@@ -2,6 +2,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -28,20 +29,33 @@ type ReconcileSummary struct {
 // protection registered before anything converges/cleans) and before the
 // consume loop starts feeding producers that may forget.
 func (ta *TagentAgent) ReconcileOutstanding() (ReconcileSummary, error) {
+	if ta == nil {
+		return ReconcileSummary{}, nil
+	}
+	return ta.reconcileDurableBusForCM(context.Background(), ta.contextManager)
+}
+
+func (ta *TagentAgent) reconcileDurableBusForCM(ctx context.Context, cm *ContextManager) (ReconcileSummary, error) {
 	var s ReconcileSummary
-	if ta == nil || ta.persistentBus == nil || ta.contextManager == nil {
+	bus := ta.batchBusForCM(cm)
+	if bus == nil || cm == nil || bus.inbox == nil {
 		return s, nil
 	}
-	in := ta.persistentBus.inbox
-	if in == nil {
-		return s, nil
+	if err := ctx.Err(); err != nil {
+		return s, err
 	}
+	if cm.memStore == nil {
+		return s, errors.New("reconcile: durable mailbox has no fact store")
+	}
+	in := bus.inbox
 	items, err := in.Outstanding()
 	if err != nil {
 		return s, fmt.Errorf("reconcile: inventory: %w", err)
 	}
-	cm := ta.contextManager
 	for _, it := range items {
+		if err := ctx.Err(); err != nil {
+			return s, err
+		}
 		if it.ReadErr != nil {
 			s.Blocked++
 			log.Errorf("[reconcile] %s unreadable during inventory — retained, NOT disposed: %v", it.Path, it.ReadErr)
@@ -50,7 +64,7 @@ func (ta *TagentAgent) ReconcileOutstanding() (ReconcileSummary, error) {
 		env := it.Env
 		if len(env.Completion) == 0 {
 			if env.State == reliability.InboxStateReceipted {
-				ta.quarantineReconcile(&s, it.Path, "state is receipted without a durable completion")
+				ta.quarantineReconcileForBus(bus, &s, it.Path, "state is receipted without a durable completion")
 				continue
 			}
 			s.Continued++
@@ -58,43 +72,43 @@ func (ta *TagentAgent) ReconcileOutstanding() (ReconcileSummary, error) {
 		}
 		c, derr := decodeCompletion(env.Completion)
 		if derr != nil {
-			ta.quarantineReconcile(&s, it.Path, "durable completion is not decodable: "+derr.Error())
+			ta.quarantineReconcileForBus(bus, &s, it.Path, "durable completion is not decodable: "+derr.Error())
 			continue
 		}
 		if verr := reconcileIdentityChecks(c, env); verr != nil {
-			ta.quarantineReconcile(&s, it.Path, verr.Error())
+			ta.quarantineReconcileForBus(bus, &s, it.Path, verr.Error())
 			continue
 		}
 		key, kerr := tagentevent.ParseEventKey(c.ReceiptKey)
 		if kerr != nil {
-			ta.quarantineReconcile(&s, it.Path, fmt.Sprintf("reserved receipt key %q unparseable", c.ReceiptKey))
+			ta.quarantineReconcileForBus(bus, &s, it.Path, fmt.Sprintf("reserved receipt key %q unparseable", c.ReceiptKey))
 			continue
 		}
 		stored, gerr := cm.memStore.GetEvent(key)
 		switch {
-		case gerr == nil:
+		case gerr == nil && stored != nil:
 			if !sameReceiptFact(*stored, c.ReceiptFact) {
-				ta.quarantineReconcile(&s, it.Path, fmt.Sprintf("chain receipt under key %s differs from the frozen receipt fact", c.ReceiptKey))
+				ta.quarantineReconcileForBus(bus, &s, it.Path, fmt.Sprintf("chain receipt under key %s differs from the frozen receipt fact", c.ReceiptKey))
 				continue
 			}
-			if cerr := ta.persistentBus.ConfirmDurable(it.Path, reliability.ReceiptCredential{ReceiptKey: c.ReceiptKey}); cerr != nil {
+			if cerr := bus.ConfirmDurable(it.Path, reliability.ReceiptCredential{ReceiptKey: c.ReceiptKey}); cerr != nil {
 				s.Blocked++
 				log.Errorf("[reconcile] cleanup of %s deferred (ack barrier will be completed by drain/next boot): %v", it.Path, cerr)
 				continue
 			}
 			s.Cleaned++
-		case errors.Is(gerr, memory.ErrKeyNotFound), memory.IsEventForgotten(gerr):
+		case (gerr == nil && stored == nil), errors.Is(gerr, memory.ErrKeyNotFound), memory.IsEventForgotten(gerr):
 			cred, verr := cm.verifyReceiptCredential(env.Completion)
 			if verr != nil {
 				if memory.IsEventForgotten(verr) || memory.IsDuplicateEventKey(verr) {
-					ta.quarantineReconcile(&s, it.Path, "receipt re-submit refused deterministically: "+verr.Error())
+					ta.quarantineReconcileForBus(bus, &s, it.Path, "receipt re-submit refused deterministically: "+verr.Error())
 					continue
 				}
 				s.Blocked++
 				log.Warnf("[reconcile] receipt re-submit for %s blocked (transient) — claim retained: %v", it.Path, verr)
 				continue
 			}
-			if cerr := ta.persistentBus.ConfirmDurable(it.Path, cred); cerr != nil {
+			if cerr := bus.ConfirmDurable(it.Path, cred); cerr != nil {
 				s.Blocked++
 				log.Warnf("[reconcile] confirm after re-submit for %s deferred: %v", it.Path, cerr)
 				continue
@@ -114,8 +128,12 @@ func (ta *TagentAgent) ReconcileOutstanding() (ReconcileSummary, error) {
 // inspection, capacity freed through the leaf's quarantine accounting) and
 // counts it. Contradictions never silently consume or delete originals.
 func (ta *TagentAgent) quarantineReconcile(s *ReconcileSummary, path, reason string) {
+	ta.quarantineReconcileForBus(ta.persistentBus, s, path, reason)
+}
+
+func (ta *TagentAgent) quarantineReconcileForBus(bus *EventBus, s *ReconcileSummary, path, reason string) {
 	s.Quarantined++
-	ta.persistentBus.QuarantineEnvelope(path, "§5.7 reconcile: "+reason)
+	bus.QuarantineEnvelope(path, "§5.7 reconcile: "+reason)
 	log.Errorf("[reconcile] QUARANTINED %s — %s", path, reason)
 }
 

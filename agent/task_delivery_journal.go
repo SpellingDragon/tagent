@@ -20,35 +20,37 @@ import (
 
 // taskSignalRecord preserves a producer's exact result before transport acceptance.
 type taskSignalRecord struct {
-	TaskID              string          `json:"task_id"`
-	Kind                task.SettleKind `json:"kind"`
-	Output              string          `json:"output,omitempty"`
-	Error               string          `json:"error,omitempty"`
-	ErrorKind           string          `json:"error_kind,omitempty"`
-	RoundID             uint64          `json:"task_round_id"`
-	RoundOwner          string          `json:"round_owner,omitempty"`
-	Seq                 uint64          `json:"seq"`
-	ObservedAt          time.Time       `json:"observed_at"`
-	Final               bool            `json:"final"`
-	Ready               bool            `json:"ready"`
-	WaitSatisfied       bool            `json:"wait_satisfied"`
-	Observation         string          `json:"observation,omitempty"`
-	Lineage             string          `json:"lineage,omitempty"`
-	ExitCode            int             `json:"exit_code,omitempty"`
-	ProducerRound       uint64          `json:"producer_round,omitempty"`
-	ProducerStatus      task.TaskStatus `json:"producer_status,omitempty"`
-	ProducerOwner       string          `json:"producer_owner,omitempty"`
-	ProducerLastSeq     uint64          `json:"producer_last_seq,omitempty"`
-	LifetimeAnchorMilli int64           `json:"lifetime_anchor_milli,omitempty"`
-	RoundInput          string          `json:"round_input,omitempty"`
-	ReceiptKey          int64           `json:"receipt_key"`
-	Event               *AgentEvent     `json:"event"`
-	ChildInvocationID   string          `json:"child_invocation_id,omitempty"`
-	ChildAgentName      string          `json:"child_agent_name,omitempty"`
+	TaskID              string             `json:"task_id"`
+	Kind                task.SettleKind    `json:"kind"`
+	Output              string             `json:"output,omitempty"`
+	Error               string             `json:"error,omitempty"`
+	ErrorKind           string             `json:"error_kind,omitempty"`
+	RoundID             uint64             `json:"task_round_id"`
+	RoundOwner          string             `json:"round_owner,omitempty"`
+	WaitFor             task.WaitCondition `json:"wait_for,omitempty"`
+	Seq                 uint64             `json:"seq"`
+	ObservedAt          time.Time          `json:"observed_at"`
+	Final               bool               `json:"final"`
+	Ready               bool               `json:"ready"`
+	WaitSatisfied       bool               `json:"wait_satisfied"`
+	Observation         string             `json:"observation,omitempty"`
+	Lineage             string             `json:"lineage,omitempty"`
+	ExitCode            int                `json:"exit_code,omitempty"`
+	ProducerRound       uint64             `json:"producer_round,omitempty"`
+	ProducerStatus      task.TaskStatus    `json:"producer_status,omitempty"`
+	ProducerOwner       string             `json:"producer_owner,omitempty"`
+	ProducerLastSeq     uint64             `json:"producer_last_seq,omitempty"`
+	LifetimeAnchorMilli int64              `json:"lifetime_anchor_milli,omitempty"`
+	RoundInput          string             `json:"round_input,omitempty"`
+	Inline              bool               `json:"inline,omitempty"`
+	ReceiptKey          int64              `json:"receipt_key"`
+	Event               *AgentEvent        `json:"event"`
+	ChildInvocationID   string             `json:"child_invocation_id,omitempty"`
+	ChildAgentName      string             `json:"child_agent_name,omitempty"`
 }
 
 func (r taskSignalRecord) signal() task.SettleSignal {
-	sig := task.SettleSignal{Kind: r.Kind, Output: r.Output, RoundID: r.RoundID, ProducerRound: r.ProducerRound, RoundOwner: r.RoundOwner, Seq: r.Seq, ObservedAt: r.ObservedAt, Final: r.Final, Ready: r.Ready, WaitSatisfied: r.WaitSatisfied, Observation: r.Observation, Lineage: r.Lineage, ExitCode: r.ExitCode}
+	sig := task.SettleSignal{Kind: r.Kind, Output: r.Output, RoundID: r.RoundID, ProducerRound: r.ProducerRound, RoundOwner: r.RoundOwner, WaitFor: r.WaitFor, Seq: r.Seq, ObservedAt: r.ObservedAt, Final: r.Final, Ready: r.Ready, WaitSatisfied: r.WaitSatisfied, Observation: r.Observation, Lineage: r.Lineage, ExitCode: r.ExitCode}
 	if r.Error != "" {
 		sig.Err = errors.New(r.Error)
 	}
@@ -98,7 +100,7 @@ func (s *taskRecordSink) recordPhase(tk *task.Task, phase string) bool {
 		return true
 	}
 	decl := *spec.Declarative
-	decl.RoundID, decl.ProducerRound, decl.RoundOwner = tk.RoundID(), tk.ProducerRound(), tk.RoundOwner()
+	decl.RoundID, decl.ProducerRound, decl.RoundOwner, decl.ProducerOwner = tk.RoundID(), tk.ProducerRound(), tk.RoundOwner(), tk.ProducerOwner()
 	decl.Mode, decl.WaitFor, decl.SignalSeq, decl.TTLAnchorMilli = spec.Mode, tk.WaitFor(), tk.SignalSeq(), tk.TTLAnchorMilli()
 	if decl.StartedAtMilli == 0 {
 		decl.StartedAtMilli = tk.StartedAt.UnixMilli()
@@ -135,9 +137,17 @@ func (s *taskRecordSink) recordPhase(tk *task.Task, phase string) bool {
 	return ok
 }
 
-func (s *taskRecordSink) prepareSignal(tk *task.Task, sig task.SettleSignal, workspace string) (*frozenTaskDelivery, bool) {
+func (s *taskRecordSink) prepareSignal(tk *task.Task, sig task.SettleSignal, workspace string, inline bool) (*frozenTaskDelivery, bool) {
 	if s == nil || s.cm == nil || tk == nil {
 		return nil, false
+	}
+	if sig.SourceID != "" {
+		s.delivery.mu.Lock()
+		d := s.delivery.pending[sig.SourceID]
+		s.delivery.mu.Unlock()
+		if d != nil {
+			return d, true
+		}
 	}
 	evt := newTaskSettledEvent(tk, sig, settleInlineCapChars, workspace)
 	if evt == nil {
@@ -158,14 +168,14 @@ func (s *taskRecordSink) prepareSignal(tk *task.Task, sig task.SettleSignal, wor
 	if len(sig.Output) > settleInlineCapChars && evt.Message != nil {
 		evt.Message.Content += " [原始结果 eventkey=" + tagentevent.FormatEventKey(key) + "]"
 	}
-	r := taskSignalRecord{TaskID: tk.ID, Kind: sig.Kind, Output: sig.Output, RoundID: sig.RoundID, ProducerRound: sig.ProducerRound, RoundOwner: sig.RoundOwner, Seq: sig.Seq, ObservedAt: evt.Timestamp, Final: sig.Final, Ready: sig.Ready, WaitSatisfied: sig.WaitSatisfied, Observation: sig.Observation, Lineage: sig.Lineage, ExitCode: sig.ExitCode, ReceiptKey: receiptKey, Event: evt, ProducerStatus: tk.Status(), LifetimeAnchorMilli: tk.TTLAnchorMilli()}
+	r := taskSignalRecord{TaskID: tk.ID, Kind: sig.Kind, Output: sig.Output, RoundID: sig.RoundID, ProducerRound: sig.ProducerRound, RoundOwner: sig.RoundOwner, WaitFor: sig.WaitFor, Seq: sig.Seq, ObservedAt: evt.Timestamp, Final: sig.Final, Ready: sig.Ready, WaitSatisfied: sig.WaitSatisfied, Observation: sig.Observation, Lineage: sig.Lineage, ExitCode: sig.ExitCode, ReceiptKey: receiptKey, Event: evt, ProducerStatus: tk.Status(), ProducerOwner: tk.ProducerOwner(), ProducerLastSeq: tk.SignalSeq(), LifetimeAnchorMilli: tk.TTLAnchorMilli(), Inline: inline}
 	if sig.Err != nil {
 		r.Error = sig.Err.Error()
 	}
-	if sig.Observation == "continuation_interrupted" {
+	if sig.Observation == "continuation_interrupted" || sig.Observation == "continuation_not_accepted" {
 		r.ErrorKind = sig.Observation
 	}
-	if spec := tk.SpecSnapshot(); spec.Kind == "subagent" && spec.Declarative != nil {
+	if spec := tk.SpecSnapshot(); spec.Kind == "subagent" && spec.Declarative != nil && sig.RoundID == sig.ProducerRound {
 		r.ChildInvocationID = spec.Declarative.Params["child_invocation_id"]
 		r.ChildAgentName = spec.Declarative.AgentName
 	}
@@ -173,7 +183,7 @@ func (s *taskRecordSink) prepareSignal(tk *task.Task, sig task.SettleSignal, wor
 	if err != nil {
 		return nil, false
 	}
-	md := map[string]string{tagentevent.MetaKeyAgentName: s.cm.name, "task_id": tk.ID, tagentevent.MetaKeyTaskRoundID: fmt.Sprint(sig.RoundID), tagentevent.MetaKeyTaskRoundOwner: sig.RoundOwner, tagentevent.MetaKeyTaskSignalSeq: fmt.Sprint(sig.Seq), tagentevent.MetaKeySourceEventID: evt.ID, "child_invocation_id": r.ChildInvocationID, "producer_status": string(r.ProducerStatus), "signal_observation": sig.Observation, "signal_lineage": sig.Lineage}
+	md := map[string]string{tagentevent.MetaKeyAgentName: s.cm.name, "task_id": tk.ID, tagentevent.MetaKeyTaskRoundID: fmt.Sprint(sig.RoundID), tagentevent.MetaKeyTaskRoundOwner: sig.RoundOwner, tagentevent.MetaKeyTaskSignalSeq: fmt.Sprint(sig.Seq), tagentevent.MetaKeySourceEventID: evt.ID, "child_invocation_id": r.ChildInvocationID, "producer_status": string(r.ProducerStatus), "signal_observation": sig.Observation, "signal_lineage": sig.Lineage, "signal_kind": string(sig.Kind), "signal_final": fmt.Sprint(sig.Final), "raw_signal_key": tagentevent.FormatEventKey(key)}
 	d := &frozenTaskDelivery{event: evt, fact: memory.FullEvent{EventKey: key, PartitionID: s.cm.partitionID, EventType: tagentevent.TypeTaskSignal, Timestamp: evt.Timestamp.UnixMilli(), EventSummary: "任务信号: " + evt.ID, Content: string(data), Metadata: md}, receipt: memory.FullEvent{EventKey: receiptKey, PartitionID: s.cm.partitionID, EventType: tagentevent.TypeTaskSignalReceipt, Timestamp: evt.Timestamp.UnixMilli(), EventSummary: "任务信号已受理: " + evt.ID, Content: tagentevent.FormatEventKey(key), Metadata: md}}
 	j.pending[evt.ID] = d
 	if g, ok := s.cm.memStore.(memory.RetentionGuard); ok {
@@ -184,7 +194,7 @@ func (s *taskRecordSink) prepareSignal(tk *task.Task, sig task.SettleSignal, wor
 }
 
 func (s *taskRecordSink) acceptSignal(tk *task.Task, sig task.SettleSignal, workspace string, accept func(*AgentEvent) bool) bool {
-	d, ok := s.prepareSignal(tk, sig, workspace)
+	d, ok := s.prepareSignal(tk, sig, workspace, accept == nil)
 	if !ok || !s.commitFrozen(d.fact) {
 		return false
 	}
@@ -209,10 +219,6 @@ func (s *taskRecordSink) acceptSignal(tk *task.Task, sig task.SettleSignal, work
 	j.mu.Lock()
 	delete(j.pending, d.event.ID)
 	j.mu.Unlock()
-	if g, ok := s.cm.memStore.(memory.RetentionGuard); ok {
-		g.ReleaseKey(d.fact.EventKey)
-		g.ReleaseKey(d.receipt.EventKey)
-	}
 	return true
 }
 
@@ -224,7 +230,7 @@ func (s *taskRecordSink) acceptBatch(batch []task.BatchRetired, workspace string
 	var ids []string
 	var latest time.Time
 	for _, r := range batch {
-		d, ok := s.prepareSignal(r.Task, r.Sig, workspace)
+		d, ok := s.prepareSignal(r.Task, r.Sig, workspace, false)
 		if !ok || !s.commitFrozen(d.fact) {
 			return false
 		}
@@ -278,7 +284,7 @@ func (s *taskRecordSink) ackChildResult(fact, proof memory.FullEvent) bool {
 	var err error
 	if r.Lineage == task.LineageRetired {
 		err = child.CancelContinuationByParent(context.Background(), r.ChildInvocationID, proof)
-	} else if r.Kind == task.SettleCompleted {
+	} else if r.Kind == task.SettleCompleted || r.Kind == task.SettleFailed {
 		err = child.AcknowledgeContinuationResultWithReceipt(context.Background(), r.ChildInvocationID, proof)
 	}
 	if err != nil {

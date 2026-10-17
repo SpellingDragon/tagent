@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 package agent
 
 import (
@@ -7,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
@@ -73,6 +75,57 @@ func (ta *TagentAgent) readContinuationCheckpoints() (map[string]*continuation, 
 	return entries, facts, nil
 }
 
+func (ta *TagentAgent) continuationByID(id string) (*continuation, error) {
+	r := ta.continuationRegistry()
+	r.mu.Lock()
+	existing := r.byID[id]
+	r.mu.Unlock()
+	if existing != nil {
+		return existing, nil
+	}
+	if ta.memStore == nil {
+		return nil, nil
+	}
+	var latest *memory.FullEvent
+	for offset := 0; ; offset += 100 {
+		refs, err := ta.memStore.QueryEvents(memory.QueryOptions{PartitionIDs: []int{ta.partitionID()}, EventTypes: []string{tagentevent.TypeContinuationState}, Keyword: id, Limit: 100, Offset: offset})
+		if err != nil {
+			return nil, err
+		}
+		for _, ref := range refs {
+			f, err := ta.memStore.GetEvent(ref.EventKey)
+			if err != nil {
+				return nil, err
+			}
+			if f != nil && f.Metadata[tagentevent.MetaKeyAgentName] == ta.name && f.Metadata[tagentevent.MetaKeyContinuationID] == id && (latest == nil || f.EventKey > latest.EventKey) {
+				latest = f
+			}
+		}
+		if len(refs) < 100 {
+			break
+		}
+	}
+	if latest == nil {
+		return nil, nil
+	}
+	var state continuationCheckpoint
+	if err := json.Unmarshal([]byte(latest.Content), &state); err != nil {
+		return nil, err
+	}
+	if state.Version != 1 || state.InvocationID != id {
+		return nil, errors.New("continuation checkpoint identity is invalid")
+	}
+	c := &continuation{state: state, stateKey: latest.EventKey, recovered: true, protected: make(map[int64]struct{}), listeners: make(map[chan *event.Event]struct{})}
+	r.mu.Lock()
+	if prior := r.byID[id]; prior != nil {
+		c = prior
+	} else {
+		r.byID[id] = c
+	}
+	r.mu.Unlock()
+	return c, nil
+}
+
 // RecoveredContinuationBindingsFromWAL reads exact original parent addresses without starting work.
 func (ta *TagentAgent) RecoveredContinuationBindingsFromWAL() ([]ContinuationBinding, error) {
 	if ta == nil {
@@ -117,15 +170,21 @@ func (ta *TagentAgent) RebuildContinuationsFromWAL() (int, error) {
 		if c.state.Outcome == "" {
 			c.state.State = "suspended"
 		}
+		c.recoveryGoalClosed = c.state.RejectedBeforeExecution
 		if err := ta.foldContinuationRecovery(c, facts); err != nil {
 			return restored, err
 		}
+		c.recoveryFolded = true
 		c.mu.Lock()
 		if err := ta.openContinuationBus(c); err != nil {
 			c.mu.Unlock()
 			return restored, err
 		}
 		if err := ta.reconcileContinuationInboxLocked(c); err != nil {
+			c.mu.Unlock()
+			return restored, err
+		}
+		if err := ta.repairConsumedContinuationInboxLocked(context.Background(), c); err != nil {
 			c.mu.Unlock()
 			return restored, err
 		}
@@ -138,7 +197,7 @@ func (ta *TagentAgent) RebuildContinuationsFromWAL() (int, error) {
 		}
 		r.mu.Unlock()
 		ta.bindSettleBus(id, c.bus)
-		ta.settleSinks.restoreRouting(id, c.state.Routing)
+		ta.settleSinks.restoreRouting(id, c.state.Routing, ta.taskManager)
 		ta.settleSinks.reconcileAccepted(id, c.acceptedInputs)
 		if c.state.Outcome != "" {
 			ta.settleSinks.retire(id)
@@ -154,7 +213,7 @@ func continuationFactBelongs(f memory.FullEvent, agentName, id string) bool {
 	if f.Metadata[tagentevent.MetaKeyAgentName] != agentName {
 		return false
 	}
-	return f.Metadata[tagentevent.MetaKeyContinuationID] == id || f.Metadata[tagentevent.MetaKeyTaskRoundOwner] == id
+	return f.Metadata[tagentevent.MetaKeyContinuationID] == id || f.Metadata[tagentevent.MetaKeyTaskRoundOwner] == id || f.Metadata["round_owner"] == id
 }
 
 func continuationTaskDeclaration(f memory.FullEvent, agentName, id string) (task.Declarative, bool) {
@@ -165,14 +224,19 @@ func continuationTaskDeclaration(f memory.FullEvent, agentName, id string) (task
 	if json.Unmarshal([]byte(f.Content), &decl) != nil {
 		return decl, false
 	}
-	return decl, decl.Origin[metaKeyInvocationID] == id || f.Metadata[tagentevent.MetaKeyTaskRoundOwner] == id
+	owner := decl.RoundOwner
+	if owner == "" {
+		owner = f.Metadata[tagentevent.MetaKeyTaskRoundOwner]
+	}
+	if owner != "" {
+		return decl, owner == id
+	}
+	return decl, decl.Origin[metaKeyInvocationID] == id
 }
 
 func continuationEventFromFact(f memory.FullEvent) *AgentEvent {
 	if f.EventType == tagentevent.TypeTaskSignal {
-		var raw struct {
-			Event *AgentEvent `json:"event"`
-		}
+		var raw taskSignalRecord
 		if json.Unmarshal([]byte(f.Content), &raw) == nil && raw.Event != nil {
 			return raw.Event
 		}
@@ -197,29 +261,28 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 	for _, key := range c.state.ConsumedKeys {
 		consumed[key] = true
 	}
-	var scoped []memory.FullEvent
 	var pendingSignals []*AgentEvent
 	var progress bool
+	var tailFinal bool
+	var tailConsumed bool
+	acceptedFacts := make(map[string]memory.FullEvent)
 	spawnWaits := make(map[string]settleWaitSnapshot)
 	for _, f := range facts {
-		decl, isSpawn := continuationTaskDeclaration(f, ta.name, id)
+		_, isSpawn := continuationTaskDeclaration(f, ta.name, id)
 		belongs := continuationFactBelongs(f, ta.name, id)
 		if isSpawn {
 			progress = true
 			if ta.taskManager != nil {
-				if tk, ok := ta.taskManager.Get(f.Metadata["task_id"]); ok && tk.Status().Live() {
-					spawnWaits[tk.ID] = settleWaitSnapshot{TaskID: tk.ID, RoundID: tk.ProducerRound(), WaitFor: task.WaitForOf(tk.SpecSnapshot())}
-					if spawnWaits[tk.ID].RoundID == 0 {
-						w := spawnWaits[tk.ID]
-						w.RoundID = tk.RoundID()
-						spawnWaits[tk.ID] = w
+				if tk, ok := ta.taskManager.Get(f.Metadata["task_id"]); ok {
+					state := tk.RoutingSnapshot()
+					if state.ProducerOwner == id && state.Status.Live() && !state.WaitSatisfied {
+						spawnWaits[tk.ID] = settleWaitSnapshot{TaskID: tk.ID, RoundID: state.ProducerRound, WaitFor: task.WaitForOf(state.Spec)}
 					}
 				}
 			}
 			if !containsContinuationKey(c.state.RetainedKeys, f.EventKey) {
 				c.state.RetainedKeys = append(c.state.RetainedKeys, f.EventKey)
 			}
-			_ = decl
 		}
 		if !belongs {
 			continue
@@ -230,8 +293,28 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 		if f.EventType == tagentevent.TypeInputDisposition {
 			key, _ := tagentevent.ParseEventKey(f.Metadata[tagentevent.MetaKeyConsumedEventKey])
 			if key > 0 {
+				source, err := ta.memStore.GetEvent(key)
+				if err != nil || source == nil || source.PartitionID != f.PartitionID || !continuationFactBelongs(*source, ta.name, id) {
+					return fmt.Errorf("continuation %s disposition has no exact source fact", id)
+				}
+				copySource := *source
+				copySource.Metadata = make(map[string]string, len(source.Metadata)+1)
+				for name, value := range source.Metadata {
+					copySource.Metadata[name] = value
+				}
+				copySource.Metadata[tagentevent.MetaKeyObservationReceiptKey] = tagentevent.FormatEventKey(f.EventKey)
+				if compress.VerifiedInputDisposition(ta.memStore, &copySource) == "" {
+					return fmt.Errorf("continuation %s disposition is not verified", id)
+				}
 				consumed[key] = true
-				c.state.InputDisposition = append(c.state.InputDisposition, continuationInputDisposition{EventKey: key, ReceiptKey: f.EventKey, Disposition: f.Metadata[tagentevent.MetaKeyInputDisposition]})
+				if f.EventKey > c.stateKey && f.Metadata[tagentevent.MetaKeyInputDisposition] == "processed" {
+					tailConsumed = true
+				}
+				sourceID := source.Metadata[tagentevent.MetaKeySourceEventID]
+				c.state.InputDisposition = append(c.state.InputDisposition, continuationInputDisposition{EventID: sourceID, EventKey: key, ReceiptKey: f.EventKey, Disposition: f.Metadata[tagentevent.MetaKeyInputDisposition]})
+				if c.state.InitialGoal != nil && sourceID == c.state.InitialGoal.ID {
+					c.state.InitialPending = false
+				}
 			}
 		}
 		if f.EventType == tagentevent.TypeTaskSignal || f.EventType == tagentevent.TypeTaskRound || len(f.ToolCalls) > 0 || f.EventType == tagentevent.TypeActionCommand {
@@ -245,15 +328,23 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 		if f.EventType == tagentevent.TypeExternalInput {
 			if evt := continuationEventFromFact(f); evt != nil && evt.Source == SourceTask {
 				c.acceptedInputs = append(c.acceptedInputs, evt)
+				acceptedFacts[evt.ID] = f
 			}
 		}
 		if f.EventKey <= c.stateKey {
 			continue
 		}
-		scoped = append(scoped, f)
 		if f.EventType == tagentevent.TypeAgentOutput {
 			c.state.LastOutput = f.Content
 			progress = true
+			if f.Response != nil && f.Response.Error != nil {
+				c.state.LastBatchOutcome, c.state.LastBatchError = "failed", f.Response.Error.Message
+				tailFinal = false
+			} else if f.Response == nil && f.Content != "" {
+				tailFinal = true
+			} else if f.Response != nil && f.Response.Done && !f.Response.IsPartial && len(f.ToolCalls) == 0 {
+				tailFinal = true
+			}
 		}
 		if f.EventType == tagentevent.TypeContextCompressSummary && f.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 {
 			payload, err := compress.UnmarshalPayload(f.Metadata[compress.CompactionPayloadMetaKey])
@@ -305,12 +396,14 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 			c.state.Routing.Waits = filtered
 		}
 	}
-	accepted := make(map[string]bool, len(c.acceptedInputs))
-	for _, evt := range c.acceptedInputs {
-		accepted[evt.ID] = true
-	}
 	for _, evt := range pendingSignals {
-		if !accepted[evt.ID] {
+		fact, accepted := acceptedFacts[evt.ID]
+		if !accepted || !consumed[fact.EventKey] {
+			if accepted {
+				copyFact := fact
+				evt.volatileFact = &copyFact
+				evt.volatileCommitted = true
+			}
 			c.replayInputs = append(c.replayInputs, evt)
 		}
 	}
@@ -318,13 +411,26 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 		c.recoveryGoalClosed = true
 		c.state.InitialPending = false
 	}
-	if c.state.Outcome == "" && progress && len(c.state.Routing.Waits) == 0 && len(pendingSignals) == 0 && c.state.LastOutput == "" {
-		c.state.State, c.state.Outcome, c.state.Error = "failed", "failed", "interrupted action needs reconciliation; the original goal was not repeated"
+	if c.state.Outcome == "" && !c.state.InitialPending && len(c.state.Routing.Waits) == 0 && len(c.replayInputs) == 0 {
+		if c.state.LastBatchOutcome == "failed" {
+			c.state.State, c.state.Outcome, c.state.Error = "failed", "failed", c.state.LastBatchError
+		} else if (c.state.LastBatchOutcome == "completed" && !tailConsumed) || (tailFinal && len(c.state.ConsumedKeys) > 0) {
+			c.state.State, c.state.Outcome = "completed", "completed"
+		} else if progress {
+			c.state.State, c.state.Outcome, c.state.Error = "failed", "failed", "interrupted action needs reconciliation; the original goal was not repeated"
+		}
 	}
-	if c.state.Outcome == "" && progress && len(c.state.Routing.Waits) == 0 && len(pendingSignals) == 0 && c.state.LastOutput != "" {
-		c.state.State, c.state.Outcome = "completed", "completed"
+	protocol := make([]memory.FullEvent, 0, len(c.state.Projection))
+	for _, ref := range c.state.Projection {
+		if ref.EventKey > 0 {
+			fact, err := ta.memStore.GetEvent(ref.EventKey)
+			if err != nil || fact == nil {
+				return fmt.Errorf("continuation %s retained key %d missing", id, ref.EventKey)
+			}
+			protocol = append(protocol, *fact)
+		}
 	}
-	return ta.closeInterruptedToolCalls(c, scoped)
+	return ta.closeInterruptedToolCalls(c, protocol)
 }
 
 func containsContinuationKey(keys []int64, key int64) bool {
@@ -395,6 +501,13 @@ func (ta *TagentAgent) reconcileContinuationInboxLocked(c *continuation) error {
 		if err := c.bus.ConfirmDurable(item.Path, cred); err != nil {
 			return err
 		}
+		if c.state.Outcome == "" || (c.state.Outcome == "failed" && strings.HasPrefix(c.state.Error, "interrupted action needs reconciliation")) {
+			c.state.LastBatchOutcome = string(completion.BatchResult)
+			c.state.LastBatchError = completion.ErrorSummary
+			if len(c.state.Routing.Waits) == 0 && len(c.replayInputs) == 0 {
+				c.state.State, c.state.Outcome, c.state.Error = string(completion.BatchResult), string(completion.BatchResult), completion.ErrorSummary
+			}
+		}
 		for _, slot := range completion.Slots {
 			key, _ := tagentevent.ParseEventKey(slot.FactKey)
 			receiptKey, _ := tagentevent.ParseEventKey(completion.ReceiptKey)
@@ -433,13 +546,120 @@ func (ta *TagentAgent) restoreInitialContinuationInputLocked(c *continuation) er
 				}
 			}
 		}
+	} else {
+		queued, err := ta.volatileContinuationInputsLocked(c)
+		if err != nil {
+			return err
+		}
+		if queued[c.state.InitialGoal.ID] {
+			return nil
+		}
 	}
 	_, err := c.bus.PublishContext(context.Background(), c.state.InitialGoal)
 	return err
 }
 
+func (ta *TagentAgent) repairConsumedContinuationInboxLocked(ctx context.Context, c *continuation) error {
+	if c.bus == nil || c.bus.inbox == nil {
+		return nil
+	}
+	cm := &ContextManager{name: ta.name, memStore: ta.memStore, bus: c.bus, partitionID: ta.partitionID(), continuationID: c.state.InvocationID, projection: compress.NewSessionProjection()}
+	summary, err := ta.reconcileDurableBusForCM(ctx, cm)
+	if err != nil {
+		return err
+	}
+	if summary.Blocked > 0 || summary.Quarantined > 0 {
+		return errors.New("continuation completion material is blocked")
+	}
+	items, err := c.bus.inbox.Outstanding()
+	if err != nil {
+		return err
+	}
+	var releases []string
+	defer func() {
+		for _, path := range releases {
+			_ = c.bus.ReleaseClaim(path)
+		}
+	}()
+	for range items {
+		env, path, err := c.bus.inbox.ClaimNext()
+		if err != nil {
+			return err
+		}
+		if env == nil {
+			break
+		}
+		var group []*AgentEvent
+		known := true
+		for _, slot := range env.Messages {
+			evt, err := decodeSourceEvent(slot.SourceEvent)
+			if err != nil {
+				return err
+			}
+			evt.claim = &durableClaim{Path: path, RequestID: env.RequestID, Slot: slot.Slot, ReceiptKey: env.ReceiptKey, PreparedFact: slot.PreparedFact}
+			var fact memory.FullEvent
+			_ = json.Unmarshal(slot.PreparedFact, &fact)
+			proven := false
+			for _, input := range c.state.InputDisposition {
+				if input.EventID == evt.ID || (fact.EventKey > 0 && input.EventKey == fact.EventKey) {
+					proven = true
+					if input.ReceiptKey > 0 {
+						if receipt, err := ta.memStore.GetEvent(input.ReceiptKey); err == nil && receipt != nil && receipt.EventType == tagentevent.TypeInputDisposition {
+							evt.observationReceiptKey = tagentevent.FormatEventKey(input.ReceiptKey)
+						}
+					}
+					break
+				}
+			}
+			if !proven && fact.EventKey > 0 {
+				proven = containsContinuationKey(c.state.ConsumedKeys, fact.EventKey)
+			}
+			if !proven && c.recoveryGoalClosed && c.state.InitialGoal != nil && evt.ID == c.state.InitialGoal.ID {
+				proven = true
+			}
+			if !proven {
+				known = false
+			}
+			evt.recoveryConsumed = true
+			group = append(group, evt)
+		}
+		if !known {
+			releases = append(releases, path)
+			continue
+		}
+		prepareTaskReceiptKeys(cm, group)
+		if outcome := ta.submitDurableBatchWithBackoffForCM(ctx, cm, group, group); outcome.status != submitOK {
+			return errors.New("recovered consumed input could not be committed")
+		}
+		if !consumeTaskInputs(ctx, cm, group, "recovered") {
+			return errors.New("recovered consumed input disposition could not be committed")
+		}
+		if !ta.finishDurableBatchForCM(ctx, cm, group, group, completedOutcome()) {
+			return errors.New("recovered consumed envelope completion could not be committed")
+		}
+		for _, evt := range group {
+			fact, err := taskInputFact(evt)
+			if err != nil {
+				return err
+			}
+			receiptKey, _ := tagentevent.ParseEventKey(evt.observationReceiptKey)
+			c.state.InputDisposition = append(c.state.InputDisposition, continuationInputDisposition{EventID: evt.ID, EventKey: fact.EventKey, ReceiptKey: receiptKey, Disposition: "recovered"})
+			if !containsContinuationKey(c.state.ConsumedKeys, fact.EventKey) {
+				c.state.ConsumedKeys = append(c.state.ConsumedKeys, fact.EventKey)
+			}
+			if c.state.InitialGoal != nil && evt.ID == c.state.InitialGoal.ID {
+				c.state.InitialPending = false
+			}
+		}
+	}
+	return nil
+}
+
 func (ta *TagentAgent) restoreContinuationSignalsLocked(c *continuation) error {
 	queued := make(map[string]bool)
+	if len(c.replayInputs) == 0 {
+		return nil
+	}
 	if c.bus.inbox != nil {
 		items, err := c.bus.inbox.Outstanding()
 		if err != nil {
@@ -457,9 +677,16 @@ func (ta *TagentAgent) restoreContinuationSignalsLocked(c *continuation) error {
 				queued[evt.ID] = true
 			}
 		}
+	} else {
+		var err error
+		queued, err = ta.volatileContinuationInputsLocked(c)
+		if err != nil {
+			return err
+		}
 	}
 	for _, evt := range c.replayInputs {
 		if queued[evt.ID] {
+			c.acceptedInputs = append(c.acceptedInputs, evt)
 			continue
 		}
 		if _, err := c.bus.PublishContext(context.Background(), evt); err != nil {
@@ -470,6 +697,46 @@ func (ta *TagentAgent) restoreContinuationSignalsLocked(c *continuation) error {
 	}
 	c.replayInputs = nil
 	return nil
+}
+
+func (ta *TagentAgent) volatileContinuationInputsLocked(c *continuation) (map[string]bool, error) {
+	release, err := ta.settleSinks.pauseDestination(context.Background(), c.state.InvocationID)
+	if err != nil {
+		return nil, err
+	}
+	defer release(nil)
+	queued := make(map[string]bool)
+	batch := c.bus.TryPull()
+	for _, evt := range batch {
+		queued[evt.ID] = true
+		if _, err := c.bus.PublishContext(context.Background(), evt); err != nil {
+			return nil, err
+		}
+	}
+	return queued, nil
+}
+
+func (ta *TagentAgent) continuationDriverFailureLocked(c *continuation) string {
+	for _, wait := range c.state.Routing.Waits {
+		hasResult := false
+		for _, evt := range append(append([]*AgentEvent(nil), c.acceptedInputs...), c.replayInputs...) {
+			key := deliveryKey(evt)
+			if key.taskID == wait.TaskID && key.roundID == wait.RoundID && settleSatisfied(evt) {
+				hasResult = true
+				break
+			}
+		}
+		if hasResult {
+			continue
+		}
+		if ta.taskManager != nil {
+			if tk, ok := ta.taskManager.Get(wait.TaskID); ok && tk.ProducerRound() == wait.RoundID && tk.HasProducer() {
+				continue
+			}
+		}
+		return fmt.Sprintf("original task %s round %d has no reattached producer or committed result; reconciliation is required", wait.TaskID, wait.RoundID)
+	}
+	return ""
 }
 
 // StartRecoveredContinuations starts parentless scopes after task detectors have reattached.
@@ -512,10 +779,10 @@ func (ta *TagentAgent) ResumeContinuationByID(ctx context.Context, childInvocati
 	if ta == nil {
 		return nil, false, nil
 	}
-	r := ta.continuationRegistry()
-	r.mu.Lock()
-	c := r.byID[childInvocationID]
-	r.mu.Unlock()
+	c, err := ta.continuationByID(childInvocationID)
+	if err != nil {
+		return nil, false, err
+	}
 	if c == nil {
 		return nil, false, nil
 	}
@@ -525,7 +792,21 @@ func (ta *TagentAgent) ResumeContinuationByID(ctx context.Context, childInvocati
 	if !valid {
 		return nil, true, errors.New("continuation result address differs from the original task round")
 	}
-	return ta.ResumeContinuation(ctx, parentTaskID, round)
+	r := ta.continuationRegistry()
+	r.mu.Lock()
+	closing := r.closing
+	r.mu.Unlock()
+	if closing {
+		return nil, true, ErrExecClosed
+	}
+	lease := ta.contextManager.AcquireLease(LeaseSubCall)
+	defer lease.Release()
+	if err := lease.Err(); err != nil {
+		return nil, true, err
+	}
+	ch, err := ta.startContinuation(ctx, c, lease, "", "")
+	ta.trimAcknowledgedContinuations()
+	return ch, true, err
 }
 
 func (ta *TagentAgent) continuationParent(address ContinuationContext) *TagentAgent {
@@ -533,9 +814,11 @@ func (ta *TagentAgent) continuationParent(address ContinuationContext) *TagentAg
 		return ta
 	}
 	if ta.resident != nil {
-		return ta.resident.Get(address.ParentAgent)
+		if parent := ta.resident.Get(address.ParentAgent); parent != nil {
+			return parent
+		}
 	}
-	return nil
+	return ta.resolveContinuationOwner(address.ParentAgent)
 }
 
 func (ta *TagentAgent) resolveContinuationReceiver(address ContinuationContext, visited map[string]bool) (settleAcceptor, error) {
@@ -647,12 +930,23 @@ func (ta *TagentAgent) RestoreServiceHandoffs(ctx context.Context) error {
 			return err
 		}
 		c.mu.Lock()
-		handoff, id, routing := c.state.Handoff, c.state.InvocationID, c.state.Routing
+		handoff, id, routing, outcome := c.state.Handoff, c.state.InvocationID, c.state.Routing, c.state.Outcome
 		c.mu.Unlock()
+		if outcome == "cancelled" || outcome == "failed" {
+			ta.settleSinks.restoreRouting(id, routing, ta.taskManager)
+			ta.settleSinks.setDestination(id, func(deliveryCtx context.Context, evt *AgentEvent) (PublishReceipt, error) {
+				return ta.acceptCancelledContinuationSignal(deliveryCtx, c, evt)
+			})
+			ta.settleSinks.retireStateOnly(id)
+			if err := ta.drainCancelledContinuationInputs(ctx, c); err != nil {
+				return err
+			}
+			continue
+		}
 		if handoff == nil {
 			continue
 		}
-		ta.settleSinks.restoreRouting(id, routing)
+		ta.settleSinks.restoreRouting(id, routing, ta.taskManager)
 		ta.settleSinks.setDestination(id, ta.continuationHandoffAcceptor(*handoff))
 		ta.settleSinks.retire(id)
 	}
@@ -850,6 +1144,10 @@ func (ta *TagentAgent) CancelContinuationByParent(ctx context.Context, invocatio
 	ta.settleSinks.setDestination(c.state.InvocationID, func(deliveryCtx context.Context, evt *AgentEvent) (PublishReceipt, error) {
 		return ta.acceptCancelledContinuationSignal(deliveryCtx, c, evt)
 	})
+	if err := ta.drainCancelledContinuationInputs(ctx, c); err != nil {
+		return err
+	}
+	ta.settleSinks.retireStateOnly(c.state.InvocationID)
 	return nil
 }
 
@@ -864,7 +1162,6 @@ func (ta *TagentAgent) acceptCancelledContinuationSignal(ctx context.Context, c 
 	defer c.stateOnlyMu.Unlock()
 	c.mu.Lock()
 	bus := c.bus
-	id := c.state.InvocationID
 	c.mu.Unlock()
 	if bus == nil {
 		return PublishReceipt{}, ErrBusClosed
@@ -873,7 +1170,25 @@ func (ta *TagentAgent) acceptCancelledContinuationSignal(ctx context.Context, c 
 	if err != nil {
 		return receipt, err
 	}
-	cm := &ContextManager{name: ta.name, memStore: ta.memStore, bus: bus, partitionID: ta.partitionID(), continuationID: id, projection: compress.NewSessionProjection()}
+	return receipt, ta.drainCancelledContinuationInputsLocked(ctx, c)
+}
+
+func (ta *TagentAgent) drainCancelledContinuationInputs(ctx context.Context, c *continuation) error {
+	c.stateOnlyMu.Lock()
+	defer c.stateOnlyMu.Unlock()
+	return ta.drainCancelledContinuationInputsLocked(ctx, c)
+}
+
+func (ta *TagentAgent) drainCancelledContinuationInputsLocked(ctx context.Context, c *continuation) error {
+	c.mu.Lock()
+	bus, id, refs := c.bus, c.state.InvocationID, append([]memory.EventReference(nil), c.state.Projection...)
+	c.mu.Unlock()
+	if bus == nil {
+		return ErrBusClosed
+	}
+	projection := compress.NewSessionProjection()
+	projection.Replace(refs)
+	cm := &ContextManager{name: ta.name, memStore: ta.memStore, bus: bus, partitionID: ta.partitionID(), continuationID: id, projection: projection}
 	for {
 		batch := bus.TryPull()
 		if len(batch) == 0 {
@@ -883,8 +1198,8 @@ func (ta *TagentAgent) acceptCancelledContinuationSignal(ctx context.Context, c 
 			input.recoveryConsumed = true
 		}
 		if ta.processTurn(ctx, cm, batch) == turnStop {
-			return receipt, errors.New("cancelled continuation disposition was not committed")
+			return errors.New("cancelled continuation disposition was not committed")
 		}
 	}
-	return receipt, nil
+	return nil
 }

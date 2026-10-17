@@ -563,6 +563,12 @@ func wireAgent(
 ) (*agent.TagentAgent, error) {
 	agentCfg := assembled.cfg
 	agentCfg.MemStoreRelease = memStoreRelease
+	agentCfg.ContinuationOwnerResolver = func(ownerName string) *agent.TagentAgent {
+		if rc.resident == nil {
+			return nil
+		}
+		return rc.resident.Get(ownerName)
+	}
 	actionTool := assembled.actionTool
 	ta, err := agent.NewTagentAgent(agentCfg)
 	if err != nil {
@@ -584,6 +590,12 @@ func wireAgent(
 			actionTool.SetResidentMetaDir(cfg.ResidentMetaDir)
 		}
 		actionTool.SetDefaultTTLSource(spawnerTTLSource(ta))
+		if mode.ownsPersistentState() {
+			if rc.actionTools == nil {
+				rc.actionTools = make(map[string]*action.ActionTool)
+			}
+			rc.actionTools[name] = actionTool
+		}
 	}
 
 	if fn := rc.retirementPoke.Load(); fn != nil {
@@ -656,32 +668,6 @@ func wireAgent(
 			return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, Declarative: &decl}
 		}
 		ta.RebuildTaskRegistryFromWAL(memStore, rebuildClosures)
-		if actionTool != nil {
-			if n := tm.RetireOrphans(actionTool.IsTrackedSession); n > 0 {
-				log.Infof("[rebuild-task-registry] orphan adjudication: retired %d nil-probe suspect(s) (reincarnation orphans)", n)
-			}
-			for _, tk := range tm.List() {
-				if tk.Spec.Declarative == nil {
-					continue
-				}
-				st := tk.Status()
-				if st != task.TaskSuspect && st != task.TaskAliveDetached {
-					continue
-				}
-				if actionTool.IsTrackedSession(tk.Spec.Declarative.TaskID) {
-					if st == task.TaskSuspect {
-						tm.MarkTaskRunning(tk.ID)
-					}
-					if d := actionTool.TakeReattachedDetector(tk.Spec.Declarative.TaskID); d != nil {
-						if berr := tm.BindDetector(tk.ID, d); berr != nil {
-							log.Warnf("[build] bind reattached detector to task %s failed: %v", tk.ID, berr)
-						} else {
-							log.Infof("[build] reattached detector bound: task=%s session=%s status=%s", tk.ID, tk.Spec.Declarative.TaskID, st)
-						}
-					}
-				}
-			}
-		}
 	}
 
 	if etsHolder != nil {
@@ -768,7 +754,7 @@ func buildToolFromRef(
 	case ToolKindAgent:
 		return buildAgentToolRef(tr, cfg, rc, loader, cache, parentMemStore, desc, mode, stack, subagentCollectors...)
 	case ToolKindTool:
-		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr, consolidationMin)
+		return buildPlainToolRef(tr, workspaceRoot, cfg.WorkingDir, rc, parentMemStore, readPartitionIDs, desc, degradationMgr, consolidationMin, cfg.ResidentMetaDir)
 	default:
 		return nil, false, fmt.Errorf("unknown tool kind %q", tr.Kind)
 	}
@@ -861,6 +847,7 @@ func buildPlainToolRef(
 	desc string,
 	degradationMgr *reliability.DegradationManager,
 	consolidationMinSources int,
+	metaDirs ...string,
 ) (trpctool.Tool, bool, error) {
 	registry := GetRegistry()
 	factory, ok := registry.GetPlainToolFactory(tr.ID)
@@ -874,6 +861,7 @@ func buildPlainToolRef(
 		Properties:              tr.Properties,
 		WorkspaceRoot:           workspaceRoot,
 		WorkingDir:              workingDir,
+		ResidentMetaDir:         rc.residentMetaDir,
 		MemStore:                memStore,
 		SkillRepo:               rc.skillRepo,
 		MCPToolSets:             rc.mcpToolSets,
@@ -881,6 +869,9 @@ func buildPlainToolRef(
 		Degradation:             degradationMgr,
 		MCPProbeEvery:           rc.reliability.DegradationMCPProbeEvery,
 		ConsolidationMinSources: consolidationMinSources,
+	}
+	if len(metaDirs) > 0 {
+		factoryCfg.ResidentMetaDir = metaDirs[0]
 	}
 	if rc.mcpRegistry != nil {
 		factoryCfg.MCPRegistry = rc.mcpRegistry

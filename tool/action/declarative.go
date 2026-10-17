@@ -16,24 +16,25 @@ import (
 // Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID are not spawn parameters and are
 // excluded; Command is handled separately).
 const (
-	pTimeout      = "timeout"
-	pTTL          = "ttl"
-	pWorkDir      = "work_dir"
-	pIsTUI        = "is_tui"
-	pQuiet        = "quiet_timeout"
-	pMode         = "mode"
-	pName         = "name"
-	pWatch        = "watch"
-	pProbe        = "probe"
-	pProbeEvery   = "probe_interval_sec"
-	pProbeFails   = "probe_failures"
-	pReadyPattern = "ready_pattern"
-	pInputPattern = "input_pattern"
-	pResourceID   = "resource_id"
-	pPhase        = "phase"
-	pPlaceholder  = "placeholder"
-	pBaseline     = "baseline"
-	pEnv          = "env"
+	pTimeout       = "timeout"
+	pTTL           = "ttl"
+	pWorkDir       = "work_dir"
+	pIsTUI         = "is_tui"
+	pQuiet         = "quiet_timeout"
+	pMode          = "mode"
+	pName          = "name"
+	pWatch         = "watch"
+	pProbe         = "probe"
+	pProbeEvery    = "probe_interval_sec"
+	pProbeFails    = "probe_failures"
+	pReadyPattern  = "ready_pattern"
+	pInputPattern  = "input_pattern"
+	pResourceID    = "resource_id"
+	pPhase         = "phase"
+	pPlaceholder   = "placeholder"
+	pBaseline      = "baseline"
+	pBaselineBytes = "baseline_bytes"
+	pEnv           = "env"
 )
 
 // DeclarativeFromArgs builds the serializable projection of a command spawn.
@@ -128,7 +129,7 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 			args.Mode = v
 		case pName:
 			args.Name = v
-		case pResourceID, pPhase, pPlaceholder, pBaseline:
+		case pResourceID, pPhase, pPlaceholder, pBaseline, pBaselineBytes:
 		case pEnv:
 			if err := json.Unmarshal([]byte(v), &args.Env); err != nil {
 				return args, fmt.Errorf("param env: %w", err)
@@ -160,11 +161,7 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 	return args, nil
 }
 
-// SpecFromDeclarative rebuilds a command TaskSpec from its declarative
-// projection (promise table: Relaunch✅ via fresh startSession; Alive✅ via
-// the TaskID session check; Resume rebuilt as a monitored-check stub — the
-// live detector binding is re-armed by the R3 reattach; until then the stub
-// returns the same relaunch guidance as an unmonitored session).
+// SpecFromDeclarative rebuilds command intent, resource liveness, and reentry closures.
 func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.Declarative) task.TaskSpec {
 	args, err := argsFromDeclarative(decl)
 	if err != nil {

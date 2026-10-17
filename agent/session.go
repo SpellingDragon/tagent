@@ -27,6 +27,9 @@ import (
 // - 租约拒绝发生在本调用计为 live 之前：私有 CM 直接 Close 且不注册，否则清理 goroutine 永不运行，LiveCMCount 不归零、owner Obligations 到不了零、退役排空挂死。
 // - 终态 drain 的 defer 绑在 unbind 之前（LIFO 下后跑），把 loop-exit 到 unbind 窗口内落地的 settle 转发到共享总线。
 func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *event.Event, error) {
+	if inv == nil {
+		return nil, fmt.Errorf("agent %q: nil invocation", ta.name)
+	}
 	userID := "tagent-user"
 	sessionID := fmt.Sprintf("tagent-session-%s", inv.InvocationID)
 

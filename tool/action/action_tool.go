@@ -65,11 +65,13 @@ type ActionTool struct {
 	// peeks tracks incremental peek cursors per session.
 	peeks peekCursors
 
-	closeOnce  sync.Once
-	closed     atomic.Bool
-	detectorMu sync.Mutex
-	detectors  map[string]*TmuxSettleDetector
-	closeErr   error
+	startMu            sync.Mutex
+	closeOnce          sync.Once
+	closed             atomic.Bool
+	detectorMu         sync.Mutex
+	detectors          map[string]*TmuxSettleDetector
+	closeErr           error
+	residentAdmissions int
 }
 
 // ActionToolOption configures ActionTool.
@@ -173,13 +175,16 @@ func (ct *ActionTool) SetResidentRecordSink(sink func(sessionID, kind, name, det
 func (ct *ActionTool) SetResidentMetaDir(dir string) {
 	if ct != nil {
 		ct.residentMetaDirOverride = dir
+		if ct.tmuxExecutor != nil && len(ct.detectors) == 0 {
+			ct.tmuxExecutor.pipeRoot = dir
+		}
 	}
 }
 
 // NewActionTool creates a new ActionTool.
 func NewActionTool(opts ...ActionToolOption) *ActionTool {
 	ct := &ActionTool{
-		description: "Execute a shell command via tmux and wait for it to stabilize. Returns the final status and captured output.",
+		description: "Execute a shell command via tmux. Oneshot waits for real exit; resident waits for evidenced readiness; interactive waits for a fresh input prompt.",
 		defaultTTL:  defaultTaskTTL,
 	}
 
@@ -197,6 +202,7 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		if ct.monitorConfig != nil {
 			monCfg = *ct.monitorConfig
 		}
+		ct.tmuxExecutor.pipeRoot = ct.metaDir()
 		ct.tmuxMonitor = NewTmuxMonitor(
 			WithMonitorExecutor(ct.tmuxExecutor),
 			WithMonitorConfig(monCfg),
@@ -253,16 +259,15 @@ func (ct *ActionTool) resolveTTL(args ActionArgs) time.Duration {
 	return defaultTaskTTL
 }
 
-// Close stops the TmuxMonitor and reaps all sessions this instance still
-// tracks: on graceful shutdown nothing keeps monitoring them, so leaving them
-// alive would leak orphan sessions (and their ptys) until the next startup's
-// orphan cleanup. Uses sync.Once to ensure idempotent closure.
+// Close stops live producers and preserves natural terminal evidence until acceptance.
 func (ct *ActionTool) Close() error {
 	ct.closeOnce.Do(func() {
 		ct.closed.Store(true)
+		ct.startMu.Lock()
 		if ct.tmuxMonitor != nil {
 			ct.tmuxMonitor.Stop()
 		}
+		ct.startMu.Unlock()
 		ct.detectorMu.Lock()
 		detectors := make([]*TmuxSettleDetector, 0, len(ct.detectors))
 		for _, detector := range ct.detectors {
@@ -271,10 +276,14 @@ func (ct *ActionTool) Close() error {
 		ct.detectorMu.Unlock()
 		for _, detector := range detectors {
 			if ct.tmuxExecutor != nil && ct.tmuxExecutor.resourceStopped(detector.sessionID, detector.resourceID) {
-				if output, err := ct.tmuxExecutor.resourceOutput(detector.sessionID, detector.resourceID); err == nil {
-					ct.persistTerminalOutput(detector.sessionID, detector.resourceID, output)
-					detector.OnStateChange(ct.tmuxMonitor.deathPolarity(detector.sessionID), output)
+				output, _ := ct.tmuxExecutor.resourceOutput(detector.sessionID, detector.resourceID)
+				status := SessionError
+				if _, err := ct.tmuxExecutor.resourceTarget(detector.sessionID, detector.resourceID); err == nil {
+					status = ct.tmuxMonitor.deathPolarity(detector.sessionID)
 				}
+				ct.persistTerminalOutput(detector.sessionID, detector.resourceID, output)
+				detector.OnStateChange(status, output)
+				detector.confirmStopped()
 				continue
 			}
 			select {
@@ -328,7 +337,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 				},
 				"mode": {
 					Type:        "string",
-					Description: "Session liveness semantics: 'oneshot' (default, command semantics — settles when the process exits), 'resident' (long-lived service: dev server / tunnel / training — silence is healthy, no auto-kill, only unexpected death reports back; pair with an output redirect to a log file you can read later), 'interactive' (REPL-like session you intend to send input to later via resume).",
+					Description: "Session liveness semantics: 'oneshot' (default, command semantics — settles when the process exits), 'resident' (long-lived service: dev server / tunnel / training — readiness requires a successful probe or ready_pattern match; silence is an observation), 'interactive' (REPL-like session: waits for a fresh prompt; input_pattern may define it).",
 					Enum:        []any{"oneshot", "resident", "interactive"},
 				},
 				"name": {
@@ -360,6 +369,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 					Type:        "integer",
 					Description: "op=stop only: seconds to wait after SIGTERM before kill-session (default 5).",
 				},
+				"resource_id": {Type: "string", Description: "Immutable resource credential returned by action. Supply it with session operations to reject a reused session name."},
 				"session_id": {
 					Type:        "string",
 					Description: "Exact tmux session id (from a previous action result) when op is set. Takes precedence over name.",
@@ -377,13 +387,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 	}
 }
 
-// Call implements tool.CallableTool.
-//
-// Creates a tmux session for the given command and blocks until the session
-// reaches a stable state (Stable/Completed/Error/TimedOut) as observed by
-// TmuxMonitor, at which point the final output is returned as the tool
-// result. If ctx is cancelled first, the session keeps running but Call()
-// returns with the context error.
+// Call executes an admitted command and waits for its declared exit, readiness, or input condition.
 func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var args ActionArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
@@ -450,6 +454,11 @@ func (ct *ActionTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		}
 		if res.Settled {
 			r := ct.buildResultFromSignal(sessionID, args.Command, args.IsTUI, res.Signal)
+			if res.Task != nil {
+				if decl := res.Task.SpecSnapshot().Declarative; decl != nil {
+					r.ResourceID = decl.Params[pResourceID]
+				}
+			}
 			r.Note += smuggleHint
 			return r, nil
 		}
@@ -537,8 +546,26 @@ func (ct *ActionTool) prepareSession(ctx context.Context, args ActionArgs) (*Tmu
 	if ct.closed.Load() {
 		return nil, nil, fmt.Errorf("action: tool is closed")
 	}
-	if (args.Mode == string(ModeResident) || args.Mode == string(ModeInteractive)) && !ct.CanSpawnResident() {
-		return nil, nil, fmt.Errorf("action: resident session cap (%d) reached", maxResidentSessions)
+	if args.Mode == string(ModeResident) || args.Mode == string(ModeInteractive) {
+		ct.detectorMu.Lock()
+		count := ct.residentAdmissions
+		for _, detector := range ct.detectors {
+			if detector.mode != ModeResident && detector.mode != ModeInteractive {
+				continue
+			}
+			select {
+			case <-detector.Stopped():
+			default:
+				count++
+			}
+		}
+		if count >= maxResidentSessions {
+			ct.detectorMu.Unlock()
+			return nil, nil, fmt.Errorf("action: resident session cap (%d) reached; stop an existing resident before spawning another", maxResidentSessions)
+		}
+		ct.residentAdmissions++
+		ct.detectorMu.Unlock()
+		defer func() { ct.detectorMu.Lock(); ct.residentAdmissions--; ct.detectorMu.Unlock() }()
 	}
 	session, err := ct.tmuxExecutor.PrepareSession(ctx, TmuxCreateOptions{Command: args.Command, WorkDir: args.WorkDir, Env: args.Env, Mode: SessionMode(args.Mode), Name: args.Name})
 	if err != nil {
@@ -560,8 +587,7 @@ func (ct *ActionTool) prepareSession(ctx context.Context, args ActionArgs) (*Tmu
 		}
 		session.Phase = "active"
 		ct.saveBoundMeta(session, args)
-		ct.activateMonitoring(session, args, detector)
-		return nil
+		return ct.activateMonitoring(session, args, detector)
 	}
 	return session, detector, nil
 }
@@ -590,12 +616,17 @@ func (ct *ActionTool) detectorForSession(session *TmuxSession, args ActionArgs) 
 		}
 		ct.removeBoundMeta(id, resource)
 		ct.tmuxMonitor.RemoveResource(id, resource)
+		ct.detectorMu.Lock()
+		if ct.detectors[resource] == detector {
+			delete(ct.detectors, resource)
+		}
+		ct.detectorMu.Unlock()
 		return nil
 	}
 	detector.stopFn = func() bool {
 		if err := cleanup(); err != nil {
 			log.Warnf("[ActionTool] stop %s: %v", id, err)
-			return false
+			return ct.tmuxExecutor.resourceStopped(id, resource)
 		}
 		return ct.tmuxExecutor.resourceStopped(id, resource)
 	}
@@ -618,9 +649,17 @@ func (ct *ActionTool) detectorForSession(session *TmuxSession, args ActionArgs) 
 	return detector, nil
 }
 
-func (ct *ActionTool) activateMonitoring(session *TmuxSession, args ActionArgs, detector *TmuxSettleDetector) {
+func (ct *ActionTool) activateMonitoring(session *TmuxSession, args ActionArgs, detector *TmuxSettleDetector) error {
+	ct.startMu.Lock()
+	defer ct.startMu.Unlock()
+	if ct.closed.Load() {
+		return fmt.Errorf("action: tool closed before monitor activation")
+	}
+	if current, err := ct.tmuxExecutor.SessionResourceID(session.ID); err == nil && current != session.ResourceID {
+		return fmt.Errorf("action: session %s resource was replaced", session.ID)
+	}
 	session.Status, session.ProducerRound = SessionRunning, detector.ProducerRound()
-	ct.tmuxMonitor.AddSessionWithRoundCallback(session, func(round uint64, status SessionStatus, output string) {
+	if !ct.tmuxMonitor.AddSessionWithRoundCallback(session, func(round uint64, status SessionStatus, output string) {
 		if current, err := ct.tmuxExecutor.SessionResourceID(session.ID); err == nil && current != session.ResourceID {
 			detector.OnObservation(round, SessionError, session.LastOutput)
 			return
@@ -630,11 +669,14 @@ func (ct *ActionTool) activateMonitoring(session *TmuxSession, args ActionArgs, 
 		}
 		detector.OnWatchOutputRound(round, output)
 		detector.OnObservation(round, status, output)
-	})
+	}) {
+		return fmt.Errorf("action: session %s is tracked under a different resource", session.ID)
+	}
 	if args.Probe != "" {
 		ct.startProbeLoop(session.ID, args, detector)
 	}
 	ct.tmuxMonitor.Start()
+	return nil
 }
 
 // startSession prepares and activates an unmanaged command session.
@@ -648,8 +690,15 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 }
 
 func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs) func(context.Context) (task.SpawnResult, error) {
-	return func(context.Context) (task.SpawnResult, error) {
-		return spawner.Spawn(ct.commandSpec(spawner, args), nil), nil
+	return func(ctx context.Context) (task.SpawnResult, error) {
+		current := spawner
+		if initiating, ok := task.TaskSpawnerFromContext(ctx); ok {
+			current = initiating
+		}
+		if current == nil {
+			return task.SpawnResult{}, fmt.Errorf("action: no current task spawner for relaunch")
+		}
+		return current.Spawn(ct.commandSpec(current, args), nil), nil
 	}
 }
 
@@ -683,11 +732,11 @@ func (ct *ActionTool) resumeResourceClosure(sessionID, resourceID string, isTUI 
 		if !ct.tmuxMonitor.TouchSession(sessionID) {
 			return nil, fmt.Errorf("session %s is no longer monitored; use relaunch_task", sessionID)
 		}
-		baseline := 0
-		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
-			baseline = strings.Count(out, "\n")
+		output, err := ct.tmuxExecutor.resourceOutput(sessionID, resourceID)
+		if err != nil {
+			return nil, fmt.Errorf("action: read resume output boundary: %w", err)
 		}
-		detector.Rearm(baseline)
+		detector.RearmOutput(output)
 		return &preparedResumeDetector{TmuxSettleDetector: detector, monitor: ct.tmuxMonitor, activate: func() error { return ct.tmuxExecutor.sendResource(sessionID, resourceID, input+"\n") }}, nil
 	}
 }
@@ -704,7 +753,20 @@ func (d *preparedResumeDetector) BeginRound(round uint64) { d.requested = round 
 
 func (d *preparedResumeDetector) Start() {
 	d.once.Do(func() {
+		d.lifecycleMu.Lock()
+		defer d.lifecycleMu.Unlock()
+		select {
+		case <-d.stop:
+			return
+		default:
+		}
 		d.monitor.mu.Lock()
+		select {
+		case <-d.stop:
+			d.monitor.mu.Unlock()
+			return
+		default:
+		}
 		oldRound := d.ProducerRound()
 		err := d.activate()
 		if err == nil {
@@ -748,25 +810,26 @@ func settleToStatus(sig task.SettleSignal) string {
 // that did not settle within the sync-wait window. The session keeps running;
 // its settle is written back later through the task layer.
 func (ct *ActionTool) buildAckResult(sessionID, command string, task *task.Task) *ActionToolResult {
-	note := "命令已在后台运行，稳定或完成后会自动回写结果；你现在可以给出简短回复并结束本回合，无需等待或轮询。"
+	note := "命令已在后台运行，满足声明的等待条件或退出后会自动回写结果；你现在可以给出简短回复并结束本回合，无需等待或轮询。"
 	if task != nil {
-		note = fmt.Sprintf("命令已在后台运行 (task %s)，稳定或完成后会自动回写结果；你现在可以给出简短回复并结束本回合，无需等待或轮询。", task.ID)
+		note = fmt.Sprintf("命令已在后台运行 (task %s)，满足声明的等待条件或退出后会自动回写结果；你现在可以给出简短回复并结束本回合，无需等待或轮询。", task.ID)
+	}
+	resource := ""
+	if task != nil {
+		if decl := task.SpecSnapshot().Declarative; decl != nil {
+			resource = decl.Params[pResourceID]
+		}
 	}
 	return &ActionToolResult{
-		SessionID: sessionID,
-		Command:   command,
-		Status:    "running",
-		Note:      note,
+		SessionID:  sessionID,
+		ResourceID: resource,
+		Command:    command,
+		Status:     "running",
+		Note:       note,
 	}
 }
 
-// buildBlockedResult renders a
-// spawn rejection (disk degraded) as a readable tool result — failure permeates
-// as result, never as error. NOTE: the command session was ALREADY started by
-// startSession before Spawn — the honest wording says "executed but unmanaged"
-// (the detector is cancelled by Spawn's gate branch, so there is no orphan
-// watcher; the tmux session itself keeps running untracked until the
-// session-reclaim sweep).
+// buildBlockedResult reports that the command was refused before business execution.
 func (ct *ActionTool) buildBlockedResult(reason string) *ActionToolResult {
 	return &ActionToolResult{Status: "blocked", Note: "命令未执行：" + reason}
 }
@@ -824,6 +887,7 @@ func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI boo
 
 	return &ActionToolResult{
 		SessionID:  sessionID,
+		ResourceID: ct.signalResource(sessionID, sig),
 		Command:    command,
 		Status:     settleToStatus(sig),
 		Output:     output,
@@ -833,6 +897,17 @@ func (ct *ActionTool) buildResultFromSignal(sessionID, command string, isTUI boo
 	}
 }
 
+func (ct *ActionTool) signalResource(sessionID string, sig task.SettleSignal) string {
+	ct.detectorMu.Lock()
+	defer ct.detectorMu.Unlock()
+	for resource, detector := range ct.detectors {
+		if detector.sessionID == sessionID && (detector.sourceTaskID == "" || strings.HasPrefix(sig.SourceID, "task-settle-"+detector.sourceTaskID+"-")) {
+			return resource
+		}
+	}
+	return ""
+}
+
 // ActionArgs represents a command execution request.
 type ActionArgs struct {
 	Command string            `json:"command"`
@@ -840,10 +915,7 @@ type ActionArgs struct {
 	WorkDir string            `json:"work_dir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	IsTUI   bool              `json:"is_tui,omitempty"`
-	// QuietTimeout overrides the fake-dead detection threshold for this session
-	// (seconds). Silent-but-legal tasks (long downloads, compiles, inference
-	// waits) produce no output while working; the default 150s threshold kills
-	// them. 0 = use global default. Values < StableDuration are rejected in Call.
+	// QuietTimeout sets the silence observation threshold in seconds; zero uses the configured default.
 	QuietTimeout int `json:"quiet_timeout,omitempty"`
 	// TTL is the requested ABSOLUTE lifetime (seconds) for a spawned session: the
 	// unified reaper terminates its backing process and retires the task this long
@@ -853,13 +925,7 @@ type ActionArgs struct {
 	// pass a large ttl or re-enter to stay alive. Orthogonal to QuietTimeout, which
 	// only detects silence and never bounds total lifetime (async-task-lifetime).
 	TTL int `json:"ttl,omitempty"`
-	// Mode selects session liveness semantics:
-	// "oneshot" (default) — command; settles on real exit; 60s quiet reports
-	// stable (never kills).
-	// "resident" — long-lived service (dev server / tunnel / trainer);
-	// silence is healthy, no auto-kill, only unexpected death settles.
-	// "interactive" — long conversational session (REPL); stable settle +
-	// resume supported.
+	// Mode selects oneshot exit, resident readiness, or interactive input semantics.
 	Mode string `json:"mode,omitempty"`
 	// Name: deterministic logical name for the session
 	// ([a-zA-Z0-9-]{1,64}). The session becomes addressable by this name in
@@ -875,13 +941,14 @@ type ActionArgs struct {
 	// Op="stop" — graceful stop: SIGTERM the pane process (fallback
 	// kill-session), grace seconds then SIGKILL.
 	// Target: session_id (exact) or name (logical name → n-<name>).
-	Op        string `json:"op,omitempty"`
-	Keys      string `json:"keys,omitempty"`
-	Enter     *bool  `json:"enter,omitempty"`
-	Tail      int    `json:"tail,omitempty"`
-	Ansi      bool   `json:"ansi,omitempty"`
-	GraceSec  int    `json:"grace,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
+	Op         string `json:"op,omitempty"`
+	Keys       string `json:"keys,omitempty"`
+	Enter      *bool  `json:"enter,omitempty"`
+	Tail       int    `json:"tail,omitempty"`
+	Ansi       bool   `json:"ansi,omitempty"`
+	GraceSec   int    `json:"grace,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	ResourceID string `json:"resource_id,omitempty"`
 	// Watch: pattern-triggered wakeups. While the session
 	// runs, output matching this regex wakes the agent (merged within a
 	// 5s window; cumulative hit count reported). Primary use: resident
@@ -920,6 +987,7 @@ func validSessionName(name string) error {
 // and rendered by the framework as a role=tool message.
 type ActionToolResult struct {
 	SessionID  string `json:"session_id"`
+	ResourceID string `json:"resource_id,omitempty"`
 	Command    string `json:"command"`
 	OldStatus  string `json:"old_status,omitempty"`
 	Status     string `json:"status"`
@@ -1029,7 +1097,11 @@ var pipeRotateBytes int64 = 10 << 20
 // writing into the rotated-away inode). peek's existing "len < cursor →
 // reset" rule transparently adapts to the truncation.
 func (ct *ActionTool) maybeRotatePipe(target string) {
-	rotatePipeFile(ct.tmuxExecutor.PipeFileFor(target))
+	path := ct.tmuxExecutor.PipeFileFor(target)
+	if resource, err := ct.tmuxExecutor.SessionResourceID(target); err == nil && path == ct.tmuxExecutor.resourcePipePath(target, resource) {
+		return
+	}
+	rotatePipeFile(path)
 }
 
 // rotatePipeFile is the copytruncate core, path-addressed for testability.
@@ -1071,6 +1143,34 @@ func (ct *ActionTool) callSessionOp(ctx context.Context, args *ActionArgs) (any,
 	default:
 		return nil, fmt.Errorf("action: unknown op %q (want peek | send | stop)", args.Op)
 	}
+}
+
+func (ct *ActionTool) operationResource(args *ActionArgs, target string) (string, error) {
+	resource := args.ResourceID
+	if resource == "" && ct.tmuxMonitor != nil {
+		if session, ok := ct.tmuxMonitor.GetSession(target); ok {
+			resource = session.ResourceID
+		}
+	}
+	if resource == "" {
+		if b, err := os.ReadFile(ct.metaPath(target)); err == nil {
+			var meta ResidentMeta
+			if json.Unmarshal(b, &meta) == nil {
+				resource = meta.ResourceID
+			}
+		}
+	}
+	if resource == "" {
+		var err error
+		resource, err = ct.tmuxExecutor.SessionResourceID(target)
+		if err != nil {
+			return "", err
+		}
+	}
+	if _, err := ct.tmuxExecutor.resourceTarget(target, resource); err != nil {
+		return "", err
+	}
+	return resource, nil
 }
 
 // opPeek returns output appended since the last peek on this session (or the
@@ -1143,7 +1243,11 @@ func (ct *ActionTool) opSend(args *ActionArgs, target string) (any, error) {
 	if enter {
 		keys += "\n"
 	}
-	if err := ct.tmuxExecutor.SendKeys(target, keys); err != nil {
+	resource, err := ct.operationResource(args, target)
+	if err != nil {
+		return nil, err
+	}
+	if err := ct.tmuxExecutor.sendResource(target, resource, keys); err != nil {
 		return nil, fmt.Errorf("action: send to %s: %w", target, err)
 	}
 	return map[string]any{
@@ -1158,25 +1262,37 @@ func (ct *ActionTool) opStop(args *ActionArgs, target string) (any, error) {
 	if !ct.tmuxExecutor.SessionExists(target) {
 		return map[string]any{"session_id": target, "status": "already_gone"}, nil
 	}
+	resource, err := ct.operationResource(args, target)
+	if err != nil {
+		return nil, err
+	}
+	native, err := ct.tmuxExecutor.resourceTarget(target, resource)
+	if err != nil {
+		return nil, err
+	}
 	grace := 5
 	if args.GraceSec > 0 {
 		grace = args.GraceSec
 	}
-	if pid, err := ct.tmuxExecutor.GetSessionPIDPublic(target); err == nil && pid > 0 {
+	if pid, err := ct.tmuxExecutor.GetSessionPIDPublic(native); err == nil && pid > 0 {
+		if _, err := ct.tmuxExecutor.resourceTarget(target, resource); err != nil {
+			return nil, err
+		}
 		if p, findErr := os.FindProcess(pid); findErr == nil {
 			_ = p.Signal(syscall.SIGTERM)
 		}
 		deadline := time.Now().Add(time.Duration(grace) * time.Second)
 		for time.Now().Before(deadline) {
-			if !ct.tmuxExecutor.SessionExists(target) {
-				return map[string]any{"session_id": target, "status": "stopped", "how": "sigterm"}, nil
+			if ct.tmuxExecutor.resourceStopped(target, resource) {
+				break
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
 	}
-	if err := ct.tmuxExecutor.KillSession(target); err != nil {
+	if err := ct.tmuxExecutor.killResource(target, resource); err != nil {
 		return nil, fmt.Errorf("action: stop %s: %w", target, err)
 	}
+	ct.removeBoundMeta(target, resource)
 	return map[string]any{"session_id": target, "status": "stopped", "how": "kill-session"}, nil
 }
 

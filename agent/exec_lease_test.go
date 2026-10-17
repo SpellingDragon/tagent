@@ -1014,8 +1014,7 @@ func newLeaseHarness(t *testing.T, gate func() string) *leaseHarness {
 
 func (h *leaseHarness) refs() ExecutorRefs { return h.cm.ExecutorRefs() }
 
-// TestLease_DerivedSubCallHoldsCallersGenerationUntilItStops 钉住 嵌套委派继承发起方那一代：真实子调用的引用挂在调用方所钉的那一代上。
-// - 因此调用中途发布新一代，也不能在该子调用停止之前回收调用方那一代。
+// TestLease_DerivedSubCallHoldsCallersGenerationUntilItStops verifies private turns retain their declared source generation.
 func TestLease_DerivedSubCallHoldsCallersGenerationUntilItStops(t *testing.T) {
 	child, g := newGatedOrg(t)
 	h := newLeaseHarness(t, nil)
@@ -1028,16 +1027,22 @@ func TestLease_DerivedSubCallHoldsCallersGenerationUntilItStops(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the gated child never reached its model call — harness broken")
 	}
-	require.Equal(t, 1, h.refs().SubCalls,
-		"a running sub-call holds its own reference kind on the caller's generation")
+	require.Zero(t, h.refs().SubCalls,
+		"assembly releases its temporary sub-call lease before the private turn executes")
 	require.Equal(t, int64(1), h.refs().InFlightTurns, "the caller's turn is counted once, not per descendant")
+	private := child.snapshotLiveCMs()
+	require.Len(t, private, 1)
+	require.Equal(t, int64(1), private[0].ExecutorRefs().InFlightTurns, "the child's calculation is counted on its private execution face")
+	bindings := h.cm.allBindings()
+	require.Len(t, bindings, 1)
+	require.Positive(t, bindings[0].snapshot().DeclaredHolders, "the private execution face retains the source declaration")
 
 	g2 := &leaseCountingRunner{id: "g2"}
 	h.cm.PublishExecutor(g2, ContextManagerConfig{Name: "d6-g2"})
 	un := h.cm.UnconvergedRefs()
 	require.Len(t, un, 1, "the retired caller generation is the unconverged one")
 	require.Equal(t, 1, un[0].Refs[LeaseTurn.String()])
-	require.Equal(t, 1, un[0].Refs[LeaseSubCall.String()], "the CHILD is why it cannot be reclaimed yet")
+	require.Zero(t, un[0].Refs[LeaseSubCall.String()], "waiting and private calculations do not retain a caller calculation lease")
 	require.Zero(t, h.gen1.closed.Load(), "a live derived call keeps its generation open")
 
 	close(g.gate)

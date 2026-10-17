@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/agent/task"
+	"github.com/SpellingDragon/tagent/testutil"
 	tasktool "github.com/SpellingDragon/tagent/tool/task"
 	"github.com/stretchr/testify/require"
 	"os"
@@ -706,6 +707,7 @@ func TestRelaunchAfterRestartResolvesOnTheCurrentFace(t *testing.T) {
 // - 重启入口有确定裁决：RestoreTask 把 running 降级 suspect，TaskID 桥先裁孤儿、再把被当前 monitor 跟踪的任务提升回 running；
 // - 一条存活会话被判「未跟踪」，等价于监视信号在某一代工具手里丢失——该链与热更窗口检验的是同一处 seam。
 func TestLiveSessionStaysWatchedAcrossToolGeneration(t *testing.T) {
+	testutil.RequireTmux(t)
 	if phase := os.Getenv(sessionWatchPhaseEnv); phase != "" {
 		sessionWatchChild(t, phase)
 		return

@@ -407,10 +407,8 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	return turnContinue
 }
 
-// persistVolatileTaskInputs preserves each notification's task identity before
-// the runner echoes a merged input. Mixed batches commit their other inputs too,
-// so skipping that echo cannot erase a user message. The active CM owns these
-// facts and their projection, including on a delegated invocation.
+// persistVolatileTaskInputs commits the frozen inputs of private continuations
+// and mixed task or durable batches under the active context's ownership.
 func persistVolatileTaskInputs(ctx context.Context, cm *ContextManager, events []*AgentEvent) bool {
 	if !batchNeedsVolatileFacts(cm, events) {
 		return true

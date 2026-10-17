@@ -105,6 +105,7 @@ type execBinding struct {
 	total     int
 	retired   bool
 	retiredAt time.Time
+	closing   bool
 	closed    bool
 }
 
@@ -129,6 +130,10 @@ func newExecBinding(cm *ContextManager, id int64, r runner.Runner, face ContextM
 // 要启动新工作必须用 tryAcquireActive——它是唯一守住「已退役的代不接受新引用」的形式。
 func (b *execBinding) acquire(kind LeaseKind) *ExecLease {
 	b.mu.Lock()
+	if b.closed || b.closing {
+		b.mu.Unlock()
+		return &ExecLease{b: b, kind: leaseKindNoop, refused: ErrExecClosed}
+	}
 	b.refs[kind]++
 	b.total++
 	b.mu.Unlock()
@@ -150,7 +155,7 @@ func (b *execBinding) acquire(kind LeaseKind) *ExecLease {
 // refuses and the caller pins the generation actually in force.
 func (b *execBinding) tryAcquireActive(kind LeaseKind) (*ExecLease, bool) {
 	b.mu.Lock()
-	if b.retired || b.closed {
+	if b.retired || b.closed || b.closing {
 		b.mu.Unlock()
 		return nil, false
 	}
@@ -189,7 +194,7 @@ func (b *execBinding) release(kind LeaseKind) {
 	doClose := b.reclaimableLocked()
 	drained := b.total == 0
 	if doClose {
-		b.closed = true
+		b.closing = true
 	}
 	b.mu.Unlock()
 
@@ -207,7 +212,7 @@ func (b *execBinding) release(kind LeaseKind) {
 // parent's deferred delegation reachable after a newer generation replaced it).
 // Caller holds b.mu.
 func (b *execBinding) reclaimableLocked() bool {
-	return b.retired && b.total == 0 && b.heldBy == 0 && !b.closed
+	return b.retired && b.total == 0 && b.heldBy == 0 && !b.closed && !b.closing
 }
 
 // finishReclaim performs the terminal cleanup of one reclaimed generation:
@@ -224,6 +229,9 @@ func (b *execBinding) finishReclaim() {
 	if b.run != nil {
 		_ = b.run.Close()
 	}
+	b.mu.Lock()
+	b.closed, b.closing = true, false
+	b.mu.Unlock()
 	b.cm.forgetBinding(b)
 	for _, child := range b.heldBindings() {
 		child.dropDeclaredHold()
@@ -273,7 +281,7 @@ func (b *execBinding) dropDeclaredHold() {
 	}
 	reclaim := b.reclaimableLocked()
 	if reclaim {
-		b.closed = true
+		b.closing = true
 	}
 	b.mu.Unlock()
 	if reclaim {
@@ -289,7 +297,7 @@ func (b *execBinding) dropDeclaredHold() {
 // kept it alive.
 func (b *execBinding) acquireDeclared(kind LeaseKind) (*ExecLease, error) {
 	b.mu.Lock()
-	if b.closed {
+	if b.closed || b.closing {
 		b.mu.Unlock()
 		return nil, ErrExecClosed
 	}
@@ -324,7 +332,7 @@ var ErrExecClosed = errors.New("execution generation already closed: new work re
 func (b *execBinding) isClosed() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.closed
+	return b.closed || b.closing
 }
 
 // snapshot returns the generation's observable reference state (diagnostics only;
@@ -333,12 +341,14 @@ func (b *execBinding) snapshot() GenerationRefs {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	g := GenerationRefs{
-		Generation: b.id,
-		Owner:      b.owner,
-		Retired:    b.retired,
-		Closed:     b.closed,
-		Age:        time.Since(b.created),
-		Refs:       map[string]int{},
+		Generation:      b.id,
+		Owner:           b.owner,
+		Retired:         b.retired,
+		Closed:          b.closed,
+		Reclaiming:      b.closing,
+		DeclaredHolders: b.heldBy,
+		Age:             time.Since(b.created),
+		Refs:            map[string]int{},
 	}
 	for _, k := range leaseKinds {
 		if n := b.refs[k]; n > 0 {
@@ -370,7 +380,7 @@ func (b *execBinding) holdsUsage() bool {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return !b.retired || b.total > 0
+	return !b.closed && (!b.retired || b.total > 0 || b.heldBy > 0)
 }
 
 // BindingHolders counts the live execution generations across `agents` whose OWN
@@ -388,17 +398,24 @@ func (b *execBinding) holdsUsage() bool {
 // work in B, and it is not a second task domain (J7).
 func BindingHolders(owner string, agents []*TagentAgent) int {
 	holders := 0
+	seen := make(map[*execBinding]bool)
 	for _, a := range agents {
 		if a == nil || a.name == owner {
 			continue
 		}
-		cm := a.ContextManager()
-		if cm == nil {
-			continue
-		}
-		for _, b := range cm.allBindings() {
-			if b.holdsUsage() && b.subagentWrapper(owner) != nil {
-				holders++
+		cms := append([]*ContextManager{a.ContextManager()}, a.snapshotLiveCMs()...)
+		for _, cm := range cms {
+			if cm == nil {
+				continue
+			}
+			for _, b := range cm.allBindings() {
+				if seen[b] {
+					continue
+				}
+				seen[b] = true
+				if b.holdsUsage() && b.subagentWrapper(owner) != nil {
+					holders++
+				}
 			}
 		}
 	}
@@ -649,21 +666,25 @@ func execLeaseFromContext(ctx context.Context) (*ExecLease, bool) {
 
 // GenerationRefs is one generation's diagnostic row.
 type GenerationRefs struct {
-	Generation int64          `json:"generation"`
-	Owner      string         `json:"owner"`
-	Retired    bool           `json:"retired"`
-	Closed     bool           `json:"closed"`
-	Age        time.Duration  `json:"ageNanos"`
-	Total      int            `json:"totalRefs"`
-	Refs       map[string]int `json:"refs"`
+	Generation      int64          `json:"generation"`
+	Owner           string         `json:"owner"`
+	Retired         bool           `json:"retired"`
+	Closed          bool           `json:"closed"`
+	Reclaiming      bool           `json:"reclaiming,omitempty"`
+	DeclaredHolders int            `json:"declaredHolders,omitempty"`
+	Age             time.Duration  `json:"ageNanos"`
+	Total           int            `json:"totalRefs"`
+	Refs            map[string]int `json:"refs"`
 }
 
 // UnconvergedRef names a generation that is still held when a bounded close
 // gives up. It is a report, not a
 // force-close: the resources stay held until their producer confirms the stop.
 type UnconvergedRef struct {
-	Generation int64          `json:"generation"`
-	Owner      string         `json:"owner"`
-	HeldFor    time.Duration  `json:"heldForNanos"`
-	Refs       map[string]int `json:"refs"`
+	Generation      int64          `json:"generation"`
+	Owner           string         `json:"owner"`
+	HeldFor         time.Duration  `json:"heldForNanos"`
+	Refs            map[string]int `json:"refs"`
+	DeclaredHolders int            `json:"declaredHolders,omitempty"`
+	Reclaiming      bool           `json:"reclaiming,omitempty"`
 }

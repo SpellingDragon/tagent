@@ -43,27 +43,27 @@ func (ta *TagentAgent) RebuildTaskRegistryFromWAL(store memory.MemoryStore,
 	if ta == nil || ta.taskManager == nil || store == nil {
 		return 0
 	}
-	return RebuildTaskRegistry(store, ta.partitionID(), ta.taskManager, rebuildClosures)
+	rebuild := func(decl task.Declarative) task.TaskSpec {
+		spec := restoredTaskSpec(decl, rebuildClosures)
+		if decl.Kind == "subagent" {
+			spec.ResumeFn = subagentResumeClosureWithOverrides(ta.contextManager, decl.AgentName, &subagentRounds{}, decl.Overrides)
+			if decl.RoundID > 0 && decl.ProducerRound == 0 {
+				spec.Start = restoredSubagentStart(ta.contextManager, decl)
+			}
+		}
+		return spec
+	}
+	n, pending := rebuildTaskRegistry(store, ta.partitionID(), ta.taskManager, rebuild)
+	if ta.taskRecords != nil {
+		for _, fact := range pending {
+			ta.taskRecords.restorePendingSignal(fact)
+		}
+	}
+	return n
 }
 
-// SubagentRedispatcher：跨重启
-// subagent Relaunch 的重投递器——镜像 subagentRelaunch 的 detector 形状
-// （RedispatchAsync 同步跑在 detector 的 watch goroutine 内，Spawn 的 sync-wait
-// 窗口语义保持；spawnKey=agentName+":"+body 与无 extraName 的原 spawn 键一致→幂等去重覆盖）。
-//
-// resolve 是**每次重投时**对目标所属调用绑定的一次解析，而不是启动时冻结的
-// wrapper 快照：否则一个被后续代移除的目标仍会在这里被旧代 wrapper 静默复活（跑
-// 的是已退役的声明与目标），而当时的拒绝文案又声称“current org”——两者均与
-// task-registry-rebuild 的「不复活已退役执行器或静默改投」相逆。调用方应传入
-// 「按有效执行面解析」的闭包（见 ContextManager.SubagentWrapper），这就让显式
-// 重投与普通委派共用同一个版本真源。
-// resolve is the SAME version source ordinary delegation and 's re-entry use
-// (see ResolveReentryDelegation): the initiating call's binding when the re-entry
-// rides one, the effective face otherwise. Freezing a wrapper snapshot here — or
-// resolving against the effective face while an initiator holds an older binding —
-// would let a target a later generation removed be silently revived by a stored
-// task, which is precisely what task-registry-rebuild「不复活已退役执行器或静默改投」
-// and forbid.
+// SubagentRedispatcher rebuilds relaunch through the same admission and binding barriers as a fresh delegation.
+// Every re-entry resolves the target on its initiating call's generation or the effective resident face.
 func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error) {
 	var redispatch func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error)
 	redispatch = func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error) {
@@ -115,7 +115,11 @@ func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*
 			ResumeFn: subagentResumeClosureWithOverrides(w.parentCM, agentName, rounds, overrides),
 		}
 		spec.Start = w.prepareTaskStart(lease.WithContext(ctx), w.parentCM, rounds, inv)
-		return tm.Spawn(spec, nil), nil
+		var spawner task.TaskSpawner = tm
+		if current, ok := task.TaskSpawnerFromContext(ctx); ok {
+			spawner = current
+		}
+		return spawner.Spawn(spec, nil), nil
 	}
 	return redispatch
 }
@@ -259,6 +263,9 @@ func (ta *TagentAgent) SetHotSource(src func() (OrgHotParams, bool)) {
 		return
 	}
 	ta.hotSource.Store(&src)
+	if ta.taskManager != nil {
+		ta.taskManager.RecheckDeadlines()
+	}
 }
 
 // HotSnapshot returns the owner's CURRENT effective hot bundle — resolved solely
@@ -319,6 +326,10 @@ func (ta *TagentAgent) unregisterLiveCM(cm *ContextManager) {
 	ta.liveCMsMu.Lock()
 	delete(ta.liveCMs, cm)
 	ta.liveCMsMu.Unlock()
+	ta.tryDeferredFinalExit()
+	if ta.contextManager != nil {
+		ta.contextManager.pokeRetirementDrain()
+	}
 }
 
 // LiveCMCount reports the number of registered in-flight invocation-private
@@ -332,9 +343,7 @@ func (ta *TagentAgent) LiveCMCount() int {
 	return len(ta.liveCMs)
 }
 
-// snapshotLiveCMs returns a snapshot of the registered in-flight invocation-private
-// CMs (test-only introspection for  acceptance: seeded values at
-// construction, hot-applied values mid-call). No execution path reads it.
+// snapshotLiveCMs returns this owner's live private execution faces for shutdown and usage accounting.
 func (ta *TagentAgent) snapshotLiveCMs() []*ContextManager {
 	if ta == nil {
 		return nil
@@ -428,6 +437,7 @@ func (s *taskRecordSink) onCancel(tk *task.Task) {
 	s.cm.EmitTaskCancelledRecord(tk)
 }
 
+// RebuildTaskRegistry restores task intentions, producer bindings and unaccepted signals in event-key order.
 func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.TaskManager,
 	rebuildClosures func(decl task.Declarative) task.TaskSpec) int {
 	n, _ := rebuildTaskRegistry(store, partitionID, tm, rebuildClosures)
@@ -471,9 +481,7 @@ func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 	receipts := make(map[int64]memory.FullEvent)
 	for _, ev := range records {
 		if ev.EventType == tagentevent.TypeTaskSignalReceipt {
-			if key, err := tagentevent.ParseEventKey(ev.Content); err == nil && key > 0 {
-				receipts[key] = ev
-			}
+			receipts[ev.EventKey] = ev
 			continue
 		}
 		id := ev.Metadata["task_id"]
@@ -495,7 +503,7 @@ func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 			foldTaskDeclaration(f, decl, ev)
 		case tagentevent.TypeTaskSignal:
 			var raw taskSignalRecord
-			if err := json.Unmarshal([]byte(ev.Content), &raw); err != nil || raw.TaskID != id || raw.RoundID == 0 || raw.Seq == 0 {
+			if err := json.Unmarshal([]byte(ev.Content), &raw); err != nil || raw.TaskID != id || raw.RoundID == 0 || raw.Seq == 0 || raw.Event == nil || raw.ReceiptKey <= 0 || raw.ObservedAt.IsZero() {
 				log.Warnf("[rebuild-task-registry] invalid signal %d", ev.EventKey)
 				continue
 			}
@@ -515,7 +523,7 @@ func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 		var latestAcceptedTerminal *taskRegistrySignal
 		for i := range f.raw {
 			raw := &f.raw[i]
-			raw.accepted = taskSignalReceiptMatches(raw.fact, raw.record, receipts[raw.fact.EventKey])
+			raw.accepted = taskSignalReceiptMatches(raw.fact, raw.record, receipts[raw.record.ReceiptKey])
 			if raw.accepted && raw.record.ErrorKind == "continuation_interrupted" && raw.fact.EventKey == f.statusKey {
 				f.status, f.result, f.err, f.settledAt = task.TaskFailed, raw.record.Output, raw.record.signal().Err, raw.record.ObservedAt
 			}
@@ -565,11 +573,14 @@ func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 }
 
 func foldTaskDeclaration(f *taskRegistryFold, decl task.Declarative, ev memory.FullEvent) {
+	if f.cancelled {
+		return
+	}
 	if decl.RoundID == 0 {
 		decl.RoundID = 1
 	}
 	phase := ev.Metadata["admission_phase"]
-	intent := strings.Contains(phase, "intent") || phase == "spawn"
+	intent := strings.Contains(phase, "intent") || phase == "spawn" || phase == "accepted" || phase == "round_accepted" || phase == "round_aborted"
 	if decl.StartedAtMilli <= 0 {
 		decl.StartedAtMilli = ev.Timestamp
 	}
@@ -613,7 +624,7 @@ func foldTaskDeclaration(f *taskRegistryFold, decl task.Declarative, ev memory.F
 
 func foldTaskSignal(f *taskRegistryFold, raw taskSignalRecord, key int64) {
 	producer := raw.ProducerRound
-	if producer == 0 {
+	if producer == 0 && raw.Observation != "round_aborted" {
 		producer = raw.RoundID
 	}
 	if raw.RoundID > f.decl.RoundID {
@@ -637,9 +648,6 @@ func foldTaskSignal(f *taskRegistryFold, raw taskSignalRecord, key int64) {
 	}
 	if raw.RoundID < f.decl.ProducerRound || f.cancelled {
 		return
-	}
-	if raw.Lineage == task.LineageRetired {
-		f.cancelled = true
 	}
 	if raw.RoundID > f.decl.ProducerRound {
 		f.decl.ProducerRound = raw.RoundID
@@ -697,6 +705,9 @@ func foldLegacyTaskSettle(f *taskRegistryFold, ev memory.FullEvent) {
 	round, _ := strconv.ParseUint(ev.Metadata[tagentevent.MetaKeyTaskRoundID], 10, 64)
 	if round == 0 {
 		round = 1
+		if status == "cancelled" && f.decl.ProducerRound > 0 {
+			round = f.decl.ProducerRound
+		}
 	}
 	if round < f.decl.ProducerRound || ev.EventKey < f.statusKey {
 		return
@@ -724,7 +735,10 @@ func foldLegacyTaskSettle(f *taskRegistryFold, ev memory.FullEvent) {
 }
 
 func taskSignalReceiptMatches(fact memory.FullEvent, raw taskSignalRecord, receipt memory.FullEvent) bool {
-	if receipt.EventKey == 0 || receipt.EventKey != raw.ReceiptKey || receipt.Content != tagentevent.FormatEventKey(fact.EventKey) {
+	if receipt.EventType != tagentevent.TypeTaskSignalReceipt || receipt.EventKey == 0 || receipt.EventKey != raw.ReceiptKey || receipt.Content != tagentevent.FormatEventKey(fact.EventKey) {
+		return false
+	}
+	if receipt.PartitionID != fact.PartitionID || receipt.Timestamp != fact.Timestamp || receipt.Timestamp != raw.ObservedAt.UnixMilli() {
 		return false
 	}
 	if receipt.Metadata["task_id"] != raw.TaskID || receipt.Metadata[tagentevent.MetaKeyTaskRoundID] != strconv.FormatUint(raw.RoundID, 10) || receipt.Metadata[tagentevent.MetaKeyTaskSignalSeq] != strconv.FormatUint(raw.Seq, 10) {
@@ -733,7 +747,7 @@ func taskSignalReceiptMatches(fact memory.FullEvent, raw taskSignalRecord, recei
 	if raw.Event != nil && receipt.Metadata[tagentevent.MetaKeySourceEventID] != raw.Event.ID {
 		return false
 	}
-	return raw.ChildInvocationID == "" || receipt.Metadata[childInvocationIDParam] == raw.ChildInvocationID
+	return receipt.Metadata[childInvocationIDParam] == raw.ChildInvocationID && receipt.Metadata[tagentevent.MetaKeyTaskRoundOwner] == fact.Metadata[tagentevent.MetaKeyTaskRoundOwner]
 }
 
 func restoredTaskSpec(decl task.Declarative, rebuild func(task.Declarative) task.TaskSpec) task.TaskSpec {

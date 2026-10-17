@@ -343,49 +343,42 @@ func TestTouchAdopted_StampsLastAdoptedAt(t *testing.T) {
 // - 新建 detector 必须接管 monitor 的 per-session 回调；不重绑则迁移仍供给旧一代 detector，本轮新 detector 永无 settle/ExitCode。
 // - 判据三分：回调换人、新 detector 经回调收到迁移并出 settle、旧绑定 detector 保持静默（供给无双写）。
 func TestCrossRestartResume_RebindsDetectorToMonitor(t *testing.T) {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		t.Skip("tmux not available — rebind wiring needs a live session for the resume path")
-	}
-	ct := NewActionTool(WithOrphanCleanupDisabled(), WithResidentMetaDir(t.TempDir()))
-	require.NotNil(t, ct.tmuxExecutor, "host has tmux: the executor must be wired")
-
-	sess, err := ct.tmuxExecutor.CreateSession(context.Background(), TmuxCreateOptions{
-		Command: "cat", Mode: ModeResident, Name: "cross-rebind",
-	})
-	if err != nil {
-		t.Skipf("cannot create tmux session: %v", err)
-	}
-	sessionID := sess.ID
-	defer func() { _ = ct.tmuxExecutor.KillSession(sessionID) }()
-
-	oldDetector := NewTmuxSettleDetector(sessionID, func() {})
-	ct.tmuxMonitor.AddSessionWithCallback(sess, func(_ string, _, newStatus SessionStatus, output string) {
-		oldDetector.OnWatchOutput(output)
-		oldDetector.OnStateChange(newStatus, output)
-	})
-
-	spec := ct.SpecFromDeclarative(nil, task.Declarative{
-		Kind: "command", Desc: "repl", Key: "repl", Command: "cat",
-		TaskID: sessionID, Params: map[string]string{"mode": "resident", "timeout": "0"},
-	})
-	require.NotNil(t, spec.ResumeFn)
-
-	newDetector, rerr := spec.ResumeFn(context.Background(), "echo hi")
-	require.NoError(t, rerr, "resume against the live session must complete the rebind+send path")
-
-	cb := ct.tmuxMonitor.sessionCallbacks[sessionID]
-	require.NotNil(t, cb, "the resume round must own a per-session callback")
-	cb(sessionID, SessionRunning, SessionCompleted, "hi\n")
-
+	fake := &fakeTmuxResource{name: "n-cross-rebind", resource: "100:$7", present: true, command: "cat", output: "prompt"}
+	ct := fakeActionTool(t, fake)
+	oldDetector := NewTmuxSettleDetector(fake.name, nil)
+	defer oldDetector.Cancel()
+	ct.tmuxMonitor.AddSessionWithCallback(&TmuxSession{ID: fake.name, ResourceID: fake.resource, Status: SessionRunning}, func(_ string, _, status SessionStatus, output string) { oldDetector.OnStateChange(status, output) })
+	decl := DeclarativeFromArgs(ActionArgs{Command: "cat", Mode: "interactive"}, fake.name)
+	decl.RoundID, decl.ProducerRound = 3, 3
+	decl.Params[pResourceID] = fake.resource
+	manager := task.NewTaskManager(task.TaskManagerConfig{})
+	tk := manager.RestoreTask("cross-rebind-task", ct.SpecFromDeclarative(manager, *decl), time.Now(), task.TaskRunning)
+	recovered := ct.RecoverTaskDetector(tk)
+	require.NotNil(t, recovered)
+	recovered.(task.ActivatableDetector).Start()
+	spec := recovered.(interface{ RecoveredSpec() task.TaskSpec }).RecoveredSpec()
+	resumed, err := spec.ResumeFn(t.Context(), "answer")
+	require.NoError(t, err)
+	resumed.(interface{ BeginRound(uint64) }).BeginRound(4)
+	resumed.(task.ActivatableDetector).Start()
+	require.Equal(t, 1, fake.sends)
+	callback := ct.tmuxMonitor.roundCallbacks[fake.name]
+	require.NotNil(t, callback)
+	fake.mu.Lock()
+	fake.dead = true
+	fake.mu.Unlock()
+	callback(4, SessionCompleted, "prompt\nfinished")
 	select {
-	case sig := <-newDetector.Settled():
-		require.Equal(t, task.SettleCompleted, sig.Kind, "the transition must surface as settle on the NEW detector")
-	case <-time.After(2 * time.Second):
-		t.Fatal("new detector never received the state change — rebind did not land")
+	case sig := <-resumed.Settled():
+		require.Equal(t, task.SettleCompleted, sig.Kind)
+		require.Equal(t, uint64(4), sig.ProducerRound)
+		require.Contains(t, sig.Output, "finished")
+	case <-time.After(time.Second):
+		t.Fatal("resumed detector received no output")
 	}
 	select {
 	case sig := <-oldDetector.Settled():
-		t.Fatalf("stale pre-rebind detector received the transition: %+v", sig)
+		t.Fatalf("stale detector received output: %+v", sig)
 	default:
 	}
 }

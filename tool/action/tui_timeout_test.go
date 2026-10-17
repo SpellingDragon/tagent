@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
 package action
 
 import (

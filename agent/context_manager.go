@@ -1025,14 +1025,16 @@ func (cm *ContextManager) UnconvergedRefs() []UnconvergedRef {
 	var out []UnconvergedRef
 	for b := range cm.retiredBindings {
 		g := b.snapshot()
-		if g.Closed || g.Total == 0 {
+		if g.Closed {
 			continue
 		}
 		out = append(out, UnconvergedRef{
-			Generation: g.Generation,
-			Owner:      g.Owner,
-			HeldFor:    time.Since(b.retiredAt),
-			Refs:       g.Refs,
+			Generation:      g.Generation,
+			Owner:           g.Owner,
+			HeldFor:         time.Since(b.retiredAt),
+			Refs:            g.Refs,
+			DeclaredHolders: g.DeclaredHolders,
+			Reclaiming:      g.Reclaiming,
 		})
 	}
 	return out
@@ -1221,6 +1223,7 @@ func (cm *ContextManager) turnOverheadText(args *model.BeforeModelArgs) string {
 	var parts []string
 	if cm.taskController != nil {
 		board := task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL())
+		cm.settleSinks.compact(cm.taskController)
 		cm.boardMu.Lock()
 		cm.boardReq, cm.boardText = args.Request, board
 		cm.boardMu.Unlock()
@@ -1495,7 +1498,7 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 	}
 	if evt.Source == SourceTask {
 		for _, k := range []string{"task_id", "settle_status", "settle_notice", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal,
-			tagentevent.MetaKeyTaskMode, tagentevent.MetaKeyTaskWaitFor, tagentevent.MetaKeyTaskRoundID, tagentevent.MetaKeyTaskRoundOwner, tagentevent.MetaKeyTaskSignalSeq, tagentevent.MetaKeySettleWaitSatisfied, tagentevent.MetaKeySettleObservation, tagentevent.MetaKeySettleWake, "lineage_absent", "task_signal_key"} {
+			tagentevent.MetaKeyTaskMode, tagentevent.MetaKeyTaskWaitFor, tagentevent.MetaKeyTaskRoundID, tagentevent.MetaKeyTaskProducerRoundID, tagentevent.MetaKeyTaskRoundOwner, tagentevent.MetaKeyTaskSignalSeq, tagentevent.MetaKeySettleWaitSatisfied, tagentevent.MetaKeySettleObservation, tagentevent.MetaKeySettleWake, "lineage_absent", "task_signal_key", "spill_path"} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
@@ -2003,6 +2006,7 @@ func (cm *ContextManager) injectLiveTaskBoard(args *model.BeforeModelArgs) {
 	board, reused := cm.takeTurnBoard(args)
 	if !reused {
 		board = task.RenderBoard(cm.taskController.List(), cm.taskController.DefaultTTL())
+		cm.settleSinks.compact(cm.taskController)
 	}
 	if board != "" {
 		args.Request.Messages = task.InjectBoard(args.Request.Messages, board)

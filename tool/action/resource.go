@@ -1,3 +1,4 @@
+// 契约: docs/wiki/tool/tmux-action.md#named-session-singleton
 package action
 
 import (
@@ -7,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -14,6 +16,11 @@ import (
 func (te *TmuxExecutor) runResourceCommand(ctx context.Context, args []string) (string, error) {
 	if te.run != nil {
 		return te.run(ctx, args)
+	}
+	if _, bounded := ctx.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
 	}
 	name, argv := te.buildTmuxCommand(args)
 	out, err := exec.CommandContext(ctx, name, argv...).CombinedOutput()
@@ -85,9 +92,21 @@ func (te *TmuxExecutor) PrepareSession(ctx context.Context, opts TmuxCreateOptio
 	if err != nil {
 		return nil, err
 	}
-	session.Command, session.Placeholder, session.Phase = command, placeholder, "prepared"
+	fingerprint, err := te.runResourceCommand(ctx, []string{"display-message", "-p", "-t", strings.Split(session.ResourceID, ":")[1], "#{pane_start_command}"})
+	if err != nil || !strings.Contains(fingerprint, strings.TrimPrefix(placeholder, "exec sleep 2147483647 # ")) {
+		_ = te.killResource(session.ID, session.ResourceID)
+		if err != nil {
+			return nil, fmt.Errorf("prepare placeholder fingerprint: %w", err)
+		}
+		return nil, fmt.Errorf("prepare placeholder fingerprint is unavailable")
+	}
+	session.Command, session.Placeholder, session.Phase = command, fingerprint, "prepared"
 	session.PipeFile = te.resourcePipePath(session.ID, session.ResourceID)
-	if _, err := te.runResourceCommand(ctx, []string{"pipe-pane", "-t", strings.Split(session.ResourceID, ":")[1], "cat >> " + session.PipeFile}); err != nil {
+	if err := os.MkdirAll(filepath.Dir(session.PipeFile), 0o755); err != nil {
+		_ = te.killResource(session.ID, session.ResourceID)
+		return nil, err
+	}
+	if _, err := te.runResourceCommand(ctx, []string{"pipe-pane", "-t", strings.Split(session.ResourceID, ":")[1], "cat >> " + tmuxQuote(session.PipeFile)}); err != nil {
 		_ = te.killResource(session.ID, session.ResourceID)
 		return nil, fmt.Errorf("prepare output capture: %w", err)
 	}
@@ -96,7 +115,11 @@ func (te *TmuxExecutor) PrepareSession(ctx context.Context, opts TmuxCreateOptio
 
 func (te *TmuxExecutor) resourcePipePath(sessionID, resourceID string) string {
 	identity := strings.NewReplacer(":", "-", "$", "").Replace(resourceID)
-	return filepath.Join(os.TempDir(), "tagent-pipe-"+sessionID+"-"+identity+".log")
+	root := te.pipeRoot
+	if root == "" {
+		root = os.TempDir()
+	}
+	return filepath.Join(root, "tagent-pipe-"+sessionID+"-"+identity+".log")
 }
 
 func (te *TmuxExecutor) resourceOutput(sessionID, resourceID string) (string, error) {
@@ -121,7 +144,7 @@ func (te *TmuxExecutor) activateResource(sessionID, resourceID, placeholder, com
 	if actual != placeholder {
 		return nil
 	}
-	return te.resourceMutation(target, resourceID, []string{"respawn-pane", "-k", "-t", target, command})
+	return te.resourceMutationGuard(target, resourceID, []string{"respawn-pane", "-k", "-t", target, command}, "#{==:#{pane_start_command},"+placeholder+"}")
 }
 
 func (te *TmuxExecutor) sendResource(sessionID, resourceID, keys string) error {
@@ -135,13 +158,27 @@ func (te *TmuxExecutor) sendResource(sessionID, resourceID, keys string) error {
 func tmuxQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
 func (te *TmuxExecutor) resourceMutation(target, resourceID string, args []string) error {
+	return te.resourceMutationGuard(target, resourceID, args, "")
+}
+
+func (te *TmuxExecutor) resourceMutationGuard(target, resourceID string, args []string, guard string) error {
 	quoted := make([]string, len(args))
 	for i, arg := range args {
 		quoted[i] = tmuxQuote(arg)
 	}
+	condition := "#{==:#{pid}:#{session_id}," + resourceID + "}"
+	if guard != "" {
+		condition = "#{&&:" + condition + "," + guard + "}"
+	}
 	out, err := te.runResourceCommand(context.Background(), []string{"if-shell", "-F", "-t", target,
-		"#{==:#{pid}:#{session_id}," + resourceID + "}", strings.Join(quoted, " "), "display-message -p tagent-resource-changed"})
+		condition, strings.Join(quoted, " "), "display-message -p tagent-resource-changed"})
 	if err == nil && strings.Contains(out, "tagent-resource-changed") {
+		if guard != "" {
+			current, readErr := te.runResourceCommand(context.Background(), []string{"display-message", "-p", "-t", target, "#{pid}:#{session_id}"})
+			if readErr == nil && current == resourceID {
+				return nil
+			}
+		}
 		return fmt.Errorf("tmux resource %s changed during mutation", resourceID)
 	}
 	return err

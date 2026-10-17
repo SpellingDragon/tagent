@@ -1,3 +1,4 @@
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 package agent
 
 import (
@@ -14,6 +15,7 @@ import (
 	tagentevent "github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 const childInvocationIDParam = "child_invocation_id"
@@ -28,6 +30,7 @@ type delegationRoundRecord struct {
 	Output            string    `json:"output,omitempty"`
 	OutputRefs        []int64   `json:"output_refs,omitempty"`
 	Error             string    `json:"error,omitempty"`
+	ErrorKind         string    `json:"error_kind,omitempty"`
 	StartedAt         time.Time `json:"started_at"`
 	FinishedAt        time.Time `json:"finished_at,omitempty"`
 }
@@ -58,9 +61,9 @@ func (cm *ContextManager) commitDelegationRound(rd delegationRoundRecord) (int64
 		Content:      string(raw), Timestamp: at.UnixMilli(),
 		Metadata: map[string]string{
 			tagentevent.MetaKeyAgentName: cm.name,
-			"task_id":                    rd.TaskID, "task_round_id": strconv.FormatUint(rd.RoundID, 10),
-			"round_owner":          rd.RoundOwner,
-			childInvocationIDParam: rd.ChildInvocationID,
+			"task_id":                    rd.TaskID, tagentevent.MetaKeyTaskRoundID: strconv.FormatUint(rd.RoundID, 10),
+			tagentevent.MetaKeyTaskRoundOwner: rd.RoundOwner,
+			childInvocationIDParam:            rd.ChildInvocationID,
 		},
 	}
 	if err := cm.memStore.StoreEvent(key, ev); err != nil {
@@ -115,7 +118,15 @@ func (d *admittedDetector) Start() {
 	go func() {
 		defer d.finish()
 		out, err := d.fn(d.ctx)
-		d.ch <- task.SettleSignal{Kind: task.SettleCompleted, Output: out, Err: err}
+		sig := task.SettleSignal{Kind: task.SettleCompleted, Output: out, Err: err}
+		var notAccepted *ErrContinuationNotAccepted
+		var interrupted *ErrContinuationInterrupted
+		if errors.As(err, &notAccepted) {
+			sig.Observation = "continuation_not_accepted"
+		} else if errors.As(err, &interrupted) {
+			sig.Observation = "continuation_interrupted"
+		}
+		d.ch <- sig
 	}()
 }
 
@@ -165,6 +176,11 @@ func prepareDelegationDetector(owner *ContextManager, rounds *subagentRounds, ta
 		}
 		return nil, err
 	}
+	return delegationDetectorForRound(owner, rounds, rd, dense, cleanup, run), nil
+}
+
+func delegationDetectorForRound(owner *ContextManager, rounds *subagentRounds, rd delegationRoundRecord,
+	dense time.Duration, cleanup func(), run func(context.Context) (string, error)) task.SettleDetector {
 	return newAdmittedDetector(func(ctx context.Context) (string, error) {
 		refs := &delegationOutputRefs{}
 		out, err := run(context.WithValue(ctx, delegationOutputRefsKey{}, refs))
@@ -172,6 +188,13 @@ func prepareDelegationDetector(owner *ContextManager, rounds *subagentRounds, ta
 		rd.FinishedAt = time.Now()
 		if err != nil {
 			rd.Error = err.Error()
+		}
+		var notAccepted *ErrContinuationNotAccepted
+		var interrupted *ErrContinuationInterrupted
+		if errors.As(err, &notAccepted) {
+			rd.ErrorKind = "continuation_not_accepted"
+		} else if errors.As(err, &interrupted) {
+			rd.ErrorKind = "continuation_interrupted"
 		}
 		key, commitErr := owner.commitDelegationRound(rd)
 		if commitErr != nil {
@@ -181,7 +204,7 @@ func prepareDelegationDetector(owner *ContextManager, rounds *subagentRounds, ta
 			rounds.addRecord(rd, key)
 		}
 		return out, err
-	}, cleanup, dense, map[string]string{childInvocationIDParam: inv.InvocationID}), nil
+	}, cleanup, dense, map[string]string{childInvocationIDParam: rd.ChildInvocationID})
 }
 
 func cloneDelegationInvocation(inv *agent.Invocation) *agent.Invocation {
@@ -236,6 +259,43 @@ func (w *AgentToolWrapper) prepareTaskStart(ctx context.Context, owner *ContextM
 	}
 }
 
+func restoredSubagentStart(owner *ContextManager, decl task.Declarative) func(*task.Task) (task.TaskSpec, task.SettleDetector, error) {
+	return func(tk *task.Task) (task.TaskSpec, task.SettleDetector, error) {
+		target, lease, err := ResolveReentryDelegation(context.Background(), owner, decl.AgentName)
+		if err != nil {
+			return task.TaskSpec{}, nil, err
+		}
+		defer lease.Release()
+		opts := agent.RunOptions{RuntimeState: make(map[string]any)}
+		if len(decl.EventKeys) > 0 {
+			if owner == nil || owner.memStore == nil {
+				return task.TaskSpec{}, nil, fmt.Errorf("subagent intent has archived context but no readable store")
+			}
+			events, err := owner.memStore.GetEvents(decl.EventKeys)
+			if err != nil {
+				return task.TaskSpec{}, nil, fmt.Errorf("subagent intent context is incomplete: %w", err)
+			}
+			if len(events) != len(decl.EventKeys) {
+				return task.TaskSpec{}, nil, fmt.Errorf("subagent intent context contains missing facts")
+			}
+			raw, err := serializeExternalContext(events)
+			if err != nil {
+				return task.TaskSpec{}, nil, err
+			}
+			opts.RuntimeState[ExternalContextKey] = json.RawMessage(raw)
+		}
+		if decl.Overrides != nil {
+			raw, err := json.Marshal(decl.Overrides)
+			if err != nil {
+				return task.TaskSpec{}, nil, err
+			}
+			opts.RuntimeState[PerCallOverridesKey] = json.RawMessage(raw)
+		}
+		inv := agent.NewInvocation(agent.WithInvocationMessage(model.NewUserMessage(decl.MessageBody)), agent.WithInvocationRunOptions(opts))
+		return target.prepareTaskStart(lease.WithContext(context.Background()), owner, &subagentRounds{cap: target.effectiveResumeRounds()}, inv)(tk)
+	}
+}
+
 func queryTaskRecords(store memory.MemoryStore, partitionID int, types []string) ([]memory.FullEvent, error) {
 	var records []memory.FullEvent
 	for off := 0; ; off += 500 {
@@ -267,6 +327,12 @@ func queryTaskRecords(store memory.MemoryStore, partitionID int, types []string)
 
 func loadDelegationRounds(store memory.MemoryStore, partitionID int, taskID string) (*subagentRounds, error) {
 	rounds := &subagentRounds{}
+	type identity struct {
+		round      uint64
+		owner      string
+		invocation string
+	}
+	latest := make(map[identity]subagentRound)
 	records, err := queryTaskRecords(store, partitionID, []string{tagentevent.TypeTaskRound})
 	if err != nil {
 		return nil, err
@@ -280,11 +346,131 @@ func loadDelegationRounds(store memory.MemoryStore, partitionID int, taskID stri
 			return nil, fmt.Errorf("decode task round %d: %w", ev.EventKey, err)
 		}
 		if rd.TaskID == taskID && rd.Phase == "finish" {
-			rounds.rounds = append(rounds.rounds, subagentRound{
+			latest[identity{rd.RoundID, rd.RoundOwner, rd.ChildInvocationID}] = subagentRound{
 				input: rd.Input, output: rd.Output, err: rd.Error, factKey: ev.EventKey,
 				invocationID: rd.ChildInvocationID, roundID: rd.RoundID, roundOwner: rd.RoundOwner, at: rd.FinishedAt,
-			})
+			}
 		}
 	}
+	for _, rd := range latest {
+		rounds.rounds = append(rounds.rounds, rd)
+	}
+	sort.Slice(rounds.rounds, func(i, j int) bool {
+		if rounds.rounds[i].roundID != rounds.rounds[j].roundID {
+			return rounds.rounds[i].roundID < rounds.rounds[j].roundID
+		}
+		return rounds.rounds[i].factKey < rounds.rounds[j].factKey
+	})
 	return rounds, nil
+}
+
+// ResumePendingDelegations attaches restored subagent tasks to their original invocation and producer round.
+func (ta *TagentAgent) ResumePendingDelegations() (int, error) {
+	if ta == nil || ta.taskManager == nil {
+		return 0, nil
+	}
+	var resumed int
+	var failures []error
+	for _, tk := range ta.taskManager.TasksSnapshot() {
+		spec := tk.SpecSnapshot()
+		if spec.Kind != "subagent" || spec.Declarative == nil || !tk.Status().Live() || tk.HasProducer() {
+			continue
+		}
+		decl := spec.Declarative
+		invocationID, round := decl.Params[childInvocationIDParam], tk.ProducerRound()
+		if invocationID == "" || round == 0 {
+			continue
+		}
+		child := ta.resolveContinuationOwner(decl.AgentName)
+		if child == nil { continue }
+		scope, err := child.continuationByID(invocationID)
+		if err != nil { failures = append(failures, err); continue }
+		if scope == nil { continue }
+		scope.mu.Lock()
+		address := scope.state.Address
+		matches := address.ParentAgent == ta.name && address.ParentTaskID == tk.ID && address.ParentTaskRound == round
+		rd := delegationRoundRecord{TaskID: tk.ID, RoundID: round, RoundOwner: decl.ProducerOwner,
+			ChildInvocationID: invocationID, Phase: "begin", Input: decl.MessageBody, StartedAt: time.UnixMilli(decl.TTLAnchorMilli)}
+		if goal := scope.state.InitialGoal; goal != nil {
+			rd.StartedAt = goal.Timestamp
+			if goal.Message != nil {
+				rd.Input = goal.Message.Content
+			}
+		}
+		scope.mu.Unlock()
+		if !matches {
+			failures = append(failures, fmt.Errorf("task %s child invocation %s has a different producer address", tk.ID, invocationID))
+			continue
+		}
+		if ta.memStore != nil {
+			records, err := queryTaskRecords(ta.memStore, ta.partitionID(), []string{tagentevent.TypeTaskRound})
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			for _, fact := range records {
+				if fact.Metadata["task_id"] != tk.ID {
+					continue
+				}
+				var prior delegationRoundRecord
+				if json.Unmarshal([]byte(fact.Content), &prior) == nil && prior.RoundID == round && prior.ChildInvocationID == invocationID {
+					rd = prior
+				}
+			}
+		}
+		if child.contextManager == nil { failures = append(failures, fmt.Errorf("child continuation owner %q has no execution context", decl.AgentName)); continue }
+		bg := child.contextManager.AcquireLease(LeaseBackground)
+		if err := bg.Err(); err != nil { bg.Release(); failures = append(failures, err); continue }
+		target := NewAgentToolWrapper(child, "", nil, nil)
+		d := delegationDetectorForRound(ta.contextManager, nil, rd, target.DenseDuration(), bg.Release,
+			func(ctx context.Context) (string, error) {
+				callCtx := bg.WithContext(WithSubagentTurnBudget(ctx, defaultSubAgentTimeout))
+				stream, found, err := child.ResumeContinuationByID(callCtx, invocationID, tk.ID, round)
+				if err != nil {
+					return "", err
+				}
+				if !found {
+					return "", &ErrContinuationInterrupted{InvocationID: invocationID}
+				}
+				return target.collectEventStream(callCtx, invocationID, decl.AgentName, stream)
+			})
+		if err := ta.taskManager.BindDetector(tk.ID, d); err != nil {
+			d.Cancel()
+			failures = append(failures, err)
+			continue
+		}
+		resumed++
+	}
+	return resumed, errors.Join(failures...)
+}
+
+func (s *taskRecordSink) restorePendingSignal(fact memory.FullEvent) bool {
+	if s == nil || s.cm == nil || fact.EventType != tagentevent.TypeTaskSignal {
+		return false
+	}
+	var raw taskSignalRecord
+	if json.Unmarshal([]byte(fact.Content), &raw) != nil || raw.Event == nil || raw.ReceiptKey <= 0 {
+		return false
+	}
+	md := make(map[string]string, len(fact.Metadata))
+	for key, value := range fact.Metadata {
+		md[key] = value
+	}
+	receipt := memory.FullEvent{EventKey: raw.ReceiptKey, PartitionID: fact.PartitionID,
+		EventType: tagentevent.TypeTaskSignalReceipt, Timestamp: fact.Timestamp,
+		Content: tagentevent.FormatEventKey(fact.EventKey), EventSummary: "任务信号已受理: " + raw.Event.ID, Metadata: md}
+	j := &s.delivery
+	j.mu.Lock()
+	if j.pending == nil {
+		j.pending = make(map[string]*frozenTaskDelivery)
+	}
+	if j.pending[raw.Event.ID] == nil {
+		j.pending[raw.Event.ID] = &frozenTaskDelivery{event: raw.Event, fact: fact, receipt: receipt}
+	}
+	j.mu.Unlock()
+	if guard, ok := s.cm.memStore.(memory.RetentionGuard); ok {
+		guard.ProtectKey(fact.EventKey)
+		guard.ProtectKey(receipt.EventKey)
+	}
+	return true
 }

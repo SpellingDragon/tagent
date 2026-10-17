@@ -85,7 +85,12 @@ func prepareTaskReceiptKeys(cm *ContextManager, events []*AgentEvent) {
 			continue
 		}
 		if evt.volatileFact != nil {
-			evt.observationReceiptKey = evt.volatileFact.Metadata[tagentevent.MetaKeyObservationReceiptKey]
+			if key := evt.volatileFact.Metadata[tagentevent.MetaKeyObservationReceiptKey]; key != "" {
+				evt.observationReceiptKey = key
+			}
+			if (evt.recoveryConsumed || (cm.continuationID != "" && evt.Source != SourceTask)) && evt.observationReceiptKey == "" {
+				evt.observationReceiptKey = tagentevent.FormatEventKey(memory.NewSnowflakeEventKey(cm.partitionID, 0))
+			}
 			continue
 		}
 		if evt.observationReceiptKey == "" {

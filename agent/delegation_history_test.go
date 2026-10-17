@@ -1,9 +1,12 @@
+// 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 package agent
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -149,4 +152,125 @@ func TestDelegationPartialOutputDoesNotHideStreamFailure(t *testing.T) {
 	require.Equal(t, "output", out)
 	require.ErrorContains(t, err, "stream lost")
 	require.Len(t, a.invocations, 1)
+}
+
+// TestDelegationBindingAcceptancePrecedesProducer 钉住 实际调用身份与开始记录准备完成后，绑定拒绝仍保持零生产者。
+func TestDelegationBindingAcceptancePrecedesProducer(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	owner := &ContextManager{name: "parent", memStore: store, partitionID: sinkPartition}
+	child := &mockAgent{name: "child"}
+	w := NewAgentToolWrapper(child, "child", nil, store)
+	w.SetParentCM(owner)
+	var seen string
+	tm := task.NewTaskManager(task.TaskManagerConfig{OnSpawnAccepted: func(*task.Task) bool { return true }, OnStartAccepted: func(tk *task.Task) bool {
+		seen = tk.SpecSnapshot().Declarative.Params[childInvocationIDParam]
+		facts, err := queryTaskRecords(store, sinkPartition, []string{tagentevent.TypeTaskRound})
+		require.NoError(t, err)
+		require.Len(t, facts, 1)
+		return false
+	}})
+	defer tm.Close(context.Background())
+	out, err := w.Call(task.WithTaskSpawner(context.Background(), tm), []byte(`{"request":"real input"}`))
+	require.NoError(t, err)
+	require.Contains(t, out, "未被任务层纳管")
+	require.NotEmpty(t, seen)
+	require.Nil(t, child.lastInv)
+}
+
+// TestDelegationStreamRequiresCommittedLocalOutcome 钉住 本地流的普通正文与关闭不是成功凭据，真实空结果也不会被替换。
+func TestDelegationStreamRequiresCommittedLocalOutcome(t *testing.T) {
+	w := NewAgentToolWrapper(&TagentAgent{name: "child"}, "child", nil, nil)
+	stream := make(chan *event.Event, 1)
+	stream <- &event.Event{Response: &model.Response{Done: true, Choices: []model.Choice{{Message: model.NewAssistantMessage("partial")}}}}
+	close(stream)
+	out, err := w.collectEventStream(context.Background(), "child-invocation", "child", stream)
+	require.Equal(t, "partial", out)
+	var interrupted *ErrContinuationInterrupted
+	require.ErrorAs(t, err, &interrupted)
+	complete := make(chan *event.Event, 1)
+	complete <- &event.Event{Response: &model.Response{Done: true}, StateDelta: map[string][]byte{"delegation_outcome": []byte("completed"), "delegation_result": {}}}
+	close(complete)
+	out, err = w.collectEventStream(context.Background(), "child-invocation", "child", complete)
+	require.NoError(t, err)
+	require.Empty(t, out)
+}
+
+type historyMockAgent struct {
+	mockAgent
+	surface []trpctool.Tool
+}
+
+func (a *historyMockAgent) Tools() []trpctool.Tool { return a.surface }
+
+// TestDelegationResumeUsesCurrentSurfaceAndDurableHistory 钉住 续跑读取当前面轮数，缺少召回能力时保留全文，有召回能力时返回可读票据。
+func TestDelegationResumeUsesCurrentSurfaceAndDurableHistory(t *testing.T) {
+	for _, readable := range []bool{false, true} {
+		t.Run(fmt.Sprint(readable), func(t *testing.T) {
+			old := NewAgentToolWrapper(&mockAgent{name: "plan"}, "old", nil, nil)
+			old.SetResumeContextRounds(1)
+			owner := ownerRouting(t, "plan", old)
+			current := &historyMockAgent{mockAgent: mockAgent{name: "plan"}}
+			if readable {
+				current.surface = []trpctool.Tool{percallLeafTool{name: "memory_recall"}}
+			}
+			selected := NewAgentToolWrapper(current, "selected", nil, owner.memStore)
+			selected.SetResumeContextRounds(2)
+			owner.PublishExecutor(&leaseCountingRunner{id: "selected"}, ContextManagerConfig{Name: owner.name, Tools: []trpctool.Tool{selected}})
+			fullInput, fullOutput := strings.Repeat("long input ", 40), strings.Repeat("full output ", 400)+"unique tail"
+			var newestKey int64
+			for round := uint64(1); round <= 3; round++ {
+				rd := delegationRoundRecord{TaskID: "task", RoundID: round, RoundOwner: "old-owner", ChildInvocationID: fmt.Sprintf("old-%d", round),
+					Phase: "finish", Input: fullInput, Output: fullOutput, StartedAt: time.Now(), FinishedAt: time.Now()}
+				var err error
+				newestKey, err = owner.commitDelegationRound(rd)
+				require.NoError(t, err)
+			}
+			tm := task.NewTaskManager(task.TaskManagerConfig{})
+			defer tm.Close(context.Background())
+			tk := tm.RestoreTask("task", task.TaskSpec{Kind: "subagent", Desc: "plan", TTL: time.Hour,
+				Declarative: &task.Declarative{Kind: "subagent", AgentName: "plan", RoundID: 3, ProducerRound: 3,
+					Params: map[string]string{childInvocationIDParam: "old-3"}},
+				ResumeFn: subagentResumeClosure(owner, "plan", &subagentRounds{})}, time.Now(), task.TaskCompleted)
+			res, err := tm.Resume(task.WithRoundOwner(context.Background(), "new-owner"), tk.ID, "new input")
+			require.NoError(t, err)
+			require.True(t, res.Settled)
+			require.NoError(t, res.Signal.Err)
+			inv := current.lastInv
+			require.NotNil(t, inv)
+			entries := restoredContext(t, inv)
+			require.Len(t, entries, 2)
+			require.Contains(t, entries[1].EventSummary, fullInput)
+			if readable {
+				require.Contains(t, entries[1].EventSummary, "[evt_"+tagentevent.FormatEventKey(newestKey)+"|task_round]")
+				require.NotContains(t, entries[1].EventSummary, "unique tail")
+			} else {
+				require.Contains(t, entries[1].EventSummary, fullOutput)
+			}
+			require.NotEqual(t, "old-3", inv.InvocationID)
+			require.Equal(t, inv.InvocationID, tk.SpecSnapshot().Declarative.Params[childInvocationIDParam])
+			address, err := continuationContextFromInvocation(inv)
+			require.NoError(t, err)
+			require.Equal(t, "task", address.ParentTaskID)
+			require.Equal(t, uint64(4), address.ParentTaskRound)
+			require.Equal(t, "new-owner", address.ParentInvocationID)
+		})
+	}
+}
+
+// TestDelegationHistoryFoldsRecoveredFinishesByOriginalRound 钉住 原轮恢复追加的结算不会占用两个历史轮次。
+func TestDelegationHistoryFoldsRecoveredFinishesByOriginalRound(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	cm := &ContextManager{name: "parent", memStore: store, partitionID: sinkPartition}
+	rd := delegationRoundRecord{TaskID: "task", RoundID: 1, RoundOwner: "owner", ChildInvocationID: "child", Phase: "finish", Input: "input", Output: "partial", StartedAt: time.Now(), FinishedAt: time.Now()}
+	_, err := cm.commitDelegationRound(rd)
+	require.NoError(t, err)
+	rd.Output, rd.Error = "full output", ""
+	key, err := cm.commitDelegationRound(rd)
+	require.NoError(t, err)
+	rounds, err := loadDelegationRounds(store, sinkPartition, "task")
+	require.NoError(t, err)
+	prior := rounds.recent(5)
+	require.Len(t, prior, 1)
+	require.Equal(t, "full output", prior[0].output)
+	require.Equal(t, key, prior[0].factKey)
 }

@@ -141,7 +141,9 @@ func TestTaskManager_WindowBoundary_NoLostSettle(t *testing.T) {
 				return false
 			}
 		}
-		return true
+		mu.Lock()
+		defer mu.Unlock()
+		return inline+len(bg) == n
 	})
 
 	mu.Lock()
@@ -214,8 +216,12 @@ func TestPruneTerminal_RemovesExitedAndReclaims(t *testing.T) {
 	base := time.Now()
 	dc := NewManualDetector()
 	dl := NewManualDetector()
+	tm.mu.Lock()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, dc)
+	tm.mu.Unlock()
+	tm.mu.Lock()
 	tm.tasks["r1"] = &Task{ID: "r1", Spec: TaskSpec{Desc: "r1"}, status: TaskRunning, detector: dl}
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base.Add(2 * time.Minute) }
 	tm.pruneTerminal()
@@ -239,7 +245,9 @@ func TestPruneTerminal_KeepsAliveDetached(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Nanosecond})
 	base := time.Now()
 	d := NewManualDetector()
+	tm.mu.Lock()
 	tm.tasks["s1"] = terminalTask("s1", TaskAliveDetached, base, d)
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base.Add(time.Hour) }
 	tm.pruneTerminal()
@@ -257,7 +265,9 @@ func TestPruneTerminal_KeepsWithinGrace(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
 	base := time.Now()
 	d := NewManualDetector()
+	tm.mu.Lock()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base.Add(10 * time.Second) }
 	tm.pruneTerminal()
@@ -275,7 +285,9 @@ func TestList_PrunesExited(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Minute})
 	base := time.Now()
 	d := NewManualDetector()
+	tm.mu.Lock()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base.Add(2 * time.Minute) }
 	if got := tm.List(); len(got) != 0 {
@@ -291,7 +303,9 @@ func TestPruneTerminal_Idempotent(t *testing.T) {
 	tm := NewTaskManager(TaskManagerConfig{TerminalTTL: time.Nanosecond})
 	base := time.Now()
 	d := NewManualDetector()
+	tm.mu.Lock()
 	tm.tasks["c1"] = terminalTask("c1", TaskCompleted, base, d)
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base.Add(time.Hour) }
 	tm.pruneTerminal()
@@ -1131,10 +1145,14 @@ func TestPruneTerminal_NilDetectorDoesNotPanic(t *testing.T) {
 	if restored.detector != nil {
 		t.Fatalf("precondition: restored task must carry a nil detector")
 	}
+	tm.mu.Lock()
 	tm.tasks[restored.ID] = restored
+	tm.mu.Unlock()
 
 	live := NewManualDetector()
+	tm.mu.Lock()
 	tm.tasks["live1"] = &Task{ID: "live1", Spec: TaskSpec{Desc: "live1"}, status: TaskRunning, detector: live}
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base.Add(2 * time.Minute) }
 
@@ -1986,7 +2004,9 @@ func TestReconcileTTL_RestoredTaskWarnsBeforeRetire(t *testing.T) {
 	tkLive := &Task{ID: "live-t", Spec: TaskSpec{Desc: "live", TTL: time.Minute}, detector: det}
 	tkLive.status = TaskRunning
 	tkLive.StartedAt = base.Add(-2 * time.Hour)
+	tm.mu.Lock()
 	tm.tasks["live-t"] = tkLive
+	tm.mu.Unlock()
 	tm.reconcileTTL()
 
 	mu.Lock()
@@ -2006,12 +2026,20 @@ func TestReconcileRetireNotify_BackstopResendsUnconfirmedTerminal(t *testing.T) 
 	var resent []BatchRetired
 	tm.onRetireResend = func(batch []BatchRetired) { resent = append(resent, batch...) }
 
+	tm.mu.Lock()
 	tm.tasks["done-unconfirmed"] = terminalTask("done-unconfirmed", TaskCompleted, base.Add(-time.Minute), NewManualDetector())
+	tm.mu.Unlock()
 	confirmed := terminalTask("done-confirmed", TaskCompleted, base.Add(-time.Minute), NewManualDetector())
 	confirmed.retireNotified = true
+	tm.mu.Lock()
 	tm.tasks["done-confirmed"] = confirmed
+	tm.mu.Unlock()
+	tm.mu.Lock()
 	tm.tasks["done-fresh"] = terminalTask("done-fresh", TaskCompleted, base.Add(-time.Millisecond), NewManualDetector())
+	tm.mu.Unlock()
+	tm.mu.Lock()
 	tm.tasks["failed-unconfirmed"] = terminalTask("failed-unconfirmed", TaskFailed, base.Add(-time.Minute), NewManualDetector())
+	tm.mu.Unlock()
 
 	tm.now = func() time.Time { return base }
 	tm.reconcileRetireNotify()
@@ -2045,7 +2073,9 @@ func TestReconcileRetireNotify_FinalizeMarksConfirmed(t *testing.T) {
 	base := time.Now()
 	tm.now = func() time.Time { return base }
 	tk := terminalTask("inline", TaskRunning, time.Time{}, NewManualDetector())
+	tm.mu.Lock()
 	tm.tasks["inline"] = tk
+	tm.mu.Unlock()
 
 	tm.finalize(tk, SettleCompleted, "out", nil)
 

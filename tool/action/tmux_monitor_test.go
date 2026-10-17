@@ -20,17 +20,14 @@ type mockInspector struct {
 	// paneDeadOnRecheck: if >= 0, on the Nth call to IsPaneDead, returns true instead of isPaneDead.
 	// Used to simulate "pane died between initial check and post-heartbeat re-check".
 	paneDeadOnRecheck int
-	// paneExitCode/paneExitKnown program PaneDeadStatus (failure-polarity passthrough).
-	// Default known=false → unresolvable → deathPolarity keeps completed polarity, so
-	// tests that don't set it are unaffected.
-	paneExitExplicit bool
-	paneExitCode     int
-	paneExitKnown    bool
-	output           string
-	outputErr        error
-	heartbeatResp    string
-	killErr          error
-	restartErr       error
+	paneExitExplicit  bool
+	paneExitCode      int
+	paneExitKnown     bool
+	output            string
+	outputErr         error
+	heartbeatResp     string
+	killErr           error
+	restartErr        error
 
 	// processExistsCalls Call tracking
 	processExistsCalls  int

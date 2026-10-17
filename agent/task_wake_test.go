@@ -47,7 +47,24 @@ func TestTaskObservationConsumesWithoutModel(t *testing.T) {
 			require.NoError(t, err)
 			batch := bus.TryPull()
 			require.Len(t, batch, 1)
-			require.Equal(t, turnContinue, ta.processTurn(context.Background(), ta.contextManager, batch))
+			reading, stopReading, readerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(readerDone)
+				close(reading)
+				for {
+					_, _ = tagentevent.EncodeSourceSnapshot(evt.Source, evt.Metadata)
+					select {
+					case <-stopReading:
+						return
+					default:
+					}
+				}
+			}()
+			<-reading
+			disposition := ta.processTurn(context.Background(), ta.contextManager, batch)
+			close(stopReading)
+			<-readerDone
+			require.Equal(t, turnContinue, disposition)
 			require.Zero(t, m.requestCount(), "quiet observation has a formal consumption without a model call")
 			after, err := json.Marshal(batch[0].Metadata)
 			require.NoError(t, err)
@@ -163,6 +180,7 @@ type taskWakeChainProbe struct {
 	mu      sync.Mutex
 	current *task.Task
 	resume  bool
+	mode    string
 	rounds  chan taskWakeRound
 }
 
@@ -185,6 +203,12 @@ func (p *taskWakeChainProbe) Call(ctx context.Context, _ []byte) (any, error) {
 	detector := task.NewManualDetector()
 	detector.FireDetach()
 	spec := task.TaskSpec{Kind: "command", Mode: "oneshot", WaitFor: task.WaitExit, Desc: "chained task"}
+	if p.mode != "" {
+		spec.Mode = p.mode
+		if p.mode == "resident" {
+			spec.WaitFor = task.WaitReady
+		}
+	}
 	if p.resume {
 		spec.Mode, spec.WaitFor = "interactive", task.WaitInput
 		spec.ResumeFn = func(context.Context, string) (task.SettleDetector, error) {
@@ -254,6 +278,83 @@ func TestRunContinuationKeepsAttributionAcrossTaskRounds(t *testing.T) {
 					}
 				case <-ctx.Done():
 					t.Fatal("the final consumed result did not quiesce")
+				}
+			}
+		})
+	}
+}
+
+// TestPrivateMailboxReconcileUsesItsOwnStore checks completion repair stays within the private context.
+func TestPrivateMailboxReconcileUsesItsOwnStore(t *testing.T) {
+	private, privateStore, _ := completionOnlyEnvelope(t, t.TempDir())
+	defer private.persistentBus.CloseDurable()
+	owner := durableAgent(t, t.TempDir())
+	defer owner.persistentBus.CloseDurable()
+	_, err := owner.persistentBus.PublishContext(context.Background(), durableMsg("owner input remains pending"))
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = owner.reconcileDurableBusForCM(ctx, private.contextManager)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, int64(1), private.persistentBus.DurablePending())
+	summary, err := owner.reconcileDurableBusForCM(context.Background(), private.contextManager)
+	require.NoError(t, err)
+	require.Equal(t, 1, summary.ReceiptsAdded)
+	require.Zero(t, summary.Blocked)
+	require.Zero(t, private.persistentBus.DurablePending())
+	require.Equal(t, int64(1), owner.persistentBus.DurablePending())
+	require.Equal(t, 1, countReceipts(t, privateStore))
+	require.Zero(t, countReceipts(t, owner.contextManager.memStore))
+}
+
+// TestRunQuietObservationDoesNotInvokeModel checks producer wake semantics for ordinary quiet output.
+func TestRunQuietObservationDoesNotInvokeModel(t *testing.T) {
+	for _, mode := range []string{"oneshot", "resident"} {
+		t.Run(mode, func(t *testing.T) {
+			store := memory.NewInMemoryStore()
+			probe := &taskWakeChainProbe{mode: mode, rounds: make(chan taskWakeRound, 2)}
+			m := &recordingSequenceModel{responses: []*model.Response{
+				toolCallResponse("spawn", "run"), finalTextResponse("ack", "waiting for requested signal"),
+				finalTextResponse("decision", "requested signal processed"),
+			}}
+			ta, err := NewTagentAgent(&TagentConfig{Name: "quiet-" + mode, Model: m, SystemPrompt: "test", MemoryStore: store, Tools: []tool.Tool{probe}, MaxToolIterations: 5})
+			require.NoError(t, err)
+			defer ta.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			output, err := ta.Run(ctx, &upagent.Invocation{InvocationID: "quiet-inv", Message: model.NewUserMessage("wait for the requested outcome")})
+			require.NoError(t, err)
+			nextSettleAnswer(t, output, "waiting for requested signal")
+			round := <-probe.rounds
+			defer round.detector.Done()
+			round.detector.Emit(task.SettleSignal{Kind: task.SettleStable, Output: "QUIET_NO_MODEL"})
+			require.Eventually(t, func() bool {
+				refs, err := store.QueryEvents(memory.QueryOptions{PartitionIDs: []int{ta.partitionID()}, EventTypes: []string{tagentevent.TypeExternalInput}, Keyword: "QUIET_NO_MODEL"})
+				if err != nil || len(refs) != 1 {
+					return false
+				}
+				fact, err := store.GetEvent(refs[0].EventKey)
+				return err == nil && fact.Metadata[tagentevent.MetaKeySettleWake] == "observe" && compress.VerifiedInputDisposition(store, fact) == "observed"
+			}, time.Second, 5*time.Millisecond)
+			m.mu.Lock()
+			calls := len(m.requests)
+			m.mu.Unlock()
+			require.Equal(t, 2, calls, "quiet output persists and consumes without entering the model")
+			require.True(t, ta.settleSinks.awaiting("quiet-inv"), "quiet output does not satisfy the requested wait")
+			sig := task.SettleSignal{Kind: task.SettleCompleted, Output: "REQUESTED_OUTCOME"}
+			if mode == "resident" {
+				sig.Kind, sig.Ready = task.SettleReady, true
+			}
+			round.detector.Emit(sig)
+			nextSettleAnswer(t, output, "requested signal processed")
+			for {
+				select {
+				case _, open := <-output:
+					if !open {
+						return
+					}
+				case <-ctx.Done():
+					t.Fatal("the satisfied wait did not quiesce")
 				}
 			}
 		})

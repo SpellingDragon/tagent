@@ -474,14 +474,20 @@ func (tm *TmuxMonitor) checkSession(session *TmuxSession) {
 }
 
 // AddSessionWithRoundCallback binds snapshots to the producer round captured by the monitor.
-func (tm *TmuxMonitor) AddSessionWithRoundCallback(session *TmuxSession, cb func(uint64, SessionStatus, string)) {
+func (tm *TmuxMonitor) AddSessionWithRoundCallback(session *TmuxSession, cb func(uint64, SessionStatus, string)) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
+	if existing := tm.sessions[session.ID]; existing != nil && existing.ResourceID != session.ResourceID {
+		return false
+	}
 	if tm.roundCallbacks == nil {
 		tm.roundCallbacks = make(map[string]func(uint64, SessionStatus, string))
 	}
 	tm.sessions[session.ID], tm.roundCallbacks[session.ID] = session, cb
+	delete(tm.sessionCallbacks, session.ID)
+	delete(tm.lastNotifiedStatus, session.ID)
 	tm.markDueLocked(session)
+	return true
 }
 
 // BindProducerRound sets the round attached to subsequent monitor snapshots.
@@ -531,12 +537,7 @@ func (tm *TmuxMonitor) fakeDeadThreshold(session *TmuxSession) time.Duration {
 	return tm.fakeDeadDuration
 }
 
-// deathPolarity decides the settle status for a detected process death
-// (failure-polarity passthrough D1): a KNOWN non-zero exit code (including a
-// negative signal death) is reported as SessionError so the failure reaches the
-// notification; a clean exit (0) or an unresolvable status keeps the current
-// completed polarity. Reading the code is the single source of failure truth —
-// the monitor does not guess success.
+// deathPolarity reports completion only for a known zero exit status.
 func (tm *TmuxMonitor) deathPolarity(sessionID string) SessionStatus {
 	if code, known := tm.executor.PaneDeadStatus(sessionID); known && code == 0 {
 		return SessionCompleted
@@ -617,12 +618,7 @@ func (tm *TmuxMonitor) detectSessionState(session *TmuxSession) SessionStatus {
 	return SessionRunning
 }
 
-// handleFakeAlive attempts to recover a session judged fake-alive; on failure it
-// leaves Status untouched. The recovery strategy — which identity is preserved, how
-// stability metadata is reset, and where the state machine is expected to move
-// afterwards — is specified in the document below.
-//
-// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
+// handleFakeAlive preserves a quiet producer as an observation.
 func (tm *TmuxMonitor) handleFakeAlive(session *TmuxSession) { session.Status = SessionTimedOut }
 
 func (tm *TmuxMonitor) handleFakeDead(session *TmuxSession) bool {

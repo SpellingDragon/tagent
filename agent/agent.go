@@ -180,17 +180,20 @@ type TagentAgent struct {
 	// 首次关闭执行、其余等待同一完成结果（不因标志已翻跳过等待）；在途计数
 	// （loopWg.Add）先于发布 running 登记；输出通道在循环 goroutine 退出（含
 	// panic 路径）时恰好关闭一次，从未启动则由 Close 落定终态（V15 终结语义不变）。
-	outputCh     chan *event.Event
-	loopCtx      context.Context
-	loopCancel   context.CancelFunc
-	loopState    atomic.Int32
-	loopDone     chan struct{}
-	loopWg       sync.WaitGroup
-	outputSettle sync.Once
-	closeMu      sync.Mutex
-	closeStarted bool
-	closeDone    chan struct{}
-	closeErr     error
+	outputCh           chan *event.Event
+	loopCtx            context.Context
+	loopCancel         context.CancelFunc
+	loopState          atomic.Int32
+	loopDone           chan struct{}
+	loopWg             sync.WaitGroup
+	outputSettle       sync.Once
+	closeMu            sync.Mutex
+	closeStarted       bool
+	closeDone          chan struct{}
+	closeErr           error
+	closeProducersDone chan struct{}
+	closeFinalDone     chan struct{}
+	closeFinalOnce     sync.Once
 	// closeTail terminal tail: a bounded Close that could not honestly finish carries
 	// the remainder (still-used tool closers, recorder, store exit and its owner
 	// registration) in exactly ONE continuation, armed on the manager's own
@@ -488,37 +491,44 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 					"L2 起拒绝自管新任务纳管，L3 冻结非保护类 spawn（保护类豁免）。", level, ratio*100, samples, frozen))))
 		}
 	})
-	taskManager := task.NewTaskManager(task.TaskManagerConfig{
-		OnSettle: func(tk *task.Task, sig task.SettleSignal) {
-			evt := newTaskSettledEvent(tk, sig, settleInlineCapChars, outputWorkspace)
+	acceptSettled := func(tk *task.Task, sig task.SettleSignal) bool {
+		return taskRecords.acceptSignal(tk, sig, outputWorkspace, func(evt *AgentEvent) bool {
 			selfAudit.ObserveSettle(evt.Metadata)
-			deliverTaskSettled(sinkReg, bus, tk, evt)
-		},
-		OnSpawn:        taskRecords.onSpawn,
-		OnInlineSettle: taskRecords.onInlineSettle,
-		OnCancel:       taskRecords.onCancel,
-		OnBatchRetire: func(batch []task.BatchRetired) {
-			for _, r := range batch {
-				taskRecords.onInlineSettle(r.Task, r.Sig)
+			return deliverTaskSettled(sinkReg, bus, tk, evt)
+		})
+	}
+	taskManager := task.NewTaskManager(task.TaskManagerConfig{
+		OnSpawnAccepted: func(tk *task.Task) bool { return taskRecords.recordPhase(tk, "accepted") },
+		OnStartAccepted: func(tk *task.Task) bool { return taskRecords.recordPhase(tk, "started") },
+		OnRoundAccepted: func(tk *task.Task) bool { return taskRecords.recordPhase(tk, "round_accepted") },
+		OnRoundAbortedAccepted: func(tk *task.Task, sig task.SettleSignal) bool {
+			if !taskRecords.recordPhase(tk, "round_aborted") || !taskRecords.acceptSignal(tk, sig, outputWorkspace, nil) {
+				return false
 			}
-			if evt := newBatchRetiredSummaryEvent(batch); evt != nil {
-				bus.Publish(evt)
-			}
+			sinkReg.abortRound(tk, sig)
+			return true
 		},
-		OnRetireResend: func(batch []task.BatchRetired) {
+		OnInlineSettleAccepted: func(tk *task.Task, sig task.SettleSignal) bool {
+			return taskRecords.acceptSignal(tk, sig, outputWorkspace, nil)
+		},
+		OnSettleAccepted: acceptSettled,
+		OnBatchRetireAccepted: func(batch []task.BatchRetired) bool {
+			return taskRecords.acceptBatch(batch, outputWorkspace, bus)
+		},
+		OnRetireResendAccepted: func(batch []task.BatchRetired) bool {
+			accepted := true
 			for _, r := range batch {
-				evt := newTaskSettledEvent(r.Task, r.Sig, settleInlineCapChars, outputWorkspace)
-				if evt == nil {
-					continue
+				if !acceptSettled(r.Task, r.Sig) {
+					accepted = false
 				}
-				evt.ID = fmt.Sprintf("retire-notify-%s-%d", task.ShortID(r.Task.ID), r.Task.SettledAtUnixNano())
-				deliverTaskSettled(sinkReg, bus, r.Task, evt)
 			}
+			return accepted
 		},
-		TerminalTTL: cfg.TaskTerminalTTL,
-		DefaultTTL:  cfg.TaskDefaultTTL,
-		SpawnGate:   buildSpawnGate(cfg),
-		AuditGate:   selfAudit.GateReason,
+		EnableDeadlineReaper: true,
+		TerminalTTL:          cfg.TaskTerminalTTL,
+		DefaultTTL:           cfg.TaskDefaultTTL,
+		SpawnGate:            buildSpawnGate(cfg),
+		AuditGate:            selfAudit.GateReason,
 	})
 
 	// onEventRef is set after TagentAgent creation. The AppendEventHook
@@ -609,6 +619,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	ta.selfAudit = selfAudit
 	taskManager.SetTTLSource(ta.taskTTLs)
 	cm.taskController = taskManager
+	cm.settleSinks = sinkReg
 
 	if cfg.Meditation.Enabled {
 		medCfg := cfg.Meditation

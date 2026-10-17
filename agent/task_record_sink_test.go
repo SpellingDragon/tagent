@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -430,4 +432,242 @@ func TestInjectLiveTaskBoard_NilControllerSafe(t *testing.T) {
 	if len(args.Request.Messages) != 1 {
 		t.Errorf("nil taskController should inject nothing, got %d msgs", len(args.Request.Messages))
 	}
+}
+
+func storeRegistryFact(t *testing.T, store memory.MemoryStore, key int64, kind string, content any, md map[string]string, at time.Time) memory.FullEvent {
+	t.Helper()
+	if memory.PartitionIDFromEventKey(key) != sinkPartition {
+		key = registryKey(key)
+	}
+	raw, err := json.Marshal(content)
+	require.NoError(t, err)
+	fact := memory.FullEvent{EventKey: key, PartitionID: sinkPartition, EventType: kind, Content: string(raw), Timestamp: at.UnixMilli(), Metadata: md}
+	require.NoError(t, store.StoreEvent(key, fact))
+	return fact
+}
+
+func registryKey(order int64) int64 {
+	return memory.NewSnowflakeEventKey(sinkPartition, 1704067200000+order*1000)
+}
+
+func registrySignal(taskID string, round, seq uint64, at time.Time) taskSignalRecord {
+	id := task.SignalSourceID(taskID, round, seq)
+	return taskSignalRecord{TaskID: taskID, RoundID: round, ProducerRound: round, RoundOwner: "owner", Seq: seq,
+		Kind: task.SettleCompleted, Final: true, WaitSatisfied: true, ObservedAt: at, Output: "full output", ReceiptKey: registryKey(900 + int64(round)),
+		Event: &AgentEvent{ID: id, Type: tagentevent.TypeExternalInput, Source: SourceTask, Timestamp: at,
+			Message: &model.Message{Role: model.RoleUser, Content: "preview"}, Metadata: map[string]any{"task_id": taskID}},
+	}
+}
+
+func signalMetadata(raw taskSignalRecord) map[string]string {
+	return map[string]string{"task_id": raw.TaskID, tagentevent.MetaKeyTaskRoundID: strconv.FormatUint(raw.RoundID, 10),
+		tagentevent.MetaKeyTaskSignalSeq: strconv.FormatUint(raw.Seq, 10), tagentevent.MetaKeySourceEventID: raw.Event.ID,
+		childInvocationIDParam: raw.ChildInvocationID}
+}
+
+// TestTaskRegistryOldTerminalCannotCoverNewProducer 钉住 写入顺序决定恢复，旧轮终局不覆盖更新的实际生产者。
+func TestTaskRegistryOldTerminalCannotCoverNewProducer(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	now := time.Now()
+	decl := task.Declarative{Kind: "subagent", Desc: "child", RoundID: 1, ProducerRound: 1, RoundOwner: "first", ProducerOwner: "first",
+		StartedAtMilli: now.Add(-time.Minute).UnixMilli(), TTLAnchorMilli: now.Add(-time.Minute).UnixMilli(), Params: map[string]string{"ttl": "86400", childInvocationIDParam: "child-old"}}
+	storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now.Add(time.Hour))
+	decl.RoundID, decl.ProducerRound, decl.RoundOwner, decl.ProducerOwner = 2, 2, "second", "second"
+	decl.TTLAnchorMilli = now.UnixMilli()
+	decl.Params[childInvocationIDParam] = "child-new"
+	storeRegistryFact(t, store, 200, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now.Add(-time.Hour))
+	old := registrySignal("task", 1, 9, now.Add(2*time.Hour))
+	old.ChildInvocationID = "child-old"
+	storeRegistryFact(t, store, 300, tagentevent.TypeTaskSignal, old, signalMetadata(old), old.ObservedAt)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	defer tm.Close(context.Background())
+	require.Equal(t, 1, RebuildTaskRegistry(store, sinkPartition, tm, nil))
+	tk, ok := tm.Get("task")
+	require.True(t, ok)
+	require.Equal(t, task.TaskSuspect, tk.Status())
+	require.Equal(t, uint64(2), tk.RoundID())
+	require.Equal(t, uint64(2), tk.ProducerRound())
+	require.Equal(t, "second", tk.ProducerOwner())
+	require.Equal(t, uint64(0), tk.SignalSeq())
+	require.Equal(t, now.UnixMilli(), tk.TTLAnchorMilli())
+	require.Equal(t, "child-new", tk.SpecSnapshot().Declarative.Params[childInvocationIDParam])
+}
+
+// TestTaskRegistryFrozenTerminalDeliverySurvivesRestart 钉住 两类任务终局都先恢复待发，收件面就绪后沿原凭据递交。
+func TestTaskRegistryFrozenTerminalDeliverySurvivesRestart(t *testing.T) {
+	for _, kind := range []string{"command", "subagent"} {
+		t.Run(kind, func(t *testing.T) {
+			store := memory.NewInMemoryStore()
+			now := time.Now()
+			decl := task.Declarative{Kind: kind, Desc: kind, RoundID: 1, ProducerRound: 1, StartedAtMilli: now.Add(-time.Hour).UnixMilli(), Params: map[string]string{"ttl": "86400"}}
+			storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+			raw := registrySignal("task", 1, 7, now)
+			raw.Output = strings.Repeat("complete result ", 1000)
+			fact := storeRegistryFact(t, store, 200, tagentevent.TypeTaskSignal, raw, signalMetadata(raw), now)
+			var accepted atomic.Int64
+			cm := &ContextManager{name: "parent", memStore: store, partitionID: sinkPartition}
+			sink := &taskRecordSink{cm: cm}
+			tm := task.NewTaskManager(task.TaskManagerConfig{OnSettleAccepted: func(tk *task.Task, sig task.SettleSignal) bool {
+				return sink.acceptSignal(tk, sig, "", func(evt *AgentEvent) bool {
+					require.Equal(t, raw.Event.ID, evt.ID)
+					require.True(t, raw.Event.Timestamp.Equal(evt.Timestamp))
+					accepted.Add(1)
+					return true
+				})
+			}})
+			defer tm.Close(context.Background())
+			ta := &TagentAgent{name: "parent", contextManager: cm, taskManager: tm, taskRecords: sink}
+			require.Equal(t, 1, ta.RebuildTaskRegistryFromWAL(store, nil))
+			require.Zero(t, accepted.Load())
+			tk, _ := tm.Get("task")
+			require.Equal(t, task.TaskCompleted, tk.Status())
+			require.Equal(t, raw.Output, tk.Result())
+			require.Len(t, tk.PendingSignals(), 1)
+			tm.ResumePendingDeliveries()
+			require.Eventually(t, func() bool { return accepted.Load() == 1 }, time.Second, time.Millisecond)
+			receipt, err := store.GetEvent(raw.ReceiptKey)
+			require.NoError(t, err)
+			require.NotNil(t, receipt)
+			require.True(t, taskSignalReceiptMatches(fact, raw, *receipt))
+			facts, err := queryTaskRecords(store, sinkPartition, []string{tagentevent.TypeTaskSignal})
+			require.NoError(t, err)
+			require.Len(t, facts, 1)
+		})
+	}
+}
+
+// TestTaskRegistryAbortedIntentKeepsActualProducer 钉住 失败的新意图保留旧资源的轮次、所有者、序列与寿命锚点。
+func TestTaskRegistryAbortedIntentKeepsActualProducer(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	now := time.Now()
+	anchor := now.Add(-time.Minute).UnixMilli()
+	decl := task.Declarative{Kind: "command", Desc: "service", RoundID: 1, ProducerRound: 1, RoundOwner: "first", ProducerOwner: "first", SignalSeq: 5,
+		StartedAtMilli: anchor, TTLAnchorMilli: anchor, Params: map[string]string{"ttl": "86400"}}
+	storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+	decl.RoundID, decl.RoundOwner = 2, "second"
+	storeRegistryFact(t, store, 200, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "round_accepted"}, now)
+	raw := registrySignal("task", 2, 1, now)
+	raw.Kind, raw.Error, raw.Observation = task.SettleFailed, "write refused", "round_aborted"
+	raw.ProducerRound, raw.ProducerOwner, raw.ProducerLastSeq, raw.ProducerStatus = 1, "first", 5, task.TaskAliveDetached
+	storeRegistryFact(t, store, 300, tagentevent.TypeTaskSignal, raw, signalMetadata(raw), now)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	defer tm.Close(context.Background())
+	require.Equal(t, 1, RebuildTaskRegistry(store, sinkPartition, tm, nil))
+	tk, _ := tm.Get("task")
+	require.Equal(t, task.TaskAliveDetached, tk.Status())
+	require.Equal(t, uint64(2), tk.RoundID())
+	require.Equal(t, uint64(1), tk.ProducerRound())
+	require.Equal(t, "second", tk.RoundOwner())
+	require.Equal(t, "first", tk.ProducerOwner())
+	require.Equal(t, uint64(5), tk.SignalSeq())
+	require.Equal(t, anchor, tk.TTLAnchorMilli())
+}
+
+// TestTaskRegistryHistoryFinishIsNotReceiverAcceptance 钉住 历史结算只记录产出，不替代收件凭据。
+func TestTaskRegistryHistoryFinishIsNotReceiverAcceptance(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	now := time.Now()
+	decl := task.Declarative{Kind: "subagent", Desc: "child", RoundID: 1, ProducerRound: 1, StartedAtMilli: now.UnixMilli(), Params: map[string]string{"ttl": "86400"}}
+	storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+	raw := registrySignal("task", 1, 1, now)
+	storeRegistryFact(t, store, 200, tagentevent.TypeTaskSignal, raw, signalMetadata(raw), now)
+	storeRegistryFact(t, store, 300, tagentevent.TypeTaskRound, delegationRoundRecord{TaskID: "task", RoundID: 1, Phase: "finish", Input: "input", Output: "output", StartedAt: now, FinishedAt: now}, map[string]string{"task_id": "task"}, now)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	defer tm.Close(context.Background())
+	require.Equal(t, 1, RebuildTaskRegistry(store, sinkPartition, tm, nil))
+	tk, _ := tm.Get("task")
+	require.Len(t, tk.PendingSignals(), 1)
+	_, err := tm.Resume(context.Background(), "task", "continue")
+	require.Error(t, err)
+}
+
+func storeRegistryReceipt(t *testing.T, store memory.MemoryStore, fact memory.FullEvent, raw taskSignalRecord) {
+	t.Helper()
+	require.NoError(t, store.StoreEvent(raw.ReceiptKey, memory.FullEvent{EventKey: raw.ReceiptKey, PartitionID: sinkPartition,
+		EventType: tagentevent.TypeTaskSignalReceipt, Content: tagentevent.FormatEventKey(fact.EventKey), Timestamp: raw.ObservedAt.UnixMilli(), Metadata: signalMetadata(raw)}))
+}
+
+// TestTaskRegistryAcceptedSubagentRetainsExplicitResumeWindow 钉住 已受理子任务终局保留近期恢复窗口，已受理命令终局不复活。
+func TestTaskRegistryAcceptedSubagentRetainsExplicitResumeWindow(t *testing.T) {
+	for _, kind := range []string{"command", "subagent"} {
+		t.Run(kind, func(t *testing.T) {
+			store := memory.NewInMemoryStore()
+			now := time.Now()
+			decl := task.Declarative{Kind: kind, Desc: kind, RoundID: 1, ProducerRound: 1, StartedAtMilli: now.UnixMilli()}
+			storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+			raw := registrySignal("task", 1, 1, now)
+			fact := storeRegistryFact(t, store, 200, tagentevent.TypeTaskSignal, raw, signalMetadata(raw), now)
+			storeRegistryReceipt(t, store, fact, raw)
+			tm := task.NewTaskManager(task.TaskManagerConfig{})
+			defer tm.Close(context.Background())
+			n := RebuildTaskRegistry(store, sinkPartition, tm, nil)
+			if kind == "command" {
+				require.Zero(t, n)
+			} else {
+				require.Equal(t, 1, n)
+				tk, _ := tm.Get("task")
+				require.Equal(t, task.TaskCompleted, tk.Status())
+				require.Equal(t, raw.Output, tk.Result())
+				require.Empty(t, tk.PendingSignals())
+			}
+		})
+	}
+}
+
+// TestTaskRegistryInterruptedProducerRemainsSuspect 钉住 未受理的中断信号保留原轮可恢复状态，不投递虚假终局。
+func TestTaskRegistryInterruptedProducerRemainsSuspect(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	now := time.Now()
+	decl := task.Declarative{Kind: "subagent", Desc: "child", RoundID: 3, ProducerRound: 3, StartedAtMilli: now.UnixMilli(), Params: map[string]string{childInvocationIDParam: "child"}}
+	storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+	raw := registrySignal("task", 3, 5, now)
+	raw.Kind, raw.ErrorKind, raw.Error = task.SettleFailed, "continuation_interrupted", "stream interrupted"
+	storeRegistryFact(t, store, 200, tagentevent.TypeTaskSignal, raw, signalMetadata(raw), now)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	defer tm.Close(context.Background())
+	require.Equal(t, 1, RebuildTaskRegistry(store, sinkPartition, tm, nil))
+	tk, _ := tm.Get("task")
+	require.Equal(t, task.TaskSuspect, tk.Status())
+	require.Equal(t, uint64(3), tk.ProducerRound())
+	require.Equal(t, uint64(5), tk.SignalSeq())
+	require.Empty(t, tk.PendingSignals())
+}
+
+// TestTaskRegistryIntentDoesNotInventProducer 钉住 已受理但未绑定的任务只有意图身份，初始派生失败仍保留该实际空资源状态。
+func TestTaskRegistryIntentDoesNotInventProducer(t *testing.T) {
+	for _, aborted := range []bool{false, true} {
+		t.Run(fmt.Sprint(aborted), func(t *testing.T) {
+			store := memory.NewInMemoryStore()
+			now := time.Now()
+			decl := task.Declarative{Kind: "subagent", Desc: "child", RoundID: 1, RoundOwner: "initiator", StartedAtMilli: now.UnixMilli()}
+			storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "accepted"}, now)
+			if aborted {
+				raw := registrySignal("task", 1, 1, now)
+				raw.ProducerRound, raw.ProducerStatus = 0, task.TaskFailed
+				raw.Kind, raw.Observation, raw.Error = task.SettleFailed, "round_aborted", "start refused"
+				storeRegistryFact(t, store, 200, tagentevent.TypeTaskSignal, raw, signalMetadata(raw), now)
+			}
+			tm := task.NewTaskManager(task.TaskManagerConfig{})
+			defer tm.Close(context.Background())
+			require.Equal(t, 1, RebuildTaskRegistry(store, sinkPartition, tm, nil))
+			tk, _ := tm.Get("task")
+			require.Equal(t, uint64(1), tk.RoundID())
+			require.Equal(t, uint64(0), tk.ProducerRound())
+			require.Empty(t, tk.ProducerOwner())
+		})
+	}
+}
+
+// TestTaskRegistryCancellationCannotReviveResumedTask 钉住 取消已续跑的任务后，遗留声明与终局不会让其复活。
+func TestTaskRegistryCancellationCannotReviveResumedTask(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	now := time.Now()
+	decl := task.Declarative{Kind: "subagent", Desc: "child", RoundID: 3, ProducerRound: 3, StartedAtMilli: now.UnixMilli()}
+	storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+	storeRegistryFact(t, store, 200, tagentevent.TypeExternalInput, "cancelled", map[string]string{"task_id": "task", "settle_status": "cancelled"}, now)
+	decl.RoundID, decl.ProducerRound = 4, 4
+	storeRegistryFact(t, store, 300, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, now)
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	defer tm.Close(context.Background())
+	require.Zero(t, RebuildTaskRegistry(store, sinkPartition, tm, nil))
 }

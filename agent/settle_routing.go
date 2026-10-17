@@ -183,8 +183,9 @@ func (r *settleSinkRegistry) bindBooking(b *settleBooking, tk *task.Task) {
 	if r == nil || b == nil || tk == nil {
 		return
 	}
-	spec := tk.SpecSnapshot()
-	key := settleWaitKey{taskID: tk.ID, roundID: tk.RoundID(), waitFor: task.WaitForOf(spec)}
+	snapshot := tk.RoutingSnapshot()
+	spec := snapshot.Spec
+	key := settleWaitKey{taskID: tk.ID, roundID: snapshot.RoundID, waitFor: task.WaitForOf(spec)}
 	if key.taskID == "" || key.roundID == 0 {
 		return
 	}
@@ -195,6 +196,16 @@ func (r *settleSinkRegistry) bindBooking(b *settleBooking, tk *task.Task) {
 		return
 	}
 	if b.key.taskID != "" {
+		if b.key.taskID == key.taskID && b.key.roundID == key.roundID && b.key.waitFor != key.waitFor {
+			delete(s.waits, b.key)
+			b.key = key
+			s.waits[key] = b
+			stream := r.streamLocked(s, settleProducerKey{taskID: key.taskID, roundID: key.roundID})
+			if stream.waitSatisfied && (stream.waitFor == "" || stream.waitFor == key.waitFor) {
+				r.voidBookingLocked(b, s)
+			}
+			r.changedLocked(s)
+		}
 		return
 	}
 	b.key = key
@@ -316,34 +327,37 @@ func (r *settleSinkRegistry) pauseDestination(ctx context.Context, id string) (f
 		}
 	}
 	var once sync.Once
-	release := func(dst settleAcceptor) {
+	finish := func(dst settleAcceptor, replace bool) {
 		once.Do(func() {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			if current := r.states[id]; current == s && current.pause == token {
-				current.destination = dst
+				if replace {
+					current.destination = dst
+				}
 				current.sealed, current.pause = false, nil
 				r.changedLocked(current)
 			}
 		})
 	}
+	release := func(dst settleAcceptor) { finish(dst, true) }
 	for {
 		r.mu.Lock()
 		if s.inFlight == 0 {
-			priorDst, err := s.destination, ctx.Err()
+			err := ctx.Err()
 			r.mu.Unlock()
 			if err != nil {
-				release(priorDst)
+				finish(nil, false)
 				return nil, err
 			}
 			return release, nil
 		}
-		idle, priorDst := s.idle, s.destination
+		idle := s.idle
 		r.mu.Unlock()
 		select {
 		case <-idle:
 		case <-ctx.Done():
-			release(priorDst)
+			finish(nil, false)
 			return nil, ctx.Err()
 		}
 	}
@@ -444,6 +458,11 @@ func deliveryKey(evt *AgentEvent) settleDeliveryKey {
 	return key
 }
 
+func settleEventOwner(evt *AgentEvent) (string, bool) {
+	owner, present := evt.Metadata["task_round_owner"].(string)
+	return owner, present && (owner != "" || settleUint(evt.Metadata["task_round_id"]) != 0)
+}
+
 func canonicalDelivery(key settleDeliveryKey) bool {
 	return key.taskID != "" && key.roundID != 0 && key.seq != 0 && key.sourceID == task.SignalSourceID(key.taskID, key.roundID, key.seq)
 }
@@ -509,17 +528,26 @@ func (r *settleSinkRegistry) accountAcceptedLocked(id string, s *settleInvocatio
 			}
 			continue
 		}
-		if b.key.taskID == key.taskID && b.key.roundID == key.roundID && (waitFor == "" || string(b.key.waitFor) == waitFor) {
+		if b.key.taskID == key.taskID && b.key.roundID == key.roundID && (waitFor == "" || b.key.waitFor == "" || string(b.key.waitFor) == waitFor) {
 			r.voidBookingLocked(b, s)
 		}
 	}
+}
+
+func invokeSettleAcceptor(ctx context.Context, dst settleAcceptor, evt *AgentEvent) (receipt PublishReceipt, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("settle receiver panicked: %v", recovered)
+		}
+	}()
+	return dst(ctx, evt)
 }
 
 func (r *settleSinkRegistry) accept(ctx context.Context, id string, evt *AgentEvent, fallback settleAcceptor, tasks ...*task.Task) bool {
 	if r == nil || evt == nil {
 		return false
 	}
-	if owner, ok := evt.Metadata["task_round_owner"].(string); ok && owner != id {
+	if owner, ok := settleEventOwner(evt); ok && owner != id {
 		return false
 	}
 	key := deliveryKey(evt)
@@ -591,7 +619,7 @@ func (r *settleSinkRegistry) accept(ctx context.Context, id string, evt *AgentEv
 		s.inFlight++
 		r.mu.Unlock()
 
-		_, err := dst(ctx, evt)
+		_, err := invokeSettleAcceptor(ctx, dst, evt)
 
 		r.mu.Lock()
 		attempt.accepted = err == nil
@@ -630,7 +658,7 @@ func deliverTaskSettled(sinks *settleSinkRegistry, bus *EventBus, tk *task.Task,
 	if evt == nil {
 		return false
 	}
-	id, explicit := evt.Metadata["task_round_owner"].(string)
+	id, explicit := settleEventOwner(evt)
 	if !explicit {
 		id = taskInvocationID(tk)
 	}
@@ -759,23 +787,24 @@ func (r *settleSinkRegistry) reconcileTasks(id string, controller task.TaskContr
 		if tk == nil {
 			continue
 		}
-		spec := tk.SpecSnapshot()
-		round, owner := tk.ProducerRound(), tk.ProducerOwner()
+		snapshot := tk.RoutingSnapshot()
+		spec := snapshot.Spec
+		round, owner := snapshot.ProducerRound, snapshot.ProducerOwner
 		if round == 0 {
-			round, owner = tk.RoundID(), tk.RoundOwner()
+			round, owner = snapshot.RoundID, snapshot.RoundOwner
 		}
 		if owner != id || round == 0 {
 			continue
 		}
 		pending, pendingSatisfying := false, false
-		for _, sig := range tk.PendingSignals() {
+		for _, sig := range snapshot.PendingSignals {
 			if sig.RoundID == round && sig.RoundOwner == id {
 				pending = true
 				pendingSatisfying = pendingSatisfying || sig.SatisfiesWait()
 			}
 		}
-		status := tk.Status()
-		live, producerSatisfied := status.Live(), tk.WaitSatisfiedOfProducer()
+		status := snapshot.Status
+		live, producerSatisfied := status.Live(), snapshot.WaitSatisfied
 		r.mu.Lock()
 		s := r.stateLocked(id)
 		stream := r.streamLocked(s, settleProducerKey{taskID: tk.ID, roundID: round})
@@ -784,6 +813,9 @@ func (r *settleSinkRegistry) reconcileTasks(id string, controller task.TaskContr
 			stream.owner = id
 		}
 		wait := task.WaitForOf(spec)
+		if !stream.waitSatisfied {
+			stream.waitFor = wait
+		}
 		key := settleWaitKey{taskID: tk.ID, roundID: round, waitFor: wait}
 		satisfied := (stream.waitSatisfied && (stream.waitFor == "" || stream.waitFor == wait)) || (producerSatisfied && !pendingSatisfying)
 		if !pending && status == task.TaskAliveDetached && wait == task.WaitReady {
@@ -822,12 +854,48 @@ func (r *settleSinkRegistry) reconcileAccepted(id string, events []*AgentEvent) 
 		if evt == nil || evt.Source != SourceTask {
 			continue
 		}
-		if owner, ok := evt.Metadata["task_round_owner"].(string); ok && owner != id {
+		if owner, ok := settleEventOwner(evt); ok && owner != id {
 			continue
 		}
 		r.accountAcceptedLocked(id, s, evt)
 	}
 	r.changedLocked(s)
+}
+
+func (r *settleSinkRegistry) abortRound(tk *task.Task, sig task.SettleSignal) {
+	if r == nil || tk == nil || sig.RoundOwner == "" || sig.RoundID == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := r.states[sig.RoundOwner]
+	if s == nil {
+		return
+	}
+	producer := settleProducerKey{taskID: tk.ID, roundID: sig.RoundID}
+	stream := r.streamLocked(s, producer)
+	stream.owner, stream.waitSatisfied, stream.terminal = "", true, true
+	if sig.Seq > 0 && sig.SourceID == task.SignalSourceID(tk.ID, sig.RoundID, sig.Seq) {
+		stream.accepted = acceptSequence(stream.accepted, sig.Seq)
+	}
+	for key, b := range s.waits {
+		if key.taskID == tk.ID && key.roundID == sig.RoundID {
+			stream.waitFor = key.waitFor
+			r.voidBookingLocked(b, s)
+		}
+	}
+	if s.retired {
+		delete(s.streams, producer)
+		if len(s.streams) == 0 {
+			s.destination = nil
+		}
+	}
+	r.changedLocked(s)
+	r.compactLocked()
+}
+
+func (r *settleSinkRegistry) retireStateOnly(id string) {
+	r.retire(id)
 }
 
 func (r *settleSinkRegistry) retire(id string) {
@@ -845,8 +913,18 @@ func (r *settleSinkRegistry) retire(id string) {
 		s.bookings, s.waits = nil, nil
 		s.retired = true
 		for key, stream := range s.streams {
-			live := stream.tk == nil || (stream.tk.Status().Live() && stream.tk.ProducerRound() == key.roundID)
-			if s.destination == nil || stream.owner == "" || stream.lifetime != task.LifetimeService || !live {
+			live := stream.tk == nil
+			if stream.tk != nil {
+				snapshot := stream.tk.RoutingSnapshot()
+				live = snapshot.Status.Live() && snapshot.ProducerRound == key.roundID
+				for _, pending := range snapshot.PendingSignals {
+					if pending.RoundID == key.roundID && pending.RoundOwner == stream.owner {
+						live = true
+						break
+					}
+				}
+			}
+			if s.destination == nil || stream.owner == "" || !live {
 				delete(s.streams, key)
 			}
 		}
@@ -955,7 +1033,7 @@ func (c *countingSpawner) Spawn(spec task.TaskSpec, detector task.SettleDetector
 	if res.Task != nil {
 		c.sinks.bindBooking(b, res.Task)
 	}
-	if (res.Settled && (res.Signal.SatisfiesWait() || res.Signal.Kind == task.SettleCompleted || res.Signal.Kind == task.SettleFailed)) || res.Deduped || res.Blocked != "" {
+	if (res.Settled && res.Signal.SatisfiesWait()) || res.Deduped || res.Blocked != "" {
 		c.sinks.voidBooking(b)
 	}
 	return res
@@ -1011,7 +1089,7 @@ func (c *countingSpawner) Resume(ctx context.Context, id string, input string) (
 	if res.Task != nil {
 		c.sinks.bindBooking(b, res.Task)
 	}
-	if err != nil || res.Deduped || res.Blocked != "" || (res.Settled && (res.Signal.SatisfiesWait() || res.Signal.Kind == task.SettleCompleted || res.Signal.Kind == task.SettleFailed)) {
+	if err != nil || res.Deduped || res.Blocked != "" || (res.Settled && res.Signal.SatisfiesWait()) {
 		c.sinks.voidBooking(b)
 	}
 	return res, err

@@ -676,22 +676,32 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 	return decl
 }
 
-// defaultSubAgentTimeout is the default timeout for sub-agent calls.
-//
-// This is intentionally generous: a sub-agent's real work bound is its own
-// max_tool_iterations (e.g. plan create runs self-check → init → new change →
-// write proposal.md + tasks.md → validate over many rounds; a slow LLM like
-// glm-5.2 takes ~15-25s/round). The timeout must NOT sever normal multi-round
-// work — it is only a backstop against a truly runaway/stuck invocation.
+// defaultSubAgentTimeout bounds a local delegate's active model turn or one remote run.
 const defaultSubAgentTimeout = 600 * time.Second
 
 type subagentTurnBudgetKey struct{}
 
+// ErrContinuationNotAccepted proves that a local run returned before handing back an event stream.
+type ErrContinuationNotAccepted struct {
+	InvocationID string
+	Cause error
+}
+
+// Error describes the local preparation refusal.
+func (e *ErrContinuationNotAccepted) Error() string {
+	return fmt.Sprintf("delegation %q was not accepted: %v", e.InvocationID, e.Cause)
+}
+
+// Unwrap preserves the local preparation error.
+func (e *ErrContinuationNotAccepted) Unwrap() error { return e.Cause }
+
+// ErrContinuationInterrupted reports a stream that closed before its committed local outcome arrived.
 type ErrContinuationInterrupted struct {
 	InvocationID string
 	Cause        error
 }
 
+// Error describes the interrupted invocation and its cancellation cause when available.
 func (e *ErrContinuationInterrupted) Error() string {
 	if e.Cause != nil {
 		return fmt.Sprintf("delegation %q interrupted before its committed outcome: %v", e.InvocationID, e.Cause)
@@ -699,12 +709,15 @@ func (e *ErrContinuationInterrupted) Error() string {
 	return fmt.Sprintf("delegation %q interrupted before its committed outcome", e.InvocationID)
 }
 
+// Unwrap preserves the cancellation or transport cause.
 func (e *ErrContinuationInterrupted) Unwrap() error { return e.Cause }
 
+// WithSubagentTurnBudget bounds active model work while preserving time spent waiting for background tasks.
 func WithSubagentTurnBudget(ctx context.Context, budget time.Duration) context.Context {
 	return context.WithValue(ctx, subagentTurnBudgetKey{}, budget)
 }
 
+// SubagentTurnBudgetFromContext returns the active model budget inherited by a delegated turn.
 func SubagentTurnBudgetFromContext(ctx context.Context) time.Duration {
 	budget, _ := ctx.Value(subagentTurnBudgetKey{}).(time.Duration)
 	return budget
@@ -723,8 +736,8 @@ func isRemoteAgent(ag agent.Agent) bool {
 //  1. Parses JSON args to extract event_keys
 //  2. If event_keys are present and parentStore is available, fetches full event data
 //  3. Serializes the events into RuntimeState["external_context"] (compact JSON)
-//  4. Constructs an Invocation and calls agent.Run with timeout — unified for local and remote
-//  5. For remote A2A agents, retries once on failure with 500ms backoff
+//  4. Prepares an invocation after task admission, then starts its producer after binding acceptance
+//  5. For remote agents, retries once only when the error explicitly proves non-acceptance
 //  6. Collects the sub-agent's final output from the event stream
 //
 // context_refs resolves through the same retrieval channel and merges into the
@@ -925,6 +938,7 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				Key:         spawnKey,
 				AgentName:   agentName,
 				MessageBody: messageBody,
+				EventKeys: append([]int64(nil), keys...),
 				Params:      declParams,
 				Overrides:   overrides,
 			},
@@ -1005,19 +1019,14 @@ func (w *AgentToolWrapper) DenseDuration() time.Duration {
 	return w.asyncDenseDuration
 }
 
-// remoteRetryBackoff is the wait before the single retry of a failed REMOTE
-// delegation. Local targets are never retried: their failure is a defect in this
-// process, and re-running it only hides it.
+// remoteRetryBackoff separates the two attempts of an explicitly safe remote retry.
 const remoteRetryBackoff = 500 * time.Millisecond
 
-// runAndCollect runs one delegation and collects its result, retrying a failed REMOTE attempt
-// exactly once: the retry wraps the whole attempt, send plus drain, because that is
-// where a transport failure actually surfaces.
-//
-// - Both attempts use the same invocation and the same wrapper instance, i.e. the target the initiating call was bound to: a retry rides the initiating call lease binding, never a re-resolution against whatever generation is published by then.
+// runAndCollect retries a remote delegation only when RetrySafe proves that the failed attempt was not accepted.
+// Both attempts retain the same invocation and declared target.
 func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
 	out, err := w.collectAttempt(ctx, inv, agentName)
-	if err == nil || !isRemoteAgent(w.agent) {
+	if err == nil || out != "" || !isRemoteAgent(w.agent) {
 		return out, err
 	}
 	var safe interface{ RetrySafe() bool }
@@ -1104,8 +1113,14 @@ func (w *AgentToolWrapper) collectEventStream(ctx context.Context, invocationID,
 	if lastErr != nil {
 		return finalOutput, fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
 	}
-	if _, local := w.agent.(*TagentAgent); local && outcome != "completed" {
-		return finalOutput, &ErrContinuationInterrupted{InvocationID: invocationID, Cause: ctx.Err()}
+	if _, local := w.agent.(*TagentAgent); local {
+		if outcome == "" {
+			return finalOutput, &ErrContinuationInterrupted{InvocationID: invocationID, Cause: ctx.Err()}
+		}
+		if outcome != "completed" {
+			return finalOutput, fmt.Errorf("agent tool %q: committed delegation outcome %s", agentName, outcome)
+		}
+		return finalOutput, nil
 	}
 	if finalOutput == "" {
 		finalOutput = "tool agent completed without output"
@@ -1129,12 +1144,24 @@ func (w *AgentToolWrapper) collectEventStream(ctx context.Context, invocationID,
 //
 //   - The owner-face lease accounts for the re-entry while armDeclaredCall selects the execution view it runs on, so a stored task cannot silently serve a retired generation's prompts, model or tools.
 func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64, overrides *task.Overrides) func(context.Context) (task.SpawnResult, error) {
+	if origin, ok := spawner.(*task.OriginSpawner); ok {
+		spawner = origin.TaskController
+	}
 	return func(ctx context.Context) (task.SpawnResult, error) {
 		target, lease, err := ResolveReentryDelegation(ctx, owner, agentName)
 		if err != nil {
 			return task.SpawnResult{}, err
 		}
 		defer lease.Release()
+		currentSpawner := spawner
+		if active, ok := task.TaskSpawnerFromContext(ctx); ok {
+			currentSpawner = active
+		} else if owner != nil && owner.taskController != nil {
+			currentSpawner = owner.taskController
+		}
+		if currentSpawner == nil {
+			return task.SpawnResult{}, fmt.Errorf("subagent %q has no current task spawner", agentName)
+		}
 		var specTTL time.Duration
 		var declParams map[string]string
 		if ttlSeconds > 0 {
@@ -1158,11 +1185,11 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 				Params:      declParams,
 				Overrides:   overrides,
 			},
-			Relaunch: subagentRelaunchClosure(owner, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
+			Relaunch: subagentRelaunchClosure(owner, currentSpawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
 			ResumeFn: subagentResumeClosureWithOverrides(owner, agentName, rounds, overrides),
 		}
 		spec.Start = target.prepareTaskStart(lease.WithContext(ctx), owner, rounds, inv)
-		return spawner.Spawn(spec, nil), nil
+		return currentSpawner.Spawn(spec, nil), nil
 	}
 }
 
@@ -1225,10 +1252,20 @@ func (r *subagentRounds) add(input, output string) {
 func (r *subagentRounds) addRecord(rd delegationRoundRecord, key int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rounds = append(r.rounds, subagentRound{
+	entry := subagentRound{
 		input: rd.Input, output: rd.Output, err: rd.Error, factKey: key, invocationID: rd.ChildInvocationID,
 		roundID: rd.RoundID, roundOwner: rd.RoundOwner, at: rd.FinishedAt,
-	})
+	}
+	if rd.RoundID > 0 && rd.ChildInvocationID != "" {
+		for index := range r.rounds {
+			prior := &r.rounds[index]
+			if prior.roundID == rd.RoundID && prior.roundOwner == rd.RoundOwner && prior.invocationID == rd.ChildInvocationID {
+				*prior = entry
+				return
+			}
+		}
+	}
+	r.rounds = append(r.rounds, entry)
 	limit := r.cap
 	if limit <= 0 {
 		limit = DefaultResumeContextRounds
@@ -1247,11 +1284,7 @@ func (r *subagentRounds) recent(n int) []subagentRound {
 	return append([]subagentRound(nil), r.rounds[len(r.rounds)-n:]...)
 }
 
-// subagentResumeClosure builds the resume closure of a subagent task.
-//
-// - 目标与目标自己的声明参数（restoration cap、dense window）都来自重入所选的那一代，因此存量任务不会重放已退役代的参数；所选代无目标则在读写任务链之前拒绝，被拒的重入不留任务链改动。
-// - 返回的是新的单轮 Run，其 external_context 只携带本任务的历史轮次（最近的结算结果在最前），不含无关任务。
-// - 子 agent 仍是单轮原语，不做进程复活：状态恢复是框架侧的喂入，不是子 agent 的持续性。
+// subagentResumeClosure resolves the current selected delegation surface and restores this task's recent durable rounds.
 func subagentResumeClosure(owner *ContextManager, agentName string, rounds *subagentRounds) func(context.Context, string) (task.SettleDetector, error) {
 	return subagentResumeClosureWithOverrides(owner, agentName, rounds, nil)
 }
@@ -1281,7 +1314,7 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 		}
 
 		restored := make([]memory.FullEvent, 0, len(prior))
-		canRead := target.canReadDelegationHistory(ctx)
+		canRead := target.canReadDelegationHistory(ctx, overrides)
 		for _, rd := range prior {
 			output := rd.output
 			if canRead && rd.factKey != 0 && len([]rune(output)) > 2048 {
@@ -1330,8 +1363,17 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 	}
 }
 
-func (w *AgentToolWrapper) canReadDelegationHistory(ctx context.Context) bool {
-	for _, name := range w.maxToolDomain(ctx) {
+func (w *AgentToolWrapper) canReadDelegationHistory(ctx context.Context, overrides *task.Overrides) bool {
+	names := w.maxToolDomain(ctx)
+	if w.selectedCallGeneration(ctx) == nil {
+		if declared := w.declared.Load(); declared != nil && declared.runCfg != nil {
+			names = toolNamesOf(declared.runCfg.Tools)
+		}
+	}
+	if overrides != nil && overrides.ToolsSubset != nil {
+		names = overrides.ToolsSubset
+	}
+	for _, name := range names {
 		switch name {
 		case "memory_recall", "recall_get", "recall":
 			return true
@@ -1340,14 +1382,19 @@ func (w *AgentToolWrapper) canReadDelegationHistory(ctx context.Context) bool {
 	return false
 }
 
-// runWithTimeout starts ONE sub-agent run under a context timeout and keeps the
-// context alive for the whole consumption of the returned stream.
-//
-// - agent.Run 是异步的，立即返回 channel；cancel 不得 defer 在本函数，否则会赶在调用方读完 channel 之前取消上下文，因此把 channel 包一层 goroutine，待其关闭后再调用 cancel。
-// - 重试策略在上一层 runAndCollect：远程传输失败通常以 error 事件（Run 返回 nil + channel）到达，本函数内的 error 分支覆盖不到那种形状。
+// runWithTimeout keeps a remote deadline alive until its event stream drains.
+// Local waiting loops inherit an active model budget instead of a whole-invocation deadline.
 func (w *AgentToolWrapper) runWithTimeout(ctx context.Context, inv *agent.Invocation, agentName string) (<-chan *event.Event, error) {
 	if _, local := w.agent.(*TagentAgent); local {
-		return w.agent.Run(WithSubagentTurnBudget(ctx, defaultSubAgentTimeout), inv)
+		budget := SubagentTurnBudgetFromContext(ctx)
+		if budget <= 0 {
+			budget = defaultSubAgentTimeout
+		}
+		stream, err := w.agent.Run(WithSubagentTurnBudget(ctx, budget), inv)
+		if err != nil {
+			return nil, &ErrContinuationNotAccepted{InvocationID: inv.InvocationID, Cause: err}
+		}
+		return stream, nil
 	}
 	runCtx, cancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
 
@@ -1516,6 +1563,9 @@ type PlainToolFactoryConfig struct {
 	// Tools that need a working/output directory derive it from here (e.g. the
 	// action/exec tool uses <root>/exec as its tmux command working directory).
 	WorkspaceRoot string
+
+	// ResidentMetaDir locates the durable task session registry prepared before tool construction.
+	ResidentMetaDir string
 
 	// WorkingDir 是 agent 的统一工作根(file tools 的 base_dir 与 exec 命令 cwd 的共同基准)。
 	// 空 = 各工具回退自身默认(file base_dir="."、exec 继承进程 cwd,现状不变);非空则作为二者

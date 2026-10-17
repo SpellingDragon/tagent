@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -201,19 +202,24 @@ func TestTmuxSettleDetector_Rearm(t *testing.T) {
 	}
 }
 
-// mustTmuxSession creates a real tmux session or skips the test when the
-// environment cannot fork one. Returns the executor and session id.
+// mustTmuxSession creates a real session; TAGENT_REQUIRE_TMUX makes unavailable resources fail.
 func mustTmuxSession(t *testing.T, command string) (*TmuxExecutor, string) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("real tmux test; skip in -short")
 	}
 	if !IsTmuxAvailable() {
+		if os.Getenv("TAGENT_REQUIRE_TMUX") == "1" {
+			t.Fatal("tmux is required by this test run")
+		}
 		t.Skip("tmux not available")
 	}
 	exec := NewTmuxExecutor()
 	sess, err := exec.CreateSession(context.Background(), TmuxCreateOptions{Command: command})
 	if err != nil {
+		if os.Getenv("TAGENT_REQUIRE_TMUX") == "1" {
+			t.Fatalf("required tmux session cannot start: %v", err)
+		}
 		t.Skipf("cannot create tmux session (sandboxed / no PTY?): %v", err)
 	}
 	return exec, sess.ID

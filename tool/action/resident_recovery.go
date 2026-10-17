@@ -242,8 +242,7 @@ func (ct *ActionTool) reattachOne(sessionID string, m ResidentMeta) {
 				return err
 			}
 		}
-		ct.activateMonitoring(session, args, detector)
-		return nil
+		return ct.activateMonitoring(session, args, detector)
 	}
 	ct.rememberReattachedDetector(sessionID, detector)
 }
@@ -267,9 +266,17 @@ func (ct *ActionTool) RecoverTaskDetector(tk *task.Task) task.SettleDetector {
 	}
 	resource := decl.Params[pResourceID]
 	if resource == "" {
-		resource, err = ct.tmuxExecutor.SessionResourceID(decl.TaskID)
-		if err != nil {
-			return nil
+		if b, readErr := os.ReadFile(ct.metaPath(decl.TaskID)); readErr == nil {
+			var meta ResidentMeta
+			if json.Unmarshal(b, &meta) == nil {
+				resource = meta.ResourceID
+			}
+		}
+		if resource == "" {
+			resource, err = ct.tmuxExecutor.SessionResourceID(decl.TaskID)
+			if err != nil {
+				return nil
+			}
 		}
 		if decl.Params == nil {
 			decl.Params = make(map[string]string)
@@ -294,6 +301,7 @@ func (ct *ActionTool) RecoverTaskDetector(tk *task.Task) task.SettleDetector {
 	}
 	detector.RestoreRound(round, tk.SignalSeq())
 	detector.Rearm(baseline)
+	detector.baselineBytes, _ = strconv.Atoi(decl.Params[pBaselineBytes])
 	for _, pending := range tk.PendingSignals() {
 		if pending.ProducerRound == round && (pending.Kind == task.SettleCompleted || pending.Kind == task.SettleFailed) && pending.Observation != "round_aborted" {
 			copy := pending
@@ -304,7 +312,9 @@ func (ct *ActionTool) RecoverTaskDetector(tk *task.Task) task.SettleDetector {
 				detector.confirmStopped()
 			}
 			detector.close()
-			ct.saveBoundMeta(session, args)
+			if current, err := ct.tmuxExecutor.SessionResourceID(session.ID); err == nil && current == resource {
+				ct.saveBoundMeta(session, args)
+			}
 			spec.ResumeFn = ct.resumeResourceClosure(session.ID, resource, args.IsTUI, detector)
 			spec.Alive = ct.resourceAliveClosure(session.ID, resource)
 			return &recoveredDetector{TmuxSettleDetector: detector, spec: spec}
@@ -316,10 +326,11 @@ func (ct *ActionTool) RecoverTaskDetector(tk *task.Task) task.SettleDetector {
 				return err
 			}
 		}
-		ct.activateMonitoring(session, args, detector)
-		return nil
+		return ct.activateMonitoring(session, args, detector)
 	}
-	ct.saveBoundMeta(session, args)
+	if current, err := ct.tmuxExecutor.SessionResourceID(session.ID); err == nil && current == resource {
+		ct.saveBoundMeta(session, args)
+	}
 	spec.ResumeFn = ct.resumeResourceClosure(session.ID, resource, args.IsTUI, detector)
 	spec.Alive = ct.resourceAliveClosure(session.ID, resource)
 	return &recoveredDetector{TmuxSettleDetector: detector, spec: spec}

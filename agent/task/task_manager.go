@@ -114,7 +114,10 @@ func WaitForOf(spec TaskSpec) WaitCondition {
 	if spec.WaitFor != "" {
 		return spec.WaitFor
 	}
-	if spec.Mode == "service" || spec.Mode == "resident" || spec.Mode == "interactive" || LifetimeOf(spec) == LifetimeService {
+	if spec.Mode == "interactive" {
+		return WaitInput
+	}
+	if spec.Mode == "service" || spec.Mode == "resident" || LifetimeOf(spec) == LifetimeService {
 		return WaitReady
 	}
 	return WaitExit
@@ -122,16 +125,20 @@ func WaitForOf(spec TaskSpec) WaitCondition {
 
 // SatisfiesWait evaluates an observation against the requested foreground condition.
 func SatisfiesWait(spec TaskSpec, sig SettleSignal) bool {
-	if sig.WaitSatisfied || sig.Kind == SettleCompleted || sig.Kind == SettleFailed {
+	if sig.WaitSatisfied || sig.EndsRound() {
 		return true
+	}
+	legacyReady := spec.WaitFor == "" && spec.Mode == "" && sig.Kind == SettleStable
+	if sig.WaitFor != "" {
+		spec.WaitFor = sig.WaitFor
 	}
 	switch WaitForOf(spec) {
 	case WaitReady:
-		return sig.Ready || sig.Kind == SettleReady || (spec.WaitFor == "" && spec.Mode == "" && sig.Kind == SettleStable)
+		return sig.Ready || sig.Kind == SettleReady || legacyReady
 	case WaitInput:
 		return sig.Kind == SettleInput
 	case WaitSignal:
-		return sig.Kind == SettleWatch && sig.Observation == "signal"
+		return sig.Kind == SettleWatch && (sig.Observation == "signal" || sig.Observation == "watch")
 	default:
 		return false
 	}
@@ -139,6 +146,7 @@ func SatisfiesWait(spec TaskSpec, sig SettleSignal) bool {
 
 // SettleSignal is emitted by a SettleDetector when a task reaches a settle point.
 type SettleSignal struct {
+	WaitFor       WaitCondition
 	RoundID       uint64
 	ProducerRound uint64
 	RoundOwner    string
@@ -171,7 +179,7 @@ type SettleSignal struct {
 
 // SatisfiesWait reports the persisted wait decision for this signal.
 func (s SettleSignal) SatisfiesWait() bool {
-	return s.WaitSatisfied || s.Kind == SettleCompleted || s.Kind == SettleFailed
+	return s.WaitSatisfied || s.EndsRound()
 }
 
 // SignalSourceID identifies one producer observation across retries and restarts.
@@ -267,9 +275,7 @@ type Declarative struct {
 	Desc                  string        `json:"desc"`
 	Key                   string        `json:"key,omitempty"`
 	Command               string        `json:"command,omitempty"`
-	// AgentName subagent Kind relaunch inputs (re-dispatch through the resident agents
-	// map). Resume is NOT rebuildable for subagent (rounds has no event source
-	// — the factory returns a relaunch-guidance error, D1.2 promise table).
+	// AgentName and MessageBody rebuild subagent delegation; the agent layer restores its round history and reentry closures.
 	AgentName   string            `json:"agent_name,omitempty"`
 	MessageBody string            `json:"message_body,omitempty"`
 	EventKeys   []int64           `json:"event_keys,omitempty"`
@@ -426,6 +432,7 @@ type Task struct {
 	producerWaitSatisfied bool
 	signalSeq             uint64
 	resuming              bool
+	recovering            bool
 	rollback              *roundRollback
 	pending               map[string]*pendingDelivery
 }
@@ -459,6 +466,10 @@ type pendingDelivery struct {
 func (t *Task) SpecSnapshot() TaskSpec {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.specSnapshotLocked()
+}
+
+func (t *Task) specSnapshotLocked() TaskSpec {
 	spec := cloneSpec(t.Spec)
 	if spec.Declarative != nil {
 		spec.Declarative.RoundID = t.roundID
@@ -470,6 +481,29 @@ func (t *Task) SpecSnapshot() TaskSpec {
 		spec.Declarative.TTLAnchorMilli = t.ttlAnchor().UnixMilli()
 	}
 	return spec
+}
+
+// RoutingSnapshot contains one consistent view of intent, producer and pending delivery identities.
+type RoutingSnapshot struct {
+	Spec           TaskSpec
+	RoundID        uint64
+	RoundOwner     string
+	ProducerRound  uint64
+	ProducerOwner  string
+	Status         TaskStatus
+	WaitSatisfied  bool
+	PendingSignals []SettleSignal
+}
+
+// RoutingSnapshot reads every routing identity under one task lock.
+func (t *Task) RoutingSnapshot() RoutingSnapshot {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := RoutingSnapshot{Spec: t.specSnapshotLocked(), RoundID: t.roundID, RoundOwner: t.roundOwner, ProducerRound: t.producerRound, ProducerOwner: t.producerOwner, Status: t.status, WaitSatisfied: t.producerWaitSatisfied}
+	for _, pending := range t.pending {
+		state.PendingSignals = append(state.PendingSignals, pending.signal)
+	}
+	return state
 }
 
 func cloneSpec(spec TaskSpec) TaskSpec {
@@ -664,7 +698,7 @@ func (t *Task) isTerminalExpired(now time.Time, ttl time.Duration) bool {
 	case TaskRunning, TaskStable, TaskAliveDetached, TaskSuspect:
 		return false
 	}
-	if t.settledAt.IsZero() {
+	if t.settledAt.IsZero() || t.recovering {
 		return false
 	}
 	return len(t.pending) == 0 && now.Sub(t.settledAt) >= ttl
@@ -801,6 +835,8 @@ func TaskControllerFromContext(ctx context.Context) (TaskController, bool) {
 
 // TaskManagerConfig configures a TaskManager.
 type TaskManagerConfig struct {
+	OnBatchRetireAccepted  func([]BatchRetired) bool
+	OnRetireResendAccepted func([]BatchRetired) bool
 	OnSpawnAccepted        func(*Task) bool
 	OnStartAccepted        func(*Task) bool
 	OnRoundAccepted        func(*Task) bool
@@ -902,6 +938,8 @@ const defaultManagerTTL = 10 * time.Minute
 // 接线方提供，把状态变化落到事实链与事件总线；spawnGate/auditGate 决定"能不能派"与
 // "派成什么"，因此委派策略留在宿主，任务层只管登记与回收。方法对 nil 接收者安全。
 type TaskManager struct {
+	onBatchRetireAccepted  func([]BatchRetired) bool
+	onRetireResendAccepted func([]BatchRetired) bool
 	onSpawnAccepted        func(*Task) bool
 	onStartAccepted        func(*Task) bool
 	onRoundAccepted        func(*Task) bool
@@ -1012,6 +1050,8 @@ func NewTaskManager(cfg TaskManagerConfig) *TaskManager {
 		dttl = defaultManagerTTL
 	}
 	tm := &TaskManager{
+		onBatchRetireAccepted:  cfg.OnBatchRetireAccepted,
+		onRetireResendAccepted: cfg.OnRetireResendAccepted,
 		onSpawnAccepted:        cfg.OnSpawnAccepted,
 		onStartAccepted:        cfg.OnStartAccepted,
 		onRoundAccepted:        cfg.OnRoundAccepted,
@@ -1061,6 +1101,13 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		}
 		return SpawnResult{Blocked: "task manager unavailable"}
 	}
+	if !tm.beginOperation() {
+		if detector != nil {
+			detector.Cancel()
+		}
+		return SpawnResult{Blocked: "task manager is closing"}
+	}
+	defer tm.operations.Done()
 	tm.pruneTerminal()
 	tm.mu.Lock()
 	if tm.closing {
@@ -1099,20 +1146,18 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 			return SpawnResult{Blocked: reason}
 		}
 	}
-	tm.operations.Add(1)
 	spec = cloneSpec(spec)
 	task := &Task{ID: uuid.NewString(), Spec: spec, StartedAt: tm.now(), status: TaskRunning,
 		firstSettle: make(chan SettleSignal, 1), windowDone: make(chan struct{}), watchDone: make(chan struct{}),
 		roundID: 1, roundOwner: spec.RoundOwner, pending: make(map[string]*pendingDelivery)}
 	tm.tasks[task.ID] = task
 	if detector != nil {
-		tm.producers = append(tm.producers, detector)
+		tm.trackProducerLocked(detector)
 	}
 	if spec.Key != "" {
 		tm.byKey[spec.Key] = task.ID
 	}
 	tm.mu.Unlock()
-	defer tm.operations.Done()
 	accepted := true
 	if tm.onSpawnAccepted != nil {
 		accepted = tm.invoke(func() bool { return tm.onSpawnAccepted(task) })
@@ -1139,6 +1184,12 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		var err error
 		spec, detector, err = spec.Start(task)
 		if err != nil {
+			if detector != nil {
+				tm.mu.Lock()
+				tm.trackProducerLocked(detector)
+				tm.mu.Unlock()
+				detector.Cancel()
+			}
 			tm.abortRound(task, 1, task.RoundOwner(), TaskFailed, err, true)
 			return SpawnResult{Task: task, Blocked: err.Error()}
 		}
@@ -1151,6 +1202,34 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 		return SpawnResult{Task: task, Blocked: reason}
 	}
 	return tm.awaitWindow(task, detector, 1)
+}
+
+func (tm *TaskManager) pruneProducersLocked() {
+	live := tm.producers[:0]
+	for _, detector := range tm.producers {
+		select {
+		case <-detector.Stopped():
+		default:
+			live = append(live, detector)
+		}
+	}
+	for i := len(live); i < len(tm.producers); i++ {
+		tm.producers[i] = nil
+	}
+	tm.producers = live
+}
+
+func (tm *TaskManager) trackProducerLocked(detector SettleDetector) {
+	tm.pruneProducersLocked()
+	stopped := detector.Stopped()
+	if stopped != nil {
+		for _, existing := range tm.producers {
+			if existing.Stopped() == stopped {
+				return
+			}
+		}
+	}
+	tm.producers = append(tm.producers, detector)
 }
 
 func (tm *TaskManager) removeUnstarted(t *Task) {
@@ -1215,10 +1294,13 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 		return "task was cancelled before activation"
 	}
 	oldSpec, oldDetector := t.Spec, t.detector
-	oldProducer, oldOwner, oldSeq, oldWait := t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied
+	oldProducer, oldOwner, oldSeq, oldWait, oldAnchor := t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied, t.ttlRenewedAt
 	spec.RoundOwner = owner
 	spec.Origin = oldSpec.Origin
 	t.Spec, t.detector = spec, detector
+	if !initial {
+		t.ttlRenewedAt = tm.now()
+	}
 	t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied = round, owner, 0, false
 	if actual, ok := detector.(interface{ ProducerRound() uint64 }); ok {
 		t.producerRound = actual.ProducerRound()
@@ -1229,7 +1311,7 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 	t.mu.Unlock()
 	if detector != nil {
 		tm.mu.Lock()
-		tm.producers = append(tm.producers, detector)
+		tm.trackProducerLocked(detector)
 		tm.mu.Unlock()
 	}
 	accepted := true
@@ -1240,11 +1322,24 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 		t.mu.Lock()
 		t.Spec, t.detector = oldSpec, oldDetector
 		t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied = oldProducer, oldOwner, oldSeq, oldWait
+		t.ttlRenewedAt = oldAnchor
 		t.mu.Unlock()
 		return "task resource binding was not accepted"
 	}
+	tm.mu.Lock()
+	closing = tm.closing
+	tm.mu.Unlock()
+	if closing {
+		t.mu.Lock()
+		t.Spec, t.detector = oldSpec, oldDetector
+		t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied, t.ttlRenewedAt = oldProducer, oldOwner, oldSeq, oldWait, oldAnchor
+		t.mu.Unlock()
+		return "task manager is closing"
+	}
 	t.mu.Lock()
 	if t.status == TaskCancelled {
+		t.Spec, t.detector = oldSpec, oldDetector
+		t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied, t.ttlRenewedAt = oldProducer, oldOwner, oldSeq, oldWait, oldAnchor
 		t.mu.Unlock()
 		return "task was cancelled before activation"
 	}
@@ -1261,9 +1356,6 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 	t.retireNotified = false
 	t.status = TaskRunning
 	t.resuming = false
-	if !initial {
-		t.ttlRenewedAt = tm.now()
-	}
 	done := t.watchDone
 	t.mu.Unlock()
 	if detector != nil {
@@ -1299,16 +1391,16 @@ func (tm *TaskManager) awaitWindow(t *Task, detector SettleDetector, round uint6
 	}
 	select {
 	case sig := <-first:
-		tm.closeWindow(t, false)
+		tm.closeCapturedWindow(t, first, windowDone, false)
 		if sig.Observation != "round_aborted" {
 			tm.deliver(t, sig, detector, true, false)
 		}
 		return SpawnResult{Task: t, Settled: true, Signal: sig}
 	case <-detach:
-		tm.closeWindow(t, true)
+		tm.closeCapturedWindow(t, first, windowDone, true)
 		return SpawnResult{Task: t}
 	case <-tm.stop:
-		tm.closeWindow(t, true)
+		tm.closeCapturedWindow(t, first, windowDone, true)
 		return SpawnResult{Task: t, Blocked: "task manager is closing"}
 	case <-windowDone:
 		return SpawnResult{Task: t}
@@ -1342,12 +1434,6 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 				}
 				t.mu.Unlock()
 				tm.abortRound(t, round, owner, previous, sig.Err, false, sig)
-				t.mu.Lock()
-				if !t.windowClosed && !t.inlineOffered {
-					t.firstSettle <- sig
-					t.inlineOffered = true
-				}
-				t.mu.Unlock()
 				continue
 			}
 			producerRound, producerOwner := t.producerRound, t.producerOwner
@@ -1386,6 +1472,9 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 			if sig.Kind == SettleReady {
 				sig.Ready = true
 			}
+			if sig.WaitFor == "" {
+				sig.WaitFor = WaitForOf(t.Spec)
+			}
 			sig.WaitSatisfied = SatisfiesWait(t.Spec, sig)
 			if sig.WaitSatisfied {
 				t.producerWaitSatisfied = true
@@ -1415,29 +1504,35 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 	}
 }
 
-// closeWindow atomically hands an offered foreground signal to its final receiver.
-func (tm *TaskManager) closeWindow(t *Task, drainToBg bool) {
+// closeCapturedWindow closes only the foreground handoff observed by its caller.
+func (tm *TaskManager) closeCapturedWindow(t *Task, first chan SettleSignal, done chan struct{}, drainToBg bool) {
 	t.mu.Lock()
-	if t.windowClosed {
+	current := done == t.windowDone
+	if current && t.windowClosed {
 		t.mu.Unlock()
 		return
 	}
-	t.windowClosed = true
-	windowDone := t.windowDone
+	if current {
+		t.windowClosed = true
+	}
 	var pending *SettleSignal
 	if drainToBg {
 		select {
-		case sig := <-t.firstSettle:
+		case sig := <-first:
 			pending = &sig
 		default:
+		}
+	}
+	if done != nil {
+		select {
+		case <-done:
+		default:
+			close(done)
 		}
 	}
 	t.mu.Unlock()
 	if pending != nil {
 		tm.emitBackground(t, *pending)
-	}
-	if windowDone != nil {
-		close(windowDone)
 	}
 }
 
@@ -1458,6 +1553,9 @@ func (tm *TaskManager) emitBackground(t *Task, sig SettleSignal) {
 			sig.ObservedAt = tm.now()
 		}
 		sig.SourceID = SignalSourceID(t.ID, sig.RoundID, sig.Seq)
+		if sig.WaitFor == "" {
+			sig.WaitFor = WaitForOf(t.Spec)
+		}
 		sig.WaitSatisfied = SatisfiesWait(t.Spec, sig)
 	}
 	service := LifetimeOf(t.Spec) == LifetimeService
@@ -1513,18 +1611,7 @@ func (tm *TaskManager) applyStatus(t *Task, sig SettleSignal) {
 	tm.applyStatusLocked(t, sig)
 }
 
-// BindDetector RestoreTask：冷启动回放重建一个跨重启
-// 存续的任务——注册到 registry（复用原 id/Key 去重语义）但不启动 watch
-// goroutine（进程内探测器不可恢复：running 语义降级为 suspect 交 R3 存活探测
-// 裁决；alive-detached 原态恢复并置 aliveDetached 使 reconcileDetached 探针
-// 路径可用）。spec 的闭包由调用方经工厂重建（承诺表）；未重建则仅展示。
-// BindDetector wires a detector to an EXISTING (typically restored) task and
-// starts the standard watch consumption — the R3 reattach bridge (hardening-
-// review-batch2 3.1). Restored tasks have no in-process detector; without
-// this binding their watch/probe signals never reach the manager and a
-// "tracked session" silently loses its settle path. A finalized task refuses
-// the bind (fencing). The task's watchDone retires the consumption on resume
-// re-arm, same as Spawn.
+// BindDetector attaches an existing resource to its original producer round. Terminal tasks accept only acknowledgement-capable detectors; their business state is never reopened.
 func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	if tm == nil || id == "" {
 		return fmt.Errorf("BindDetector: empty id")
@@ -1580,7 +1667,7 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	t.mu.Unlock()
 	if d != nil {
 		tm.mu.Lock()
-		tm.producers = append(tm.producers, d)
+		tm.trackProducerLocked(d)
 		tm.mu.Unlock()
 	}
 	if recovered != nil && tm.onStartAccepted != nil && !tm.invoke(func() bool { return tm.onStartAccepted(t) }) {
@@ -1612,6 +1699,45 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	return nil
 }
 
+// ResumeRestoredStart prepares an accepted intent that has no bound resource, keeping its original intent identity.
+func (tm *TaskManager) ResumeRestoredStart(id string) error {
+	if tm == nil || !tm.beginOperation() {
+		return fmt.Errorf("task manager is closing")
+	}
+	defer tm.operations.Done()
+	tm.mu.Lock()
+	t := tm.tasks[id]
+	if t == nil {
+		tm.mu.Unlock()
+		return fmt.Errorf("task %s not found", id)
+	}
+	t.mu.Lock()
+	tm.mu.Unlock()
+	if t.resuming || t.detector != nil || t.producerRound != 0 || t.Spec.Start == nil || isTerminalStatus(t.status) {
+		t.mu.Unlock()
+		return fmt.Errorf("task %s has no unbound recoverable intent", id)
+	}
+	spec, round, owner := cloneSpec(t.Spec), t.roundID, t.roundOwner
+	t.resuming, t.status = true, TaskRunning
+	t.mu.Unlock()
+	prepared, detector, err := spec.Start(t)
+	if err != nil {
+		tm.cancelUnadoptedDetector(t, detector)
+		tm.abortRound(t, round, owner, TaskFailed, err, true)
+		return fmt.Errorf("task %s restore start: %w", id, err)
+	}
+	if reason := tm.bindPrepared(t, prepared, detector, round, owner, true); reason != "" {
+		tm.cancelUnadoptedDetector(t, detector)
+		tm.abortRound(t, round, owner, TaskFailed, fmt.Errorf("%s", reason), true)
+		return fmt.Errorf("task %s restore start: %s", id, reason)
+	}
+	t.mu.Lock()
+	first, done := t.firstSettle, t.windowDone
+	t.mu.Unlock()
+	tm.closeCapturedWindow(t, first, done, true)
+	return nil
+}
+
 // RestoreTask 从已持久化的事实重建任务，返回登记在用的任务对象：沿用其 id、声明、派生时刻与状态；
 // 状态为 alive_detached 时同时标记已脱离，使其继续享受脱离后信号抑制的语义。
 //
@@ -1636,6 +1762,7 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		firstSettle:  make(chan SettleSignal, 1),
 		windowDone:   make(chan struct{}),
 		pending:      make(map[string]*pendingDelivery),
+		recovering:   tm.enableDeadlineReaper,
 		roundID:      1, producerRound: 1, roundOwner: spec.RoundOwner, producerOwner: spec.RoundOwner,
 	}
 	if d := spec.Declarative; d != nil {
@@ -1644,6 +1771,8 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		}
 		if d.ProducerRound > 0 {
 			tk.producerRound = d.ProducerRound
+		} else if d.RoundID > 0 {
+			tk.producerRound = 0
 		} else {
 			tk.producerRound = tk.roundID
 		}
@@ -1651,8 +1780,11 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 			tk.roundOwner = d.RoundOwner
 		}
 		tk.producerOwner = d.ProducerOwner
-		if tk.producerOwner == "" {
+		if tk.producerOwner == "" && tk.producerRound > 0 {
 			tk.producerOwner = tk.roundOwner
+		}
+		if tk.producerRound == 0 {
+			tk.producerOwner = ""
 		}
 		tk.signalSeq = d.SignalSeq
 		tk.producerWaitSatisfied = d.ProducerWaitSatisfied
@@ -1661,13 +1793,16 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		}
 	}
 	if isTerminalStatus(status) {
-		tk.settledAt = startedAt
+		tk.settledAt = tm.now()
 	}
 	if status == TaskAliveDetached {
 		tk.aliveDetached = true
 	}
 	tm.mu.Lock()
 	defer func() { tm.mu.Unlock(); tm.RecheckDeadlines() }()
+	if tm.closing {
+		return nil
+	}
 	if _, exists := tm.tasks[id]; exists {
 		return tm.tasks[id]
 	}
@@ -1689,7 +1824,12 @@ func (tm *TaskManager) MarkTaskRunning(id string) bool {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tk, ok := tm.tasks[id]
-	if !ok || tk.status != TaskSuspect {
+	if !ok {
+		return false
+	}
+	tk.mu.Lock()
+	defer tk.mu.Unlock()
+	if tk.status != TaskSuspect {
 		return false
 	}
 	tk.status = TaskRunning
@@ -1751,7 +1891,7 @@ func (tm *TaskManager) reconcileTTL() {
 			ttl = tm.effDefaultTTL()
 		}
 		age := now.Sub(t.ttlAnchor())
-		expired := ttl > 0 && !isTerminalStatus(t.status) && !t.ttlAnchor().IsZero() && age >= ttl
+		expired := !t.recovering && ttl > 0 && !isTerminalStatus(t.status) && !t.ttlAnchor().IsZero() && age >= ttl
 		var det SettleDetector
 		if expired {
 			det = t.detector
@@ -1801,7 +1941,7 @@ func (tm *TaskManager) reconcileDetached() {
 	var candidates []*Task
 	for _, t := range tm.tasks {
 		t.mu.Lock()
-		need := t.status == TaskAliveDetached && t.Spec.Alive != nil
+		need := !t.recovering && t.status == TaskAliveDetached && t.Spec.Alive != nil
 		t.mu.Unlock()
 		if need {
 			candidates = append(candidates, t)
@@ -1840,7 +1980,7 @@ func (tm *TaskManager) reconcileDetached() {
 // process replacement that restored a terminal task with the flag at zero.
 // Marking happens AFTER the callback returns, for the same reason as finalize.
 func (tm *TaskManager) reconcileRetireNotify() {
-	if tm == nil || tm.onRetireResend == nil {
+	if tm == nil || (tm.onRetireResend == nil && tm.onRetireResendAccepted == nil) {
 		return
 	}
 	now := tm.now()
@@ -1848,12 +1988,22 @@ func (tm *TaskManager) reconcileRetireNotify() {
 	var batch []BatchRetired
 	for _, t := range tm.tasks {
 		t.mu.Lock()
-		if isTerminalStatus(t.status) && !t.retireNotified && len(t.pending) == 0 && now.Sub(t.settledAt) > retireNotifyGrace {
+		if !t.recovering && isTerminalStatus(t.status) && !t.retireNotified && len(t.pending) == 0 && now.Sub(t.settledAt) > retireNotifyGrace {
 			kind := SettleFailed
 			if t.status == TaskCompleted {
 				kind = SettleCompleted
 			}
-			batch = append(batch, BatchRetired{Task: t, Sig: SettleSignal{Kind: kind, Output: t.result, Err: t.err}})
+			seq := t.signalSeq
+			if seq == 0 {
+				seq = 1
+			}
+			sig := SettleSignal{Kind: kind, Output: t.result, Err: t.err, Final: true, Seq: seq, ObservedAt: t.settledAt}
+			if t.status == TaskCancelled {
+				sig.Observation, sig.Lineage = "cancelled", LineageRetired
+			}
+			tm.identifySignalLocked(t, &sig)
+			tm.holdBatchSignalLocked(t, sig, t.detector)
+			batch = append(batch, BatchRetired{Task: t, Sig: sig})
 		}
 		t.mu.Unlock()
 	}
@@ -1861,14 +2011,14 @@ func (tm *TaskManager) reconcileRetireNotify() {
 	if len(batch) == 0 {
 		return
 	}
-	if !tm.invoke(func() bool { tm.onRetireResend(batch); return true }) {
-		return
-	}
-	for _, r := range batch {
-		r.Task.mu.Lock()
-		r.Task.retireNotified = true
-		r.Task.mu.Unlock()
-	}
+	accepted := tm.invoke(func() bool {
+		if tm.onRetireResendAccepted != nil {
+			return tm.onRetireResendAccepted(batch)
+		}
+		tm.onRetireResend(batch)
+		return true
+	})
+	tm.finishBatchDeliveries(batch, accepted)
 }
 
 // SetSessionTracker wires the live-session tracking signal post-construction
@@ -1918,7 +2068,7 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 		tm.mu.Unlock()
 		return func() {}
 	}
-	if tm.onBatchRetire == nil {
+	if tm.onBatchRetire == nil && tm.onBatchRetireAccepted == nil {
 		tm.mu.Unlock()
 		return func() {}
 	}
@@ -1929,19 +2079,48 @@ func (tm *TaskManager) beginBatchRetire() (finish func()) {
 		tm.mu.Lock()
 		tm.batchCollect = nil
 		tm.mu.Unlock()
-		accepted := len(batch) == 0 || tm.invoke(func() bool { tm.onBatchRetire(batch); return true })
-		if !accepted {
-			for _, r := range batch {
-				tm.deliver(r.Task, r.Sig, nil, false, false)
-			}
+		if len(batch) == 0 {
 			return
 		}
-		for _, r := range batch {
-			r.Task.mu.Lock()
-			r.Task.retireNotified = true
-			r.Task.mu.Unlock()
+		accepted := tm.invoke(func() bool {
+			if tm.onBatchRetireAccepted != nil {
+				return tm.onBatchRetireAccepted(batch)
+			}
+			tm.onBatchRetire(batch)
+			return true
+		})
+		tm.finishBatchDeliveries(batch, accepted)
+	}
+}
+
+func (tm *TaskManager) holdBatchSignalLocked(t *Task, sig SettleSignal, detector SettleDetector) {
+	if t.pending == nil {
+		t.pending = make(map[string]*pendingDelivery)
+	}
+	t.pending[sig.SourceID] = &pendingDelivery{signal: sig, detector: detector, inFlight: true, restored: t.recovering}
+}
+
+func (tm *TaskManager) finishBatchDeliveries(batch []BatchRetired, accepted bool) {
+	for _, r := range batch {
+		r.Task.mu.Lock()
+		pending := r.Task.pending[r.Sig.SourceID]
+		var detector SettleDetector
+		if pending != nil {
+			detector = pending.detector
+			pending.inFlight = false
+			if accepted {
+				delete(r.Task.pending, r.Sig.SourceID)
+				r.Task.retireNotified = true
+			}
+		}
+		r.Task.mu.Unlock()
+		if accepted {
+			tm.acknowledge(detector, r.Sig)
+		} else if pending != nil {
+			tm.attemptDelivery(r.Task, pending)
 		}
 	}
+	tm.RecheckDeadlines()
 }
 
 // finalizeRetired settles a retired task. Retirement attributes on the SIGNAL
@@ -1990,6 +2169,9 @@ func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 	t.mu.Unlock()
 	tm.mu.Lock()
 	if tm.batchCollect != nil && !attributed {
+		t.mu.Lock()
+		tm.holdBatchSignalLocked(t, sig, detector)
+		t.mu.Unlock()
 		*tm.batchCollect = append(*tm.batchCollect, BatchRetired{Task: t, Sig: sig})
 		tm.mu.Unlock()
 		tm.RecheckDeadlines()
@@ -2032,6 +2214,9 @@ func (tm *TaskManager) identifySignalLocked(t *Task, sig *SettleSignal) {
 	}
 	if sig.SourceID == "" {
 		sig.SourceID = SignalSourceID(t.ID, sig.RoundID, sig.Seq)
+	}
+	if sig.WaitFor == "" {
+		sig.WaitFor = WaitForOf(t.Spec)
 	}
 	sig.WaitSatisfied = SatisfiesWait(t.Spec, *sig)
 	if sig.WaitSatisfied && sig.RoundID == t.producerRound {
@@ -2080,12 +2265,16 @@ func (tm *TaskManager) DefaultTTL() time.Duration {
 // never touched; generic display tasks without Declarative are never touched.
 // Returns the number retired.
 func (tm *TaskManager) RetireOrphans(isTracked func(sessionID string) bool) int {
+	if tm == nil || !tm.beginOperation() {
+		return 0
+	}
+	defer tm.operations.Done()
 	now := tm.now()
 	tm.mu.Lock()
 	var candidates []*Task
 	for _, t := range tm.tasks {
 		t.mu.Lock()
-		need := t.status == TaskSuspect &&
+		need := !t.recovering && t.status == TaskSuspect &&
 			t.Spec.Alive == nil &&
 			t.Spec.Declarative != nil &&
 			now.Sub(t.StartedAt) >= tm.orphanGrace
@@ -2135,7 +2324,7 @@ func (tm *TaskManager) reconcileZombies() {
 	var candidates []*Task
 	for _, t := range tm.tasks {
 		t.mu.Lock()
-		need := t.Spec.Alive != nil &&
+		need := !t.recovering && t.Spec.Alive != nil &&
 			(t.status == TaskRunning || t.status == TaskSuspect) &&
 			now.Sub(t.StartedAt) >= tm.zombieGrace
 		t.mu.Unlock()
@@ -2189,6 +2378,7 @@ func (tm *TaskManager) pruneTerminal() {
 			}
 		}
 	}
+	tm.pruneProducersLocked()
 	tm.mu.Unlock()
 	for _, t := range victims {
 		t.mu.Lock()
@@ -2221,15 +2411,16 @@ func (t *Task) SettledAtUnixNano() int64 {
 
 // List returns a snapshot of all tracked tasks.
 func (tm *TaskManager) List() []*Task {
+	if tm == nil {
+		return nil
+	}
+	if !tm.beginOperation() {
+		return tm.TasksSnapshot()
+	}
+	defer tm.operations.Done()
 	tm.reconcileDetached()
 	tm.pruneTerminal()
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-	out := make([]*Task, 0, len(tm.tasks))
-	for _, t := range tm.tasks {
-		out = append(out, t)
-	}
-	return out
+	return tm.TasksSnapshot()
 }
 
 // Cancel stops a task's underlying work and marks it cancelled.
@@ -2249,9 +2440,9 @@ func (tm *TaskManager) Cancel(id string) bool {
 		return false
 	}
 	wasActive := !isTerminalStatus(t.status)
-	sig := SettleSignal{Kind: SettleFailed, Output: "task cancelled", Final: true, Lineage: LineageRetired}
+	sig := SettleSignal{Kind: SettleFailed, Output: "task cancelled", Final: true, Lineage: LineageRetired, Observation: "cancelled"}
 	tm.identifySignalLocked(t, &sig)
-	notify := wasActive && (t.windowClosed || t.inlineOffered || t.firstSettle == nil)
+	notify := !wasActive || t.windowClosed || t.inlineOffered || t.firstSettle == nil
 	if wasActive && !t.windowClosed && !t.inlineOffered && t.firstSettle != nil {
 		t.firstSettle <- sig
 		t.inlineOffered = true
@@ -2314,10 +2505,11 @@ func (tm *TaskManager) Relaunch(ctx context.Context, id string) (SpawnResult, er
 	if !ok {
 		return SpawnResult{}, fmt.Errorf("task %s not found", id)
 	}
-	if t.Spec.Relaunch == nil {
+	spec := t.SpecSnapshot()
+	if spec.Relaunch == nil {
 		return SpawnResult{}, fmt.Errorf("task %s is not relaunchable", id)
 	}
-	return t.Spec.Relaunch(ctx)
+	return spec.Relaunch(ctx)
 }
 
 // Resume feeds new input into a task and re-enters the standard dense, ACK and settle
@@ -2333,11 +2525,12 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 	defer tm.operations.Done()
 	tm.mu.Lock()
 	t, ok := tm.tasks[id]
-	tm.mu.Unlock()
 	if !ok {
+		tm.mu.Unlock()
 		return SpawnResult{}, fmt.Errorf("task %s not found", id)
 	}
 	t.mu.Lock()
+	tm.mu.Unlock()
 	previous := t.status
 	if t.resuming {
 		t.mu.Unlock()
@@ -2384,25 +2577,47 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 	ctx = WithRoundOwner(ctx, owner)
 	detector, err := resume(ctx, input)
 	if err != nil {
+		tm.cancelUnadoptedDetector(t, detector)
 		tm.abortRound(t, round, owner, previous, err, false)
 		return SpawnResult{Task: t}, fmt.Errorf("task %s resume: %w", id, err)
 	}
 	if reason := tm.bindPrepared(t, spec, detector, round, owner, false); reason != "" {
-		if detector != nil {
-			detector.Cancel()
-		}
+		tm.cancelUnadoptedDetector(t, detector)
 		tm.abortRound(t, round, owner, previous, fmt.Errorf("%s", reason), false)
 		return SpawnResult{Task: t}, fmt.Errorf("task %s resume: %s", id, reason)
 	}
 	return tm.awaitWindow(t, detector, round), nil
 }
 
-func (tm *TaskManager) abortRound(t *Task, round uint64, owner string, previous TaskStatus, err error, initial bool, observed ...SettleSignal) {
+func (tm *TaskManager) cancelUnadoptedDetector(t *Task, detector SettleDetector) {
+	if detector == nil {
+		return
+	}
+	t.mu.Lock()
+	current := t.detector
+	t.mu.Unlock()
+	if current != nil {
+		if stopped := detector.Stopped(); stopped != nil && stopped == current.Stopped() {
+			return
+		}
+		candidate, hasCandidate := detector.(interface{ ProducerID() string })
+		active, hasActive := current.(interface{ ProducerID() string })
+		if hasCandidate && hasActive && candidate.ProducerID() != "" && candidate.ProducerID() == active.ProducerID() {
+			return
+		}
+	}
+	tm.mu.Lock()
+	tm.trackProducerLocked(detector)
+	tm.mu.Unlock()
+	detector.Cancel()
+}
+
+func (tm *TaskManager) abortRound(t *Task, round uint64, owner string, previous TaskStatus, err error, initial bool, observed ...SettleSignal) SettleSignal {
 	t.mu.Lock()
 	if t.status != TaskCancelled {
 		t.status = previous
 	}
-	t.resuming = false
+	t.resuming = true
 	t.rollback = nil
 	if initial {
 		t.settledAt = tm.now()
@@ -2425,9 +2640,20 @@ func (tm *TaskManager) abortRound(t *Task, round uint64, owner string, previous 
 	if sig.SourceID == "" {
 		sig.SourceID = SignalSourceID(t.ID, round, sig.Seq)
 	}
+	if sig.WaitFor == "" {
+		sig.WaitFor = WaitForOf(t.Spec)
+	}
 	t.mu.Unlock()
 	tm.deliver(t, sig, nil, false, true)
+	t.mu.Lock()
+	t.resuming = false
+	if len(observed) > 0 && !t.windowClosed && !t.inlineOffered {
+		t.firstSettle <- sig
+		t.inlineOffered = true
+	}
+	t.mu.Unlock()
 	tm.RecheckDeadlines()
+	return sig
 }
 
 // RestorePendingDelivery records a restored receipt without contacting receivers.
@@ -2437,15 +2663,19 @@ func (tm *TaskManager) RestorePendingDelivery(id string, sig SettleSignal) bool 
 	}
 	tm.mu.Lock()
 	t := tm.tasks[id]
-	tm.mu.Unlock()
-	if t == nil || sig.RoundID == 0 || sig.Seq == 0 {
+	if tm.closing || t == nil || sig.RoundID == 0 || sig.Seq == 0 {
+		tm.mu.Unlock()
 		return false
 	}
 	if sig.SourceID == "" {
 		sig.SourceID = SignalSourceID(id, sig.RoundID, sig.Seq)
 	}
 	t.mu.Lock()
+	tm.mu.Unlock()
 	defer t.mu.Unlock()
+	if sig.WaitFor == "" {
+		sig.WaitFor = WaitForOf(t.Spec)
+	}
 	if t.pending == nil {
 		t.pending = make(map[string]*pendingDelivery)
 	}
@@ -2459,8 +2689,13 @@ func (tm *TaskManager) ResumePendingDeliveries() {
 		return
 	}
 	tm.mu.Lock()
+	if tm.closing {
+		tm.mu.Unlock()
+		return
+	}
 	for _, t := range tm.tasks {
 		t.mu.Lock()
+		t.recovering = false
 		for _, p := range t.pending {
 			p.restored = false
 			p.retryAt = time.Time{}
@@ -2469,6 +2704,7 @@ func (tm *TaskManager) ResumePendingDeliveries() {
 	}
 	tm.mu.Unlock()
 	tm.wakeDelivery()
+	tm.RecheckDeadlines()
 }
 
 func (tm *TaskManager) deliver(t *Task, sig SettleSignal, detector SettleDetector, inline, aborted bool) bool {
@@ -2498,6 +2734,9 @@ func (tm *TaskManager) deliver(t *Task, sig SettleSignal, detector SettleDetecto
 		if sig.ObservedAt.IsZero() {
 			sig.ObservedAt = tm.now()
 		}
+		if sig.WaitFor == "" {
+			sig.WaitFor = WaitForOf(t.Spec)
+		}
 		sig.WaitSatisfied = SatisfiesWait(t.Spec, sig)
 		sig.SourceID = SignalSourceID(t.ID, sig.RoundID, sig.Seq)
 		t.mu.Unlock()
@@ -2508,7 +2747,7 @@ func (tm *TaskManager) deliver(t *Task, sig SettleSignal, detector SettleDetecto
 	}
 	p := t.pending[sig.SourceID]
 	if p == nil {
-		p = &pendingDelivery{signal: sig, detector: detector, inline: inline, aborted: aborted}
+		p = &pendingDelivery{signal: sig, detector: detector, inline: inline, aborted: aborted, restored: t.recovering}
 		t.pending[sig.SourceID] = p
 	}
 	t.mu.Unlock()
@@ -2610,6 +2849,11 @@ func (tm *TaskManager) deliveryWorker() {
 		<-timer.C
 	}
 	defer timer.Stop()
+	select {
+	case <-tm.stop:
+		return
+	case <-tm.retryWake:
+	}
 	for {
 		tm.mu.Lock()
 		var due []struct {
@@ -2684,6 +2928,10 @@ func (tm *TaskManager) deadlineWorker() {
 		var nearest time.Time
 		for _, t := range tm.tasks {
 			t.mu.Lock()
+			if t.recovering {
+				t.mu.Unlock()
+				continue
+			}
 			var deadline time.Time
 			if !isTerminalStatus(t.status) {
 				ttl := t.Spec.TTL
@@ -2741,7 +2989,16 @@ func (tm *TaskManager) Close(ctx context.Context) error {
 			tm.mu.Lock()
 			producers := append([]SettleDetector(nil), tm.producers...)
 			tm.mu.Unlock()
-			for _, detector := range producers[len(initial):] {
+			seen := make(map[<-chan struct{}]bool, len(initial))
+			for _, detector := range initial {
+				if stopped := detector.Stopped(); stopped != nil {
+					seen[stopped] = true
+				}
+			}
+			for _, detector := range producers {
+				if stopped := detector.Stopped(); stopped != nil && seen[stopped] {
+					continue
+				}
 				cancellations.Add(1)
 				go func(d SettleDetector) { defer cancellations.Done(); d.Cancel() }(detector)
 			}
@@ -2749,6 +3006,9 @@ func (tm *TaskManager) Close(ctx context.Context) error {
 			tm.watchers.Wait()
 			tm.workers.Wait()
 			tm.callbacks.Wait()
+			for _, detector := range initial {
+				<-detector.Stopped()
+			}
 			for _, detector := range producers {
 				<-detector.Stopped()
 			}

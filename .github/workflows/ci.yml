@@ -52,6 +52,11 @@ jobs:
       - name: Test (short)
         run: go test ./... -short -count=1
 
+      - name: Test (real tmux preparation and terminal receipt)
+        env:
+          TAGENT_REQUIRE_TMUX: '1'
+        run: go test -race ./tool/action -run '^TestPreparedTmuxExecPreservesFullOutput$' -count=1 -timeout 30s
+
       # Second module (resident-remaining-hardening 3.5): examples/wechat-bot is
       # an independent module with no go.work, so the root `./...` never reaches
       # it. Build/vet/test it explicitly or its regressions ship silently.

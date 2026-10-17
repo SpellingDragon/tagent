@@ -6,6 +6,8 @@
 package tagent
 
 import (
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -24,6 +26,19 @@ func actionFactory(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, err
 	}
 
 	var opts []action.ActionToolOption
+	if cfg.MemStore != nil {
+		metaDir := cfg.ResidentMetaDir
+		if metaDir == "" {
+			base := cfg.MemStore.GetStats().DataDir
+			if base == "" || strings.Contains(base, ":") {
+				base = filepath.Join(filepath.Dir(workspace.Root(cfg.WorkspaceRoot)), ".tagent-state")
+			}
+			metaDir = filepath.Join(base, "action")
+		}
+		opts = append(opts, action.WithResidentMetaDir(metaDir), action.WithOrphanCleanupDisabled())
+	} else if cfg.ResidentMetaDir != "" {
+		opts = append(opts, action.WithResidentMetaDir(cfg.ResidentMetaDir))
+	}
 
 	if wd, ok := properties["workspace"].(string); ok && wd != "" {
 		opts = append(opts, action.WithActionWorkspace(wd))

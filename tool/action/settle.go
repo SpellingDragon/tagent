@@ -4,6 +4,7 @@ package action
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,7 @@ type TmuxSettleDetector struct {
 	stopFn        func() bool
 	ackFn         func() error
 	startFn       func() error
+	lifecycleMu   sync.Mutex
 	startOnce     sync.Once
 	beginRoundFn  func(uint64)
 	paneStatusFn  func() (int, bool)
@@ -68,6 +70,7 @@ type TmuxSettleDetector struct {
 	detach        <-chan struct{}
 	baseline      int
 	round         uint64
+	baselineBytes int
 	mode          SessionMode
 	readyRe       *regexp.Regexp
 	inputRe       *regexp.Regexp
@@ -160,10 +163,25 @@ func (d *TmuxSettleDetector) RoundBaseline() int {
 // Rearm establishes a resumed output baseline and dense observation window.
 func (d *TmuxSettleDetector) Rearm(baseline int) {
 	d.mu.Lock()
-	d.baseline = baseline
+	d.baseline, d.baselineBytes = baseline, 0
 	d.detach = task.DetachAfter(d.denseDur, d.stop)
 	d.ready, d.inputSnapshot = false, ""
 	d.mu.Unlock()
+}
+
+// RearmOutput establishes an exact byte baseline for the resumed producer.
+func (d *TmuxSettleDetector) RearmOutput(output string) {
+	d.Rearm(strings.Count(output, "\n"))
+	d.mu.Lock()
+	d.baselineBytes = len(output)
+	d.mu.Unlock()
+}
+
+// DeclarativeParams returns the durable output boundary for a prepared round.
+func (d *TmuxSettleDetector) DeclarativeParams() map[string]string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return map[string]string{pBaselineBytes: strconv.Itoa(d.baselineBytes)}
 }
 
 // Detached implements task.SettleDetector.
@@ -187,6 +205,13 @@ func (d *TmuxSettleDetector) confirmStopped() { d.stoppedOnce.Do(func() { close(
 // Start activates a prepared producer after its durable task binding.
 func (d *TmuxSettleDetector) Start() {
 	d.startOnce.Do(func() {
+		d.lifecycleMu.Lock()
+		defer d.lifecycleMu.Unlock()
+		select {
+		case <-d.stop:
+			return
+		default:
+		}
 		if d.startFn == nil {
 			return
 		}
@@ -202,6 +227,9 @@ func (d *TmuxSettleDetector) Start() {
 // Cancel requests termination and records only confirmed producer stoppage.
 func (d *TmuxSettleDetector) Cancel() {
 	d.cancelOnce.Do(func() {
+		d.lifecycleMu.Lock()
+		defer d.lifecycleMu.Unlock()
+		d.close()
 		if d.stopFn != nil {
 			if d.stopFn() {
 				d.confirmStopped()
@@ -234,6 +262,11 @@ func (d *TmuxSettleDetector) AcknowledgeSignal(sig task.SettleSignal) {
 	} else if d.cancelFn != nil {
 		d.cancelOnce.Do(d.cancelFn)
 	}
+	d.signalMu.Lock()
+	if d.acked {
+		d.terminal = nil
+	}
+	d.signalMu.Unlock()
 }
 
 // OnStateChange accepts a state observed in the current producer round.
@@ -248,9 +281,15 @@ func (d *TmuxSettleDetector) OnObservation(round uint64, status SessionStatus, o
 		d.mu.Unlock()
 		return
 	}
-	baseline := d.baseline
+	baseline, baselineBytes := d.baseline, d.baselineBytes
 	d.mu.Unlock()
 	increment := trimToLineOffset(output, baseline)
+	if baselineBytes > 0 {
+		increment = ""
+		if len(output) >= baselineBytes {
+			increment = output[baselineBytes:]
+		}
+	}
 	if !isTerminalStatus(status) {
 		d.onOutput(round, increment)
 	}
@@ -296,15 +335,17 @@ func (d *TmuxSettleDetector) onOutput(round uint64, output string) {
 		d.ready = true
 	}
 	input := false
-	if d.mode == ModeInteractive && output != "" && output != d.inputSnapshot {
+	if d.mode == ModeInteractive && output != d.inputSnapshot {
+		fresh := output
+		if strings.HasPrefix(output, d.inputSnapshot) {
+			fresh = output[len(d.inputSnapshot):]
+		}
+		d.inputSnapshot = output
 		pattern := d.inputRe
 		if pattern == nil {
 			pattern = defaultInputPrompt
 		}
-		input = pattern.MatchString(strings.TrimRight(output, "\r\n"))
-		if input {
-			d.inputSnapshot = output
-		}
+		input = fresh != "" && pattern.MatchString(strings.TrimRight(fresh, "\r\n"))
 	}
 	d.mu.Unlock()
 	if ready {

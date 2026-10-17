@@ -18,6 +18,7 @@ import (
 type TmuxExecutor struct {
 	prefix     string
 	workspace  string
+	pipeRoot   string
 	runAsUser  string
 	runAsGroup string
 	run        func(context.Context, []string) (string, error)
@@ -149,11 +150,9 @@ const (
 	SessionRunning SessionStatus = "running"
 	// SessionStable 输出已稳定但进程存活、且未显式声明静默超时的判定；不视为死亡，按调度上限继续轮询。
 	SessionStable SessionStatus = "stable"
-	// SessionCompleted 会话已结束的终态：pane 死、命令收尾或探测彻底不可辨，随即移出监控。
+	// SessionCompleted 表示进程已退出且退出码确认为零。
 	SessionCompleted SessionStatus = "completed"
-	// SessionError 失败极性的终态主载体（D1 透传）：已知非零退出码（含信号死）、
-	// 探测连续失明超限、强拆重试超限、探测器未装配——四类产源都以它把失败送达
-	// 结算通知；退出码可辨时由 settle 侧附 ExitCode（PaneDeadStatus 真源）。
+	// SessionError 表示已确认进程终止，且退出码非零或无法读取。
 	SessionError SessionStatus = "error"
 	// SessionFakeDead 静默越过阈值后的假死判定中间态：仅在显式声明静默超时、或心跳失败且 pane 未死时进入。
 	// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
@@ -161,7 +160,7 @@ const (
 	// SessionFakeAlive 心跳仍有响应的假活判定中间态：以原会话 ID 重启以保持监控链条。
 	// 契约: docs/wiki/tool/tmux-action.md#fake-alive-restart
 	SessionFakeAlive SessionStatus = "fake_alive"
-	// SessionTimedOut TUI 会话静默越过假死阈值后的终态（不做假死/假活探测）：随即移出监控。
+	// SessionTimedOut 表示静默或探活不可辨观察；进程继续被监控。
 	SessionTimedOut SessionStatus = "timed_out"
 )
 
@@ -170,17 +169,11 @@ const (
 type SessionMode string
 
 const (
-	// ModeOneshot is the default command semantics: settle on exit; a 60s-quiet alive
-	// session reports Stable (never Completed — see detectSessionState), and quiet_timeout
-	// (if set) is a hard kill deadline.
+	// ModeOneshot waits for real exit; silence only produces observations.
 	ModeOneshot SessionMode = "oneshot"
-	// ModeResident is for long-lived services (dev servers, tunnels, training): silence
-	// is HEALTHY — no stable settle, no fake-dead kill, no auto-reap. Only unexpected death
-	// (Completed/Error) settles; pair with watch/probe to hear from it.
+	// ModeResident waits for a successful health probe or declared readiness pattern.
 	ModeResident SessionMode = "resident"
-	// ModeInteractive is for long-running conversational sessions (REPL, coding agents):
-	// stable settle plus resume/send-keys semantics, with heartbeat-based fake-dead
-	// detection.
+	// ModeInteractive waits for a fresh input prompt and supports resumed input.
 	ModeInteractive SessionMode = "interactive"
 )
 
@@ -363,9 +356,8 @@ func (te *TmuxExecutor) KillSession(sessionID string) error {
 
 // SessionExists checks if a tmux session exists
 func (te *TmuxExecutor) SessionExists(sessionID string) bool {
-	cmdName, cmdArgs := te.buildTmuxCommand([]string{"has-session", "-t", sessionID})
-	cmd := exec.Command(cmdName, cmdArgs...)
-	return cmd.Run() == nil
+	_, err := te.runResourceCommand(context.Background(), []string{"has-session", "-t", "=" + sessionID})
+	return err == nil
 }
 
 // pipeFilePath GetSessionOutput gets the current output of a tmux session
@@ -501,7 +493,7 @@ func (te *TmuxExecutor) SendKeys(sessionID string, keys string) error {
 	return err
 }
 
-// SendHeartbeat sends a heartbeat command to detect if session is alive
+// SendHeartbeat checks process liveness without writing to the business input stream.
 func (te *TmuxExecutor) SendHeartbeat(sessionID string) string {
 	alive, known := te.SessionAlive3(sessionID)
 	if !known {

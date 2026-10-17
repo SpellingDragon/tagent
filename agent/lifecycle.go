@@ -201,88 +201,32 @@ func (ta *TagentAgent) Close() (err error) {
 // owner each (the release path / this sequence), never also plain closers.
 func (ta *TagentAgent) closeOnce() error {
 	var errs []error
-
-	ta.sessionMu.Lock()
-	settledIdle := ta.loopState.CompareAndSwap(loopIdle, loopClosed)
-	if settledIdle && ta.loopDone == nil {
-		ta.loopDone = make(chan struct{})
+	ta.beginOwnedShutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), turnDrainTimeout)
+	defer cancel()
+	if err := ta.waitOwnedShutdown(ctx); err != nil {
+		errs = append(errs, err)
 	}
-	ta.sessionMu.Unlock()
-
-	if settledIdle {
-		if ta.persistentBus != nil {
-			if err := ta.persistentBus.CloseDurable(); err != nil {
-				errs = append(errs, fmt.Errorf("close durable inbox: %w", err))
-			}
-		}
-	} else {
-		ta.StopLoop()
-		if ta.persistentBus != nil {
-			if err := ta.persistentBus.CloseDurable(); err != nil {
-				errs = append(errs, fmt.Errorf("close durable inbox: %w", err))
-			}
-		}
-	}
-
-	if ta.cleanupCancel != nil {
-		ta.cleanupCancel()
-	}
-	if ta.cleanupDone != nil {
-		select {
-		case <-ta.cleanupDone:
-		case <-time.After(cleanerStopGrace):
-			errs = append(errs, fmt.Errorf("workspace cleaner still running after %v", cleanerStopGrace))
-		}
-	}
-
-	if settledIdle {
-		ta.waitForTurns()
-		ta.settleOutput()
-	}
-
-	liveWork := ta.contextManager != nil && ta.contextManager.OutstandingRefs() > 0
-	if !liveWork {
+	carryClosers := !ta.producersStopped() || !ta.executionWorkQuiet()
+	if !carryClosers {
 		for _, c := range ta.closers {
 			if err := c.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close resource: %w", err))
 			}
 		}
 	}
-
-	// Close the runner (unified Runner under ContextManager) — no new turns
-	// can start after this point. The close is BOUNDED: an execution whose
-	// producer never confirmed a stop is reported, not force-closed, and
-	// the flag below is what keeps its shared store out of reach of that zombie.
-	var unconverged bool
 	if ta.contextManager != nil {
-		if err := ta.contextManager.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close context manager: %w", err))
-			unconverged = errors.Is(err, ErrExecUnconverged)
-		}
+		ta.contextManager.retireForOwnerClose()
 	}
-
-	if liveWork || unconverged {
-		ta.deferFinalExit(liveWork)
-		if len(errs) > 0 {
-			return fmt.Errorf("close errors: %w", errors.Join(errs...))
-		}
-		return nil
+	grace, cancelGrace := context.WithTimeout(context.Background(), execCloseGrace)
+	defer cancelGrace()
+	if !ta.waitFinalExitReady(grace) {
+		errs = append(errs, fmt.Errorf("%w: private drivers, producers or execution faces remain held", ErrExecUnconverged))
+		ta.deferFinalExit(carryClosers)
+		return errors.Join(errs...)
 	}
-
-	if ta.trajectoryRecorder != nil {
-		if err := ta.trajectoryRecorder.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close trajectory recorder: %w", err))
-		}
-	}
-
-	if err := ta.exitMemoryStore(); err != nil {
-		errs = append(errs, err)
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("close errors: %w", errors.Join(errs...))
-	}
-	return nil
+	errs = append(errs, ta.finishOwnedExit(carryClosers))
+	return errors.Join(errs...)
 }
 
 // exitMemoryStore takes the store's single exit: through the lease release when
@@ -318,53 +262,31 @@ func (ta *TagentAgent) exitMemoryStore() error {
 // manager is already quiet, so a race between this decision and the last reclaim
 // can never strand the responsibility.
 func (ta *TagentAgent) deferFinalExit(carryClosers bool) {
-	log.Warnf("[Close] bounded return with execution(s) still unconfirmed — tool/recorder/store exit deferred to the real stop (final exit will be taken exactly once by this owner's tail)")
+	log.Warnf("[Close] execution shutdown remains unconfirmed; final exit stays with this owner")
 	ta.closeMu.Lock()
 	if ta.closeTail != nil {
 		ta.closeMu.Unlock()
 		return
 	}
 	ta.closeTail = func() {
+		if !ta.finalExitReady() {
+			return
+		}
 		ta.closeTailOnce.Do(func() {
-			var errs []error
-			if carryClosers {
-				for _, c := range ta.closers {
-					if err := c.Close(); err != nil {
-						errs = append(errs, fmt.Errorf("close resource: %w", err))
-					}
-				}
-			}
-			if ta.trajectoryRecorder != nil {
-				if err := ta.trajectoryRecorder.Close(); err != nil {
-					errs = append(errs, fmt.Errorf("close trajectory recorder: %w", err))
-				}
-			}
-			if err := ta.exitMemoryStore(); err != nil {
-				errs = append(errs, err)
-			}
+			err := ta.finishOwnedExit(carryClosers)
 			ta.closeMu.Lock()
-			ta.closeTailDone = true
-			ta.closeTailErr = errors.Join(errs...)
+			ta.closeTailDone, ta.closeTailErr = true, err
 			ta.closeMu.Unlock()
-			if ta.closeTailErr != nil {
-				log.Errorf("[Close] deferred final exit reported: %v — the first report stays visible too", ta.closeTailErr)
-				return
+			if err != nil {
+				log.Errorf("[Close] deferred final exit reported: %v", err)
 			}
-			log.Infof("[Close] deferred final exit completed exactly once after the executions actually stopped")
 		})
 	}
 	ta.closeMu.Unlock()
-
 	if ta.contextManager != nil {
-		ta.contextManager.armFullyDrained(func() {
-			ta.closeMu.Lock()
-			tail := ta.closeTail
-			ta.closeMu.Unlock()
-			if tail != nil {
-				go tail()
-			}
-		})
+		ta.contextManager.armFullyDrained(ta.tryDeferredFinalExit)
 	}
+	ta.tryDeferredFinalExit()
 }
 
 // DeferredCloseOutcome reports the  terminal tail's result separately from
@@ -372,11 +294,14 @@ func (ta *TagentAgent) deferFinalExit(carryClosers bool) {
 // close completed inline and never deferred anything). The first Close's error
 // is deliberately NOT rewritten by it — 「初次错误保持可见」.
 func (ta *TagentAgent) DeferredCloseOutcome() (done bool, err error) {
-	quiet := ta.contextManager == nil || ta.contextManager.OutstandingRefs() == 0
 	ta.closeMu.Lock()
 	defer ta.closeMu.Unlock()
-	if quiet && ta.closeTail == nil {
-		return true, nil
+	if ta.closeTail == nil && ta.closeFinalDone != nil {
+		select {
+		case <-ta.closeFinalDone:
+			return true, nil
+		default:
+		}
 	}
 	return ta.closeTailDone, ta.closeTailErr
 }
@@ -619,7 +544,11 @@ func (ta *TagentAgent) prepareBatchFactsForCM(cm *ContextManager, events []*Agen
 			if len(ev.claim.PreparedFact) > 0 {
 				continue
 			}
-			b, err := json.Marshal(cm.buildBusFact(ev))
+			if ev.volatileFact == nil {
+				fact := cm.buildBusFact(ev)
+				ev.volatileFact = &fact
+			}
+			b, err := json.Marshal(*ev.volatileFact)
 			if err != nil {
 				log.Errorf("[prepareBatchFacts] marshal failed rid=%s slot=%d — deterministic, isolating: %v",
 					ev.claim.RequestID, ev.claim.Slot, err)

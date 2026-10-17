@@ -178,14 +178,14 @@ func TestExplicitExitWaitKeepsObservationsOutOfForeground(t *testing.T) {
 		result <- tm.Spawn(TaskSpec{Kind: "command", WaitFor: WaitExit, OnRoundStart: func(tk *Task) { started <- tk }}, d)
 	}()
 	tk := <-started
-	d.Emit(SettleSignal{Kind: SettleStable, Output: "no output", Final: true})
+	d.Emit(SettleSignal{Kind: SettleStable, Output: "no output"})
 	observation := <-observations
 	require.False(t, observation.SatisfiesWait())
 	require.Equal(t, "stable", observation.Observation)
 	require.Equal(t, TaskRunning, tk.Status())
 	select {
 	case <-result:
-		t.Fatal("final observation released an exit wait")
+		t.Fatal("non-final observation released an exit wait")
 	case <-time.After(30 * time.Millisecond):
 	}
 	d.Emit(SettleSignal{Kind: SettleCompleted, Output: "exit"})
@@ -283,7 +283,7 @@ func TestRestoredReceiptWaitsForRecoveryBarrier(t *testing.T) {
 	calls := make(chan SettleSignal, 1)
 	tm := NewTaskManager(TaskManagerConfig{OnSettleAccepted: func(_ *Task, sig SettleSignal) bool { calls <- sig; return true }})
 	tk := tm.RestoreTask("restored-receipt", TaskSpec{Kind: "command", Declarative: &Declarative{RoundID: 3, ProducerRound: 3, RoundOwner: "owner", ProducerOwner: "owner", SignalSeq: 8}}, time.Now(), TaskCompleted)
-	sig := SettleSignal{Kind: SettleCompleted, RoundID: 3, ProducerRound: 3, RoundOwner: "owner", Seq: 8, ObservedAt: time.Now(), Output: "saved", WaitSatisfied: true}
+	sig := SettleSignal{WaitFor: WaitExit, Kind: SettleCompleted, RoundID: 3, ProducerRound: 3, RoundOwner: "owner", Seq: 8, ObservedAt: time.Now(), Output: "saved", WaitSatisfied: true}
 	sig.SourceID = SignalSourceID(tk.ID, sig.RoundID, sig.Seq)
 	require.True(t, tm.RestorePendingDelivery(tk.ID, sig))
 	d := newAdmittedTestDetector()
@@ -403,5 +403,389 @@ func TestFailedAcceptedResumeConsumesIntentAndPreservesProducer(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 3, res.Task.RoundID())
 	require.EqualValues(t, 3, res.Task.ProducerRound())
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// failedActivationDetector models a prepared input binding whose actual resource keeps its previous round.
+type failedActivationDetector struct {
+	*ManualDetector
+	producer  atomic.Uint64
+	requested uint64
+	detach    chan struct{}
+}
+
+func (d *failedActivationDetector) ProducerRound() uint64     { return d.producer.Load() }
+func (d *failedActivationDetector) BeginRound(round uint64)   { d.requested = round }
+func (d *failedActivationDetector) Detached() <-chan struct{} { return d.detach }
+func (d *failedActivationDetector) Start() {
+	d.Emit(SettleSignal{Kind: SettleFailed, RoundID: d.requested, ProducerRound: d.producer.Load(), Seq: 9, Observation: "round_aborted", Err: context.Canceled})
+}
+
+// TestActivationFailureKeepsActualProducerAndReturnsAbortedIntent checks a committed binding cannot turn a failed input into a new producer round.
+func TestActivationFailureKeepsActualProducerAndReturnsAbortedIntent(t *testing.T) {
+	aborts := make(chan SettleSignal, 1)
+	base := NewManualDetector()
+	base.FireDetach()
+	d := &failedActivationDetector{ManualDetector: base, detach: make(chan struct{})}
+	d.producer.Store(1)
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettleAccepted:       func(*Task, SettleSignal) bool { return true },
+		OnRoundAccepted:        func(*Task) bool { return true },
+		OnStartAccepted:        func(*Task) bool { return true },
+		OnRoundAbortedAccepted: func(_ *Task, sig SettleSignal) bool { aborts <- sig; return true },
+	})
+	res := tm.Spawn(TaskSpec{Kind: "command", RoundOwner: "producer-owner", ResumeFn: func(context.Context, string) (SettleDetector, error) { return d, nil }}, base)
+	base.Emit(SettleSignal{Kind: SettleStable, WaitSatisfied: true})
+	waitStatus(t, res.Task, TaskStable)
+	anchor := res.Task.TTLAnchorMilli()
+	result, err := tm.Resume(WithRoundOwner(context.Background(), "intent-owner"), res.Task.ID, "input")
+	require.NoError(t, err)
+	require.True(t, result.Settled)
+	require.Equal(t, "round_aborted", result.Signal.Observation)
+	require.Equal(t, "intent-owner", result.Signal.RoundOwner)
+	require.EqualValues(t, 9, result.Signal.Seq)
+	require.EqualValues(t, 2, result.Signal.RoundID)
+	require.EqualValues(t, 1, result.Signal.ProducerRound)
+	require.EqualValues(t, 1, res.Task.ProducerRound())
+	require.Equal(t, "producer-owner", res.Task.ProducerOwner())
+	require.Equal(t, TaskStable, res.Task.Status())
+	require.Equal(t, anchor, res.Task.TTLAnchorMilli())
+	require.Equal(t, result.Signal, <-aborts)
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestFinalObservationEndsWaitWithoutCompletingProducer checks an ended observer releases the caller while preserving the ambiguous task state.
+func TestFinalObservationEndsWaitWithoutCompletingProducer(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{OnInlineSettleAccepted: func(*Task, SettleSignal) bool { return true }})
+	d := NewManualDetector()
+	d.Emit(SettleSignal{Kind: SettleSuspect, Observation: "suspect", Final: true, Output: "observation ended"})
+	res := tm.Spawn(TaskSpec{Kind: "command", WaitFor: WaitExit}, d)
+	require.True(t, res.Settled)
+	require.True(t, res.Signal.SatisfiesWait())
+	require.Equal(t, TaskSuspect, res.Task.Status())
+	require.False(t, isTerminalStatus(res.Task.Status()))
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestLazySpawnDeduplicatesBeforePreparation checks committed preparation runs once and activation follows resource binding.
+func TestLazySpawnDeduplicatesBeforePreparation(t *testing.T) {
+	var stages []string
+	d := newAdmittedTestDetector()
+	d.FireDetach()
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSpawnAccepted: func(tk *Task) bool {
+			stages = append(stages, "intent")
+			require.Zero(t, tk.ProducerRound())
+			return true
+		},
+		OnStartAccepted: func(*Task) bool { stages = append(stages, "binding"); require.Zero(t, d.starts.Load()); return true },
+	})
+	spec := TaskSpec{Kind: "command", Key: "same-resource", Start: func(tk *Task) (TaskSpec, SettleDetector, error) {
+		stages = append(stages, "prepared")
+		return tk.SpecSnapshot(), d, nil
+	}}
+	first := tm.Spawn(spec, nil)
+	require.Equal(t, []string{"intent", "prepared", "binding"}, stages)
+	require.EqualValues(t, 1, d.starts.Load())
+	second := tm.Spawn(spec, nil)
+	require.True(t, second.Deduped)
+	require.Same(t, first.Task, second.Task)
+	require.Len(t, stages, 3)
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// recoveredTestDetector carries pinned resource metadata supplied by recovery.
+type recoveredTestDetector struct {
+	*admittedTestDetector
+	spec TaskSpec
+}
+
+func (d *recoveredTestDetector) RecoveredSpec() TaskSpec { return d.spec }
+
+// TestRecoveredBindingRejectionCannotActivate checks restored resource identity must be accepted before its observer starts.
+func TestRecoveredBindingRejectionCannotActivate(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{OnStartAccepted: func(*Task) bool { return false }})
+	tk := tm.RestoreTask("pinned", TaskSpec{Kind: "command", Origin: map[string]string{"owner": "original"}, Declarative: &Declarative{Params: map[string]string{"resource_id": "old"}}}, time.Now(), TaskRunning)
+	d := &recoveredTestDetector{admittedTestDetector: newAdmittedTestDetector(), spec: TaskSpec{Kind: "command", Origin: map[string]string{"owner": "replacement"}, Declarative: &Declarative{Params: map[string]string{"resource_id": "new"}}}}
+	require.Error(t, tm.BindDetector(tk.ID, d))
+	require.Zero(t, d.starts.Load())
+	require.True(t, d.Cancelled())
+	require.False(t, tk.HasProducer())
+	require.Equal(t, "old", tk.SpecSnapshot().Declarative.Params["resource_id"])
+	require.Equal(t, "original", tk.SpecSnapshot().Origin["owner"])
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestDeadlineSourceRecheckExpiresExistingTask checks a source rotation reschedules the deadline without mutating task TTL or lifetime anchor.
+func TestDeadlineSourceRecheckExpiresExistingTask(t *testing.T) {
+	var ttl atomic.Int64
+	ttl.Store(int64(time.Hour))
+	settled := make(chan struct{}, 1)
+	tm := NewTaskManager(TaskManagerConfig{EnableDeadlineReaper: true, OnSettleAccepted: func(*Task, SettleSignal) bool { settled <- struct{}{}; return true }})
+	tm.SetTTLSource(func() (time.Duration, time.Duration) { return time.Minute, time.Duration(ttl.Load()) })
+	d := NewManualDetector()
+	d.FireDetach()
+	res := tm.Spawn(TaskSpec{Kind: "command"}, d)
+	anchor := res.Task.TTLAnchorMilli()
+	ttl.Store(int64(20 * time.Millisecond))
+	tm.RecheckDeadlines()
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("TTL source rotation did not reschedule the existing quiet task")
+	}
+	require.Zero(t, res.Task.SpecSnapshot().TTL)
+	require.Equal(t, anchor, res.Task.TTLAnchorMilli())
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestDeadlineRetirementUnblocksDenseWait checks TTL retirement also settles a caller whose producer never detached or emitted.
+func TestDeadlineRetirementUnblocksDenseWait(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{EnableDeadlineReaper: true, OnInlineSettleAccepted: func(*Task, SettleSignal) bool { return true }})
+	d := NewManualDetector()
+	result := make(chan SpawnResult, 1)
+	go func() {
+		result <- tm.Spawn(TaskSpec{Kind: "command", WaitFor: WaitExit, TTL: 20 * time.Millisecond}, d)
+	}()
+	select {
+	case res := <-result:
+		require.True(t, res.Settled)
+		require.Equal(t, TaskFailed, res.Task.Status())
+		require.True(t, res.Signal.SatisfiesWait())
+	case <-time.After(time.Second):
+		t.Fatal("TTL retirement stranded a dense foreground wait")
+	}
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestOldForegroundHandoffCannotCloseResumedWindow checks a delayed caller closes only the window whose signal it received.
+func TestOldForegroundHandoffCannotCloseResumedWindow(t *testing.T) {
+	tm := NewTaskManager(TaskManagerConfig{OnInlineSettleAccepted: func(*Task, SettleSignal) bool { return true }})
+	old := &gatedWindowDetector{ManualDetector: NewManualDetector(), enter: make(chan struct{}), release: make(chan struct{})}
+	next := NewManualDetector()
+	started := make(chan *Task, 1)
+	first := make(chan SpawnResult, 1)
+	go func() {
+		first <- tm.Spawn(TaskSpec{Kind: "command", OnRoundStart: func(tk *Task) { started <- tk }, ResumeFn: func(context.Context, string) (SettleDetector, error) { return next, nil }}, old)
+	}()
+	tk := <-started
+	<-old.enter
+	old.Emit(SettleSignal{Kind: SettleStable, WaitSatisfied: true, Output: "old ready"})
+	waitStatus(t, tk, TaskStable)
+	resumed := make(chan SpawnResult, 1)
+	go func() {
+		res, err := tm.Resume(context.Background(), tk.ID, "next")
+		require.NoError(t, err)
+		resumed <- res
+	}()
+	require.Eventually(t, func() bool { return tk.ProducerRound() == 2 }, time.Second, time.Millisecond)
+	close(old.release)
+	require.Equal(t, "old ready", (<-first).Signal.Output)
+	select {
+	case <-resumed:
+		t.Fatal("old caller closed the new round's foreground window")
+	case <-time.After(30 * time.Millisecond):
+	}
+	next.Emit(SettleSignal{Kind: SettleCompleted, Output: "new result"})
+	select {
+	case res := <-resumed:
+		require.Equal(t, "new result", res.Signal.Output)
+	case <-time.After(time.Second):
+		t.Fatal("new round lost its independent foreground handoff")
+	}
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestRejectedResumeBindingPreservesSharedProducer checks failure to record a prepared input cannot cancel the unchanged backing resource.
+func TestRejectedResumeBindingPreservesSharedProducer(t *testing.T) {
+	var bindings atomic.Int32
+	base := newAdmittedTestDetector()
+	base.FireDetach()
+	prepared := &admittedTestDetector{ManualDetector: base.ManualDetector, acks: make(chan SettleSignal, 2)}
+	tm := NewTaskManager(TaskManagerConfig{
+		OnSettleAccepted:       func(*Task, SettleSignal) bool { return true },
+		OnStartAccepted:        func(*Task) bool { return bindings.Add(1) == 1 },
+		OnRoundAccepted:        func(*Task) bool { return true },
+		OnRoundAbortedAccepted: func(*Task, SettleSignal) bool { return true },
+	})
+	res := tm.Spawn(TaskSpec{Kind: "command", ResumeFn: func(context.Context, string) (SettleDetector, error) { return prepared, nil }}, base)
+	base.Emit(SettleSignal{Kind: SettleStable, WaitSatisfied: true})
+	waitStatus(t, res.Task, TaskStable)
+	anchor := res.Task.TTLAnchorMilli()
+	_, err := tm.Resume(context.Background(), res.Task.ID, "input")
+	require.Error(t, err)
+	require.False(t, base.Cancelled())
+	require.Zero(t, prepared.starts.Load())
+	require.EqualValues(t, 1, res.Task.ProducerRound())
+	require.Equal(t, anchor, res.Task.TTLAnchorMilli())
+	require.Equal(t, TaskStable, res.Task.Status())
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestRecoveryBarrierDefersProductionDeadlineAndNewObservations checks recovery can assemble old tasks and receipts before any consumer or deadline runs.
+func TestRecoveryBarrierDefersProductionDeadlineAndNewObservations(t *testing.T) {
+	calls := make(chan SettleSignal, 2)
+	tm := NewTaskManager(TaskManagerConfig{EnableDeadlineReaper: true, OnSettleAccepted: func(_ *Task, sig SettleSignal) bool { calls <- sig; return true }})
+	tk := tm.RestoreTask("recover-before-expiry", TaskSpec{Kind: "command", TTL: time.Millisecond}, time.Now().Add(-time.Hour), TaskRunning)
+	d := NewManualDetector()
+	require.NoError(t, tm.BindDetector(tk.ID, d))
+	d.Emit(SettleSignal{Kind: SettleStable, Observation: "stable"})
+	require.Eventually(t, tk.HasPendingDelivery, time.Second, time.Millisecond)
+	select {
+	case <-calls:
+		t.Fatal("restored observation reached a receiver before the recovery barrier")
+	case <-time.After(30 * time.Millisecond):
+	}
+	require.Equal(t, TaskRunning, tk.Status())
+	require.False(t, d.Cancelled())
+	tm.ResumePendingDeliveries()
+	seenTerminal := false
+	for i := 0; i < 2; i++ {
+		select {
+		case sig := <-calls:
+			if sig.Kind == SettleFailed {
+				seenTerminal = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("recovery barrier failed to resume pending observations and deadline")
+		}
+	}
+	require.True(t, seenTerminal)
+	require.Equal(t, TaskFailed, tk.Status())
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestUnboundIntentRecoveryKeepsIntentAndCommitsResourceBeforeStart checks original-intent preparation commits before activation.
+func TestUnboundIntentRecoveryKeepsIntentAndCommitsResourceBeforeStart(t *testing.T) {
+	var bindings atomic.Int32
+	d := newAdmittedTestDetector()
+	tm := NewTaskManager(TaskManagerConfig{EnableDeadlineReaper: true, OnStartAccepted: func(tk *Task) bool {
+		bindings.Add(1)
+		require.Zero(t, d.starts.Load())
+		require.EqualValues(t, 4, tk.RoundID())
+		return true
+	}})
+	tk := tm.RestoreTask("unbound-intent", TaskSpec{Kind: "command", RoundOwner: "owner", Declarative: &Declarative{RoundID: 4, RoundOwner: "owner", Params: map[string]string{"phase": "intent"}}, Start: func(tk *Task) (TaskSpec, SettleDetector, error) { return tk.SpecSnapshot(), d, nil }}, time.Now(), TaskSuspect)
+	require.Zero(t, tk.ProducerRound())
+	require.NoError(t, tm.ResumeRestoredStart(tk.ID))
+	require.EqualValues(t, 4, tk.RoundID())
+	require.EqualValues(t, 4, tk.ProducerRound())
+	require.EqualValues(t, 1, bindings.Load())
+	require.EqualValues(t, 1, d.starts.Load())
+	require.Error(t, tm.ResumeRestoredStart(tk.ID))
+	tm.ResumePendingDeliveries()
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestResumeBindingPersistsRenewedAnchor checks the accepted resource binding already contains the producer's renewed TTL anchor.
+func TestResumeBindingPersistsRenewedAnchor(t *testing.T) {
+	var anchor atomic.Int64
+	base := time.Now()
+	tm := NewTaskManager(TaskManagerConfig{OnSettleAccepted: func(*Task, SettleSignal) bool { return true }, OnStartAccepted: func(tk *Task) bool { anchor.Store(tk.TTLAnchorMilli()); return true }})
+	d := NewManualDetector()
+	d.FireDetach()
+	res := tm.Spawn(TaskSpec{Kind: "command", ResumeFn: func(context.Context, string) (SettleDetector, error) {
+		next := NewManualDetector()
+		next.FireDetach()
+		return next, nil
+	}}, d)
+	d.Emit(SettleSignal{Kind: SettleStable, WaitSatisfied: true})
+	waitStatus(t, res.Task, TaskStable)
+	tm.now = func() time.Time { return base.Add(time.Minute) }
+	_, err := tm.Resume(context.Background(), res.Task.ID, "input")
+	require.NoError(t, err)
+	require.Equal(t, res.Task.TTLAnchorMilli(), anchor.Load())
+	require.Equal(t, base.Add(time.Minute).UnixMilli(), anchor.Load())
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestRejectedBatchRetainsRawReceiptAndOriginalAcknowledgement checks rejection never clears delivery or releases the wrong producer.
+func TestRejectedBatchRetainsRawReceiptAndOriginalAcknowledgement(t *testing.T) {
+	var calls atomic.Int32
+	raw := make(chan SettleSignal, 2)
+	batch := make(chan SettleSignal, 1)
+	tm := NewTaskManager(TaskManagerConfig{OnBatchRetireAccepted: func(items []BatchRetired) bool { batch <- items[0].Sig; return false }, OnSettleAccepted: func(_ *Task, sig SettleSignal) bool { raw <- sig; return calls.Add(1) > 1 }})
+	d := newAdmittedTestDetector()
+	d.FireDetach()
+	res := tm.Spawn(TaskSpec{Kind: "command", WaitFor: WaitExit}, d)
+	finish := tm.beginBatchRetire()
+	tm.finalizeRetired(res.Task, "retired", nil)
+	require.True(t, res.Task.HasPendingDelivery())
+	finish()
+	original := <-batch
+	require.Equal(t, original, <-raw)
+	select {
+	case <-d.acks:
+		t.Fatal("rejected batch acknowledged its producer")
+	default:
+	}
+	select {
+	case retry := <-raw:
+		require.Equal(t, original, retry)
+	case <-time.After(2 * time.Second):
+		t.Fatal("batch rejection did not retain raw retry")
+	}
+	select {
+	case ack := <-d.acks:
+		require.Equal(t, original, ack)
+	case <-time.After(time.Second):
+		t.Fatal("accepted raw fallback did not acknowledge original producer")
+	}
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestRetireResendRetainsTerminalIdentity checks terminal replay reuses its recorded sequence and observation time after a refusal.
+func TestRetireResendRetainsTerminalIdentity(t *testing.T) {
+	resent := make(chan SettleSignal, 1)
+	raw := make(chan SettleSignal, 2)
+	var attempts atomic.Int32
+	tm := NewTaskManager(TaskManagerConfig{OnRetireResendAccepted: func(items []BatchRetired) bool { resent <- items[0].Sig; return false }, OnSettleAccepted: func(_ *Task, sig SettleSignal) bool { raw <- sig; return attempts.Add(1) > 1 }})
+	observed := time.Now().Add(-time.Minute)
+	tk := tm.RestoreTask("terminal-resend", TaskSpec{Kind: "command", WaitFor: WaitExit, Declarative: &Declarative{RoundID: 3, ProducerRound: 3, SignalSeq: 5}}, observed.Add(-time.Minute), TaskCompleted)
+	tk.RestoreSettlement("saved output", nil, observed)
+	d := newAdmittedTestDetector()
+	require.NoError(t, tm.BindDetector(tk.ID, d))
+	tm.reconcileRetireNotify()
+	first := <-resent
+	require.EqualValues(t, 3, first.RoundID)
+	require.EqualValues(t, 5, first.Seq)
+	require.Equal(t, observed, first.ObservedAt)
+	require.Equal(t, SignalSourceID(tk.ID, 3, 5), first.SourceID)
+	require.Equal(t, first, <-raw)
+	select {
+	case retry := <-raw:
+		require.Equal(t, first, retry)
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal resend lost its retry")
+	}
+	select {
+	case ack := <-d.acks:
+		require.Equal(t, first, ack)
+	case <-time.After(time.Second):
+		t.Fatal("terminal resend did not acknowledge receipt")
+	}
+	require.NoError(t, tm.Close(context.Background()))
+}
+
+// TestCancelTerminalTaskUsesRawAcceptedDelivery checks cancelling an existing terminal is recorded without depending on a legacy cancel hook.
+func TestCancelTerminalTaskUsesRawAcceptedDelivery(t *testing.T) {
+	calls := make(chan SettleSignal, 2)
+	var attempts atomic.Int32
+	tm := NewTaskManager(TaskManagerConfig{OnSettleAccepted: func(_ *Task, sig SettleSignal) bool { calls <- sig; return attempts.Add(1) > 1 }})
+	tk := tm.RestoreTask("cancel-terminal", TaskSpec{Kind: "command", Declarative: &Declarative{RoundID: 2, ProducerRound: 2, SignalSeq: 4}}, time.Now(), TaskCompleted)
+	require.True(t, tm.Cancel(tk.ID))
+	first := <-calls
+	require.Equal(t, "cancelled", first.Observation)
+	require.Equal(t, LineageRetired, first.Lineage)
+	require.EqualValues(t, 5, first.Seq)
+	require.True(t, tk.HasPendingDelivery())
+	require.False(t, tm.Cancel(tk.ID))
+	select {
+	case retry := <-calls:
+		require.Equal(t, first, retry)
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel raw receipt was not retried")
+	}
+	require.Equal(t, TaskCancelled, tk.Status())
 	require.NoError(t, tm.Close(context.Background()))
 }
