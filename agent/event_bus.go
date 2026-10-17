@@ -62,8 +62,11 @@ type AgentEvent struct {
 
 	// volatileFact freezes a task-driven input's identity across store retries.
 	// These consumer-only fields never enter the serialized bus payload.
-	volatileFact      *memory.FullEvent
-	volatileCommitted bool
+	volatileFact          *memory.FullEvent
+	volatileCommitted     bool
+	observationReceipt    *memory.FullEvent
+	observationReceiptKey string
+	recoveryConsumed      bool
 }
 
 // durableClaim is the typed, non-JSON provenance of one claimed inbox message
@@ -839,6 +842,11 @@ func (b *EventBus) ConfirmDurable(path string, cred reliability.ReceiptCredentia
 // Returns the batch and nil error on success.
 // Returns nil and ctx.Err() when ctx is cancelled before any event arrives.
 func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
+	return b.PullWithWake(ctx, nil)
+}
+
+// PullWithWake returns an empty batch when this caller's wait ledger changes.
+func (b *EventBus) PullWithWake(ctx context.Context, wake <-chan struct{}) ([]*AgentEvent, error) {
 	for {
 		batch := b.drainChannelNonWake()
 		batch = append(batch, b.claimDurable()...)
@@ -856,6 +864,8 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
 				return batch, nil
 			}
 			continue
+		case <-wake:
+			return nil, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -865,7 +875,7 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error) {
 // drainChannelNonWake drains volatile events, dropping wake sentinels.
 func (b *EventBus) drainChannelNonWake() []*AgentEvent {
 	var batch []*AgentEvent
-	for {
+	for remaining := len(b.ch); remaining > 0; remaining-- {
 		select {
 		case evt := <-b.ch:
 			if isInboxWake(evt) {
@@ -878,6 +888,7 @@ func (b *EventBus) drainChannelNonWake() []*AgentEvent {
 			return batch
 		}
 	}
+	return batch
 }
 
 // drainChannel 非阻塞排空 channel 现有事件。

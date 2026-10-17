@@ -957,52 +957,35 @@ func TestRemoteRefRejectsURLLessDeclaration(t *testing.T) {
 	require.Contains(t, err.Error(), "requires a url")
 }
 
-// TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget 钉住 远端传输失败必须对同一声明端点、同一委派载荷重试，父收到真实答案而非错误事件。
-// - 传输失败驱动远端重试分支（至少两次尝试），每次尝试携带同一委派载荷；
-// - 在重试路径重解析目标是被禁止的形状——全局表查询会静默做这件事。
+// TestRemoteUnknownAcceptanceDoesNotRetry 钉住 HTTP 503 未证明对端未受理，委派只发送一次并向父回报失败。
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
-func TestRemoteDelegationRetriesAgainstTheSameDeclaredTarget(t *testing.T) {
+func TestRemoteUnknownAcceptanceDoesNotRetry(t *testing.T) {
 	svc := newRemoteService(t)
 	svc.mu.Lock()
 	svc.failFirstRPC = 1
 	svc.mu.Unlock()
-
 	yamlPath := writeYAML(t, remoteYAML(svc.srv.URL, ""))
 	cfg, err := LoadConfig(yamlPath)
 	require.NoError(t, err)
-	m := &wireModel{args: `{"request":"retry this delegation"}`}
+	m := &wireModel{args: `{"request":"one delegation"}`}
 	entry, err := New(*cfg, WithModel(m), WithConfigPath(yamlPath))
 	require.NoError(t, err)
 	defer func() { _ = entry.Close() }()
-
 	driveOneTurn(t, entry, m)
-
-	require.Eventually(t, func() bool { return svc.rpcCount() >= 2 }, 20*time.Second, 20*time.Millisecond,
-		"the transport failure must drive the remote retry branch, not a silent failure")
-	rpcs := svc.snapshotRPCs()
-	for i, rpc := range rpcs[:2] {
-		body, _ := json.Marshal(rpc)
-		require.Contains(t, string(body), "retry this delegation",
-			"attempt %d must carry the same delegation payload", i)
-	}
-	var sawAnswer bool
+	require.Equal(t, 1, svc.rpcCount())
+	var result string
 	for _, req := range m.snapshot() {
 		for _, got := range toolResultsOf(req) {
-			if strings.Contains(got, remoteAnswer) {
-				sawAnswer = true
-			}
+			result += got
 		}
 	}
-	require.True(t, sawAnswer, "the retried attempt's answer must reach the parent turn")
+	require.NotEmpty(t, result)
+	require.NotContains(t, result, remoteAnswer)
 }
 
-// TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint 钉住 重试过程中发布把同名 agent 指向不同端点时，重试仍锁在它开始声明的端点与载荷上。
-// - 判别是因果的、不数全局总量：父拿到答案之前，后继端点一次都不得被联系；
-// - 原端点上记录的每次尝试都携带同一委派载荷，传输重试固定端点与载荷、本地回合不重试。
-// - 换代依赖 mtime 严格变新：不晚于上次成功载入则懒检测命中缓存、发布成为 no-op，故显式把 mtime 设到 +90s 而非依赖系统时钟。
-// - 在途代必须在发布之前捕获（此处在重试钩子能发布之前取值），否则被断言回收的代就不是被打断的那一代。
+// TestRemoteUnknownAcceptanceAcrossPublishKeepsTheFailure 钉住 在途调用遇到未知受理状态时，发布不能使失败变成向新端点重发。
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
-func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
+func TestRemoteUnknownAcceptanceAcrossPublishKeepsTheFailure(t *testing.T) {
 	original := newRemoteService(t)
 	original.mu.Lock()
 	original.failFirstRPC = 1
@@ -1059,7 +1042,8 @@ func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 			"§3.4：重试期间发布后，重投仍须打在发起时声明的端点——后继端点被联系即说明重试改道了")
 		for _, req := range m.snapshot() {
 			for _, got := range toolResultsOf(req) {
-				if strings.Contains(got, remoteAnswer) {
+				if got != "" {
+					require.NotContains(t, got, remoteAnswer)
 					answered = true
 				}
 			}
@@ -1068,7 +1052,7 @@ func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	require.True(t, answered, "the retried attempt's real answer must reach the parent turn")
+	require.True(t, answered, "the unknown acceptance error must reach the parent turn")
 
 	require.Eventuallyf(t, func() bool { return !hasGeneration(entry, inflightGen) },
 		20*time.Second, 20*time.Millisecond,
@@ -1077,8 +1061,7 @@ func TestRemoteRetryAcrossPublishKeepsTheDeclaredEndpoint(t *testing.T) {
 
 	require.Greater(t, diagInt64(t, entry.OrgDiagnostics(), "generation"), int64(0),
 		"precondition: a new generation was published during the retry")
-	require.GreaterOrEqual(t, original.rpcCount(), 2,
-		"the transient failure must drive a retry against the declared endpoint")
+	require.Equal(t, 1, original.rpcCount(), "unknown acceptance must not repeat the delegation")
 	for i, rpc := range original.snapshotRPCs() {
 		body, _ := json.Marshal(rpc)
 		require.Contains(t, string(body), "retry across a publish",

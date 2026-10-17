@@ -519,14 +519,18 @@ type submitOutcome struct {
 // - submitOK lets the model run; submitConflict isolates the offending envelope and stops auto-consumption; submitTransient committed nothing and is retried with bounded backoff; submitCancelled returns the claims.
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func (ta *TagentAgent) submitDurableBatch(ctx context.Context, received, selected []*AgentEvent) submitOutcome {
-	if ta.persistentBus == nil || ta.contextManager == nil {
+	return ta.submitDurableBatchForCM(ctx, ta.contextManager, received, selected)
+}
+
+func (ta *TagentAgent) submitDurableBatchForCM(ctx context.Context, cm *ContextManager, received, selected []*AgentEvent) submitOutcome {
+	bus := ta.batchBusForCM(cm)
+	if bus == nil || cm == nil {
 		return submitOutcome{status: submitOK}
 	}
-	cm := ta.contextManager
 
-	status, conflictPath := ta.prepareBatchFacts(received)
+	status, conflictPath := ta.prepareBatchFactsForCM(cm, received)
 	if status == submitConflict {
-		ta.persistentBus.QuarantineEnvelope(conflictPath, "deterministic prepare conflict (§4.2) — isolated, not retried")
+		bus.QuarantineEnvelope(conflictPath, "deterministic prepare conflict (§4.2) — isolated, not retried")
 		return submitOutcome{status: submitConflict, conflict: conflictPath}
 	}
 	if status == submitTransient {
@@ -542,7 +546,7 @@ func (ta *TagentAgent) submitDurableBatch(ctx context.Context, received, selecte
 		}
 		if ok, deterministic := cm.persistBusEventCommitted(ev); !ok {
 			if deterministic {
-				ta.persistentBus.QuarantineEnvelope(ev.claim.Path,
+				bus.QuarantineEnvelope(ev.claim.Path,
 					"deterministic store conflict (§8.5): the frozen fact key collides with different content or is forgotten — isolated, never retried")
 				log.Errorf("[submitDurableBatch] deterministic store conflict rid=%s slot=%d — envelope isolated, batch stopped",
 					ev.claim.RequestID, ev.claim.Slot)
@@ -569,10 +573,14 @@ func (ta *TagentAgent) submitDurableBatch(ctx context.Context, received, selecte
 // a retryable I/O failure. A fact that cannot be marshalled is deterministic
 // corruption, not transient, so it is classified as a conflict.
 func (ta *TagentAgent) prepareBatchFacts(events []*AgentEvent) (submitStatus, string) {
-	if ta.persistentBus == nil || ta.contextManager == nil {
+	return ta.prepareBatchFactsForCM(ta.contextManager, events)
+}
+
+func (ta *TagentAgent) prepareBatchFactsForCM(cm *ContextManager, events []*AgentEvent) (submitStatus, string) {
+	bus := ta.batchBusForCM(cm)
+	if bus == nil || cm == nil {
 		return submitOK, ""
 	}
-	cm := ta.contextManager
 	byPath := map[string][]*AgentEvent{}
 	var order []string
 	for _, ev := range events {
@@ -619,7 +627,7 @@ func (ta *TagentAgent) prepareBatchFacts(events []*AgentEvent) (submitStatus, st
 			}
 			facts[ev.claim.Slot] = b
 		}
-		if err := ta.persistentBus.PrepareEnvelope(path, receiptKey, facts); err != nil {
+		if err := bus.PrepareEnvelope(path, receiptKey, facts); err != nil {
 			if errors.Is(err, reliability.ErrPrepareConflict) || errors.Is(err, reliability.ErrReceiptKeyConflict) {
 				log.Warnf("[prepareBatchFacts] deterministic conflict for %s — isolating, stopping: %v", path, err)
 				return submitConflict, path
@@ -643,8 +651,12 @@ func (ta *TagentAgent) prepareBatchFacts(events []*AgentEvent) (submitStatus, st
 // commits, hits a deterministic conflict, is cancelled, or the backoff budget is spent
 // .
 func (ta *TagentAgent) submitDurableBatchWithBackoff(ctx context.Context, received, selected []*AgentEvent) submitOutcome {
+	return ta.submitDurableBatchWithBackoffForCM(ctx, ta.contextManager, received, selected)
+}
+
+func (ta *TagentAgent) submitDurableBatchWithBackoffForCM(ctx context.Context, cm *ContextManager, received, selected []*AgentEvent) submitOutcome {
 	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
-	outcome := ta.submitDurableBatch(ctx, received, selected)
+	outcome := ta.submitDurableBatchForCM(ctx, cm, received, selected)
 	for attempt := 0; outcome.status == submitTransient && attempt < len(delays); attempt++ {
 		log.Warnf("[runEventLoop:%s] transient submit failure — backing off %v (attempt %d/%d), same batch, not the next",
 			ta.name, delays[attempt], attempt+1, len(delays))
@@ -653,7 +665,7 @@ func (ta *TagentAgent) submitDurableBatchWithBackoff(ctx context.Context, receiv
 		case <-ctx.Done():
 			return submitOutcome{status: submitCancelled}
 		}
-		outcome = ta.submitDurableBatch(ctx, received, selected)
+		outcome = ta.submitDurableBatchForCM(ctx, cm, received, selected)
 	}
 	return outcome
 }
@@ -663,7 +675,12 @@ func (ta *TagentAgent) submitDurableBatchWithBackoff(ctx context.Context, receiv
 // exhausted transient backoff to preserve ordering + bounded backpressure without
 // ever acking/dropping an uncommitted input.
 func (ta *TagentAgent) releaseBatchClaims(events []*AgentEvent) {
-	if ta.persistentBus == nil {
+	ta.releaseBatchClaimsForCM(ta.contextManager, events)
+}
+
+func (ta *TagentAgent) releaseBatchClaimsForCM(cm *ContextManager, events []*AgentEvent) {
+	bus := ta.batchBusForCM(cm)
+	if bus == nil {
 		return
 	}
 	seen := map[string]bool{}
@@ -672,7 +689,7 @@ func (ta *TagentAgent) releaseBatchClaims(events []*AgentEvent) {
 			continue
 		}
 		seen[ev.claim.Path] = true
-		if err := ta.persistentBus.ReleaseClaim(ev.claim.Path); err != nil {
+		if err := bus.ReleaseClaim(ev.claim.Path); err != nil {
 			log.Warnf("[runEventLoop:%s] release claim %s failed: %v", ta.name, ev.claim.RequestID, err)
 		}
 	}
@@ -693,13 +710,18 @@ func (ta *TagentAgent) releaseBatchClaims(events []*AgentEvent) {
 // prepared fact to freeze a per-slot skipped completion for — closing the
 // ack-scope-vs-prepare-scope gap.
 func (ta *TagentAgent) finishDurableBatch(ctx context.Context, received, selected []*AgentEvent, outcome turnOutcome) {
-	if ta == nil || ta.persistentBus == nil || ta.contextManager == nil {
-		return
+	ta.finishDurableBatchForCM(ctx, ta.contextManager, received, selected, outcome)
+}
+
+func (ta *TagentAgent) finishDurableBatchForCM(ctx context.Context, cm *ContextManager, received, selected []*AgentEvent, outcome turnOutcome) bool {
+	bus := ta.batchBusForCM(cm)
+	if ta == nil || bus == nil || cm == nil {
+		return true
 	}
 	if _, _, ok := batchResultFromOutcome(outcome); !ok {
-		return
+		return true
 	}
-	cm := ta.contextManager
+	allCommitted := true
 	completedAt := time.Now().UnixMilli()
 	attribution := cm.buildTurnAttribution(ctx)
 	paths, byPath := groupClaimsByPath(received)
@@ -710,23 +732,28 @@ func (ta *TagentAgent) finishDurableBatch(ctx context.Context, received, selecte
 		if err != nil {
 			log.Errorf("[finishDurableBatch] completion freeze failed rid=%s path=%s — claim held, NOT acked: %v",
 				group[0].claim.RequestID, path, err)
+			allCommitted = false
 			continue
 		}
-		if err := ta.recordCompletionWithRetry(path, completion); err != nil {
+		if err := ta.recordCompletionWithRetryForBus(ctx, bus, path, completion); err != nil {
 			log.Warnf("[finishDurableBatch] completion not durable rid=%s path=%s after retry — claim held, receipt+ack deferred: %v",
 				c.RequestID, path, err)
+			allCommitted = false
 			continue
 		}
 		cred, verr := cm.verifyReceiptCredential(completion)
 		if verr != nil {
 			log.Warnf("[finishDurableBatch] receipt unverified rid=%s key=%s — completion durable, claim held (§5.7 re-submits receipt, no re-run): %v",
 				c.RequestID, c.ReceiptKey, verr)
+			allCommitted = false
 			continue
 		}
-		if err := ta.persistentBus.ConfirmDurable(path, cred); err != nil {
+		if err := bus.ConfirmDurable(path, cred); err != nil {
+			allCommitted = false
 			log.Warnf("[finishDurableBatch] confirm for %s deferred (replay will Ack-skip): %v", c.RequestID, err)
 		}
 	}
+	return allCommitted
 }
 
 // recordCompletionWithRetry durably freezes a completion, retrying the WRITE on a
@@ -736,12 +763,34 @@ func (ta *TagentAgent) finishDurableBatch(ctx context.Context, received, selecte
 // already-durable completion is authoritative) and is NOT retried. Returns nil once the
 // freeze is durable, or an error after the budget is spent (caller holds the claim).
 func (ta *TagentAgent) recordCompletionWithRetry(path string, completion json.RawMessage) error {
+	return ta.recordCompletionWithRetryForBus(context.Background(), ta.persistentBus, path, completion)
+}
+
+func (ta *TagentAgent) recordCompletionWithRetryForBus(ctx context.Context, bus *EventBus, path string, completion json.RawMessage) error {
 	delays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
-	err := ta.persistentBus.RecordCompletion(path, completion)
+	err := bus.RecordCompletion(path, completion)
 	for attempt := 0; err != nil && !errors.Is(err, reliability.ErrCompletionConflict) && attempt < len(delays); attempt++ {
 		log.Warnf("[finishDurableBatch] completion write retry %d/%d for %s: %v", attempt+1, len(delays), path, err)
-		time.Sleep(delays[attempt])
-		err = ta.persistentBus.RecordCompletion(path, completion)
+		select {
+		case <-time.After(delays[attempt]):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		err = bus.RecordCompletion(path, completion)
 	}
 	return err
+}
+
+// batchBusForCM resolves this private mailbox or the owner's original assembly.
+func (ta *TagentAgent) batchBusForCM(cm *ContextManager) *EventBus {
+	if ta == nil || cm == nil {
+		return nil
+	}
+	if cm.bus != nil {
+		return cm.bus
+	}
+	if cm == ta.contextManager {
+		return ta.persistentBus
+	}
+	return nil
 }

@@ -101,7 +101,9 @@ type TagentAgent struct {
 	// background task_settled to the owning sub-invocation loop's sink when one is
 	// registered; with no sink (entry owner + every pre-S3m-b path) it falls back
 	// to persistentBus, so this is behavior-neutral until S3m-b registers a sink.
-	settleSinks *settleSinkRegistry
+	settleSinks   *settleSinkRegistry
+	continuations *continuationRegistry
+	taskRecords   *taskRecordSink
 
 	// orgRollback：热更回滚钩子（tagent
 	// 包懒检查闭包注入；Rollback() 触发）。它**每次成功发布都被重写**（运行期写），
@@ -221,8 +223,10 @@ type TagentAgent struct {
 
 // TagentConfig holds configuration for creating a TagentAgent.
 type TagentConfig struct {
-	Model       model.Model
-	MemoryStore memory.MemoryStore
+	// ContinuationOwnerResolver resolves persisted result addresses to live owners.
+	ContinuationOwnerResolver func(string) *TagentAgent
+	Model                     model.Model
+	MemoryStore               memory.MemoryStore
 	// MemStoreRelease: lease release for the
 	// provided MemoryStore; executed exactly once from Close. nil = the agent
 	// does not own a registry lease.
@@ -419,6 +423,9 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	} else {
 		memStore = memory.NewInMemoryStore()
 	}
+	effectiveConfig := *cfg
+	effectiveConfig.MemoryStore = memStore
+	cfg = &effectiveConfig
 
 	memPlugin := plugin.NewMemoryPlugin(memStore, plugin.WithCallIDResolver(callIDResolverFor(cfg)))
 
@@ -572,6 +579,8 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 		persistentBus:       bus,
 		activeBus:           bus,
 		settleSinks:         sinkReg,
+		continuations:       newContinuationRegistry(),
+		taskRecords:         taskRecords,
 		droppedOutputEvents: droppedOutputCounter,
 		memStore:            memStore,
 		memStoreRelease:     cfg.MemStoreRelease,
@@ -591,6 +600,7 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	onEventRef = onEvent
 	cm := newContextManagerFromConfig(cfg, nil, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	taskRecords.cm = cm
+	taskRecords.owner = ta
 	ta.contextManager = cm
 	ta.liveCMs = make(map[*ContextManager]struct{})
 	ta.SetHotSource(staticHotSource(initialHotParams(cfg)))

@@ -86,11 +86,12 @@ type ContextManager struct {
 	// owner whose bounded Close could not finish because an execution never
 	// confirmed a stop, fired at most once when the last held generation is
 	// reclaimed with nothing referencing it (see armFullyDrained).
-	drainedHook atomic.Pointer[func()]
-	drainedOnce sync.Once
-	name        string
-	userID      string
-	sessionID   string
+	drainedHook    atomic.Pointer[func()]
+	drainedOnce    sync.Once
+	name           string
+	userID         string
+	sessionID      string
+	continuationID string
 
 	// outputCh Event routing
 	outputCh   chan *event.Event
@@ -1277,6 +1278,9 @@ func (cm *ContextManager) emitCompactionEvent(retained []memory.EventReference) 
 		compress.CompactionPayloadMetaKey: raw,
 		tagentevent.MetaKeyAgentName:      cm.name,
 	}
+	if cm.continuationID != "" {
+		md[tagentevent.MetaKeyContinuationID] = cm.continuationID
+	}
 	if cm.sessionID != "" {
 		md[tagentevent.MetaKeyRolloutID] = cm.sessionID
 	}
@@ -1313,26 +1317,21 @@ func (cm *ContextManager) latestCompactionKey() int64 {
 	if cm.memStore == nil {
 		return 0
 	}
-	refs, err := cm.memStore.QueryEvents(memory.QueryOptions{
-		PartitionIDs: []int{cm.partitionID},
-		EventTypes:   []string{tagentevent.TypeContextCompressSummary},
-		OrderBy:      "timestamp_desc",
-		Limit:        5,
-	})
-	if err != nil {
-		return 0
-	}
-	for _, r := range refs {
-		evt, err := cm.memStore.GetEvent(r.EventKey)
-		if err != nil || evt == nil {
-			continue
+	for offset := 0; ; offset += 100 {
+		refs, err := cm.memStore.QueryEvents(memory.QueryOptions{PartitionIDs: []int{cm.partitionID}, EventTypes: []string{tagentevent.TypeContextCompressSummary}, OrderBy: "timestamp_desc", Limit: 100, Offset: offset})
+		if err != nil {
+			return 0
 		}
-		if evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 &&
-			evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name {
-			return r.EventKey
+		for _, r := range refs {
+			evt, err := cm.memStore.GetEvent(r.EventKey)
+			if err == nil && evt != nil && evt.Metadata[compress.CompactionMetaKey] == compress.CompactionGenV1 && evt.Metadata[tagentevent.MetaKeyAgentName] == cm.name && evt.Metadata[tagentevent.MetaKeyContinuationID] == cm.continuationID {
+				return r.EventKey
+			}
+		}
+		if len(refs) < 100 {
+			return 0
 		}
 	}
-	return 0
 }
 
 // persistTaskRecord：记录-only 持久化——只写
@@ -1482,11 +1481,21 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 	fullEvent.Metadata = map[string]string{
 		tagentevent.MetaKeyAgentName: cm.name,
 	}
+	if cm.continuationID != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyContinuationID] = cm.continuationID
+	}
+	if evt.ID != "" {
+		fullEvent.Metadata[tagentevent.MetaKeySourceEventID] = evt.ID
+	}
+	if evt.observationReceiptKey != "" {
+		fullEvent.Metadata[tagentevent.MetaKeyObservationReceiptKey] = evt.observationReceiptKey
+	}
 	if cm.triggerSource != "" {
 		fullEvent.Metadata[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
 	}
 	if evt.Source == SourceTask {
-		for _, k := range []string{"task_id", "settle_status", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal} {
+		for _, k := range []string{"task_id", "settle_status", "settle_notice", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal,
+			tagentevent.MetaKeyTaskMode, tagentevent.MetaKeyTaskWaitFor, tagentevent.MetaKeyTaskRoundID, tagentevent.MetaKeyTaskRoundOwner, tagentevent.MetaKeyTaskSignalSeq, tagentevent.MetaKeySettleWaitSatisfied, tagentevent.MetaKeySettleObservation, tagentevent.MetaKeySettleWake, "lineage_absent", "task_signal_key"} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
@@ -1746,6 +1755,9 @@ func (cm *ContextManager) buildTurnAttribution(ctx context.Context) plugin.Attri
 	}
 	if cm.triggerSource != "" {
 		attr[tagentevent.MetaKeyTriggerSource] = cm.triggerSource
+	}
+	if cm.continuationID != "" {
+		attr[tagentevent.MetaKeyContinuationID] = cm.continuationID
 	}
 	return attr
 }

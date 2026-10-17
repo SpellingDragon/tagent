@@ -82,36 +82,43 @@ type loopSpec struct {
 // the only remaining difference is the output receiver. It exits on ctx done, a
 // turnStop from processTurn, or (invocation form) delivery quiescence with an
 // drained bus.
-func (ta *TagentAgent) runAgentLoop(ctx context.Context, bus *EventBus, cm *ContextManager, spec loopSpec) {
+func (ta *TagentAgent) runAgentLoop(ctx context.Context, bus *EventBus, cm *ContextManager, spec loopSpec) turnDisposition {
 	for {
 		if err := ctx.Err(); err != nil {
 			log.Infof("[runAgentLoop:%s] ctx cancelled, exiting: %v", ta.name, err)
-			return
+			return turnStop
 		}
-		if spec.invocationID != "" && !ta.settleSinks.awaiting(spec.invocationID) {
-			rest := bus.TryPull()
-			if len(rest) == 0 {
-				return
+		var wake <-chan struct{}
+		if spec.invocationID != "" {
+			awaiting, changed := ta.settleSinks.waitState(spec.invocationID)
+			wake = changed
+			if !awaiting {
+				rest := bus.TryPull()
+				if len(rest) == 0 {
+					return turnContinue
+				}
+				ta.markContinuationRecoveryInputs(cm, rest)
+				if ta.processTurn(ctx, cm, rest) == turnStop {
+					return turnStop
+				}
+				continue
 			}
-			if ta.processTurn(ctx, cm, rest) == turnStop {
-				return
-			}
-			continue
 		}
-		events, err := bus.Pull(ctx)
+		events, err := bus.PullWithWake(ctx, wake)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				log.Infof("[runAgentLoop:%s] Pull returned: %v, exiting", ta.name, err)
-				return
+				return turnStop
 			}
 			log.Errorf("[runAgentLoop:%s] Pull error: %v", ta.name, err)
-			return
+			return turnStop
 		}
 		if len(events) == 0 {
 			continue
 		}
+		ta.markContinuationRecoveryInputs(cm, events)
 		if ta.processTurn(ctx, cm, events) == turnStop {
-			return
+			return turnStop
 		}
 	}
 }
@@ -146,50 +153,92 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	events = selected
 	if len(events) == 0 {
 		cm.turnEcho = nil
-		ta.finishDurableBatch(ctx, received, nil, completedOutcome())
+		if !ta.finishDurableBatchForCM(ctx, cm, received, nil, completedOutcome()) {
+			return turnStop
+		}
 		return turnContinue
 	}
 
-	if batchCarriesMeditation(events) && ta.persistentBus.PendingCount() > 0 {
+	if bus := ta.batchBusForCM(cm); batchCarriesMeditation(events) && bus != nil && bus.PendingCount() > 0 {
 		return ta.yieldMeditationOnPresence(ctx, cm, received)
 	}
 	log.Infof("[runEventLoop:%s] iteration start: pulled %d events (%s)",
 		ta.name, len(events), summarizeEvents(events))
 
-	ta.persistentBus.DrainRetentionCleanups()
-
-	switch outcome := ta.submitDurableBatchWithBackoff(ctx, received, events); outcome.status {
-	case submitCancelled:
-		cm.turnEcho = nil
-		log.Infof("[runEventLoop:%s] submit cancelled mid-batch — claims retained, exiting", ta.name)
-		return turnStop
-	case submitConflict:
-		cm.turnEcho = nil
-		log.Errorf("[runEventLoop:%s] deterministic submit conflict on %s — isolated; STOPPING auto-consumption (fail-closed, §4.2)",
-			ta.name, outcome.conflict)
-		return turnStop
-	case submitTransient:
-		ta.releaseBatchClaims(received)
-		cm.turnEcho = nil
-		log.Warnf("[runEventLoop:%s] transient submit failure after backoff — claims requeued, model NOT called, next batch NOT taken", ta.name)
-		return turnContinue
-	case submitOK:
+	if bus := ta.batchBusForCM(cm); bus != nil {
+		bus.DrainRetentionCleanups()
 	}
+
 	cm.SetTriggerSource(extractTriggerSource(events))
 	cm.SetInvocationMetadata(extractRootMetadata(events))
+	prepareTaskReceiptKeys(cm, events)
+	prepareVolatileTaskInputs(cm, events)
+	for {
+		outcome := ta.submitDurableBatchWithBackoffForCM(ctx, cm, received, events)
+		switch outcome.status {
+		case submitCancelled:
+			cm.turnEcho = nil
+			log.Infof("[runEventLoop:%s] submit cancelled mid-batch — claims retained, exiting", ta.name)
+			return turnStop
+		case submitConflict:
+			cm.turnEcho = nil
+			log.Errorf("[runEventLoop:%s] deterministic submit conflict on %s — isolated; STOPPING auto-consumption (fail-closed, §4.2)",
+				ta.name, outcome.conflict)
+			return turnStop
+		case submitTransient:
+			cm.turnEcho = nil
+			if hasVolatileInput(received) {
+				log.Warnf("[runEventLoop:%s] mixed submit failed — retaining the frozen batch for retry", ta.name)
+				if !waitTaskInputRetry(ctx) {
+					return turnStop
+				}
+				continue
+			}
+			ta.releaseBatchClaimsForCM(cm, received)
+			log.Warnf("[runEventLoop:%s] transient submit failure after backoff — claims requeued, model NOT called, next batch NOT taken", ta.name)
+			return turnContinue
+		case submitOK:
+		}
+		break
+	}
 	if !persistVolatileTaskInputs(ctx, cm, events) {
 		cm.turnEcho = nil
 		return turnStop
 	}
+	modelEvents := decisionInputs(events)
+	observations := observationInputs(events)
+	if !consumeTaskInputs(ctx, cm, observations, "observed") {
+		cm.turnEcho = nil
+		return turnStop
+	}
+	foldConsumedTaskObservations(ctx, cm)
+	if len(modelEvents) == 0 {
+		cm.turnEcho = nil
+		cm.setLastBatchOutcome(completedOutcome())
+		if !ta.finishDurableBatchForCM(ctx, cm, received, events, completedOutcome()) {
+			return turnStop
+		}
+		if err := ta.checkpointContinuation(ctx, cm, events); err != nil {
+			return turnStop
+		}
+		return turnContinue
+	}
+	if len(observations) > 0 {
+		if err := ta.checkpointContinuation(ctx, cm, observations); err != nil {
+			return turnStop
+		}
+	}
 
-	msg := cm.BuildInvocation(events)
+	msg := cm.BuildInvocation(modelEvents)
 	if msg.Content == "" && len(msg.ContentParts) == 0 {
 		log.Debugf("[runEventLoop:%s] empty message after merge, skipping", ta.name)
 		cm.turnEcho = nil
-		ta.finishDurableBatch(ctx, received, events, completedOutcome())
+		if !ta.finishDurableBatchForCM(ctx, cm, received, events, completedOutcome()) {
+			return turnStop
+		}
 		return turnContinue
 	}
-	if keys := durableCommittedKeys(events); len(keys) > 0 {
+	if keys := durableCommittedKeys(modelEvents); len(keys) > 0 {
 		cm.turnEcho = &echoSpec{
 			agent:         cm.name,
 			session:       cm.sessionID,
@@ -199,19 +248,21 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		defer func() { cm.turnEcho = nil }()
 	}
 
-	turnMeta := extractRootMetadata(events)
+	cm.SetTriggerSource(extractTriggerSource(modelEvents))
+	cm.SetInvocationMetadata(extractRootMetadata(modelEvents))
+	turnMeta := extractRootMetadata(modelEvents)
 	spanCtx, turnSpan := startTurnSpan(ctx, turnSpanAttrs{
 		AgentName:     ta.name,
-		TriggerSource: extractTriggerSource(events),
+		TriggerSource: extractTriggerSource(modelEvents),
 		ChatID:        turnMeta["chat_id"],
 		UserID:        turnMeta["user_id"],
-		BatchSize:     len(events),
-		EventSources:  eventSources(events),
+		BatchSize:     len(modelEvents),
+		EventSources:  eventSources(modelEvents),
 		LinkTraceID:   turnMeta[tagentevent.MetaKeyTraceID],
 		LinkSpanID:    turnMeta[tagentevent.MetaKeySpanID],
 	})
-	spanCtx = governance.WithTriggerSource(spanCtx, extractTriggerSource(events))
-	spanCtx = withInvocationID(spanCtx, extractDelegationInvocationID(events))
+	spanCtx = governance.WithTriggerSource(spanCtx, extractTriggerSource(modelEvents))
+	spanCtx = withInvocationID(spanCtx, turnInvocationID(spanCtx, cm, modelEvents))
 
 	turnLease := cm.BeginTurnLease()
 	turnExecutor := turnLease.Runner()
@@ -221,7 +272,8 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		endTurnSpan(turnSpan, degenerate)
 	}
 
-	// RunFlow with exponential backoff retry
+	remaining := SubagentTurnBudgetFromContext(spanCtx)
+	limited := remaining > 0
 	var lastErr error
 	retried := false
 	retriedDegenerate := false
@@ -254,13 +306,33 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 				return turnStop
 			}
 		}
-		if err := cm.RunFlowWithExecutor(spanCtx, msg, turnExecutor); err != nil {
+		activeCtx := spanCtx
+		cancelActive := func() {}
+		if limited {
+			if remaining <= 0 {
+				cm.setLastBatchOutcome(cancelledOutcome())
+				endTurn(retriedDegenerate)
+				return turnStop
+			}
+			activeCtx, cancelActive = context.WithTimeout(spanCtx, remaining)
+		}
+		activeStart := time.Now()
+		runErr := cm.RunFlowWithExecutor(activeCtx, msg, turnExecutor)
+		activeErr := activeCtx.Err()
+		remaining -= time.Since(activeStart)
+		cancelActive()
+		if activeErr != nil {
+			cm.setLastBatchOutcome(cancelledOutcome())
+			endTurn(retriedDegenerate)
+			return turnStop
+		}
+		if err := runErr; err != nil {
 			if cm.LastTurnOutcome().status == turnCancelled {
 				endTurn(retriedDegenerate)
 				log.Infof("[runEventLoop:%s] §5.1 turn cancelled mid-stream — claim retained, NOT acked", ta.name)
 				return turnStop
 			}
-			if errors.Is(err, ErrExecClosed) {
+			if errors.Is(err, ErrExecClosed) || errors.Is(err, ErrBudgetExceeded) {
 				endTurn(retriedDegenerate)
 				log.Infof("[runEventLoop:%s] turn refused — generation already closed, claim retained", ta.name)
 				return turnStop
@@ -303,6 +375,10 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	if lastErr != nil {
 		batchOutcome = failedOutcome(lastErr.Error())
 	}
+	if strings.Contains(batchOutcome.err, ErrBudgetExceeded.Error()) {
+		cm.setLastBatchOutcome(failedOutcome(batchOutcome.err))
+		return turnStop
+	}
 	cm.setLastBatchOutcome(batchOutcome)
 	log.Infof("[runEventLoop:%s] §5.1 turn reduced to %s (batch outcome)", ta.name, batchOutcome.status)
 
@@ -312,7 +388,18 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		return turnStop
 	}
 	cm.turnEcho = nil
-	ta.finishDurableBatch(spanCtx, received, events, batchOutcome)
+	if batchOutcome.status == turnCancelled || ctx.Err() != nil {
+		return turnStop
+	}
+	if !consumeTaskInputs(ctx, cm, modelEvents, "processed") {
+		return turnStop
+	}
+	if !ta.finishDurableBatchForCM(spanCtx, cm, received, events, batchOutcome) {
+		return turnStop
+	}
+	if err := ta.checkpointContinuation(spanCtx, cm, events); err != nil {
+		return turnStop
+	}
 
 	if ta.meditationMgr != nil && batchCarriesMeditation(events) {
 		ta.meditationMgr.NoteMeditationBatchOutcome(true)
@@ -325,23 +412,13 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 // so skipping that echo cannot erase a user message. The active CM owns these
 // facts and their projection, including on a delegated invocation.
 func persistVolatileTaskInputs(ctx context.Context, cm *ContextManager, events []*AgentEvent) bool {
-	hasTask := false
-	for _, evt := range events {
-		if evt != nil && evt.Source == SourceTask && evt.claim == nil {
-			hasTask = true
-			break
-		}
-	}
-	if !hasTask {
+	if !batchNeedsVolatileFacts(cm, events) {
 		return true
 	}
+	prepareVolatileTaskInputs(cm, events)
 	for _, evt := range events {
 		if evt == nil || evt.claim != nil || evt.Type != tagentevent.TypeExternalInput || evt.Message == nil {
 			continue
-		}
-		if evt.volatileFact == nil {
-			fact := cm.buildBusFact(evt)
-			evt.volatileFact = &fact
 		}
 		for {
 			if ctx.Err() != nil {
@@ -354,9 +431,7 @@ func persistVolatileTaskInputs(ctx context.Context, cm *ContextManager, events [
 				return false
 			}
 			log.Warnf("[task-input] store failed — retaining the current notification batch for retry")
-			select {
-			case <-time.After(400 * time.Millisecond):
-			case <-ctx.Done():
+			if !waitTaskInputRetry(ctx) {
 				return false
 			}
 		}
@@ -379,12 +454,12 @@ func persistVolatileTaskInputs(ctx context.Context, cm *ContextManager, events [
 // 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
 func (ta *TagentAgent) yieldMeditationOnPresence(ctx context.Context, cm *ContextManager, received []*AgentEvent) turnDisposition {
 	log.Infof("[runEventLoop:%s] consumption re-check: %d pending event(s) behind a pure meditation batch — yielding",
-		ta.name, ta.persistentBus.PendingCount())
+		ta.name, ta.batchBusForCM(cm).PendingCount())
 	cm.turnEcho = nil
 	if ta.meditationMgr != nil {
 		ta.meditationMgr.NoteMeditationBatchOutcome(false)
 	}
-	switch gate := ta.submitDurableBatchWithBackoff(ctx, received, nil); gate.status {
+	switch gate := ta.submitDurableBatchWithBackoffForCM(ctx, cm, received, nil); gate.status {
 	case submitCancelled:
 		log.Infof("[runEventLoop:%s] yield prepare cancelled mid-batch — claims retained, exiting", ta.name)
 		return turnStop
@@ -393,12 +468,14 @@ func (ta *TagentAgent) yieldMeditationOnPresence(ctx context.Context, cm *Contex
 			ta.name, gate.conflict)
 		return turnStop
 	case submitTransient:
-		ta.releaseBatchClaims(received)
+		ta.releaseBatchClaimsForCM(cm, received)
 		log.Warnf("[runEventLoop:%s] transient submit failure during yield prepare — claims requeued, nothing acked", ta.name)
 		return turnContinue
 	case submitOK:
 	}
-	ta.finishDurableBatch(ctx, received, nil, completedOutcome())
+	if !ta.finishDurableBatchForCM(ctx, cm, received, nil, completedOutcome()) {
+		return turnStop
+	}
 	return turnContinue
 }
 
@@ -518,7 +595,14 @@ var controlMetaKeys = map[string]bool{
 	"settle_status": true, "task_id": true, "lineage_absent": true,
 	"detached_at_ms":               true,
 	tagentevent.MetaKeySettleFinal: true,
-	metaKeyInvocationID:            true,
+	tagentevent.MetaKeyTaskMode:    true, tagentevent.MetaKeyTaskWaitFor: true,
+	tagentevent.MetaKeyTaskRoundID: true, tagentevent.MetaKeyTaskRoundOwner: true,
+	tagentevent.MetaKeyTaskSignalSeq: true, tagentevent.MetaKeyTaskProducerRoundID: true,
+	tagentevent.MetaKeySettleWaitSatisfied: true, tagentevent.MetaKeySettleObservation: true,
+	tagentevent.MetaKeySettleWake: true, tagentevent.MetaKeyObservationReceiptKey: true,
+	tagentevent.MetaKeyConsumedEventKey: true, tagentevent.MetaKeyInputDisposition: true,
+	tagentevent.MetaKeyContinuationID: true,
+	metaKeyInvocationID:               true,
 }
 
 // extractDelegationInvocationID returns the S1 correlation handle (metaKeyInvocationID)

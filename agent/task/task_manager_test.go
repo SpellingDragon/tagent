@@ -1709,7 +1709,7 @@ func TestReconcileZombies_NilProbeSkipped(t *testing.T) {
 // - 跨重启的探测器不可恢复，"没有探测器"是常态而不是异常。
 // 契约: docs/wiki/agent/task-lifecycle.md#restore-rebuild
 func TestPruneTerminal_NilDetectorRestoredTask(t *testing.T) {
-	tm := NewTaskManager(TaskManagerConfig{})
+	tm := NewTaskManager(TaskManagerConfig{OnSettleAccepted: func(*Task, SettleSignal) bool { return true }})
 	tk := tm.RestoreTask("t-restored", TaskSpec{
 		Kind:  "command",
 		Desc:  "nightly probe",
@@ -1764,7 +1764,7 @@ func TestEmitBackground_JobObservationsNotify(t *testing.T) {
 	waitUntil(t, time.Second, func() bool {
 		res.Task.mu.Lock()
 		defer res.Task.mu.Unlock()
-		return res.Task.status == TaskStable
+		return res.Task.status == TaskRunning
 	})
 	time.Sleep(50 * time.Millisecond)
 	mu.Lock()

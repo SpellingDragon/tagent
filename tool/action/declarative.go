@@ -3,13 +3,12 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/task"
-	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // pTimeout et al. are the spawn-parameter keys for the declarative
@@ -17,17 +16,24 @@ import (
 // Op/Keys/Enter/Tail/Ansi/GraceSec/SessionID are not spawn parameters and are
 // excluded; Command is handled separately).
 const (
-	pTimeout    = "timeout"
-	pTTL        = "ttl"
-	pWorkDir    = "work_dir"
-	pIsTUI      = "is_tui"
-	pQuiet      = "quiet_timeout"
-	pMode       = "mode"
-	pName       = "name"
-	pWatch      = "watch"
-	pProbe      = "probe"
-	pProbeEvery = "probe_interval_sec"
-	pProbeFails = "probe_failures"
+	pTimeout      = "timeout"
+	pTTL          = "ttl"
+	pWorkDir      = "work_dir"
+	pIsTUI        = "is_tui"
+	pQuiet        = "quiet_timeout"
+	pMode         = "mode"
+	pName         = "name"
+	pWatch        = "watch"
+	pProbe        = "probe"
+	pProbeEvery   = "probe_interval_sec"
+	pProbeFails   = "probe_failures"
+	pReadyPattern = "ready_pattern"
+	pInputPattern = "input_pattern"
+	pResourceID   = "resource_id"
+	pPhase        = "phase"
+	pPlaceholder  = "placeholder"
+	pBaseline     = "baseline"
+	pEnv          = "env"
 )
 
 // DeclarativeFromArgs builds the serializable projection of a command spawn.
@@ -54,6 +60,17 @@ func DeclarativeFromArgs(args ActionArgs, sessionID string) *task.Declarative {
 	}
 	if args.Name != "" {
 		p[pName] = args.Name
+	}
+	if len(args.Env) > 0 {
+		if b, err := json.Marshal(args.Env); err == nil {
+			p[pEnv] = string(b)
+		}
+	}
+	if args.ReadyPattern != "" {
+		p[pReadyPattern] = args.ReadyPattern
+	}
+	if args.InputPattern != "" {
+		p[pInputPattern] = args.InputPattern
 	}
 	if args.Watch != "" {
 		p[pWatch] = args.Watch
@@ -111,6 +128,15 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 			args.Mode = v
 		case pName:
 			args.Name = v
+		case pResourceID, pPhase, pPlaceholder, pBaseline:
+		case pEnv:
+			if err := json.Unmarshal([]byte(v), &args.Env); err != nil {
+				return args, fmt.Errorf("param env: %w", err)
+			}
+		case pReadyPattern:
+			args.ReadyPattern = v
+		case pInputPattern:
+			args.InputPattern = v
 		case pWatch:
 			args.Watch = v
 		case pProbe:
@@ -144,56 +170,38 @@ func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.De
 	if err != nil {
 		return task.TaskSpec{Kind: decl.Kind, Desc: decl.Desc, Key: decl.Key, TTL: defaultTaskTTL, Declarative: &decl}
 	}
-	spec := task.TaskSpec{
-		Kind:        "command",
-		Desc:        args.Command,
-		Key:         args.Command,
-		TTL:         ct.resolveTTL(args),
-		Relaunch:    ct.relaunchClosure(spawner, args),
-		ResumeFn:    ct.rebuiltResumeClosure(decl.TaskID, args.IsTUI),
-		Alive:       ct.sessionAliveClosure(decl.TaskID),
-		Declarative: &decl,
+	if args.Mode == "" {
+		args.Mode = string(ModeOneshot)
+	}
+	spec := ct.commandSpec(spawner, args)
+	spec.Declarative = &decl
+	if decl.TaskID != "" {
+		spec.Start = nil
+		spec.ResumeFn = ct.rebuiltResumeResourceClosure(decl.TaskID, decl.Params[pResourceID], args.IsTUI)
+		spec.Alive = ct.resourceAliveClosure(decl.TaskID, decl.Params[pResourceID])
 	}
 	return spec
 }
 
-// rebuiltResumeClosure（R3：跨重启 resume 真供能）：镜像 resumeClosure 主体
-// （TouchSession 校验→baseline→SendKeys→Rearm），但 detector 为新建——重挂场景
-// 下 reattachOne 的原 detector 归属 monitor 回调链，此处新 detector 服务本轮
-// resume 的 settle 检测（watch 兕底仍由 reattach detector 承担）。R3 重挂前
-// （未跟踪）返回与旧路径同款的 relaunch 引导。
-//
-// The initiating context is accepted and ignored: like every command
-// re-entry this feeds a tmux session, which is not bound to a generation.
 func (ct *ActionTool) rebuiltResumeClosure(sessionID string, isTUI bool) func(context.Context, string) (task.SettleDetector, error) {
-	return func(_ context.Context, input string) (task.SettleDetector, error) {
-		if isTUI {
-			return nil, fmt.Errorf("session %s is a TUI — resume (send-keys) would corrupt the screen; use cancel + a fresh call instead", sessionID)
-		}
-		if !ct.tmuxMonitor.TouchSession(sessionID) {
-			return nil, fmt.Errorf("session %s is no longer monitored — use relaunch_task instead", sessionID)
-		}
-		detector := NewTmuxSettleDetector(sessionID, func() {
-			if err := ct.tmuxExecutor.KillSession(sessionID); err != nil {
-				log.Warnf("[rebuiltResume] kill %s: %v", sessionID, err)
+	return ct.rebuiltResumeResourceClosure(sessionID, "", isTUI)
+}
+
+func (ct *ActionTool) rebuiltResumeResourceClosure(sessionID, resourceID string, isTUI bool) func(context.Context, string) (task.SettleDetector, error) {
+	return func(ctx context.Context, input string) (task.SettleDetector, error) {
+		ct.detectorMu.Lock()
+		var detector *TmuxSettleDetector
+		for _, candidate := range ct.detectors {
+			if candidate.sessionID == sessionID && (resourceID == "" || resourceID == candidate.resourceID) {
+				detector = candidate
+				break
 			}
-			ct.tmuxMonitor.RemoveSession(sessionID)
-			ct.removeResidentMeta(sessionID)
-		})
-		detector.SetPaneStatusReader(func() (int, bool) { return ct.tmuxExecutor.PaneDeadStatus(sessionID) })
-		ct.tmuxMonitor.RebindCallback(sessionID, func(_ string, _, newStatus SessionStatus, output string) {
-			detector.OnWatchOutput(output)
-			detector.OnStateChange(newStatus, output)
-		})
-		baseline := 0
-		if out, err := ct.tmuxExecutor.GetSessionOutput(sessionID); err == nil {
-			baseline = strings.Count(out, "\n")
 		}
-		detector.Rearm(baseline)
-		if err := ct.tmuxExecutor.SendKeys(sessionID, input+"\n"); err != nil {
-			return nil, fmt.Errorf("send to session %s failed (session may be gone): %w", sessionID, err)
+		ct.detectorMu.Unlock()
+		if detector == nil {
+			return nil, fmt.Errorf("session %s is no longer monitored; use relaunch_task", sessionID)
 		}
-		return detector, nil
+		return ct.resumeResourceClosure(sessionID, detector.resourceID, isTUI, detector)(ctx, input)
 	}
 }
 

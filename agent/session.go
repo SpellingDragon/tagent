@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/agent/compress"
 	"github.com/SpellingDragon/tagent/memory"
 
 	tagentevent "github.com/SpellingDragon/tagent/event"
@@ -76,11 +75,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		return nil, fmt.Errorf("agent %q: config or model is nil", ta.name)
 	}
 
-	invBus := NewEventBus()
-
-	invOutputCh := make(chan *event.Event, 100)
-	invProjection := compress.NewSessionProjection()
-	invOnEvent := ta.makeOnEventCallback()
 	maxToolIters := ta.config.MaxToolIterations
 	if maxToolIters <= 0 {
 		maxToolIters = DefaultSubAgentMaxToolIterations
@@ -109,13 +103,6 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 			return nil, fmt.Errorf("agent %q: per-call override refused at assembly: %w", ta.name, err)
 		}
 	}
-	invCM := newContextManagerFromConfig(&invCfg, ta, ta.memPlugin, ta.sessionSvc, invBus, invOutputCh, invProjection, invOnEvent)
-	invCM.SetUserIDSessionID(userID, sessionID)
-	if ta.taskManager != nil {
-		invCM.taskController = ta.taskManager
-	}
-	invCM.settleSinks = ta.settleSinks
-
 	callerLease, inherited := execLeaseFromContext(ctx)
 	var invLease *ExecLease
 	switch {
@@ -125,30 +112,10 @@ func (ta *TagentAgent) Run(ctx context.Context, inv *agent.Invocation) (<-chan *
 		invLease = ta.contextManager.AcquireLease(LeaseSubCall)
 	}
 	if err := invLease.Err(); err != nil {
-		invCM.Close()
 		return nil, fmt.Errorf("subagent %q invocation refused: %w", ta.name, err)
 	}
-	ta.registerLiveCM(invCM)
-
 	inputEvent := newDelegationEvent(inv, message)
-	go func() {
-		defer invLease.Release()
-		defer close(invOutputCh)
-		defer ta.unregisterLiveCM(invCM)
-		defer invCM.Close()
-		invID := ""
-		if inv != nil {
-			invID = inv.InvocationID
-		}
-		ta.bindSettleBus(invID, invBus)
-		defer drainSettleBusTo(invBus, ta.persistentBus)
-		defer ta.unbindSettleBus(invID)
-		firstCtx := withInvocationID(ctx, invID)
-		invBus.Publish(inputEvent)
-		ta.runAgentLoop(firstCtx, invBus, invCM, loopSpec{invocationID: invID})
-	}()
-
-	return invOutputCh, nil
+	return ta.beginContinuation(ctx, inv, inputEvent, invCfg, pinnedRefs, invLease, userID, sessionID)
 }
 
 // newDelegationEvent wraps a request/response sub-call's assembled message as a

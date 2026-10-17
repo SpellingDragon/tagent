@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -684,8 +685,36 @@ func (w *AgentToolWrapper) Declaration() *trpctool.Declaration {
 // work — it is only a backstop against a truly runaway/stuck invocation.
 const defaultSubAgentTimeout = 600 * time.Second
 
+type subagentTurnBudgetKey struct{}
+
+type ErrContinuationInterrupted struct {
+	InvocationID string
+	Cause        error
+}
+
+func (e *ErrContinuationInterrupted) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("delegation %q interrupted before its committed outcome: %v", e.InvocationID, e.Cause)
+	}
+	return fmt.Sprintf("delegation %q interrupted before its committed outcome", e.InvocationID)
+}
+
+func (e *ErrContinuationInterrupted) Unwrap() error { return e.Cause }
+
+func WithSubagentTurnBudget(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, subagentTurnBudgetKey{}, budget)
+}
+
+func SubagentTurnBudgetFromContext(ctx context.Context) time.Duration {
+	budget, _ := ctx.Value(subagentTurnBudgetKey{}).(time.Duration)
+	return budget
+}
+
 // isRemoteAgent checks if the wrapped agent is a remote A2AAgent.
 func isRemoteAgent(ag agent.Agent) bool {
+	if remote, ok := ag.(interface{ RemoteAgent() bool }); ok {
+		return remote.RemoteAgent()
+	}
 	return fmt.Sprintf("%T", ag) == "*a2aagent.A2AAgent"
 }
 
@@ -869,16 +898,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 
 	if spawner, ok := task.TaskSpawnerFromContext(ctx); ok && !w.asyncDisabled {
 		rounds := &subagentRounds{cap: w.effectiveResumeRounds()}
-		callerLease, _ := execLeaseFromContext(ctx)
-		bgLease := callerLease.Derive(LeaseBackground)
-		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			defer bgLease.Release()
-			out, err := w.runAndCollect(bgLease.WithContext(runCtx), inv, agentName)
-			if err == nil {
-				rounds.add(messageBody, out)
-			}
-			return out, err
-		}, w.asyncDenseDuration)
 		spawnKey := agentName + ":" + request
 		if extraName != "" {
 			spawnKey = agentName + ":" + extraName
@@ -893,29 +912,31 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 			specTTL = time.Duration(ttlSeconds) * time.Second
 			declParams = map[string]string{subagentTTLParam: strconv.FormatInt(ttlSeconds, 10)}
 		}
-		res := spawner.Spawn(task.TaskSpec{
-			Kind: "subagent",
-			Desc: agentName + ": " + truncate(request, 60),
-			Key:  spawnKey,
-			TTL:  specTTL,
+		roundOwner, _ := invocationIDFromContext(ctx)
+		spec := task.TaskSpec{
+			Kind:       "subagent",
+			Desc:       agentName + ": " + truncate(request, 60),
+			Key:        spawnKey,
+			TTL:        specTTL,
+			RoundOwner: roundOwner,
 			Declarative: &task.Declarative{
 				Kind:        "subagent",
 				Desc:        agentName + ": " + truncate(request, 60),
 				Key:         spawnKey,
 				AgentName:   agentName,
-				MessageBody: request,
+				MessageBody: messageBody,
 				Params:      declParams,
 				Overrides:   overrides,
 			},
 			Relaunch: subagentRelaunchClosure(w.parentCM, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
 			ResumeFn: subagentResumeClosureWithOverrides(w.parentCM, agentName, rounds, overrides),
-		}, detector)
+		}
+		spec.Start = w.prepareTaskStart(ctx, w.parentCM, rounds, inv)
+		res := spawner.Spawn(spec, nil)
 		if res.Blocked != "" {
-			waitForUnadoptedStop(ctx, detector)
-			return "子任务未被任务层纳管（已启动的后台运行已被取消跟踪，结果不会回写）：" + res.Blocked + "。可稍后重发。", nil
+			return "子任务未被任务层纳管：" + res.Blocked + "。可稍后重发。", nil
 		}
 		if res.Deduped {
-			waitForUnadoptedStop(ctx, detector)
 			return fmt.Sprintf("同名计划任务已在运行 (task %s)；请等待其 task_settled 结果，不要重复发起同名调用。",
 				res.Task.ID), nil
 		}
@@ -934,24 +955,6 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 		return nil, err
 	}
 	return out, nil
-}
-
-// waitForUnadoptedStop honours  for a detector whose producer had ALREADY
-// started when the task layer refused to adopt it (spawn gate blocked, or a
-// same-key dedup hit). Cancel is only a notification, so the derived execution
-// reference this call created must not be dropped until the producer really
-// returns. The wait is bounded by the caller's own context — and if that deadline
-// arrives first, the reference stays held (the producer closure still owns its
-// release), which is the safe-retention outcome, never a premature reclaim.
-func waitForUnadoptedStop(ctx context.Context, d task.SettleDetector) {
-	if d == nil {
-		return
-	}
-	select {
-	case <-d.Stopped():
-	case <-ctx.Done():
-		log.Warnf("[AgentToolWrapper] un-adopted sub-run still active at the caller's deadline; its generation reference stays held until the producer stops")
-	}
 }
 
 // RedispatchAsync runAndCollect runs the sub-agent for the given invocation and collects its
@@ -1017,6 +1020,10 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 	if err == nil || !isRemoteAgent(w.agent) {
 		return out, err
 	}
+	var safe interface{ RetrySafe() bool }
+	if !errors.As(err, &safe) || !safe.RetrySafe() {
+		return out, err
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return out, err
 	}
@@ -1032,18 +1039,36 @@ func (w *AgentToolWrapper) runAndCollect(ctx context.Context, inv *agent.Invocat
 
 // collectAttempt is ONE send-and-drain attempt of a sub-agent delegation.
 func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invocation, agentName string) (string, error) {
-	startTime := time.Now()
-
 	eventCh, err := w.runWithTimeout(ctx, inv, agentName)
 	if err != nil {
 		return "", fmt.Errorf("agent tool %q: run failed: %w", agentName, err)
 	}
+	return w.collectEventStream(ctx, inv.InvocationID, agentName, eventCh)
+}
 
-	// Collect the final output from the sub-agent
+func (w *AgentToolWrapper) collectEventStream(ctx context.Context, invocationID, agentName string, eventCh <-chan *event.Event) (string, error) {
+	startTime := time.Now()
 	var finalOutput string
 	var toolCallCount int
 	var lastErr *model.ResponseError
+	var outcome string
 	for evt := range eventCh {
+		if evt == nil {
+			continue
+		}
+		if refs, _ := ctx.Value(delegationOutputRefsKey{}).(*delegationOutputRefs); refs != nil {
+			if key := string(evt.StateDelta["event_key"]); key != "" {
+				if parsed, err := strconv.ParseInt(key, 10, 64); err == nil && parsed != 0 {
+					refs.keys = append(refs.keys, parsed)
+				}
+			}
+		}
+		if value := evt.StateDelta["delegation_outcome"]; len(value) > 0 {
+			outcome = string(value)
+			if value, ok := evt.StateDelta["delegation_result"]; ok {
+				finalOutput = string(value)
+			}
+		}
 		var resp *model.Response
 		if evt.Response != nil {
 			resp = evt.Response.Clone()
@@ -1076,8 +1101,11 @@ func (w *AgentToolWrapper) collectAttempt(ctx context.Context, inv *agent.Invoca
 	log.Infof("[TRACE] tool_exit agent=%s output_len=%d tool_calls=%d elapsed=%v",
 		agentName, len(finalOutput), toolCallCount, elapsed)
 
-	if finalOutput == "" && lastErr != nil {
-		return "", fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
+	if lastErr != nil {
+		return finalOutput, fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
+	}
+	if _, local := w.agent.(*TagentAgent); local && outcome != "completed" {
+		return finalOutput, &ErrContinuationInterrupted{InvocationID: invocationID, Cause: ctx.Err()}
 	}
 	if finalOutput == "" {
 		finalOutput = "tool agent completed without output"
@@ -1106,60 +1134,36 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 		if err != nil {
 			return task.SpawnResult{}, err
 		}
-		detector := task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			defer lease.Release()
-			callCtx, release, err := target.armDeclaredCall(lease.WithContext(runCtx), agentName)
-			if err != nil {
-				return "", err
-			}
-			defer release()
-			return target.runAndCollect(callCtx, inv, agentName)
-		}, target.DenseDuration())
+		defer lease.Release()
 		var specTTL time.Duration
 		var declParams map[string]string
 		if ttlSeconds > 0 {
 			specTTL = time.Duration(ttlSeconds) * time.Second
 			declParams = map[string]string{subagentTTLParam: strconv.FormatInt(ttlSeconds, 10)}
 		}
-		res := spawner.Spawn(task.TaskSpec{
-			Kind: "subagent",
-			Desc: agentName + ": " + truncate(request, 60),
-			Key:  spawnKey,
-			TTL:  specTTL,
+		roundOwner, _ := invocationIDFromContext(ctx)
+		rounds := &subagentRounds{cap: target.effectiveResumeRounds()}
+		spec := task.TaskSpec{
+			Kind:       "subagent",
+			Desc:       agentName + ": " + truncate(request, 60),
+			Key:        spawnKey,
+			TTL:        specTTL,
+			RoundOwner: roundOwner,
 			Declarative: &task.Declarative{
 				Kind:        "subagent",
 				Desc:        agentName + ": " + truncate(request, 60),
 				Key:         spawnKey,
 				AgentName:   agentName,
-				MessageBody: request,
+				MessageBody: inv.Message.Content,
 				Params:      declParams,
 				Overrides:   overrides,
 			},
 			Relaunch: subagentRelaunchClosure(owner, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
-		}, detector)
-		if (res.Blocked != "" || res.Deduped) && hasInitiator(ctx) {
-			waitForUnadoptedStop(ctx, detector)
+			ResumeFn: subagentResumeClosureWithOverrides(owner, agentName, rounds, overrides),
 		}
-		return res, nil
+		spec.Start = target.prepareTaskStart(lease.WithContext(ctx), owner, rounds, inv)
+		return spawner.Spawn(spec, nil), nil
 	}
-}
-
-// hasInitiator ResolveReentryDelegation picks the delegation target a Resume/Relaunch re-entry
-// runs on: a re-entry riding an initiating call inherits THAT
-// call's binding (its own generation's face and its resource reference), while a
-// re-entry with no initiator (console/WAL/ops path) acquires the current effective
-// generation. A target the selected version does not route is REFUSED, never
-// silently re-routed onto another generation and never revived from the instance
-// the task happened to be spawned by.
-//
-// The returned lease is the reference taken on the selected generation BEFORE the
-// re-entered work starts (D6「派生前获取」); the caller owns exactly one Release.
-// hasInitiator reports a re-entry that rides a live call — the same predicate
-// ResolveReentryDelegation uses to pick the version source, so "who vouches for
-// this re-entry" is answered one way everywhere.
-func hasInitiator(ctx context.Context) bool {
-	_, ok := execLeaseFromContext(ctx)
-	return ok
 }
 
 // ResolveReentryDelegation 为一次重入（存储任务的 Resume/Relaunch）解析委派目标，并返回随附的子调用租约。
@@ -1204,15 +1208,27 @@ type subagentRounds struct {
 }
 
 type subagentRound struct {
-	input  string
-	output string
-	at     time.Time
+	input        string
+	output       string
+	err          string
+	factKey      int64
+	invocationID string
+	roundID      uint64
+	roundOwner   string
+	at           time.Time
 }
 
 func (r *subagentRounds) add(input, output string) {
+	r.addRecord(delegationRoundRecord{Input: input, Output: output, FinishedAt: time.Now()}, 0)
+}
+
+func (r *subagentRounds) addRecord(rd delegationRoundRecord, key int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.rounds = append(r.rounds, subagentRound{input: input, output: output, at: time.Now()})
+	r.rounds = append(r.rounds, subagentRound{
+		input: rd.Input, output: rd.Output, err: rd.Error, factKey: key, invocationID: rd.ChildInvocationID,
+		roundID: rd.RoundID, roundOwner: rd.RoundOwner, at: rd.FinishedAt,
+	})
 	limit := r.cap
 	if limit <= 0 {
 		limit = DefaultResumeContextRounds
@@ -1250,18 +1266,35 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 		if err != nil {
 			return nil, err
 		}
-		prior := rounds.recent(target.effectiveResumeRounds())
+		history := rounds
+		if id := task.TaskIDFromContext(ctx); id != "" && owner != nil && owner.memStore != nil {
+			history, err = loadDelegationRounds(owner.memStore, owner.partitionID, id)
+			if err != nil {
+				lease.Release()
+				return nil, err
+			}
+		}
+		prior := history.recent(target.effectiveResumeRounds())
 		if len(prior) == 0 {
 			lease.Release()
 			return nil, fmt.Errorf("subagent task has no settled round to resume from — use relaunch_task or a fresh call")
 		}
 
 		restored := make([]memory.FullEvent, 0, len(prior))
+		canRead := target.canReadDelegationHistory(ctx)
 		for _, rd := range prior {
+			output := rd.output
+			if canRead && rd.factKey != 0 && len([]rune(output)) > 2048 {
+				output = truncate(output, 2048) + "\n完整本轮输入、结果及错误: [evt_" + tagentevent.FormatEventKey(rd.factKey) + "|task_round]"
+			}
+			if rd.err != "" {
+				output += "\n本轮错误: " + rd.err
+			}
 			restored = append(restored, memory.FullEvent{
-				EventType: "task_round",
+				EventKey:  rd.factKey,
+				EventType: tagentevent.TypeTaskRound,
 				EventSummary: fmt.Sprintf("〔本任务上一轮〕指令: %s\n结果: %s",
-					truncate(rd.input, 200), rd.output),
+					rd.input, output),
 				Timestamp: rd.at.UnixMilli(),
 			})
 		}
@@ -1282,20 +1315,29 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 			agent.WithInvocationMessage(model.NewUserMessage(input)),
 			agent.WithInvocationRunOptions(runOpts),
 		)
-		return task.NewFuncSettleDetector(context.Background(), func(runCtx context.Context) (string, error) {
-			defer lease.Release()
+		id, round := task.TaskIDFromContext(ctx), task.RoundFromContext(ctx)
+		roundOwner := task.RoundOwnerFromContext(ctx)
+		stampDelegationParent(inv, owner, id, round, roundOwner, nil)
+		d, err := prepareDelegationDetector(owner, rounds, id, round, roundOwner, inv, input, target.DenseDuration(), lease.Release, func(runCtx context.Context) (string, error) {
 			callCtx, release, armErr := target.armDeclaredCall(lease.WithContext(runCtx), agentName)
 			if armErr != nil {
 				return "", armErr
 			}
 			defer release()
-			out, err := target.runAndCollect(callCtx, inv, agentName)
-			if err == nil {
-				rounds.add(input, out)
-			}
-			return out, err
-		}, target.DenseDuration()), nil
+			return target.runAndCollect(callCtx, inv, agentName)
+		})
+		return d, err
 	}
+}
+
+func (w *AgentToolWrapper) canReadDelegationHistory(ctx context.Context) bool {
+	for _, name := range w.maxToolDomain(ctx) {
+		switch name {
+		case "memory_recall", "recall_get", "recall":
+			return true
+		}
+	}
+	return false
 }
 
 // runWithTimeout starts ONE sub-agent run under a context timeout and keeps the
@@ -1304,6 +1346,9 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 // - agent.Run 是异步的，立即返回 channel；cancel 不得 defer 在本函数，否则会赶在调用方读完 channel 之前取消上下文，因此把 channel 包一层 goroutine，待其关闭后再调用 cancel。
 // - 重试策略在上一层 runAndCollect：远程传输失败通常以 error 事件（Run 返回 nil + channel）到达，本函数内的 error 分支覆盖不到那种形状。
 func (w *AgentToolWrapper) runWithTimeout(ctx context.Context, inv *agent.Invocation, agentName string) (<-chan *event.Event, error) {
+	if _, local := w.agent.(*TagentAgent); local {
+		return w.agent.Run(WithSubagentTurnBudget(ctx, defaultSubAgentTimeout), inv)
+	}
 	runCtx, cancel := context.WithTimeout(ctx, defaultSubAgentTimeout)
 
 	eventCh, err := w.agent.Run(runCtx, inv)

@@ -1080,8 +1080,7 @@ func TestLease_BackgroundRunKeepsGenerationPastTheAck(t *testing.T) {
 	require.Zero(t, h.refs().BackgroundRuns, "and its reference is gone")
 }
 
-// TestLease_RejectedAndDedupedSpawnReleaseExactlyOnce 钉住 任务层未收养、而探测器生产者已在跑的两条路径：引用必须活到该生产者停止，且恰好释放一次。
-// - 提前释放会让仍在写入的一方失去依赖；重复释放则把计数打成负数。
+// TestLease_RejectedAndDedupedSpawnReleaseExactlyOnce 钉住 拒绝与去重发生在业务生产者启动之前，不留后台引用。
 func TestLease_RejectedAndDedupedSpawnReleaseExactlyOnce(t *testing.T) {
 	t.Run("spawn rejected by gate", func(t *testing.T) {
 		h := newLeaseHarness(t, func() string { return "disk degraded: new background tasks paused" })
@@ -1089,21 +1088,13 @@ func TestLease_RejectedAndDedupedSpawnReleaseExactlyOnce(t *testing.T) {
 		w := NewAgentToolWrapper(child, "do work", nil, nil)
 		w.SetAsyncDenseDuration(20 * time.Millisecond)
 
-		go func() {
-			time.Sleep(150 * time.Millisecond)
-			close(child.finish)
-		}()
-		done := make(chan any, 1)
-		go func() {
-			out, _ := w.Call(h.ctx, subagentCallArgs(t))
-			done <- out
-		}()
-		out := <-done
+		out, err := w.Call(h.ctx, subagentCallArgs(t))
+		require.NoError(t, err)
 		require.Contains(t, out.(string), "未被任务层纳管")
 		select {
-		case <-child.finished:
+		case <-child.running:
+			t.Fatal("rejected task started its producer")
 		default:
-			t.Fatal("§4.1「拒绝分支也先等停止」: the rejection branch returned while its un-adopted producer was still running")
 		}
 		require.Zero(t, h.refs().BackgroundRuns, "the un-adopted run's reference is released once, at its stop")
 	})
@@ -1127,7 +1118,11 @@ func TestLease_RejectedAndDedupedSpawnReleaseExactlyOnce(t *testing.T) {
 		out, err := w2.Call(h.ctx, subagentCallArgs(t))
 		require.NoError(t, err)
 		require.Contains(t, out.(string), "同名计划任务已在运行")
-		second.once2.Do(func() { close(second.finished) })
+		select {
+		case <-second.running:
+			t.Fatal("deduped task started its producer")
+		default:
+		}
 		require.Eventually(t, func() bool { return h.refs().BackgroundRuns <= 1 }, 5*time.Second, 10*time.Millisecond,
 			"only the adopted task keeps a background reference")
 

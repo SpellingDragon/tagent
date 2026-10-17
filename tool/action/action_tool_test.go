@@ -292,6 +292,9 @@ func TestEmitProbeResult_Latch(t *testing.T) {
 	}
 
 	d.EmitProbeResult(true, "")
+	if recovered := <-d.Settled(); recovered.Observation != "probe_recovered" {
+		t.Fatalf("missing recovery edge: %+v", recovered)
+	}
 	d.EmitProbeResult(false, "down again")
 	select {
 	case sig := <-d.Settled():

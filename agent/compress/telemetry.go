@@ -48,8 +48,27 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
 			continue
 		}
 		evt := lookupNoticeEvent(store, ref)
+		if store != nil && evt == nil {
+			out[ref.EventKey] = TelemActive
+			continue
+		}
 		if evt != nil && !isMarkedSettleNotice(evt) {
 			continue
+		}
+		protocol := evt != nil && (evt.Metadata[tagentevent.MetaKeySettleWake] != "" || evt.Metadata[tagentevent.MetaKeyObservationReceiptKey] != "")
+		disposition := ""
+		if protocol {
+			disposition = VerifiedInputDisposition(store, evt)
+			wake := evt.Metadata[tagentevent.MetaKeySettleWake]
+			valid := disposition == "recovered" || (wake == "observe" && disposition == "observed") || (wake != "observe" && disposition == "processed")
+			if !valid {
+				out[ref.EventKey] = TelemActive
+				continue
+			}
+			if wake == "observe" || disposition == "recovered" {
+				out[ref.EventKey] = TelemDemote
+				continue
+			}
 		}
 		consumer := -1
 		outputsAfter := 0
@@ -64,7 +83,7 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
 			}
 		}
 		switch {
-		case consumer < 0:
+		case consumer < 0 && !protocol:
 			out[ref.EventKey] = TelemActive
 		case isExternalizedNotice(evt):
 			out[ref.EventKey] = TelemDemote
@@ -103,7 +122,7 @@ func lookupNoticeEvent(store memory.MemoryStore, ref memory.EventReference) *mem
 		return nil
 	}
 	evt, err := store.GetEvent(ref.EventKey)
-	if err != nil {
+	if err != nil || evt == nil || evt.EventKey != ref.EventKey || (ref.PartitionID != 0 && evt.PartitionID != ref.PartitionID) {
 		return nil
 	}
 	return evt
@@ -127,4 +146,28 @@ func isExternalizedNotice(evt *memory.FullEvent) bool {
 		ts = evt.Metadata[tagentevent.MetaKeyTriggerSource]
 	}
 	return ts != "" && tagentevent.DeliverableLineage(ts)
+}
+
+// VerifiedInputDisposition returns the disposition proven for this exact source fact.
+func VerifiedInputDisposition(store memory.MemoryStore, source *memory.FullEvent) string {
+	if store == nil || source == nil || source.EventKey <= 0 {
+		return ""
+	}
+	raw := source.Metadata[tagentevent.MetaKeyObservationReceiptKey]
+	key, err := tagentevent.ParseEventKey(raw)
+	if err != nil || key <= 0 || tagentevent.FormatEventKey(key) != raw {
+		return ""
+	}
+	receipt, err := store.GetEvent(key)
+	if err != nil || receipt == nil || receipt.EventKey != key || receipt.PartitionID != source.PartitionID || receipt.EventType != tagentevent.TypeInputDisposition {
+		return ""
+	}
+	if receipt.Metadata[tagentevent.MetaKeyConsumedEventKey] != tagentevent.FormatEventKey(source.EventKey) || receipt.Metadata[tagentevent.MetaKeyAgentName] != source.Metadata[tagentevent.MetaKeyAgentName] {
+		return ""
+	}
+	kind := receipt.Metadata[tagentevent.MetaKeyInputDisposition]
+	if kind != "observed" && kind != "processed" && kind != "recovered" {
+		return ""
+	}
+	return kind
 }

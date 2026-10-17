@@ -82,7 +82,7 @@ func TestTmuxSettleDetector_ErrorCarriesErr(t *testing.T) {
 	}
 }
 
-// TestTmuxSettleDetector_TimedOutSuspect: timed_out → suspect + close.
+// TestTmuxSettleDetector_TimedOutSuspect keeps quiet producers observable.
 func TestTmuxSettleDetector_TimedOutSuspect(t *testing.T) {
 	d := NewTmuxSettleDetector("s4", nil)
 	d.OnStateChange(SessionTimedOut, "no output")
@@ -90,9 +90,14 @@ func TestTmuxSettleDetector_TimedOutSuspect(t *testing.T) {
 	if sig.Kind != task.SettleSuspect {
 		t.Errorf("signal = %+v, want suspect", sig)
 	}
-	if _, ok := <-d.Settled(); ok {
-		t.Errorf("stream should be closed after timed_out")
+	select {
+	case _, ok := <-d.Settled():
+		if !ok {
+			t.Fatal("silence must keep monitoring active")
+		}
+	default:
 	}
+	d.Cancel()
 }
 
 // TestTmuxSettleDetector_CancelClosesAndKills: Cancel invokes cancelFn and closes.
@@ -108,30 +113,32 @@ func TestTmuxSettleDetector_CancelClosesAndKills(t *testing.T) {
 	}
 }
 
-// TestTmuxSettleDetector_DrivesTaskManager 钉住 the detector composes with the TaskManager sync-wait primitive (stable settle within window → inline).
+// TestTmuxSettleDetector_DrivesTaskManager returns inline for an actual process exit.
 func TestTmuxSettleDetector_DrivesTaskManager(t *testing.T) {
 	tm := task.NewTaskManager(task.TaskManagerConfig{})
 	d := NewTmuxSettleDetector("s6", nil, 500*time.Millisecond)
-	go func() {
-		d.OnStateChange(SessionStable, "ready")
-	}()
-	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "svc"}, d)
-	if !res.Settled || res.Signal.Kind != task.SettleStable {
-		t.Errorf("expected inline stable settle, got %+v", res)
+	defer d.Cancel()
+	go d.OnStateChange(SessionCompleted, "finished")
+	res := tm.Spawn(task.TaskSpec{Kind: "command", Desc: "job", Mode: "oneshot", WaitFor: task.WaitExit}, d)
+	if !res.Settled || res.Signal.Kind != task.SettleCompleted {
+		t.Fatalf("expected inline actual exit, got %+v", res)
 	}
-	if res.Task.Status() != task.TaskStable {
-		t.Errorf("task status = %s, want stable", res.Task.Status())
+	if res.Task.Status() != task.TaskCompleted {
+		t.Fatalf("status = %s", res.Task.Status())
 	}
-	d.Cancel()
 }
 
-// TestTmuxSettleDetector_ReapsOnCompletion 钉住 a completed (process-dead) session is reaped (kill closure invoked) so dead sessions don't accumulate.
+// TestTmuxSettleDetector_ReapsOnCompletion retains evidence until the exact receipt is accepted.
 func TestTmuxSettleDetector_ReapsOnCompletion(t *testing.T) {
 	reaped := false
 	d := NewTmuxSettleDetector("s-reap", func() { reaped = true })
 	d.OnStateChange(SessionCompleted, "done")
+	if reaped {
+		t.Fatal("completion must retain evidence until acceptance")
+	}
+	d.AcknowledgeSignal(<-d.Settled())
 	if !reaped {
-		t.Errorf("completed session should be reaped")
+		t.Fatal("acceptance must release the retained pane")
 	}
 }
 
@@ -237,6 +244,7 @@ func TestTmuxSettleDetector_CompletedReapsRealSession(t *testing.T) {
 
 	detector := NewTmuxSettleDetector(id, func() { _ = exec.KillSession(id) })
 	detector.OnStateChange(SessionCompleted, "done")
+	detector.AcknowledgeSignal(<-detector.Settled())
 
 	if exec.SessionExists(id) {
 		t.Error("a completed tmux session must be auto-reaped")

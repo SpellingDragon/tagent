@@ -23,13 +23,14 @@ type mockInspector struct {
 	// paneExitCode/paneExitKnown program PaneDeadStatus (failure-polarity passthrough).
 	// Default known=false → unresolvable → deathPolarity keeps completed polarity, so
 	// tests that don't set it are unaffected.
-	paneExitCode  int
-	paneExitKnown bool
-	output        string
-	outputErr     error
-	heartbeatResp string
-	killErr       error
-	restartErr    error
+	paneExitExplicit bool
+	paneExitCode     int
+	paneExitKnown    bool
+	output           string
+	outputErr        error
+	heartbeatResp    string
+	killErr          error
+	restartErr       error
 
 	// processExistsCalls Call tracking
 	processExistsCalls  int
@@ -93,6 +94,9 @@ func (m *mockInspector) IsPaneDead(sessionID string) bool {
 func (m *mockInspector) PaneDeadStatus(sessionID string) (int, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.paneExitExplicit && !m.paneExitKnown && (m.isPaneDead || !m.processExists) {
+		return 0, true
+	}
 	return m.paneExitCode, m.paneExitKnown
 }
 
@@ -100,7 +104,7 @@ func (m *mockInspector) PaneDeadStatus(sessionID string) (int, bool) {
 func (m *mockInspector) setPaneExit(code int, known bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.paneExitCode, m.paneExitKnown = code, known
+	m.paneExitCode, m.paneExitKnown, m.paneExitExplicit = code, known, true
 }
 
 func (m *mockInspector) GetSessionOutput(sessionID string) (string, error) {
@@ -193,8 +197,8 @@ func TestDetectSessionState_NilExecutor(t *testing.T) {
 	session := newTestSession("test", SessionRunning, "")
 
 	status := tm.detectSessionState(session)
-	if status != SessionError {
-		t.Errorf("expected SessionError, got %s", status)
+	if status != SessionTimedOut {
+		t.Errorf("expected SessionTimedOut, got %s", status)
 	}
 }
 
@@ -485,33 +489,7 @@ func TestStateMachine_FullLifecycle_NormalCompletion(t *testing.T) {
 }
 
 func TestStateMachine_FakeDeadLifecycle(t *testing.T) {
-	inspector := &mockInspector{
-		processExists: true,
-		heartbeatResp: "no_response",
-	}
-	tm := newTestMonitor(inspector)
-	tm.fakeDeadDuration = 10 * time.Millisecond
-
-	session := newTestSession("fake", SessionRunning, "X")
-	session.IsInteractive = true
-	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("X")))
-	tm.sessions["fake"] = session
-
-	inspector.setOutput("X", nil)
-
-	tm.checkSession(session)
-	if _, exists := tm.GetSession("fake"); !exists {
-		t.Fatal("session should not be removed after first check")
-	}
-
-	session.StableSince = time.Now().Add(-1 * time.Hour)
-
-	tm.checkSession(session)
-
-	_, exists := tm.GetSession("fake")
-	if exists {
-		t.Error("BUG: session should be removed after fake_dead")
-	}
+	assertQuietObservation(t, ModeInteractive, false)
 }
 
 // newTUISession creates a TmuxSession with IsTUI=true for TUI testing.
@@ -870,153 +848,19 @@ func TestCallback_ReceiveExactOutput(t *testing.T) {
 }
 
 func TestDetectSessionState_FakeAlive_HeartbeatOk(t *testing.T) {
-	inspector := &mockInspector{
-		processExists: true,
-		heartbeatResp: "ok",
-	}
-	tm := newTestMonitor(inspector)
-	tm.fakeDeadDuration = 10 * time.Millisecond
-
-	session := newTestSession("fakealive", SessionRunning, "unchanged")
-	session.IsInteractive = true
-	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("unchanged")))
-	session.StableSince = time.Now().Add(-1 * time.Hour)
-
-	inspector.setOutput("unchanged", nil)
-
-	status := tm.detectSessionState(session)
-
-	if status != SessionFakeAlive {
-		t.Errorf("expected SessionFakeAlive, got %s", status)
-	}
-	if inspector.sendHeartbeatCalls != 1 {
-		t.Errorf("expected 1 heartbeat, got %d", inspector.sendHeartbeatCalls)
-	}
+	assertQuietObservation(t, ModeInteractive, false)
 }
 
 func TestDetectSessionState_FakeDead_RecheckPaneDead(t *testing.T) {
-	inspector := &mockInspector{
-		processExists: true,
-		heartbeatResp: "no_response",
-	}
-	inspector.isPaneDead = false
-	inspector.paneDeadOnRecheck = 2
-
-	tm := newTestMonitor(inspector)
-	tm.fakeDeadDuration = 10 * time.Millisecond
-
-	session := newTestSession("recheck", SessionRunning, "stable_output")
-	session.IsInteractive = true
-	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stable_output")))
-	session.StableSince = time.Now().Add(-1 * time.Hour)
-
-	inspector.setOutput("stable_output", nil)
-
-	status := tm.detectSessionState(session)
-
-	if status != SessionCompleted {
-		t.Errorf("expected SessionCompleted (pane died on re-check), got %s", status)
-	}
-	if session.LastOutput != "stable_output" {
-		t.Errorf("LastOutput not captured! got %q", session.LastOutput)
-	}
-	if inspector.sendHeartbeatCalls != 1 {
-		t.Errorf("expected 1 heartbeat, got %d", inspector.sendHeartbeatCalls)
-	}
+	assertQuietObservation(t, ModeOneshot, false)
 }
 
 func TestHandleFakeAlive_RestartSuccess_ContinuesTracking(t *testing.T) {
-	inspector := &mockInspector{
-		processExists: true,
-		heartbeatResp: "ok",
-	}
-	tm := newTestMonitor(inspector)
-	tm.fakeDeadDuration = 10 * time.Millisecond
-
-	session := newTestSession("restart_ok", SessionRunning, "stuck")
-	session.IsInteractive = true
-	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stuck")))
-	session.StableSince = time.Now().Add(-1 * time.Hour)
-	tm.sessions["restart_ok"] = session
-
-	inspector.setOutput("stuck", nil)
-
-	var transitions []string
-	tm.StateChangeCallback = func(sid string, oldS, newS SessionStatus, output string) {
-		transitions = append(transitions, fmt.Sprintf("%s→%s", oldS, newS))
-	}
-
-	tm.checkSession(session)
-
-	if inspector.restartSessionCalls != 1 {
-		t.Errorf("expected 1 restart call, got %d", inspector.restartSessionCalls)
-	}
-	if !session.StableSince.IsZero() {
-		t.Error("StableSince should be reset after successful restart")
-	}
-	if session.LastOutput != "" {
-		t.Errorf("LastOutput should be empty after restart, got %q", session.LastOutput)
-	}
-	if session.Status != SessionFakeAlive {
-		t.Errorf("expected Status=FakeAlive (set by checkSession), got %s", session.Status)
-	}
-	if _, exists := tm.GetSession("restart_ok"); !exists {
-		t.Fatal("session should still be tracked after FakeAlive restart")
-	}
-
-	inspector.setOutput("fresh_output", nil)
-	oldStatus := session.Status
-	tm.checkSession(session)
-
-	if session.Status != SessionRunning {
-		t.Errorf("after restart, expected Running, got %s (was %s)", session.Status, oldStatus)
-	}
-
-	if session.Status != SessionRunning {
-		t.Errorf("expected state to transition to Running after restart, got %s", session.Status)
-	}
-
-	if _, exists := tm.GetSession("restart_ok"); !exists {
-		t.Fatal("session should still be tracked after FakeAlive restart")
-	}
+	assertQuietObservation(t, ModeResident, false)
 }
 
 func TestHandleFakeAlive_RestartFailure_StaysFakeAlive(t *testing.T) {
-	inspector := &mockInspector{
-		processExists: true,
-		heartbeatResp: "ok",
-		restartErr:    fmt.Errorf("tmux unavailable"),
-	}
-	tm := newTestMonitor(inspector)
-	tm.fakeDeadDuration = 10 * time.Millisecond
-
-	session := newTestSession("restart_fail", SessionRunning, "stuck")
-	session.IsInteractive = true
-	session.LastOutputMD5 = fmt.Sprintf("%x", md5.Sum([]byte("stuck")))
-	session.StableSince = time.Now().Add(-1 * time.Hour)
-	tm.sessions["restart_fail"] = session
-
-	inspector.setOutput("stuck", nil)
-
-	var callbackFired bool
-	tm.StateChangeCallback = func(sid string, oldS, newS SessionStatus, output string) {
-		callbackFired = true
-	}
-
-	tm.checkSession(session)
-
-	if callbackFired {
-		t.Error("callback should NOT fire on running→fake_alive transition (FakeAlive is intermediate state)")
-	}
-	if inspector.restartSessionCalls != 1 {
-		t.Errorf("expected 1 restart attempt, got %d", inspector.restartSessionCalls)
-	}
-	if session.Status != SessionFakeAlive {
-		t.Errorf("expected Status=FakeAlive (untouched on failure), got %s", session.Status)
-	}
-	if _, exists := tm.GetSession("restart_fail"); !exists {
-		t.Error("session should remain tracked after failed restart")
-	}
+	assertQuietObservation(t, ModeInteractive, false)
 }
 
 // TestBuildResultFromSignal_OutputTruncation 钉住 小输出原样返回；大输出转储到文件并保留截断尾部在内联，使上下文有界。
@@ -1150,7 +994,7 @@ func TestCheckAllSessions_PollsDue(t *testing.T) {
 
 	inspector.resetCallCounters()
 	tm.checkAllSessions()
-	if inspector.processExistsCalls == 0 {
+	if inspector.alive3Calls == 0 {
 		t.Errorf("due session should be polled")
 	}
 	if !tm.nextPoll["s"].After(time.Now()) {

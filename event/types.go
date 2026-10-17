@@ -32,7 +32,13 @@ const (
 
 	TypeSettleFold = "settle_fold"
 
-	TypeTaskSpawned = "task_spawned"
+	TypeTaskSpawned       = "task_spawned"
+	TypeTaskSignal        = "task_signal"
+	TypeTaskSignalReceipt = "task_signal_receipt"
+	TypeInputDisposition  = "input_disposition"
+	TypeContinuationState = "continuation_state"
+
+	TypeTaskRound = "task_round"
 
 	TypeResidentSession = "resident_session"
 

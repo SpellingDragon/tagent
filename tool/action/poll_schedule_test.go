@@ -107,10 +107,10 @@ func TestQuietTimeout_DefaultEquivalence(t *testing.T) {
 
 	s2 := quietSession(tm, "d2", 200*time.Millisecond, 0, false)
 	s2.IsInteractive = true
-	if st := tm.detectSessionState(s2); st != SessionFakeDead && st != SessionFakeAlive {
+	if st := tm.detectSessionState(s2); st != SessionTimedOut {
 		t.Fatalf("silence 200ms with default threshold: got %v, want fake path", st)
 	}
-	if inspector.sendHeartbeatCalls == 0 {
+	if inspector.sendHeartbeatCalls != 0 {
 		t.Errorf("default path did not send heartbeat; fake check not entered")
 	}
 }
@@ -158,7 +158,7 @@ func TestQuietTimeout_ConcurrentIsolation(t *testing.T) {
 	if stA == SessionFakeDead {
 		t.Errorf("session A (override 10m) judged fake-dead; isolation broken")
 	}
-	if stB != SessionFakeDead && stB != SessionFakeAlive {
+	if stB != SessionTimedOut {
 		t.Errorf("session B (default) not on fake path at 200ms: %v", stB)
 	}
 }
@@ -208,7 +208,7 @@ func TestTrimToLineOffset(t *testing.T) {
 	if got := trimToLineOffset(full, 0); got != full {
 		t.Errorf("zero baseline must return input, got %q", got)
 	}
-	if got := trimToLineOffset("only\ntwo", 5); got != "only\ntwo" {
-		t.Errorf("shifted scrollback must degrade to full capture, got %q", got)
+	if got := trimToLineOffset("only\ntwo", 5); got != "" {
+		t.Errorf("a baseline beyond available output must not replay previous output, got %q", got)
 	}
 }

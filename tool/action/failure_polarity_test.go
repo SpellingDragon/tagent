@@ -1,7 +1,6 @@
 package action
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -40,7 +39,7 @@ func TestDetect_DeathUnresolvableCodeStaysCompleted(t *testing.T) {
 	tm := newTestMonitor(m)
 	session := newTestSession("du", SessionRunning, "x\n")
 
-	require.Equal(t, SessionCompleted, tm.detectSessionState(session))
+	require.Equal(t, SessionError, tm.detectSessionState(session))
 }
 
 // TestDetect_SignalDeathIsError 钉住信号死（负码）判 SessionError。
@@ -62,30 +61,33 @@ func TestDetect_ProbeUnresolvableLimitIsError(t *testing.T) {
 	session := newTestSession("pu", SessionRunning, "partial\n")
 	session.ProbeUnknownCount = defaultProbeUnknownLimit
 
-	require.Equal(t, SessionError, tm.detectSessionState(session), "框架失明不得伪装成功")
+	require.Equal(t, SessionTimedOut, tm.detectSessionState(session), "框架失明不得伪装成功")
 }
 
-// TestHandleFakeDead_KillEscapeIsError 钉住 kill 三连败强拆判 SessionError，逃逸不伪装完成。
+// TestHandleFakeDead_KillEscapeIsError preserves a quiet producer without invoking termination.
 func TestHandleFakeDead_KillEscapeIsError(t *testing.T) {
-	m := &mockInspector{killErr: fmt.Errorf("kill failed")}
-	tm := newTestMonitor(m)
-	session := newTestSession("fk", SessionFakeDead, "")
-	session.KillRetryCount = 2
-
-	removed := tm.handleFakeDead(session)
-	require.True(t, removed, "达最大重试应强拆移除")
-	require.Equal(t, SessionError, session.Status, "逃逸进程报失败极性")
+	inspector := &mockInspector{processExists: true}
+	monitor := newTestMonitor(inspector)
+	session := newTestSession("quiet", SessionFakeDead, "output")
+	if monitor.handleFakeDead(session) {
+		t.Fatal("quiet observation must retain monitoring")
+	}
+	if inspector.killSessionCalls != 0 || session.Status != SessionTimedOut {
+		t.Fatal("quiet observation must never kill")
+	}
 }
 
-// TestHandleFakeDead_KillSucceedsStaysCompleted 钉住 kill 成功（非逃逸）保持 completed。
+// TestHandleFakeDead_KillSucceedsStaysCompleted preserves a quiet producer without invoking termination.
 func TestHandleFakeDead_KillSucceedsStaysCompleted(t *testing.T) {
-	m := &mockInspector{}
-	tm := newTestMonitor(m)
-	session := newTestSession("fk2", SessionFakeDead, "")
-
-	removed := tm.handleFakeDead(session)
-	require.True(t, removed)
-	require.Equal(t, SessionCompleted, session.Status)
+	inspector := &mockInspector{processExists: true}
+	monitor := newTestMonitor(inspector)
+	session := newTestSession("quiet", SessionFakeDead, "output")
+	if monitor.handleFakeDead(session) {
+		t.Fatal("quiet observation must retain monitoring")
+	}
+	if inspector.killSessionCalls != 0 || session.Status != SessionTimedOut {
+		t.Fatal("quiet observation must never kill")
+	}
 }
 
 // TestDetectorPull_ExitCodeOnError 钉住 SessionError 时探测退出码填入 ExitCode 与 Err。

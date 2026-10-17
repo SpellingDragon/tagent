@@ -40,7 +40,7 @@ func TestProbeUnknownGate_ConsecutiveLimit(t *testing.T) {
 			"unknown #%d must keep the session (gate < limit 3)", i)
 		require.Equal(t, i, sess.ProbeUnknownCount)
 	}
-	require.Equal(t, SessionError, tm.detectSessionState(sess),
+	require.Equal(t, SessionTimedOut, tm.detectSessionState(sess),
 		"3rd consecutive unknown = 框架失明，报失败极性而非伪装完成（failure-polarity passthrough D3）")
 }
 
