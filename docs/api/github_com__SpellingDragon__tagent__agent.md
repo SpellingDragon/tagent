@@ -42,6 +42,10 @@ const (
 	// TurnSpanName 是 turn root span 名。
 	TurnSpanName = "tagent.turn"
 )
+const ContinuationContextKey = "tagent.continuation_context"
+    ContinuationContextKey carries a child's exact result address in invocation
+    state.
+
 const ExternalContextKey = "external_context"
     ExternalContextKey is the RuntimeState key used to pass external context
     through the Invocation → A2A metadata → Invocation chain. Exported so that
@@ -154,13 +158,9 @@ func PinModelReferences(s *StagedGeneration, refs *ModelRefSnapshot) error
     only process-wide store.
 
 func RebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.TaskManager,
-	rebuildClosures func(decl task.Declarative) task.TaskSpec) (restored int)
-    RebuildTaskRegistry：冷启动从事实链 纯全量回放重建 active 任务集（registry=fold：task_spawned
-    记录 − 终态 settle）。 无 compaction snapshot（任务无折叠语义）。状态映射：running→suspect（进程内
-    watch goroutine 不可恢复，交 R3 存活探测裁决）；alive-detached/suspect 原态；
-    终态（completed/failed/cancelled/dead，含 inline settle 记录）不重建。 rebuildClosures
-    由 tool/action 提供（承诺表：command 全/subagent Relaunch/generic ❌）。
-    best-effort：单条记录损坏跳过 + WARN，不阻断重建。
+	rebuildClosures func(decl task.Declarative) task.TaskSpec) int
+    RebuildTaskRegistry restores task intentions, producer bindings and
+    unaccepted signals in event-key order.
 
 func RegisterModelReference(ref string, m model.Model)
     RegisterModelReference publishes a model instance under a reference name,
@@ -207,22 +207,13 @@ func ResolveReentryDelegation(ctx context.Context, owner *ContextManager, agentN
     - 上下文有发起方租约时按其同一代解析；目标不在该代的编排里就直接报错，绝不悄悄改投当前生效代。 -
 
 func SubagentRedispatcher(resolve func(ctx context.Context, agentName string) (*AgentToolWrapper, *ExecLease, error), tm *task.TaskManager) func(ctx context.Context, agentName, body string, overrides *task.Overrides) (task.SpawnResult, error)
-    SubagentRedispatcher：跨重启 subagent Relaunch 的重投递器——镜像 subagentRelaunch
-    的 detector 形状 （RedispatchAsync 同步跑在 detector 的 watch goroutine 内，Spawn
-    的 sync-wait 窗口语义保持；spawnKey=agentName+":"+body 与无 extraName 的原 spawn
-    键一致→幂等去重覆盖）。
+    SubagentRedispatcher rebuilds relaunch through the same admission and
+    binding barriers as a fresh delegation. Every re-entry resolves the target
+    on its initiating call's generation or the effective resident face.
 
-    resolve 是**每次重投时**对目标所属调用绑定的一次解析，而不是启动时冻结的 wrapper 快照：否则一个被后续代移除的目标仍会在这里被旧代
-    wrapper 静默复活（跑 的是已退役的声明与目标），而当时的拒绝文案又声称“current org”——两者均与
-    task-registry-rebuild 的「不复活已退役执行器或静默改投」相逆。调用方应传入 「按有效执行面解析」的闭包（见
-    ContextManager.SubagentWrapper），这就让显式 重投与普通委派共用同一个版本真源。 resolve is
-    the SAME version source ordinary delegation and 's re-entry use (see
-    ResolveReentryDelegation): the initiating call's binding when the
-    re-entry rides one, the effective face otherwise. Freezing a wrapper
-    snapshot here — or resolving against the effective face while an
-    initiator holds an older binding — would let a target a later generation
-    removed be silently revived by a stored task, which is precisely what
-    task-registry-rebuild「不复活已退役执行器或静默改投」 and forbid.
+func SubagentTurnBudgetFromContext(ctx context.Context) time.Duration
+    SubagentTurnBudgetFromContext returns the active model budget inherited by a
+    delegated turn.
 
 func TagentAgentsConstructed() int64
     TagentAgentsConstructed reports the process-wide count of TagentAgent
@@ -242,6 +233,10 @@ func WireOrgGeneration(owners map[string]*ContextManager, staged map[string]*Sta
     on it, so a call through that wrapper resolves the child from the
     declaring generation own execution view. - Outgoing (retroactive):
     a cold-start owner whose binding was created lazily and never wired
+
+func WithSubagentTurnBudget(ctx context.Context, budget time.Duration) context.Context
+    WithSubagentTurnBudget bounds active model work while preserving time spent
+    waiting for background tasks.
 
 TYPES
 
@@ -309,9 +304,10 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
         event data
      3. Serializes the events into RuntimeState["external_context"] (compact
         JSON)
-     4. Constructs an Invocation and calls agent.Run with timeout — unified for
-        local and remote
-     5. For remote A2A agents, retries once on failure with 500ms backoff
+     4. Prepares an invocation after task admission, then starts its producer
+        after binding acceptance
+     5. For remote agents, retries once only when the error explicitly proves
+        non-acceptance
      6. Collects the sub-agent's final output from the event stream
 
     context_refs resolves through the same retrieval channel and merges into the
@@ -726,6 +722,27 @@ func BuildExecutionFace(cfg *TagentConfig) ContextManagerConfig
     so a face assembled here is byte-equivalent to the face a discarded shell's
     ExecutorConfig() would have returned.
 
+type ContinuationBinding struct {
+	InvocationID       string `json:"invocation_id"`
+	ParentAgent        string `json:"parent_agent,omitempty"`
+	ParentInvocationID string `json:"parent_invocation_id,omitempty"`
+	ParentTaskID       string `json:"parent_task_id,omitempty"`
+	ParentTaskRound    uint64 `json:"parent_task_round,omitempty"`
+	State              string `json:"state"`
+}
+    ContinuationBinding describes an original child invocation without granting
+    a new round.
+
+type ContinuationContext struct {
+	ParentAgent        string            `json:"parent_agent,omitempty"`
+	ParentInvocationID string            `json:"parent_invocation_id,omitempty"`
+	ParentTaskID       string            `json:"parent_task_id,omitempty"`
+	ParentTaskRound    uint64            `json:"parent_task_round,omitempty"`
+	Origin             map[string]string `json:"origin,omitempty"`
+}
+    ContinuationContext identifies the parent task and producer round awaiting a
+    result.
+
 type DegradationBehaviors struct {
 	// ModelBackoff pauses the loop between turns while DepModel is degraded.
 	ModelBackoff time.Duration
@@ -740,6 +757,33 @@ type DegradationBehaviors struct {
     degradation. All fields are independent; zero values disable each behavior
     (zero behavior change). Only effective when Degradation is wired; “a gate,
     not a wall”.
+
+type ErrContinuationInterrupted struct {
+	InvocationID string
+	Cause        error
+}
+    ErrContinuationInterrupted reports a stream that closed before its committed
+    local outcome arrived.
+
+func (e *ErrContinuationInterrupted) Error() string
+    Error describes the interrupted invocation and its cancellation cause when
+    available.
+
+func (e *ErrContinuationInterrupted) Unwrap() error
+    Unwrap preserves the cancellation or transport cause.
+
+type ErrContinuationNotAccepted struct {
+	InvocationID string
+	Cause        error
+}
+    ErrContinuationNotAccepted proves that a local run returned before handing
+    back an event stream.
+
+func (e *ErrContinuationNotAccepted) Error() string
+    Error describes the local preparation refusal.
+
+func (e *ErrContinuationNotAccepted) Unwrap() error
+    Unwrap preserves the local preparation error.
 
 type EventBus struct {
 	// Has unexported fields.
@@ -851,6 +895,9 @@ func (b *EventBus) Pull(ctx context.Context) ([]*AgentEvent, error)
     non-blocking drains all remaining pending events. Returns the batch and nil
     error on success. Returns nil and ctx.Err() when ctx is cancelled before any
     event arrives.
+
+func (b *EventBus) PullWithWake(ctx context.Context, wake <-chan struct{}) ([]*AgentEvent, error)
+    PullWithWake returns an empty batch when this caller's wait ledger changes.
 
 func (b *EventBus) QuarantineEnvelope(path, reason string)
     QuarantineEnvelope isolates a deterministic-conflict envelope (kept on disk
@@ -989,13 +1036,15 @@ type ExtraParam struct {
     NOT a general RPC channel.
 
 type GenerationRefs struct {
-	Generation int64          `json:"generation"`
-	Owner      string         `json:"owner"`
-	Retired    bool           `json:"retired"`
-	Closed     bool           `json:"closed"`
-	Age        time.Duration  `json:"ageNanos"`
-	Total      int            `json:"totalRefs"`
-	Refs       map[string]int `json:"refs"`
+	Generation      int64          `json:"generation"`
+	Owner           string         `json:"owner"`
+	Retired         bool           `json:"retired"`
+	Closed          bool           `json:"closed"`
+	Reclaiming      bool           `json:"reclaiming,omitempty"`
+	DeclaredHolders int            `json:"declaredHolders,omitempty"`
+	Age             time.Duration  `json:"ageNanos"`
+	Total           int            `json:"totalRefs"`
+	Refs            map[string]int `json:"refs"`
 }
     GenerationRefs is one generation's diagnostic row.
 
@@ -1290,6 +1339,9 @@ type PlainToolFactoryConfig struct {
 	// action/exec tool uses <root>/exec as its tmux command working directory).
 	WorkspaceRoot string
 
+	// ResidentMetaDir locates the durable task session registry prepared before tool construction.
+	ResidentMetaDir string
+
 	// WorkingDir 是 agent 的统一工作根(file tools 的 base_dir 与 exec 命令 cwd 的共同基准)。
 	// 空 = 各工具回退自身默认(file base_dir="."、exec 继承进程 cwd,现状不变);非空则作为二者
 	// 共同根,优先级仍低于 ToolRef.properties 的显式 base_dir/workspace。由 config.WorkingDir 注入。
@@ -1472,10 +1524,26 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error)
     for session and plugin management (MemoryPlugin.OnEvent, SummaryPlugin).
     - Actual execution is driven by AgentLoop, not the Runner.
 
+func (ta *TagentAgent) AcknowledgeContinuationResult(invocationID string) error
+    AcknowledgeContinuationResult releases retained material only after an exact
+    parent receipt.
+
+func (ta *TagentAgent) AcknowledgeContinuationResultWithReceipt(ctx context.Context, invocationID string, proof memory.FullEvent) error
+    AcknowledgeContinuationResultWithReceipt accepts the parent writer's exact
+    committed receipt.
+
 func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference)
     AppendProjectionRef appends an EventReference to this agent's session
     projection: used by the mem_spill replay double-write so replayed events
     restore the store⇔projection invariant. nil-safe.
+
+func (ta *TagentAgent) BeginClose()
+    BeginClose seals admission and starts the same close sequence without
+    waiting for its result.
+
+func (ta *TagentAgent) CancelContinuationByParent(ctx context.Context, invocationID string, proof memory.FullEvent) error
+    CancelContinuationByParent terminates a scope only when its parent
+    cancellation is durable.
 
 func (ta *TagentAgent) CheckOrgReload()
     CheckOrgReload runs the armed org-config hot-reload check once (ops/test
@@ -1487,11 +1555,17 @@ func (ta *TagentAgent) CleanerStopped() bool
     has returned. Only meaningful together with CloseStarted (the close cancels
     it); the spec asks whether the maintenance producer really converged.
 
-func (ta *TagentAgent) Close() (err error)
-    Close shuts the instance down. : the FIRST call executes the close sequence;
-    every other caller — concurrent or later — waits for and returns the SAME
-    completion result. Closers, leases and the store release therefore run
-    exactly once per instance.
+func (ta *TagentAgent) Close() error
+    Close shuts the instance down once and returns the same bounded result to
+    every caller.
+
+func (ta *TagentAgent) CloseContinuationInboxes() error
+    CloseContinuationInboxes releases directory ownership after private drivers
+    stop.
+
+func (ta *TagentAgent) CloseDone() <-chan struct{}
+    CloseDone closes after owned producers, transports, execution faces and
+    final exit have finished.
 
 func (ta *TagentAgent) CloseStarted() bool
     CloseStarted reports whether this instance's close sequence has begun.
@@ -1636,6 +1710,10 @@ func (ta *TagentAgent) OrgThreshold() float64
     background-write vs read data race after hot-apply moved to the rebuild
     goroutine).
 
+func (ta *TagentAgent) RebuildContinuationsFromWAL() (int, error)
+    RebuildContinuationsFromWAL restores private projections, waiting rounds and
+    result caches.
+
 func (ta *TagentAgent) RebuildProjectionFromWAL()
     RebuildProjectionFromWAL rebuilds the projection from the fact chain at cold
     start (build_agent wiring), startup-only, once, into an EMPTY projection.
@@ -1660,9 +1738,21 @@ func (ta *TagentAgent) RecordCognitiveAssetChange(changes []CognitiveAssetChange
     RecordCognitiveAssetChange 是漂移审计批次事件的事实链写入入口——进投影（被看见 是审计的最低目标），不发
     bus、不打断消息路由。
 
+func (ta *TagentAgent) RecordRecoveredTaskBinding(tk *task.Task) bool
+    RecordRecoveredTaskBinding commits an executor identity learned during
+    recovery.
+
 func (ta *TagentAgent) RecordResidentSession(sessionID, kind, name, detail string)
     RecordResidentSession（R3 2.5）：常驻会话生命周期事件的事实链写入入口 （ActionTool residentSink 经
     build 路径接线到这里；记录-only 不发 bus 不进投影）。
+
+func (ta *TagentAgent) RecoverTaskOutbox() error
+    RecoverTaskOutbox repairs accepted task inputs whose receiver had not
+    formally consumed them before restart.
+
+func (ta *TagentAgent) RecoveredContinuationBindingsFromWAL() ([]ContinuationBinding, error)
+    RecoveredContinuationBindingsFromWAL reads exact original parent addresses
+    without starting work.
 
 func (ta *TagentAgent) RecoveryResult() *RecoveryResult
     RecoveryResult returns the cold-start rebuild outcome for diagnostics.
@@ -1675,6 +1765,22 @@ func (ta *TagentAgent) ResidentAgentNames() []string
 
 func (ta *TagentAgent) ResidentTable() map[string]*TagentAgent
     ResidentTable returns the binding table copy (introspection, 4.6).
+
+func (ta *TagentAgent) RestoreServiceHandoffs(ctx context.Context) error
+    RestoreServiceHandoffs reinstalls committed destinations after parent
+    receivers exist.
+
+func (ta *TagentAgent) ResumeContinuation(ctx context.Context, parentTaskID string, originalRound uint64) (<-chan *event.Event, bool, error)
+    ResumeContinuation attaches to the original private loop and never creates a
+    task round.
+
+func (ta *TagentAgent) ResumeContinuationByID(ctx context.Context, childInvocationID, parentTaskID string, round uint64) (<-chan *event.Event, bool, error)
+    ResumeContinuationByID verifies the durable child identity before attaching
+    to its original round.
+
+func (ta *TagentAgent) ResumePendingDelegations() (int, error)
+    ResumePendingDelegations attaches restored subagent tasks to their original
+    invocation and producer round.
 
 func (ta *TagentAgent) Rollback()
     Rollback triggers the wired rollback hook (R4 3.8；no-op if unset)。
@@ -1790,6 +1896,10 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
     error — the closed outputCh makes silent restart a production panic (V15).
     Creates a new TagentAgent for a fresh loop.
 
+func (ta *TagentAgent) StartRecoveredContinuations(ctx context.Context) error
+    StartRecoveredContinuations starts parentless scopes after task detectors
+    have reattached.
+
 func (ta *TagentAgent) StopLoop()
     StopLoop stops the persistent event loop. : the CAS winner cancels and
     drains; every other caller — a second StopLoop, a Close arriving mid-stop
@@ -1817,8 +1927,10 @@ func (ta *TagentAgent) TrajectoryRecorder() *rl.TrajectoryRecorder
     TrajectoryRecorder returns the trajectory recorder if one is set, or nil.
 
 type TagentConfig struct {
-	Model       model.Model
-	MemoryStore memory.MemoryStore
+	// ContinuationOwnerResolver resolves persisted result addresses to live owners.
+	ContinuationOwnerResolver func(string) *TagentAgent
+	Model                     model.Model
+	MemoryStore               memory.MemoryStore
 	// MemStoreRelease: lease release for the
 	// provided MemoryStore; executed exactly once from Close. nil = the agent
 	// does not own a registry lease.
@@ -1976,10 +2088,12 @@ type ToolAgentFactoryConfig struct {
     the AgentToolWrapper's event_key resolution at call time.
 
 type UnconvergedRef struct {
-	Generation int64          `json:"generation"`
-	Owner      string         `json:"owner"`
-	HeldFor    time.Duration  `json:"heldForNanos"`
-	Refs       map[string]int `json:"refs"`
+	Generation      int64          `json:"generation"`
+	Owner           string         `json:"owner"`
+	HeldFor         time.Duration  `json:"heldForNanos"`
+	Refs            map[string]int `json:"refs"`
+	DeclaredHolders int            `json:"declaredHolders,omitempty"`
+	Reclaiming      bool           `json:"reclaiming,omitempty"`
 }
     UnconvergedRef names a generation that is still held when a bounded close
     gives up. It is a report, not a force-close: the resources stay held until

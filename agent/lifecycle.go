@@ -93,7 +93,7 @@ const (
 // stop is as final as a finished one (inject refuses, V15 semantics kept).
 func (ta *TagentAgent) loopTerminatedNow() bool {
 	s := ta.loopState.Load()
-	return s == loopStopping || s == loopClosed
+	return s == loopStopping || s == loopClosed || ta.CloseStarted()
 }
 
 // turnDrainTimeout bounds the wait for in-flight runner turns during close.
@@ -167,27 +167,58 @@ func (ta *TagentAgent) finishLoop() {
 	ta.settleOutput()
 }
 
-// Close shuts the instance down. : the
-// FIRST call executes the close sequence; every other caller — concurrent or
-// later — waits for and returns the SAME completion result. Closers, leases
-// and the store release therefore run exactly once per instance.
-func (ta *TagentAgent) Close() (err error) {
+func (ta *TagentAgent) claimClose() bool {
 	ta.closeMu.Lock()
+	defer ta.closeMu.Unlock()
 	if ta.closeStarted {
-		done := ta.closeDone
-		ta.closeMu.Unlock()
-		<-done
-		return ta.closeErr
+		return false
 	}
 	ta.closeStarted = true
 	ta.closeDone = make(chan struct{})
-	ta.closeMu.Unlock()
+	return true
+}
 
+// BeginClose seals admission and starts the same close sequence without waiting for its result.
+func (ta *TagentAgent) BeginClose() {
+	if !ta.claimClose() {
+		return
+	}
+	ta.beginOwnedShutdown()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("[Close] asynchronous close panicked: %v", r)
+			}
+		}()
+		_ = ta.runClose()
+	}()
+}
+
+// Close shuts the instance down once and returns the same bounded result to every caller.
+func (ta *TagentAgent) Close() error {
+	if ta.claimClose() {
+		return ta.runClose()
+	}
+	ta.closeMu.Lock()
+	done := ta.closeDone
+	ta.closeMu.Unlock()
+	<-done
+	return ta.closeErr
+}
+
+func (ta *TagentAgent) runClose() (err error) {
 	defer func() {
+		panicked := recover()
+		if panicked != nil {
+			err = fmt.Errorf("close resource panic: %v", panicked)
+		}
 		ta.closeMu.Lock()
 		ta.closeErr = err
 		ta.closeMu.Unlock()
 		close(ta.closeDone)
+		if panicked != nil {
+			panic(panicked)
+		}
 	}()
 	err = ta.closeOnce()
 	return err
@@ -202,6 +233,14 @@ func (ta *TagentAgent) Close() (err error) {
 func (ta *TagentAgent) closeOnce() error {
 	var errs []error
 	ta.beginOwnedShutdown()
+	for _, c := range ta.closers {
+		if staged, ok := c.(interface{ BeginClose() }); ok {
+			staged.BeginClose()
+			if completed, ok := c.(interface{ CloseDone() <-chan struct{} }); ok {
+				go func(done <-chan struct{}) { <-done; ta.tryDeferredFinalExit() }(completed.CloseDone())
+			}
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), turnDrainTimeout)
 	defer cancel()
 	if err := ta.waitOwnedShutdown(ctx); err != nil {
@@ -209,14 +248,17 @@ func (ta *TagentAgent) closeOnce() error {
 	}
 	carryClosers := !ta.producersStopped() || !ta.executionWorkQuiet()
 	if !carryClosers {
-		for _, c := range ta.closers {
-			if err := c.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close resource: %w", err))
-			}
-		}
+		errs = append(errs, ta.closeRegularResources(true))
 	}
 	if ta.contextManager != nil {
 		ta.contextManager.retireForOwnerClose()
+	}
+	for _, c := range ta.closers {
+		if _, staged := c.(interface{ BeginClose() }); staged {
+			if err := c.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close owned resource: %w", err))
+			}
+		}
 	}
 	grace, cancelGrace := context.WithTimeout(context.Background(), execCloseGrace)
 	defer cancelGrace()
@@ -226,6 +268,7 @@ func (ta *TagentAgent) closeOnce() error {
 		return errors.Join(errs...)
 	}
 	errs = append(errs, ta.finishOwnedExit(carryClosers))
+	ta.signalFinalExit()
 	return errors.Join(errs...)
 }
 
@@ -277,6 +320,7 @@ func (ta *TagentAgent) deferFinalExit(carryClosers bool) {
 			ta.closeMu.Lock()
 			ta.closeTailDone, ta.closeTailErr = true, err
 			ta.closeMu.Unlock()
+			ta.signalFinalExit()
 			if err != nil {
 				log.Errorf("[Close] deferred final exit reported: %v", err)
 			}
@@ -295,6 +339,10 @@ func (ta *TagentAgent) deferFinalExit(carryClosers bool) {
 // is deliberately NOT rewritten by it — 「初次错误保持可见」.
 func (ta *TagentAgent) DeferredCloseOutcome() (done bool, err error) {
 	ta.closeMu.Lock()
+	if !ta.closeStarted {
+		ta.closeMu.Unlock()
+		return ta.executionWorkQuiet(), nil
+	}
 	defer ta.closeMu.Unlock()
 	if ta.closeTail == nil && ta.closeFinalDone != nil {
 		select {
@@ -335,6 +383,9 @@ func (ta *TagentAgent) AppendProjectionRef(ref memory.EventReference) {
 // error — the closed outputCh makes silent restart a production panic (V15).
 // Creates a new TagentAgent for a fresh loop.
 func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event, error) {
+	if ta.CloseStarted() {
+		return nil, fmt.Errorf("persistent loop already terminated: agent close has begun")
+	}
 	ta.sessionMu.Lock()
 	switch ta.loopState.Load() {
 	case loopRunning:
@@ -380,9 +431,15 @@ func (ta *TagentAgent) StartLoop(userID, sessionID string) (<-chan *event.Event,
 		ta.runEventLoop(ta.loopCtx, ta.persistentBus, ta.contextManager)
 	}()
 
-	if ta.meditationMgr != nil {
+	if err := ta.startRecoveredOwners(ta.loopCtx); err != nil {
+		ta.StopLoop()
+		return nil, fmt.Errorf("start recovered work: %w", err)
+	}
+	ta.sessionMu.Lock()
+	if ta.loopState.Load() == loopRunning && ta.meditationMgr != nil {
 		ta.meditationMgr.Start()
 	}
+	ta.sessionMu.Unlock()
 
 	log.Infof("[StartLoop] persistent event loop started user=%s session=%s", userID, sessionID)
 	return ta.outputCh, nil

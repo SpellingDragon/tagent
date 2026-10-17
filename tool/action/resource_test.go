@@ -149,6 +149,83 @@ func fakeActionTool(t *testing.T, fake *fakeTmuxResource) *ActionTool {
 	return ct
 }
 
+type commandRelaunchSpawner func(task.TaskSpec, task.SettleDetector) task.SpawnResult
+
+func (s commandRelaunchSpawner) Spawn(spec task.TaskSpec, detector task.SettleDetector) task.SpawnResult {
+	return s(spec, detector)
+}
+
+// TestTaskOwnedConstructionDoesNotAdoptSharedResources leaves discovery to declared task recovery.
+func TestTaskOwnedConstructionDoesNotAdoptSharedResources(t *testing.T) {
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "tmux-calls")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TAGENT_FAKE_TMUX_LOG\"\nexit 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o700))
+	t.Setenv("PATH", binDir)
+	t.Setenv("TAGENT_FAKE_TMUX_LOG", logPath)
+	wasReattached := residentReattachOnce.Load()
+	residentReattachOnce.Store(false)
+	t.Cleanup(func() { residentReattachOnce.Store(wasReattached) })
+	metaDir := t.TempDir()
+	metaPath := filepath.Join(metaDir, "sess-n-other-owner.json")
+	metadata := []byte(`{"name":"other-owner","mode":"resident","resource_id":"100:$7"}`)
+	require.NoError(t, os.WriteFile(metaPath, metadata, 0o600))
+
+	ct := NewActionTool(WithOrphanCleanupDisabled(), WithResidentMetaDir(metaDir))
+	require.NotNil(t, ct.tmuxExecutor)
+	require.Empty(t, ct.detectors)
+	require.False(t, residentReattachOnce.Load())
+	require.NoError(t, ct.Close())
+	_, err := os.Stat(logPath)
+	require.True(t, os.IsNotExist(err), "task-owned construction must not enumerate or mutate shared sessions")
+	preserved, err := os.ReadFile(metaPath)
+	require.NoError(t, err)
+	require.Equal(t, metadata, preserved)
+}
+
+// TestActionRelaunchUsesCurrentToolAfterRetirement prepares resources through the initiating execution face.
+func TestActionRelaunchUsesCurrentToolAfterRetirement(t *testing.T) {
+	oldResource := &fakeTmuxResource{}
+	oldTool := fakeActionTool(t, oldResource)
+	oldSpawner := commandRelaunchSpawner(func(task.TaskSpec, task.SettleDetector) task.SpawnResult {
+		t.Fatal("relaunch used the retired spawner")
+		return task.SpawnResult{}
+	})
+	decl := DeclarativeFromArgs(ActionArgs{Command: "relaunch-command", Mode: string(ModeOneshot)}, "old-session")
+	decl.Params[pResourceID] = "100:$7"
+	oldSpec := oldTool.SpecFromDeclarative(oldSpawner, *decl)
+	require.NoError(t, oldTool.Close())
+
+	currentResource := &fakeTmuxResource{resource: "200:$9"}
+	currentTool := fakeActionTool(t, currentResource)
+	currentTool.defaultTTL = 17 * time.Hour
+	var captured task.TaskSpec
+	currentSpawner := commandRelaunchSpawner(func(spec task.TaskSpec, detector task.SettleDetector) task.SpawnResult {
+		require.Nil(t, detector)
+		captured = spec
+		return task.SpawnResult{Blocked: "current-spawner"}
+	})
+	ctx := task.WithTaskSpawner(t.Context(), currentSpawner)
+	ctx = task.WithCommandRelauncher(ctx, currentTool.RelaunchTask)
+	result, err := oldSpec.Relaunch(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "current-spawner", result.Blocked)
+	require.Equal(t, 17*time.Hour, captured.TTL)
+	require.Empty(t, captured.Declarative.TaskID)
+	require.Empty(t, captured.Declarative.Params[pResourceID])
+	require.Equal(t, "intent", captured.Declarative.Params[pPhase])
+	require.NotNil(t, captured.Start)
+
+	bound, detector, err := captured.Start(&task.Task{ID: "relaunched", Spec: captured})
+	require.NoError(t, err)
+	require.Equal(t, "200:$9", bound.Declarative.Params[pResourceID])
+	require.Equal(t, 1, currentResource.creates)
+	require.Zero(t, oldResource.creates)
+	detector.(interface{ BeginRound(uint64) }).BeginRound(1)
+	detector.(task.ActivatableDetector).Start()
+	require.Equal(t, 1, currentResource.activates)
+}
+
 // TestActionAdmissionPrecedesResourcePreparation keeps rejected intents from starting commands.
 func TestActionAdmissionPrecedesResourcePreparation(t *testing.T) {
 	for _, intentRejected := range []bool{false, true} {

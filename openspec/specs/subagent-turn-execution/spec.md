@@ -2,34 +2,8 @@
 
 ## Purpose
 
-定义 sub-agent 工具调用的执行语义:一次调用 = 一次 `RunFlow` = 一个完整 turn。turn 边界由 `RunFlow` 的自然返回定义,而非对输出事件流的内容探测。sub-agent 与顶层持久循环共享同一个 turn 原语 `RunFlow`,仅循环包裹方式不同(顶层 `for { Pull; RunFlow }` 反应式守护;sub-agent 直调一次)。
+定义本地与远端子agent委派的执行边界、私有上下文和任务交付语义。本地逻辑调用在同一事件壳内可跨多个RunFlow业务turn等待子任务；完成、恢复和显式续行分别保存自己的身份，不以中间回复或固定整调用deadline截断目标。
 ## Requirements
-### Requirement: Sub-agent 调用执行恰好一个 turn
-
-Sub-agent 工具调用(经 `AgentToolWrapper.Call` → `agent.Run()`)SHALL 通过**直接调用一次 `RunFlow`** 执行,而非运行持久事件循环 `runEventLoop` 后再探测事件流。一次 `RunFlow` = 一个完整 turn(单一输入 → 完整 ReAct 工具循环 → 最终响应)。turn 边界 SHALL 由 `RunFlow` 的返回定义,而非对输出事件的内容探测。
-
-`Run()` SHALL NOT 使用 500ms drain 定时器、事件探测停止条件(`len(ToolCalls) == 0` 判断)或 `runCancel` 强制取消来确定 turn 结束。
-
-#### Scenario: 多轮工具调用完整执行
-
-- **WHEN** sub-agent 收到需要多次工具调用的请求(如 plan create 需依次执行 `openspec init`、`openspec new change`、写 tasks.md)
-- **THEN** `RunFlow` 在单次调用内跑完所有工具轮次直到最终 assistant 响应
-- **AND** sub-agent 不在任一中间工具结果处提前返回
-- **AND** 输出 channel 在 `RunFlow` 返回后关闭
-
-#### Scenario: 慢 LLM 不触发提前返回
-
-- **WHEN** sub-agent 的 LLM 每轮响应耗时远超 500ms(如 glm-5.2 每轮约 16s)
-- **THEN** sub-agent 仍执行到最终响应,不被任何定时器截断
-- **AND** 首个工具调用后的后续轮次正常执行
-
-#### Scenario: turn 边界由 RunFlow 返回定义
-
-- **WHEN** `RunFlow` 内部的 event channel 关闭(Flow 在最终响应处结束)
-- **THEN** 承载 `RunFlow` 的 goroutine 关闭 `invOutputCh`
-- **AND** 调用方对输出 channel 的 `range` 循环自然结束
-- **AND** 无需探测事件内容判断结束
-
 ### Requirement: 最终响应识别区分 assistant 响应与工具结果
 
 判断一个事件是否为最终响应(`isFinalResponse`)SHALL 同时要求消息角色为 `assistant` **且** 无 tool_calls。工具结果事件(`Role=tool`)即使无 tool_calls,也 SHALL NOT 被识别为最终响应。
@@ -53,58 +27,36 @@ Sub-agent 工具调用(经 `AgentToolWrapper.Call` → `agent.Run()`)SHALL 通�
 
 ### Requirement: Sub-agent 保持并发隔离与调用契约不变
 
-每次 sub-agent 调用 SHALL 创建独立的 EventBus、SessionProjection 与 ContextManager(SmartCompressor 具有可变状态,不可跨并发调用共享)。`AgentToolWrapper.Call` 的输入参数与返回值契约 SHALL 保持不变。
+每个新的本地逻辑调用 SHALL 创建独立EventBus、私有SessionProjection与ContextManager，MUST NOT 共享可变压缩器、activeBus或临时输入袋。按原invocation附着或恢复 SHALL 复用该调用保存的私有状态，不创建新的goal或污染其它调用。一次RunFlow返回但仍有等待时，调用scope SHALL 保持；scope结束或服务明确handoff后才退役其receiver。
 
-#### Scenario: 每次调用组件隔离
+#### Scenario: 两次独立调用隔离
+- **WHEN** 同一owner并发处理两个不同invocation
+- **THEN** 输入、projection、等待与结果分别属于各自scope，不跨调用传播
 
-- **WHEN** 同一 sub-agent 实例被并发或连续多次调用
-- **THEN** 每次调用使用各自独立的 invBus / invProjection / invCM
-- **AND** 调用之间不共享可变的压缩器状态
+#### Scenario: 原调用结果附着
+- **WHEN** 按已保存invocation附着等待中的逻辑调用
+- **THEN** 继续同一私有投影和等待，不用空CM重跑初始goal
 
-#### Scenario: 调用完成后恢复持久 bus
-
-- **WHEN** 一次 sub-agent 调用的 `RunFlow` 返回
-- **THEN** agent 的 activeBus 恢复为 persistentBus
-- **AND** 后续 `InjectMessage` 路由回持久事件循环(若其处于活动状态)
 
 ### Requirement: Sub-agent 调用超时对多轮工作宽容
 
-`AgentToolWrapper` 对 sub-agent 调用施加的超时（`defaultSubAgentTimeout`）SHALL 足够宽容，以容纳 sub-agent 正常的多轮 ReAct 工作（如 plan create 依次执行自检、init、new change、写多个 artifact、validate）。超时 SHALL NOT 在 sub-agent 正常推进多轮工具调用时将其截断；其真实工作上界由各 agent 的 `max_tool_iterations` 决定，超时仅作为对真正失控（runaway/挂死）调用的兜底。
+本地子调用 SHALL 不再套一个覆盖整次逻辑调用的固定600s截止；等待producer期间不消耗active模型turn预算。模型turn仍 SHALL 受自己的有限预算和max_tool_iterations限制，Task统一TTL仍是整个producer的绝对上限。远端A2A适配可保留有界传输deadline并明确其能力边界，MUST NOT 据此声称本地continuation可跨进程恢复远端进程。
 
-`defaultSubAgentTimeout` SHALL 不小于 600 秒。
+#### Scenario: 本地等待超过600秒
+- **WHEN** 本地子agent合法等待长任务，且任务TTL允许
+- **THEN** 不因固定的整调用600秒timeout取消等待；独立模型turn仍受限
 
-#### Scenario: 多轮创建流程不被超时截断
-
-- **WHEN** plan agent 执行需要多轮工具调用的 create 流程（自检 → init → new change → 写 proposal.md → 写 tasks.md → validate）
-- **AND** 使用较慢的 LLM（如 glm-5.2 每轮约 15–25s）
-- **THEN** sub-agent 调用 SHALL 在超时内完成，不被 `defaultSubAgentTimeout` 中途取消
-
-#### Scenario: 超时仅作 runaway 兜底
-
-- **WHEN** sub-agent 达到其 `max_tool_iterations` 上界
-- **THEN** sub-agent SHALL 因迭代上界正常结束，而非依赖超时
-- **AND** `defaultSubAgentTimeout` 仅在调用真正挂死时兜底触发
+#### Scenario: 父任务到期
+- **WHEN** 父task统一TTL到期并提交可靠取消/退役事实
+- **THEN** 对应逻辑子调用按原父地址终止，不延伸成无限调用
 
 ### Requirement: 子 agent 调用可作为异步任务执行
 
-`AgentToolWrapper` 对子 agent 的调用 SHALL 可纳入任务层作为异步 Task 执行:其 settle 信号为 `RunFlow` 返回,结果为子 agent 的最终输出。dense 阶段内完成则内联返回(等价于既有同步行为);越过 dense 阶段(detach)则返回 ack 并在 `RunFlow` 返回时发出 `task_settled`。
+子agent SHALL 默认通过任务层异步执行，可保留显式同步适配。准备child invocation、task_round begin与parent binding SHALL 先于实际Run；完成/失败及输出正文 SHALL 先提交task_round finish，再发父task信号。dense内逻辑调用完成时内联返回；越窗返回ACK，直到同一逻辑调用结果可受理才结算，MUST NOT 以中间回复当完成。
 
-子 agent SHALL **默认异步**,并保留回退开关(可强制同步)。每次子 agent Task 的并发隔离契约(独立 EventBus / SessionProjection / ContextManager)SHALL 保持不变。
-
-#### Scenario: 快子 agent 窗口内内联返回
-
-- **WHEN** 一个纳入任务层的子 agent 在 dense 阶段内 `RunFlow` 返回
-- **THEN** 父 agent 的 `Call()` SHALL 内联返回子 agent 最终输出(与既有同步行为等价)
-
-#### Scenario: 慢子 agent 越窗异步回收
-
-- **WHEN** 一个子 agent 的 `RunFlow` 越过 dense 阶段仍未返回
-- **THEN** `Call()` SHALL 返回 ack,并在 `RunFlow` 最终返回时发出自包含的 `task_settled` 事件
-
-#### Scenario: 回退开关强制同步
-
-- **WHEN** 子 agent 异步回退开关被启用(asyncDisabled)
-- **THEN** 子 agent 调用 SHALL 保持既有同步执行行为
+#### Scenario: 越窗后仍属于原调用
+- **WHEN** 子调用dense期结束但仍有子任务等待
+- **THEN** ACK携带父task id，后续原invocation结果结算原producer round而不另造调用
 
 ### Requirement: 子 agent 委派使用同代目标绑定
 
@@ -155,21 +107,25 @@ Sub-agent 工具调用(经 `AgentToolWrapper.Call` → `agent.Run()`)SHALL 通�
 
 ### Requirement: 投递对账屏障的 booking 与投递期望一一配对
 
-子调用环的投递对账屏障（delivery-accounting barrier）SHALL 保证每个 invocation 的 pending 计数与真实投递期望一一配对：包装 spawner 在内层 spawn 返回 inline settle、dedup 命中或被 gate 拒绝（Blocked）三种「本次调用不再拥有 settle 期望」的形态时，MUST 撤销（void）本次预登记的 booking；booking 的登记 MUST 保持先于内层 spawn（期望先于任务可能极快的 settle 而存在）。
+投递屏障 SHALL 以task id、producer round、round owner及冻结WaitFor配对真实等待；producer stream结束与本次等待满足 SHALL 分离记录。booking SHALL 在资源可能产信号前注册；dedup、gate拒绝、失败意图及已满足的内联结果撤销本次预登记。非终局观察、重复/旧轮信号、被receiver拒绝的投递 MUST NOT 释放新轮或其他任务的等待。有限去重 SHALL 以已确认seq区间压缩，不以无界SourceID集合增长。
 
-#### Scenario: 同 key 任务在飞时重复发起（dedup single-flight）
+#### Scenario: A先就绪后退出不扣掉B
+- **WHEN** 同调用派生A和B，A ready已满足本次等待，之后A终局到达而B仍等待
+- **THEN** A后续信号不得扣掉B的booking，调用继续等B
 
-- **WHEN** 子调用的某 turn 内对同 key 任务第二次发起调用，任务层 dedup 命中返回既有 active 任务
-- **THEN** 本次调用的 booking 被撤销，屏障 pending 不因 dedup 而净增；既有任务 settle 时按其原发起调用的 booking 配对递减
-- **THEN** 子调用环在该调用最后一个真实 settle 投递并排空总线后静默退出，不被无人消耗的 booking 钉住
+#### Scenario: 两个任务并发resume
+- **WHEN** 不同task产生相同kind/seq的信号
+- **THEN** 身份按task+round独立匹配，不能串账；拒收时保持原等待和重试
 
-#### Scenario: spawn gate 拒绝纳管（disk 退化）
+### Requirement: 本地子调用保持逻辑目标直至等待收敛
 
-- **WHEN** 子调用的某 turn 内 spawn 被 disk 退化闸拒绝（Blocked，工作已被取消跟踪）
-- **THEN** 本次调用的 booking 被撤销，屏障不泄漏；调用环按正常静默条件退出
+本地子调用 SHALL 使用独立bus、私有projection和CM复用统一事件壳；每个业务turn仍执行一次完整RunFlow。模型回复或dense ACK MUST NOT 在其派生的等待尚未满足、对应结果尚未受理时被当作父任务完成。逻辑调用 SHALL 保存原goal、父任务地址、等待集合、输入处置、最近输出和结果ACK状态；owner Close仅挂起，原父任务的可靠取消或TTL退役才终止该scope。
 
-#### Scenario: inline settle 保持既有配对（回归对照）
+#### Scenario: 子agent先派命令后回复等待
+- **WHEN** 子agent在一次RunFlow中派生长命令并回复等待
+- **THEN** 父委派task仍等待原子调用；命令结果先回该私有bus，由后续turn处理后才返回最终结果
 
-- **WHEN** 内层 spawn 在同步等待窗口内结算（Settled=true）
-- **THEN** booking 照旧被撤销（既有行为不变），屏障与环退出行为与本变更前逐字节一致
+#### Scenario: 无后续工作时正常结束
+- **WHEN** 当前turn结束且全部真实等待和已受理输入已排空
+- **THEN** 逻辑调用完成并缓存结果，父任务受理结果后才确认该缓存可释放
 

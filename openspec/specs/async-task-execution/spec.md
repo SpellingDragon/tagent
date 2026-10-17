@@ -10,42 +10,21 @@ tracked in the background (see also `adaptive-poll-scheduling`).
 ## Requirements
 ### Requirement: 工具调用经 spawn + dense 窗口执行
 
-每个纳入任务层的 tool / 子 agent 调用 SHALL 通过 spawn 一个 Task 执行。`Call()` SHALL 等待该 Task 的**第一个 settle 信号**直到调度的 **dense 阶段**结束（dense→sparse 边界，即 detach；见 `adaptive-poll-scheduling`）:
+每个受管工具或子 agent 调用 SHALL 经 TaskManager 的去重和准入后执行。调用 SHALL 在 dense 窗口等待本轮声明的条件 `exit`、`ready`、`input` 或 `signal`，与 producer 寿命分开；普通 stable/watch/probe 观察 MUST NOT 冒充条件满足。`completed`、`failed` 与带 Final 的观察 SHALL 结束本轮等待；Final 仅表示观察已结束，MUST NOT 把 suspect 等状态伪造为业务成功。
 
-- 若在 dense 阶段内 settle,`Call()` SHALL 返回**内联的最终结果**(与同步调用等价的手感)。
-- 若越过 dense 阶段仍未 settle(detach 先到),`Call()` SHALL 返回一个**诚实的 ack**(说明任务已启动、处于 running、完成后将通过事件通知),并将该 Task 转交 TaskManager 后台跟踪。
+满足条件先到 SHALL 内联返回真实结果；detach 先到 SHALL 返回含 task id 的诚实 ACK 并继续后台跟踪。ACK MUST NOT 声称已完成或引导 sleep/轮询。旧版直接调用未声明 Mode/WaitFor 的首观察返回兼容，不得使生产命令默认 exit 条件被稳定输出提前满足。
 
-`Call()` SHALL NOT 返回撒谎式占位符(声称已完成但实际未完成),ack 与 inline 两种返回 SHALL 都是各自闭合、语义诚实的 tool 结果。
+#### Scenario: 静默长命令仍在 exit 等待
+- **WHEN** oneshot 进程仍活着且 dense 内出现 stable/watch 观察
+- **THEN** 观察可提交为事实，exit 等待不解除；进程退出或观察器 Final 到达才返回相应结果
 
-**ack 防轮询约束**：后台 ack 文案 SHALL NOT 引导轮询式查询或等待（如"可用任务工具查询状态/结果"类表述——实机已证明其诱发模型以 sleep 命令自旋等待）。ack 携带的"完成后回写/自动通知"语义 SHALL 完整可依，模型凭 ack 即可安心结束回合。
+#### Scenario: Final suspect 结束等待但不完成工作
+- **WHEN** 本轮观察器以 Final suspect 结束
+- **THEN** 调用等待解除，任务保持 suspect，结果交给模型判断而非记为 completed
 
-#### Scenario: 快任务在 dense 阶段内 settle 内联返回
-
-- **WHEN** 一个 tool 调用对应的 Task 在 dense 阶段内产生 settle 信号
-- **THEN** `Call()` SHALL 返回内联最终结果
-- **AND** 若该信号结束本轮，任务 SHALL NOT 触发额外回收 turn；若为 stable/watch 等非终局观察，后续完成信号 SHALL 继续由后台跟踪并触发回收 turn
-
-#### Scenario: 内联观察后紧接完成
-
-- **WHEN** stable/watch 先进入内联窗口，完成信号在窗口交接前到达
-- **THEN** 首条观察 SHALL 内联返回，后续完成 SHALL 完整送到后台通知，MUST NOT 被单格窗口缓冲覆盖或丢弃
-
-#### Scenario: 慢任务越过 dense 阶段转后台
-
-- **WHEN** 一个 tool 调用对应的 Task 越过 dense 阶段仍未 settle(detach 先到)
-- **THEN** `Call()` SHALL 返回启动 ack（含 task id 与 running 状态）
-- **AND** 该 Task SHALL 转入 TaskManager 后台跟踪
-
-#### Scenario: 后台 ack 不引导轮询
-
-- **WHEN** `Call()` 返回后台 ack
-- **THEN** ack 文案 SHALL NOT 出现"查询状态/结果"等引导模型轮询或以命令等待的表述
-- **AND** ack 文案 SHALL 保留"结算后回写/通知"语义
-
-#### Scenario: dense_duration 不小于稳定判定时长
-
-- **WHEN** 配置 `dense_duration` 与 tmux `stable_duration`
-- **THEN** `dense_duration` SHALL ≳ `stable_duration`，以保证能在 dense 阶段内捕获快命令的稳定 settle
+#### Scenario: detach 与条件信号同时到达
+- **WHEN** 条件信号恰在窗口交接边界到达
+- **THEN** 同一信号恰走内联或后台一条路径，不被覆盖或丢失
 
 ### Requirement: 并行 dense 窗口
 
@@ -59,113 +38,47 @@ tracked in the background (see also `adaptive-poll-scheduling`).
 
 ### Requirement: 按任务类型的 settle 探测器与分档
 
-任务层 SHALL 为不同任务类型提供各自的 settle 探测器:tmux 命令使用 `TmuxMonitor`(周期 poll + 输出稳定计时 + 主动 heartbeat 探针 + 进程退出检测);子 agent 使用 `RunFlow` 返回;通用任务使用 goroutine 返回。
+探测器 SHALL 只报告确定性证据：命令 native pane 退出及退出码、显式 readiness/input 匹配或成功探针、稳定/可疑/watch/probe 边沿；子 agent 以逻辑调用结果作为完成信号。稳定输出 MUST NOT 证明进程退出，探针失败 MUST NOT 等同死亡。信号 SHALL 区分 Kind、Observation、Ready、WaitSatisfied 与 Final，并冻结产生时的 WaitFor、round、owner、seq、ObservedAt。
 
-settle 信号 SHALL 携带分档 `kind`:`completed`(进程退出,确定完成)、`stable`(输出稳定,可用但未必完成)、`suspect`(静默超过 `fake_dead_duration`,疑似挂死)。探测器 SHALL 只做确定性探测与分类,SHALL NOT 对"是否真正完成"做语义判断;语义解读 SHALL 由 LLM 在被触发的 turn 读取输出后完成。
+#### Scenario: native 非零退出
+- **WHEN** tmux pane 原生状态证明进程非零退出
+- **THEN** 结算包含失败极性及原生退出码，稳定时长不参与成功判定
 
-#### Scenario: 进程退出判定为 completed
-
-- **WHEN** 一个 tmux 命令的进程退出或 pane dead
-- **THEN** 探测器 SHALL 发出 `completed` settle 信号并附带捕获的输出
-
-#### Scenario: 静默过久判定为 suspect 而非 completed
-
-- **WHEN** 一个存活进程的输出静默超过 `fake_dead_duration` 且 heartbeat 探针无响应
-- **THEN** 探测器 SHALL 发出 `suspect` settle 信号(而非误判为 completed)
-- **AND** LLM SHALL 在回收 turn 中据输出决定重试/取消/继续等待
-
-#### Scenario: 子 agent 以 RunFlow 返回为 settle
-
-- **WHEN** 一个纳入任务层的子 agent 调用其 `RunFlow` 返回
-- **THEN** 该 Task SHALL 被判定为 `completed` 并以子 agent 最终输出作为结果
+#### Scenario: probe 失效后恢复
+- **WHEN** 活进程的健康探针先失败后恢复
+- **THEN** 系统记录相应边沿观察；仅明确成功证据可满足 ready，不把探针失败记成进程死亡
 
 ### Requirement: 服务型任务转 alive-detached
 
-仅 `LifetimeOf(spec) == service` 的任务在首个输出稳定结算（`SettleStable`）时 SHALL 转入 alive-detached 观测态并发送一次性「就绪」通知；job 型（command/subagent）任务的 `SettleStable`/`SettleSuspect` SHALL NOT 转入 alive-detached，但 SHALL 以 stable/suspect 观察通知进入 agent 事件管线，由模型决定后续工作；终态结算仍 SHALL 通知。
+服务的前台等待条件 SHALL 与 producer 存活分别跟踪。生产 resident 服务 SHALL 由显式 ready pattern 或成功 probe 证明就绪，interactive SHALL 由 input pattern 证明等待输入；首次满足 ready 后可进入 alive_detached，重复非终局稳定/可疑观察可被抑制。job 的 stable/suspect MUST NOT 冒充 ready 或 completed，非终局稳定观察不解除默认 exit 等待。进程终态及 Final 观察仍 SHALL 通知。旧版无 Mode/WaitFor 的直接 service 声明可保留 stable 兼容语义，但 MUST 只抑制同producer round、同kind、同payload的重复观察；changed载荷仍进入管线。
 
-service 型任务进入 alive-detached 观测语义时，其脱离时间戳（detachedAt）MUST 作为任务生命周期事实持久化（写入 Declarative 并随 task_spawned 链恢复）；恢复后的脱离时间 MUST 沿用原值，MUST NOT 以恢复时间替代。
+detachedAt SHALL 持久化并沿原值恢复，MUST NOT 以恢复时刻替代。
 
-#### Scenario: job 型静默任务不转就绪
+#### Scenario: 服务已就绪但仍存活
+- **WHEN** resident ready 条件先满足，进程稍后才退出
+- **THEN** ready 只解除对应等待，producer 继续受跟踪与 TTL 约束，之后退出以新的 seq 通知
 
-- **WHEN** job 型任务（如 `sleep 180`、包安装命令）输出静默触发 `SettleStable`
-- **THEN** 任务 SHALL 保持 stable，SHALL 产生结构化 stable 观察通知，SHALL NOT 进入 alive-detached 或冒充完成；其后终态仍 SHALL 通知
-
-#### Scenario: 观察通知保留调用消费链
-
-- **WHEN** 委派调用收到 stable/watch 等非终局信号
-- **THEN** 信号 SHALL 经同一调用的总线驱动回合，交付屏障 MUST NOT 扣减，调用 MUST 保持可接收后续完成
-
-#### Scenario: 探测器以可疑结算结束
-
-- **WHEN** TUI 超时等非终态结论是探测器的末条信号
-- **THEN** 信号 SHALL 标记 Final，并经 settle_final 控制元数据终结本轮交付屏障，MUST NOT 无限等待不存在的后续完成
-
-#### Scenario: service 型转移动机不变
-
-- **WHEN** service 型任务（如常驻服务）首个 `SettleStable` 结算
-- **THEN** 任务 SHALL 转 alive-detached 并收到一次性就绪通知（现状语义保持）
-
-#### Scenario: detached 任务跨重启
-
-- **WHEN** alive-detached 任务跨重启恢复
-- **THEN** 恢复后的 detachedAt MUST 等于死亡前的原值，超龄观测/终止判定沿用真实时长
+#### Scenario: job 稳定观察
+- **WHEN** 包安装进程仅输出稳定而仍存活
+- **THEN** 其 stable 作为观察记录，任务不进入 alive_detached，默认 exit 等待继续
 
 ### Requirement: task_settled 为通知类 input 事件
 
-后台任务的结算结果（task_settled)SHALL 被视为"通知"类外部输入事件：它 SHALL NOT 被视为对某次"等待中" tool 调用的协议应答（同步应答已在 spawn 的 sync-wait 窗口内以 ack/内联结果完成）；它 SHALL 作为新的驱动事件进入时间线并触发回收 turn。通知内容 SHALL 携带文本级关联标识（task id 与任务简述），使模型能在内容上将通知与先前的调用关联。
+任务信号 SHALL 形成带 task id、producer round、round owner、seq、观察时间和冻结等待条件的自包含输入事实，不依赖原 tool_call 仍在历史中。生产端 SHALL 标记 `settle_wake=observe|decision`；普通观察 SHALL 提交、投影并写输入处置凭据，MUST NOT 单独调用模型；满足等待、终局、Final 或需裁决的输入 SHALL 经原调用总线驱动模型。混合用户/任务批次 SHALL 保留每条原始事实，MUST NOT 因部分输入已提交而跳过其余事实。
 
-该通知在未开启持久信箱时也 MUST 逐条进入事实链与所属调用投影，保留 task_id、settle_status、settle_final 及来源元数据；同批用户输入 MUST 一并保留，Runner 的合并输入回显 MUST NOT 重复写入。存储失败 SHALL 保留当前批重试，并在提交成功前禁止模型执行。
+通知内容 SHALL 有界；大结果使用可读取的正文文件和尾部预览。存储失败 MUST 保留同一信号及其身份重试，MUST NOT 假装交付。取消 SHALL 产生原 producer 归属的可靠终局事实，不依赖旧 void OnCancel 的最佳努力记录。
 
-#### Scenario: volatile 任务通知保留结构化身份
+#### Scenario: 纯观察批次
+- **WHEN** 只有稳定、watch 或 probe 边沿观察到达
+- **THEN** 系统提交原事实和精确 input_disposition，不启动模型且不丢失后续终局
 
-- **WHEN** 未开启持久信箱的 agent 消费任务通知，或与用户输入混批消费
-- **THEN** 每条输入 SHALL 保留独立事实身份与正文，结算状态和 task_id SHALL 可结构化查询，回显 SHALL 不产生重复输入事实
+#### Scenario: 用户与 volatile 任务结果混批
+- **WHEN** durable 用户输入与未启用 inbox 的任务结果同批消费
+- **THEN** 每条输入独立提交并保持结构化身份，Runner 合并回显不重复入库
 
-#### Scenario: 取消唤醒等待调用
-
-- **WHEN** 已纳管的任务被取消
-- **THEN** 系统 SHALL 一次发布 cancelled 终局通知到原调用，解除交付屏障，重复取消 SHALL 不再次发布
-
-**失败极性表达**：命令非零退出（含信号死）、探测不可辨超限、kill 失败强拆三类路径的结算 SHALL 以失败极性呈现（✗/failed），通知文本 SHALL 携带 `exit_code=N`（判定与透传契约见 failure-polarity 能力规格）；零退出的成功极性（✓/completed）语义不变。
-
-通知结果 SHALL **有界化**（对齐同步路径的输出转储模式）：结果不超过转储阈值（与 OutputLimitTool 同公式，`MaxTokens/2×4` 字符）时全文内联；超过时全文 SHALL 转储到 workspace 的 tool-output 目录（受 Cleaner 周期清理），通知 Content SHALL 携带尾部摘录（对齐 ActionTool 的 2000 字符）与文件路径票据，事件本体 SHALL NOT 持有全文——凭票据召回该事件返回的是有界版+票据，大结果永不经召回回流上下文。全文消费 SHALL 经 `read_file(start_line, num_lines)` 行级分页。纯空白载荷（去除首尾空白后为空且无 Err）SHALL 降级为单行票据，不投递空白正文。
-
-#### Scenario: 慢命令的应答-通知二段式
-
-- **WHEN** 一个命令越过 dense 窗口转后台，稍后在后台 settle
-- **THEN** 原调用处 SHALL 已返回 ack（含 task id)——这是该调用的同步应答
-- **AND** settle 结果 SHALL 以 task_settled 通知（含同一 task id）驱动一个**新的** turn
-
-#### Scenario: 失败结算以失败极性通知
-
-- **WHEN** 后台命令以非零退出码结束并结算
-- **THEN** task_settled 通知 SHALL 为失败极性（✗/failed），文本 SHALL 含 `exit_code=N` 与 task id
-
-#### Scenario: 通知携带可关联标识
-
-- **WHEN** 渲染含 task_settled 通知的历史
-- **THEN** 通知文本 SHALL 含 task id 与任务简述
-- **AND** 同时间线中先前 ack 文本 SHALL 含同一 task id
-
-#### Scenario: 小结果全文内联
-
-- **GIVEN** 一个 settle 输出低于转储阈值（如 800 字符）
-- **WHEN** task_settled 事件被构造并持久化
-- **THEN** 事件 Content SHALL 为结果全文，SHALL NOT 含截断标记或文件票据
-
-#### Scenario: 大结果转储文件且事件有界
-
-- **GIVEN** 一个 settle 输出远超转储阈值（如数万字符）
-- **WHEN** task_settled 事件被构造
-- **THEN** 全文 SHALL 已写入 tool-output 目录文件，通知 SHALL 含尾部摘录与文件路径票据
-- **AND** 事件 Content SHALL 有界（不含全文），凭 evt key 召回 SHALL 返回有界版+票据，不复发大结果
-- **AND** 模型 SHALL 可经 `read_file` 分页读取全文
-
-#### Scenario: 空白载荷降级票据
-
-- **GIVEN** 一个 settle 输出去除首尾空白后为空且无 Err
-- **WHEN** task_settled 通知被构造
-- **THEN** 通知 SHALL 为单行票据（id、简述、极性），SHALL NOT 投递空白正文
+#### Scenario: 大结果写入失败
+- **WHEN** 终局输出正文无法持久保存
+- **THEN** 信号拒绝受理并保留原 receipt 重试，MUST NOT 用不存在的路径票据确认成功
 
 ### Requirement: 任务状态机 resume 边
 
@@ -184,11 +97,16 @@ service 型任务进入 alive-detached 观测语义时，其脱离时间戳（de
 - **THEN** 看板状态、task_settled 事件、WAL settle_status、反馈四端 MUST 同为失败语义，MUST NOT 出现「内存 failed、事件 completed」
 
 ### Requirement: 迟到信号不得复活终态
-任务进入终态后，后续到达的 detector 信号 MUST 被丢弃并记录（含被丢弃的 Kind），MUST NOT 修改终态、MUST NOT 触发重复结算。
 
-#### Scenario: 终态后迟到 Stable 信号
-- **WHEN** 任务已 finalize 为 failed，其旧 detector 随后发出 SettleStable
-- **THEN** 该信号 MUST 被丢弃并记 Warn，任务状态与结算事实 MUST 保持不变
+信号 SHALL 在同一任务锁内按原 producer round 与观察窗口身份校验后再改状态或交付。旧 detector、迟到窗口交接、重复 seq MUST NOT 修改新轮状态或释放新轮等待。终态后仅允许原 receipt 的 ACK 清理，MUST NOT 重新打开业务状态或重复通知。
+
+#### Scenario: 旧调用晚交接窗口
+- **WHEN** 旧 Spawn 尚未交接其内联窗口，而 Resume 已绑定新轮
+- **THEN** 旧调用只关闭自己捕获的窗口，不能让新轮提前返回
+
+#### Scenario: 重复终局仅确认清理
+- **WHEN** 已记录终态的原 receipt 重现
+- **THEN** 系统仅按原身份确认清理，不产生新业务结算
 
 ### Requirement: 生命周期类只决定编排语义，不决定是否受年龄约束
 
@@ -238,4 +156,28 @@ spawnGate 判定链 SHALL 支持行为审计触发源（self-telemetry-audit L3 
 
 - **WHEN** disk 退化与审计冻结同时生效
 - **THEN** 两者 reason 分别如实呈现；豁免类任务仅在 disk 源下受检（审计源不拦截保护性任务）
+
+### Requirement: 受理意图与资源绑定先于业务启动
+
+生产 Spawn SHALL 依次完成去重/门控、OnSpawnAccepted 意图提交、TaskSpec.Start 资源准备、OnStartAccepted 绑定提交及 ActivatableDetector.Start 业务激活。被拒绝或 dedup 的 lazy 调用 MUST NOT 准备或启动资源；绑定未提交 MUST NOT 激活。已准备资源拒绑时 SHALL 清理本次新资源，MUST NOT 杀死被复用的旧 producer。旧 void 回调仅提供兼容，MUST NOT 使生产拒收被误记为成功。
+
+#### Scenario: 意图提交失败
+- **WHEN** OnSpawnAccepted 返回 false
+- **THEN** lazy factory 不执行，业务零副作用
+
+#### Scenario: 资源绑定提交失败
+- **WHEN** 准备完成但 OnStartAccepted 返回 false
+- **THEN** 新资源被取消且不激活，原有共享 producer 保持
+
+### Requirement: 精确信号受理与 producer ACK
+
+每个信号 SHALL 使用 task id、原 round 与 seq 构成稳定 SourceID，冻结 ObservedAt、WaitFor、owner、完整输出和结果极性。OnSettleAccepted/OnInlineSettleAccepted 及批量/补发的 accepted 回调返回 true 后才 SHALL 清除 pending、确认通知并调用原 detector 的 AcknowledgeSignal。无接收者 SHALL 视为拒收。拒收 SHALL 由独立 worker 以 400ms 至 4s 退避重试，不依赖 List、输入或冥想；重试 MUST NOT 换身份或时间戳。
+
+#### Scenario: transport 拒绝后无新输入
+- **WHEN** receiver 第一次拒绝某终局，之后没有用户消息或看板读取
+- **THEN** 原信号自动重试，成功前 producer 证据不被 ACK 清理
+
+#### Scenario: 批量通知拒绝
+- **WHEN** 批量退役或终局补发受理失败
+- **THEN** 每条原始信号保持 pending，并以原 detector 和身份进入可靠重试，不仅以 bus Publish 返回作为完成凭据
 

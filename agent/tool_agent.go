@@ -684,7 +684,7 @@ type subagentTurnBudgetKey struct{}
 // ErrContinuationNotAccepted proves that a local run returned before handing back an event stream.
 type ErrContinuationNotAccepted struct {
 	InvocationID string
-	Cause error
+	Cause        error
 }
 
 // Error describes the local preparation refusal.
@@ -938,11 +938,11 @@ func (w *AgentToolWrapper) Call(ctx context.Context, jsonArgs []byte) (any, erro
 				Key:         spawnKey,
 				AgentName:   agentName,
 				MessageBody: messageBody,
-				EventKeys: append([]int64(nil), keys...),
+				EventKeys:   append([]int64(nil), keys...),
 				Params:      declParams,
 				Overrides:   overrides,
 			},
-			Relaunch: subagentRelaunchClosure(w.parentCM, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
+			Relaunch: subagentRelaunchClosure(w.parentCM, spawner, inv, agentName, request, spawnKey, ttlSeconds, overrides, keys),
 			ResumeFn: subagentResumeClosureWithOverrides(w.parentCM, agentName, rounds, overrides),
 		}
 		spec.Start = w.prepareTaskStart(ctx, w.parentCM, rounds, inv)
@@ -1110,17 +1110,24 @@ func (w *AgentToolWrapper) collectEventStream(ctx context.Context, invocationID,
 	log.Infof("[TRACE] tool_exit agent=%s output_len=%d tool_calls=%d elapsed=%v",
 		agentName, len(finalOutput), toolCallCount, elapsed)
 
+	var streamErr error
 	if lastErr != nil {
-		return finalOutput, fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
+		streamErr = fmt.Errorf("agent tool %q: upstream model error (%s): %s", agentName, lastErr.Type, lastErr.Message)
 	}
 	if _, local := w.agent.(*TagentAgent); local {
 		if outcome == "" {
-			return finalOutput, &ErrContinuationInterrupted{InvocationID: invocationID, Cause: ctx.Err()}
+			return finalOutput, &ErrContinuationInterrupted{InvocationID: invocationID, Cause: errors.Join(ctx.Err(), streamErr)}
+		}
+		if streamErr != nil {
+			return finalOutput, streamErr
 		}
 		if outcome != "completed" {
 			return finalOutput, fmt.Errorf("agent tool %q: committed delegation outcome %s", agentName, outcome)
 		}
 		return finalOutput, nil
+	}
+	if streamErr != nil {
+		return finalOutput, streamErr
 	}
 	if finalOutput == "" {
 		finalOutput = "tool agent completed without output"
@@ -1143,7 +1150,7 @@ func (w *AgentToolWrapper) collectEventStream(ctx context.Context, invocationID,
 // covers relaunch rounds too, not just the first spawn).
 //
 //   - The owner-face lease accounts for the re-entry while armDeclaredCall selects the execution view it runs on, so a stored task cannot silently serve a retired generation's prompts, model or tools.
-func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64, overrides *task.Overrides) func(context.Context) (task.SpawnResult, error) {
+func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, inv *agent.Invocation, agentName, request, spawnKey string, ttlSeconds int64, overrides *task.Overrides, eventKeys []int64) func(context.Context) (task.SpawnResult, error) {
 	if origin, ok := spawner.(*task.OriginSpawner); ok {
 		spawner = origin.TaskController
 	}
@@ -1182,10 +1189,11 @@ func subagentRelaunchClosure(owner *ContextManager, spawner task.TaskSpawner, in
 				Key:         spawnKey,
 				AgentName:   agentName,
 				MessageBody: inv.Message.Content,
+				EventKeys:   append([]int64(nil), eventKeys...),
 				Params:      declParams,
 				Overrides:   overrides,
 			},
-			Relaunch: subagentRelaunchClosure(owner, currentSpawner, inv, agentName, request, spawnKey, ttlSeconds, overrides),
+			Relaunch: subagentRelaunchClosure(owner, currentSpawner, inv, agentName, request, spawnKey, ttlSeconds, overrides, eventKeys),
 			ResumeFn: subagentResumeClosureWithOverrides(owner, agentName, rounds, overrides),
 		}
 		spec.Start = target.prepareTaskStart(lease.WithContext(ctx), owner, rounds, inv)
@@ -1352,6 +1360,7 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 		roundOwner := task.RoundOwnerFromContext(ctx)
 		stampDelegationParent(inv, owner, id, round, roundOwner, nil)
 		d, err := prepareDelegationDetector(owner, rounds, id, round, roundOwner, inv, input, target.DenseDuration(), lease.Release, func(runCtx context.Context) (string, error) {
+			runCtx = WithSubagentTurnBudget(runCtx, SubagentTurnBudgetFromContext(ctx))
 			callCtx, release, armErr := target.armDeclaredCall(lease.WithContext(runCtx), agentName)
 			if armErr != nil {
 				return "", armErr
@@ -1359,6 +1368,9 @@ func subagentResumeClosureWithOverrides(owner *ContextManager, agentName string,
 			defer release()
 			return target.runAndCollect(callCtx, inv, agentName)
 		})
+		if prepared, ok := d.(*admittedDetector); ok {
+			prepared.params = target.delegationParams(inv.InvocationID)
+		}
 		return d, err
 	}
 }

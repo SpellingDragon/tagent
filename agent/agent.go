@@ -78,12 +78,8 @@ type TagentAgent struct {
 	// compressor / taskManager / 私有 CM 全部经它现读——它就是唯一读源，不存在第二份可写缓存。
 	hotSource atomic.Pointer[func() (OrgHotParams, bool)]
 
-	// liveCMsMu liveCMs：随调用生命周期注册/注销的**存活调用私有 CM**集合
-	// （绝非历史对象列表）。提交点从不向它扇出任何值——私有 CM
-	// 的压缩器绑本 agent 的热参源，在下一次压缩/预算读取边界现读记录。本集合目前
-	// **无生产读取方**（只有注册/注销与 LiveCMCount／snapshotLiveCMs 读面，后者已按
-	//  收为包内——向外暴露内部 CM 切片没有生产价值）：其存续理由
-	// 待 S-D 按 D4「若保留只服务取消/完成等待，归唯一 owner」裁定。有界：调用结束即注销。
+	// liveCMsMu guards private execution faces until their producers and references drain.
+	// Lifecycle waits and declaration usage inspect this bounded set.
 	liveCMsMu sync.Mutex
 	liveCMs   map[*ContextManager]struct{}
 
@@ -194,11 +190,8 @@ type TagentAgent struct {
 	closeProducersDone chan struct{}
 	closeFinalDone     chan struct{}
 	closeFinalOnce     sync.Once
-	// closeTail terminal tail: a bounded Close that could not honestly finish carries
-	// the remainder (still-used tool closers, recorder, store exit and its owner
-	// registration) in exactly ONE continuation, armed on the manager's own
-	// reclaim event and run when the executions actually stop. Guarded by closeMu;
-	// closeTailOnce makes the exit itself exactly-once.
+	// closeTail retains final cleanup until producers, private drivers and execution faces stop.
+	// closeMu guards its result; closeTailOnce owns the final exit.
 	closeTail     func()
 	closeTailOnce sync.Once
 	closeTailDone bool
@@ -611,6 +604,8 @@ func NewTagentAgent(cfg *TagentConfig) (*TagentAgent, error) {
 	cm := newContextManagerFromConfig(cfg, nil, memPlugin, sessionSvc, bus, outputCh, projection, onEvent)
 	taskRecords.cm = cm
 	taskRecords.owner = ta
+	cm.taskSignalJournal = taskRecords
+	cm.taskSignalOwnerResolver = ta.resolveContinuationOwner
 	ta.contextManager = cm
 	ta.liveCMs = make(map[*ContextManager]struct{})
 	ta.SetHotSource(staticHotSource(initialHotParams(cfg)))
@@ -762,6 +757,10 @@ func newContextManagerFromConfig(cfg *TagentConfig, owner *TagentAgent, memPlugi
 		OnEvent:               onEvent,
 	})
 	cm.overflowDir = filepath.Join(workspace.ToolOutputPath(cfg.WorkspaceRoot), "output-overflow")
+	if owner != nil {
+		cm.taskSignalOwnerResolver = owner.resolveContinuationOwner
+		cm.taskSignalJournal = owner.taskRecords
+	}
 	return cm
 }
 

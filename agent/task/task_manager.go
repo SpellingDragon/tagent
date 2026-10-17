@@ -147,6 +147,8 @@ func SatisfiesWait(spec TaskSpec, sig SettleSignal) bool {
 // SettleSignal is emitted by a SettleDetector when a task reaches a settle point.
 type SettleSignal struct {
 	WaitFor       WaitCondition
+	InputBatchID  string
+	Declarative   *Declarative
 	RoundID       uint64
 	ProducerRound uint64
 	RoundOwner    string
@@ -264,6 +266,8 @@ func DetachAfter(d time.Duration, stop <-chan struct{}) <-chan struct{} {
 type Declarative struct {
 	Mode                  string        `json:"mode,omitempty"`
 	WaitFor               WaitCondition `json:"wait_for,omitempty"`
+	InputBatchID          string        `json:"input_batch_id,omitempty"`
+	ProducerInputBatchID  string        `json:"producer_input_batch_id,omitempty"`
 	RoundID               uint64        `json:"round_id,omitempty"`
 	RoundOwner            string        `json:"round_owner,omitempty"`
 	ProducerRound         uint64        `json:"producer_round,omitempty"`
@@ -334,6 +338,7 @@ func (o *Overrides) IsEmpty() bool {
 type TaskSpec struct {
 	Mode         string
 	WaitFor      WaitCondition
+	InputBatchID string
 	RoundOwner   string
 	Start        func(*Task) (TaskSpec, SettleDetector, error)
 	OnRoundStart func(*Task)
@@ -402,11 +407,12 @@ type Task struct {
 	Spec      TaskSpec
 	StartedAt time.Time
 
-	mu        sync.Mutex
-	status    TaskStatus
-	result    string
-	err       error
-	settledAt time.Time
+	mu           sync.Mutex
+	activationMu sync.Mutex
+	status       TaskStatus
+	result       string
+	err          error
+	settledAt    time.Time
 
 	// retireNotified marks that the terminal notification for this task was
 	// HANDED to a dispatcher callback that RETURNED (the in-flight kill window
@@ -429,10 +435,17 @@ type Task struct {
 	roundOwner            string
 	producerRound         uint64
 	producerOwner         string
+	inputBatchID          string
+	producerInputBatchID  string
 	producerWaitSatisfied bool
 	signalSeq             uint64
 	resuming              bool
+	serviceObserved       bool
+	serviceKind           SettleKind
+	serviceOutput         string
+	serviceRound          uint64
 	recovering            bool
+	deferredActivation    *detectorActivation
 	rollback              *roundRollback
 	pending               map[string]*pendingDelivery
 }
@@ -444,6 +457,7 @@ type roundRollback struct {
 	detector              SettleDetector
 	producerRound         uint64
 	producerOwner         string
+	producerInputBatchID  string
 	signalSeq             uint64
 	ttlRenewedAt          time.Time
 	settledAt             time.Time
@@ -462,6 +476,14 @@ type pendingDelivery struct {
 	restored bool
 }
 
+type detectorActivation struct {
+	detector SettleDetector
+	round    uint64
+	owner    string
+	refresh  bool
+	ready    chan struct{}
+}
+
 // SpecSnapshot returns an isolated copy of the task declaration and metadata.
 func (t *Task) SpecSnapshot() TaskSpec {
 	t.mu.Lock()
@@ -471,7 +493,10 @@ func (t *Task) SpecSnapshot() TaskSpec {
 
 func (t *Task) specSnapshotLocked() TaskSpec {
 	spec := cloneSpec(t.Spec)
+	spec.InputBatchID = t.inputBatchID
 	if spec.Declarative != nil {
+		spec.Declarative.InputBatchID = t.inputBatchID
+		spec.Declarative.ProducerInputBatchID = t.producerInputBatchID
 		spec.Declarative.RoundID = t.roundID
 		spec.Declarative.RoundOwner = t.roundOwner
 		spec.Declarative.ProducerRound = t.producerRound
@@ -752,13 +777,17 @@ var _ TaskController = (*TaskManager)(nil)
 // tools; only Spawn is augmented.
 type OriginSpawner struct {
 	TaskController
-	Origin     map[string]string
-	RoundOwner string
+	Origin       map[string]string
+	RoundOwner   string
+	InputBatchID string
 }
 
 // Spawn 在 spec 未自带 Origin 时，把本包装器携带的 origin 逐键复制一份填进去（复制而非共享：
 // 调用方随后改写自己的 map 不会串到任务上），再委托给内层控制器。
 func (o *OriginSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult {
+	if spec.InputBatchID == "" {
+		spec.InputBatchID = o.InputBatchID
+	}
 	if spec.RoundOwner == "" {
 		spec.RoundOwner = o.RoundOwner
 	}
@@ -774,6 +803,7 @@ func (o *OriginSpawner) Spawn(spec TaskSpec, detector SettleDetector) SpawnResul
 
 type taskSpawnerCtxKey struct{}
 type roundOwnerCtxKey struct{}
+type inputBatchCtxKey struct{}
 type roundStartCtxKey struct{}
 type taskIdentityCtxKey struct{}
 type taskIdentity struct {
@@ -790,6 +820,17 @@ func WithRoundOwner(ctx context.Context, owner string) context.Context {
 func RoundOwnerFromContext(ctx context.Context) string {
 	owner, _ := ctx.Value(roundOwnerCtxKey{}).(string)
 	return owner
+}
+
+// WithInputBatchID carries the opaque input batch that initiated a task round.
+func WithInputBatchID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, inputBatchCtxKey{}, id)
+}
+
+// InputBatchIDFromContext returns the initiating input batch without interpreting it.
+func InputBatchIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(inputBatchCtxKey{}).(string)
+	return id
 }
 
 // WithRoundStart registers bookkeeping before a resumed producer may emit signals.
@@ -1149,7 +1190,7 @@ func (tm *TaskManager) Spawn(spec TaskSpec, detector SettleDetector) SpawnResult
 	spec = cloneSpec(spec)
 	task := &Task{ID: uuid.NewString(), Spec: spec, StartedAt: tm.now(), status: TaskRunning,
 		firstSettle: make(chan SettleSignal, 1), windowDone: make(chan struct{}), watchDone: make(chan struct{}),
-		roundID: 1, roundOwner: spec.RoundOwner, pending: make(map[string]*pendingDelivery)}
+		roundID: 1, roundOwner: spec.RoundOwner, inputBatchID: spec.InputBatchID, pending: make(map[string]*pendingDelivery)}
 	tm.tasks[task.ID] = task
 	if detector != nil {
 		tm.trackProducerLocked(detector)
@@ -1295,17 +1336,21 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 	}
 	oldSpec, oldDetector := t.Spec, t.detector
 	oldProducer, oldOwner, oldSeq, oldWait, oldAnchor := t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied, t.ttlRenewedAt
+	oldBatch := t.producerInputBatchID
 	spec.RoundOwner = owner
+	spec.InputBatchID = t.inputBatchID
 	spec.Origin = oldSpec.Origin
 	t.Spec, t.detector = spec, detector
 	if !initial {
 		t.ttlRenewedAt = tm.now()
 	}
 	t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied = round, owner, 0, false
+	t.producerInputBatchID = t.inputBatchID
 	if actual, ok := detector.(interface{ ProducerRound() uint64 }); ok {
 		t.producerRound = actual.ProducerRound()
 		if t.producerRound != round {
 			t.producerOwner, t.signalSeq, t.producerWaitSatisfied = oldOwner, oldSeq, oldWait
+			t.producerInputBatchID = oldBatch
 		}
 	}
 	t.mu.Unlock()
@@ -1322,6 +1367,7 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 		t.mu.Lock()
 		t.Spec, t.detector = oldSpec, oldDetector
 		t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied = oldProducer, oldOwner, oldSeq, oldWait
+		t.producerInputBatchID = oldBatch
 		t.ttlRenewedAt = oldAnchor
 		t.mu.Unlock()
 		return "task resource binding was not accepted"
@@ -1333,6 +1379,7 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 		t.mu.Lock()
 		t.Spec, t.detector = oldSpec, oldDetector
 		t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied, t.ttlRenewedAt = oldProducer, oldOwner, oldSeq, oldWait, oldAnchor
+		t.producerInputBatchID = oldBatch
 		t.mu.Unlock()
 		return "task manager is closing"
 	}
@@ -1340,6 +1387,7 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 	if t.status == TaskCancelled {
 		t.Spec, t.detector = oldSpec, oldDetector
 		t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied, t.ttlRenewedAt = oldProducer, oldOwner, oldSeq, oldWait, oldAnchor
+		t.producerInputBatchID = oldBatch
 		t.mu.Unlock()
 		return "task was cancelled before activation"
 	}
@@ -1353,29 +1401,26 @@ func (tm *TaskManager) bindPrepared(t *Task, spec TaskSpec, detector SettleDetec
 	t.windowClosed = false
 	t.windowDone = make(chan struct{})
 	t.aliveDetached = false
+	t.serviceObserved = false
 	t.retireNotified = false
 	t.status = TaskRunning
 	t.resuming = false
 	done := t.watchDone
+	activation := &detectorActivation{detector: detector, round: round, owner: owner, refresh: true, ready: make(chan struct{})}
+	_, activatable := detector.(ActivatableDetector)
+	deferred := t.recovering && activatable
+	if deferred && detector != nil {
+		t.deferredActivation = activation
+	}
 	t.mu.Unlock()
 	if detector != nil {
 		tm.mu.Lock()
 		tm.watchers.Add(1)
 		tm.mu.Unlock()
-		if d, ok := detector.(ActivatableDetector); ok {
-			d.Start()
+		if !deferred {
+			tm.activateDetector(t, activation)
 		}
-		t.mu.Lock()
-		if actual, ok := detector.(interface{ ProducerRound() uint64 }); ok {
-			t.producerRound = actual.ProducerRound()
-			if t.producerRound == round {
-				t.producerOwner, t.signalSeq, t.rollback, t.producerWaitSatisfied = owner, 0, nil, false
-			}
-		} else {
-			t.rollback = nil
-		}
-		t.mu.Unlock()
-		go func() { defer tm.watchers.Done(); tm.watch(t, detector, done, round, owner) }()
+		go func() { defer tm.watchers.Done(); tm.watch(t, detector, done, round, owner, activation.ready) }()
 	}
 	tm.RecheckDeadlines()
 	return ""
@@ -1391,16 +1436,16 @@ func (tm *TaskManager) awaitWindow(t *Task, detector SettleDetector, round uint6
 	}
 	select {
 	case sig := <-first:
-		tm.closeCapturedWindow(t, first, windowDone, false)
+		tm.closeCapturedWindow(t, first, windowDone, false, detector)
 		if sig.Observation != "round_aborted" {
 			tm.deliver(t, sig, detector, true, false)
 		}
 		return SpawnResult{Task: t, Settled: true, Signal: sig}
 	case <-detach:
-		tm.closeCapturedWindow(t, first, windowDone, true)
+		tm.closeCapturedWindow(t, first, windowDone, true, detector)
 		return SpawnResult{Task: t}
 	case <-tm.stop:
-		tm.closeCapturedWindow(t, first, windowDone, true)
+		tm.closeCapturedWindow(t, first, windowDone, true, detector)
 		return SpawnResult{Task: t, Blocked: "task manager is closing"}
 	case <-windowDone:
 		return SpawnResult{Task: t}
@@ -1408,7 +1453,16 @@ func (tm *TaskManager) awaitWindow(t *Task, detector SettleDetector, round uint6
 }
 
 // watch fences both state mutation and foreground handoff by producer identity.
-func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struct{}, round uint64, owner string) {
+func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struct{}, round uint64, owner string, ready ...<-chan struct{}) {
+	if len(ready) > 0 {
+		select {
+		case <-ready[0]:
+		case <-done:
+			return
+		case <-tm.stop:
+			return
+		}
+	}
 	for {
 		select {
 		case <-tm.stop:
@@ -1429,6 +1483,7 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 				if old := t.rollback; old != nil {
 					previous = old.status
 					t.Spec, t.detector, t.producerRound, t.producerOwner, t.signalSeq, t.producerWaitSatisfied = old.spec, old.detector, old.producerRound, old.producerOwner, old.signalSeq, old.producerWaitSatisfied
+					t.producerInputBatchID = old.producerInputBatchID
 					t.ttlRenewedAt, t.settledAt, t.aliveDetached, t.detachedAt = old.ttlRenewedAt, old.settledAt, old.aliveDetached, old.detachedAt
 					t.rollback = nil
 				}
@@ -1463,6 +1518,9 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 			}
 			t.signalSeq = sig.Seq
 			sig.RoundID, sig.ProducerRound, sig.RoundOwner = producerRound, producerRound, producerOwner
+			if sig.InputBatchID == "" {
+				sig.InputBatchID = t.producerInputBatchID
+			}
 			if sig.ObservedAt.IsZero() {
 				sig.ObservedAt = tm.now()
 			}
@@ -1476,6 +1534,7 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 				sig.WaitFor = WaitForOf(t.Spec)
 			}
 			sig.WaitSatisfied = SatisfiesWait(t.Spec, sig)
+			tm.freezeSignalLocked(t, &sig)
 			if sig.WaitSatisfied {
 				t.producerWaitSatisfied = true
 			}
@@ -1486,7 +1545,7 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 			legacyOffer := t.Spec.WaitFor == "" && t.Spec.Mode == ""
 			if t.windowClosed || (!sig.WaitSatisfied && !legacyOffer) {
 				t.mu.Unlock()
-				tm.emitBackground(t, sig)
+				tm.emitBackground(t, sig, detector)
 				continue
 			}
 			windowDone := t.windowDone
@@ -1505,7 +1564,7 @@ func (tm *TaskManager) watch(t *Task, detector SettleDetector, done <-chan struc
 }
 
 // closeCapturedWindow closes only the foreground handoff observed by its caller.
-func (tm *TaskManager) closeCapturedWindow(t *Task, first chan SettleSignal, done chan struct{}, drainToBg bool) {
+func (tm *TaskManager) closeCapturedWindow(t *Task, first chan SettleSignal, done chan struct{}, drainToBg bool, detectors ...SettleDetector) {
 	t.mu.Lock()
 	current := done == t.windowDone
 	if current && t.windowClosed {
@@ -1532,46 +1591,36 @@ func (tm *TaskManager) closeCapturedWindow(t *Task, first chan SettleSignal, don
 	}
 	t.mu.Unlock()
 	if pending != nil {
-		tm.emitBackground(t, *pending)
+		tm.emitBackground(t, *pending, detectors...)
 	}
 }
 
 // emitBackground applies readiness suppression after the foreground condition is decided.
-func (tm *TaskManager) emitBackground(t *Task, sig SettleSignal) {
+func (tm *TaskManager) emitBackground(t *Task, sig SettleSignal, detectors ...SettleDetector) {
 	t.mu.Lock()
 	if sig.RoundID == 0 {
-		if t.producerRound == 0 {
-			t.producerRound = t.roundID
-			if t.producerRound == 0 {
-				t.producerRound = 1
-				t.roundID = 1
-			}
-		}
-		t.signalSeq++
-		sig.RoundID, sig.ProducerRound, sig.Seq, sig.RoundOwner = t.producerRound, t.producerRound, t.signalSeq, t.producerOwner
-		if sig.ObservedAt.IsZero() {
-			sig.ObservedAt = tm.now()
-		}
-		sig.SourceID = SignalSourceID(t.ID, sig.RoundID, sig.Seq)
-		if sig.WaitFor == "" {
-			sig.WaitFor = WaitForOf(t.Spec)
-		}
-		sig.WaitSatisfied = SatisfiesWait(t.Spec, sig)
+		tm.identifySignalLocked(t, &sig)
 	}
-	service := LifetimeOf(t.Spec) == LifetimeService
+	tm.freezeSignalLocked(t, &sig)
+	detector := t.detector
+	if len(detectors) > 0 {
+		detector = detectors[0]
+	}
+	currentProducer := sig.ProducerRound == t.producerRound
+	service := currentProducer && LifetimeOf(t.Spec) == LifetimeService
 	if service && (sig.Kind == SettleStable || sig.Kind == SettleReady || sig.Kind == SettleSuspect) {
-		if t.aliveDetached && !sig.EndsRound() {
+		bare := t.Spec.Mode == "" && t.Spec.WaitFor == ""
+		same := t.serviceObserved && t.serviceRound == sig.ProducerRound && t.serviceKind == sig.Kind && t.serviceOutput == sig.Output
+		if t.aliveDetached && !sig.EndsRound() && (!bare || same) {
 			t.mu.Unlock()
-			tm.acknowledge(t.detector, sig)
+			tm.acknowledge(detector, sig)
 			return
 		}
-		if sig.Kind == SettleReady || (sig.Kind == SettleStable && sig.WaitSatisfied) {
-			t.aliveDetached = true
-			t.status = TaskAliveDetached
-			t.detachedAt = tm.now()
+		t.serviceObserved, t.serviceRound, t.serviceKind, t.serviceOutput = true, sig.ProducerRound, sig.Kind, sig.Output
+		if !t.aliveDetached && (sig.Kind == SettleReady || (sig.Kind == SettleStable && sig.WaitSatisfied)) {
+			t.aliveDetached, t.status, t.detachedAt = true, TaskAliveDetached, tm.now()
 		}
 	}
-	detector := t.detector
 	t.mu.Unlock()
 	tm.deliver(t, sig, detector, false, false)
 }
@@ -1611,6 +1660,38 @@ func (tm *TaskManager) applyStatus(t *Task, sig SettleSignal) {
 	tm.applyStatusLocked(t, sig)
 }
 
+func (tm *TaskManager) activateDetector(t *Task, activation *detectorActivation) {
+	defer close(activation.ready)
+	t.activationMu.Lock()
+	defer t.activationMu.Unlock()
+	tm.mu.Lock()
+	closing := tm.closing
+	tm.mu.Unlock()
+	t.mu.Lock()
+	allowed := !closing && t.detector == activation.detector && t.status != TaskCancelled
+	t.mu.Unlock()
+	if !allowed {
+		return
+	}
+	if active, ok := activation.detector.(ActivatableDetector); ok {
+		active.Start()
+	}
+	if !activation.refresh {
+		return
+	}
+	t.mu.Lock()
+	if actual, ok := activation.detector.(interface{ ProducerRound() uint64 }); ok {
+		t.producerRound = actual.ProducerRound()
+		if t.producerRound == activation.round {
+			t.producerOwner, t.signalSeq, t.rollback, t.producerWaitSatisfied = activation.owner, 0, nil, false
+			t.producerInputBatchID = t.inputBatchID
+		}
+	} else {
+		t.rollback = nil
+	}
+	t.mu.Unlock()
+}
+
 // BindDetector attaches an existing resource to its original producer round. Terminal tasks accept only acknowledgement-capable detectors; their business state is never reopened.
 func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	if tm == nil || id == "" {
@@ -1632,7 +1713,8 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 		recovered = &spec
 	}
 	t.mu.Lock()
-	if isTerminalStatus(t.status) {
+	terminal := isTerminalStatus(t.status)
+	if terminal {
 		if _, ackOnly := d.(SignalAcknowledger); !ackOnly {
 			status := t.status
 			t.mu.Unlock()
@@ -1653,17 +1735,24 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 		t.Spec = *recovered
 	}
 	t.detector = d
-	if t.producerRound == 0 {
+	if t.producerRound == 0 && !terminal {
 		t.producerRound = t.roundID
 		if t.producerRound == 0 {
 			t.producerRound, t.roundID = 1, 1
 		}
+		t.producerInputBatchID = t.inputBatchID
 	}
 	if t.watchStopped {
 		t.watchDone = make(chan struct{})
 		t.watchStopped = false
 	}
 	done, round, owner := t.watchDone, t.producerRound, t.producerOwner
+	activation := &detectorActivation{detector: d, round: round, owner: owner, ready: make(chan struct{})}
+	_, activatable := d.(ActivatableDetector)
+	deferred := t.recovering && activatable
+	if deferred && d != nil && !terminal {
+		t.deferredActivation = activation
+	}
 	t.mu.Unlock()
 	if d != nil {
 		tm.mu.Lock()
@@ -1673,6 +1762,7 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 	if recovered != nil && tm.onStartAccepted != nil && !tm.invoke(func() bool { return tm.onStartAccepted(t) }) {
 		t.mu.Lock()
 		t.Spec, t.detector = oldSpec, nil
+		t.deferredActivation = nil
 		t.mu.Unlock()
 		if d != nil {
 			d.Cancel()
@@ -1686,14 +1776,14 @@ func (tm *TaskManager) BindDetector(id string, d SettleDetector) error {
 		}
 	}
 	t.mu.Unlock()
-	if d != nil {
+	if d != nil && !terminal {
 		tm.mu.Lock()
 		tm.watchers.Add(1)
 		tm.mu.Unlock()
-		if active, ok := d.(ActivatableDetector); ok {
-			active.Start()
+		if !deferred {
+			tm.activateDetector(t, activation)
 		}
-		go func() { defer tm.watchers.Done(); tm.watch(t, d, done, round, owner) }()
+		go func() { defer tm.watchers.Done(); tm.watch(t, d, done, round, owner, activation.ready) }()
 	}
 	tm.RecheckDeadlines()
 	return nil
@@ -1734,7 +1824,7 @@ func (tm *TaskManager) ResumeRestoredStart(id string) error {
 	t.mu.Lock()
 	first, done := t.firstSettle, t.windowDone
 	t.mu.Unlock()
-	tm.closeCapturedWindow(t, first, done, true)
+	tm.closeCapturedWindow(t, first, done, true, detector)
 	return nil
 }
 
@@ -1764,8 +1854,13 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		pending:      make(map[string]*pendingDelivery),
 		recovering:   tm.enableDeadlineReaper,
 		roundID:      1, producerRound: 1, roundOwner: spec.RoundOwner, producerOwner: spec.RoundOwner,
+		inputBatchID: spec.InputBatchID, producerInputBatchID: spec.InputBatchID,
 	}
 	if d := spec.Declarative; d != nil {
+		if d.InputBatchID != "" {
+			tk.inputBatchID = d.InputBatchID
+		}
+		tk.producerInputBatchID = d.ProducerInputBatchID
 		if d.RoundID > 0 {
 			tk.roundID = d.RoundID
 		}
@@ -1785,6 +1880,9 @@ func (tm *TaskManager) RestoreTask(id string, spec TaskSpec, startedAt time.Time
 		}
 		if tk.producerRound == 0 {
 			tk.producerOwner = ""
+			tk.producerInputBatchID = ""
+		} else if tk.producerRound == tk.roundID && tk.producerInputBatchID == "" {
+			tk.producerInputBatchID = tk.inputBatchID
 		}
 		tk.signalSeq = d.SignalSeq
 		tk.producerWaitSatisfied = d.ProducerWaitSatisfied
@@ -2110,7 +2208,9 @@ func (tm *TaskManager) finishBatchDeliveries(batch []BatchRetired, accepted bool
 			pending.inFlight = false
 			if accepted {
 				delete(r.Task.pending, r.Sig.SourceID)
-				r.Task.retireNotified = true
+				if r.Task.signalEndsCurrentRoundLocked(r.Sig) {
+					r.Task.retireNotified = true
+				}
 			}
 		}
 		r.Task.mu.Unlock()
@@ -2165,7 +2265,7 @@ func (tm *TaskManager) finalizeWithSignal(t *Task, sig SettleSignal) {
 		tm.RecheckDeadlines()
 		return
 	}
-	detector, attributed := t.detector, t.Spec.Origin[originKeyInvocationID] != ""
+	detector, attributed := t.detector, sig.RoundOwner != "" || t.Spec.Origin[originKeyInvocationID] != ""
 	t.mu.Unlock()
 	tm.mu.Lock()
 	if tm.batchCollect != nil && !attributed {
@@ -2190,14 +2290,17 @@ func (t *Task) retireWatchLocked() {
 }
 
 func (tm *TaskManager) identifySignalLocked(t *Task, sig *SettleSignal) {
-	if t.producerRound == 0 {
-		t.producerRound = t.roundID
-		if t.producerRound == 0 {
-			t.producerRound, t.roundID = 1, 1
-		}
+	if t.roundID == 0 && t.producerRound == 0 {
+		t.roundID = 1
 	}
 	if sig.RoundID == 0 {
 		sig.RoundID = t.producerRound
+		if sig.RoundID == 0 {
+			sig.RoundID = t.roundID
+			if sig.RoundID == 0 {
+				sig.RoundID = 1
+			}
+		}
 	}
 	if sig.ProducerRound == 0 {
 		sig.ProducerRound = t.producerRound
@@ -2218,10 +2321,43 @@ func (tm *TaskManager) identifySignalLocked(t *Task, sig *SettleSignal) {
 	if sig.WaitFor == "" {
 		sig.WaitFor = WaitForOf(t.Spec)
 	}
+	if sig.InputBatchID == "" {
+		sig.InputBatchID = t.producerInputBatchID
+		if t.producerRound == 0 {
+			sig.InputBatchID = t.inputBatchID
+		}
+	}
 	sig.WaitSatisfied = SatisfiesWait(t.Spec, *sig)
+	tm.freezeSignalLocked(t, sig)
 	if sig.WaitSatisfied && sig.RoundID == t.producerRound {
 		t.producerWaitSatisfied = true
 	}
+}
+
+func (tm *TaskManager) freezeSignalLocked(t *Task, sig *SettleSignal) {
+	if sig.Declarative != nil {
+		return
+	}
+	d := t.specSnapshotLocked().Declarative
+	if d == nil {
+		return
+	}
+	d.RoundID, d.RoundOwner, d.ProducerRound = sig.RoundID, sig.RoundOwner, sig.ProducerRound
+	d.InputBatchID, d.SignalSeq, d.WaitFor = sig.InputBatchID, sig.Seq, sig.WaitFor
+	if sig.Observation != "round_aborted" && sig.ProducerRound > 0 {
+		d.ProducerInputBatchID = sig.InputBatchID
+	}
+	sig.Declarative = d
+}
+
+func (t *Task) signalEndsCurrentRoundLocked(sig SettleSignal) bool {
+	if !sig.EndsRound() {
+		return false
+	}
+	if t.producerRound == 0 {
+		return sig.ProducerRound == 0 && sig.RoundID == t.roundID
+	}
+	return sig.RoundID == t.producerRound && sig.ProducerRound == t.producerRound
 }
 
 // sessionTrackerFn snapshots the wired tracker (lock-safe read).
@@ -2434,9 +2570,11 @@ func (tm *TaskManager) Cancel(id string) bool {
 	if !ok {
 		return false
 	}
+	t.activationMu.Lock()
 	t.mu.Lock()
 	if t.status == TaskCancelled {
 		t.mu.Unlock()
+		t.activationMu.Unlock()
 		return false
 	}
 	wasActive := !isTerminalStatus(t.status)
@@ -2454,6 +2592,7 @@ func (tm *TaskManager) Cancel(id string) bool {
 	if detector != nil {
 		detector.Cancel()
 	}
+	t.activationMu.Unlock()
 	if tm.onCancel != nil {
 		tm.invoke(func() bool { tm.onCancel(t); return true })
 	}
@@ -2550,7 +2689,7 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 		t.mu.Unlock()
 		return SpawnResult{}, fmt.Errorf("task %s does not support resume", id)
 	}
-	t.rollback = &roundRollback{producerWaitSatisfied: t.producerWaitSatisfied, status: previous, spec: cloneSpec(t.Spec), detector: t.detector, producerRound: t.producerRound, producerOwner: t.producerOwner, signalSeq: t.signalSeq,
+	t.rollback = &roundRollback{producerWaitSatisfied: t.producerWaitSatisfied, status: previous, spec: cloneSpec(t.Spec), detector: t.detector, producerRound: t.producerRound, producerOwner: t.producerOwner, producerInputBatchID: t.producerInputBatchID, signalSeq: t.signalSeq,
 		ttlRenewedAt: t.ttlRenewedAt, settledAt: t.settledAt, aliveDetached: t.aliveDetached, detachedAt: t.detachedAt}
 	t.roundID++
 	if t.roundID == 0 {
@@ -2562,7 +2701,9 @@ func (tm *TaskManager) Resume(ctx context.Context, id string, input string) (Spa
 		owner = t.roundOwner
 	}
 	t.roundOwner, t.resuming, t.status = owner, true, TaskRunning
+	t.inputBatchID = InputBatchIDFromContext(ctx)
 	spec := cloneSpec(t.Spec)
+	spec.InputBatchID = t.inputBatchID
 	t.mu.Unlock()
 	if tm.onRoundAccepted != nil && !tm.invoke(func() bool { return tm.onRoundAccepted(t) }) {
 		t.mu.Lock()
@@ -2625,10 +2766,11 @@ func (tm *TaskManager) abortRound(t *Task, round uint64, owner string, previous 
 		t.err = err
 	}
 	sig := SettleSignal{Kind: SettleFailed, Final: true, Err: err, Output: "task round aborted", RoundID: round,
-		ProducerRound: t.producerRound, RoundOwner: owner, Seq: 1, ObservedAt: tm.now(), WaitSatisfied: true, Observation: "round_aborted"}
+		ProducerRound: t.producerRound, RoundOwner: owner, InputBatchID: t.inputBatchID, Seq: 1, ObservedAt: tm.now(), WaitSatisfied: true, Observation: "round_aborted"}
 	if len(observed) > 0 {
 		sig = observed[0]
 		sig.RoundID, sig.ProducerRound, sig.RoundOwner = round, t.producerRound, owner
+		sig.InputBatchID = t.inputBatchID
 		sig.Observation, sig.WaitSatisfied = "round_aborted", true
 		if sig.Seq == 0 {
 			sig.Seq = 1
@@ -2643,6 +2785,7 @@ func (tm *TaskManager) abortRound(t *Task, round uint64, owner string, previous 
 	if sig.WaitFor == "" {
 		sig.WaitFor = WaitForOf(t.Spec)
 	}
+	tm.freezeSignalLocked(t, &sig)
 	t.mu.Unlock()
 	tm.deliver(t, sig, nil, false, true)
 	t.mu.Lock()
@@ -2658,6 +2801,11 @@ func (tm *TaskManager) abortRound(t *Task, round uint64, owner string, previous 
 
 // RestorePendingDelivery records a restored receipt without contacting receivers.
 func (tm *TaskManager) RestorePendingDelivery(id string, sig SettleSignal) bool {
+	return tm.RestorePendingDeliveryWithMode(id, sig, false)
+}
+
+// RestorePendingDeliveryWithMode preserves the original inline or background receipt destination.
+func (tm *TaskManager) RestorePendingDeliveryWithMode(id string, sig SettleSignal, inline bool) bool {
 	if tm == nil {
 		return false
 	}
@@ -2679,23 +2827,63 @@ func (tm *TaskManager) RestorePendingDelivery(id string, sig SettleSignal) bool 
 	if t.pending == nil {
 		t.pending = make(map[string]*pendingDelivery)
 	}
-	t.pending[sig.SourceID] = &pendingDelivery{signal: sig, restored: true, aborted: sig.Observation == "round_aborted"}
+	t.pending[sig.SourceID] = &pendingDelivery{signal: sig, inline: inline, restored: true, aborted: sig.Observation == "round_aborted"}
+	return true
+}
+
+// ResolveRestoredDelivery releases one frozen receipt after recovery proves its receiver accepted it.
+func (tm *TaskManager) ResolveRestoredDelivery(id, sourceID string) bool {
+	if tm == nil || sourceID == "" || !tm.beginOperation() {
+		return false
+	}
+	defer tm.operations.Done()
+	tm.mu.Lock()
+	t := tm.tasks[id]
+	if t == nil {
+		tm.mu.Unlock()
+		return false
+	}
+	t.mu.Lock()
+	tm.mu.Unlock()
+	p := t.pending[sourceID]
+	if p == nil || !p.restored || p.inFlight {
+		t.mu.Unlock()
+		return false
+	}
+	delete(t.pending, sourceID)
+	sig, detector := p.signal, p.detector
+	if t.signalEndsCurrentRoundLocked(sig) {
+		t.retireNotified = true
+	}
+	t.mu.Unlock()
+	tm.acknowledge(detector, sig)
+	tm.RecheckDeadlines()
 	return true
 }
 
 // ResumePendingDeliveries starts retries after every recovery receiver has bound.
 func (tm *TaskManager) ResumePendingDeliveries() {
-	if tm == nil {
+	if tm == nil || !tm.beginOperation() {
 		return
 	}
+	defer tm.operations.Done()
 	tm.mu.Lock()
 	if tm.closing {
 		tm.mu.Unlock()
 		return
 	}
+	type deferredStart struct {
+		task       *Task
+		activation *detectorActivation
+	}
+	var activations []deferredStart
 	for _, t := range tm.tasks {
 		t.mu.Lock()
 		t.recovering = false
+		if activation := t.deferredActivation; activation != nil {
+			activations = append(activations, deferredStart{t, activation})
+			t.deferredActivation = nil
+		}
 		for _, p := range t.pending {
 			p.restored = false
 			p.retryAt = time.Time{}
@@ -2703,6 +2891,9 @@ func (tm *TaskManager) ResumePendingDeliveries() {
 		t.mu.Unlock()
 	}
 	tm.mu.Unlock()
+	for _, start := range activations {
+		tm.activateDetector(start.task, start.activation)
+	}
 	tm.wakeDelivery()
 	tm.RecheckDeadlines()
 }
@@ -2737,7 +2928,14 @@ func (tm *TaskManager) deliver(t *Task, sig SettleSignal, detector SettleDetecto
 		if sig.WaitFor == "" {
 			sig.WaitFor = WaitForOf(t.Spec)
 		}
+		if sig.InputBatchID == "" {
+			sig.InputBatchID = t.producerInputBatchID
+			if sig.Observation == "round_aborted" || t.producerRound == 0 {
+				sig.InputBatchID = t.inputBatchID
+			}
+		}
 		sig.WaitSatisfied = SatisfiesWait(t.Spec, sig)
+		tm.freezeSignalLocked(t, &sig)
 		sig.SourceID = SignalSourceID(t.ID, sig.RoundID, sig.Seq)
 		t.mu.Unlock()
 	}
@@ -2793,7 +2991,7 @@ func (tm *TaskManager) attemptDelivery(t *Task, p *pendingDelivery) bool {
 	p.inFlight = false
 	if accepted {
 		delete(t.pending, sig.SourceID)
-		if sig.EndsRound() && ((sig.RoundID == t.producerRound && sig.ProducerRound == t.producerRound) || (aborted && t.producerRound == 0)) {
+		if t.signalEndsCurrentRoundLocked(sig) {
 			t.retireNotified = true
 		}
 	} else {

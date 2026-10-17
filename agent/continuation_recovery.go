@@ -50,6 +50,9 @@ func continuationFacts(store memory.MemoryStore, partitionID int) ([]memory.Full
 		}
 	}
 	sort.Slice(facts, func(i, j int) bool { return facts[i].EventKey < facts[j].EventKey })
+	if len(facts) > 0 {
+		memory.RaiseSnowflakeFloor(partitionID, facts[len(facts)-1].EventKey)
+	}
 	return facts, nil
 }
 
@@ -261,7 +264,11 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 	for _, key := range c.state.ConsumedKeys {
 		consumed[key] = true
 	}
-	var pendingSignals []*AgentEvent
+	type rawSignal struct {
+		fact memory.FullEvent
+		raw  taskSignalRecord
+	}
+	var pendingSignals []rawSignal
 	var progress bool
 	var tailFinal bool
 	var tailConsumed bool
@@ -292,6 +299,14 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 		}
 		if f.EventType == tagentevent.TypeInputDisposition {
 			key, _ := tagentevent.ParseEventKey(f.Metadata[tagentevent.MetaKeyConsumedEventKey])
+			if f.Metadata[tagentevent.MetaKeyInputDisposition] == "inline_processed" {
+				source, err := ta.memStore.GetEvent(key)
+				var raw taskSignalRecord
+				if err != nil || source == nil || !continuationFactBelongs(*source, ta.name, id) || json.Unmarshal([]byte(source.Content), &raw) != nil || !inlineTaskSignalConsumed(ta.memStore, *source, raw) {
+					return fmt.Errorf("continuation %s inline disposition has no exact raw result", id)
+				}
+				continue
+			}
 			if key > 0 {
 				source, err := ta.memStore.GetEvent(key)
 				if err != nil || source == nil || source.PartitionID != f.PartitionID || !continuationFactBelongs(*source, ta.name, id) {
@@ -321,8 +336,12 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 			progress = true
 		}
 		if f.EventType == tagentevent.TypeTaskSignal {
-			if evt := continuationEventFromFact(f); evt != nil {
-				pendingSignals = append(pendingSignals, evt)
+			var raw taskSignalRecord
+			if json.Unmarshal([]byte(f.Content), &raw) == nil && raw.Event != nil {
+				pendingSignals = append(pendingSignals, rawSignal{fact: f, raw: raw})
+				if raw.ReceiptKey > 0 && !containsContinuationKey(c.state.RetainedKeys, raw.ReceiptKey) {
+					c.state.RetainedKeys = append(c.state.RetainedKeys, raw.ReceiptKey)
+				}
 			}
 		}
 		if f.EventType == tagentevent.TypeExternalInput {
@@ -396,7 +415,13 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 			c.state.Routing.Waits = filtered
 		}
 	}
-	for _, evt := range pendingSignals {
+	replayed := make(map[string]bool)
+	for _, pending := range pendingSignals {
+		evt := pending.raw.Event
+		if continuationInlineSignalCheckpointed(c.state, pending.fact, pending.raw) || inlineTaskSignalConsumed(ta.memStore, pending.fact, pending.raw) {
+			c.acceptedInputs = append(c.acceptedInputs, evt)
+			continue
+		}
 		fact, accepted := acceptedFacts[evt.ID]
 		if !accepted || !consumed[fact.EventKey] {
 			if accepted {
@@ -405,13 +430,30 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 				evt.volatileCommitted = true
 			}
 			c.replayInputs = append(c.replayInputs, evt)
+			replayed[evt.ID] = true
 		}
+	}
+	for eventID, fact := range acceptedFacts {
+		if replayed[eventID] || consumed[fact.EventKey] {
+			continue
+		}
+		evt := continuationEventFromFact(fact)
+		copyFact := fact
+		evt.volatileFact, evt.volatileCommitted = &copyFact, true
+		c.replayInputs = append(c.replayInputs, evt)
 	}
 	if progress && c.state.InitialPending {
 		c.recoveryGoalClosed = true
 		c.state.InitialPending = false
 	}
-	if c.state.Outcome == "" && !c.state.InitialPending && len(c.state.Routing.Waits) == 0 && len(c.replayInputs) == 0 {
+	ownedProducer := false
+	for _, stream := range c.state.Routing.Streams {
+		if stream.Owner != "" && !stream.Terminal {
+			ownedProducer = true
+			break
+		}
+	}
+	if c.state.Outcome == "" && !c.state.InitialPending && len(c.state.Routing.Waits) == 0 && len(c.replayInputs) == 0 && len(c.state.InheritedProducers) == 0 && !ownedProducer {
 		if c.state.LastBatchOutcome == "failed" {
 			c.state.State, c.state.Outcome, c.state.Error = "failed", "failed", c.state.LastBatchError
 		} else if (c.state.LastBatchOutcome == "completed" && !tailConsumed) || (tailFinal && len(c.state.ConsumedKeys) > 0) {
@@ -431,6 +473,48 @@ func (ta *TagentAgent) foldContinuationRecovery(c *continuation, facts []memory.
 		}
 	}
 	return ta.closeInterruptedToolCalls(c, protocol)
+}
+
+func continuationInlineSignalCheckpointed(state continuationCheckpoint, fact memory.FullEvent, raw taskSignalRecord) bool {
+	return raw.Inline && raw.Event != nil && raw.RoundOwner == state.InvocationID &&
+		fact.EventKey > 0 && fact.EventKey <= state.LastBatchThroughKey &&
+		(state.LastBatchOutcome == "completed" || state.LastBatchOutcome == "failed")
+}
+
+func (ta *TagentAgent) continuationInlineSignalConsumed(fact memory.FullEvent, raw taskSignalRecord) bool {
+	if !raw.Inline || raw.RoundOwner == "" {
+		return false
+	}
+	c, err := ta.continuationByID(raw.RoundOwner)
+	if err != nil || c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return continuationInlineSignalCheckpointed(c.state, fact, raw) || inlineTaskSignalConsumed(ta.memStore, fact, raw)
+}
+
+func (ta *TagentAgent) releaseConsumedInlineSignalsLocked(c *continuation) {
+	if ta.taskRecords == nil || c.state.LastBatchThroughKey <= 0 {
+		return
+	}
+	facts, err := queryTaskRecords(ta.memStore, ta.partitionID(), []string{tagentevent.TypeTaskSignal})
+	if err != nil {
+		return
+	}
+	for _, fact := range facts {
+		if !continuationFactBelongs(fact, ta.name, c.state.InvocationID) {
+			continue
+		}
+		var raw taskSignalRecord
+		if json.Unmarshal([]byte(fact.Content), &raw) != nil || !continuationInlineSignalCheckpointed(c.state, fact, raw) {
+			continue
+		}
+		proof, err := ta.memStore.GetEvent(raw.ReceiptKey)
+		if err == nil && proof != nil && taskSignalReceiptMatches(fact, raw, *proof) {
+			ta.taskRecords.markSignalConsumed(fact.EventKey, raw.ReceiptKey)
+		}
+	}
 }
 
 func containsContinuationKey(keys []int64, key int64) bool {
@@ -717,9 +801,10 @@ func (ta *TagentAgent) volatileContinuationInputsLocked(c *continuation) (map[st
 }
 
 func (ta *TagentAgent) continuationDriverFailureLocked(c *continuation) string {
+	inputs := append(append([]*AgentEvent(nil), c.acceptedInputs...), c.replayInputs...)
 	for _, wait := range c.state.Routing.Waits {
 		hasResult := false
-		for _, evt := range append(append([]*AgentEvent(nil), c.acceptedInputs...), c.replayInputs...) {
+		for _, evt := range inputs {
 			key := deliveryKey(evt)
 			if key.taskID == wait.TaskID && key.roundID == wait.RoundID && settleSatisfied(evt) {
 				hasResult = true
@@ -736,6 +821,28 @@ func (ta *TagentAgent) continuationDriverFailureLocked(c *continuation) string {
 		}
 		return fmt.Sprintf("original task %s round %d has no reattached producer or committed result; reconciliation is required", wait.TaskID, wait.RoundID)
 	}
+	for _, stream := range c.state.Routing.Streams {
+		if stream.Owner == "" || stream.Terminal {
+			continue
+		}
+		closed := false
+		for _, evt := range inputs {
+			key := deliveryKey(evt)
+			if key.taskID == stream.TaskID && key.roundID == stream.RoundID && settleTerminal(evt) {
+				closed = true
+				break
+			}
+		}
+		if closed {
+			continue
+		}
+		if ta.taskManager != nil {
+			if tk, ok := ta.taskManager.Get(stream.TaskID); ok && tk.ProducerRound() == stream.RoundID && tk.HasProducer() {
+				continue
+			}
+		}
+		return fmt.Sprintf("owned producer %s round %d has no reattached detector or terminal result; reconciliation is required", stream.TaskID, stream.RoundID)
+	}
 	return ""
 }
 
@@ -745,16 +852,14 @@ func (ta *TagentAgent) StartRecoveredContinuations(ctx context.Context) error {
 		return nil
 	}
 	r := ta.continuationRegistry()
-	r.mu.Lock()
 	var entries []*continuation
-	for _, c := range r.byID {
+	for _, c := range r.snapshot() {
 		c.mu.Lock()
 		if c.recovered && c.state.Address.ParentTaskID == "" && c.state.Outcome == "" {
 			entries = append(entries, c)
 		}
 		c.mu.Unlock()
 	}
-	r.mu.Unlock()
 	for _, c := range entries {
 		lease := ta.contextManager.AcquireLease(LeaseSubCall)
 		if err := lease.Err(); err != nil {
@@ -793,9 +898,7 @@ func (ta *TagentAgent) ResumeContinuationByID(ctx context.Context, childInvocati
 		return nil, true, errors.New("continuation result address differs from the original task round")
 	}
 	r := ta.continuationRegistry()
-	r.mu.Lock()
-	closing := r.closing
-	r.mu.Unlock()
+	closing := r.closing.Load()
 	if closing {
 		return nil, true, ErrExecClosed
 	}
@@ -837,10 +940,10 @@ func (ta *TagentAgent) resolveContinuationReceiver(address ContinuationContext, 
 		}
 		return parent.persistentBus.PublishContext, nil
 	}
-	r := parent.continuationRegistry()
-	r.mu.Lock()
-	c := r.byID[address.ParentInvocationID]
-	r.mu.Unlock()
+	c, err := parent.continuationByID(address.ParentInvocationID)
+	if err != nil {
+		return nil, err
+	}
 	if c == nil {
 		return nil, fmt.Errorf("parent continuation %s is unavailable", address.ParentInvocationID)
 	}
@@ -868,10 +971,41 @@ func (ta *TagentAgent) continuationHandoffAcceptor(address ContinuationContext) 
 
 var errContinuationEventsPending = errors.New("continuation received events while sealing")
 
+func (ta *TagentAgent) commitFailedContinuation(ctx context.Context, c *continuation, reason string) error {
+	id := c.state.InvocationID
+	release, err := ta.settleSinks.pauseDestination(ctx, id)
+	if err != nil {
+		return err
+	}
+	if c.bus.PendingCount() > 0 {
+		release(nil)
+		return errContinuationEventsPending
+	}
+	c.mu.Lock()
+	oldState, oldOutcome, oldError := c.state.State, c.state.Outcome, c.state.Error
+	c.state.State, c.state.Outcome, c.state.Error = "failed", "failed", reason
+	c.state.Routing = ta.settleSinks.snapshotRouting(id)
+	err = ta.persistContinuationLocked(c)
+	if err != nil {
+		c.state.State, c.state.Outcome, c.state.Error = oldState, oldOutcome, oldError
+	}
+	c.mu.Unlock()
+	if err != nil {
+		release(nil)
+		return err
+	}
+	release(func(deliveryCtx context.Context, evt *AgentEvent) (PublishReceipt, error) {
+		return ta.acceptCancelledContinuationSignal(deliveryCtx, c, evt)
+	})
+	ta.settleSinks.retireStateOnly(id)
+	return nil
+}
+
 func (ta *TagentAgent) handoffContinuationServices(ctx context.Context, c *continuation) error {
 	c.mu.Lock()
 	id := c.state.InvocationID
 	address := c.state.Address
+	inherited := append([]continuationProducerReference(nil), c.state.InheritedProducers...)
 	c.mu.Unlock()
 	release, err := ta.settleSinks.pauseDestination(ctx, id)
 	if err != nil {
@@ -883,10 +1017,19 @@ func (ta *TagentAgent) handoffContinuationServices(ctx context.Context, c *conti
 	}
 	routing := ta.settleSinks.snapshotRouting(id)
 	live := false
+	var producers []continuationProducerReference
 	for _, stream := range routing.Streams {
 		if stream.Owner != "" {
 			live = true
-			break
+			producers = append(producers, continuationProducerReference{Agent: ta.name, InvocationID: id, TaskID: stream.TaskID, RoundID: stream.RoundID})
+		}
+	}
+	var retained []continuationProducerReference
+	for _, reference := range inherited {
+		if ta.continuationProducerLive(reference) {
+			producers = append(producers, reference)
+			retained = append(retained, reference)
+			live = true
 		}
 	}
 	if !live {
@@ -900,9 +1043,14 @@ func (ta *TagentAgent) handoffContinuationServices(ctx context.Context, c *conti
 		release(nil)
 		return err
 	}
+	if err := ta.registerInheritedProducers(address, producers, false, make(map[string]bool)); err != nil {
+		release(nil)
+		return err
+	}
 	c.mu.Lock()
 	c.state.Handoff = &address
 	c.state.Routing = routing
+	c.state.InheritedProducers = retained
 	err = ta.persistContinuationLocked(c)
 	c.mu.Unlock()
 	if err != nil {
@@ -911,6 +1059,71 @@ func (ta *TagentAgent) handoffContinuationServices(ctx context.Context, c *conti
 	}
 	release(ta.continuationHandoffAcceptor(address))
 	return nil
+}
+
+func (ta *TagentAgent) continuationProducerLive(reference continuationProducerReference) bool {
+	source := ta.resolveContinuationOwner(reference.Agent)
+	if source == nil || source.taskManager == nil {
+		return false
+	}
+	tk, ok := source.taskManager.Get(reference.TaskID)
+	if !ok {
+		return false
+	}
+	state := tk.RoutingSnapshot()
+	if state.ProducerRound == reference.RoundID && state.Status.Live() {
+		return true
+	}
+	for _, pending := range state.PendingSignals {
+		if pending.RoundID == reference.RoundID {
+			return true
+		}
+	}
+	return false
+}
+
+func (ta *TagentAgent) registerInheritedProducers(address ContinuationContext, references []continuationProducerReference, allowSuspended bool, visited map[string]bool) error {
+	parent := ta.continuationParent(address)
+	if parent == nil {
+		return fmt.Errorf("handoff parent %q is unavailable", address.ParentAgent)
+	}
+	if address.ParentInvocationID == "" {
+		return nil
+	}
+	key := parent.name + "/" + address.ParentInvocationID
+	if visited[key] {
+		return errors.New("inherited producer ownership is cyclic")
+	}
+	visited[key] = true
+	c, err := parent.continuationByID(address.ParentInvocationID)
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		return errors.New("inherited producer parent scope is missing")
+	}
+	c.mu.Lock()
+	if c.running || (allowSuspended && c.state.Outcome == "") {
+		seen := make(map[continuationProducerReference]bool, len(c.state.InheritedProducers))
+		for _, reference := range c.state.InheritedProducers {
+			seen[reference] = true
+		}
+		for _, reference := range references {
+			if !seen[reference] {
+				c.state.InheritedProducers = append(c.state.InheritedProducers, reference)
+				seen[reference] = true
+			}
+		}
+		err := parent.persistContinuationLocked(c)
+		c.mu.Unlock()
+		return err
+	}
+	next := c.state.Handoff
+	c.mu.Unlock()
+	if next != nil {
+		return parent.registerInheritedProducers(*next, references, allowSuspended, visited)
+	}
+	return errors.New("inherited producer has no parent receiver")
 }
 
 // RestoreServiceHandoffs reinstalls committed destinations after parent receivers exist.
@@ -946,6 +1159,17 @@ func (ta *TagentAgent) RestoreServiceHandoffs(ctx context.Context) error {
 		if handoff == nil {
 			continue
 		}
+		var references []continuationProducerReference
+		for _, stream := range routing.Streams {
+			if stream.Owner != "" {
+				references = append(references, continuationProducerReference{Agent: ta.name, InvocationID: id, TaskID: stream.TaskID, RoundID: stream.RoundID})
+			}
+		}
+		if len(references) > 0 {
+			if err := ta.registerInheritedProducers(*handoff, references, true, make(map[string]bool)); err != nil {
+				return err
+			}
+		}
 		ta.settleSinks.restoreRouting(id, routing, ta.taskManager)
 		ta.settleSinks.setDestination(id, ta.continuationHandoffAcceptor(*handoff))
 		ta.settleSinks.retire(id)
@@ -958,10 +1182,10 @@ func (ta *TagentAgent) AcknowledgeContinuationResult(invocationID string) error 
 	if ta == nil {
 		return nil
 	}
-	r := ta.continuationRegistry()
-	r.mu.Lock()
-	c := r.byID[invocationID]
-	r.mu.Unlock()
+	c, err := ta.continuationByID(invocationID)
+	if err != nil {
+		return err
+	}
 	if c == nil {
 		return errors.New("continuation result is unknown")
 	}
@@ -999,15 +1223,18 @@ func (ta *TagentAgent) AcknowledgeContinuationResultWithReceipt(ctx context.Cont
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	r := ta.continuationRegistry()
-	r.mu.Lock()
-	c := r.byID[invocationID]
-	r.mu.Unlock()
+	c, err := ta.continuationByID(invocationID)
+	if err != nil {
+		return err
+	}
 	if c == nil {
 		return errors.New("continuation result is unknown")
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		c.mu.Unlock()
+		ta.trimAcknowledgedContinuations()
+	}()
 	if c.state.ResultAcked {
 		return nil
 	}
@@ -1100,10 +1327,10 @@ func (ta *TagentAgent) CancelContinuationByParent(ctx context.Context, invocatio
 	if ta == nil {
 		return nil
 	}
-	r := ta.continuationRegistry()
-	r.mu.Lock()
-	c := r.byID[invocationID]
-	r.mu.Unlock()
+	c, err := ta.continuationByID(invocationID)
+	if err != nil {
+		return err
+	}
 	if c == nil {
 		return errors.New("cancelled continuation is unknown")
 	}
@@ -1126,24 +1353,43 @@ func (ta *TagentAgent) CancelContinuationByParent(ctx context.Context, invocatio
 			return ctx.Err()
 		}
 	}
+	release, err := ta.settleSinks.pauseDestination(ctx, invocationID)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if err := ta.openContinuationBus(c); err != nil {
+		c.mu.Unlock()
+		release(nil)
+		return err
+	}
+	c.state.State, c.state.Outcome, c.state.Error = "cancelled", "cancelled", proof.Content
+	c.state.InitialPending = false
+	oldAcked := c.state.ResultAcked
+	c.state.ResultAcked = true
+	if err := ta.persistContinuationLocked(c); err != nil {
+		c.state.ResultAcked = oldAcked
+		c.mu.Unlock()
+		release(nil)
+		return err
+	}
+	if guard, ok := ta.memStore.(memory.RetentionGuard); ok {
+		for key := range c.protected {
+			guard.ReleaseKey(key)
+		}
+	}
+	c.protected = nil
+	c.mu.Unlock()
+	release(func(deliveryCtx context.Context, evt *AgentEvent) (PublishReceipt, error) {
+		return ta.acceptCancelledContinuationSignal(deliveryCtx, c, evt)
+	})
 	if ta.taskManager != nil {
 		for _, tk := range ta.taskManager.TasksSnapshot() {
-			if tk.SpecSnapshot().Origin[metaKeyInvocationID] == c.state.InvocationID {
+			if tk.RoutingSnapshot().ProducerOwner == invocationID {
 				ta.taskManager.Cancel(tk.ID)
 			}
 		}
 	}
-	c.mu.Lock()
-	c.state.State, c.state.Outcome, c.state.Error = "cancelled", "cancelled", proof.Content
-	c.state.InitialPending = false
-	if err := ta.persistContinuationLocked(c); err != nil {
-		c.mu.Unlock()
-		return err
-	}
-	c.mu.Unlock()
-	ta.settleSinks.setDestination(c.state.InvocationID, func(deliveryCtx context.Context, evt *AgentEvent) (PublishReceipt, error) {
-		return ta.acceptCancelledContinuationSignal(deliveryCtx, c, evt)
-	})
 	if err := ta.drainCancelledContinuationInputs(ctx, c); err != nil {
 		return err
 	}

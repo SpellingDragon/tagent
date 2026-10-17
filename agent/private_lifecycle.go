@@ -70,8 +70,19 @@ func (ta *TagentAgent) finalExitReady() bool {
 	}
 	if cm := ta.contextManager; cm != nil {
 		for _, b := range cm.allBindings() {
-			g := b.snapshot()
-			if !g.Closed || g.Total != 0 || g.DeclaredHolders != 0 {
+			if !b.fullyReclaimed() {
+				return false
+			}
+		}
+	}
+	for _, c := range ta.closers {
+		if _, staged := c.(interface{ BeginClose() }); !staged {
+			continue
+		}
+		if completed, ok := c.(interface{ CloseDone() <-chan struct{} }); ok {
+			select {
+			case <-completed.CloseDone():
+			default:
 				return false
 			}
 		}
@@ -100,8 +111,7 @@ func (ta *TagentAgent) executionWorkQuiet() bool {
 	}
 	if cm := ta.contextManager; cm != nil {
 		for _, b := range cm.allBindings() {
-			g := b.snapshot()
-			if g.Total != 0 || g.DeclaredHolders != 0 || g.Reclaiming {
+			if !b.shutdownQuiet() {
 				return false
 			}
 		}
@@ -157,6 +167,7 @@ func (ta *TagentAgent) beginOwnedShutdown() {
 		if waitLoop && loopDone != nil {
 			<-loopDone
 			ta.loopWg.Wait()
+			ta.loopState.Store(loopClosed)
 		}
 		if ta.cleanupDone != nil {
 			<-ta.cleanupDone
@@ -173,11 +184,27 @@ func (ta *TagentAgent) waitOwnedShutdown(ctx context.Context) error {
 	ta.closeMu.Lock()
 	done := ta.closeProducersDone
 	ta.closeMu.Unlock()
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return fmt.Errorf("%w: producer or transport shutdown: %v", ErrExecUnconverged, ctx.Err())
+	var cleanerDeadline <-chan time.Time
+	if ta.cleanupDone != nil {
+		timer := time.NewTimer(cleanerStopGrace)
+		defer timer.Stop()
+		cleanerDeadline = timer.C
 	}
+	waiting := true
+	for waiting {
+		select {
+		case <-done:
+			waiting = false
+		case <-cleanerDeadline:
+			if !ta.CleanerStopped() {
+				return fmt.Errorf("%w: workspace cleaner has not stopped", ErrExecUnconverged)
+			}
+			cleanerDeadline = nil
+		case <-ctx.Done():
+			return fmt.Errorf("%w: producer or transport shutdown: %v", ErrExecUnconverged, ctx.Err())
+		}
+	}
+
 	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
 	for !ta.executionWorkQuiet() {
@@ -197,9 +224,16 @@ func (cm *ContextManager) retireForOwnerClose() {
 	if cm.retiredBindings == nil {
 		cm.retiredBindings = make(map[*execBinding]struct{})
 	}
-	cm.retiredBindings[b] = struct{}{}
+	b.mu.Lock()
+	closed := b.closed
+	if !closed {
+		cm.retiredBindings[b] = struct{}{}
+	}
+	b.mu.Unlock()
 	cm.retiredMu.Unlock()
-	go b.release(leaseKindNoop)
+	if !closed {
+		go b.release(leaseKindNoop)
+	}
 }
 
 func (ta *TagentAgent) waitFinalExitReady(ctx context.Context) bool {
@@ -215,15 +249,31 @@ func (ta *TagentAgent) waitFinalExitReady(ctx context.Context) bool {
 	return true
 }
 
-func (ta *TagentAgent) finishOwnedExit(carryClosers bool) error {
+func (ta *TagentAgent) closeRegularResources(beforeOwned bool) error {
 	var errs []error
-	if carryClosers {
-		for _, c := range ta.closers {
+	before := true
+	for _, c := range ta.closers {
+		if _, staged := c.(interface{ BeginClose() }); staged {
+			if _, owned := c.(interface{ CloseDone() <-chan struct{} }); owned {
+				before = false
+			}
+			continue
+		}
+		if before == beforeOwned {
 			if err := c.Close(); err != nil {
 				errs = append(errs, fmt.Errorf("close resource: %w", err))
 			}
 		}
 	}
+	return errors.Join(errs...)
+}
+
+func (ta *TagentAgent) finishOwnedExit(carryClosers bool) error {
+	var errs []error
+	if carryClosers {
+		errs = append(errs, ta.closeRegularResources(true))
+	}
+	errs = append(errs, ta.closeRegularResources(false))
 	if ta.persistentBus != nil {
 		errs = append(errs, ta.persistentBus.CloseDurable())
 	}
@@ -233,6 +283,10 @@ func (ta *TagentAgent) finishOwnedExit(carryClosers bool) error {
 		errs = append(errs, ta.trajectoryRecorder.Close())
 	}
 	errs = append(errs, ta.exitMemoryStore())
+	return errors.Join(errs...)
+}
+
+func (ta *TagentAgent) signalFinalExit() {
 	ta.closeFinalOnce.Do(func() {
 		ta.closeMu.Lock()
 		if ta.closeFinalDone == nil {
@@ -241,7 +295,6 @@ func (ta *TagentAgent) finishOwnedExit(carryClosers bool) error {
 		close(ta.closeFinalDone)
 		ta.closeMu.Unlock()
 	})
-	return errors.Join(errs...)
 }
 
 // CloseDone closes after owned producers, transports, execution faces and final exit have finished.
@@ -262,8 +315,10 @@ func (ta *TagentAgent) startRecoveredOwners(ctx context.Context) error {
 		}
 	}
 	names := make([]string, 0, len(owners))
-	for name := range owners {
-		names = append(names, name)
+	for name, owner := range owners {
+		if owner != nil {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
@@ -282,7 +337,7 @@ func (ta *TagentAgent) startRecoveredOwners(ctx context.Context) error {
 		}
 	}
 	for _, owner := range owners {
-		if owner.taskManager != nil {
+		if owner != nil && owner.taskManager != nil {
 			owner.taskManager.ResumePendingDeliveries()
 		}
 	}

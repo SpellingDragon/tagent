@@ -188,12 +188,16 @@ func newBatchRetiredSummaryEvent(batch []task.BatchRetired) *AgentEvent {
 	}
 	var b strings.Builder
 	for i, r := range batch {
+		spec := r.Task.SpecSnapshot()
+		if r.Sig.Declarative != nil {
+			spec.Desc = r.Sig.Declarative.Desc
+		}
 		marker, statusWord := settleMarkerAndStatus(r.Sig)
 		if i > 0 {
 			b.WriteString("\n\n---\n\n")
 		}
 		fmt.Fprintf(&b, "[task settled] %s %s (id=%s) %s%s",
-			marker, truncateRunes(r.Task.Spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord, formatExitCode(r.Sig.ExitCode))
+			marker, truncateRunes(spec.Desc, settleDescMaxChars), task.ShortID(r.Task.ID), statusWord, formatExitCode(r.Sig.ExitCode))
 		if r.Sig.Err != nil {
 			fmt.Fprintf(&b, " 错误: %s", truncateRunes(r.Sig.Err.Error(), settleErrMaxChars))
 		}
@@ -217,6 +221,10 @@ func newTaskSettledEvent(tk *task.Task, sig task.SettleSignal, maxChars int, out
 		return nil
 	}
 	spec := tk.SpecSnapshot()
+	if frozen := sig.Declarative; frozen != nil {
+		spec.Kind, spec.Desc, spec.Mode, spec.WaitFor = frozen.Kind, frozen.Desc, frozen.Mode, frozen.WaitFor
+		spec.Lifetime, spec.Origin = frozen.Lifetime, frozen.Origin
+	}
 	id := sig.SourceID
 	if id == "" {
 		id = task.SignalSourceID(tk.ID, sig.RoundID, sig.Seq)

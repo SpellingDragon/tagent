@@ -51,8 +51,7 @@ type ActionTool struct {
 	tmuxExecutor  *TmuxExecutor
 	tmuxMonitor   *TmuxMonitor
 	monitorConfig *MonitorConfig
-	// orphanCleanupDisabled skips the startup reaping of prefix-matched
-	// leftover sessions (see WithOrphanCleanupDisabled).
+	// orphanCleanupDisabled skips automatic startup cleanup and session adoption.
 	orphanCleanupDisabled bool
 
 	// residentSink：常驻会话生命周期事件
@@ -89,10 +88,8 @@ func WithActionWorkspace(dir string) ActionToolOption {
 	}
 }
 
-// WithOrphanCleanupDisabled skips the startup orphan-session cleanup. Use it
-// when multiple instances share one tmux server AND one session prefix (the
-// cleanup would reap the other instance's live sessions); prefer distinct
-// prefixes instead.
+// WithOrphanCleanupDisabled skips automatic startup cleanup and session adoption.
+// Task-owned recovery uses RecoverTaskDetector for each declared resource.
 func WithOrphanCleanupDisabled() ActionToolOption {
 	return func(ct *ActionTool) {
 		ct.orphanCleanupDisabled = true
@@ -210,10 +207,12 @@ func NewActionTool(opts ...ActionToolOption) *ActionTool {
 		if !ct.orphanCleanupDisabled && ct.residentMetaDirOverride == "" {
 			ct.tmuxExecutor.CleanupOrphanSessions()
 		}
-		if residentReattachOnce.CompareAndSwap(false, true) {
-			ct.ReattachResidentSessions()
-		} else {
-			log.Infof("[ActionTool] resident reattach already done by another instance (single mount point)")
+		if !ct.orphanCleanupDisabled {
+			if residentReattachOnce.CompareAndSwap(false, true) {
+				ct.ReattachResidentSessions()
+			} else {
+				log.Infof("[ActionTool] resident reattach already done by another instance (single mount point)")
+			}
 		}
 	}
 
@@ -691,6 +690,9 @@ func (ct *ActionTool) startSession(ctx context.Context, args ActionArgs) (string
 
 func (ct *ActionTool) relaunchClosure(spawner task.TaskSpawner, args ActionArgs) func(context.Context) (task.SpawnResult, error) {
 	return func(ctx context.Context) (task.SpawnResult, error) {
+		if relaunch, ok := task.CommandRelauncherFromContext(ctx); ok {
+			return relaunch(ctx, *DeclarativeFromArgs(args, ""))
+		}
 		current := spawner
 		if initiating, ok := task.TaskSpawnerFromContext(ctx); ok {
 			current = initiating

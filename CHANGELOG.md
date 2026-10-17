@@ -5,7 +5,13 @@
 
 ## [Unreleased]
 
-（当前无未发布变更。)
+### Fixed
+
+- **异步任务连续性**：等待条件与producer寿命分离，命令稳定输出不再冒充退出；resident ready/interactive input按显式证据满足。启动采用意图受理→prepare→绑定受理→激活，任务、资源、round/owner/seq及字节基线封住旧观察串轮。
+- **结果受理与恢复**：冻结raw信号、原结果正文和receipt，受理后才ACK原producer；队满、拒收、混批与重启按同身份重试。输入观察落事实及精确处置后消费，decision才运行模型；批量、补发与取消也走可靠raw责任。
+- **本地子调用与寿命**：逻辑调用保存私有投影、等待、已消费输入和父task原round地址，恢复附着原调用而不重复goal；显式Resume保留持久轮次历史。本地等待不再受整调用固定600s截止，模型active预算与统一Task TTL仍生效；生产单最近期限timer保证无输入也回收，CloseDone以实际停止为准。
+
+详见[异步任务连续性技术报告](docs/async-task-continuity-report.md)；完整仓库及部署验证进度以报告补齐记录为准。
 
 ## [v0.3.0] - 2026-10-11
 

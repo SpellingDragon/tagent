@@ -197,53 +197,16 @@ per-agent 有序事件队列。Publish 非阻塞，Pull 阻塞直到有事件。
 
 确定性（非 LLM）的任务注册表 + 调度器，让 `action`（tmux）等长耗时工具与子 agent 不阻塞事件循环：
 
-- **spawn + settle-or-detach**：`Spawn` 在 `select{settle, detach}` 上等待——探测器在自适应轮询的 **dense→sparse 边界**发出 `Detached()`，即"同步→异步"的 ack 点（已退役独立 `sync_wait` 旋钮）。dense 内 settle → 内联；detach 先到 → ack + 后台跟踪；越界后到的 settle 走 `OnSettle`（不丢失）。
-- **自适应轮询**：`TmuxMonitor` 按任务年龄逐会话调度——dense 密集探测、几何退避至 `max_interval`；`stable` 服务型任务钉在最稀档（alive-detached）。参数经 `MonitorConfig` 配置。
-- **settle 五档 + 唯一终态入口**：`completed` / `stable` / `suspect` / `watch`（命中通知，非终态）/ `failed`（reconcile 回收），探测器只做确定性分类；终态转换**只经 `finalize`**（内存状态、信号 Kind、WAL settle_status、反馈极性四端一致——失败必带失败语义，未知 Kind 映射 unknown 告警不落 completed）；终态后迟到信号被 fencing 丢弃（不得复活/重复结算）。
-- **task_settled 回收 turn**：后台任务结算发一条自包含事件到 EventBus；持久循环空闲则唤醒、进行中则排队。
-- **Origin 信使行李**：TaskSpec.Origin 携带 spawn turn 的调用元数据（chat_id 等 + trace_id/span_id 锚点），任务层只透传不解读；task_settled 回流的新 turn 据锚点建 OTel span link，连接 spawn/settle 两棵 trace（跨 turn 闭环）。
-- **registry = 事实链 fold**：spawn 伴随 `task_spawned` 一等事件（载 Declarative 声明式投影）；**inline settle 也补发终态记录**（`task_inline_record` 标记）+ 后台 settle 携结构化 `task_id/settle_status` Metadata——重启经 `RebuildTaskRegistry` 纯全量回放重建 active 态（running→suspect 交存活探测裁决，终端不重建），闭包按 Kind 承诺表由工厂重建（command 全套；subagent 仅 Relaunch、跨重启 Resume 返回引导；generic 展示）。TaskManager 归属每个 agent 自身——一个 tagent 生命周期内唯一，换执行器代不丢任务板；父的委派任务与子的内部任务分属各自任务域，不合并为全局表。
-- **看板 + 工具**：`BeforeModel` 每次调用从 registry 重渲染 live 看板（不参与压缩，**追加在消息列表末尾**——看板字节逐次变化，置于尾部使前缀缓存仅损失看板自身，等待指引行同时是模型读到的最后内容）；`list_tasks` / `cancel` / `relaunch` / `resume_task` 为即时同步工具（结果消费不走专用工具：小结果随 settle 通知内联，大结果转储文件经 read_file 分页）。
-- **resume_task 重入**：合法源状态 {alive-detached, stable, completed, failed}；tmux 经 detector `Rearm`（绑会话非轮次，零换绑），subagent 经新 Run + 任务链还原器。详见 [tool 架构文档「任务重入」章](../tool/tool-architecture.md)。
-- **会话回收闭环（ADOPT-FIRST）**：运行时 completed/error 即回收；优雅退出 `Close()` 收编存活会话；启动**先收养后清扫**——每个重挂/已跟踪会话刷新 `LastAdoptedAt`（收养即 freshness 锚），Sweep 只收割「无人收养且距最后收养超 TTL」的孤儿，**spawn 年龄不构成清理依据**（长驻会话不因 24h 生日被误杀）。探测三态化：`SessionAlive3`（list-sessions 单源：在列表=活/不在=死/命令不可辨=unknown），monitor 连续 N 次（默认 3）unknown 才按 dead 处理（fail-dead 加闸，tmux 抖动不再误杀常驻会话）。
-- **统一 TTL 回收（假活治理）**：命令在 spawn 时确定有限 `ttl`（模型入参；否则取 `task_default_ttl`，缺省 10min），到期由**唯一** reaper 经 owner `detector.Cancel` 真实终止 → failed 终态 → reap → 移出看板。准入覆盖全部 active 态（running/stable/alive_detached/suspect）与全部寿命类（含常驻/交互服务，**无按 mode 豁免、无禁用哨兵**），堵死旧双墙「gate 在 alive_detached/stale + detachedAt、漏掉未 detach 的 suspect」的盲区。`op=send`/`resume_task` 续命重置锚点，`op=peek` 只读不续；restored 任务经声明式投影恢复其 `ttl`。年龄回收仅 TTL 一条路径，无按 mode 豁免、无禁用哨兵。detachedAt 仍入事实链供观测，但不再作为终止判据。
-- **世系跨重启保真**：`Spec.Origin` 深拷贝入 `task_spawned`，恢复时身份字段以持久层为准（恢复闭包只补执行能力，不得整体覆盖）；无世系历史恢复为 `unknown`，宿主对 unknown 与内部来源同等扣留——内部任务（如冥想派生）跨重启不再退化为可投递来源。`settle_status/task_id/lineage_absent/detached_at_ms` 为框架控制键，不进后续任务的 Origin baggage。
-- **跨重启连续**：冷启动序 = 投影重建 → registry 重建 → 常驻会话重挂（`residentReattachOnce` 唯一挂载点，多 agent 仅首实例）→ TaskID 桥（重挂跟踪的会话将其 suspect 任务提升回 running）。常驻会话生命周期入事实链（`resident_session` spawn 全参/终态事件），meta 目录可配（`resident_meta_dir`）。
-  - 投影重建是**事实链的纯回放**：取最新的压缩快照，再把尾部事件重放出来，目标是逐字节复原换代前的上下文（同样的字节才谈得上复用前缀缓存）。只在启动期做一次、进的是空投影，并且排在兜底落盘的重放接线之前。事实链里没有带代际标记的压缩事件时（首次启动、或从未折叠）整步 no-op，维持现状行为；热重建的执行壳跳过这一步——投影属常驻实例，丢弃壳上重建是空跑。
-  - **进程重启 vs 整机重启（证据边界）**：常驻重挂以 **live `tmux list` 为存活真源**对账磁盘 `ResidentMeta`——(a) **进程重启**（tagent 崩溃/升级，tmux server 存活）：tmux 会话仍在列表 → 重挂成功 → suspect 任务经 TaskID 桥提升回 running，执行现场连续；(b) **整机重启**（tmux server 随之消亡）：`ResidentMeta` 磁盘持久仍在，但 `tmux list` 为空 → 无存活可挂 → 在飞任务**不复活**（registry fold 后 running→suspect，探测判死）。两态下**事实链均不受影响**（正 key 事件 + settle_fold 票据原样在链，recall 仍可取回原文）——即「耐久真相源恒存，易失执行现场仅进程重启可续」。
+- **受理后启动**：去重/门控→意图accepted→资源prepare→绑定accepted→Start。default独立管理器保留兼容，生产由可靠journal接accepted hooks。
+- **等待与存活分离**：Mode和WaitFor声明exit/ready/input/signal；普通stable/watch/probe不冒充完成，Final结束观察等待但不把suspect变成功。dense满足则内联、detach先到则ACK，旧window只能交接自己的round。
+- **原轮可靠结果**：信号冻结task/round/owner/seq/time/WaitFor；raw结果先保存，receiver受理后才ACK原detector证据。拒收独立400ms→4s重试，批量和补发也保留逐条raw责任。
+- **输入分流**：observe事实与精确input_disposition入库但不单独运行模型，decision才驱动所属总线续写；混批逐条保存，完整来源和正文不因合并丢失。
+- **不可变来源**：Origin保持spawn谱系，RoundOwner另表本轮receiver；RoutingSnapshot原子读取intent/producer身份。退役谱系只写信号。
+- **统一TTL与关闭**：生产启用单最近期限timer，无输入也到期，Recheck只重读现有TTL源。Close有界返回，CloseDone等watch、callback、worker和实际Stopped全部退出，不以kill请求伪造完成。
+- **事实链重建**：恢复task_spawned阶段、task_signal/receipt、task_round和continuation状态。私有投影、receiver、native资源及原child地址装配完成后才放行pending与deadline；终态仅ACK清理。显式subagent Resume从持久轮史继续，新Run按所选执行面解析目标。
+- **面板与工具**：BeforeModel尾部渲染live状态及剩余寿命，不持久化、不参与压缩；list/cancel/relaunch/resume_task操作同一agent自己的任务域。父的委派task与子的内部producer不合并成全局表。
 
-- **遥测通道与消费降级**：结算通知是机器遥测而非对话输入——其保留由**消费状态**决定（确定性推导：回收 turn 的产出与 outputCh 投递记录），不由相邻关系或段龄决定。compaction act 时：已消费且外显的通知降级为票据卡（settle_fold 单条折叠，原文 recall 可达；failed 卡片行带 ★ 进反思通道）；内部性（冥想派生/退役结算/无世系）保一行摘要 keepRecent 轮后降级；**未消费通知保持完整且被 L3 豁免**（至少一次在通道层的延伸）。看板是任务状态的唯一常驻呈现，通知只承载"事件到达"。行为审计（self-telemetry-audit）滚动统计自管遥测占比，L2 拒绝自管来源的新 spawn、L3 冻结非保护类（保护类由构造声明豁免，磁盘闸仍适用）——与 disk block spawn 同闸不同源。
-
-**一个 tmux 命令的一生**（把上面的零件串成一条线）：
-
-```mermaid
-sequenceDiagram
-    participant LLM
-    participant Tool as ActionTool
-    participant TM as TaskManager
-    participant Mon as TmuxMonitor(自适应轮询)
-    participant Bus as EventBus/持久循环
-
-    LLM->>Tool: Call(command)
-    Tool->>TM: Spawn(spec, TmuxSettleDetector)
-    TM->>Mon: 启动会话 + 按年龄调度(dense→backoff)
-    alt dense 阶段内结算
-        Mon-->>TM: settle(completed/stable)
-        TM-->>Tool: 内联结果
-        Tool-->>LLM: 最终结果(体验如常)
-    else 越过 dense(detach)
-        TM-->>Tool: ack(task_id, running)
-        Tool-->>LLM: "已在后台运行"
-        Note over Mon: 稀疏轮询直至结算
-        Mon-->>TM: settle(后台)
-        TM->>Bus: task_settled 自包含事件
-        Bus->>LLM: 触发回收 turn(空闲唤醒/进行中排队)
-    end
-```
-
-对应能力规格：`async-task-execution`、`task-registry-and-board`、`adaptive-poll-scheduling`。
-
-子任务登记在**提供 spawner 的那个 agent 自己的** TaskManager 看板上，而不是入口的看板：`TaskSpawner` 由所属 agent 注入，看板与 TaskManager 一一对应。因此"任务落在哪一级"由抬起它的那一级决定，跨级重放与退役判定都按这一归属解析。
+完整判据见[任务生命周期](task-lifecycle.md)，历史证据与验证状态见[技术报告](../../async-task-continuity-report.md)。
 
 ### 2.11 治理与可靠性接线（本模块落点）
 
@@ -547,7 +510,9 @@ tools:
 3. 共享壳 `runAgentLoop` 消费该总线：每次迭代是一次完整 turn（`processTurn`，与入口同一原语）；请求级隔离的 CM/投影接本 agent 自己的服务（含任务控制器）；
 4. 本 agent 任务域发起的后台任务，其 `task_settled` 按绑定路由回**本次调用的总线**——环持续消费，晚到结算触发续写轮（首答与续写同环、同一重试预算）；
 5. 输出恒发往本次调用的通道：同步关联结果按原语义作为 tool result 返回发起 turn；父 turn 已结束的越窗输出按通知形态送达绑定接收者，不对同一 tool_call 重复结算；
-6. 终止＝**投递对账**：绑定总线上无待达结算且无更多注入时环排空退出（调用方 ctx 为硬上限），不靠首条 assistant 消息、drain 定时器或文本探测关闭 agent。
+6. 终止＝**逻辑调用收敛**：声明等待满足、已受理输入排空、结果可回父原task round；中间回复不结束仍有等待的goal。本地等待不套整调用600s截止，模型active turn预算与Task TTL仍有限。
+
+本地逻辑调用以 `continuation_state` 保存goal、私有投影、输入处置、等待、stream游标、父task原round地址与结果缓存。重启按原invocation附着，不重复已消费goal；父ACK前保留结果。owner Close挂起scope，父task可靠取消才结束scope；goal完成后仍活的ready服务交接到明确receiver。详见[恢复契约](task-lifecycle.md#recoverable-invocations)。
 
 被调用不构成第二套架构：本地目标借用唯一常驻 owner 实例（身份/存储/治理随组织代统一推进，不因角色变化缺能力）；远程 A2A 目标走同一 `agent.Agent` 接口。取消/超时只终结该调用环与通道，不 Close 被 agent、不级联其无关任务。子 agent 的 MaxToolIterations 取 `min(父配置, 10)`；运行参数只在其自身 `agents.<name>` 定义处配置（ToolRef 只声明引用关系）。
 

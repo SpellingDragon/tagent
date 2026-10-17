@@ -741,7 +741,7 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 
 - **启动**：`NewActionTool` 若 tmux 可用则创建 executor/monitor，并执行**孤儿会话清扫**（`CleanupOrphanSessions`，上代实例残留按前缀回收——每个孤儿占一个 pty）。
 - **关闭**：`Close()` 停止 monitor 并**收编全部存活会话**（优雅退出不留孤儿）。
-- **会话回收**：completed/error 即 kill 会话；服务型 alive-detached 会话由 cancel/进程死亡结束。
+- **会话回收**：native终局先保留输出和pane/pipe证据，原信号受理并ACK后才清理；显式取消仍请求停止，Stopped以实际确认生效。
 
 > 历史注记：早期的 `MessageInjector` 闭环（ActionTool 直接向 EventBus 注入消息）与同步 `ActionExecutor`（`sh -c` 直接执行）已在任务层重构中移除，相应代码已删除；本文档不再保留其代码留存。
 
@@ -753,19 +753,19 @@ func (ct *ActionTool) Declaration() *tool.Declaration {
 ```mermaid
 stateDiagram-v2
     [*] --> Running
-    Running --> Running: 有输出变化
-    Running --> Stable: 输出稳定 N 次检测
-    Running --> FakeAlive: 进程存在但无响应
-    FakeAlive --> Running: 重启成功
-    FakeAlive --> FakeDead: 重启失败
-    FakeDead --> [*]: 强制清理
-    Stable --> Completed: pane 已死或进程退出
-    Stable --> TimedOut: TUI 会话静默越过假死阈（不探测假死/假活）
-    Stable --> [*]: 清理
-    TimedOut --> [*]: 移出监控
-    Completed --> [*]
-    Error --> [*]
+    Running --> Stable: 输出稳定但native仍活
+    Stable --> Running: 新增输出
+    Stable --> TimedOut: 静默观察期限
+    Running --> Completed: native退出零码
+    Running --> Error: native非零退出或明确失败
+    Stable --> Completed: native退出零码
+    Stable --> Error: native非零退出
+    Completed --> Evidence: 等待原receipt受理
+    Error --> Evidence: 等待原receipt受理
+    Evidence --> [*]: 精确ACK后清理
 ```
+
+稳定和静默不自动重启或kill producer；ready/input由显式证据产生，普通观察不能证明进程退出。
 
 ### 9.2 状态常量
 
@@ -794,8 +794,8 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 
 | 状态 | 触发条件 | 处理方式 |
 |------|---------|---------|
-| `fake_alive` | 进程存在、pane 存活、输出稳定超过阈值，但心跳有响应 | 重启 session |
-| `fake_dead` | 进程存在、pane 存活、输出稳定超过阈值，心跳也无响应 | 强制 kill session |
+| `fake_alive` | 旧状态适配或安静producer观察 | 归一为静默观察，不自动重启 |
+| `fake_dead` | 旧状态适配或无响应观察 | 归一为静默观察，不以心跳缺失杀死活进程 |
 
 ### 9.5 配置参数
 
@@ -819,8 +819,8 @@ session.ProbeUnknownCount = 0 // 可辨探测到达——重置连续计数
 
 | Kind | Relaunch | Alive | Resume |
 |------|----------|-------|--------|
-| command | ✅ fresh startSession | ✅ TaskID 会话核查 | ✅ `rebuiltResumeClosure`（镜像 resumeClosure 主体新建 detector；重挂前返回引导） |
-| subagent | ✅ 经 `SubagentRedispatcher`（spawnKey 幂等去重） | ✅ | ❌ rounds 链无事件源，返回引导 |
+| command | ✅ 新资源prepare/绑定后激活 | ✅ 原TaskID及resource identity核查 | ✅ 原resource与producer round、seq、字节基线恢复后续输入 |
+| subagent | ✅ 按所选执行面重投递 | 依实际driver | ✅ 从持久task_round轮史显式新Run；未完成逻辑调用按原invocation附着 |
 | generic | 展示 | — | — |
 
 ### 九·A.2 ResidentMeta 与常驻会话事实链
@@ -1095,16 +1095,16 @@ stateDiagram-v2
 
 | 执行器 | resume 实现 | 关键机制 |
 |---|---|---|
-| tmux | 同一 detector `Rearm(baseline)` + `SendKeys` | detector 绑会话而非轮次——回调/watch 永不换手，零换绑零竞态；输出=基线后增量；TouchSession 重回 dense 轮询；TUI 拒绝 |
-| subagent | 新 Run + 任务链还原器 | 本任务前序轮次链（上次 settle 结果为首，`resume_context_rounds` 封顶）注入 external_context；只含本任务内容；无进程复活 |
+| tmux | 准备精确字节基线，绑定accepted后SendKeys | 底层resource可复用，watch按producer round换代；旧末行prompt不得满足新input；TUI拒绝 |
+| subagent | 显式新Run + 持久task_round历史 | 还原输入/输出/错误与正文票据；原未完成调用只按continuation地址附着，不重复goal |
 
-任务层 `detector != task.detector` 一行区分两形态：同 detector 不退役 watch；新 detector 走 watchDone 退役（防泄漏与陈旧信号串轮）。
+任务层区分intent与actual producer。accepted尝试失败记round_aborted且消耗轮号，旧producer/owner/TTL不变；wrapper更换不代表底层资源更换。旧样本、旧window与旧seq均不能改写或释放新轮。
 
 ### 会话回收闭环
 
 | 时机 | 机制 |
 |---|---|
-| 运行时 | completed/error → 自动 kill session |
+| 运行时 | native终局保留证据，原receipt受理后ACK清理；TTL/显式取消由owner请求停止 |
 | 优雅退出 | `ActionTool.Close()` 收编 monitor 内全部存活 session |
 | 崩溃/强杀后 | 下次启动 `CleanupOrphanSessions()` 按前缀清扫孤儿（每个孤儿占一个 pty，实机曾因此耗尽系统 pty 池）；多实例场景 `WithOrphanCleanupDisabled` 或独立前缀 |
 

@@ -187,6 +187,12 @@ func TestDelegationStreamRequiresCommittedLocalOutcome(t *testing.T) {
 	require.Equal(t, "partial", out)
 	var interrupted *ErrContinuationInterrupted
 	require.ErrorAs(t, err, &interrupted)
+	failed := make(chan *event.Event, 1)
+	failed <- &event.Event{Response: &model.Response{Error: &model.ResponseError{Type: "stream_error", Message: "lost before outcome"}}}
+	close(failed)
+	_, err = w.collectEventStream(context.Background(), "child-invocation", "child", failed)
+	require.ErrorAs(t, err, &interrupted)
+	require.ErrorContains(t, interrupted, "lost before outcome")
 	complete := make(chan *event.Event, 1)
 	complete <- &event.Event{Response: &model.Response{Done: true}, StateDelta: map[string][]byte{"delegation_outcome": []byte("completed"), "delegation_result": {}}}
 	close(complete)
@@ -273,4 +279,108 @@ func TestDelegationHistoryFoldsRecoveredFinishesByOriginalRound(t *testing.T) {
 	require.Len(t, prior, 1)
 	require.Equal(t, "full output", prior[0].output)
 	require.Equal(t, key, prior[0].factKey)
+}
+
+// TestDelegationNotAcceptedKeepsItsTypedCredential 钉住 本地资源尚未交付流的拒绝带明确凭据，并与流中断区分存档。
+func TestDelegationNotAcceptedKeepsItsTypedCredential(t *testing.T) {
+	child := continuationTestAgent(t, "never-started-child", nil, nil)
+	child.continuationRegistry().closing.Store(true)
+	w := NewAgentToolWrapper(child, "child", nil, nil)
+	inv := agent.NewInvocation(agent.WithInvocationMessage(model.NewUserMessage("one request")))
+	stream, err := w.runWithTimeout(context.Background(), inv, "child")
+	require.Nil(t, stream)
+	var notAccepted *ErrContinuationNotAccepted
+	require.ErrorAs(t, err, &notAccepted)
+	require.Equal(t, inv.InvocationID, notAccepted.InvocationID)
+	require.ErrorIs(t, err, ErrExecClosed)
+	store := memory.NewInMemoryStore()
+	cm := &ContextManager{name: "parent", partitionID: sinkPartition, memStore: store}
+	d := delegationDetectorForRound(cm, nil, delegationRoundRecord{TaskID: "task", RoundID: 3, ChildInvocationID: inv.InvocationID}, time.Second, nil,
+		func(context.Context) (string, error) { return "", err })
+	d.(task.ActivatableDetector).Start()
+	sig := <-d.Settled()
+	require.Equal(t, "continuation_not_accepted", sig.Observation)
+	<-d.Stopped()
+	facts, queryErr := queryTaskRecords(store, sinkPartition, []string{tagentevent.TypeTaskRound})
+	require.NoError(t, queryErr)
+	require.Len(t, facts, 1)
+	var rd delegationRoundRecord
+	require.NoError(t, json.Unmarshal([]byte(facts[0].Content), &rd))
+	require.Equal(t, "continuation_not_accepted", rd.ErrorKind)
+}
+
+// TestDelegationRestoresUnactivatedIntentOnItsOriginalRound 钉住 只有明确无实际生产者的受理意图可冷启动准备，且实际调用绑定先于运行。
+func TestDelegationRestoresUnactivatedIntentOnItsOriginalRound(t *testing.T) {
+	child := &mockAgent{name: "child"}
+	w := NewAgentToolWrapper(child, "child", nil, nil)
+	cm := ownerRouting(t, "child", w)
+	w.SetParentCM(cm)
+	var acceptedInvocation string
+	tm := task.NewTaskManager(task.TaskManagerConfig{OnStartAccepted: func(tk *task.Task) bool {
+		acceptedInvocation = tk.SpecSnapshot().Declarative.Params[childInvocationIDParam]
+		require.Nil(t, child.lastInv)
+		require.NotEmpty(t, acceptedInvocation)
+		require.Equal(t, uint64(5), tk.RoundID())
+		return true
+	}})
+	defer tm.Close(context.Background())
+	parent := &TagentAgent{name: cm.name, memStore: cm.memStore, contextManager: cm, taskManager: tm}
+	decl := task.Declarative{Kind: "subagent", AgentName: "child", Desc: "original request", RoundID: 5, RoundOwner: "parent-invocation", MessageBody: "original packed request", TTLAnchorMilli: time.Now().UnixMilli()}
+	content, err := json.Marshal(decl)
+	require.NoError(t, err)
+	key := memory.NewSnowflakeEventKey(cm.partitionID, 0)
+	require.NoError(t, cm.memStore.StoreEvent(key, memory.FullEvent{EventKey: key, PartitionID: cm.partitionID, EventType: tagentevent.TypeTaskSpawned, Content: string(content), Timestamp: time.Now().UnixMilli(), Metadata: map[string]string{"task_id": "task", "admission_phase": "accepted"}}))
+	require.Equal(t, 1, parent.RebuildTaskRegistryFromWAL(cm.memStore, nil))
+	tk, ok := tm.Get("task")
+	require.True(t, ok)
+	require.Zero(t, tk.ProducerRound())
+	require.Nil(t, child.lastInv)
+	n, err := parent.ResumePendingDelegations()
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Eventually(t, func() bool { return tk.Status() == task.TaskCompleted }, time.Second, time.Millisecond)
+	require.Equal(t, uint64(5), tk.RoundID())
+	require.Equal(t, uint64(5), tk.ProducerRound())
+	require.Equal(t, "original packed request", child.lastInv.Message.Content)
+	require.Equal(t, acceptedInvocation, child.lastInv.InvocationID)
+	address, err := continuationContextFromInvocation(child.lastInv)
+	require.NoError(t, err)
+	require.Equal(t, "task", address.ParentTaskID)
+	require.Equal(t, uint64(5), address.ParentTaskRound)
+	require.Equal(t, "parent-invocation", address.ParentInvocationID)
+}
+
+// TestDelegationRecoveryUsesHiddenOriginalInvocationWithoutANewGoal 钉住 已受理旧义务按隐藏归属和原调用身份恢复，缓存终局只重放已有结果。
+func TestDelegationRecoveryUsesHiddenOriginalInvocationWithoutANewGoal(t *testing.T) {
+	m := &requestCapturingModel{resp: finalTextResponse("unused", "must not run")}
+	child := continuationTestAgent(t, "hidden-original-owner", nil, m)
+	parent := continuationTestAgent(t, "recovering-parent", nil, nil)
+	parent.config.ContinuationOwnerResolver = func(name string) *TagentAgent {
+		if name == child.name {
+			return child
+		}
+		return nil
+	}
+	require.Nil(t, parent.contextManager.SubagentWrapper(child.name))
+	c := seedContinuation(t, child, "original-child-invocation", ContinuationContext{ParentAgent: parent.name, ParentInvocationID: "old-parent-invocation", ParentTaskID: "task", ParentTaskRound: 6})
+	c.state.State, c.state.Outcome, c.state.LastOutput, c.state.InitialPending = "completed", "completed", "committed cached output", false
+	require.NoError(t, child.persistContinuationLocked(c))
+	child.continuations = newContinuationRegistry()
+	decl := &task.Declarative{Kind: "subagent", AgentName: child.name, Desc: "original task", RoundID: 7, RoundOwner: "new-intent-owner", ProducerRound: 6, ProducerOwner: "old-parent-invocation", TTLAnchorMilli: time.Now().UnixMilli(), Params: map[string]string{childInvocationIDParam: "original-child-invocation"}}
+	tk := parent.taskManager.RestoreTask("task", task.TaskSpec{Kind: "subagent", Desc: "original task", Declarative: decl, TTL: time.Hour}, time.Now(), task.TaskSuspect)
+	require.NotNil(t, tk)
+	n, err := parent.ResumePendingDelegations()
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Eventually(t, func() bool { return tk.Status() == task.TaskCompleted }, time.Second, time.Millisecond)
+	require.Zero(t, m.requestCount())
+	require.Equal(t, uint64(7), tk.RoundID())
+	require.Equal(t, uint64(6), tk.ProducerRound())
+	require.Equal(t, "original-child-invocation", tk.SpecSnapshot().Declarative.Params[childInvocationIDParam])
+	rounds, err := loadDelegationRounds(parent.memStore, parent.partitionID(), "task")
+	require.NoError(t, err)
+	prior := rounds.recent(1)
+	require.Len(t, prior, 1)
+	require.Equal(t, "committed cached output", prior[0].output)
+	require.Empty(t, prior[0].err)
 }

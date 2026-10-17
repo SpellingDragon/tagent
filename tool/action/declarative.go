@@ -161,6 +161,28 @@ func argsFromDeclarative(decl task.Declarative) (ActionArgs, error) {
 	return args, nil
 }
 
+// RelaunchTask starts a fresh command using this tool and the initiating task spawner.
+func (ct *ActionTool) RelaunchTask(ctx context.Context, decl task.Declarative) (task.SpawnResult, error) {
+	if ct.closed.Load() {
+		return task.SpawnResult{}, fmt.Errorf("action: tool is closed")
+	}
+	if ct.tmuxExecutor == nil || ct.tmuxMonitor == nil {
+		return task.SpawnResult{}, fmt.Errorf("action: tmux not available")
+	}
+	args, err := argsFromDeclarative(decl)
+	if err != nil {
+		return task.SpawnResult{}, fmt.Errorf("action: relaunch: %w", err)
+	}
+	if args.Mode == "" {
+		args.Mode = string(ModeOneshot)
+	}
+	spawner, ok := task.TaskSpawnerFromContext(ctx)
+	if !ok {
+		return task.SpawnResult{}, fmt.Errorf("action: no current task spawner for relaunch")
+	}
+	return spawner.Spawn(ct.commandSpec(spawner, args), nil), nil
+}
+
 // SpecFromDeclarative rebuilds command intent, resource liveness, and reentry closures.
 func (ct *ActionTool) SpecFromDeclarative(spawner task.TaskSpawner, decl task.Declarative) task.TaskSpec {
 	args, err := argsFromDeclarative(decl)

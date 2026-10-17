@@ -9,61 +9,21 @@ emits self-contained `task_settled` events, and exposes LLM task-operation tools
 ## Requirements
 ### Requirement: TaskManager 内存 registry 与幂等 spawn
 
-系统 SHALL 提供一个确定性的 TaskManager 组件(非 LLM agent),维护 registry,记录每个 Task 的 `{id, desc, status, spawn-spec, resultRef, startedAt, declarative}`。status SHALL 覆盖 `running` / `stable` / `alive-detached` / `completed` / `failed` / `suspect` / `dead` / `cancelled`。
+TaskManager SHALL 维护每个任务的声明、状态、结果、intent round/owner、actual producer round/owner、seq、等待条件及真实TTL锚点，按active Key幂等去重。生产注册 SHALL 先可靠提交意图和资源绑定，再启动业务；记录失败不得只打日志后假装纳管成功。运行态是同一事实链的fold，不随执行器换代重建。
 
-spawn SHALL 幂等:当一个语义等价的任务已在运行时,再次 spawn SHALL 返回既有 Task 句柄而非新建,以防止 LLM 重复发起。
+声明式投影 SHALL 深拷贝Origin、Params、EventKeys与Overrides；恢复闭包工厂仅恢复能力，不覆盖持久身份。command原resource可重接；subagent按持久task_round历史和continuation地址恢复，显式新Run Resume使用当前合法执行面；generic仅在有可恢复工厂时恢复执行。
 
-**registry=事实链 fold（R2 反转原「纯内存禁持久化」）**：spawn SHALL 伴随一条 `task_spawned` 正 key 事件入事实链（载声明式 spec：Kind/Desc/Key/Command/AgentName/MessageBody/EventKeys/Origin/TaskID/Params/StartedAtUnixMilli）；**窗口内 inline settle（最常见形态）SHALL 也发 settle 终态记录**（既有 external_input+subtype 形态，不新增 settle 事件类型）；settle 事件 SHALL 携带结构化 `Metadata[task_id]`（全量 UUID）与 `settle_status`（不解析正文）。运行期 registry 为内存维护；重启 SHALL经 `RebuildTaskRegistry` 纯全量回放重建 active 态（无 compaction snapshot）。事件写入 best-effort（失败仅 ERROR 日志——**残余缺口**：spawn 落库失败则重启丢该任务）。
+#### Scenario: lazy去重命中
+- **WHEN** 同Key已active而第二次调用仍未prepare
+- **THEN** 第二次返回原Task，factory不执行且无新业务副作用
 
-**TaskSpec 声明式化（按 Kind 拆分承诺）**：`RebuildClosures(declarative)` 工厂承诺表——command：Relaunch/Resume/Alive 全可用（Resume 跨重启由 resident-session-continuity 重挂供能）；subagent：Relaunch 可用（AgentName+MessageBody+EventKeys 重投递）、**跨重启 Resume SHALL 返回「请 relaunch」引导文案**（rounds 轮次链为无事件源的运行期态，不承诺）；generic：仅展示。Params SHALL 枚举 ActionArgs 全 spawn 字段集（含 Timeout/ProbeFailures；未知字段拒绝）。
+#### Scenario: 内联结果仍可恢复
+- **WHEN** dense内完成并返回结果
+- **THEN** 同一信号仍形成可靠raw结果及受理证据，重启不复活为无结果suspect
 
-**TaskManager org 级单例**：TaskManager SHALL 在 build 路径构造一次（org 级、跨执行器代共享），注入各 cm/taskController/meditationMgr/ActionTool；SHALL NOT 随执行器换代重建（状态⊥执行器不变量）。
-
-#### Scenario: 幂等 spawn 去重
-
-- **WHEN** 一个语义等价的任务已处于 running,LLM 再次发起同一任务
-- **THEN** TaskManager SHALL 返回既有 Task,SHALL NOT 新建重复任务
-
-#### Scenario: 死任务保留 spec 以便进程内 relaunch
-
-- **WHEN** 一个任务转为 `dead` / `suspect`
-- **THEN** 其记录 SHALL 保留 spawn-spec
-- **AND** LLM SHALL 可通过 `relaunch(id)` 用原 spec 在**同一进程内**重新发起
-
-#### Scenario: spawn 伴随事实链事件（含 StartedAt）
-
-- **WHEN** 一个任务 spawn（含跨重启重建后的新 spawn）
-- **THEN** SHALL StoreEvent 一条 `task_spawned` 正 key 事件，载完整 Declarative（含 StartedAtUnixMilli）
-- **AND** 运行期内存 registry 照旧即时可用（best-effort，写失败仅 ERROR 日志——重启丢该任务为已文档化残余缺口）
-
-#### Scenario: inline settle 也有终态事件
-
-- **GIVEN** 一个任务在 dense 窗口内（默认 10s）完成结算
-- **WHEN** Spawn 返回内联结果
-- **THEN** SHALL 也发一条 settle 终态记录（既有 external_input+subtype 形态，含 task_id/settle_status 结构化 Metadata；不新增 settle 事件类型）→ 重启回放不重建为幽灵 suspect
-
-#### Scenario: subagent 跨重启 resume 引导 relaunch
-
-- **GIVEN** 跨重启重建的 subagent 任务，LLM 调用 resume
-- **THEN** SHALL 返回「请 relaunch」引导文案（rounds 无事件源不承诺），进程内 resume 不受影响
-
-#### Scenario: 重启回放重建 active 态
-
-- **GIVEN** 重启前 registry 有 2 个 running、1 个 alive-detached、1 个 completed（含 inline 结算）任务，事实链含对应 spawned/settled 事件
-- **WHEN** 冷启动 `RebuildTaskRegistry`
-- **THEN** 重建后 active 任务=3（running×2→suspect+alive-detached×1），completed（含 inline-settled）不重建
-
-#### Scenario: running 任务跨重启重建为 suspect（tmux 存活待裁决）
-
-- **GIVEN** 一个 running 任务的 tmux 会话跨重启存活状态未知
-- **WHEN** registry 重建
-- **THEN** SHALL 重建为 `suspect`（进程内 watch goroutine 不可恢复），由存活探测（resident-session-continuity 能力）裁决：会话活→恢复跟踪，会话死→走 settle 补偿
-- **AND** 看板对 suspect 的 ⚠ 提示语义不变
-
-#### Scenario: 换执行器不丢任务板
-
-- **WHEN** R4（swappable-executor）结构热更换入新执行器
-- **THEN** TaskManager 及其 registry SHALL 原封不动（持有者在执行器之外），新执行器内的工具经注入接口继续操作同一 registry
+#### Scenario: 子任务终态保留重入窗口
+- **WHEN** subagent已结束且仍在terminalTTL内
+- **THEN** 任务结果和历史仍支持显式Resume；未受理pending不会因terminalTTL被prune
 
 ### Requirement: live 任务看板投影
 
@@ -154,7 +114,6 @@ spawn SHALL 幂等:当一个语义等价的任务已在运行时,再次 spawn SH
 - **THEN** 小结果 SHALL 直接从通知/召回可见；超大结果 SHALL 经 `read_file` 分页读取转储文件
 - **AND** SHALL NOT 依赖 `get_task_result` 工具或任务层 TTL 窗口
 - **AND** 召回路径 SHALL NOT 返回超大全文（事件本体有界，复发不可能）
-
 
 ### Requirement: 看板渲染数据源跨重启连续
 

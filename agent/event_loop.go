@@ -230,6 +230,8 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 	}
 
 	msg := cm.BuildInvocation(modelEvents)
+	cm.inlineTaskTurnToken = inlineTaskTurnToken(cm, modelEvents)
+	defer func() { cm.inlineTaskTurnToken = "" }()
 	if msg.Content == "" && len(msg.ContentParts) == 0 {
 		log.Debugf("[runEventLoop:%s] empty message after merge, skipping", ta.name)
 		cm.turnEcho = nil
@@ -395,6 +397,9 @@ func (ta *TagentAgent) processTurn(ctx context.Context, cm *ContextManager, even
 		return turnStop
 	}
 	if !ta.finishDurableBatchForCM(spanCtx, cm, received, events, batchOutcome) {
+		return turnStop
+	}
+	if !finishInlineSignalsForTurn(spanCtx, cm) {
 		return turnStop
 	}
 	if err := ta.checkpointContinuation(spanCtx, cm, events); err != nil {
@@ -591,6 +596,7 @@ const metaKeyInvocationID = "invocation_id"
 
 var controlMetaKeys = map[string]bool{
 	"settle_status": true, "task_id": true, "lineage_absent": true,
+	"task_signal_key": true, "task_signal_owner": true, "task_inline_turn": true, taskBatchSignalsKey: true,
 	"detached_at_ms":               true,
 	tagentevent.MetaKeySettleFinal: true,
 	tagentevent.MetaKeyTaskMode:    true, tagentevent.MetaKeyTaskWaitFor: true,

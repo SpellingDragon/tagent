@@ -706,12 +706,12 @@ func TestAliveDetached_ReadyOnceThenSuppress(t *testing.T) {
 		},
 	})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
-	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "server :8080"}, d)
+	res := tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Mode: "resident", WaitFor: WaitReady, Desc: "server :8080"}, d)
 	if res.Settled {
 		t.Fatalf("expected ack (background) for a service task")
 	}
 
-	d.Emit(SettleSignal{Kind: SettleStable, Output: "listening on :8080"})
+	d.Emit(SettleSignal{Kind: SettleReady, Ready: true, Output: "listening on :8080"})
 	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return len(settles) == 1 })
 	if got := res.Task.Status(); got != TaskAliveDetached {
 		t.Errorf("status = %s, want alive_detached", got)
@@ -740,9 +740,9 @@ func TestAliveDetached_SuspectSuppressed(t *testing.T) {
 		OnSettle: func(_ *Task, _ SettleSignal) { mu.Lock(); count++; mu.Unlock() },
 	})
 	d := NewManualDetectorDetach(30 * time.Millisecond)
-	tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Desc: "svc"}, d)
+	tm.Spawn(TaskSpec{Kind: "command", Lifetime: LifetimeService, Mode: "resident", WaitFor: WaitReady, Desc: "svc"}, d)
 
-	d.Emit(SettleSignal{Kind: SettleStable, Output: "ready"})
+	d.Emit(SettleSignal{Kind: SettleReady, Ready: true, Output: "ready"})
 	waitUntil(t, time.Second, func() bool { mu.Lock(); defer mu.Unlock(); return count == 1 })
 	d.Emit(SettleSignal{Kind: SettleSuspect, Output: "quiet"})
 	time.Sleep(100 * time.Millisecond)

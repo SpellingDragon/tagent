@@ -72,6 +72,11 @@ func prepareTaskReceiptKeys(cm *ContextManager, events []*AgentEvent) {
 		if evt == nil || (evt.Source != SourceTask && !evt.recoveryConsumed && cm.continuationID == "") || evt.Type != tagentevent.TypeExternalInput {
 			continue
 		}
+		if evt.Source == SourceTask {
+			if fact, err := taskInputFact(evt); err == nil && fact.Metadata[tagentevent.MetaKeySourceEventID] == evt.ID && compress.VerifiedInputDisposition(cm.memStore, fact) != "" {
+				evt.recoveryConsumed = true
+			}
+		}
 		if evt.claim != nil && len(evt.claim.PreparedFact) > 0 {
 			var fact memory.FullEvent
 			if json.Unmarshal(evt.claim.PreparedFact, &fact) == nil {
@@ -173,6 +178,10 @@ func consumeTaskInputs(ctx context.Context, cm *ContextManager, events []*AgentE
 			fact = &copyFact
 		}
 		if evt.recoveryConsumed && compress.VerifiedInputDisposition(cm.memStore, fact) != "" {
+			if err := releaseConsumedTaskSignal(cm, evt, fact); err != nil {
+				log.Errorf("[task-input] consumed signal release refused: %v", err)
+				return false
+			}
 			continue
 		}
 
@@ -221,6 +230,10 @@ func consumeTaskInputs(ctx context.Context, cm *ContextManager, events []*AgentE
 			if !waitTaskInputRetry(ctx) {
 				return false
 			}
+		}
+		if err := releaseConsumedTaskSignal(cm, evt, fact); err != nil {
+			log.Errorf("[task-input] consumed signal release refused: %v", err)
+			return false
 		}
 	}
 	return true

@@ -6,39 +6,34 @@
 ## 一、整体事件流
 
 ```mermaid
-graph TD
-    User["用户 / 外部输入"] -->|InjectMessage| Bus[EventBus<br/>persistentBus]
-    Tool["工具回调"] -->|Publish| Bus
-    SubAgent["子 Agent 结果"] -->|Publish| Bus
-    Task["后台任务 settle<br/>(TaskManager)"] -->|task_settled Publish| Bus
-
-    Bus -->|Pull 批量拉取| EL[runEventLoop<br/>每 turn 一 trace(tagent.turn)]
-    EL -->|① BuildInvocation| Msg[model.Message 合并]
-    EL -->|② startTurnSpan + RunFlow| CM[ContextManager]
-    CM -->|runner.Run| Runner[框架 Runner]
-
-    Runner -->|emit event channel| OutCh[outputCh]
-    OutCh -->|wechat-bot / HTTPAPI| Consumer[外部消费者]
-
-    OutCh -.->|isFinalResponse| Bus
+flowchart TD
+    Producer["后台 producer 信号"] --> Raw["冻结 raw task_signal"]
+    Raw --> Accept["指定 receiver 受理"]
+    Accept --> Bus["所属 EventBus"]
+    User["用户或外部输入"] --> Bus
+    Bus --> Fact["逐条输入事实与投影"]
+    Fact --> Wake{"settle_wake"}
+    Wake -->|observe| Receipt["精确 input_disposition"]
+    Wake -->|decision| Turn["统一 RunFlow 业务 turn"]
+    Turn --> Receipt
+    Receipt --> Wait["继续等待或完成逻辑调用"]
 ```
 
-> **task_settled 结构化语义**：`settle_status` 为 `completed/failed/cancelled/stable/alive-detached/suspect/watch/unknown`；job 的 stable 是输出稳定，service 的 alive-detached 是首次就绪。failed 显式携带（`SettleFailed` 或 Err），**未知 Kind 映射 unknown 并告警**；反馈按确定终态极性落库。`settle_final` 表示这一轮信号已结束，观察通知不扣减调用的交付屏障。Origin 缺失的任务结算打 `lineage_absent` 标记，回收 turn 降级 `task-unstamped`；控制键（settle_status/settle_final/task_id/lineage_absent/detached_at_ms）不进 Origin baggage。
+`task_settled` 是自包含输入事实，结构化携带 task id、原 producer round、round owner、seq、ObservedAt、冻结 WaitFor、状态与结果票据。`settle_wait_satisfied` 表达本次等待结果；`settle_final` 表达观察流结束，两者都不单独证明业务成功。普通稳定、watch 和 probe 边沿标为 `settle_wake=observe`：提交原事实、追加所属投影、写精确源 key/partition 的 `input_disposition` 后消费，不单独运行模型。ready/input条件满足、终局或 Final 等 decision 输入才驱动续写。未带wake的旧输入按decision处理。
 
-> **task_settled 回收 turn**：长命令 / 子 agent 经**任务层**异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发一个回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。事件携带原 spawn turn 的 trace 锚（Origin→Metadata 管道），回收 turn 的 root span 据此建 OTel span link，跨 turn 闭环（见 [platform 篇](../platform/platform-subsystems.md)）。详见 `agent-architecture.md` §2.10 任务层。
+receiver受理后才能ACK producer证据；受理不等于模型消费，后者另有处置/checkpoint。信号拒收在原SourceID和时间上退避重试。task、round、seq、wake、等待、处置及inbox控制键不回流到Origin baggage。Origin仍是不可变派生来源，原轮归属由RoundOwner表达。
 
-未开启持久信箱的任务通知也在执行前逐条提交事实并追加到**本次调用**的投影；与用户输入混批时一并提交，保留各自身份和正文。提交失败保留当前批等待重试，不启动模型。提交成功后用既有回显凭据跳过 Runner 的合并输入双写，因此 `task_id`、`settle_status` 与完整来源元数据不会在正文合并时丢失。
+所有 SourceTask 输入在执行前逐条提交，不论是否启用 durable inbox；与用户混批时，各自身份、正文和元数据都保留。部分输入已提交不能把整批当作已提交。存储失败保留冻结批次，提交完成前不运行模型。Runner的合并回显用既有凭据跳过双写。
 
-### 冷启动重建序（R1→R2→R3）
+### 冷启动恢复与交付屏障
 
-持久循环启动前，build 路径按固定顺序从事实链重建三层状态（均一次、进空态、无据则 no-op）：
+1. 恢复持久输入、投影压缩边界及尾部事实，登记必要保留材料。
+2. 折叠任务意图、资源绑定、raw结果与受理receipt，保留真实producer、seq、寿命锚点和inline记录目的地。
+3. 恢复 continuation 的原 invocation、私有投影、goal/输入处置、等待和 stream 游标、结果缓存及父 task 原 round 地址；尚未启动模型或投递pending。
+4. 重接 native/tmux资源及 child原调用，完成 receiver、结果地址与ready服务交接；无资源的accepted intent仅沿原intent安全补完prepare/绑定。
+5. 所有接收者就绪后，显式 `ResumePendingDeliveries` 放行原信号重试和deadline；再启动可恢复逻辑调用。缺少实际driver的等待要明确处置，不永久伪装tracked。
 
-1. **投影重建**（`RebuildProjectionFromWAL`）：最新 compaction 事件作 snapshot + `MinEventKey` 写序尾部回放，逐字节复原上下文（prefix-cache 复用）；先于 spill 重放接线；
-2. **任务 registry 重建**（`RebuildTaskRegistryFromWAL`）：`task_spawned` − 终态 settle 纯全量回放，running→suspect 交存活探测裁决；
-3. **常驻会话重挂**（`ReattachResidentSessions`）：tmux list 对账 ResidentMeta → 存活会话重挂 → TaskID 桥把 suspect 任务提升回 running；
-4. **spill 重放双写**（mem_spill 兜底路径）：重放成功事件补投影，恢复「存储⇔投影同点」在退化路径的等价语义。
-
-三层重建只发生在**常驻构建**（冷启动与热新增 agent）：已存在 agent 的执行换代只换执行面（模型/工具/声明），不重建投影、registry 与会话绑定——状态原封流过，在途 turn 持旧代跑完（见 [agent 篇 §2.13](agent-architecture.md)）。
+恢复阶段只登记，不能让timer在结果/receipt尚未装配时提前prune，也不能把terminal ACK-only绑定当业务重启。已消费goal不重跑；缺工具结果的中断以可对账失败表达。热更保留同一常驻状态，仅独立新执行按版本规则选择执行面。
 
 <a id="runner-flow"></a>
 ## 二、Runner 内部流转

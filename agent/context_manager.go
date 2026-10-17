@@ -60,11 +60,13 @@ type ContextManager struct {
 	// NewContextManager 从 cfg 取快照；每次 PublishExecutor 更新为该代真实执行面——
 	// 快照即「当前生效绑定」，供诊断与「原样重发同一执行面」使用。候选构造不得把它
 	// 当隐式回落源：回落会把已清空的字段退回上一份，属主换代后留下旧绑定。
-	memPlugin    *plugin.MemoryPlugin
-	sessionSvc   session.Service
-	execCfg      ContextManagerConfig
-	tokenCounter compress.TokenCounter
-	memStore     memory.MemoryStore
+	memPlugin               *plugin.MemoryPlugin
+	sessionSvc              session.Service
+	execCfg                 ContextManagerConfig
+	tokenCounter            compress.TokenCounter
+	memStore                memory.MemoryStore
+	taskSignalOwnerResolver func(string) *TagentAgent
+	taskSignalJournal       *taskRecordSink
 
 	// runner Framework integration
 	runner     runner.Runner
@@ -86,12 +88,13 @@ type ContextManager struct {
 	// owner whose bounded Close could not finish because an execution never
 	// confirmed a stop, fired at most once when the last held generation is
 	// reclaimed with nothing referencing it (see armFullyDrained).
-	drainedHook    atomic.Pointer[func()]
-	drainedOnce    sync.Once
-	name           string
-	userID         string
-	sessionID      string
-	continuationID string
+	drainedHook         atomic.Pointer[func()]
+	drainedOnce         sync.Once
+	name                string
+	userID              string
+	sessionID           string
+	continuationID      string
+	inlineTaskTurnToken string
 
 	// outputCh Event routing
 	outputCh   chan *event.Event
@@ -881,9 +884,16 @@ func (cm *ContextManager) retireBinding(b *execBinding) {
 	if cm.retiredBindings == nil {
 		cm.retiredBindings = map[*execBinding]struct{}{}
 	}
-	cm.retiredBindings[b] = struct{}{}
+	b.mu.Lock()
+	closed := b.closed
+	if !closed {
+		cm.retiredBindings[b] = struct{}{}
+	}
+	b.mu.Unlock()
 	cm.retiredMu.Unlock()
-	b.release(leaseKindNoop)
+	if !closed {
+		b.release(leaseKindNoop)
+	}
 }
 
 // forgetBinding drops a closed generation from the unconverged list so the
@@ -1498,7 +1508,7 @@ func (cm *ContextManager) buildBusFact(evt *AgentEvent) memory.FullEvent {
 	}
 	if evt.Source == SourceTask {
 		for _, k := range []string{"task_id", "settle_status", "settle_notice", tagentevent.MetaKeyTaskInlineRecord, tagentevent.MetaKeySettleFinal,
-			tagentevent.MetaKeyTaskMode, tagentevent.MetaKeyTaskWaitFor, tagentevent.MetaKeyTaskRoundID, tagentevent.MetaKeyTaskProducerRoundID, tagentevent.MetaKeyTaskRoundOwner, tagentevent.MetaKeyTaskSignalSeq, tagentevent.MetaKeySettleWaitSatisfied, tagentevent.MetaKeySettleObservation, tagentevent.MetaKeySettleWake, "lineage_absent", "task_signal_key", "spill_path"} {
+			tagentevent.MetaKeyTaskMode, tagentevent.MetaKeyTaskWaitFor, tagentevent.MetaKeyTaskRoundID, tagentevent.MetaKeyTaskProducerRoundID, tagentevent.MetaKeyTaskRoundOwner, tagentevent.MetaKeyTaskSignalSeq, tagentevent.MetaKeySettleWaitSatisfied, tagentevent.MetaKeySettleObservation, tagentevent.MetaKeySettleWake, "lineage_absent", "task_signal_key", "task_signal_owner", taskBatchSignalsKey, "spill_path"} {
 			if v, ok := evt.Metadata[k]; ok {
 				fullEvent.Metadata[k] = fmt.Sprint(v)
 			}
@@ -1860,6 +1870,7 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 	if err := lease.Err(); err != nil {
 		return fmt.Errorf("%w: agent %q turn", err, cm.name)
 	}
+	ctx = withCommandRelauncherForLease(ctx, lease)
 	if cm.turnEcho != nil {
 		cred := cm.newAttemptEchoCredential()
 		cm.lastEchoCred = cred
@@ -1887,7 +1898,9 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 		traceID, spanID := spanTraceIDs(ctx)
 		ts := cm.triggerSource
 		invID, _ := invocationIDFromContext(ctx)
-		if len(md) > 0 || traceID != "" || ts != "" || invID != "" {
+		ctx = task.WithRoundOwner(ctx, invID)
+		ctx = task.WithInputBatchID(ctx, cm.inlineTaskTurnToken)
+		if len(md) > 0 || traceID != "" || ts != "" || invID != "" || cm.inlineTaskTurnToken != "" {
 			cp := make(map[string]string, len(md)+4)
 			for k, v := range md {
 				cp[k] = v
@@ -1902,7 +1915,10 @@ func (cm *ContextManager) RunFlowWithExecutor(ctx context.Context, msg model.Mes
 			if invID != "" {
 				cp[metaKeyInvocationID] = invID
 			}
-			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp}
+			if cm.inlineTaskTurnToken != "" {
+				cp["task_inline_turn"] = cm.inlineTaskTurnToken
+			}
+			spawner = &task.OriginSpawner{TaskController: cm.taskController, Origin: cp, RoundOwner: invID, InputBatchID: cm.inlineTaskTurnToken}
 			if invID != "" && cm.settleSinks != nil {
 				spawner = &countingSpawner{inner: spawner, sinks: cm.settleSinks, id: invID}
 			}
@@ -2034,13 +2050,16 @@ func (cm *ContextManager) SetUserIDSessionID(userID, sessionID string) {
 func (cm *ContextManager) allBindings() []*execBinding {
 	var out []*execBinding
 	cm.executorMu.RLock()
-	if cm.active != nil {
-		out = append(out, cm.active)
+	active := cm.active
+	if active != nil {
+		out = append(out, active)
 	}
 	cm.executorMu.RUnlock()
 	cm.retiredMu.Lock()
 	for b := range cm.retiredBindings {
-		out = append(out, b)
+		if b != active {
+			out = append(out, b)
+		}
 	}
 	cm.retiredMu.Unlock()
 	return out
@@ -2089,18 +2108,24 @@ func (cm *ContextManager) retireActiveBinding() {
 // ErrExecUnconverged so no caller can claim a clean close. The holder acts on it
 // by keeping the shared resources they ride on (see agent.Close).
 func (cm *ContextManager) Close() error {
-	cm.retireActiveBinding()
-	cm.WaitForInFlight(execCloseGrace)
-	held := cm.UnconvergedRefs()
-	if len(held) == 0 {
-		cm.retiredMu.Lock()
-		cm.retiredBindings = nil
-		cm.retiredMu.Unlock()
-		return nil
+	cm.retireForOwnerClose()
+	deadline := time.NewTimer(execCloseGrace)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for len(cm.UnconvergedRefs()) > 0 {
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			held := cm.UnconvergedRefs()
+			if len(held) == 0 {
+				return nil
+			}
+			log.Warnf("[ContextManager] bounded close retained %d generation(s): %+v", len(held), held)
+			return fmt.Errorf("%w: %d generation(s) still held: %+v", ErrExecUnconverged, len(held), held)
+		}
 	}
-	log.Warnf("[ContextManager] bounded close left %d unconverged generation(s): %+v — their executors are HELD, not force-closed; investigate the execution that never confirmed a stop",
-		len(held), held)
-	return fmt.Errorf("%w: %d generation(s) still referenced: %+v", ErrExecUnconverged, len(held), held)
+	return nil
 }
 
 // WaitForInFlight blocks until every outstanding execution reference (resident

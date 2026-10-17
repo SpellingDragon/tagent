@@ -370,10 +370,7 @@ func (b *execBinding) subagentWrapper(name string) *AgentToolWrapper {
 	return subagentWrapperIn(b.face.Tools, name)
 }
 
-// holdsUsage reports whether this generation still justifies keeping an owner it
-// declares callable: D8 counts the published slot itself (「发布槽…在即保有」) and,
-// once retired, any execution/background reference still pinning it. A retired
-// generation with zero references is on its way out and holds nothing.
+// holdsUsage reports whether an active face, execution or live declarer retains this generation's targets.
 func (b *execBinding) holdsUsage() bool {
 	if b == nil {
 		return false
@@ -381,6 +378,18 @@ func (b *execBinding) holdsUsage() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return !b.closed && (!b.retired || b.total > 0 || b.heldBy > 0)
+}
+
+func (b *execBinding) shutdownQuiet() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.total == 0 && !b.closing
+}
+
+func (b *execBinding) fullyReclaimed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closed && b.total == 0 && b.heldBy == 0
 }
 
 // BindingHolders counts the live execution generations across `agents` whose OWN

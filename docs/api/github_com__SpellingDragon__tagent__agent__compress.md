@@ -117,6 +117,10 @@ func TelemetryDispositions(ctx context.Context, store memory.MemoryStore, refs [
     or an event written before the mark existed) is never fold-eligible and
     stays verbatim.
 
+func VerifiedInputDisposition(store memory.MemoryStore, source *memory.FullEvent) string
+    VerifiedInputDisposition returns the disposition proven for this exact
+    source fact.
+
 TYPES
 
 type CompactionPayload struct {
@@ -278,6 +282,10 @@ func (cc *ContextCompressor) Compress(
 func (cc *ContextCompressor) CondensedTicketsLost() int64
     CondensedTicketsLost returns the cumulative count of recall tickets folded
     into prose by card condensation.
+
+func (cc *ContextCompressor) FoldConsumedObservations(ctx context.Context, refs []memory.EventReference) []memory.EventReference
+    FoldConsumedObservations replaces formally consumed observations with recall
+    tickets.
 
 func (cc *ContextCompressor) FullBoundary() int64
     FullBoundary returns the current full-render window anchor . Zero means

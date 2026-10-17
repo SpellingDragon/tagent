@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/agent/compress"
@@ -54,29 +55,38 @@ type continuationInputDisposition struct {
 	Disposition string `json:"disposition"`
 }
 
+type continuationProducerReference struct {
+	Agent        string `json:"agent"`
+	InvocationID string `json:"invocation_id"`
+	TaskID       string `json:"task_id"`
+	RoundID      uint64 `json:"round_id"`
+}
+
 type continuationCheckpoint struct {
-	Version                 int                            `json:"version"`
-	InvocationID            string                         `json:"invocation_id"`
-	Address                 ContinuationContext            `json:"address"`
-	InitialGoal             *AgentEvent                    `json:"initial_goal,omitempty"`
-	InitialPending          bool                           `json:"initial_pending"`
-	ExecutionStarted        bool                           `json:"execution_started,omitempty"`
-	RejectedBeforeExecution bool                           `json:"rejected_before_execution,omitempty"`
-	Projection              []memory.EventReference        `json:"projection,omitempty"`
-	FullBoundary            int64                          `json:"full_boundary,omitempty"`
-	Routing                 settleRoutingSnapshot          `json:"routing"`
-	ConsumedKeys            []int64                        `json:"consumed_keys,omitempty"`
-	RetainedKeys            []int64                        `json:"retained_keys,omitempty"`
-	InputDisposition        []continuationInputDisposition `json:"input_disposition,omitempty"`
-	State                   string                         `json:"state"`
-	Outcome                 string                         `json:"outcome,omitempty"`
-	LastOutput              string                         `json:"last_output,omitempty"`
-	LastBatchOutcome        string                         `json:"last_batch_outcome,omitempty"`
-	LastBatchError          string                         `json:"last_batch_error,omitempty"`
-	Error                   string                         `json:"error,omitempty"`
-	ResultAcked             bool                           `json:"result_acked,omitempty"`
-	Handoff                 *ContinuationContext           `json:"handoff,omitempty"`
-	UpdatedAt               int64                          `json:"updated_at"`
+	Version                 int                             `json:"version"`
+	InvocationID            string                          `json:"invocation_id"`
+	Address                 ContinuationContext             `json:"address"`
+	InitialGoal             *AgentEvent                     `json:"initial_goal,omitempty"`
+	InitialPending          bool                            `json:"initial_pending"`
+	ExecutionStarted        bool                            `json:"execution_started,omitempty"`
+	RejectedBeforeExecution bool                            `json:"rejected_before_execution,omitempty"`
+	Projection              []memory.EventReference         `json:"projection,omitempty"`
+	FullBoundary            int64                           `json:"full_boundary,omitempty"`
+	Routing                 settleRoutingSnapshot           `json:"routing"`
+	ConsumedKeys            []int64                         `json:"consumed_keys,omitempty"`
+	RetainedKeys            []int64                         `json:"retained_keys,omitempty"`
+	InputDisposition        []continuationInputDisposition  `json:"input_disposition,omitempty"`
+	State                   string                          `json:"state"`
+	Outcome                 string                          `json:"outcome,omitempty"`
+	LastOutput              string                          `json:"last_output,omitempty"`
+	LastBatchOutcome        string                          `json:"last_batch_outcome,omitempty"`
+	LastBatchError          string                          `json:"last_batch_error,omitempty"`
+	LastBatchThroughKey     int64                           `json:"last_batch_through_key,omitempty"`
+	Error                   string                          `json:"error,omitempty"`
+	ResultAcked             bool                            `json:"result_acked,omitempty"`
+	Handoff                 *ContinuationContext            `json:"handoff,omitempty"`
+	InheritedProducers      []continuationProducerReference `json:"inherited_producers,omitempty"`
+	UpdatedAt               int64                           `json:"updated_at"`
 }
 
 type continuation struct {
@@ -98,16 +108,44 @@ type continuation struct {
 	recoveryGoalClosed bool
 	acceptedInputs     []*AgentEvent
 	replayInputs       []*AgentEvent
+	driver             atomic.Pointer[continuationDriver]
+	evicted            bool
+}
+
+type continuationDriver struct {
+	cancel context.CancelFunc
+	done   <-chan struct{}
 }
 
 type continuationRegistry struct {
-	mu      sync.Mutex
-	byID    map[string]*continuation
-	closing bool
+	mu         sync.Mutex
+	byID       map[string]*continuation
+	closing    atomic.Bool
+	assembling sync.WaitGroup
 }
 
 func newContinuationRegistry() *continuationRegistry {
 	return &continuationRegistry{byID: make(map[string]*continuation)}
+}
+
+func (r *continuationRegistry) beginAssembly() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closing.Load() {
+		return false
+	}
+	r.assembling.Add(1)
+	return true
+}
+
+func (r *continuationRegistry) snapshot() []*continuation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries := make([]*continuation, 0, len(r.byID))
+	for _, c := range r.byID {
+		entries = append(entries, c)
+	}
+	return entries
 }
 
 func (ta *TagentAgent) continuationRegistry() *continuationRegistry {
@@ -206,6 +244,9 @@ func (ta *TagentAgent) openContinuationBus(c *continuation) error {
 
 func (ta *TagentAgent) beginContinuation(ctx context.Context, inv *agent.Invocation, goal *AgentEvent, cfg TagentConfig, refs *ModelRefSnapshot, sourceLease *ExecLease, userID, sessionID string) (<-chan *event.Event, error) {
 	defer sourceLease.Release()
+	if ta.CloseStarted() {
+		return nil, ErrExecClosed
+	}
 	address, err := continuationContextFromInvocation(inv)
 	if err != nil {
 		return nil, err
@@ -219,11 +260,15 @@ func (ta *TagentAgent) beginContinuation(ctx context.Context, inv *agent.Invocat
 		goal.Metadata[metaKeyInvocationID] = id
 	}
 	r := ta.continuationRegistry()
+	if !r.beginAssembly() {
+		return nil, ErrExecClosed
+	}
+	defer r.assembling.Done()
 	if _, err := ta.continuationByID(id); err != nil {
 		return nil, err
 	}
 	r.mu.Lock()
-	if r.closing {
+	if r.closing.Load() {
 		r.mu.Unlock()
 		return nil, ErrExecClosed
 	}
@@ -281,7 +326,21 @@ func (ta *TagentAgent) beginContinuation(ctx context.Context, inv *agent.Invocat
 }
 
 func (ta *TagentAgent) startContinuation(ctx context.Context, c *continuation, sourceLease *ExecLease, userID, sessionID string) (<-chan *event.Event, error) {
+	r := ta.continuationRegistry()
+	if !r.beginAssembly() {
+		return nil, ErrExecClosed
+	}
+	defer r.assembling.Done()
 	c.mu.Lock()
+	if c.evicted {
+		id := c.state.InvocationID
+		c.mu.Unlock()
+		fresh, err := ta.continuationByID(id)
+		if err != nil || fresh == nil {
+			return nil, errors.Join(errors.New("evicted continuation checkpoint is unavailable"), err)
+		}
+		return ta.startContinuation(ctx, fresh, sourceLease, userID, sessionID)
+	}
 	defer c.mu.Unlock()
 	out := make(chan *event.Event, 256)
 	if c.running {
@@ -399,16 +458,24 @@ func (ta *TagentAgent) startContinuation(ctx context.Context, c *continuation, s
 	ta.settleSinks.reconcileAccepted(c.state.InvocationID, c.acceptedInputs)
 	c.acceptedInputs = nil
 	c.listeners[out] = struct{}{}
+	wasStarted := c.state.ExecutionStarted
 	c.state.ExecutionStarted = true
 	if err := ta.persistContinuationLocked(c); err != nil {
-		c.state.ExecutionStarted = false
+		c.state.ExecutionStarted = wasStarted
 		delete(c.listeners, out)
 		cm.Close()
 		return nil, err
 	}
+	if r.closing.Load() {
+		c.state.ExecutionStarted = wasStarted
+		delete(c.listeners, out)
+		cm.Close()
+		return nil, ErrExecClosed
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	c.cancel, c.running, c.cm = cancel, true, cm
 	c.done = make(chan struct{})
+	c.driver.Store(&continuationDriver{cancel: cancel, done: c.done})
 	c.state.State = "running"
 	ta.registerLiveCM(cm)
 	go ta.driveContinuation(runCtx, c, cm, delivery)
@@ -453,16 +520,24 @@ func (ta *TagentAgent) driveContinuation(ctx context.Context, c *continuation, c
 		if disposition != turnContinue || ctx.Err() != nil {
 			break
 		}
-		if err := ta.handoffContinuationServices(ctx, c); errors.Is(err, errContinuationEventsPending) {
+		var finalErr error
+		if cm.lastBatchOutcome.status == turnFailed {
+			finalErr = ta.commitFailedContinuation(ctx, c, cm.lastBatchOutcome.err)
+		} else {
+			finalErr = ta.handoffContinuationServices(ctx, c)
+		}
+		if errors.Is(finalErr, errContinuationEventsPending) {
 			continue
-		} else if err != nil {
-			log.Errorf("[continuation] %s handoff failed: %v", c.state.InvocationID, err)
+		} else if finalErr != nil {
+			log.Errorf("[continuation] %s finalization failed: %v", c.state.InvocationID, finalErr)
 			disposition = turnStop
 		}
 		break
 	}
 	c.mu.Lock()
-	if disposition == turnContinue && ctx.Err() == nil {
+	if c.state.Outcome != "" {
+		c.state.State = c.state.Outcome
+	} else if disposition == turnContinue && ctx.Err() == nil {
 		c.state.State, c.state.Outcome = "completed", "completed"
 		if cm.lastBatchOutcome.status == turnFailed {
 			c.state.State, c.state.Outcome, c.state.Error = "failed", "failed", cm.lastBatchOutcome.err
@@ -499,9 +574,14 @@ func (ta *TagentAgent) driveContinuation(ctx context.Context, c *continuation, c
 	}
 	c.running, c.cm, c.cancel = false, nil, nil
 	close(c.done)
+	c.driver.Store(nil)
 	c.mu.Unlock()
 	if completed {
-		ta.settleSinks.retire(c.state.InvocationID)
+		if c.state.Outcome == "failed" || c.state.Outcome == "cancelled" {
+			ta.settleSinks.retireStateOnly(c.state.InvocationID)
+		} else {
+			ta.settleSinks.retire(c.state.InvocationID)
+		}
 		ta.trimAcknowledgedContinuations()
 	}
 }
@@ -601,10 +681,7 @@ func (ta *TagentAgent) checkpointContinuation(ctx context.Context, cm *ContextMa
 		c.state.FullBoundary = cm.contextCompressor.FullBoundary()
 	}
 	c.state.Routing = ta.settleSinks.snapshotRouting(cm.continuationID)
-	if len(decisionInputs(events)) > 0 {
-		c.state.LastBatchOutcome = cm.lastBatchOutcome.status.String()
-		c.state.LastBatchError = cm.lastBatchOutcome.err
-	}
+	decisions := decisionInputs(events)
 	seenKeys := make(map[int64]bool, len(c.state.ConsumedKeys))
 	seenIDs := make(map[string]bool, len(c.state.InputDisposition))
 	for _, key := range c.state.ConsumedKeys {
@@ -651,7 +728,24 @@ func (ta *TagentAgent) checkpointContinuation(ctx context.Context, cm *ContextMa
 			c.state.InitialPending = false
 		}
 	}
-	return ta.persistContinuationLocked(c)
+	batchProven := len(decisions) > 0
+	for _, evt := range decisions {
+		if evt == nil || !seenIDs[evt.ID] {
+			batchProven = false
+		}
+	}
+	if batchProven {
+		c.state.LastBatchOutcome = cm.lastBatchOutcome.status.String()
+		c.state.LastBatchError = cm.lastBatchOutcome.err
+		c.state.LastBatchThroughKey = memory.NewSnowflakeEventKey(ta.partitionID(), 0)
+	}
+	if err := ta.persistContinuationLocked(c); err != nil {
+		return err
+	}
+	if batchProven {
+		ta.releaseConsumedInlineSignalsLocked(c)
+	}
+	return nil
 }
 
 func (ta *TagentAgent) markContinuationRecoveryInputs(cm *ContextManager, events []*AgentEvent) {
@@ -709,22 +803,19 @@ func (ta *TagentAgent) ResumeContinuation(ctx context.Context, parentTaskID stri
 		return nil, false, nil
 	}
 	r := ta.continuationRegistry()
-	r.mu.Lock()
 	var found *continuation
-	for _, c := range r.byID {
+	for _, c := range r.snapshot() {
 		c.mu.Lock()
 		matches := c.state.Address.ParentTaskID == parentTaskID && c.state.Address.ParentTaskRound == originalRound
 		c.mu.Unlock()
 		if matches {
 			if found != nil {
-				r.mu.Unlock()
 				return nil, true, fmt.Errorf("continuation result address %s/%d is ambiguous", parentTaskID, originalRound)
 			}
 			found = c
 		}
 	}
-	closing := r.closing
-	r.mu.Unlock()
+	closing := r.closing.Load()
 	if found == nil {
 		entries, _, err := ta.readContinuationCheckpoints()
 		if err != nil {
@@ -760,29 +851,45 @@ func (ta *TagentAgent) ResumeContinuation(ctx context.Context, parentTaskID stri
 func (ta *TagentAgent) trimAcknowledgedContinuations() {
 	r := ta.continuationRegistry()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if len(r.byID) <= 256 {
+		r.mu.Unlock()
 		return
 	}
 	type candidate struct {
 		id string
 		at int64
+		c  *continuation
 	}
-	var candidates []candidate
+	entries := make(map[string]*continuation, len(r.byID))
 	for id, c := range r.byID {
+		entries[id] = c
+	}
+	r.mu.Unlock()
+	var candidates []candidate
+	for id, c := range entries {
 		c.mu.Lock()
 		if c.state.Outcome == "completed" && c.state.ResultAcked && !c.running {
-			candidates = append(candidates, candidate{id: id, at: c.state.UpdatedAt})
+			candidates = append(candidates, candidate{id: id, at: c.state.UpdatedAt, c: c})
 		}
 		c.mu.Unlock()
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].at < candidates[j].at })
 	for _, item := range candidates {
+		r.mu.Lock()
 		if len(r.byID) <= 256 {
+			r.mu.Unlock()
 			break
 		}
 		c := r.byID[item.id]
+		r.mu.Unlock()
+		if c != item.c {
+			continue
+		}
 		c.mu.Lock()
+		if c.running || !c.state.ResultAcked || c.state.Outcome != "completed" {
+			c.mu.Unlock()
+			continue
+		}
 		if c.bus != nil {
 			if err := c.bus.CloseDurable(); err != nil {
 				c.mu.Unlock()
@@ -790,8 +897,13 @@ func (ta *TagentAgent) trimAcknowledgedContinuations() {
 			}
 			c.bus = nil
 		}
+		r.mu.Lock()
+		if r.byID[item.id] == c {
+			c.evicted = true
+			delete(r.byID, item.id)
+		}
+		r.mu.Unlock()
 		c.mu.Unlock()
-		delete(r.byID, item.id)
 	}
 }
 
@@ -827,19 +939,34 @@ func (ta *TagentAgent) stopContinuations(ctx context.Context) error {
 	}
 	r := ta.continuationRegistry()
 	r.mu.Lock()
-	r.closing = true
-	var done []<-chan struct{}
+	r.closing.Store(true)
+	entries := make([]*continuation, 0, len(r.byID))
 	for _, c := range r.byID {
-		c.mu.Lock()
-		if c.cancel != nil {
-			c.cancel()
-		}
-		if c.running {
-			done = append(done, c.done)
-		}
-		c.mu.Unlock()
+		entries = append(entries, c)
 	}
 	r.mu.Unlock()
+	for _, c := range entries {
+		if driver := c.driver.Load(); driver != nil {
+			driver.cancel()
+		}
+	}
+	assembled := make(chan struct{})
+	go func() {
+		r.assembling.Wait()
+		close(assembled)
+	}()
+	select {
+	case <-assembled:
+	case <-ctx.Done():
+		return fmt.Errorf("continuation assembly: %w", ErrExecUnconverged)
+	}
+	var done []<-chan struct{}
+	for _, c := range r.snapshot() {
+		if driver := c.driver.Load(); driver != nil {
+			driver.cancel()
+			done = append(done, driver.done)
+		}
+	}
 	for _, ch := range done {
 		select {
 		case <-ch:

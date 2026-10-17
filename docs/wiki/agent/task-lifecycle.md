@@ -1,96 +1,115 @@
-# 任务层：结算窗口、脱离抑制、统一回收与重建
+# 任务层：受理、等待、可靠结算与恢复
 
-本页承载 `agent/task` 的判据。任务层管的对象是**任务本身**（派生、状态、回收、通知），不是它跑在哪个执行面上。这里的失效模式都不是异常：丢一次结算、复活一个已终结任务、让一个静默任务永久占用面板，或者在重启后把在途任务误判成僵尸。
+本页承载 `agent/task`、任务 outbox 与本地逻辑调用的连续性契约。一个任务可返回 ACK 后继续运行；一次等待可先满足而 producer 继续存活；一次模型回复也可先结束而逻辑目标仍在等子任务。这三个边界分别记账。
 
 <a id="status-machine"></a>
-## 一、状态迁移与两条铁律
+## 一、状态、等待与身份
 
-结算信号有五类（`completed`／`stable`／`suspect`／`watch`／`failed`），任务状态有八种。迁移里的硬约束：
+任务状态仍为 `running`、`stable`、`alive_detached`、`suspect`、`completed`、`failed`、`dead`、`cancelled`。信号包括完成、失败、明确 ready/input，以及 stable/suspect/watch/probe 观察。
 
-| 约束 | 含义 |
-|---|---|
-| 已脱离前台的任务**不回退**到 `stable`／`suspect` | 脱离是单向语义进度，回退会让面板反复摆动 |
-| **迟到的信号不得复活**已终结任务 | 终结是一次性的；否则一个慢探测就能把已退役任务重新摆回在途 |
-| `watch` 只作观察通知，**不改状态** | 观测与裁决分离，避免"看一眼就改判" |
-| 带错误的完成在终结处**规范化为失败** | 失败口径只有一处，不在各分支各写一份 |
+| 轴 | 含义 | 不能代替的证据 |
+|---|---|---|
+| `Mode` | oneshot、resident、interactive 等执行形态 | 不能证明进程退出 |
+| `WaitFor` | 本次前台等待 `exit`、`ready`、`input`、`signal` | 等待满足不表示 producer 已停止 |
+| intent round / owner | 被受理的尝试及其接收调用 | 不能覆盖实际 producer 的轮次 |
+| producer round / owner / seq | 实际资源的归属和观察顺序 | 不能用最新任务状态推断旧信号身份 |
+| `InputBatchID` | 发起本轮的 opaque 输入批次 | 不能从出生时 Origin 推断 Resume 的输入归属 |
+| `Origin` | 派生时来源与谱系 | 不随 Resume 或回收改写 |
+| `Stopped()` | 实际 producer 及其清理已确认停止 | Cancel、终态、流关闭或 Close 超时都不能替代 |
 
-## 二、结算窗口：窗口内联返回，窗口外后台确认
+信号产生时冻结 `RoundID`、`ProducerRound`、`RoundOwner`、`Seq`、`ObservedAt`、`WaitFor`、`InputBatchID`、producer 绑定声明和正文；`SourceID` 由 task id、round、seq 构成，重试不重新取时间或序号。`SpecSnapshot` 深拷贝声明内的 map、slice 和 overrides；`RoutingSnapshot` 在一把任务锁下读取意图、producer、状态与 pending，避免拼接出不同轮次的身份。旧信号使用自己的 child invocation 和输入批次，不能在回调时反查已经 Resume 的最新绑定。
 
-一次派生在窗口内结算 ⇒ 结果**内联**返回给发起方；超出窗口 ⇒ 先返回确认，任务继续后台跑，结算走后台通知。窗口的**边界本身不得丢结算**：恰在边界完成的场合，要么内联给出，要么后台通知必达，不存在两边都不落。
+`completed`/`failed` 自动结束等待；`Final` 也结束观察器等待，但不把 suspect 伪装成业务成功。普通 stable/watch/probe 观察不满足无关等待。命令默认等 exit，resident 默认等 ready，interactive 默认等 input；旧版无 Mode/WaitFor 的直接 service 用法保留 stable 兼容，生产命令声明明确条件。
 
-内联稳定或 watch 只是一次观察，探测器仍可在随后完成；首条信号交给调用方之后，观察者等待窗口交接完成，再消费后续信号，避免稳定与完成挤进单格缓冲时丢掉完成。spawn 与 resume 的内联终局都记录事实并确认已交付，正常后台终局也在回调返回后确认，防止看板兜底重复通知。
+## 二、受理与 dense 窗口
 
-恢复路径（重入）另有一组约束：已终结态拒绝重入；并发重入只有单一赢家；重入必须**退役旧观察**再挂新的，否则会留下两个观察者在竞争同一条信号。
+生产启动顺序是：去重及门控 → `OnSpawnAccepted` 提交意图 → `TaskSpec.Start` 准备资源 → `OnStartAccepted` 提交绑定 → `ActivatableDetector.Start` 激活业务。意图未受理时不 prepare，绑定未受理时不执行命令或子 agent。准备失败或拒绑只清理本次新资源；同一 resource 的旧 producer 不因 wrapper 更换而被杀。
+
+`Spawn`/`Resume` 等待声明条件或 detector 的 detach，独立 `sync_wait` 不再存在。条件先到则内联返回真实结果；dense→sparse 先到则返回含 task id 的 ACK，后续交付由任务层承担。ACK 不声称完成，也不引导 sleep 或轮询。
+
+窗口内外只能有一个接收路径。旧调用晚交接时只能关闭自己捕获的窗口，不能关闭新 Resume 的窗口。内联首观察与紧随的完成分别保留，不能挤掉终局。
 
 <a id="detach-suppression"></a>
-## 三、脱离后的信号抑制
+## 三、观察、条件满足与 producer 存活
 
-服务任务首次 ready 进入 `alive_detached` 后，重复的非终局稳定/可疑观察被抑制；**完成与失败永远外发**。job 型命令的稳定/可疑观察照常进入事件管线，供模型判断后续工作，状态仍为 stable/suspect，不能冒充服务 ready 或完成。
+native pane 存活时，输出稳定只是观察。oneshot 的稳定输出不等于 completed；非零退出及信号死亡按原生退出码表达失败。resident ready 需要明确 pattern 或成功 probe，interactive input 需要本轮增量输出的 input pattern。watch 命中、probe 失败/恢复边沿有各自观察类型，不因探针失败直接宣称进程死亡。
 
-调用的交付屏障按**轮次结束**扣减，stable/watch 等观察不结束调用。`SettleSignal.Final` 表示探测器的末条非终态信号（如 TUI 超时）；completed/failed 自动视为轮次结束。通知通过控制键 `settle_final` 携带此语义，内联非终局观察保留后续交付预期；取消也发布一条终局通知，让等待中的调用退出。
+服务 ready 满足等待后仍可保持 `alive_detached`；显式resident的重复非终局稳定/可疑观察可被抑制，终态和 Final 仍进入结算。未声明Mode/WaitFor的直接旧调用只抑制同producer round、同kind、同payload的重复观察；新稳定载荷继续入管线，避免新prompt或结果被当成安静噪声。job 的非终局稳定观察不转服务 ready，也不解除 exit 等待。
+
+调用屏障按 task、producer round、owner 和冻结 WaitFor 配对；等待满足与 producer stream 结束分别记录。A 已 ready 后的终局不能扣掉仍在等结果的 B。旧轮或重复 seq 不能释放新轮；被 receiver 拒绝的信号不能清掉其 booking。去重以已确认 seq 区间收敛，不积累无界 SourceID 集合。
+
+<a id="recoverable-invocations"></a>
+## 四、可靠结果、受理回执与 ACK
+
+任务 journal 把同一事实链上的阶段和结果分开保存：
+
+| 事实 | 职责 |
+|---|---|
+| `task_spawned` 阶段记录 | 原意图、资源绑定、声明与寿命锚点 |
+| `task_signal` | 完整冻结结果、错误、父子地址、输出正文或已保存的文件票据 |
+| `task_signal_receipt` | 该结果已被指定接收管线受理 |
+| `input_disposition` | 精确源 EventKey 和 partition 的消费处置 |
+| `task_round` | 显式子 agent 委派的 begin/finish 历史 |
+| `continuation_state` | 逻辑调用的私有投影、等待、输入处置和结果缓存 |
+
+accepted 回调返回 true 后，任务层才删除 pending、确认通知并 `AcknowledgeSignal` 原 detector。ACK 确认管线受理，不冒充模型已处理；后者由输入处置与 continuation checkpoint 证明。没有接收者是拒收。批量退役和终局补发同样要确认每条 raw 信号，并 ACK 原 producer；只成功发出汇总总线事件不够。
+
+拒收信号由独立 worker 以 400ms→4s 退避自动重试，不依赖用户输入、看板或冥想。重试沿用原 SourceID、seq、时间、WaitFor、正文和目标。大结果保存失败会拒收，不能用不存在的正文路径确认成功。终局输出、pane/pipe 和结果缓存保留到相应 ACK，pending 不因 terminalTTL 被提前剔除。
+
+取消也进入 raw 结果路径：包括已有 completed/failed 任务转 cancelled 的新转换。取消信号带终局语义和退役谱系；生产不靠旧 void OnCancel 的最佳努力记录证明保存成功。
 
 <a id="ttl-reclaim"></a>
-## 四、统一回收：与"静默"无关、与"是否脱离"无关
+## 五、统一 TTL 与有界关闭
 
-回收判定只看一个来源——统一 TTL 回收器的绝对锚点。四条由此而来的性质：
+任务的绝对寿命为显式 TTL，否则读取同一默认 source；非正值不是无限哨兵。全部 active 状态和寿命类都受相同 TTL 约束，resident/interactive 无年龄豁免。quiet timeout 只决定观察，不能代替绝对寿命。
 
-- **与静默态无关**：探测/静默只影响状态标注，不影响是否到期；
-- **从未脱离的任务也逃不过年龄墙**：可疑态不会因为"还没脱离"就绕过 TTL；
-- **重入可续期，但不覆盖显式声明**：默认 TTL 到达活消费者时补齐，显式设置的值优先；
-- **重启后重建的任务照样被回收**：重建不携带 TTL 绑定时，回收器仍须能收掉它，否则每次重启都攒一批永生任务。
+生产装配启用一个最近期限 timer：存在任务时调度最近 active 到期点或可回收终态期限；空表停用。没有输入、看板或冥想，到期仍请求 owner Cancel，并一次退役为 failed。没有逐任务 sleep，也没有固定扫空 ticker。`RecheckDeadlines` 只重读现有 TTL source 和锚点排期，不另存 TTL 真值；独立管理器保留显式 List/reconcile 的兼容入口。
 
-僵尸/孤儿的判据是**探活**，不是年龄：没有探活器接线时相关路径必须**什么都不改**（宁可不动，也不凭猜测退役），且探针返回 nil 时跳过而不是误杀。
-- **默认寿命只有一个权威源**：省略寿命的派生，其默认绝对寿命在**派生那一刻**从属主已提交的记录解析；执行工具不得自己再持有一份可写默认值。否则一个旋钮两处真值——热更新到了任务管理器却没到新派生，且重载协程上的裸写会与业务回合的读并发。属主换源时的轮换应是对被捕获变量的一次普通赋值，与装配根换记录的方式一致。
+成功 send/resume 更新寿命锚点，peek 不续命。Resume 候选锚点在绑定提交时就保存，避免绑定后首信号前崩溃丢掉续期；准备、绑定或实际发送失败则记录失败意图并恢复旧 producer/owner/TTL。detachedAt 只作观察，不是第二条到期墙。
+
+`Close(ctx)` 有界停止准入、观察和重试，向所有已纳管 producer 请求取消。`CloseDone` 等操作、watch、callback、worker 和实际 Stopped 全部退出。kill 失败不能关闭 Stopped；Cancel 已先发生的 lazy producer 不能再次 Start。第一次 Close 超时后，同一关闭尾部继续承担最终退出，不能借超时提前释放仍被使用的资源。
 
 <a id="board-rendering"></a>
-## 五、在途面板：只呈现事实与剩余寿命，不做仲裁
+## 六、面板是只读快照
 
-面板渲染的是在途任务与**剩余寿命**，用来让模型在同一回合里判断"继续等还是再派"；它**不替模型做仲裁**（不自动取消、不自动续期）。展示规模有上限，超出即截断——面板是给模型的提示，不是完整账本，完整账本在事实链里。
-
-面板每回合在 `BeforeModel` 时刻重新生成、从不持久化，因此**不参与上下文压缩**：它是当前异步状态的鲜活近期锚，而不是事实链的一部分。没有活跃任务时渲染空串，调用方届时什么都不注入。行内渲染的是各任务对统一回收器的有效剩余寿命，未显式声明 TTL 的任务取管理器地板值（`TaskManager.DefaultTTL`）。
-
-终态任务（completed/failed/cancelled/dead）被老化剔除：它们已经通过 `task_settled` 事件出现过一次，留在面板上只会成为陈旧噪声。
+面板每次 BeforeModel 在消息末尾重新生成，展示 active 事实和同一回收器计算的剩余寿命，不落库、不参与压缩、不替模型续命或裁决。展示上限不等于完整账本；终态不继续渲染，完整结果和历史由事实链、正文票据及恢复记录承接。
 
 <a id="spawn-dedup-origin"></a>
-## 六、派生入口：幂等去重、门控与来源袋
+## 七、去重与来源
 
-- **幂等**：重复派生返回既有任务，而不是造一个副本；索引键为空即关闭去重；
-- **派生门**可否决一次派生，并给出可读原因；
-- "本次不收养任务"的两条路径（派生被否决、去重命中）有同一要求：调用方必须等到**生产者真正停止**才算完——`Cancel` 只是一个信号，不是凭证；
-- **来源袋**（发起回合的调用元数据）由包装器在派生时盖章：仅在声明方未自带时填写，且**逐键复制**——共享同一张 map 会让调用方后续改写串到任务上。任务层因此不需要理解路由语义。
+active Key 去重先于 lazy prepare；空 Key 关闭去重。被拒绝或 dedup 的预先运行 detector 仍须由调用方取消并等待真实 Stopped，不能只丢掉执行引用。新 lazy 路径在准入前不启动业务。
+
+OriginSpawner 仅在 spec 未自带时逐键复制 Origin；RoundOwner 另行记录本次调用归属。资源绑定 factory 可补执行能力，不能覆盖持久身份和不可变来源。回收谱系只盖在信号上。
 
 <a id="finalize-lineage"></a>
-## 七、终结与谱系：回收路径必须发失败，退役要降级谱系
+## 八、终结与批量退役
 
-所有回收路径（僵尸、孤儿、批量退役）都通过同一次终结动作外发**失败**结论，不允许各路径自造通知口径。批量退役把一轮回收**折叠成一次**通知（嵌套回收不得重复投递）。
+失败的内存状态、信号、WAL 状态和反馈极性保持一致，未知 Kind 不默认当成功。TTL、僵尸和孤儿回收沿同一退役通路，信号带 `task-retired`，不改 Spec.Origin。有调用归属的退役逐条回原调用；无归属条目可汇总通知，但每条 raw receipt 的受理、拒收与 ACK 责任不被汇总吞掉。
 
-**终局通知有看板兜底**：正常分发（逐条 onSettle 或批量交付）在回调返回后即确认；未被确认的终局——分发回调在途中断（典型：换装进程替换恰好落在结算回写的 in-flight 窗），或重启后恢复的终局任务——由看板周期补发一次：补发走逐条结算事件，id 稳定于"任务+终局时刻"，跨周期与跨重启经持久信箱去重收敛为一次送达（2026-10-11 宿主侧"完成但结算丢失"事件的根因收口：换装硬替换与结算回写的竞态窗）。谱系处理有一条明确禁令：**回收/退役外发的结算信号不得继承任务原有的触发谱系**——否则下游会把一次回收当成一次由用户发起的正常答复。
+正常后台与内联结果均有记录和受理证据。补发仅处理未确认终态，使用原 producer round、终局 seq 和观察时间；拒收后进入原 raw pending，不能每次补发制造新身份。
 
 <a id="restore-rebuild"></a>
-## 八、从事实重建：不重启观察、幂等不覆盖
+## 九、恢复先登记，receiver 就绪后再运行
 
-重建沿用任务的 id、声明、派生时刻与状态；脱离态同时恢复其"已脱离"标记，使其继续享受抑制语义。三条要点：**窗口标记为已关闭**（不重启观察，因而不会因"重启后没人在看"被误判为静默或僵尸，而终态判定与 TTL 回收照常生效）；**幂等且不覆盖**（同 id 已在表内直接返回既有任务，索引键也只在无人占用时登记）；重建入口对空 id 与 nil 管理器安全。终态记录必须能在消费者重启后存活，否则外部读到的"已完成"会凭空消失。
+恢复按 task id 幂等登记，不覆盖已有运行态，窗口初始关闭。身份、原 producer、seq、真实 settledAt、detachedAt 和 TTL 锚点以事实为准；新格式 ProducerRound=0 表示从未有实际 producer，不能从 intent round 造出一个。旧格式无 round 身份时才应用兼容推断。
 
-- 退役与清理路径**不得假设探测器存在**：跨重启的探测器按设计不可恢复，"没有探测器"是常态而不是异常；据以判定的画像（存活声明来自承诺表、派生时刻是历史值）更不能就地解引用。
+生产恢复先装配任务、pending 原信号、child 私有投影和输入处置，再附着原资源及所有 receiver。期间 deadline、liveness、prune 和新观察交付均受恢复屏障保护。恢复绑定只登记 driver；ActivatableDetector 不立即 Start，即使是尚未资源化意图的 prepare 也须等待全图绑定完成。最后显式 `ResumePendingDeliveries` 解除恢复 hold、激活本管理器全部资源，再放行重试与 TTL；Cancel 先赢得激活门时不再 Start。`RestorePendingDeliveryWithMode` 保留原 inline/background 记录目的地，不能把内联结果恢复成新的模型输入。
 
-**重建的任务同样要接上信号消费链**：从事实链重建出来的 detached/stale 任务，其判死与 stale/deadline 治理都依赖探活器在位；只恢复记录而不重接探活器，这些任务重启后就再也收不到信号，只能等寿命兜底。这与「不得假设探测器存在」不矛盾——没有探活器时相关路径什么都不改是安全前提，有探活器却不重接是漏配。
+若正式输入处置已证明消费，可补交原受理证明与 child ACK，再用 `ResolveRestoredDelivery` 清理唯一对应的冻结 pending 并 ACK 原 detector；它不改轮次、状态或序号，也不清理其他待交付结果。
+
+`BindDetector` 绑定原 producer round，不从 round 1 重采样；终态只允许 ACK-capable detector 清理原证据，不重开业务。已受理且没有任何资源的意图，可由 `ResumeRestoredStart` 沿原 intent prepare→绑定→激活；已有资源者不走重执行入口。恢复工厂返回带 resource identity 的 spec 时，也要受理绑定后才启用观察。
+
+进程重启只能重接仍存活的 tmux/native 资源，不恢复消失的进程。整机重启后缺执行现场应明确失败或需对账，事实链不会因此失去结果身份。没有 detector 的回收仍须 nil 安全；不能把显示 tracked 当成已连通信号链。
 
 <a id="resume-states"></a>
-## 九、重入的合法来源态：同一个 id，重新走一遍标准回合
+## 十、显式 Resume 与逻辑调用
 
-`Resume` 把新输入喂进已有任务，并在**同一个 task id** 下重新进入 密集→ACK→结算 的标准生命周期。哪些来源态允许这样做，是由执行器的形态决定的，不是由"看起来忙不忙"决定的：
+Resume 保持 task id。`alive_detached/stable/completed/failed` 可认领新意图，`running/suspect` 拒绝并行在飞，`cancelled` 要 relaunch。认领单胜；被受理的失败尝试仍消耗轮号。例如 round 2 输入失败而实际 producer 仍是 round 1，下一次使用 round 3，旧 owner/seq/TTL 不变。`round_aborted` 是内部尝试事实，不是旧 producer 的终局。
 
-| 来源态 | 是否合法 | 理由 |
-|---|---|---|
-| `alive_detached` / `stable` | 合法 | 会话还活着，tmux 重入经 `SendKeys` 落进去（service/repl 重入） |
-| `completed` / `failed` | 合法 | 上一轮已结束；对**按轮**执行的执行器（subagent：新的 Run + 任务链 restorer），重入就是自然的续接。对已死会话的 tmux 重入在 `SendKeys` 处干净失败并给出可操作错误 |
-| `running` / `suspect` | 非法 | 有一轮在途，只能等待后重试 |
-| `cancelled` | 非法 | 会话已被杀死，应当 relaunch 或重新派生 |
+命令准备输入和精确字节基线，绑定提交后才 SendKeys；旧末行 prompt 不能满足新轮 input。subagent 显式 Resume 新建 Run，从持久 task_round 历史还原前序输入、输出、错误与正文票据，并按发起者绑定或当前有效面解析目标。
 
-并发上：认领在 `task.mu` 下**先**转为 running，然后才调用 `ResumeFn`，因此并行的重入（并行工具执行是开启的）单点胜出，落败方被告知任务正在运行。传入的 ctx 是**发起调用**的上下文并原样转给 `ResumeFn`，被重入的那一轮据此在它持有的代际上解析目标；那一处的拒绝会把认领原样回滚，不留状态改动。
+本地 child 的逻辑调用使用原 invocation、私有投影、等待与 stream 游标、输入处置和父 task 原 producer 地址。一次 RunFlow 回复后仍有子任务等待时，逻辑调用继续；本地等待不受覆盖整调用的固定600s截止，模型 active turn 预算与 Task TTL 仍各自有限。远端 A2A 保留有界 transport deadline。
 
-## 已知缺口与演进方向
+重启重建保存的 goal 和输入处置，不重复已消费初始 goal。工具结果未提交的中断明确要求 reconciliation，不假装恢复了程序计数器。结果已保存但父未 ACK 时只重发缓存结果；goal 完成后仍活的 ready 服务明确交接到父 scope 或持久 owner，之后终局仍有接收者。owner Close 挂起 scope，父 task 的可靠取消/TTL 退役才取消对应逻辑调用。
 
-- 面板上限是常量，缺"被截断了多少条"的可见信号，模型可能以为自己看到的是全集；
-- 探活未接线时"什么都不改"是安全的，但也意味着没有探活的部署里僵尸任务只能靠 TTL 兜底，缺一次实测说明这层兜底的代价；
-- 重入续期与显式 TTL 的优先级只在测试里钉住，缺一个面向宿主的说明页。
+历史根因、边界与验证进度见[异步任务连续性技术报告](../../async-task-continuity-report.md)。

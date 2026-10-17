@@ -524,9 +524,6 @@ func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 		for i := range f.raw {
 			raw := &f.raw[i]
 			raw.accepted = taskSignalReceiptMatches(raw.fact, raw.record, receipts[raw.record.ReceiptKey])
-			if raw.accepted && raw.record.ErrorKind == "continuation_interrupted" && raw.fact.EventKey == f.statusKey {
-				f.status, f.result, f.err, f.settledAt = task.TaskFailed, raw.record.Output, raw.record.signal().Err, raw.record.ObservedAt
-			}
 			if raw.accepted && raw.record.signal().EndsRound() && raw.record.Observation != "round_aborted" && raw.record.Lineage != task.LineageRetired && raw.record.RoundID == f.decl.ProducerRound {
 				latestAcceptedTerminal = raw
 			}
@@ -563,7 +560,7 @@ func rebuildTaskRegistry(store memory.MemoryStore, partitionID int, tm *task.Tas
 			if raw.record.Event != nil {
 				sig.SourceID = raw.record.Event.ID
 			}
-			if tm.RestorePendingDelivery(f.id, sig) {
+			if tm.RestorePendingDeliveryWithMode(f.id, sig, raw.record.Inline) {
 				pendingFacts = append(pendingFacts, raw.fact)
 			}
 		}
@@ -580,6 +577,12 @@ func foldTaskDeclaration(f *taskRegistryFold, decl task.Declarative, ev memory.F
 		decl.RoundID = 1
 	}
 	phase := ev.Metadata["admission_phase"]
+	if phase == "cancelled" {
+		if decl.RoundID >= f.decl.RoundID {
+			f.decl, f.status, f.statusKey, f.cancelled = decl, task.TaskCancelled, ev.EventKey, true
+		}
+		return
+	}
 	intent := strings.Contains(phase, "intent") || phase == "spawn" || phase == "accepted" || phase == "round_accepted" || phase == "round_aborted"
 	if decl.StartedAtMilli <= 0 {
 		decl.StartedAtMilli = ev.Timestamp
@@ -590,11 +593,13 @@ func foldTaskDeclaration(f *taskRegistryFold, decl task.Declarative, ev memory.F
 	if intent && f.bound {
 		decl.ProducerRound, decl.ProducerOwner, decl.SignalSeq = f.decl.ProducerRound, f.decl.ProducerOwner, f.decl.SignalSeq
 		decl.TTLAnchorMilli = f.decl.TTLAnchorMilli
-		if f.decl.Params[childInvocationIDParam] != "" {
-			if decl.Params == nil {
-				decl.Params = make(map[string]string)
+		for _, key := range []string{childInvocationIDParam, localContinuationParam} {
+			if value := f.decl.Params[key]; value != "" {
+				if decl.Params == nil {
+					decl.Params = make(map[string]string)
+				}
+				decl.Params[key] = value
 			}
-			decl.Params[childInvocationIDParam] = f.decl.Params[childInvocationIDParam]
 		}
 		f.decl = decl
 		return
@@ -649,6 +654,14 @@ func foldTaskSignal(f *taskRegistryFold, raw taskSignalRecord, key int64) {
 	if raw.RoundID < f.decl.ProducerRound || f.cancelled {
 		return
 	}
+	if raw.RoundID == f.decl.ProducerRound {
+		if owner := f.decl.ProducerOwner; owner != "" && raw.RoundOwner != "" && owner != raw.RoundOwner {
+			return
+		}
+		if invocation := f.decl.Params[childInvocationIDParam]; invocation != "" && raw.ChildInvocationID != "" && invocation != raw.ChildInvocationID {
+			return
+		}
+	}
 	if raw.RoundID > f.decl.ProducerRound {
 		f.decl.ProducerRound = raw.RoundID
 		f.decl.ProducerOwner = raw.RoundOwner
@@ -666,6 +679,7 @@ func foldTaskSignal(f *taskRegistryFold, raw taskSignalRecord, key int64) {
 			f.decl.Params = make(map[string]string)
 		}
 		f.decl.Params[childInvocationIDParam] = raw.ChildInvocationID
+		f.decl.Params[localContinuationParam] = strconv.FormatBool(raw.ChildContinuation)
 	}
 	if raw.ErrorKind == "continuation_interrupted" {
 		f.status = task.TaskSuspect
@@ -739,6 +753,9 @@ func taskSignalReceiptMatches(fact memory.FullEvent, raw taskSignalRecord, recei
 		return false
 	}
 	if receipt.PartitionID != fact.PartitionID || receipt.Timestamp != fact.Timestamp || receipt.Timestamp != raw.ObservedAt.UnixMilli() {
+		return false
+	}
+	if memory.PartitionIDFromEventKey(fact.EventKey) != fact.PartitionID || memory.PartitionIDFromEventKey(receipt.EventKey) != fact.PartitionID {
 		return false
 	}
 	if receipt.Metadata["task_id"] != raw.TaskID || receipt.Metadata[tagentevent.MetaKeyTaskRoundID] != strconv.FormatUint(raw.RoundID, 10) || receipt.Metadata[tagentevent.MetaKeyTaskSignalSeq] != strconv.FormatUint(raw.Seq, 10) {

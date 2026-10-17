@@ -462,7 +462,22 @@ func registrySignal(taskID string, round, seq uint64, at time.Time) taskSignalRe
 func signalMetadata(raw taskSignalRecord) map[string]string {
 	return map[string]string{"task_id": raw.TaskID, tagentevent.MetaKeyTaskRoundID: strconv.FormatUint(raw.RoundID, 10),
 		tagentevent.MetaKeyTaskSignalSeq: strconv.FormatUint(raw.Seq, 10), tagentevent.MetaKeySourceEventID: raw.Event.ID,
-		childInvocationIDParam: raw.ChildInvocationID}
+		tagentevent.MetaKeyTaskRoundOwner: raw.RoundOwner,
+		childInvocationIDParam:            raw.ChildInvocationID}
+}
+
+// TestTaskRegistryCommittedCancellationCannotRevive 钉住 取消阶段是持久终止凭据，同任务身份的晚到绑定保持终止。
+func TestTaskRegistryCommittedCancellationCannotRevive(t *testing.T) {
+	store := memory.NewInMemoryStore()
+	decl := task.Declarative{Kind: "subagent", AgentName: "child", RoundID: 3, ProducerRound: 2, ProducerOwner: "original-owner", Params: map[string]string{childInvocationIDParam: "original-child"}}
+	storeRegistryFact(t, store, 100, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "round_accepted"}, time.Now())
+	storeRegistryFact(t, store, 200, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "cancelled"}, time.Now())
+	decl.RoundID, decl.ProducerRound = 4, 4
+	storeRegistryFact(t, store, 300, tagentevent.TypeTaskSpawned, decl, map[string]string{"task_id": "task", "admission_phase": "started"}, time.Now())
+	tm := task.NewTaskManager(task.TaskManagerConfig{})
+	defer tm.Close(context.Background())
+	require.Zero(t, RebuildTaskRegistry(store, sinkPartition, tm, nil))
+	require.Empty(t, tm.TasksSnapshot())
 }
 
 // TestTaskRegistryOldTerminalCannotCoverNewProducer 钉住 写入顺序决定恢复，旧轮终局不覆盖更新的实际生产者。
@@ -584,7 +599,7 @@ func TestTaskRegistryHistoryFinishIsNotReceiverAcceptance(t *testing.T) {
 func storeRegistryReceipt(t *testing.T, store memory.MemoryStore, fact memory.FullEvent, raw taskSignalRecord) {
 	t.Helper()
 	require.NoError(t, store.StoreEvent(raw.ReceiptKey, memory.FullEvent{EventKey: raw.ReceiptKey, PartitionID: sinkPartition,
-		EventType: tagentevent.TypeTaskSignalReceipt, Content: tagentevent.FormatEventKey(fact.EventKey), Timestamp: raw.ObservedAt.UnixMilli(), Metadata: signalMetadata(raw)}))
+		EventType: tagentevent.TypeTaskSignalReceipt, Content: tagentevent.FormatEventKey(fact.EventKey), Timestamp: raw.ObservedAt.UnixMilli(), Metadata: fact.Metadata}))
 }
 
 // TestTaskRegistryAcceptedSubagentRetainsExplicitResumeWindow 钉住 已受理子任务终局保留近期恢复窗口，已受理命令终局不复活。

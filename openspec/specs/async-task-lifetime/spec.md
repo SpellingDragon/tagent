@@ -27,17 +27,15 @@
 
 ### Requirement: 写入型重入续期锚点，只读观察不续期
 
-模型对既有任务会话的**写入型重入**（向会话注入输入的 `send`、以及 `resume`）SHALL 把该任务的 TTL 锚点重置为本次重入时刻，到期按新锚点计算；只读观察（`peek`）MUST NOT 刷新锚点。一次性无会话命令没有重入通路，其锚点恒为派生时刻。续期 MUST NOT 覆盖显式声明：内建默认只补齐未带 `ttl` 的任务，显式值优先。
+成功写入型 send/resume SHALL 更新同一 producer 的 TTL 锚点；peek MUST NOT 续命。Resume 的候选锚点 SHALL 在绑定受理记录中持久化，避免绑定提交后、首信号前崩溃丢失续期。意图受理后准备、绑定或实际发送失败时，系统 MUST 保留失败尝试轮号并恢复旧 producer、owner 和寿命锚点，不把失败尝试当作成功续命。显式TTL仍优先于默认值。
 
-#### Scenario: 重入注入输入即续命
+#### Scenario: 绑定提交后立即崩溃
+- **WHEN** 新轮绑定已提交而尚无任何结果信号
+- **THEN** 恢复读取该绑定中的候选寿命锚点，不退回旧锚点
 
-- **WHEN** 模型对一个已脱离前台的会话执行写入型重入并成功注入输入
-- **THEN** 锚点重置为本次重入，剩余寿命顺延一个完整 TTL，看板相应更新
-
-#### Scenario: 只读观察不改变到期时刻
-
-- **WHEN** 模型仅以 `peek` 读取该会话的增量输出
-- **THEN** 锚点不变，到期仍按原时刻计算
+#### Scenario: 输入发送失败
+- **WHEN** Resume 已记录意图但实际SendKeys失败
+- **THEN** 记录 round_aborted，旧 producer 的身份和TTL不变，下一尝试不复用失败轮号
 
 ### Requirement: 看板只呈现事实与剩余寿命，不诱发重复裁决
 
@@ -62,43 +60,17 @@
 - **WHEN** 检查年龄相关的配置解析与任务状态机
 - **THEN** 仅 TTL 一条到期强杀路径，无并存的 stale／job deadline 读取，旧别名不被读取
 
-### Requirement: 回收由唤醒驱动，不为到期引入常驻计时器
-
-回收器 SHALL 由活动唤醒驱动（看板渲染、冥想周期、冷启动清点），MUST NOT 为 TTL 到期引入独立常驻的后台 ticker。常驻 bot 在无输入的完全静默期没有任何回收需求方，ticker 只会回收无人观察的任务并空耗唤醒。因此到期任务"从看板消失的时刻"等于下一次唤醒；完全静默期内物理回收可滞后于 TTL 名义到期，一旦有输入、看板渲染或冥想触发即收敛。此为既定语义，不是缺陷。
-
-#### Scenario: 完全静默期滞后回收
-
-- **WHEN** 一个任务越过 TTL 而进程此后完全静默（无输入、无渲染、无冥想触发）
-- **THEN** 其物理回收滞后到下一次唤醒；下一次看板渲染时它已不在 active 集合中
-
 ### Requirement: 结算通知以有界票据进入投影并可被折叠回收
 
-批量退役 SHALL 把一轮回收折叠为单条汇总通知，MUST NOT 为每个退役任务各发一条独立通知（嵌套回收不得重复投递）。批量折叠的适用域由产生侧定义：有 invocation 归属（被父调用循环 await）的退役条目 SHALL NOT 进入批量折叠，仍走逐条结算路由与记账释放（递减记账屏障、唤醒父循环）；汇总通知 SHALL 仅覆盖无 invocation 归属的条目。`[task settled]` 类结算通知 MUST 以有界票据形式进入投影：正文携带可召回的事件键票据与受限预览，其全量体在事实链按票据可取。投影压缩 SHALL 能像对待其它内容一样折叠这些结算票据，消除"折叠不覆盖 external_input 因而其正文结构性不可回收"的死重。本要求只界定新通知的产生形态与可折叠性，MUST NOT 改写通用压缩与回放算法本身。回收／退役外发的结算信号 MUST NOT 继承任务原有的触发谱系，且该谱系戳 MUST 挂在结算信号上传递，MUST NOT 原地改写任务的 Origin（消除并发写与恢复轮污染）。经 Resume 从退役终态恢复的任务，其恢复轮外发的结算信号 SHALL 按恢复语境取谱系，MUST NOT 继承退役戳记。
+结算正文 SHALL 有界且可按票据取回；消费过的观察 SHALL 仅在 input_disposition 的源EventKey和partition精确核验后折叠。未消费观察、decision输入、用户输入和仍被恢复需要的事实 MUST 保留。批量退役可对无调用归属条目汇总通知，但每条raw信号 SHALL 独立保留受理与ACK责任；有 invocation 归属的条目 MUST 走原调用逐条路由。退役谱系 SHALL 只盖在信号上，MUST NOT 改写 Spec.Origin。
 
-#### Scenario: 批量退役单条汇总
+#### Scenario: 有处置凭据的观察被折叠
+- **WHEN** 一个观察有与其源key及partition匹配的observe处置事实
+- **THEN** 投影可回收其正文，原始事实仍可按key取回
 
-- **WHEN** 一次唤醒同时回收多个无 invocation 归属的任务
-- **THEN** 仅产生一条合并汇总通知，而非逐任务多条
-
-#### Scenario: 积累的结算票据可被折叠
-
-- **WHEN** 历史中积累多条结算通知且上下文逼近预算
-- **THEN** 压缩将其折叠为票据引用并回收正文，仍可按票据回补全量
-
-#### Scenario: 被父循环 await 的退役条目不进折叠
-
-- **WHEN** 一个由父调用循环 await（有 invocation 归属）的任务被批量退役
-- **THEN** 该条目不进入批量折叠，仍按逐条结算路由递减记账屏障并唤醒父循环，父循环可正常静止退出，不依赖调用方硬超时
-
-#### Scenario: Resume 恢复轮结果按原谱系外投
-
-- **WHEN** 一个被退役（终态 failed）的任务经 Resume 恢复并再次结算
-- **THEN** 恢复轮结算信号携带恢复语境谱系（非 task-retired），宿主投递门按原谱系正常外投，用户可拿到恢复轮结果
-
-#### Scenario: 退役谱系不写任务 Origin
-
-- **WHEN** 任意路径退役一个任务
-- **THEN** 任务 Spec.Origin 不被改写，谱系戳仅存在于外发结算信号上
+#### Scenario: 伪造处置凭据
+- **WHEN** receipt 引用错误源key或不同partition
+- **THEN** 原观察不被视为已消费，也不得据此折叠
 
 ### Requirement: 静默探测与 TTL 正交
 
@@ -108,4 +80,16 @@
 
 - **WHEN** 一个构建任务长时间静默但被设了较大静默阈值，同时其 TTL 也较大
 - **THEN** 静默探测不提前判死，TTL 提供绝对上限，两条轴独立生效
+
+### Requirement: 单一最近期限调度主动执行 TTL
+
+生产 TaskManager SHALL 启用 deadline reaper，以一个可重排的最近期限 timer 处理 active TTL 及可回收终态，不使用逐任务 sleep 或固定扫空 ticker。无输入、无看板、无冥想时，到期任务仍 SHALL 由 owner 请求 Cancel 并一次退役为 failed。没有任务时 SHALL 停用 timer。RecheckDeadlines SHALL 从现有 TTL source 和真实锚点重新调度，MUST NOT 另存一份 TTL 真值。独立构建且未启用主动调度的管理器可保留显式 List/reconcile 行为。
+
+#### Scenario: 完全静默任务到期
+- **WHEN** 已纳管任务到期后没有任何外部唤醒
+- **THEN** 最近期限 timer 仍触发取消和失败退役
+
+#### Scenario: 默认 TTL 热更新
+- **WHEN** 当前 source 降低默认 TTL 并调用 RecheckDeadlines
+- **THEN** 既有无显式TTL任务按新值重新排期，显式TTL与任务锚点不被覆盖
 
