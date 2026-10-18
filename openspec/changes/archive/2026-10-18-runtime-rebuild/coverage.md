@@ -16,7 +16,7 @@
 
 ## 1. 集合校验（可复跑）
 
-- 本表行数 = **120**，与 `ls openspec/specs | wc -l` 相等；每行 `路径` 唯一、且 `openspec/specs/<cap>/spec.md` 存在（集合可核）。
+- 本表行数 = **121**，与 `ls openspec/specs | wc -l` 相等（含本批新建 `runtime-inspection`）；每行 `路径` 唯一、且 `openspec/specs/<cap>/spec.md` 存在（集合可核）。
 - 每个主规格目录恰好 1 个 `spec.md`（无遗漏目录）。
 - task 编号取自同目录并行产出的 `task-graph.json`（**65** 个 id：00×6 / 01×6 / 02×9 / 03×8 / 04×9 / 05×4 / 06×8 / 07×4 / 08×5 / 09×6），本表所引 id 全部落在图内。
 
@@ -49,6 +49,7 @@
 | 路径（cap） | 能力名 | 新域.task | 处理 | 下游 consumer（可选） | 理由（一句，绑新 goal 真实消费方） |
 |---|---|---|---|---|---|
 | `action-tool-config` | action 工具配置面 | 04.2 | M | — | tmux exec 工具构造期消费 monitor 超参；compress 子配置段已退役 |
+| `runtime-inspection` | 运行时只读观测面（本批新建能力，05-inspection 建立） | 05.1/05.2 | R | — | 只读总图/快照/游标/订阅；消费者=08.4 诊断面与验收 runner |
 | `adaptive-poll-scheduling` | 自适应轮询调度 | 02.2 | M | — | task 受理/detach/settle 消费 poll schedule，sync_wait 旋钮移除 |
 | `adaptive-segment-size` | 段级容量封段 | 03.2 | D | — | 段级封段未实现；消费方=存储分段/lifecycle，需设计核验，不猜 |
 | `agent-thinking-activation` | 思考激活行为 | 02.4 | R | 01.4 | 模型请求装配消费 thinking 触发字段，配了必须真产生推理 |

@@ -16,6 +16,8 @@
 
 输出协议统一:条目 `{key(hex), type, summary, content, time}`。触发 SHALL 保持显式工具调用（不做隐式自动换出）。`memory_recall`/`memory_turn` 工具名 SHALL 退役（能力由 `recall` 的对应参数形态承接，协议输出不变）。
 
+原文引用与引用元数据 SHALL 分离：blob 内容可去重，但 `owner`/`format`/保留策略不同的引用 MUST NOT 互覆盖。系统 MUST NOT 复活多套同义召回接口（多入口并存即分叉）。
+
 #### Scenario: 卡片票据工程化召回
 
 - **WHEN** 模型从卡片序列抠出 key 构造 items 调用 recall
@@ -47,6 +49,11 @@
 - **WHEN** 调用携带 `orchestrate: true`
 - **THEN** SHALL 优先于确定性形态被识别；编排引擎已接线时升级 RecallAgent，未接线时返回明确指引
 - **AND** 未携带时 SHALL NOT 进入 LLM 路径
+
+#### Scenario: 同 blob 不同 owner 不覆盖
+
+- **WHEN** 同一段原文 blob 被 owner/format 不同的两个引用登记
+- **THEN** 两个引用 SHALL 各自保留，MUST NOT 因 blob 内容相同而互相覆盖
 
 ### Requirement: RecallAgent 定位收窄
 
@@ -113,3 +120,29 @@ recall 的 items 路径（票据批量精确回补）SHALL 施加条数上限（
 
 - **WHEN** recall(items=[...]) 携带超过上限的票据列表
 - **THEN** 仅水合前 N 条（N=上限），返回携带截断说明（含被丢弃计数与建议），不静默
+
+### Requirement: 原文引用与分段读取保真
+
+原文读取 SHALL 与原文存储字节一致；`items` 精确召回 SHALL 原序回补、零 LLM，未命中 key SHALL 明确报告（不静默省略）。系统 SHALL 提供**分段读取**入口（按 `start_line`/`num_lines` 行级分页）以消费超大原文，MUST NOT 以「召回即全文回流上下文」为唯一路径；凭票据召回超大事件 SHALL 返回有界版 + 票据，全文经分段读取获取。
+
+原文引用 SHALL 记录 `owner`/`format`/保留策略并以此隔离；这些元数据不同的引用 MUST NOT 被去重合并。
+
+#### Scenario: 分段读取字节一致
+
+- **WHEN** 对一段原文按 `start_line`/`num_lines` 分段读取并拼接
+- **THEN** 拼接结果 SHALL 与原文逐字节一致
+
+#### Scenario: 超大原文不全量回流
+
+- **WHEN** 召回一个远超阈值的事件
+- **THEN** 返回 SHALL 为有界版 + 票据，全文 SHALL 经分段读取获取，MUST NOT 全量回流上下文
+
+#### Scenario: 未命中显式报告
+
+- **WHEN** `items` 中存在不存在的 key
+- **THEN** 未命中 SHALL 被明确标注（不静默省略），命中项 SHALL 原序返回
+
+#### Scenario: 不留多套同义召回接口
+
+- **WHEN** 审计召回入口
+- **THEN** 对主 agent SHALL 只暴露统一 `recall` 入口，MUST NOT 并存多套同义召回接口

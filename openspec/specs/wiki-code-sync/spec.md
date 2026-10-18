@@ -16,6 +16,10 @@ wiki 文档引用的 tagent 自有源文件 SHALL 在当前仓库中真实存在
 拆分为子包）时，引用 SHALL 在同一变更内同步更新。引用上游依赖（trpc-agent-go 等）文件时 SHALL
 明示其属上游，避免读者误在本仓查找。
 
+对**新架构文档**（本次重设新增/改写的 `docs/wiki/**` 与正式架构/scenarios 文档）此类引用 SHALL 映射**新代码**：引用的文件 SHALL 存在于重构后布局（登记于分层覆盖清单），MUST NOT 引用已被删除/迁移路径的旧文件；MUST NOT 以「历史说明」名义在新文档中保留指向旧实现的可复制引用。
+
+对**历史 wiki 记录**（重设前既有 `docs/wiki/**` 快照，作为历史留档）评审 SHALL 以**固定 SHA 快照**核验——即在该文档所属历史提交（具名 commit/tag SHA）上其引用真实存在即可，MUST NOT 要求历史文档与**重构后新代码**逐字一致，也 MUST NOT 因新代码重命名/迁移而把历史快照判为腐化。历史快照与新文档 SHALL 以引用根/路径前缀可区分，判定基准 SHA SHALL 可复跑。
+
 #### Scenario: 引用文件存在
 
 - **WHEN** 文档中出现形如 `some_file.go` 或 `pkg/some_file.go` 的 tagent 自有文件引用
@@ -26,6 +30,16 @@ wiki 文档引用的 tagent 自有源文件 SHALL 在当前仓库中真实存在
 
 - **WHEN** 某类型的实现从核心包迁入子包（例如 KV 后端迁入 `memory/kv`、引擎适配器迁入 `memory/engine`）
 - **THEN** 文档中的文件清单与符号归属说明 SHALL 同步为新子包路径
+
+#### Scenario: 新文档映射新代码
+
+- **WHEN** 校验本次重设新增/改写的 wiki 与正式架构文档中的文件引用
+- **THEN** 引用 SHALL 指向重构后真实存在的新布局；指向被删除/迁移旧文件的引用 SHALL 判失败，不得以「历史说明」豁免
+
+#### Scenario: 历史快照按固定 SHA 核验
+
+- **WHEN** 校验作为历史留档的既有 wiki 快照
+- **THEN** 判定基准为该文档所属历史提交的具名 SHA；其引用在该 SHA 上存在即通过；MUST NOT 因重构后新代码重命名而判其腐化
 
 ### Requirement: 禁止行号与行数标注
 
