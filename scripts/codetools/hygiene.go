@@ -24,8 +24,9 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 var registeredTopDirs = map[string]bool{
 	".github": true, "agent": true, "config": true, "docs": true, "evals": true,
 	"event": true, "evolution": true, "examples": true, "golden": true, "internal": true,
-	"memory": true, "modelutil": true, "openspec": true, "plugin": true,
-	"prompt": true, "prototype": true, "resources": true, "rl": true,
+	"memory": true, "model": true, "modelutil": true, "openspec": true, "plugin": true,
+	"query": true, "rl": true, "state": true, "task": true, "telemetry": true,
+	"prompt": true, "prototype": true, "resources": true,
 	"scripts": true, "tests": true, "testutil": true, "tool": true,
 	"workspace": true,
 }

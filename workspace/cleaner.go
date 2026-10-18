@@ -22,10 +22,11 @@ const (
 // on a period, bounded by age and by count, and it waits for its own stop so the close
 // sequence confirms the reclaimer ended.
 //
-// Reclamation leaves a replica that is being read or written alone, never removes a user
-// file, and never follows a symbolic link out of the replica root. A replica is in scope
-// only through its own ownership, so reclamation is limited to this workspace's
-// temporary replicas.
+// The redline list (4 rules):
+// MUST leave a replica that is being read or written alone.
+// MUST limit reclamation to this workspace's own temporary replicas.
+// MUST NOT remove a user file.
+// MUST NOT follow a symbolic link out of the replica root.
 type Cleaner interface {
 	// CleanupStartup reclaims the temporary replicas left behind by a previous run.
 	CleanupStartup(ctx context.Context) error

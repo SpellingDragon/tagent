@@ -8,6 +8,7 @@ require (
 	github.com/SpellingDragon/tagent v0.0.0-00010101000000-000000000000
 	github.com/SpellingDragon/wechat-robot-go v1.5.1
 	github.com/openai/openai-go v1.12.0
+	gopkg.in/yaml.v3 v3.0.1
 	trpc.group/trpc-go/trpc-agent-go v1.11.2
 )
 
@@ -85,7 +86,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251124214823-79d6a2a48846 // indirect
 	google.golang.org/grpc v1.77.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	trpc.group/trpc-go/trpc-a2a-go v0.2.6-0.20260721084546-18c8244d0acb // indirect
 	trpc.group/trpc-go/trpc-agent-go/model/anthropic v1.10.0 // indirect
 	trpc.group/trpc-go/trpc-agent-go/model/gemini v1.10.0 // indirect

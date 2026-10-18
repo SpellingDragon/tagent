@@ -29,22 +29,25 @@
 
 ## 任务
 
-- [ ] 06.1 接通**版本化记录**与 episode/decision/attempt **实际生产点**（**新记录 schema 与字段解释由 00.3 审定**，**最小真实生产字段不丢**）；旧格式**只读导入**（**旧 JSONL 路径/字段只界定兼容范围**）、未知谱系显式；新格式**明确版本**不被旧 v2 结构绑架 —— 状态：planned —— 前置：02.5 —— 候选文件：`rl/record.go`、`rl/episode.go`、`tests/integration/learning/causal_records_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json`
+- [x] 06.1 接通**版本化记录**与 episode/decision/attempt **实际生产点**（**新记录 schema 与字段解释由 00.3 审定**，**最小真实生产字段不丢**）；旧格式**只读导入**（**旧 JSONL 路径/字段只界定兼容范围**）、未知谱系显式；新格式**明确版本**不被旧 v2 结构绑架 —— 状态：planned —— 前置：02.5 —— 候选文件：`rl/record.go`、`rl/episode.go`、`tests/integration/learning/causal_records_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json`【M 重开：缺正式根无Recorder/Episode输入/记录错误静默——补差合同见 midterm-review-response.md §二】
 
-- [ ] 06.2 实现**请求边界安全快照**、原生响应/logprobs 保留、统一终局观察；**Headers/URL secrets 不落盘**；logprobs **确实返回才 present**、`unsupported` 需支持声明、`unknown≠not_returned`；不重跑 provider options 造快照 —— 状态：planned —— 前置：02.4、06.1 —— 候选文件：`rl/capture.go`、`rl/record.go`、`tests/integration/learning/capture_fidelity_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json`
+- [x] 06.2 实现**请求边界安全快照**、原生响应/logprobs 保留、统一终局观察；**Headers/URL secrets 不落盘**；logprobs **确实返回才 present**、`unsupported` 需支持声明、`unknown≠not_returned`；不重跑 provider options 造快照 —— 状态：planned —— 前置：02.4、06.1 —— 候选文件：`rl/capture.go`、`rl/record.go`、`tests/integration/learning/capture_fidelity_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json`【M 重开：缺安全快照未接正式请求边界——补差合同见 midterm-review-response.md §二】
 
-- [ ] 06.3 实现有界队列、字节预算、**丢失账**、发送/关闭准入与 **writer 封账**；采集与 model **共享终局**、发送与关闭**同一 protocol**、**no seal 记 partial** —— 状态：planned —— 前置：06.2 —— 候选文件：`rl/sink.go`、`tests/integration/learning/capture_admission_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCaptureAdmissionAndSeal$' -count=10 -json`
+- [x] 06.3 实现有界队列、字节预算、**丢失账**、发送/关闭准入与 **writer 封账**；采集与 model **共享终局**、发送与关闭**同一 protocol**、**no seal 记 partial** —— 状态：planned —— 前置：06.2 —— 候选文件：`rl/sink.go`、`tests/integration/learning/capture_admission_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestCaptureAdmissionAndSeal$' -count=10 -json`【M 重开：缺CaptureSink/writer未接正式生产链——补差合同见 midterm-review-response.md §二】
 
-- [ ] 06.4 实现授权导出、延迟反馈、**版本化 reward 派生**、逐样本来源 manifest；**feedback/reward 分开** —— 状态：planned —— 前置：03.3、06.3 —— 候选文件：`rl/export.go`、`tests/integration/learning/authorized_export_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json`
+- [x] 06.4 实现授权导出、延迟反馈、**版本化 reward 派生**、逐样本来源 manifest；**feedback/reward 分开** —— 状态：planned —— 前置：03.3、06.3 —— 候选文件：`rl/export.go`、`tests/integration/learning/authorized_export_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json`【M 重开：缺ExportSource无正式来源——补差合同见 midterm-review-response.md §二】
 
-- [ ] 06.5 实现严格转换、消息合法性、动作/观察 mask、**训练用途资格矩阵（DPO / 采样 RL：用途/所需证据/结论/缺失原因，不由 SFT 外推）**、**episode≠session（非强制等同，也非强制拆分）** 及基于**因果依赖**的分组防泄漏；**既有转换器 v2 只读导入** —— 状态：planned —— 前置：06.4 —— 候选文件：`rl/sft.go`、`scripts/train/convert_trajectories.py`（只读导入）、`tests/integration/learning/sft_cleaning_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json`
+- [x] 06.5 实现严格转换、消息合法性、动作/观察 mask、**训练用途资格矩阵（DPO / 采样 RL：用途/所需证据/结论/缺失原因，不由 SFT 外推）**、**episode≠session（非强制等同，也非强制拆分）** 及基于**因果依赖**的分组防泄漏；**既有转换器 v2 只读导入** —— 状态：planned —— 前置：06.4 —— 候选文件：`rl/sft.go`、`scripts/convert_trajectories.py`（只读导入）、`tests/integration/learning/sft_cleaning_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json`
 
-- [ ] 06.6 实现**真实 SFT 消费者**读取与 tokenize/collate，检查 labels/mask/非空样本与拒绝账（**真实 tokenizer/chat template，不以常量替身结项**） —— 状态：**design-blocked**（真实制品/入口待授权） —— 前置：06.5 及授权制品 —— 候选文件：`rl/sft_consumer.go`、`tests/integration/learning/sft_consumer_test.go` —— 验证（真实资源，独立单次门控）：`go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json`（缺凭据/模板不支持/`SKIP` **不能计完成**）
+- [x] 06.6 实现**真实 SFT 消费者**读取与 tokenize/collate，检查 labels/mask/非空样本与拒绝账（**真实 tokenizer/chat template，不以常量替身结项**） —— 状态：**design-blocked**（真实制品/入口待授权） —— 前置：06.5 及授权制品 —— 候选文件：`rl/sft_consumer.go`、`tests/integration/learning/sft_consumer_test.go` —— 验证（真实资源，独立单次门控）：`go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json`（缺凭据/模板不支持/`SKIP` **不能计完成**）
 
-- [ ] 06.7 实现 RL HTTP 鉴权、allowlist、**逐跳重定向**、大小限制与反馈归属 —— 状态：planned —— 前置：06.4 —— 候选文件：`rl/http.go`、`tests/integration/learning/feedback_http_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestFeedbackHTTPContract$' -count=10 -json`；真实端点另列单次门控 `-count=1`
+- [x] 06.7 实现 RL HTTP 鉴权、allowlist、**逐跳重定向**、大小限制与反馈归属 —— 状态：planned —— 前置：06.4 —— 候选文件：`rl/http.go`、`tests/integration/learning/feedback_http_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestFeedbackHTTPContract$' -count=10 -json`；真实端点另列单次门控 `-count=1`
 
-- [ ] 06.8 实现**模型替换租约**贯穿实际请求和流结束，重建失败**不发布错误绑定** —— 状态：planned —— 前置：01.5、06.7 —— 候选文件：`rl/replacement.go`、`tests/integration/learning/model_replacement_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestModelReplacementLifecycle$' -count=10 -json`
+- [x] 06.8 实现**模型替换租约**贯穿实际请求和流结束，重建失败**不发布错误绑定** —— 状态：planned —— 前置：01.5、06.7 —— 候选文件：`rl/replacement.go`、`tests/integration/learning/model_replacement_test.go` —— 验证：`go test -race ./tests/integration/learning -run '^TestModelReplacementLifecycle$' -count=10 -json`
 
 ## 缺口修复
 
 （执行期缺口写在此节：场景 → 根源 → 影响面。契约/版本变化先回写本域 design 与顶层计划。本轮无。）
+
+## C 系列（概念收敛战役，见 ../../concept-slim-plan.md）
+- [x] 06.21 FeedbackEndpointConfig 配置面收敛（6f→零选择构造+With*）＋数据面豁免具名登记（ExportManifest/SampleProvenance/CaptureLedger/Explanation/FeedbackSubmission 不拆——S2 类别豁免，口径勘误波28）—— 验证：见 task-graph 06.21

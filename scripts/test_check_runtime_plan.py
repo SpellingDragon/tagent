@@ -16,7 +16,7 @@ SCRIPTS = Path(__file__).resolve().parent
 CHECKER = SCRIPTS / "check_runtime_plan.py"
 
 DOMAIN_SPEC = (
-    ("00-foundation", 6, 3),
+    ("00-foundation", 20, 3),
     ("01-state-binding", 6, 2),
     ("02-execution", 9, 4),
     ("03-history", 8, 2),
@@ -52,7 +52,20 @@ def task_ids():
         prefix = domain.split("-", 1)[0]
         ids.extend("{}.{}".format(prefix, i) for i in range(1, count + 1))
         ids.extend("{}.P0.{}".format(prefix, i) for i in range(1, p0_count + 1))
+    ids.extend(SLIM_IDS)
     return ids
+
+
+# 概念收敛战役收敛叶（与 check_runtime_plan.py 的 SLIM_IDS 同源——两处必须同步修改）。
+SLIM_IDS = (
+    "00.21", "00.22", "00.23", "00.24", "00.25",
+    "02.21", "02.22", "04.21", "04.22", "04.23",
+    "05.21", "06.21", "07.22", "09.21", "00.26", "09.7", "04.24", "04.25", "09.8", "09.9",
+)
+SLIM_DOMAIN = {
+    "00": "00-foundation", "02": "02-execution", "04": "04-capabilities",
+    "05": "05-inspection", "06": "06-learning", "07": "07-evolution", "09": "09-acceptance",
+}
 
 
 def graph_tasks():
@@ -62,11 +75,21 @@ def graph_tasks():
         for index in range(1, count + 1):
             # Hard check (b): every 01–09 non-P0 task carries the stage-gate edge.
             deps = [STAGE_GATE_ID] if prefix != "00" else []
+            phase = "implementation"
+            if prefix == "00" and index >= 7:
+                # 报告响应修订轮 R 任务（00.7–00.20）：批次串行、phase=design
+                phase = "design"
+                if index <= 11:
+                    deps = ["00.P0.3"]
+                elif index <= 17:
+                    deps = ["00.11"]
+                else:
+                    deps = ["00.17"]
             tasks.append({
                 "id": "{}.{}".format(prefix, index),
                 "domain": domain,
                 "depends_on": deps,
-                "phase": "implementation",
+                "phase": phase,
                 "status": "planned",
                 "verification": ["go test ./... -run '^TestThing$' -count=1 -json"],
             })
@@ -89,6 +112,17 @@ def graph_tasks():
                 "status": "planned",
                 "verification": ["go build ./..."],
             })
+    for tid in SLIM_IDS:
+        prefix = tid.split(".", 1)[0]
+        deps = [] if prefix == "00" else [STAGE_GATE_ID]
+        tasks.append({
+            "id": tid,
+            "domain": SLIM_DOMAIN[prefix],
+            "depends_on": deps,
+            "phase": "tooling" if tid == "00.21" else "implementation",
+            "status": "planned",
+            "verification": ["go build ./..."],
+        })
     return tasks
 
 
@@ -125,6 +159,11 @@ class Fixture:
             lines += ["", "## P0 骨架任务", ""]
             for index in range(1, p0_count + 1):
                 lines.append("- [ ] {}.P0.{} 骨架占位 —— 验证：go build ./...".format(prefix, index))
+            slim = [tid for tid in SLIM_IDS if tid.startswith(prefix + ".")]
+            if slim:
+                lines += ["", "## C 系列（概念收敛）", ""]
+                for tid in slim:
+                    lines.append("- [ ] {} 收敛占位 —— 验证：go build ./...".format(tid))
             write(base / "tasks.md", "\n".join(lines) + "\n")
             write(base / "specs" / domain / "spec.md", GOOD_SPEC.format(cap=domain))
         write(self.change / "task-graph.json", json.dumps(
@@ -190,8 +229,8 @@ class PlanCheckerTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
         self.assertIsNone(payload["productVerified"])
-        self.assertEqual(payload["counts"]["graph_tasks"], 89)
-        self.assertEqual(payload["counts"]["checkboxes"], 89)
+        self.assertEqual(payload["counts"]["graph_tasks"], len(graph_tasks()))
+        self.assertEqual(payload["counts"]["checkboxes"], len(task_ids()))
         self.assertEqual(payload["counts"]["scenarios"], 11)
 
     def test_missing_task_reported(self):
@@ -233,6 +272,63 @@ class PlanCheckerTest(unittest.TestCase):
         code, out, _ = self.check()
         self.assertNotEqual(code, 0)
         self.assertIn("length mismatch", out)
+
+    def test_done_named_test_must_exist_and_be_run(self):
+        # 正例（2026-10-15 测试锚规则）：verification 承诺的 TestThing 在仓库
+        # 真实存在且被 evidence 命令面跑过，完成合法。
+        root = Path(self._tmp.name) / "repo"
+        write(root / "probe_test.go", "package probe\n\nfunc TestThing(t *testing.T) {}\n")
+        self.tick(STAGE_GATE_ID)
+        self.set_status(STAGE_GATE_ID, "done", {"run_id": "r",
+                        "commands": ["go build ./..."], "exit_codes": [0],
+                        "artifact_paths": ["a"]})
+        self.tick("02.3")
+        self.set_status("02.3", "done", {"run_id": "r",
+                        "commands": ["go test ./... -run '^TestThing$' -count=1"],
+                        "exit_codes": [0], "artifact_paths": ["a"]})
+        code, out, _ = self.check("--repo-root", str(root))
+        self.assertEqual(code, 0, out)
+
+    def test_done_renamed_or_absent_test_is_rejected(self):
+        # 反例 A：evidence 声称跑了 TestGone，但仓库无任何 *_test.go 定义它
+        # （历史先例：Roundtrip/RoundTrip 改名漂移导致验收命令零匹配空转）。
+        root = Path(self._tmp.name) / "repo"
+        write(root / "probe_test.go", "package probe\n\nfunc TestThing(t *testing.T) {}\n")
+        self.tick(STAGE_GATE_ID)
+        self.set_status(STAGE_GATE_ID, "done", {"run_id": "r",
+                        "commands": ["go build ./..."], "exit_codes": [0],
+                        "artifact_paths": ["a"]})
+        self.tick("02.3")
+        self.set_status("02.3", "done", {"run_id": "r",
+                        "commands": ["go test ./... -run '^TestGone$' -count=1"],
+                        "exit_codes": [0], "artifact_paths": ["a"]})
+        code, out, _ = self.check("--repo-root", str(root))
+        self.assertNotEqual(code, 0)
+        self.assertIn("no *_test.go defines", out)
+        self.assertIn("never ran it (只跑一半)", out)
+
+    def test_done_verification_promises_must_all_run(self):
+        # 反例 B：verification 承诺两个点名测试，evidence 只跑一半。
+        root = Path(self._tmp.name) / "repo"
+        write(root / "probe_test.go",
+              "package probe\n\nfunc TestAlpha(t *testing.T) {}\n\nfunc TestBeta(t *testing.T) {}\n")
+        self.tick(STAGE_GATE_ID)
+        self.set_status(STAGE_GATE_ID, "done", {"run_id": "r",
+                        "commands": ["go build ./..."], "exit_codes": [0],
+                        "artifact_paths": ["a"]})
+        self.tick("02.3")
+        graph = self.fixture.load_graph()
+        for task in graph["tasks"]:
+            if task["id"] == "02.3":
+                task["verification"] = ["go test -run '^TestAlpha$'", "go test -run '^TestBeta$'"]
+        self.fixture.save_graph(graph)
+        self.set_status("02.3", "done", {"run_id": "r",
+                        "commands": ["go test -run '^TestAlpha$'"],
+                        "exit_codes": [0], "artifact_paths": ["a"]})
+        code, out, _ = self.check("--repo-root", str(root))
+        self.assertNotEqual(code, 0)
+        self.assertIn("TestBeta", out)
+        self.assertIn("never ran it (只跑一半)", out)
 
     def test_missing_coverage_row_is_rejected(self):
         write(self.fixture.change / "coverage.md", "# 空映射\n")
@@ -363,14 +459,20 @@ class PlanCheckerTest(unittest.TestCase):
                 return
 
     def test_done_with_evidence_and_ticked_box_is_accepted(self):
-        evidence = {"run_id": "run-1", "commands": ["go test ./..."],
+        # 2026-10-15 测试锚规则级联：完成证据须跑过 verification 承诺的点名
+        # 测试，故 commands 点名 TestThing 且仓库根真实定义它。
+        root = Path(self._tmp.name) / "repo"
+        write(root / "probe_test.go", "package probe\n\nfunc TestThing(t *testing.T) {}\n")
+        evidence = {"run_id": "run-1", "commands": ["go test ./... -run '^TestThing$' -count=1"],
                     "exit_codes": [0], "artifact_paths": ["out/run-1.json"]}
         # The stage gate itself must be done before any NN.M task may be done.
         self.tick(STAGE_GATE_ID)
-        self.set_status(STAGE_GATE_ID, "done", evidence)
+        self.set_status(STAGE_GATE_ID, "done", {"run_id": "run-1",
+                        "commands": ["go build ./..."], "exit_codes": [0],
+                        "artifact_paths": ["out/run-1.json"]})
         self.tick("02.3")
         self.set_status("02.3", "done", evidence)
-        code, out, err = self.check()
+        code, out, err = self.check("--repo-root", str(root))
         self.assertEqual(code, 0, out + err)
 
     def test_done_without_evidence_is_rejected(self):

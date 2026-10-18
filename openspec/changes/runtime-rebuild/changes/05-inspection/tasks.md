@@ -29,14 +29,17 @@
 
 ## 任务
 
-- [ ] 05.1 实现 agent/session/invocation/task/notice/租约的**只读运行总图**；统计从明细派生（不把多维状态相加成"运行数"） —— 状态：planned —— 前置：01.3、01.5、02.2 —— 候选文件：`query/inventory.go`、`tests/integration/inspection/runtime_inventory_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10 -json`
+- [x] 05.1 实现 agent/session/invocation/task/notice/租约的**只读运行总图**；统计从明细派生（不把多维状态相加成"运行数"） —— 状态：planned —— 前置：01.3、01.5、02.2 —— 候选文件：`query/inventory.go`、`tests/integration/inspection/runtime_inventory_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10 -json`【M 重开：缺公开投影压状态+配置租约读源错接——补差合同见 midterm-review-response.md §二】
 
-- [ ] 05.2 实现授权过滤、**不可变快照**、稳定分页、详情及订阅 **gap/reset**；游标绑定 revision 与过滤条件 —— 状态：planned —— 前置：05.1 —— 候选文件：`query/snapshot.go`、`query/cursor.go`、`query/subscribe.go`、`tests/integration/inspection/query_auth_cursor_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10 -json`
+- [x] 05.2 实现授权过滤、**不可变快照**、稳定分页、详情及订阅 **gap/reset**；游标绑定 revision 与过滤条件 —— 状态：planned —— 前置：05.1 —— 候选文件：`query/snapshot.go`、`query/cursor.go`、`query/subscribe.go`、`tests/integration/inspection/query_auth_cursor_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10 -json`【M 重开：缺单快照对象/字节无界——补差合同见 midterm-review-response.md §二】
 
-- [ ] 05.3 提交后插件接 **OTel/审计**，SDK 尝试观察分层；**关闭 OTel 不影响 Query** —— 状态：planned —— 前置：02.6、05.2 —— 候选文件：`telemetry/otel.go`、`plugin/observe.go`、`tests/integration/inspection/observation_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestObservationDoesNotOwnState$' -count=10 -json` —— **资源门（09.5 消费，归属本任务 05.3）**：真实 collector 接收 span/metric 由**点名用例** `TestRealCollectorDelivery`（同包 `tests/integration/inspection`，05.3 实现 + `09.5` 验收）在启用门+授权+`-count=1` 单次运行；确定性 `TestObservationDoesNotOwnState`（关闭 OTel 仍 Query 可用）不以真实 collector 为前提。**资源归属 05.3**——MUST NOT 以 `06.3` 的 RL 队列封账 `TestCaptureAdmissionAndSeal` 冒充 collector 接收。
+- [x] 05.3 提交后插件接 **OTel/审计**，SDK 尝试观察分层；**关闭 OTel 不影响 Query** —— 状态：planned —— 前置：02.6、05.2 —— 候选文件：`telemetry/otel.go`、`plugin/observe.go`、`tests/integration/inspection/observation_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestObservationDoesNotOwnState$' -count=10 -json` —— **资源门（09.5 消费，归属本任务 05.3）**：真实 collector 接收 span/metric 由**点名用例** `TestRealCollectorDelivery`（同包 `tests/integration/inspection`，05.3 实现 + `09.5` 验收）在启用门+授权+`-count=1` 单次运行；确定性 `TestObservationDoesNotOwnState`（关闭 OTel 仍 Query 可用）不以真实 collector 为前提。**资源归属 05.3**——MUST NOT 以 `06.3` 的 RL 队列封账 `TestCaptureAdmissionAndSeal` 冒充 collector 接收。【M 重开：缺telemetry/After未挂正式装配——补差合同见 midterm-review-response.md §二】
 
-- [ ] 05.4 在**重启/取消/退役/存储失败**下解释每条**阻塞及下一推进者**（含连续 `unknown` 仅升级诊断/显式停止处理、不作判死退出依据；未止义务/租约保留且可解释） —— 状态：planned —— 前置：03.3、04.2、05.3 —— 候选文件：`query/explain.go`、`tests/integration/inspection/blocker_explain_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json`
+- [x] 05.4 在**重启/取消/退役/存储失败**下解释每条**阻塞及下一推进者**（含连续 `unknown` 仅升级诊断/显式停止处理、不作判死退出依据；未止义务/租约保留且可解释） —— 状态：planned —— 前置：03.3、04.2、05.3 —— 候选文件：`query/explain.go`、`tests/integration/inspection/blocker_explain_test.go` —— 验证：`go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json`
 
 ## 缺口修复
 
 （执行期缺口写在此节：场景 → 根源 → 影响面。契约变化先回写本域 design 与顶层计划。本轮无。）
+
+## C 系列（概念收敛战役，见 ../../concept-slim-plan.md）
+- [x] 05.21 query 碎接口归并（12→≤4）+InventoryFaces 瘦身 —— 验证：见 task-graph 05.21（静态锚+回归锚双轨）

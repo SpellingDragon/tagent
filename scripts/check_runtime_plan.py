@@ -54,16 +54,28 @@ DOMAINS = (
 # 每域叶任务编号范围（新计划编号：00.1..6 / 01.1..6 / 02.1..9 / 03.1..8 /
 # 04.1..9 / 05.1..4 / 06.1..8 / 07.1..4 / 08.1..5 / 09.1..6 = 65 实施叶任务）。
 ID_RANGES = (
-    ("00", 6), ("01", 6), ("02", 9), ("03", 8), ("04", 9),
+    ("00", 20), ("01", 6), ("02", 9), ("03", 8), ("04", 9),
     ("05", 4), ("06", 8), ("07", 4), ("08", 5), ("09", 6),
 )
 # 两阶段修订（阶段一骨架）新增的 24 个 P0 骨架叶任务编号范围：
 # 00.P0.1..3 / 01.P0.1..2 / 02.P0.1..4 / 03.P0.1..2 / 04.P0.1..4 /
 # 05.P0.1..2 / 06.P0.1..2 / 07.P0.1..2 / 08.P0.1..2 / 09.P0.1 = 24。
 # 与 ID_RANGES 共同构成 89 个叶任务（65 实施＋24 骨架）。
+# 报告响应修订轮（2026-10-14，docs/.dev/REPORT.md 响应）：00.7–00.20 共 14 个
+# 跨域合同修订任务（[R1]×5/[R2]×6/[R3]×3，title 前缀标批次），phase=design；
+# 批次间串行硬边（R2 全依赖 R1 尾、R3 全依赖 R2 尾），剩余 NN.M 按三档加批次尾前置。
 P0_RANGES = (
     ("00", 3), ("01", 2), ("02", 4), ("03", 2), ("04", 4),
     ("05", 2), ("06", 2), ("07", 2), ("08", 2), ("09", 1),
+)
+# 概念收敛战役（2026-10-17 用户裁定：破坏式收敛/全仓规划按痛点排波/双轨验收标尺，
+# 见 openspec/changes/runtime-rebuild/concept-slim-plan.md）：13 个收敛叶任务
+# （00.21–00.25 / 02.21–02.22 / 04.21–04.23 / 05.21 / 06.21 / 09.21），
+# 编号非连续故单列显式清单；01–09 域收敛叶同样受 00.P0.3 阶段门约束。
+SLIM_IDS = (
+    "00.21", "00.22", "00.23", "00.24", "00.25",
+    "02.21", "02.22", "04.21", "04.22", "04.23",
+    "05.21", "06.21", "07.22", "09.21", "00.26", "09.7", "04.24", "04.25", "09.8", "09.9",
 )
 # 阶段门：01–09 域的全部非 P0 实施叶任务 MUST 以 00.P0.3 为额外前置。
 STAGE_GATE_ID = "00.P0.3"
@@ -92,15 +104,24 @@ ENUMERATOR_RE = re.compile(
 )
 HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
 MAIN_TITLE_RE = re.compile(r"^#\s+(?P<cap>.+?)\s+Specification\s*$")
+# 中期复审修订（2026-10-15）新增的完成证据三规则之二（对齐规则已在
+# runtime_checklib.check_completion_evidence）：点名测试必须真实存在且被跑过。
+# 违反历史先例：Roundtrip/RoundTrip 改名漂移导致验收命令零匹配空转（R24），
+# 以及验证面承诺两个点名测试、证据只跑一半。规则只看 -run 锚与 verification
+# 裸标识，不扫 evidence 叙述散文，避免误报。
+RUN_ANCHOR_RE = re.compile(r"-run[= ]+['\"^]*(?P<name>Test[A-Za-z0-9_]+)")
+BARE_TEST_NAME_RE = re.compile(r"\b(?P<name>Test[A-Z][A-Za-z0-9_]*)\b")
+TEST_FUNC_RE = re.compile(r"^func (?P<name>Test[A-Za-z0-9_]+)\(", re.M)
 
 
 def expected_ids():
-    """全部批准叶任务编号：65 实施（NN.M）＋24 骨架（NN.P0.M）= 89。"""
+    """全部批准叶任务编号：65 实施（NN.M）＋24 骨架（NN.P0.M）＋13 概念收敛（SLIM_IDS）= 102。"""
     ids = []
     for prefix, count in ID_RANGES:
         ids.extend("{}.{}".format(prefix, index) for index in range(1, count + 1))
     for prefix, count in P0_RANGES:
         ids.extend("{}.P0.{}".format(prefix, index) for index in range(1, count + 1))
+    ids.extend(SLIM_IDS)
     return ids
 
 
@@ -129,7 +150,93 @@ def parse_args(argv):
         help="主规格根目录（openspec/specs 的绝对路径）；MODIFIED/REMOVED 的主源在此查找",
     )
     parser.add_argument("--json", action="store_true", help="以 JSON 输出报告")
+    parser.add_argument(
+        "--repo-root",
+        default=".",
+        help="点名测试存在性扫描的仓库根（默认当前目录）",
+    )
     return parser.parse_args(argv)
+
+
+def dedupe(names):
+    seen = set()
+    out = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def promised_test_names(strings):
+    """验证面承诺的点名测试：-run 锚＋裸 Test 标识（只扫 verification）。"""
+    names = []
+    for text in strings:
+        names.extend(m.group("name") for m in RUN_ANCHOR_RE.finditer(text))
+        names.extend(m.group("name") for m in BARE_TEST_NAME_RE.finditer(text))
+    return dedupe(names)
+
+
+def anchored_test_names(strings):
+    """声称跑过的点名测试：仅 -run 锚（evidence 命令面，不扫叙述散文）。"""
+    names = []
+    for text in strings:
+        names.extend(m.group("name") for m in RUN_ANCHOR_RE.finditer(text))
+    return dedupe(names)
+
+
+def index_repo_test_funcs(repo_root):
+    """仓库内全部 *_test.go 的顶层 func TestX( 索引；找不到任何测试文件返回空集。"""
+    names = set()
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            try:
+                with open(os.path.join(dirpath, filename), "r", encoding="utf-8") as handle:
+                    text = handle.read()
+            except OSError:
+                continue
+            names.update(m.group("name") for m in TEST_FUNC_RE.finditer(text))
+    return names
+
+
+def check_completion_test_anchors(report, raw_tasks, repo_tests):
+    """done 任务的点名测试三规则之二：存在性＋全覆盖（对齐规则在 lib 层）。
+
+    存在性：verification 与 evidence 命令面点名的 Go 测试必须在仓库
+    *_test.go 中真实存在——空转（验收正则零匹配）与改名漂移在此拦住。
+    全覆盖：verification 承诺的每个点名测试必须出现在 evidence.commands
+    ——只跑一半在此拦住。二者共同把「负向锚」变成勾选硬门：M 补差任务的
+    负向测试不存在或未跑，就不可能勾选。
+    """
+    for task in raw_tasks:
+        if not isinstance(task, dict) or task.get("status") != "done":
+            continue
+        tid = task.get("id", "?")
+        where = "task {}".format(tid)
+        verification = task.get("verification")
+        evidence = task.get("evidence")
+        v_strings = [v for v in verification if isinstance(v, str)] \
+            if isinstance(verification, list) else []
+        commands = evidence.get("commands") if isinstance(evidence, dict) else None
+        c_strings = [c for c in commands if isinstance(c, str)] \
+            if isinstance(commands, list) else []
+        promised = promised_test_names(v_strings)
+        ran = anchored_test_names(c_strings)
+        joined = "\n".join(c_strings)
+        for name in promised:
+            if name not in repo_tests:
+                report.error("{} promises test {} but no *_test.go defines func {} "
+                             "(空转或改名漂移)".format(where, name, name))
+            if name not in joined:
+                report.error("{} verification names test {} but evidence.commands "
+                             "never ran it (只跑一半)".format(where, name))
+        for name in ran:
+            if name not in repo_tests:
+                report.error("{} evidence claims test {} but no *_test.go defines it "
+                             "(空转或改名漂移)".format(where, name))
 
 
 def check_done_evidence(report, where, evidence):
@@ -246,7 +353,7 @@ def check_dependency_graph(report, tasks):
     for tid in sorted(expected - actual):
         report.error("task {} missing from task-graph".format(tid))
     for tid in sorted(actual - expected):
-        report.error("task {} is not part of the approved 89 leaf tasks (65 实施＋24 骨架)".format(tid))
+        report.error("task {} is not part of the approved leaf tasks (65 实施＋24 骨架＋13 收敛)".format(tid))
     adjacency = {task["id"]: [] for task in tasks}
     statuses = {task["id"]: task["status"] for task in tasks}
     for task in tasks:
@@ -611,6 +718,8 @@ def run(argv):
         return report.emit(args.json)
     tasks = check_graph_shape(report, graph, change_name)
     check_dependency_graph(report, tasks)
+    raw_tasks = graph.get("tasks") if isinstance(graph.get("tasks"), list) else []
+    check_completion_test_anchors(report, raw_tasks, index_repo_test_funcs(args.repo_root))
     check_artifacts(report, change_dir)
     check_orchestration(report, change_dir)
     collect_checkbox_ids(report, change_dir, {t["id"]: t.get("status") for t in tasks})

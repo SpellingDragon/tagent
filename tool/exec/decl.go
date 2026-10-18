@@ -48,3 +48,7 @@ type ResourceKey struct {
 	// Key is the canonical identity of the resource inside its kind.
 	Key string
 }
+
+// String renders the canonical comparison form of the key: its kind beside its
+// identity, so every report names a resource the same way its ledger does.
+func (k ResourceKey) String() string { return k.Kind + "/" + k.Key }

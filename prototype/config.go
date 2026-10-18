@@ -6,6 +6,7 @@
 // 明确指定（默认 user），反思即自定义 Source 的输入，无专属控制器，也不做生产保护。
 // 接线：state.go 提供 State/AgentState 与 Apply；AgentTask 提供 agent:<id> 委派；
 // Memory 提供 recall，CallModel 记录轨迹，agent.go 实现消费循环。
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import (
@@ -59,7 +60,7 @@ func NewAgent(id string, state *State, registry Registry, deliver ToolFunc) (*Ba
 	agent := &BaseTAgent{
 		State:   owner,
 		Deliver: deliver,
-		Compact: func() { CompactResults(owner) }, // 模型调用后折叠刚用过的结果。
+		Compact: func() { CompactResults(owner) },
 		Plugins: plugins,
 	}
 	agent.Run = agent.DefaultRun
@@ -69,7 +70,7 @@ func NewAgent(id string, state *State, registry Registry, deliver ToolFunc) (*Ba
 		req := ModelRequest{
 			AgentID:      def.ID,
 			ModelName:    def.Model,
-			SystemPrompt: owner.SystemPrompt(), // 读 state 保存的生效值，请求期不再现拼 buildSystem。
+			SystemPrompt: owner.SystemPrompt(),
 			Params:       def.Params,
 			Skills:       def.Skills,
 			Tools:        def.Tools,

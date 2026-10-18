@@ -8,10 +8,11 @@ import "context"
 // and stops one external execution, and through which it reports what was
 // observed rather than what was requested.
 //
-// An Executor owns the lease of every resource it holds. A stop it cannot
-// confirm leaves the resource held under its key and refuses a fresh execution
-// under that key, so an unconfirmed exit is never released to a second writer
-// and never reported as a clean one.
+// The redline list (4 rules):
+// MUST own the lease of every resource it holds.
+// MUST report what a probe or a stop observed, never what was requested.
+// MUST NOT release a resource whose stop it could not confirm.
+// MUST NOT report an unconfirmed exit as a clean one.
 type Executor interface {
 	// Start begins the external execution declared by decl and returns the
 	// canonical key of the resource it now holds.
@@ -55,6 +56,26 @@ type StopEvidence struct {
 	ExitCode int
 
 	// Reason carries why the stop is unconfirmed where Confirmed is false.
+	Reason string
+}
+
+// ReleaseEvidence is the settling proof one release produced: whether the
+// resource was actually freed, beside the stop evidence observed for it and the
+// reason a retained resource stayed held.
+//
+// Released is false for a resource whose stop stayed unconfirmed, so a release
+// never claims an ending the executor did not observe.
+type ReleaseEvidence struct {
+	// Resource is the resource identity the release was driven for.
+	Resource ResourceKey
+
+	// Released reports whether the resource was freed beside a confirmed stop.
+	Released bool
+
+	// Stop is the stop evidence the release observed.
+	Stop StopEvidence
+
+	// Reason carries why the resource stayed held where Released is false.
 	Reason string
 }
 

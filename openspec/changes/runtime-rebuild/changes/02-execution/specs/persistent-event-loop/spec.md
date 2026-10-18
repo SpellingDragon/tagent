@@ -34,7 +34,7 @@
 #### Scenario: 不引第二工具循环
 
 - **WHEN** 一个回合内模型返回工具调用
-- **THEN** 工具轮次 SHALL 由框架既有 ReAct 路径处理，系统 MUST NOT 自建第二套工具迭代循环
+- **THEN** 工具轮次 SHALL 由自有唯一事件循环（非框架 Runner/LLMAgent 第二循环）处理，系统 MUST NOT 自建第二套工具迭代循环
 
 ### Requirement: 业务 turn 开始执行时绑定编排版本
 

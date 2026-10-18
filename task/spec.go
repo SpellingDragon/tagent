@@ -75,6 +75,12 @@ const (
 	// StatusCancelled is a task cancelled by its caller; cancelling one
 	// invocation does not cancel other invocations of the same session.
 	StatusCancelled
+	// StatusAwaitingApproval is a task whose call is parked in the approval wait:
+	// the call is registered and executed nothing yet, and the task reports the
+	// wait rather than a final answer. The wait is execution-phase information
+	// and never occupies a decision slot: it consumes no DecisionID and the
+	// decision-stream semantics are unchanged by it.
+	StatusAwaitingApproval
 )
 
 // AdmissionKind classifies one admission receipt. A fresh admission adds an

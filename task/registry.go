@@ -53,6 +53,12 @@ const (
 // Registry is the task table through which a task is registered, looked up,
 // cancelled and resumed. A registry carries a status transition on the commit
 // port, so a transition is stored before it becomes visible.
+//
+// The redline list (4 rules):
+// MUST store a transition on the commit port before it becomes visible.
+// MUST recognise a repeated mutation identity as the same mutation.
+// MUST NOT store a mutation identity that carries different content.
+// MUST NOT cancel other invocations of the same session when one task is cancelled.
 type Registry interface {
 	// Register admits one task declaration and returns the admission receipt.
 	// Admission is not a result and does not clear the task's obligation.
@@ -84,6 +90,36 @@ type Obligations struct {
 	// ExitReason is the reason an obligation ended without settlement; it is
 	// empty while no obligation has exited.
 	ExitReason string
+	// Open lists the obligations still open as the classified detail, one entry
+	// per obligation with the class it waits in.
+	Open []Obligation
+}
+
+// ObligationKind classifies one open obligation by the wait it is held under.
+type ObligationKind string
+
+const (
+	// ObligationAwaitingTool is an obligation whose task has not settled: the
+	// admission that opened it stays owed until an outcome is explicitly settled.
+	ObligationAwaitingTool ObligationKind = "awaiting-tool"
+	// ObligationAwaitingDelivery is an obligation whose committed notification has
+	// no acceptance from its target yet.
+	ObligationAwaitingDelivery ObligationKind = "awaiting-delivery"
+	// ObligationHandedOff is an obligation whose notification moves to the target
+	// instance an explicit handoff named.
+	ObligationHandedOff ObligationKind = "handed-off"
+)
+
+// Obligation is one obligation a manager still holds: the class it waits in beside
+// the task and the notification it points at.
+type Obligation struct {
+	// Kind is the class the obligation waits in.
+	Kind ObligationKind
+	// TaskID is the task the obligation belongs to.
+	TaskID event.TaskID
+	// Notice is the notification the obligation points at; its zero value marks an
+	// obligation that points at the task itself.
+	Notice Notice
 }
 
 // BlockedObligation is one obligation that cannot proceed, paired with the
@@ -108,6 +144,12 @@ type HandoffTarget struct {
 // Manager is the task admission and settlement face: it admits a task, reports
 // the obligations it still holds, hands a task's future notifications to another
 // target, and flushes notifications whose obligations are still open.
+//
+// The redline list (4 rules):
+// MUST keep the obligation an admission opened until an outcome explicitly settles it.
+// MUST report each outstanding obligation by kind, with the reason a blocked one cannot proceed.
+// MUST NOT read a successful admission as a settled obligation.
+// MUST NOT re-resolve the target a committed notification froze at its transition.
 type Manager interface {
 	// Admit accepts one task declaration and returns the admission receipt.
 	Admit(ctx context.Context, spec Spec) (AdmissionReceipt, error)

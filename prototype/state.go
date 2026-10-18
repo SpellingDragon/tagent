@@ -7,6 +7,7 @@
 // 队列与上下文是内存态，只有显式 Save 才落盘，也不自动重执行任何副作用。
 // 接线：BaseTAgent 经 Begin/Next/End 消费并 Publish 回流；TaskManager 完成通知进入所属队列，
 // 插件经 Context/ReplaceContext 改写现场，config.go 装配时读取定义。
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import (
@@ -19,7 +20,7 @@ import (
 	"sync"
 )
 
-// 现场级可见错误：拒绝而非静默丢弃。
+// ErrOwnerRemoved 等现场级可见错误：拒绝而非静默丢弃。
 var (
 	ErrOwnerRemoved    = errors.New("prototype: owner 已移除，拒绝路由")
 	ErrAlreadyConsumed = errors.New("prototype: 现场已被消费壳占用")
@@ -66,7 +67,8 @@ func (a *AgentState) SystemPrompt() string {
 	return a.prompt
 }
 
-// Publish 补全/校验归属后追加事件并唤醒消费者；owner 已移除或归属不符时拒绝。
+// Publish 补全/校验归属后追加事件并唤醒消费者；owner 被回收或归属不符时拒绝。
+// 唤醒是容量 1 的脉冲：已有未消费脉冲时跳过唤醒，事件已入队，不丢。
 func (a *AgentState) Publish(e Event) error {
 	if e.OwnerID == "" {
 		e.OwnerID = a.ID
@@ -82,7 +84,7 @@ func (a *AgentState) Publish(e Event) error {
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
-	default: // 已有未消费脉冲：数据已入队，唤醒不丢事件。
+	default:
 	}
 	return nil
 }
@@ -108,12 +110,12 @@ func (a *AgentState) PublishBatch(events []Event) error {
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
-	default: // 已有未消费脉冲：数据已入队，唤醒不丢事件。
+	default:
 	}
 	return nil
 }
 
-// Next 取走当前整批事件；每轮先响应 ctx 取消与已移除，再取队列；空队列则等唤醒。
+// Next 取走当前整批事件；ctx 取消或现场被回收时返回错误，空队列则等唤醒。
 func (a *AgentState) Next(ctx context.Context) ([]Event, error) {
 	for {
 		if err := ctx.Err(); err != nil {
@@ -191,7 +193,7 @@ func (a *AgentState) End() {
 	a.mu.Unlock()
 }
 
-// detach 标记现场已移除并唤醒可能在 Next 等待的消费壳；返回其 TaskManager 供锁外关闭。
+// detach 标记现场被回收并唤醒可能在 Next 等待的消费壳；返回其 TaskManager 供锁外关闭。
 func (a *AgentState) detach() *TaskManager {
 	a.mu.Lock()
 	a.removed = true
@@ -204,7 +206,7 @@ func (a *AgentState) detach() *TaskManager {
 	return tasks
 }
 
-// snapshotOf 采集现场可序列化字段（不含函数/nil 指针）；先取 Tasks/Memory 再取 mu，
+// snapshotOf 采集现场可序列化字段（不含函数/nil 指针），锁外读 Tasks/Memory、锁内读队列与上下文，
 // 避免与任务完成上行 Publish 形成锁序反转。
 func (a *AgentState) snapshotOf() agentSnapshot {
 	tasks := a.Tasks.Snapshot()
@@ -263,17 +265,21 @@ func (s *State) currentConfig() Config {
 	return cfg
 }
 
-// Apply 以整份新配置重建架构：先做结构校验，再由当前生效定义（Before）与候选（After）构建
+// Apply 以整份新配置重建架构：结构校验后，由当前生效定义（Before）与候选（After）构建
 // StatePlan，依序交 Eval→Benchmark→ApplyGate 裁决（nil 段恒真）；通过后同 id 更新定义与生效
 // prompt、新 id 建现场、旧 id 标记移除并回收。任一段拒绝即返回，定义、生效 prompt 与现场保持旧值。
 // TaskManager.Close 会等在途任务，一律在 State 锁外执行。返回本次被回收的 owner id（升序）。
+//
+// - 同 id 换装只换定义与生效 prompt，现场不动。
+// - 新建现场尚未发布，写入生效 prompt 不需要加锁。
+// - 孤儿回收在锁外取消任务上下文并等待在途任务收尾。
 func (s *State) Apply(cfg Config, resolve func(AgentConfig) string, evo Evolution) ([]string, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, err
 	}
 	plan := buildStatePlan(s.currentConfig(), cfg, resolve)
 	if err := runEvolution(plan, evo); err != nil {
-		return nil, err // 演进拒绝：定义、生效 prompt 与现场保持旧值。
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -282,12 +288,12 @@ func (s *State) Apply(cfg Config, resolve func(AgentConfig) string, evo Evolutio
 		keep[def.ID] = true
 		if a, ok := s.agents[def.ID]; ok {
 			a.mu.Lock()
-			a.def, a.prompt = def, plan.Prompts[def.ID] // 同 id 换装：只换定义与生效 prompt，现场不动。
+			a.def, a.prompt = def, plan.Prompts[def.ID]
 			a.mu.Unlock()
 			continue
 		}
 		a := newAgentState(def)
-		a.prompt = plan.Prompts[def.ID] // 尚未发布，无需加锁。
+		a.prompt = plan.Prompts[def.ID]
 		s.agents[def.ID] = a
 	}
 	var removed []*TaskManager
@@ -303,7 +309,7 @@ func (s *State) Apply(cfg Config, resolve func(AgentConfig) string, evo Evolutio
 	s.mu.Unlock()
 
 	for _, tasks := range removed {
-		tasks.Close() // 孤儿回收：锁外取消任务上下文并等待在途任务收尾。
+		tasks.Close()
 	}
 	sort.Strings(removedIDs)
 	return removedIDs, nil
@@ -455,7 +461,7 @@ func LoadState(path string) (*State, error) {
 		a := newAgentState(snap.Definition)
 		a.restoreFrom(snap)
 		s.agents[a.ID] = a
-		a.Tasks.Restore(snap.Tasks) // 在途任务 → unknown；owner 绑定保留。
+		a.Tasks.Restore(snap.Tasks)
 	}
 	return s, nil
 }

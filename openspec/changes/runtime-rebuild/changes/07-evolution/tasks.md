@@ -21,14 +21,17 @@
 
 ## 任务
 
-- [ ] 07.1 实现反思主动输入：授权观察面（越界具名拒绝）、水位新鲜度 fail-closed、确定性自状态摘要，反思作为显式输入生产者注入本 agent 循环 session —— 前置：`04.7`、`05.4` —— 复用目标：`plugin` 回调（随 state 代借用）、`model` 原生终局 —— 复用注意点：观察面 `⊆ read_namespaces ∪ {自身}`、自管判定走 event 包 `SelfManagedLineage` 单源；读失败门保持关闭不回落备用判据；digest 零 LLM、不阻塞、有界、复用同一次扫描结果（无二次扫链）—— 真实测试：`go test -race ./tests/integration/evolution -run '^TestReflectionScopeAndWatermark$' -count=10 -json`。
+- [x] 07.1 实现反思主动输入：授权观察面（越界具名拒绝）、水位新鲜度 fail-closed、确定性自状态摘要，反思作为显式输入生产者注入本 agent 循环 session —— 前置：`04.7`、`05.4` —— 复用目标：`plugin` 回调（随 state 代借用）、`model` 原生终局 —— 复用注意点：观察面 `⊆ read_namespaces ∪ {自身}`、自管判定走 evolution 包 `SelfManagedLineage` 单源（event 冻结豁免——判定属观察面政策，落点 evolution/observation.go 唯一派生点）；读失败门保持关闭不回落备用判据；digest 零 LLM、不阻塞、有界、复用同一次扫描结果（无二次扫链）—— 真实测试：`go test -race ./tests/integration/evolution -run '^TestReflectionScopeAndWatermark$' -count=10 -json`。
 
-- [ ] 07.2 实现 git 原生 refine 三操作：`register` 仅对显式 pathspec 内受控文件 `git add`+结构化 commit（`[self-improve]`）、`status` 改进台账、`rollback` 标记校验；越界拒绝且不动 git —— 前置：`03.3`、`01.6` —— 复用目标：宿主机 `git` CLI（经受控执行面）、`event`/governance 事件面 —— 复用注意点：MUST NOT 用 `git add -A`/`git commit -a` 或复用用户已 staged 内容（不卷用户 index）；非 git 仓返回具名错误但文件已按 mtime 热读生效；成功发 improvement 事件，**sha 仅作版本关联、不以 commit 时刻开评估窗**—— 真实测试：`go test ./tests/integration/evolution -run '^TestGitNativeRefine$' -count=10 -json`（**临时仓**，不动用户仓/用户 index）。
+- [x] 07.2 实现 git 原生 refine 三操作：`register` 仅对显式 pathspec 内受控文件 `git add`+结构化 commit（`[self-improve]`）、`status` 改进台账、`rollback` 标记校验；越界拒绝且不动 git —— 前置：`03.3`、`01.6` —— 复用目标：宿主机 `git` CLI（经受控执行面）、`event`/governance 事件面 —— 复用注意点：MUST NOT 用 `git add -A`/`git commit -a` 或复用用户已 staged 内容（不卷用户 index）；非 git 仓返回具名错误但文件已按 mtime 热读生效；成功发 improvement 事件，**sha 仅作版本关联、不以 commit 时刻开评估窗**—— 真实测试：`go test ./tests/integration/evolution -run '^TestGitNativeRefine$' -count=10 -json`（**临时仓**，不动用户仓/用户 index）。【M 回归重验：上游 03.3/01.6 重开，收口后重跑回归锚再勾选——见 midterm-review-response.md §四】
 
-- [ ] 07.3 实现激活时刻证据窗与后验评估：窗口锚 = 改进版本**首次被真实请求消费**的激活证据时刻（**非 commit/register 时刻**），窗口内前后版本请求按**真实消费版本**归因（GitSHA 仅关联）、feedback 版本章（sha=S）AND 真实消费版本精确 join、`judge_delay` 保留、评估输出**四态**（健康/劣化/样本不足/未到期），劣化只产建议事件不自动回滚；缺激活证据即**样本不足**（不猜 commit 时刻）—— 前置：`07.2`、`05.3` —— 复用目标：`model` 公开 LLM-judge 接点、OTel 提交后观测 —— 复用注意点：文件按 mtime 热读无需 register 即生效，故 t0 改 < t1 消费 < t2 register 为常态，窗口 MUST NOT 从 t2 起算而漏 t1；样本不足 MUST NOT 判健康、治理未启用时 DenialCount/CriticalCount 判据显式标注不可用（不以静默零值冒充无劣化）；框架不动手 revert；真实 LLM-judge 制品单列资源门—— 真实测试：`go test ./tests/integration/evolution -run '^TestPostActivationEvidence$' -count=10 -json`。
+- [x] 07.3 实现激活时刻证据窗与后验评估：窗口锚 = 改进版本**首次被真实请求消费**的激活证据时刻（**非 commit/register 时刻**），窗口内前后版本请求按**真实消费版本**归因（GitSHA 仅关联）、feedback 版本章（sha=S）AND 真实消费版本精确 join、`judge_delay` 保留、评估输出**四态**（健康/劣化/样本不足/未到期），劣化只产建议事件不自动回滚；缺激活证据即**样本不足**（不猜 commit 时刻）—— 前置：`07.2`、`05.3` —— 复用目标：`model` 公开 LLM-judge 接点、OTel 提交后观测 —— 复用注意点：文件按 mtime 热读无需 register 即生效，故 t0 改 < t1 消费 < t2 register 为常态，窗口 MUST NOT 从 t2 起算而漏 t1；样本不足 MUST NOT 判健康、治理未启用时 DenialCount/CriticalCount 判据显式标注不可用（不以静默零值冒充无劣化）；框架不动手 revert；真实 LLM-judge 制品单列资源门—— 真实测试：`go test ./tests/integration/evolution -run '^TestPostActivationEvidence$' -count=10 -json`。【M 回归重验：上游 05.3 重开，收口后重跑回归锚再勾选——见 midterm-review-response.md §四】
 
-- [ ] 07.4 实现结构评估门：Eval/Benchmark/ApplyGate 消费同一声明（OrgPlan）与同代执行绑定（StatePlan/租约），缺证据不报通过，门错误 `errors.Is/As` 因果保留 —— 前置：`01.5`、`02.4`；**不依赖**后验反思调度完成 —— 复用目标：组合根声明/绑定产物（跨域只读）、`model` 原生请求终局 —— 复用注意点：各门 MUST NOT 自建配置解析/影子结构；门失败保留具名根源 `Unwrap` 链（以可达性用例证明，不以文本包含代替）；无证据即 design-blocked/不通过；真实模型评估单列门控—— 真实测试：`go test ./tests/integration/evolution -run '^TestStructuralEvaluation$' -count=10 -json`；真实模型另列资源门 `-count=1`。
+- [x] 07.4 实现结构评估门：Eval/Benchmark/ApplyGate 消费同一声明（OrgPlan）与同代执行绑定（StatePlan/租约），缺证据不报通过，门错误 `errors.Is/As` 因果保留 —— 前置：`01.5`、`02.4`；**不依赖**后验反思调度完成 —— 复用目标：组合根声明/绑定产物（跨域只读）、`model` 原生请求终局 —— 复用注意点：各门 MUST NOT 自建配置解析/影子结构；门失败保留具名根源 `Unwrap` 链（以可达性用例证明，不以文本包含代替）；无证据即 design-blocked/不通过；真实模型评估单列门控—— 真实测试：`go test ./tests/integration/evolution -run '^TestStructuralEvaluation$' -count=10 -json`；真实模型另列资源门 `-count=1`。【M 重开：缺Completed探针冒充Eval/Benchmark——补差合同见 midterm-review-response.md §二】
 
 ## 新增问题修复
 
 （执行期发现的异常/缺口写在此节，格式：场景 → 根源 → 影响面。契约变化先回写 `design.md`，不静默塞进补丁。）
+
+## C 系列（概念收敛战役，见 ../../concept-slim-plan.md）
+- [x] 07.22 evolution 大参数面拆块（ObservationScan/ScannedFact/ReflectionConfig/TickOutcome）—— 验证：见 task-graph 07.22（静态锚+回归锚双轨）

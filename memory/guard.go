@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 
 	"github.com/SpellingDragon/tagent/event"
 )
@@ -13,26 +14,54 @@ import (
 // consults it before any destructive reclamation rather than assuming that an
 // absence of protection is safety.
 //
-// Protection is reference counted and owned by the shared resource, so a hold
-// outlives any single agent that relies on it. Constraints:
-//
-//   - a hold is released only when the last holder releases it, and both operations are idempotent;
-//   - the holder is the owner of the shared resource, not an individual agent, so closing one agent never releases a hold the shared store still needs;
-//   - a released hold means the reference takes part in the retention policy again, not that it became unreadable;
-//   - a storage tier whose recovery inventory or protection coordination is not ready reports that incomplete capability by name and performs no destructive reclamation, since a timeout or an absent capability is never a safe default.
+// The redline list (4 rules):
+// MUST keep a hold owned by the shared resource, so it outlives any single agent relying on it.
+// MUST answer whether a reference is still held before any destructive reclamation.
+// MUST NOT treat the absence of protection, a timeout or an absent capability as safety.
+// MUST NOT treat a released hold as an unreadable reference.
 type Guard interface {
-	// Hold registers one protection hold on the original of ref and is
-	// idempotent for the same holder.
-	Hold(ctx context.Context, ref OriginalRef) error
+	// Hold registers one protection hold on the original of ref for holder and
+	// returns the lease its release must carry back. Holding again as the same
+	// holder while the hold stands is idempotent: the hold counts once and the
+	// retry gets the lease it already holds, while a hold made after that holder
+	// released is a new hold with a fresh lease. A hold that names no holder is
+	// refused by name with ErrHolderRequired, so its release could always be
+	// recognized as the same hold.
+	Hold(ctx context.Context, ref OriginalRef, holder HolderID) (ProtectionLease, error)
 
-	// Release drops one hold on the original of ref, and is idempotent once the
-	// last holder has released it.
-	Release(ctx context.Context, ref OriginalRef) error
+	// Release drops the hold of holder on the original of ref under the lease
+	// that hold returned. Releasing a hold that has already been released is a
+	// no-op, so a repeated release is not an error; a release whose lease is not
+	// the current lease of the named hold is refused by name with ErrLeaseMismatch
+	// and leaves every hold standing, so a late or foreign lease never releases
+	// the protection another hold keeps. The original is unprotected only once
+	// the last holder has released it.
+	Release(ctx context.Context, ref OriginalRef, holder HolderID, lease ProtectionLease) error
 
 	// Protected reports whether the original of ref is still held, so a
 	// reclaimer asks before it reclaims anything.
 	Protected(ctx context.Context, ref OriginalRef) (bool, error)
 }
+
+// HolderID is the stable identity of one protection holder: the recovery
+// resource or unsettled obligation the hold protects, not the agent name and
+// not the owner of the reference it protects. It is stable across retries, so a
+// retried hold is recognized as the same hold and counts once, while two
+// holders on one original hold and release independently of each other.
+type HolderID string
+
+// ProtectionLease is the opaque token one accepted hold returns and its release
+// must carry back. A lease is fresh per hold: a retry of a hold that still
+// stands gets the same token, while a hold made after an earlier release gets a
+// new one, so a late release carrying the earlier token matches nothing and
+// releases nothing. Callers treat a lease as opaque: they never construct one,
+// and its encoding is not a contract.
+type ProtectionLease string
+
+// ErrLeaseMismatch reports a release whose lease is not the current lease of
+// the hold it names: a superseded token from before a re-hold, or a token that
+// belongs to another hold. The named hold stays held.
+var ErrLeaseMismatch = errors.New("memory: release carries a lease that is not the hold's current lease")
 
 // RecallOutcome names the classification of one exact recall result.
 type RecallOutcome int

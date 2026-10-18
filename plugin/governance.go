@@ -1,8 +1,6 @@
 package plugin
 
 import (
-	"context"
-
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -30,6 +28,11 @@ const (
 // RiskLevel grades the risk of one tool call, from low to critical. The
 // critical grade always takes the asynchronous approval path, and the grading
 // input is plain data: the tool name, the argument JSON and the trigger source.
+//
+// The zero value is not a grade a face renders: it reads as "no grade was
+// rendered". A ruling that receives it reads RiskMedium, so the call is ruled as
+// an ordinary mutating call instead of passing ungraded; a rule threshold that
+// carries it fires at every grade instead of at none.
 type RiskLevel string
 
 const (
@@ -97,10 +100,16 @@ type Decision struct {
 }
 
 // Governor renders the single pre-execution ruling for one tool call.
+//
+// The redline list (3 rules):
+// MUST render one ruling per call, over the one Before pass that call carries.
+// MUST NOT execute the call, and MUST NOT bypass a hold it rendered.
+// MUST NOT report a hold as a denial.
 type Governor interface {
-	// Judge returns the ruling for one tool call before its side effect runs.
-	// The ruling is rendered exactly once per call, from the parameter and
-	// identity already resolved for that call, and is used both for the
-	// execution and for the record. A hold is a wait, not a denial.
-	Judge(ctx context.Context, call *trpcmodel.ToolCall) (Decision, error)
+	// Judge returns the ruling for one tool call before its side effect runs,
+	// over the one Before pass the call carries: the final call, the risk grade
+	// the risk faces already rendered and the trigger source the dispatch
+	// stated. The ruling is rendered exactly once per call and is used both for
+	// the execution and for the record. A hold is a wait, not a denial.
+	Judge(pass CallPass) (Decision, error)
 }

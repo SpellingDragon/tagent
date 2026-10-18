@@ -29,13 +29,13 @@ const (
 // on.
 type EpisodeDependency struct {
 	// EpisodeID names the episode that depends on another.
-	EpisodeID event.EpisodeID
+	EpisodeID event.EpisodeID `json:"episode_id"`
 	// DependsOn names the episode it depends on.
-	DependsOn event.EpisodeID
+	DependsOn event.EpisodeID `json:"depends_on"`
 	// Kind classifies the dependency.
-	Kind DependencyKind
+	Kind DependencyKind `json:"kind"`
 	// Lineage states how certain the declared dependency is.
-	Lineage Lineage
+	Lineage Lineage `json:"lineage"`
 }
 
 // EpisodeGroup is one leakage free split unit: an episode together with every

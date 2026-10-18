@@ -23,8 +23,11 @@ import (
 // binding generation, closes a session's own side, and forwards the
 // notifications a task intends to deliver.
 //
-// The shared face is established before any candidate binding is prepared, so it
-// is never part of a candidate's revocable resources.
+// The redline list (4 rules):
+// MUST establish the shared face before any candidate binding is prepared.
+// MUST discard a candidate whose baseline was advanced during its preparation.
+// MUST NOT overwrite a newer publication with an expired candidate, or derive a new generation from byte-identical content.
+// MUST NOT default an address to a most-recent session or drop the accepted obligations of a closed site.
 type Store interface {
 	// Establish creates the session site for one explicit (agent, session)
 	// address on the given runtime instance and returns it. The address is never

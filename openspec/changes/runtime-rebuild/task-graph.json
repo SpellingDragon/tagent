@@ -85,10 +85,25 @@
         "00.3"
       ],
       "phase": "tooling",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "golden/runtime/architecture.json 与 golden/runtime/scenarios.json 可经检查器解析，断言含具体可比值而非仅键名（只读判据）"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-00.4",
+        "commands": [
+          "check_runtime_architecture --check-policy (ok)",
+          "check_runtime_evidence --check-contract (ok, 10 scenarios, S03 值级断言实证)"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "golden/runtime/architecture.json",
+          "golden/runtime/scenarios.json"
+        ]
+      }
     },
     {
       "id": "00.5",
@@ -97,10 +112,29 @@
         "00.4"
       ],
       "phase": "tooling",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-00.5",
+        "commands": [
+          "python3 -B -m unittest discover -s scripts -p test_check_runtime_*.py (OK, 含负控子进程断言——负控 exit 1 由测试内断言)",
+          "python3 scripts/check_runtime_plan.py --change-dir /nonexistent (负控自证: exit 1, 不计入本凭据)"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "scripts/check_runtime_plan.py",
+          "scripts/check_runtime_architecture.py",
+          "scripts/check_runtime_structure.py",
+          "scripts/check_runtime_evidence.py",
+          "scripts/runtime_checklib.py",
+          "scripts/test_check_runtime_*.py"
+        ]
+      }
     },
     {
       "id": "00.6",
@@ -109,10 +143,25 @@
         "00.5"
       ],
       "phase": "tooling",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "python3 -c \"import yaml;yaml.safe_load(open('.github/workflows/runtime-contracts.yml'))\" 退出 0 且无重复校验实现；规则变更附正反样例（只读判据）"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-00.6",
+        "commands": [
+          "unittest test_check_runtime_workflow (15 tests OK 含双负控)",
+          "tracked-hygiene=0 (主编排者补登 5 顶层目录后)"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          ".github/workflows/runtime-contracts.yml",
+          "scripts/test_check_runtime_workflow.py"
+        ]
+      }
     },
     {
       "id": "00.P0.1",
@@ -199,10 +248,26 @@
         "09.P0.1"
       ],
       "phase": "skeleton",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "骨架评审门：全部域 P0 done 后执行认真评审（CodeReview 子代理＋主代理亲自复核＋用户确认），产出评审记录后解锁阶段二；未过门派发任何 NN.M 属编排违规"
-      ]
+      ],
+      "evidence": {
+        "run_id": "gate-00P03-20261013",
+        "commands": [
+          "(第一道) CodeReview 子代理独立评审",
+          "(第二道) 主编排者复核 P2 全处置 + 全套验证 0",
+          "(第三道) 用户确认：/openspec-apply 继续推进"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/skeleton-review.md"
+        ]
+      }
     },
     {
       "id": "01.1",
@@ -212,10 +277,25 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/config -run '^TestConfigurationContract$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-01.1",
+        "commands": [
+          "go test TestConfigurationContract -count=10 (281 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "config/source.go",
+          "config/defaults.go",
+          "config/clone.go",
+          "tests/integration/config/config_contract_test.go"
+        ]
+      }
     },
     {
       "id": "01.2",
@@ -225,10 +305,25 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/state -run '^TestSessionAuthority$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-01.2",
+        "commands": [
+          "go test TestSessionAuthority -count=10 (61 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "state/authority.go",
+          "state/memory.go",
+          "state/mailbox.go",
+          "tests/integration/state/session_authority_test.go"
+        ]
+      }
     },
     {
       "id": "01.3",
@@ -239,10 +334,23 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/state -run '^TestMailboxConsumption$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-01.3",
+        "commands": [
+          "go test -race TestMailboxConsumption -count=10 (41 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "state/occupancy.go",
+          "tests/integration/state/mailbox_consumption_test.go"
+        ]
+      }
     },
     {
       "id": "01.4",
@@ -253,23 +361,66 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/state -run '^TestStateOwnsPipeline$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/state -run '^TestStateOwnsPipeline$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestFormalAssemblyRequiresGovernance$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺正式治理注入+Publisher借用退役+租约配置读源统一（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm1-01.4 完成（D-M1 波/波后 M 回归重验）",
+      "evidence": {
+        "run_id": "dm1-01.4",
+        "commands": [
+          "go test -race ./tests/integration/state -run ^TestStateOwnsPipeline$ -count=10 -json (40 pass/0 fail, 正锚零改动)",
+          "go test -race ./tests/integration/host -run ^TestFormalAssemblyRequiresGovernance$ -count=10 -json (40 pass/0 fail, 负锚: 无治理 ErrGovernanceMissing 拒建/rejectPolicy ErrCheckRefused/pass completed)",
+          "全回归 go test ./tests/integration/... -count=1 (10 包 ok); go build/vet/gofmt (0); check_runtime_architecture ok",
+          "R30 偏差评估五面达标; 编排者复跑六命令计数与战报逐一对上 (40/70/60/40/30/30)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "prepare.go",
+          "tests/integration/host/formal_assembly_requires_governance_test.go"
+        ]
+      }
     },
     {
       "id": "01.5",
       "domain": "01-state-binding",
       "depends_on": [
         "01.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/state -run '^TestGenerationPublication$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/state -run '^TestGenerationPublication$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestFormalPublishRefusesMissingEvidence$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺正式发布门固定通过（standGovernance）（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm2-01.5 完成（D-M2 波）",
+      "evidence": {
+        "run_id": "dm2-01.5",
+        "commands": [
+          "go test -race ./tests/integration/state -run ^TestGenerationPublication$ -count=10 -json (10/10 正锚零改动)",
+          "go test -race ./tests/integration/host -run ^TestFormalPublishRefusesMissingEvidence$ -count=10 -json (10/10 负锚: 缺 eval/零裁决均 ErrRequiredCheckMissing 拒、旧代不变、代记账证无新记录; 变异负控: 门固定通过必红)",
+          "全回归 10 包 ok (D-C1 级联后); go build/vet/gofmt (0); state/publish.go 零改动(无缺口, evaluate 先于 commitRecord 结构证明)",
+          "R30 偏差评估: 达标勾选; 代记账证明可接受性裁断通过"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/host/formal_publish_refuses_missing_evidence_test.go"
+        ]
+      }
     },
     {
       "id": "01.6",
@@ -279,10 +430,29 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/state -run '^TestFileAndStructuralChange$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/state -run '^TestFileAndStructuralChange$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestFileChangesReachNextRequest$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺prompt/skill正文未进实际请求（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm4-01.6 完成（D-M4 波）",
+      "evidence": {
+        "run_id": "dm4-01.6",
+        "commands": [
+          "go test -race ./tests/integration/state -run ^TestFileAndStructuralChange$ -count=10 -json (10/10 正锚)",
+          "go test -race ./tests/integration/host -run ^TestFileChangesReachNextRequest$ -count=10 -json (10/10 负锚: 文件改动后下一请求 Request 携带新版本正文, 假 provider 断言; Source A=fileFixer 请求边界固化)",
+          "全回归 10 包 ok; go build/vet/gofmt (0); 正文经 system 前缀进真实 GenerateContent"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "tests/integration/host/request_boundary_test.go"
+        ]
+      }
     },
     {
       "id": "01.P0.1",
@@ -371,10 +541,23 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/execution -run '^TestIdentityAndCommitContract$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-02.1",
+        "commands": [
+          "go test TestIdentityAndCommitContract -count=10 (61 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "task/admission.go",
+          "tests/integration/execution/identity_commit_contract_test.go"
+        ]
+      }
     },
     {
       "id": "02.2",
@@ -384,10 +567,25 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/execution -run '^TestTaskLifecycle$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-02.2",
+        "commands": [
+          "go test TestTaskLifecycle -count=10 (81 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "task/lifecycle.go",
+          "task/cancel.go",
+          "task/manager.go",
+          "tests/integration/execution/task_lifecycle_test.go"
+        ]
+      }
     },
     {
       "id": "02.3",
@@ -397,10 +595,32 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/execution -run '^TestNativeToolAdmission$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/execution -run '^TestNativeToolAdmission$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/capabilities -run '^TestFormalWrapperAdmission$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺file/skill绕wrapper+正式根无approver（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm1-02.3 完成（D-M1 波/波后 M 回归重验）",
+      "evidence": {
+        "run_id": "dm1-02.3",
+        "commands": [
+          "go test -race ./tests/integration/execution -run ^TestNativeToolAdmission$ -count=10 -json (70 pass/0 fail, 正锚零改动)",
+          "go test -race ./tests/integration/capabilities -run ^TestFormalWrapperAdmission$ -count=10 -json (30 pass/0 fail, 负锚: strict 无 approver 拒绝零执行零 task; 有 approver 三族真实 Receipt 结算原文)",
+          "全回归 10 包 ok; go build/vet/gofmt (0); comment_policy 本单主写面 0 finding",
+          "偏差4已修: deny 子测注释/名称收窄为实驱动面 (deny 路径三族共享)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "prepare.go",
+          "tests/integration/capabilities/formal_wrapper_admission_test.go"
+        ]
+      }
     },
     {
       "id": "02.4",
@@ -410,10 +630,23 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/execution -run '^TestModelTerminalProtocol$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-02.4",
+        "commands": [
+          "go test TestModelTerminalProtocol -count=10 (121 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "model/usage.go",
+          "tests/integration/execution/model_terminal_protocol_test.go"
+        ]
+      }
     },
     {
       "id": "02.5",
@@ -423,13 +656,37 @@
         "01.4",
         "02.3",
         "02.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/execution -run '^TestNativeConversationRoundTrip$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/execution -run '^TestNativeConversationRoundTrip$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/execution -run '^TestReceiptAndBackgroundStaySeparate$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺Receipt丢弃/await阻塞受理/回流绕mailbox/跨invocation不共享历史（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm2-02.5 完成（D-M2 波）",
+      "evidence": {
+        "run_id": "dm2-02.5",
+        "commands": [
+          "go test -race ./tests/integration/execution -run ^TestNativeConversationRoundTrip$ -count=10 -json (41 pass, 正锚级联强度不降)",
+          "go test -race ./tests/integration/execution -run ^TestReceiptAndBackgroundStaySeparate$ -count=10 -json (11 pass 负锚: 慢工具在途后续已受理 Receipt 可见/二次 Invoke 含前次历史/mailbox DetailRetired 记账/receipt 无结算正文无前缀)",
+          "全回归 10 包 ok; go build/vet/gofmt (0); check_runtime_architecture ok",
+          "六项补差逐句过(Receipt 入 transcript/后台观察回流不冒充第二次同步/受理不阻塞/mailbox 接纳/共享历史/原样透传); D-C1 跨叶级联 4 组断言改形后全绿; R30 裁断: role=user 观察(ToolID 保真)符合 contracts 不冒充条款"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/loop.go",
+          "run.go",
+          "tests/integration/execution/native_conversation_roundtrip_test.go",
+          "tests/integration/execution/receipt_background_separation_test.go"
+        ]
+      }
     },
     {
       "id": "02.6",
@@ -439,10 +696,33 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/execution -run '^TestPluginPhaseOrdering$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/execution -run '^TestPluginPhaseOrdering$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/capabilities -run '^TestFormalLoopEnforcesPolicy$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺Risk未接正式裁决+After产物丢弃（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm3-02.6 完成（D-M3 波/波后 M 回归）",
+      "evidence": {
+        "run_id": "dm3-02.6",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestFormalLoopEnforcesPolicy$ -count=10 -json (30 pass/0 fail, 负锚: strict 违规正式 Loop 零执行拒绝具名/judge 恰一次/After 缺口经 Run.Presentations 可读; 变异负控: 摘 CallPass 接线必红)",
+          "go test -race ./tests/integration/execution -run ^TestPluginPhaseOrdering$ -count=10 -json (80 pass/0 fail, 正锚级联: gap 子测改经 sink 读出强度不降)",
+          "全回归 10 包 ok; go build/vet/gofmt (0); check_runtime_architecture ok; 无 policy 行为逐字节不变(else 分支原逻辑保留)",
+          "R30 评估: 达标; NativeAgent.Plugins 供面+WithPolicy 占座语义文档明示; 02.3/04.5 语义未变"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/loop.go",
+          "run.go",
+          "tests/integration/capabilities/formal_loop_enforces_policy_test.go",
+          "tests/integration/execution/plugin_phase_ordering_test.go"
+        ]
+      }
     },
     {
       "id": "02.7",
@@ -452,10 +732,25 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/execution -run '^TestDelegationCompletion$' -count=10 -json"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 02.6 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg2-02.7 完成（D-M3 波/波后 M 回归）",
+      "evidence": {
+        "run_id": "mreg2-02.7",
+        "commands": [
+          "go test -race ./tests/integration/execution -run ^TestDelegationCompletion$ -count=10 -json (40 pass/0 fail)",
+          "M 回归重验: 上游 02.6 收口后重跑回归锚, 实现不判错零适配"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/execution/delegation_completion_test.go"
+        ]
+      }
     },
     {
       "id": "02.8",
@@ -465,10 +760,31 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/execution -run '^TestHandoffFutureNotifications$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/execution -run '^TestHandoffFutureNotifications$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/execution -run '^TestHandoffRoutingSurvivesRestart$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺Handoff未来路由无持久mutation/通知归属靠临时ctx（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | S1 已登记 contracts.md(handoff:<slot>:<json> 持久编码格式/slot 语义/唯一解析点) | dm4-02.8 完成（D-M4 波）",
+      "evidence": {
+        "run_id": "dm4-02.8",
+        "commands": [
+          "go test -race ./tests/integration/execution -run ^TestHandoffFutureNotifications$ -count=10 -json (70 pass 正锚)",
+          "go test -race ./tests/integration/execution -run ^TestHandoffRoutingSurvivesRestart$ -count=10 -json (10/10 负锚: Handoff→重启→新通知投新实例/旧通知冻结 envelope 不改投/归属取持久 Spec 非运输 ctx/重复运输幂等)",
+          "全回归 10 包 ok; Handoff 经冻结 Commit 端口持久 mutation(未扩冻结面); W1 注释勘误双处落笔(冻结路由语义纠偏); S1 持久编码已登记 contracts.md"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "task/handoff.go",
+          "task/manager.go",
+          "task/restore.go",
+          "tests/integration/execution/handoff_routing_survives_restart_test.go"
+        ]
+      }
     },
     {
       "id": "02.9",
@@ -478,10 +794,34 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/execution -run '^TestCloseDrainsObligations$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/execution -run '^TestCloseDrainsObligations$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestCloseRefusesWhileModelInFlight$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺在途工作与producer未登记Shutdown（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm5-02.9 完成（D-M5 波）",
+      "evidence": {
+        "run_id": "dm5-02.9",
+        "commands": [
+          "go test -race ./tests/integration/host -run ^TestCloseRefusesWhileModelInFlight$ -count=10 -json: 50 pass/0 fail; 负锚=模型在途未建 task 时 Close 得 Drained=false 加具名 Unsettled 两条 drive+model producer 未确认停止; 慢 producer 恒 false 不 Drained; cancel 后 tool.finished=false 即 WithoutCancel 真实停止确认; 拒新 ErrShutdownRefused 在排空前",
+          "go test -race ./tests/integration/execution -run ^TestCloseDrainsObligations$ -count=10 -json: 60 pass/0 fail 正锚不破",
+          "全回归 10 包 ok; go build/vet/gofmt 0; 正式链路 Assemble-Invoke-Close, producer 经 SetWatch+Track/Watch 登记于 loop.go drive/模型 producer 与 run.go 直接工具 producer",
+          "编排者 -count=1 抽验 host 负锚 PASS 附 P2 凭证; R30 有条件勾选经凭证回填解除; 02.9 战报残缺回传失败记流程缺陷 D1, 产物验收面直核成立"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/shutdown.go",
+          "agent/loop.go",
+          "run.go",
+          "tests/integration/host/close_refuses_while_model_in_flight_test.go",
+          "tests/integration/execution/close_drains_obligations_test.go"
+        ]
+      }
     },
     {
       "id": "02.P0.1",
@@ -645,10 +985,24 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/history -run '^TestOriginalReferenceIsolation$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-03.1",
+        "commands": [
+          "go test TestOriginalReferenceIsolation -count=10 (71 pass/0 fail)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "memory/original_store.go",
+          "memory/guard_memory.go",
+          "tests/integration/history/original_reference_isolation_test.go"
+        ]
+      }
     },
     {
       "id": "03.2",
@@ -658,10 +1012,26 @@
         "00.P0.3"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/history -run '^TestStorageCapabilities$' -count=10 -json；真实 rustviking 档另列资源门（-count=1）"
-      ]
+      ],
+      "evidence": {
+        "run_id": "phase2-03.2",
+        "commands": [
+          "go test -race TestStorageCapabilities -count=10 (pass; file 档具名 Skip 归 09.5 资源门, 零 mock)"
+        ],
+        "exit_codes": [
+          0
+        ],
+        "artifact_paths": [
+          "memory/config.go",
+          "memory/localfile.go",
+          "memory/segment_store.go",
+          "memory/rustviking_kv.go",
+          "tests/integration/history/storage_capabilities_test.go"
+        ]
+      }
     },
     {
       "id": "03.3",
@@ -669,13 +1039,38 @@
       "depends_on": [
         "02.2",
         "03.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/history -run '^TestDurableTaskRoundTrip$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/history -run '^TestDurableTaskRoundTrip$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/history -run '^TestRestoreRefusesChainWithoutSpec$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺Register首提不含Spec+Restore容忍零Spec（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm1-03.3 完成（D-M1 波/波后 M 回归重验）",
+      "evidence": {
+        "run_id": "dm1-03.3",
+        "commands": [
+          "go test -race ./tests/integration/history -run ^TestDurableTaskRoundTrip$ -count=10 -json (60 pass/0 fail, 级联: 删手工 Declare 换自包含断言)",
+          "go test -race ./tests/integration/history -run ^TestRestoreRefusesChainWithoutSpec$ -count=10 -json (30 pass/0 fail, 负锚: 正式 Register 重启 Restore Spec 在链; 缺 Spec ErrSpecMissing 且不报 Recovered)",
+          "全回归 10 包 ok; go build/vet/gofmt (0)",
+          "R30: fixture 仅构造损坏链, 驱动断言全走正式入口; task.Commit 冻结端口未扩 (specDeclarer 结构口)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "task/lifecycle.go",
+          "task/restore.go",
+          "run.go",
+          "tests/integration/history/restore_refuses_chain_without_spec_test.go",
+          "tests/integration/history/durable_task_round_trip_test.go"
+        ]
+      }
     },
     {
       "id": "03.4",
@@ -683,26 +1078,65 @@
       "depends_on": [
         "02.5",
         "03.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/history -run '^TestProjectionReplayAndBudget$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/history -run '^TestProjectionReplayAndBudget$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestRequestCarriesProjectedBudget$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺投影预算未接正式请求+ProjectedEntry镜像违D1（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | 回写项登记(波18): agent/loop.go roleOf(TypeTaskSettled→RoleTool) 与 observationOf(settled→RoleUser) 双轨口径——随本单 transcript 装配收口统一(建议 settled 观察统一 RoleUser)，现无实路径触发但属语义接缝 | 双轨勘误(波20): 已按注释边界落定——replay settled→tool(按其当年应答的 call 角色)、live observation→user(范围新输入)，不同路径不合并，原\"统一 RoleUser\"回写项由注释边界取代。W2 回写项: RequestChain.PartitionID 被 AttachReplay/requestBoundary 忽略(查键仅 SessionID)——键改完整链身份或注释收窄\"PartitionID 仅透传不参与隔离\"，二选一；S2: RequestChain 与 memory.ChainKey 字段同构属 D1 灰区，随 §五.7 agent→memory 边裁决一并记账 | dm4-03.4 完成（D-M4 波）",
+      "evidence": {
+        "run_id": "dm4-03.4",
+        "commands": [
+          "go test -race ./tests/integration/history -run ^TestProjectionReplayAndBudget$ -count=10 -json (10/10 正锚级联: G2.6 六场景重排强度不降)",
+          "go test -race ./tests/integration/host -run ^TestRequestCarriesProjectedBudget$ -count=10 -json (10/10 负锚: 预算投影进正式 Request.Messages 逐条 Content+冻结 role 对照)",
+          "全回归 10 包 ok; ProjectedEntry 镜像已删未换名再造(D1); RequestFace/BoundaryView 注入缝真消费 memory.AssembleBudget; roleOf/observationOf 双轨注释边界落定(勘误已登记); W2 PartitionID 查键/S2 ChainKey 同构已登记回写项"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/request_assembly.go",
+          "agent/loop.go",
+          "run.go",
+          "tests/integration/host/request_boundary_test.go",
+          "tests/integration/history/projection_replay_and_budget_test.go"
+        ]
+      }
     },
     {
       "id": "03.5",
       "domain": "03-history",
       "depends_on": [
         "03.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/history -run '^TestRecoveryBeforeReclamation$' -count=10 -json"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 03.3 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg-03.5 完成（D-M1 波/波后 M 回归重验）",
+      "evidence": {
+        "run_id": "mreg-03.5",
+        "commands": [
+          "go test -race ./tests/integration/history -run ^TestRecoveryBeforeReclamation$ -count=10 -json (70 pass/0 fail)",
+          "M 回归重验: 上游 03.3 收口后重跑回归锚, 实现不判错零适配 (正确命令: history 包)"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/history/recovery_before_reclamation_test.go"
+        ]
+      }
     },
     {
       "id": "03.6",
@@ -710,26 +1144,66 @@
       "depends_on": [
         "03.4",
         "03.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/history -run '^TestReplicaMaterialization$' -count=10 -json"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 03.4 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg3-03.6 完成（波21 M 回归重验）",
+      "evidence": {
+        "run_id": "mreg3-03.6",
+        "commands": [
+          "go test -race ./tests/integration/history -run ^TestReplicaMaterialization$ -count=10 -json (70 pass/0 fail)",
+          "M 回归重验: 上游 03.4 收口后重跑回归锚, 实现不判错零适配"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/history/replica_materialization_test.go"
+        ]
+      }
     },
     {
       "id": "03.7",
       "domain": "03-history",
       "depends_on": [
         "03.6",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/history -run '^TestReplicaCleanup$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/history -run '^TestReplicaCleanup$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/history -run '^TestReplicaLifecycleProtectsActiveUse$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺活跃保护未随物化/读写生命周期（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm6-03.7 完成（D-M6 波）",
+      "evidence": {
+        "run_id": "dm6-03.7",
+        "commands": [
+          "go test -race ./tests/integration/history -run ^TestReplicaLifecycleProtectsActiveUse$ -count=10 -json: 10/10 顶 pass 91 events/0 fail; 负锚 S0-S6 八子场景=保护注入具名拒/工作副本保护/真源变更 next-evaluate 重定影/保护随物化读写结束释放/父级链接拒/文件链接治愈/TOCTOU stress/启动遗留暂存件永不服务",
+          "go test -race ./tests/integration/history -run ^TestReplicaCleanup$ -count=10 -json: 10/10 61 events 正锚不破; TestReplicaMaterialization 10/10 71 events 03.6 回归锚不破",
+          "全回归十包加全仓 31 包 ok; NewMaterializer 扩变参源级兼容; evaluate 字节比对复用/重定影保持 G2.1/G2.5 冻结断言; 零手工 Acquire 脱离补线模式",
+          "空返重派后完成: 前次转发失败零产物 R6 验工作区后重派; R30 裁定可勾选; fragmentation+1 按既定裁决记账不上调 baseline"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "workspace/cleanup.go",
+          "workspace/replica.go",
+          "workspace/skeleton_assert.go",
+          "tests/integration/history/replica_lifecycle_protects_active_use_test.go"
+        ]
+      }
     },
     {
       "id": "03.8",
@@ -737,13 +1211,34 @@
       "depends_on": [
         "03.7",
         "04.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/history -run '^TestLargeResultRestart$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "m5-03.8",
+        "commands": [
+          "go test -race ./tests/integration/history -run ^TestLargeResultRestart$ -count=10 -json: 90 pass/0 fail(8 子锚x10+顶层x10); G1 同路同阈值四格式逐字节同预览/清副本独立进程恢复逐字节; G2 阈值对齐(31998 放行 31999 拦截)/nil 不拦截/原文未提交不发预览(puts==1 零预览)/副本写失败仍保留原文(ErrReplicaWriteFailed)",
+          "正式链消费者锚 G2.6: Assemble(NativeAgent.Tools 含 BoundedTool)-Invoke 全链, 二次请求结算观察含票据 key+65536 上限, 无消息长度>=原文字节, 原文 RecallFound 逐字节",
+          "正锚 TestDurableTaskRoundTrip/TestReplicaMaterialization 不破; DecideExternalize 结构化满足 plugin.ExternalizePolicy 零新边; 全回归十包绿",
+          "S3 注明: task/tmux/overflow 生产者调用点接线=09.1(组合根, 架构禁边 workspace-natural task), 本叶交付消费端口+G2.6"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "workspace/externalize.go",
+          "tests/integration/history/large_result_restart_test.go"
+        ]
+      },
+      "notes": " | m5-03.8 完成（波26）"
     },
     {
       "id": "03.P0.1",
@@ -826,13 +1321,39 @@
       "domain": "04-capabilities",
       "depends_on": [
         "02.6",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/capabilities -run '^TestNativeToolsAndSkillState$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/capabilities -run '^TestNativeToolsAndSkillState$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestNativeToolFamiliesAdmitted$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestSkillBodyReachesNextRequest$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺统一受理缺失+技能正文不入下一请求（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm4-04.1 完成（D-M4 波）",
+      "evidence": {
+        "run_id": "dm4-04.1",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestNativeToolsAndSkillState$ -count=10 -json (10/10 正锚级联: 计数 8→10+system 正文断言净增强)",
+          "go test -race ./tests/integration/host -run ^TestNativeToolFamiliesAdmitted$ -count=10 -json (10/10 负锚: 组合根解析 Tools 跳过 EvaluationCriterionRef, 三族进模型工具面)",
+          "go test -race ./tests/integration/host -run ^TestSkillBodyReachesNextRequest$ -count=10 -json (10/10 负锚: 技能 Body 进下一 Request, SkillLoads 去重恰现一次)",
+          "全回归 10 包 ok; 统一受理部分 D-M1 已闭(本单核验)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "tests/integration/host/request_boundary_test.go",
+          "tests/integration/capabilities/native_tools_test.go",
+          "tests/integration/capabilities/formal_wrapper_admission_test.go",
+          "tests/integration/capabilities/formal_loop_enforces_policy_test.go"
+        ]
+      }
     },
     {
       "id": "04.2",
@@ -840,26 +1361,67 @@
       "depends_on": [
         "02.9",
         "01.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/capabilities -run '^TestExecutionResourceLifecycle$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "dm9-04.2",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestExecutionResourceLifecycle$ -count=10 -json: 90 pass/0 fail(8 子测 x10+顶层 x10); 八子测=受理协议时序 journal 精确序 receipt-start-end-record-settle-stop-release/cancel 不停止 context.WithoutCancel 真停才释放/停止未确认 retained 拒二次/unknown 不 dead 只升级诊断/TTL 续行过期显式停止/重挂 Adopt 不二启/Scene B 正式入口全链/IsTmuxAvailable 真实 PATH 对拍加 monitor 按代加降级可观测加 compress 退役",
+          "资源门: fake exec 确定性假面承载实跑非空转, tmux 面只读对拍不冒充, 无 t.Skip 项",
+          "全回归 10 包 ok; build/vet/gofmt 0; check_runtime_architecture edge_violations=0(tool/exec 新边 os/exec+trpctool 已申报)",
+          "C1 已回写: state/resources.go 租约消费移交 05.x/05.4(task 行改写+05.4 notes 登记); MonitorConfig 四值已钉 contracts(30/60/90/120s); tool.go RunTool/ReleaseTool 白名单内(tool/exec 按包授权)经 R30 核"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tool/exec/exec.go",
+          "tool/exec/tmux.go",
+          "tool/exec/stop.go",
+          "tool/exec/decl.go",
+          "tool/exec/tool.go",
+          "tests/integration/capabilities/exec_lifecycle_test.go"
+        ]
+      },
+      "notes": " | dm9-04.2 完成（D-M9 波）"
     },
     {
       "id": "04.3",
       "domain": "04-capabilities",
       "depends_on": [
         "04.1",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/capabilities -run '^TestMCPProtocolLifecycle$' -count=10 -json；授权真实服务验证另列资源门"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 04.1 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg3-04.3 完成（波21 M 回归重验）",
+      "evidence": {
+        "run_id": "mreg3-04.3",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestMCPProtocolLifecycle$ -count=10 -json (110 pass/0 fail)",
+          "M 回归重验: 上游 04.1 收口后重跑回归锚, 实现不判错零适配"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/capabilities/mcp_lifecycle_test.go"
+        ]
+      }
     },
     {
       "id": "04.4",
@@ -867,26 +1429,69 @@
       "depends_on": [
         "02.9",
         "03.8",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11",
+        "04.21",
+        "04.22"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/capabilities -run '^TestAddressedDelivery$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | m5-04.4 完成（波30）",
+      "evidence": {
+        "run_id": "m5-04.4",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestAddressedDelivery$ -count=10 -json: 80 pass/0 fail(七子测x10+顶层); 显式目标只落该站/不猜三形态 ErrSendTargetMissing/重复投递 Duplicate 同 AcceptSeq 冻结/地址变更旧通知冻结/拒绝账三类具名/重试身份不变+ErrCallTargetConflict/正式链外置路径(Assemble-Invoke-BoundedTool-CallFrameFrom 归属)",
+          "变异回退自证: 关运行门-子测红/重试 1 次-子测红(非空转); 正锚 TestHandoffFutureNotifications 71/TestHandoffRoutingSurvivesRestart 11 不破",
+          "C1 修复(R30 W1): state/send.go 幂等预检查改持锁 noticeSeatOf(数据竞争消除), 锚 80/0 复绿+state 绿; 越界 tool/remote 两文件经核=任务行候选内; run.go 接线留 09.1(S1 残余=未授权重复投递读冻结回执, 09.1 处置)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "state/send.go",
+          "state/mailbox.go",
+          "tool/remote/a2a.go",
+          "tool/remote/send.go",
+          "tests/integration/capabilities/addressed_delivery_test.go"
+        ]
+      }
     },
     {
       "id": "04.5",
       "domain": "04-capabilities",
       "depends_on": [
         "02.6",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/capabilities -run '^TestGovernanceBeforeExecution$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/capabilities -run '^TestGovernanceBeforeExecution$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/capabilities -run '^TestCriticalCallsHoldThroughFormalPath$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺正式策略裁决未接线（rig手工补）（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm5-04.5 完成（D-M5 波）",
+      "evidence": {
+        "run_id": "dm5-04.5",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestCriticalCallsHoldThroughFormalPath$ -count=10 -json: 负锚=critical 调用正式路径 HoldReceipt/parked awaiting approval 非 Denied 零执行 probe 计数 0; DispositionHold; StatusAwaitingApproval; strict 违规零执行加拒绝事实与原生参数一致 Result.ToolID 与 ArgsDigest==plugin.ArgsDigest",
+          "go test -race ./tests/integration/capabilities -run ^TestGovernanceBeforeExecution$ -count=10 -json: 150 pass 含正锚不破",
+          "全回归 10 包 ok; 正式链路 Assemble WithPolicy=rulingRecorder 包装真实 plugin.Policy 后 Invoke-Query; 未违令改 run.go 经 R30 面1 核实; 战报残缺截断记流程缺陷 D1"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/capabilities/critical_calls_hold_through_formal_path_test.go"
+        ]
+      }
     },
     {
       "id": "04.6",
@@ -894,13 +1499,29 @@
       "depends_on": [
         "04.5",
         "03.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/capabilities -run '^TestGovernanceRecovery$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 解阻 2026-10-15：只读探针核实完成，主编排者裁决已落 04 域解阻记录（04.6 goal 状态词沿用 active/achieved/abandoned/expired+expired 派生态+epoch 防刷限；04.7 时间/类型薄映射做/关系轴自证不实施/融合限两值/embedder 留 09.5；QueryEvents 承载断层归 04.7 实施面） | 中期复审判为 M 回归重验（2026-10-15）：上游 04.5/03.3 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg4-04.6 完成（波21 M 回归重验）",
+      "evidence": {
+        "run_id": "mreg4-04.6",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestGovernanceRecovery$ -count=10 -json: 70 pass/0 fail",
+          "M 回归重验: 上游 04.5 与 03.3 收口后重跑回归锚, 实现不判错零适配"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/capabilities/governance_recovery_test.go"
+        ]
+      }
     },
     {
       "id": "04.7",
@@ -909,39 +1530,103 @@
         "03.4",
         "03.5",
         "04.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/capabilities -run '^TestRecallConsumer$' -count=10 -json；真实 embedding 另列资源门"
-      ]
+        "go test -race ./tests/integration/capabilities -run '^TestRecallConsumer$' -count=10 -json；真实 embedding 另列资源门",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/capabilities -run '^TestSearchRecallsFromRealStore$' -count=10 -json"
+      ],
+      "notes": " | 解阻 2026-10-15：只读探针核实完成，主编排者裁决已落 04 域解阻记录（04.6 goal 状态词沿用 active/achieved/abandoned/expired+expired 派生态+epoch 防刷限；04.7 时间/类型薄映射做/关系轴自证不实施/融合限两值/embedder 留 09.5；QueryEvents 承载断层归 04.7 实施面） | 中期复审重开（2026-10-15）：缺QueryEvents真实存储源未接线（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm8-04.7 完成（D-M8 波）",
+      "evidence": {
+        "run_id": "dm8-04.7",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestSearchRecallsFromRealStore$ -count=10 -json: 70 pass/0 fail/10 skip; 负锚=真实 FileSegmentStore 提交 5 事件 BodyFromEvent/Encode-LandEvent 落观察表-QueryEvents-StoreSearcher 召回上文逐字节等价; QueryEvents 先落表后可见 happens-before; RRF 融合序; 越权分区不出现; 异 scope 具名拒; 续页并集==全集; 资源门 skip=真实 embedder 端点缺合法 Skip 三态判定部分置 Fatal 分支在树",
+          "go test -race ./tests/integration/capabilities -run ^TestRecallConsumer$ -count=10 -json: 170 pass/0 fail 正锚不破",
+          "全回归十包 ok; build/vet/gofmt 0; 消费者口径裁决=负锚即具名消费者消费五文件全链(grep 实证唯一), 生产侧接线归属 04.9 检索路径接线面加 09.5 真实 embedding 承载, 不留无主孤岛",
+          "假产物重派后完成: 前次战报幻影(R15 写假成功)被 R30 抓出; 本次写后校验三连逐文件留证 ls/wc/grep; memory/ 五文件为保留资产零改动(git diff 0 行)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/capabilities/search_real_store_test.go",
+          "memory/store_query.go",
+          "memory/search/store_searcher.go",
+          "memory/event_body.go",
+          "memory/embedder_hash.go",
+          "memory/partition.go"
+        ]
+      }
     },
     {
       "id": "04.8",
       "domain": "04-capabilities",
       "depends_on": [
         "04.7",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/capabilities -run '^TestMemoryCuration$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "dm10-04.8",
+        "commands": [
+          "go test -race ./tests/integration/capabilities -run ^TestMemoryCuration$ -count=10 -json: 60 pass/0 fail(5 子测+顶层); 断言=价值评估纯函数/整理触发/固化物因果关联内容寻址/不改写原始事实原文逐字节/三通道互斥穷尽 retain-evict-protect/淘汰唯一走 Lifecycle.Delete 墓碑通道/引用保护 ErrProtected",
+          "全回归 10 包 ok; build/vet/gofmt 0; MinScore 5-6 校准为测试参数抬地板不改引擎语义(申报)"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/curation.go",
+          "tests/integration/capabilities/memory_curation_test.go"
+        ]
+      },
+      "notes": " | dm10-04.8 完成（D-M10 波） | 问题脉络映射(波42): R4 残余=并发跨 session 串场专项测试缺口(P4 验证面, 原申报未做)——待补专项测试"
     },
     {
       "id": "04.9",
       "domain": "04-capabilities",
       "depends_on": [
         "04.7",
-        "00.P0.3"
+        "00.P0.3",
+        "00.11"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/capabilities -run '^TestRecallEvaluation$' -count=1 -json（需授权检索资源与启用门；保留零增益与失败）"
-      ]
+      ],
+      "evidence": {
+        "run_id": "dm10-04.9",
+        "commands": [
+          "go test ./tests/integration/capabilities -run ^TestRecallEvaluation$ -count=10 -json: 40 pass/0 fail/10 skip(3 子测+顶层); 断言=组合根生产接线消费 04.7 资产(supplyRetrieval-ObserveStore-StoreSearcher RRF)/召回报告写仓外/评测保留零增益与失败不美化(gain-zero-gain-failed 各 1 totals 诚实)/ErrRetrievalUnwired 具名拒/counting embedder 装配期恰 5 向量",
+          "资源门: R24 真实端点 0-3 缺门合法 t.Skip 不结项——真实资源腿(检索路径真实档)挂 09.5 欠账, -count=1 真实资源实跑为结项条件(D3 明写); 确定性 HashEmbedder 承载实跑非空转",
+          "run.go 组合根最小面申报: import memory/search(预登记边)/ErrRetrievalUnwired/WithEmbedder/supplyRetrieval/Run.Recall/Close nil 守卫; 与 05.4 explain 面并行双写合体零遮蔽(R30 核)",
+          "D2 挂账: Run.record 未接 StoreEvent 写入侧(正式链工具产物不经 Run.Recall 召回)——登记 09.5 后续面显式回写项(见 09.5 notes)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "tests/integration/capabilities/recall_evaluation_test.go"
+        ]
+      },
+      "notes": " | dm10-04.9 完成（D-M10 波） | 问题脉络映射(波42): R2 残余=Renew 零消费者——长任务执行中续租调用点缺失(租约到期仍收割长任务, P2 变体); 待补调用点或具名收缩"
     },
     {
       "id": "04.P0.1",
@@ -1098,26 +1783,75 @@
         "01.3",
         "01.5",
         "02.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestQueryShowsPublishedAgentState$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺公开投影压状态+配置租约读源错接（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm3-05.1 完成（D-M3 波/波后 M 回归）",
+      "evidence": {
+        "run_id": "dm3-05.1",
+        "commands": [
+          "go test -race ./tests/integration/inspection -run ^TestRuntimeInventory$ -count=10 -json (80 pass/0 fail, S7 新增六维逐项保真断言)",
+          "go test -race ./tests/integration/host -run ^TestQueryShowsPublishedAgentState$ -count=10 -json (40 pass/0 fail, 负锚: Publish 新 agent 后 configured 态可见/三读数四读数原生态四相各自可辨/统计从明细派生)",
+          "级联: TestQueryAuthorizationAndCursor S5 子测(视图进出具名) 1→2 upsert 适配(通知相变+承接会话邮箱读数推进)——锚名勘误(W1: 非 TestRuntimeInventory S5)",
+          "全回归 10 包 ok; 三红线守住(只读投影/单真源/授权过滤先于统计); §五.2 待核(Query lease 授权归属)已随 scopeCovers/refAllowed 授权过滤收口(S1 注明)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "query/snapshot.go",
+          "query/types.go",
+          "query/skeleton_assert.go",
+          "tests/integration/host/query_shows_published_agent_state_test.go",
+          "tests/integration/inspection/runtime_inventory_test.go",
+          "tests/integration/inspection/query_auth_cursor_test.go"
+        ]
+      }
     },
     {
       "id": "05.2",
       "domain": "05-inspection",
       "depends_on": [
         "05.1",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/inspection -run '^TestSnapshotPagesWithinByteBudget$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺单快照对象/字节无界（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm5-05.2 完成（D-M5 波）",
+      "evidence": {
+        "run_id": "dm5-05.2",
+        "commands": [
+          "go test -race ./tests/integration/inspection -run ^TestSnapshotPagesWithinByteBudget$ -count=10 -json: 负锚=countingSource 证物化量上界 built 小于预算 小页不物化全量; OmittedObjects 与 ErrSnapshotBudgetExceeded 具名截断拒绝; 分页拼接 DeepEqual 不破",
+          "go test -race ./tests/integration/inspection -run ^TestQueryAuthorizationAndCursor$ -count=10 -json: 130 pass; 同命令组 TestRuntimeInventory 80 pass, 05.1 六维保真不破",
+          "全回归 10 包 ok; Budget MaxObjects+MaxBytes 加 DefaultBudget 4096 对象 4MiB 字节; NewBoundedProjection; Run.Query 结构性消费 DefaultBudget; 预算作用域=read 路径 Follow 增量另面 doc 明示"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "query/snapshot.go",
+          "query/types.go",
+          "query/inventory.go",
+          "query/skeleton_assert.go",
+          "tests/integration/inspection/snapshot_budget_test.go"
+        ]
+      }
     },
     {
       "id": "05.3",
@@ -1125,14 +1859,38 @@
       "depends_on": [
         "02.6",
         "05.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/inspection -run '^TestObservationDoesNotOwnState$' -count=10 -json",
-        "资源门（09.5 消费，归属 05.3）：go test ./tests/integration/inspection -run '^TestRealCollectorDelivery$' -count=1 -json（真实 collector 接收非空 span/metric；启用门+授权，缺门可 Skip、必验项 Skip 不结项；不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收）"
-      ]
+        "资源门（09.5 消费，归属 05.3）：go test ./tests/integration/inspection -run '^TestRealCollectorDelivery$' -count=1 -json（真实 collector 接收非空 span/metric；启用门+授权，缺门可 Skip、必验项 Skip 不结项；不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收）",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/inspection -run '^TestObservationReachDiagnostics$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺telemetry/After未挂正式装配（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm8-05.3 完成（D-M8 波）",
+      "evidence": {
+        "run_id": "dm8-05.3",
+        "commands": [
+          "go test -race ./tests/integration/inspection -run ^TestObservationReachDiagnostics$ -count=10 -json: 40 pass/0 fail; 负锚=After 产物经正式装配 observePlugin-commit-observer 消费; 缺口具名 Plugin==commit-observer 可从诊断读到不丢弃; 观察不建第二真源(有无观察 Query 读面 DeepEqual 反证); 事实逐字节保真",
+          "go test -race ./tests/integration/inspection -run ^TestObservationDoesNotOwnState$ -count=10 -json: 60 pass/0 fail 正锚不破",
+          "资源门 TestRealCollectorDelivery 合法 t.Skip 不结项(OTEL_EXPORTER_OTLP_ENDPOINT 缺)留 09.5 授权预算下跑, 未以 06.3 RL 队列封账冒充 collector 接收",
+          "facts 账本单一真源核验: map[EventID]Event 单写点 record 双读点 resolveFact/runFacts 全 r.mu 保护(R30 面B 达标)",
+          "对账点名: TestCaptureAdmissionAndSeal go test ./tests/integration/learning -run ^TestCaptureAdmissionAndSeal$ -count=10 -json 10/10 绿——该测试属 06.3 RL 队列封账, 本次核对确认其未被用作 collector 接收证明(资源门仍以 TestRealCollectorDelivery 为准且 Skip 不结项)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "tests/integration/inspection/observation_reach_diagnostics_test.go"
+        ]
+      }
     },
     {
       "id": "05.4",
@@ -1141,13 +1899,35 @@
         "03.3",
         "04.2",
         "05.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 回写项登记(波24): 消费 tool/exec.Manager.Explain/租约账(TTL/Renew/Sweep 计数面)与根接线——04.2 移交项, 05.4 候选 query/explain.go 承载 | dm10-05.4 完成（D-M10 波）",
+      "evidence": {
+        "run_id": "dm10-05.4",
+        "commands": [
+          "go test -race ./tests/integration/inspection -run ^TestExplainRuntimeBlockers$ -count=10 -json: 70 pass/0 fail(6 子测+顶层); 断言=blocker 具名 Ref/Notice/Reason 逐字/LeaseRetention 逐字段对拍 Manager.Explain 计数面/授权过滤先于列与计数/重复读 DeepEqual 不建第二真源/重启恢复欠义务列 advancer/未确认停止保留 unknown 只升诊断不判死",
+          "正锚三包 271 pass 不破(TestRuntimeInventory/TestQueryAuthorizationAndCursor/TestObservationDoesNotOwnState)",
+          "波24 回写项承接成立: 消费 tool/exec.Manager.Explain/租约账(TTL-Renew-Sweep 计数面)经 WithExecManager+ExecLeaseExplainer 生产适配器+Run.Explain 根接线",
+          "D1 追认: 实施方自勾 tasks.md 行(白名单外写 openspec, 越权已申报)——编排者/评估门追认勾选内容属实(锚 70 绿), 后续波次明令实施方禁写 openspec"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "query/explain.go",
+          "run.go",
+          "tests/integration/inspection/blocker_explain_test.go"
+        ]
+      }
     },
     {
       "id": "05.P0.1",
@@ -1232,13 +2012,34 @@
       "domain": "06-learning",
       "depends_on": [
         "02.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/learning -run '^TestCausalTrainingRecords$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/learning -run '^TestFormalInvokeProducesTrainingRecords$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺正式根无Recorder/Episode输入/记录错误静默（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm4-06.1 完成（D-M4 波）",
+      "evidence": {
+        "run_id": "dm4-06.1",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestCausalTrainingRecords$ -count=10 -json (10/10 正锚零改动)",
+          "go test -race ./tests/integration/learning -run ^TestFormalInvokeProducesTrainingRecords$ -count=10 -json (10/10 负锚: 正式 Invoke 产 episode/decision/attempt 三记录; 无 Episode 零 episode 记录不猜; failingRecorder 下 loss 账精确 episode1+decision2+attempt2)",
+          "全回归 10 包 ok; WithRecorder→rl.NewRecorderAdapter 正式挂接; RecordingLoss 显式账无静默吞错"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/loop.go",
+          "run.go",
+          "tests/integration/learning/formal_invoke_records_test.go"
+        ]
+      }
     },
     {
       "id": "06.2",
@@ -1246,26 +2047,72 @@
       "depends_on": [
         "02.4",
         "06.1",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/learning -run '^TestCaptureFidelityAndRedaction$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/learning -run '^TestFormalRequestSnapshotHasNoSecrets$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺安全快照未接正式请求边界（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm6-06.2 完成（D-M6 波）",
+      "evidence": {
+        "run_id": "dm6-06.2",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestFormalRequestSnapshotHasNoSecrets$ -count=10 -json: 40 pass/0 fail; 负锚=快照固定于 GenerateContent 前且 JSON 字节全等模型可见 Request 含 prompt/skill/投影/历史全量; 密钥边界零泄漏 USERINFO/QUERY 凭据不进快照含 [redacted] 而 provider 实收保留原凭据; 工具 result 不冒充请求快照",
+          "go test -race ./tests/integration/learning -run ^TestCaptureFidelityAndRedaction$ -count=10 -json: 121 pass/0 fail 正锚零改动",
+          "全回归十包 ok; go build/vet/gofmt 0; RequestSnapshotFace 签名携 state.AgentBinding 避 agent-config 新边经 R30 核; D4 已修 RequestSnapshots Godoc 收窄为结构层副本如实声明 ContentParts 共享",
+          "R30 裁定可勾选: 负锚真/正式链真 Assemble-Invoke/rl 零改动"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/loop.go",
+          "run.go",
+          "tests/integration/learning/formal_request_snapshot_test.go"
+        ]
+      }
     },
     {
       "id": "06.3",
       "domain": "06-learning",
       "depends_on": [
         "06.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/learning -run '^TestCaptureAdmissionAndSeal$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/learning -run '^TestCaptureAdmissionAndSeal$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/learning -run '^TestFormalChainSealsCapture$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺CaptureSink/writer未接正式生产链（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm9-06.3 完成（D-M9 波）",
+      "evidence": {
+        "run_id": "dm9-06.3",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestFormalChainSealsCapture$ -count=10 -json: 40 pass/0 fail(4 测 x10); 负锚三子测=封账可读回(manifest-Sealed/Records==5/SHA256 对盘/ParseLine 逐条真实身份)加 loss 显式账(MaxRecordBytes 全拒 5 条 ErrCaptureRefused 1/2/2 进 RecordingLosses)加封账不冒充(拒收 Records==0/Dropped==5/Partial/写失败 Admitted5/WriteErrors5/Written0/封后 BoundClosed 拒/二次 Seal 冻结)",
+          "go test -race ./tests/integration/learning -run ^TestCaptureAdmissionAndSeal$ -count=10 -json: 110 pass/0 fail 正锚零回归(sink 重构 Record 语义未动)",
+          "flaky 修复: TestFormalChainSealsCapture 的 ledger/losses 断言从 Seal(异步队列 drain 完成点)前移到 Seal 后, 断言内容零变化(前后对照=ledger Admitted5/WriteErrors5/Written0/InFlight0 与 losses==0 格式串逐字保留仅位置平移); 12/12 稳定复验; 判定=同步缺陷修复非改断言绕过(R30 裁断)",
+          "正式链路: CaptureSink 实现 rl.Recorder 三方法经 WithRecorder-RecorderAdapter-loop 正式注入, run.go/loop 零改动(接口无新触点); fragmentation 按规则-结构错配记账(learning #trajectory-capture 组 3-4 文件, 实测 finding 数口径)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/sink.go",
+          "rl/skeleton_assert.go",
+          "tests/integration/learning/formal_chain_seal_test.go"
+        ]
+      }
     },
     {
       "id": "06.4",
@@ -1273,52 +2120,147 @@
       "depends_on": [
         "03.3",
         "06.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json"
-      ]
+        "go test -race ./tests/integration/learning -run '^TestAuthorizedTrainingExport$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/learning -run '^TestExportTracesFormalRecords$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺ExportSource无正式来源（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm10-06.4 完成（D-M10 波）",
+      "evidence": {
+        "run_id": "dm10-06.4",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestAuthorizedTrainingExport$ -count=10 -json: 160 pass/0 fail(15 子测+顶层) 正锚断言集零删改",
+          "go test -race ./tests/integration/learning -run ^TestExportTracesFormalRecords$ -count=10 -json: 50 pass/0 fail(4 子测+顶层); 负锚三要件=无授权 ErrExportUnauthorized 先于任何读(src.calls==0)/逐样本与存储行逐字节对账双向必红/loss 不冒充(failingAfterWriter Admitted5-Written2-WriteErrors3 恒等式+失败记录绝不冒充样本)/篡改拒读 Unsealed-Mismatch 零写入",
+          "CaptureExportSource 读正式链产物(seal SHA256 复核)非 fake source; %w 双包裹错误链可 errors.Is 路由; run.go 零改动申报属实",
+          "D4 discharge: 编排者 -count=1 抽验 MemoryCuration/ExportTracesFormalRecords 双 PASS 附证"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/export_source.go",
+          "rl/export.go",
+          "tests/integration/learning/formal_export_trace_test.go",
+          "tests/integration/learning/authorized_export_test.go"
+        ]
+      }
     },
     {
       "id": "06.5",
       "domain": "06-learning",
       "depends_on": [
         "06.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17",
+        "06.21"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/learning -run '^TestSFTCleaningContract$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | m5-06.5 完成（波29）",
+      "evidence": {
+        "run_id": "m5-06.5",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestSFTCleaningContract$ -count=10 -json: 20 pass/0 fail(16 子测+顶层); CleanSFT 12 种具名 SFTGapKind 无静默默认/清洗记录+失败显式账(按 gap kind 聚合)/不改旧数据(sha256 逐条比对)/role mask 语义/资格矩阵三行四要素不外推/因果分组防泄漏 sha256 定侧/v2 只读路由",
+          "正锚三锚不破: TestAuthorizedTrainingExport/TestExportTracesFormalRecords/TestModelReplacementLifecycle 全绿; 消费者证据=正式链 Assemble-Invoke-CaptureSink-Export-Snapshot",
+          "W1-① 落地: SplitDeclaration{SplitSeed,TrainRatio} 配置面归位(2f), SFTCleanRequest 6-5 达标免豁免(baseline 行出表); D2 观察项=负锚覆盖 7/12 gap kind 留 06.6 补齐",
+          "拆三文件申报(sft/sft_convert/sft_qualification=500 行硬门驱动, R30 裁定可接受); D5 路径勘误已回写 tasks.md"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/sft.go",
+          "rl/sft_convert.go",
+          "rl/sft_qualification.go",
+          "tests/integration/learning/sft_cleaning_test.go"
+        ]
+      }
     },
     {
       "id": "06.6",
       "domain": "06-learning",
       "depends_on": [
         "06.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17",
+        "06.21"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/learning -run '^TestSFTConsumer$' -count=1 -json（需真实 tokenizer/制品与授权；不以替身结项）"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | m5-06.6 完成（波30）",
+      "evidence": {
+        "run_id": "m5-06.6",
+        "commands": [
+          "go test ./tests/integration/learning -run ^TestSFTConsumer$ -count=1 -json: 26 pass/0 fail; 机制面确定性实跑=token mask 分侧(action 侧 token 数==动作字节)/制品 JSONL 序列化 DeepEqual/18 具名拒绝表/常量替身拒收(encoder_constant)/collate pad 语义",
+          "资源门(R24 三态): 真实 tokenizer/chat template/制品面=无门合法 Skip 标注未验证挂 09.5(W1 勾选口径: 该面不计完成, 不以替身结项); 门若声明但坏=Fatal 已实装; S4 已修 t.Logf->t.Skipf 形式一致",
+          "正锚 TestSFTCleaningContract 21 不破; C3 已登记: loss=1 落 action 全侧语义若 09.5 改尾 span 须同步改 Verify 契约+两断言(具名级联)",
+          "拆两文件(500 行硬门)/函数型端口(SFTSourceTokenizer)避 S4 范例面/结构全<=5f 零豁免申报"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/sft_artifact.go",
+          "rl/sft_consumer.go",
+          "tests/integration/learning/sft_consumer_test.go"
+        ]
+      }
     },
     {
       "id": "06.7",
       "domain": "06-learning",
       "depends_on": [
         "06.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/learning -run '^TestFeedbackHTTPContract$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "m5-06.7",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestFeedbackHTTPContract$ -count=10 -json: 130 pass/0 fail(12 子测x10+顶层x10); 内容寻址身份幂等/derive-on-change 不改旧(r1 unrated 不动 r2 新实例)/409 冲突零写入/重启归属版本保持/逐跳重定向复核(越权 hop 零触达)/大小限制双端/目的地校验",
+          "正式链: formalRun-formalInvoke-sink.Seal-CaptureExportSource-cli.Serve 真 TCP; 双门认证(08.1 外门+rl 自门常数时间)401 零副作用三账全空",
+          "正锚 TestAuthorizedTrainingExport/TestExportTracesFormalRecords 不破; 全回归十包绿",
+          "W1 勾选口径: 确定性契约锚 12 子测绿; 真实端点单次门控未验证(缺凭据, 按 spec 标注未验证, 挂 09.5 补 -count=1 补凭据后方可称该面完成); S2 登记: 同波 rl 文件纯注释调整=rl/export.go 6 处+feedback.go 2 处+reward_ledger.go 2 处(零逻辑, comment_policy 共享门合规)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/feedback_endpoint.go",
+          "rl/feedback_resolver.go",
+          "rl/http.go",
+          "cli.go",
+          "tests/integration/learning/feedback_http_test.go"
+        ]
+      },
+      "notes": " | m5-06.7 完成（波26）"
     },
     {
       "id": "06.8",
@@ -1326,13 +2268,37 @@
       "depends_on": [
         "01.5",
         "06.7",
-        "00.P0.3"
+        "00.P0.3",
+        "00.17"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/learning -run '^TestModelReplacementLifecycle$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "m5-06.8",
+        "commands": [
+          "go test -race ./tests/integration/learning -run ^TestModelReplacementLifecycle$ -count=10 -json: 顶层 10/10+4 子测x10 全 0 fail; 四子测=替换后绑新不改旧/重建失败不发布错误绑定/在途请求持旧版本至流结束/重启按持久版本恢复不跨版本串绑; mutation probe 非空转(ParseModelIdentity 清版本→4 子测红→还原复绿)",
+          "正式链全通: Assemble-Invoke-Publish-capture-Seal-FeedbackEndpoint-cli.Serve 真 TCP; 版本归属通路=Response.Model 自述-AttemptOf-记录链 ModelVersion-跨版本混证 ErrRewardVersionConflict 具名拒",
+          "正锚 TestAuthorizedTrainingExport 16/TestExportTracesFormalRecords 5/TestFeedbackHTTPContract 13 不破; 全回归十包绿",
+          "S2 类别豁免(编排者裁决): 五记录 schema=序列化保真面非配置选择面(元规则一: S2 领域事实=实现者选择数; 拆块=序列化复杂化违数据原样透传), baseline 具名豁免; FeedbackEndpointConfig 配置面留 06.21 收敛(W1 剔出豁免块)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/replacement.go",
+          "rl/record.go",
+          "rl/produce.go",
+          "rl/reward_ledger.go",
+          "tests/integration/learning/model_replacement_test.go"
+        ]
+      },
+      "notes": " | m5-06.8 完成（波27）"
     },
     {
       "id": "06.P0.1",
@@ -1418,13 +2384,38 @@
       "depends_on": [
         "04.7",
         "05.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/evolution -run '^TestReflectionScopeAndWatermark$' -count=10 -json"
-      ]
+      ],
+      "evidence": {
+        "run_id": "m5-07.1",
+        "commands": [
+          "go test -race ./tests/integration/evolution -run ^TestReflectionScopeAndWatermark$ -count=10 -json: 80 pass/0 fail(7 子测x10+顶层x10; S1 口径勘误=申报 8 项混入父测); 观察面越界具名拒/水位 fail-closed 三态(损坏/未接线/链不可读)各具名因+双正控证非空转/防重放(ErrReflectionNotPending/KeyMismatch)/让位不烧窗口/重启自锁/digest 确定性零 LLM(QueryEvents 计数=1)",
+          "消费者锚: agent.NewLoop-Drive 真实循环注入 ReflectionInput(Type=external_input/trigger_source=meditation/[reflection] 正文入模型请求), 原始事实逐字段未变",
+          "正锚 TestStructuralEvaluation/TestEvalRejectsWrongContentCompletion/TestGitNativeRefine 不破; 全回归十包绿; 架构门 ok(evolution 不 import plugin, 测试侧断言)",
+          "W2/W3 文书闭合已落: spec 水位场景改水位不可建立+新增引导态场景; 任务行 SelfManagedLineage 落点改 evolution 单源(event 冻结豁免, 观察面政策)——实现与文书一致化, 代码不回收"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "evolution/observation.go",
+          "evolution/reflection.go",
+          "evolution/reflection_scope.go",
+          "evolution/watermark.go",
+          "evolution/digest.go",
+          "tests/integration/evolution/reflection_scope_watermark_test.go"
+        ]
+      },
+      "notes": " | m5-07.1 完成（波26）"
     },
     {
       "id": "07.2",
@@ -1432,13 +2423,29 @@
       "depends_on": [
         "03.3",
         "01.6",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/evolution -run '^TestGitNativeRefine$' -count=10 -json（临时仓）"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 03.3/01.6 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg3-07.2 完成（波21 M 回归重验）",
+      "evidence": {
+        "run_id": "mreg3-07.2",
+        "commands": [
+          "go test -race ./tests/integration/evolution -run ^TestGitNativeRefine$ -count=10 -json (80 pass/0 fail)",
+          "M 回归重验: 上游 03.3/01.6 收口后重跑回归锚, 实现不判错零适配"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/evolution/git_native_refine_test.go"
+        ]
+      }
     },
     {
       "id": "07.3",
@@ -1446,13 +2453,29 @@
       "depends_on": [
         "07.2",
         "05.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/evolution -run '^TestPostActivationEvidence$' -count=10 -json"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 05.3 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg5-07.3 完成（波23 M 回归）",
+      "evidence": {
+        "run_id": "mreg5-07.3",
+        "commands": [
+          "go test ./tests/integration/evolution -run ^TestPostActivationEvidence$ -count=10 -json: 80 pass/0 fail",
+          "M 回归重验: 上游 05.3 收口后重跑回归锚, 实现不判错零适配"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/evolution/post_activation_evidence_test.go"
+        ]
+      }
     },
     {
       "id": "07.4",
@@ -1460,13 +2483,37 @@
       "depends_on": [
         "01.5",
         "02.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test ./tests/integration/evolution -run '^TestStructuralEvaluation$' -count=10 -json；真实模型评估单列门控"
-      ]
+        "go test ./tests/integration/evolution -run '^TestStructuralEvaluation$' -count=10 -json；真实模型评估单列门控",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/evolution -run '^TestEvalRejectsWrongContentCompletion$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺Completed探针冒充Eval/Benchmark（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm3-07.4 完成（D-M3 波/波后 M 回归）",
+      "evidence": {
+        "run_id": "dm3-07.4",
+        "commands": [
+          "go test -race ./tests/integration/evolution -run ^TestStructuralEvaluation$ -count=10 -json (80 pass/0 fail, 正锚六子测+新增判据子测)",
+          "go test -race ./tests/integration/evolution -run ^TestEvalRejectsWrongContentCompletion$ -count=10 -json (40 pass/0 fail, 负锚: 内容错误但 Completed 不能过 Eval(ErrCriterionNotMet)/ApplyGate 零驱动消费 evidenceRecord/正式 Publish 面拒)",
+          "全回归 10 包 ok; 真机判 TrimSpace 比对; 判据载体=Tools 的 EvaluationCriterionRef 无影子结构; 集成提示已由编排者登记 contracts.md(W2)",
+          "R30 评估: 达标; 测试改名合并 structural_test.go(测试名未漂移零断言丢失); fragmentation 21 条定性=规则-结构错配(00.6/09.3 改规则,不上调 baseline)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "evolution/criteria.go",
+          "evolution/structural.go",
+          "evolution/gate.go",
+          "tests/integration/evolution/structural_test.go"
+        ]
+      }
     },
     {
       "id": "07.P0.1",
@@ -1553,13 +2600,38 @@
       "depends_on": [
         "02.9",
         "05.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
-        "go test ./tests/integration/host -run '^TestPublicRuntimeEntry$' -count=10 -json"
-      ]
+        "go test ./tests/integration/host -run '^TestPublicRuntimeEntry$' -count=10 -json",
+        "负向锚（M 补差硬门，勾选前必须存在且被 evidence 点名）: go test -race ./tests/integration/host -run '^TestDiagnosticEndpointRequiresAuthentication$' -count=10 -json"
+      ],
+      "notes": "中期复审重开（2026-10-15）：缺/query无请求主体认证（补差合同见 midterm-review-response.md §二；原 evidence 作废留档 ORCHESTRATION 台账批次8-15） | dm8-08.1 完成（D-M8 波）",
+      "evidence": {
+        "run_id": "dm8-08.1",
+        "commands": [
+          "go test -race ./tests/integration/host -run ^TestDiagnosticEndpointRequiresAuthentication$ -count=10 -json: 60 pass/0 fail; 负锚=无认证 401 具名拒非裸奔; 未配认证不开诊断口 ErrDiagnosticNotOpen; 带认证可达 http 读数==SDK 读数; /healthz 纳入门无端点旁路; 常数时间比对凭据不入日志",
+          "go test ./tests/integration/host -run ^TestPublicRuntimeEntry$ -count=10 -json: 50 pass/0 fail 正锚级联(加凭据断言强度不降)",
+          "全回归十包 ok; 运行时读源统一核验=runAgents/runLeases 读 r.current 单一读源零改动(D-M1 成果); 认证门先于路由(401 先于 404 不泄露路径存在性)",
+          "R30 五点核查达标: 认证门单结构无旁路/常数时间/事实单一真源/真实 store 链/白名单合规"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "cli.go",
+          "skeleton_assert.go",
+          "tests/integration/host/diagnostic_endpoint_requires_authentication_test.go",
+          "tests/integration/host/public_runtime_entry_test.go"
+        ]
+      }
     },
     {
       "id": "08.2",
@@ -1568,13 +2640,39 @@
         "08.1",
         "04.4",
         "04.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20",
+        "04.21",
+        "04.22"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go -C examples/wechat-bot test ./... -run '^TestSessionRouting$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | m5-08.2 完成（波31）",
+      "evidence": {
+        "run_id": "m5-08.2",
+        "commands": [
+          "go -C examples/wechat-bot test ./... -run ^TestSessionRouting$ -count=10 -json: 91 events(8 子测x10+顶层x10+包级); 八子测=会址单射+历史隔离/入站去重/缺身份拒+零侧效/答复只落发言会话/内部通知进本会址/显式 send 只达绑定会话/未绑定具名拒不猜(最近会话诱饵)/审批按摘要唯一定位守白名单",
+          "资源门=无门: TestGuard_TestsNeverConstructRealChannel 守卫钉测试永不构造真实通道; 真实微信 API 归 09.5; examples 历史 build 断链已消失(grep agent/governance memory/engine 零命中)",
+          "D2 口径修正: 7/8 经 assembleHostFrom 真实装配, 审批子测组件级(newApprovalGateway/Resolve 直驱)——入站拦截胶水 main.go:301 集成断言缺口登记 08.4 补",
+          "D3 15-13 映射表: 1 随装配形态退出(旧 registry 死路注入面消亡, 主动送达面由 explicit_send 子测承接)+1 并入(TestSendToolUnboundSeamRefuses 双情形断言俱在)+1 恢复改名(TestHostSenderFailureReceiptsTheTerminal)+2 改名(SendFailureReturnsNamedReason/DocumentGrantsEntryAndMeditator)——13 测全带负向断言强度无降; go.mod yaml.v3 indirect-direct 申报; .gitignore 白名单+5 实证"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "examples/wechat-bot/host_runtime.go",
+          "examples/wechat-bot/session_routing.go",
+          "examples/wechat-bot/approval_channel.go",
+          "examples/wechat-bot/session_routing_test.go",
+          "examples/wechat-bot/send_tool_test.go"
+        ]
+      }
     },
     {
       "id": "08.3",
@@ -1582,13 +2680,37 @@
       "depends_on": [
         "08.2",
         "03.8",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20",
+        "00.22"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go -C examples/wechat-bot test ./... -run '^TestFileRoundTrip$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | m5-08.3 完成（波33）",
+      "evidence": {
+        "run_id": "m5-08.3",
+        "commands": [
+          "go -C examples/wechat-bot test ./... -run ^TestFileRoundTrip$ -count=10 -json: 4 子测x10 全绿(S1 类型识别媒体分派/S2 大结果经唯一副本投递+活跃保护/S3 可执行硬拒+file-denied 回执/S4 单文件失败不静默不阻断)",
+          "变异反证四组(!Exceeds 反转/Materialize 换 Open/删 file-denied/删 file-failed 均被抓, 还原 FILES_INTACT); 正锚 TestPublicRuntimeEntry 50/TestDiagnosticEndpointRequiresAuthentication 60/TestSessionRouting 90 等全 -count=10 不破",
+          "正式链: inboundMessage-hostRuntime.Drive-Invoke-deliverTurn-hostSender-fileDelivery-FileSender; main() 生产装配副本生命周期(被测面=生产面); 13 包全量 0 FAIL; comment_policy 0 finding(白名单生效后真测 6 条已修)",
+          "越界申报: .gitignore +3 白名单(whitelist 制必需); 测试并入 file_delivery_test.go(fragmentation 首选出口); docs/wiki outbound-delivery 行未同步留收尾; 原文存储进程内档(跨重启重物化待 03.3 持久档, 行为边界申报)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "examples/wechat-bot/file_delivery.go",
+          "examples/wechat-bot/file_replica.go",
+          "examples/wechat-bot/main.go",
+          "examples/wechat-bot/file_delivery_test.go"
+        ]
+      }
     },
     {
       "id": "08.4",
@@ -1599,26 +2721,70 @@
         "07.3",
         "07.4",
         "08.3",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20",
+        "00.22"
       ],
       "phase": "implementation",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/host -run '^TestRuntimeVisibility$' -count=10 -json"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | m5-08.4 完成（波34）",
+      "evidence": {
+        "run_id": "m5-08.4",
+        "commands": [
+          "go test -race ./tests/integration/host -run ^TestRuntimeVisibility$ -count=10 -json: 6 子测x10 全绿(开关面 off=Available 具名理由/OTel 关闭不影响 Query/诊断不复制状态 Revision 递增+读后增长/反思面 anchor 水位+自演进账目/训练面 Recorder+Snapshots+Losses 具名/启停信号+未知开关 exit 2 具名拒+重启连续 Recovered 恰 1)",
+          "变异反证三处(全被击落后还原): diagnosticFace 忽略开关-closed face 断言红/lifecycleFace 硬编码 Closing:false-红/Diagnostics 缓存首读-开关+不存在面双断言红",
+          "Reconciler 裁决=装配(run.go:210-211 NewDelegator+SetReconciler); 措辞收窄: 行为契约由 agent 层 rig 覆盖(close_drains/delegation_completion), run.go 接线行无变异锚不得宣称被锚覆盖(外部不可观测如实挂账)",
+          "正锚 TestPublicRuntimeEntry/TestFormalAssemblyRequiresGovernance/TestQueryShowsPublishedAgentState 各 10/0; 十包绿; DiagnosticReport 7f=S2 类别豁免(数据保真面同 Explanation 先例, 编排者登记)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "diagnostics.go",
+          "run.go",
+          "opts.go",
+          "cli.go",
+          "tests/integration/host/runtime_visibility_test.go"
+        ]
+      }
     },
     {
       "id": "08.5",
       "domain": "08-host",
       "depends_on": [
         "08.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20",
+        "00.22"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go -C examples/wechat-bot test ./... -run '^TestRealWechat$' -count=1 -json（需明确发送授权与真实接收者）"
-      ]
+      ],
+      "notes": " | 概念收敛穿插(波S): 前置 C 面收敛后按新 API 实施 | t6-annotated-08.5 完成（波41，T6 裁决标注收尾）",
+      "evidence": {
+        "run_id": "t6-annotated-08.5",
+        "commands": [
+          "T6 裁决(标注未验收收尾): 微信真实发送面=未验证(缺凭据)——TestRealWechat 需明确发送授权与真实接收者, 本机无微信凭据; 确定性面已由 08.2/08.3 承载(TestGuard 守卫钉测试永不构造真实通道); 凭据后补跑 -count=1 即可转实测",
+          "勾选口径=W1 模式: 真实面不计完成, 标注挂 09.5 凭据后补跑",
+          "锚存在性补实: TestRealWechat 资源门测试已建(examples/wechat-bot/real_wechat_gate_test.go, R24 三态: 缺门合法 Skip/半配置 Fatal/全配置真实路径待接)——实跑 SKIP(缺门)1/1, go -C vet 干净"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "examples/wechat-bot/"
+        ]
+      }
     },
     {
       "id": "08.P0.1",
@@ -1754,14 +2920,36 @@
         "08.2",
         "08.3",
         "08.4",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "scenario runner 输出真实观测并对照 golden/runtime/scenarios.json（值/消息角色序列/身份关系差异报告）；禁用人工 PASS 汇总；真实资源欠账由 09.5 承载；对照命令：python3 scripts/check_runtime_evidence.py --evidence <RUN-file.json> --test-log <PATH>（成对提供，缺一即失败）",
         "验收集：默认 --scope complete（全 10 场景严格，缺 S10 即失败）；确定性 runner 用 --scope deterministic 只验合同登记的确定性集（S01–S09）并输出 scope 与 remaining_required（S10 列为显式欠账，不报全通过）；确定性集不要求真实 SFT 批次，也不得合成/替身冒充"
-      ]
+      ],
+      "notes": " | 回写项登记(波18): golden S03 model_message_roles 期望值过时(与双 call receipts 及新 observation 范式不自洽)——S03 验收实施前必须修订为新范式序列或按 call 切片声明，否则验收将固化错误 role 序列 | scenario-runner-09.1 完成（波36，确定性档；4 处 golden drift 与 S10 待裁）",
+      "evidence": {
+        "run_id": "scenario-runner-09.1",
+        "commands": [
+          "scripts/run_runtime_scenarios.py --scope deterministic: 9/9 attest(run-20261018T085943Z), 真实驱动单次 go test 发射 TAGENT-SCENARIO-RECORD, 三轴机器对照禁人工 PASS 汇总; check_runtime_evidence 接受证据形状(selector/生命周期全过, 失败只落真实差异)",
+          "逐场景键对照 54/58: S01-S02-S04-S05-S06-S07 全等; S03 10/12(model_message_roles 期望值过时-波18已登记+receipts[1].decision 归属); S08 9/10(blocker/advancer golden 词表 storage-degraded/task-a 在产品词表不存在——产品实词 executor/diagnosis/explicit-stop/notice-transport); S09 5/6(tokenizer_capability golden unknown vs 产品词表 real/deterministic/absent)",
+          "--scope complete 如实失败: remaining S10(无 case 记录, 归 09.5 资源), 不冒充; runner 自测 19 tests OK; 十包零影响+build/vet/gofmt 干净",
+          "W1 口径: deterministic 档达成; complete 档(全 10 场景严格)待 S10 真实资源——该面不计完成挂 09.5; 4 处 golden drift 待裁决(改 golden 对齐产品语义 vs 改产品)——按用户判据穿透行为看本质, 归 09.7 终态回溯 review 面裁决"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "scripts/run_runtime_scenarios.py",
+          "tests/integration/acceptance/scenario_s01_test.go",
+          "/tmp/tagent-09-1/deterministic/evidence.json"
+        ]
+      }
     },
     {
       "id": "09.2",
@@ -1770,13 +2958,29 @@
         "00.1",
         "03.3",
         "03.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test ./tests/integration/acceptance -run '^TestOfflineMigration$' -count=10 -json；源摘要不变，不让旧程序读新格式"
-      ]
+      ],
+      "notes": "中期复审判为 M 回归重验（2026-10-15）：上游 03.3 重开，实现不判错；上游收口后重跑 midterm-review-response.md §四 回归锚再勾选（原 evidence 作废留档台账批次8-15） | mreg-09.2 完成（D-M1 波/波后 M 回归重验）",
+      "evidence": {
+        "run_id": "mreg-09.2",
+        "commands": [
+          "go test ./tests/integration/acceptance -run ^TestOfflineMigration$ -count=10 -json (50 pass/0 fail)",
+          "M 回归重验: 上游 03.3/03.5 收口后重跑回归锚, 迁移写面兼容 Spec 自包含 (正确命令: acceptance 包)"
+        ],
+        "exit_codes": [
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/acceptance/offline_migration_test.go"
+        ]
+      }
     },
     {
       "id": "09.3",
@@ -1785,14 +2989,34 @@
         "00.6",
         "08.1",
         "09.1",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "按 plan §9 完整门禁逐条独立执行并记原始退出码：go mod verify / go build ./... / go vet ./... / go test ./... -short -count=1 -json / GOMAXPROCS=1 go test . -short -count=1 -json / go -C examples/wechat-bot build ./... / go -C examples/wechat-bot vet ./... / go -C examples/wechat-bot test ./... -short -count=1 -json / bash scripts/lint.sh / bash scripts/gen_godoc.sh --check / bash scripts/test_race_check.sh（检查器自测，保持，不等价于产品 race）/ python3 scripts/test_verify_restart_prefix.py / bash scripts/check-openspec.sh / openspec validate --all --strict --no-interactive",
         "产品 race 入口（两 module 全第一方子包递归，逐条保存原始退出码）：根 module `go test -race ./... -short -count=1 -json`；微信 module `go -C examples/wechat-bot test -race ./... -short -count=1 -json`。第一方新包（config/state/agent/task/memory/workspace/plugin/model/telemetry/rl/evolution/tool/*/query 及其子包）经 `./...` 递归覆盖、MUST NOT 遗漏；真实外部资源启用门 MUST NOT 被隐式打开（`-short` 且不设资源启用变量，资源门用例默认 Skip）；根 `./...` 若连带覆盖 prototype/（历史骨架，同属根 module）属额外只读编译，本轮不执行，作为未来全量 command 允许"
-      ]
+      ],
+      "evidence": {
+        "run_id": "gate-run-09.3",
+        "commands": [
+          "16 门逐条独立进程执行记原始退出码(evidence/09.3-gate-run.md 309 行): 14 PASS(G01-G08 产品两 module build/vet/test 全绿 688+112 pass/0 fail/G11-G14 检查器自测+openspec validate 121 passed/G15-G16 race 两 module 零 DATA RACE tsan 292 符号)",
+          "2 FAIL 如实: G09 lint.sh=comment_policy 494 超基线(baseline counts 空+战役 253 未提交文件存量债, 未 --update-baseline 不掩盖)/G10 gen_godoc=docs/api 27 stale+13 分歧(已删包生成面漂移)——两项入收尾账 F2 全绿前置",
+          "race 覆盖面核: 31/46 包进 race 构建图(传递闭包核算), 未进 15 全是 examples/contract 范例; 产品包零包内测试如实报(集成层 400 测试承载); G05 空转门口径上报",
+          "口径注记: prototype 随 ./... 实跑 22 pass(措辞差异如实); 耗时不可作性能断言(GOCACHE 热)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/evidence/09.3-gate-run.md"
+        ]
+      },
+      "notes": " | gate-run-09.3 完成（波37）"
     },
     {
       "id": "09.4",
@@ -1800,14 +3024,34 @@
       "depends_on": [
         "09.1",
         "09.2",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "go test -race ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -json（新计划正式新路径用例名；如需 soak 构建标签隔离统一加 -tags soak，全处一致；旧 CI 的 30轮×30事件/45m 仅作待核参数参考，不作新验收锚）",
         "部署环境（macOS/Linux）实跑：常驻 soak + 独立进程崩溃恢复 + 热更回滚 + 权限与资源泄漏仍必验；未到位标 BLOCKED，不以 mock/优雅 Close/同进程 New 顶替，硬件断电不宣称"
-      ]
+      ],
+      "evidence": {
+        "run_id": "soak-09.4",
+        "commands": [
+          "锚1 TestSoakContinuity 真实跑 6 events 全绿; 长跑 30 轮x30 事件=900 调用 170s 全绿(pid 连续/轮号连续/Close Drained+Unsettled=0)",
+          "部署四件: 常驻 soak PASS/独立进程崩溃恢复 PASS(kill -9 SIGKILL+ESRCH+无 closed 事件+异进程读回 32/900 任务逐一相同+空根恢复 0 负锚)/权限资源泄漏 PASS(属主+无 world-writable+fd/协程 31 采样恒 2/6)/热更回滚=前滚+内容回退实证 PASS(gen1-2-3 同现场连续)但专用 Rollback 通道 BLOCKED(Run 公共面无出口, 不冒充)",
+          "硬件断电如实不宣称(localfile temp+rename 无 fsync); 全回归 13 包 0 FAIL(short 与非 short 均绿); sha256/865 行三连留证",
+          "待裁登记: Rollback 公共出口(建议 09.5 后续面或 Run.Publish 增口)/旧 CI soak job 引用已删测试待修/单写者锁未实现(并行 soak 前置)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/host/soak_continuity_test.go"
+        ]
+      },
+      "notes": " | soak-09.4 完成（波37）"
     },
     {
       "id": "09.5",
@@ -1820,31 +3064,67 @@
         "05.3",
         "06.6",
         "08.5",
-        "00.P0.3"
+        "00.P0.3",
+        "00.20"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "逐项在启用门+资源+授权齐备时运行对应真实档用例（存储档/真实模型/MCP/A2A/embedding/collector/SFT/微信），各子场景互不等待、可各自独立 -count=1 运行；depends_on 为所需实现的汇总登记，不表示各资源子项互为前置或全等；未启用可 Skip，但正式必验项不得以 Skip 结项",
         "collector/OTel 子项归属 05.3：点名用例 TestRealCollectorDelivery（tests/integration/inspection），不以 06.3 的 RL 队列封账 TestCaptureAdmissionAndSeal 冒充 collector 接收；S10/真实 SFT 子项归属 06.6"
-      ]
+      ],
+      "notes": " | 挂账登记(波25): ①Run.record 接 StoreEvent 写入侧(04.9 D2 读面闭环缺口, 正式链工具产物召回); ②04.9 检索真实资源腿(embedding 档) -count=1 真实资源实跑为结项条件(D3); ③既有真实 embedding/collector 资源门(TestRealCollectorDelivery/TestSearchRecallsFromRealStore skip 项)同此单结项 | C3 具名级联(波30): 06.6 将 loss=1 落 action 全侧写死为 Verify 拒绝契约(SFTRefusalObservationTrained/ActionUntrained)+两测试断言——若 09.5 裁定改 v2 strict 尾 span 语义, 必须同步改 rl/sft_artifact.go Verify 语义+两测试断言(反向破坏面, 到时须认领) | t6-annotated-09.5 完成（波41，T6 裁决标注收尾）",
+      "evidence": {
+        "run_id": "t6-annotated-09.5",
+        "commands": [
+          "T6 裁决(标注未验收收尾): 全部真实档子项(存储档/真实模型/MCP/A2A/embedding/collector/SFT tokenizer/微信/S10)=未验证(缺凭据)——各子场景门已实装(R24 三态: 缺门合法 Skip/门坏 Fatal/不以替身结项), 凭据注入即 -count=1 独立实跑",
+          "已挂账子项清单: 06.2/06.4/06.6/06.7/04.9/05.3/09.1-S10/08.5 各真实面标注均在各叶 evidence(W1 口径); C3 loss 语义级联已具名",
+          "勾选口径=W1 模式: 真实面不计完成, 凭据后补跑逐子项",
+          "对账点名: TestRealCollectorDelivery(tests/integration/inspection, 05.3 资源门锚-缺门合法 Skip 在案)与 TestCaptureAdmissionAndSeal(tests/integration/learning, 06.3 RL 队列封账锚-110/0 在案)——两锚存在性与 Skip/绿状态已核, 非冒充 collector 接收(05.3 证据明示)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/ORCHESTRATION.md"
+        ]
+      }
     },
     {
       "id": "09.6",
       "domain": "09-acceptance",
       "depends_on": [
+        "08.2",
+        "08.3",
+        "08.4",
         "09.1",
-        "09.2",
-        "09.3",
-        "09.4",
-        "09.5",
         "00.P0.3"
       ],
       "phase": "acceptance",
-      "status": "planned",
+      "status": "done",
       "verification": [
         "主规格 delta、文档/API 与消费者逐项闭合核对；存在未裁项则如实保持未完成（只读判据）"
-      ]
+      ],
+      "notes": " | 用户裁定: 文档闭合核对只读面可先行——deps 解除资源锁, 未裁项如实保持未完成 | doc-closure-09.6 完成（波44 W1 口径：核对交付达成）",
+      "evidence": {
+        "run_id": "doc-closure-09.6",
+        "commands": [
+          "三方对齐 62 行表(09.6-doc-closure.md 522 行): 闭合 0/待裁 6/未闭合 56——判定=不闭合, 如实(禁 PASS 汇总)",
+          "docs/api 漂移 27 stale+13 分歧+33 新增逐条归属(09.8 已收敛落地--check 0); doc-refs 43 条按快照全有效(09.8 已落地口径 exit 0)",
+          "W1 口径(波44 裁决): 核对交付达成; '不闭合'是判定内容(如实)而非图状态——未裁项(71 delta 归档授权)转 F4, 与 06.6/09.5 W1 模式一致"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/evidence/09.6-doc-closure.md"
+        ]
+      }
     },
     {
       "id": "09.P0.1",
@@ -1880,6 +3160,1314 @@
           "tests/integration/acceptance/skeleton_assert.go"
         ]
       }
+    },
+    {
+      "id": "00.7",
+      "domain": "00-foundation",
+      "title": "[R1.1] 终局归约边界声明：model 合同面 Godoc 定稿（归约唯一入口/六态/结束证据）＋persistent-event-loop delta 措辞修正（自有唯一循环，非框架 ReAct）",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.P0.3"
+      ],
+      "evidence": {
+        "run_id": "r1-00.7",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./model/... (exit 0)",
+          "gofmt -l model/ (0)",
+          "go test TestModelTerminalProtocol -count=1 (11 子项 PASS, 测试零改动)",
+          "persistent-event-loop spec 措辞核验: ReAct/框架既有 零命中"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "model/terminal.go",
+          "model/aliases.go"
+        ]
+      },
+      "notes": "报告响应修订轮R1（report-response.md）",
+      "verification": [
+        "go build ./... && go vet ./... (0)",
+        "gofmt -l model/ (empty)",
+        "openspec validate --strict (0)"
+      ]
+    },
+    {
+      "id": "00.8",
+      "domain": "00-foundation",
+      "title": "[R1.2] 派生代借用：state 增 BindingRef 与 BorrowDerived（委派继承发起代）；排队保有/释放/恢复具名不可恢复协议入 Godoc",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.P0.3"
+      ],
+      "evidence": {
+        "run_id": "r1-00.8",
+        "commands": [
+          "gofmt -l state/ (0)",
+          "go build ./... (exit 0)",
+          "go vet ./state/... (exit 0)",
+          "go test TestStateOwnsPipeline|TestMailboxConsumption|TestSessionAuthority -count=1 (3 PASS 零改动)",
+          "主编排者四查: BindingRef×15/BorrowDerived×5/协议 Godoc 三条(排队保有/换代不移动/恢复具名拒绝)/断言级联20行; 前次空返半成品(ErrBindingRefUnknown sentinel)经重派闭合"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "state/binding.go",
+          "state/skeleton_assert.go"
+        ]
+      },
+      "notes": "报告响应修订轮R1（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "go test -race TestStateOwnsPipeline 回归 pass"
+      ]
+    },
+    {
+      "id": "00.9",
+      "domain": "00-foundation",
+      "title": "[R1.3] 审批身份：event 增 ApprovalID；ApprovalDecision 绑定 ApprovalID+ExpectedDigest+调用作用域；task 增等待审批状态（不占决策槽）；重复回应幂等",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.P0.3"
+      ],
+      "evidence": {
+        "run_id": "r1-00.9",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./event/... ./task/... . (exit 0)",
+          "go test TestNativeToolAdmission -count=1 (7 PASS 含新增 approval resolves/mismatched refused 用例)",
+          "主编排者复验 grep: ApprovalID in event/types.go=2, host_bridge.go=4; StatusAwaitingApproval in task/spec.go=2"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "event/types.go",
+          "event/skeleton_assert.go",
+          "host_bridge.go",
+          "task/spec.go",
+          "task/hold.go",
+          "task/wrapper.go",
+          "task/lifecycle.go",
+          "task/skeleton_assert.go",
+          "tests/integration/execution/native_tool_admission_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R1（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "go test -race TestNativeToolAdmission 回归 pass"
+      ]
+    },
+    {
+      "id": "00.10",
+      "domain": "00-foundation",
+      "title": "[R1.4] 通知信封：task 增 NoticeEnvelope（冻结 Target/Source/TargetInstance）；CommitRecord.Outbox 改 []NoticeEnvelope；自包含扩展（创建 Spec/终局事实引用/Handoff 记录）",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.P0.3"
+      ],
+      "evidence": {
+        "run_id": "r1-00.10",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go test TestIdentityAndCommitContract|TestTaskLifecycle -count=1 (15 PASS 含新增 freezes the notification target 断言)",
+          "主编排者复验 grep: NoticeEnvelope in task/commit.go=4; slices.Equal comparable 级联确认"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "task/commit.go",
+          "task/lifecycle.go",
+          "task/cancel.go",
+          "task/skeleton_assert.go",
+          "tests/integration/execution/identity_commit_contract_test.go",
+          "tests/integration/execution/task_lifecycle_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R1（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "TestIdentityAndCommitContract/TestTaskLifecycle 回归 pass"
+      ]
+    },
+    {
+      "id": "00.11",
+      "domain": "00-foundation",
+      "title": "[R1.5] 工具前变换：plugin 增 TransformCall 窄接口（per-ToolCall、副作用前、变换后经核心复核）；与 Enricher 职责分界入 Godoc",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.P0.3"
+      ],
+      "evidence": {
+        "run_id": "r1-00.11",
+        "commands": [
+          "gofmt -l plugin/ (0)",
+          "go build ./... (exit 0)",
+          "go vet ./plugin/... (exit 0)",
+          "go test TestNativeToolAdmission -count=1 (7 PASS 零改动)",
+          "comment_policy -no-baseline ./plugin (0 findings)",
+          "主编排者复验 grep: TransformCall in plugin/phases.go=8"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/phases.go",
+          "plugin/skeleton_assert.go"
+        ]
+      },
+      "notes": "报告响应修订轮R1（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "comment_policy plugin (0 findings)"
+      ]
+    },
+    {
+      "id": "00.12",
+      "domain": "00-foundation",
+      "title": "[R2.1] 原文读作用域：memory.Get 增可信读作用域参数（或 scoped-reader 绑定）——授权不随裸 key 扩散",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.7",
+        "00.8",
+        "00.9",
+        "00.10",
+        "00.11"
+      ],
+      "evidence": {
+        "run_id": "r2-00.12",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./memory/... (exit 0)",
+          "go test TestOriginalReferenceIsolation -v (a_read_runs_inside_the_scope_it_is_bound_to PASS: 裸key聚合保留/外域Missing不泄露/零域ErrScopeRequired)",
+          "主编排者复验 grep: ReadScope|ScopedReader=30, ErrScopeRequired=4; 冻结文件 original_store.go/localfile.go 零字节改动(git 可核)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/reference.go",
+          "memory/skeleton_assert.go",
+          "tests/integration/history/original_reference_isolation_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R2（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "TestOriginalReferenceIsolation 回归 pass"
+      ]
+    },
+    {
+      "id": "00.13",
+      "domain": "00-foundation",
+      "title": "[R2.2] 保留保护租约：Guard.Hold 增稳定 HolderID、返回 lease token；重试幂等/多 holder/迟到旧 lease 不误释",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.7",
+        "00.8",
+        "00.9",
+        "00.10",
+        "00.11"
+      ],
+      "evidence": {
+        "run_id": "r2-00.13",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go test TestOriginalReferenceIsolation -v (protection_holds_outlive_one_holder PASS: 同holder重试同token/迟到旧lease ErrLeaseMismatch不误释/重复释放no-op)",
+          "主编排者复验 grep: HolderID|ProtectionLease=7, ErrLeaseMismatch=3"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/guard.go",
+          "memory/guard_memory.go",
+          "memory/skeleton_assert.go",
+          "tests/integration/history/original_reference_isolation_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R2（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "TestOriginalReferenceIsolation 回归 pass"
+      ]
+    },
+    {
+      "id": "00.14",
+      "domain": "00-foundation",
+      "title": "[R2.3] 检索内容：search.Query 增 Text/Strategy/Cursor；Result 增续页语义；零 Limit 有界默认",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.7",
+        "00.8",
+        "00.9",
+        "00.10",
+        "00.11"
+      ],
+      "evidence": {
+        "run_id": "r2-00.14",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./memory/search/... (exit 0)",
+          "gofmt -l memory/search/ (0)",
+          "go test tests/integration/history -count=1 (ok, TestSearchQueryContract 3 子项 PASS)",
+          "主编排者复验 grep: Text=11/ErrQueryTextMissing+DefaultLimit=9; 空 Text 具名拒绝裁决依据 spec recall-protocol; DefaultLimit=20 无据注明"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/search/port.go",
+          "memory/search/fusion.go",
+          "memory/search/skeleton_assert.go",
+          "tests/integration/history/search_query_contract_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R2（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)"
+      ]
+    },
+    {
+      "id": "00.15",
+      "domain": "00-foundation",
+      "title": "[R2.4] 字节有界分段：SegmentRequest（字节偏移/续读位置/MaxBytes）＋SegmentResult（Body/Next/EOF）；零上限不表示无限；workspace 引用同型",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.7",
+        "00.8",
+        "00.9",
+        "00.10",
+        "00.11"
+      ],
+      "evidence": {
+        "run_id": "r2-00.15",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go test TestOriginalReferenceIsolation -v (byte_bounded_segments_stay_bounded_and_resume_exactly PASS: 零上限=64KiB默认非无限/逐段精确重组/越界三sentinel)",
+          "主编排者复验 grep: MaxBytes|Next|EOF=21; workspace同型已由 D12 补单完成(复用 memory.SegmentRequest/Result,行数形态零残留,编译断言级联)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/segment_store.go",
+          "memory/reference.go",
+          "memory/skeleton_assert.go",
+          "tests/integration/history/original_reference_isolation_test.go",
+          "tests/integration/history/storage_capabilities_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R2（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "TestOriginalReferenceIsolation 回归 pass"
+      ]
+    },
+    {
+      "id": "00.16",
+      "domain": "00-foundation",
+      "title": "[R2.5] mailbox 关联：MailboxEntry 增 EventID/InvocationID/Notice 关联；Consumed 定义连续完成前缀或显式洞位协议",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.7",
+        "00.8",
+        "00.9",
+        "00.10",
+        "00.11"
+      ],
+      "evidence": {
+        "run_id": "r2-00.16",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./state/... (exit 0)",
+          "go test tests/integration/state -count=1 (16 PASS: TestSessionAuthority 6 + TestMailboxConsumption 5 子项含新增回溯/前缀用例 + TestStateOwnsPipeline 3)",
+          "主编排者复验 grep: EventID|InvocationID=4; W 列原文核验 session.go 级联追认; Consumed 连续前缀行为修正=R2.5 语义级联"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "state/session.go",
+          "state/mailbox.go",
+          "state/skeleton_assert.go",
+          "tests/integration/state/mailbox_consumption_test.go"
+        ]
+      },
+      "notes": "报告响应修订轮R2（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "TestSessionAuthority/TestMailboxConsumption 回归 pass"
+      ]
+    },
+    {
+      "id": "00.17",
+      "domain": "00-foundation",
+      "title": "[R2.6] Query 载体：分页 Cursor（绑 revision/授权/过滤）、逐源水位（不透明 position、滞后未知单独表达）、Update 增 upsert/delete/gap/reset、逐义务推进者、ObjectRef 增 InstanceID",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.7",
+        "00.8",
+        "00.9",
+        "00.10",
+        "00.11"
+      ],
+      "evidence": {
+        "run_id": "r2-00.17",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./query/... (exit 0)",
+          "gofmt -l query/ (0)",
+          "query 包无测试(合同面修订,运行行为后续取证)",
+          "主编排者复验 grep: Cursor=13/WatermarkLagUnknown=3/NextAdvancer 零残留"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "query/types.go",
+          "query/snapshot.go",
+          "query/subscribe.go",
+          "query/skeleton_assert.go"
+        ]
+      },
+      "notes": "报告响应修订轮R2（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)"
+      ]
+    },
+    {
+      "id": "00.18",
+      "domain": "00-foundation",
+      "title": "[R3.1] RL 证据合同：ModelViewRef 增安全快照可读引用+逐项版本；CaptureManifest 增逐文件摘要/writer 同步结果；RewardRecord 增实例 ID/revision；SampleProvenance 指确切实例版本",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.12",
+        "00.13",
+        "00.14",
+        "00.15",
+        "00.16",
+        "00.17"
+      ],
+      "evidence": {
+        "run_id": "r3-00.18",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./rl/... (exit 0)",
+          "gofmt -l rl/ (0)",
+          "主编排者复验 grep: SnapshotRef|VersionedName=7; 四项合同面(SnapshotRef+VersionedName/CaptureFileDigest+WriterSyncResult/InstanceID+Revision/RewardInstanceID)全部实存; VisibleTools 字段类型修订(rl外零构造点)追认; RL 运行行为取证属 06.x/09.x"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/record.go",
+          "rl/capture.go",
+          "rl/reward.go",
+          "rl/manifest.go",
+          "rl/skeleton_assert.go"
+        ]
+      },
+      "notes": "报告响应修订轮R3（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)"
+      ]
+    },
+    {
+      "id": "00.19",
+      "domain": "00-foundation",
+      "title": "[R3.2] 自演进读面：StructuralGate 返回 GateReport{Verdict,Reason,Scope,EvidenceRefs}；后验四态独立（healthy/degraded/insufficient/not-due）；RefineRecord 接回 SHA/激活窗口/后验报告",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.12",
+        "00.13",
+        "00.14",
+        "00.15",
+        "00.16",
+        "00.17"
+      ],
+      "evidence": {
+        "run_id": "r3-00.19",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./evolution/... (exit 0)",
+          "gofmt -l evolution/ (0)",
+          "主编排者复验 grep: GateReport=7/PosteriorHealthy=2; 后验四态独立类型+GateReport 四要素+RefineRecord 接回(SHA/激活窗口/后验/GateBasis)实存; 命名自定(PosteriorVerdict/PosteriorReport)追认"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "evolution/gate.go",
+          "evolution/refine.go",
+          "evolution/skeleton_assert.go"
+        ]
+      },
+      "notes": "报告响应修订轮R3（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)"
+      ]
+    },
+    {
+      "id": "00.20",
+      "domain": "00-foundation",
+      "title": "[R3.3] 根入口消费面：Runtime 增 Bridge(ctx)(HostBridge,error) 候选；待投递输出有界读面（稳定投递身份/目标实例/原生 Message/回执对账）；模型工厂候选声明（原生签名未核前不落实现）",
+      "phase": "design",
+      "status": "done",
+      "depends_on": [
+        "00.12",
+        "00.13",
+        "00.14",
+        "00.15",
+        "00.16",
+        "00.17"
+      ],
+      "evidence": {
+        "run_id": "r3-00.20",
+        "commands": [
+          "go build ./... (exit 0)",
+          "go vet ./... (exit 0)",
+          "go test tests/integration/execution|state|history -count=1 (10 PASS 全回归)",
+          "主编排者复验 grep: ErrBridgeNotAssembled=4/DeliveryID=9; DeliveryReceipt.MessageID→DeliveryID 改型追认(全仓零消费者); ModelFactory 候选声明零实现零接线(G1 编译门≠原生对齐)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tagent.go",
+          "host_bridge.go",
+          "build.go",
+          "skeleton_assert.go"
+        ]
+      },
+      "notes": "报告响应修订轮R3（report-response.md）",
+      "verification": [
+        "go build/vet/gofmt (0)",
+        "全套验证 0"
+      ]
+    },
+    {
+      "id": "00.21",
+      "domain": "00-foundation",
+      "depends_on": [],
+      "phase": "tooling",
+      "status": "done",
+      "verification": [
+        "python3 scripts/test_check_concept_budget.py（自测全绿）",
+        "python3 scripts/check_concept_budget.py --self-check（S1-S4 规则自校）",
+        "CI runtime-contracts.yml 注册概念预算门（与架构门同链）"
+      ],
+      "notes": " | W4 登记(波26): baseline 164 项含本波新产债 9 项（ObservationScan 10f/ScannedFact 7f/ReflectionConfig 9f/TickOutcome 6f/FeedbackEndpointConfig 6f/FeedbackSubmission 8f/ObservedFacts/ReflectionInput/FeedbackTargetResolver）——归属=06.21 扩容+07.22 新叶拆块清零；W-S0 后新码零债（新 slot 入册须具名豁免理由） | wS0-00.21 完成（波26）",
+      "evidence": {
+        "run_id": "wS0-00.21",
+        "commands": [
+          "python3 scripts/test_check_concept_budget.py: 29 例全绿(含 8 条负向锚: 超标件被点名/空仓库不冒充绿)",
+          "python3 scripts/check_concept_budget.py --self-check: exit 0, 4 规则自校+棘轮三路径(豁免 warn 禁静默/超 baseline error/失效 stale warn)",
+          "CI runtime-contracts.yml 注册 Concept budget 步骤+自测步(WorkflowRegistrationTest 防静默移除); --rule S1-S4 各可单跑",
+          "级联修复: test_check_runtime_plan fixture 补 SLIM 节点/checkbox/动态计数断言(我注册 SLIM_IDS 所致 4 例红, 编排者 R8 修复, scripts 全自测 OK)",
+          "W4 登记: baseline 164 项含本波新产债 9 项(归属 06.21 扩容+07.22 拆块清零); W-S0 后新码零债纪律入 ORCHESTRATION"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "scripts/check_concept_budget.py",
+          "scripts/test_check_concept_budget.py",
+          ".github/workflows/runtime-contracts.yml"
+        ]
+      }
+    },
+    {
+      "id": "05.21",
+      "domain": "05-inspection",
+      "depends_on": [
+        "00.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule iface-methods query（碎接口归并后单口≤3 方法）",
+        "go test -race ./tests/integration/inspection -run '^TestRuntimeInventory$' -count=10（级联强度不降）",
+        "go test -race ./tests/integration/inspection -run '^TestQueryAuthorizationAndCursor$' -count=10",
+        "go test -race ./tests/integration/inspection -run '^TestExplainRuntimeBlockers$' -count=10"
+      ],
+      "evidence": {
+        "run_id": "wS1-05.21",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule iface-methods: query 0 命中(12 碎接口归并为 Reading 3f/ReadingSource 1f/DetailSource 2f/LeaseExplainer 2f, 全<=3); --rule struct-fields: InventoryFaces 8f 结构删除, Generation 2f/SiteReading 4f/TaskReading 5f 全<=5",
+          "回归锚逐锚: TestRuntimeInventory 80(8 子测x10)/TestQueryAuthorizationAndCursor/TestExplainRuntimeBlockers/TestObservationReachDiagnostics/TestQueryShowsPublishedAgentState 全绿 0 fail",
+          "run.go 级联: runReading 单供面(删 runAgents/runLeases/runSites/runWatermarks 四面, 0 残留); 正锚断言改写=块锚+编译锚+行为锚三重(S5 具名拒绝负向锚完整保留)",
+          "裁断①: 水位并入 Freeze 单 revision(删 ErrWatermarksUnreadable)可接受——单读源强于旧双面撕裂读, 具名拒由 ErrSourceUnreadable/SourceError 承接, lag 如实报 Unknown 不编造",
+          "W1 处置: plugin 14 行 contract-surface 幽灵/stale 行已机械清零(编排者代行, scripts 机械表维护开口); -count=1 抽验 RuntimeInventory PASS 留证"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "query/reading.go",
+          "query/inventory.go",
+          "query/snapshot.go",
+          "run.go",
+          "tests/integration/inspection/runtime_inventory_test.go"
+        ]
+      },
+      "notes": " | wS1-05.21 完成（波28）"
+    },
+    {
+      "id": "04.21",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "00.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule struct-fields plugin（Policy 核心≤4f+WithX/ApprovalRequest≤3 块）",
+        "go test -race ./tests/integration/capabilities -run '^TestFormalLoopEnforcesPolicy$' -count=10（级联强度不降）",
+        "go test -race ./tests/integration/capabilities -run '^TestCriticalCallsHoldThroughFormalPath$' -count=10"
+      ],
+      "evidence": {
+        "run_id": "wS1-04.21",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule struct-fields: plugin findings=0(Policy 0 导出字段+Open+8 With*; ApprovalRequest 三块匿名嵌入 3/4/4 JSON 扁平兼容)",
+          "四回归锚逐锚分跑: TestFormalLoopEnforcesPolicy 31/TestCriticalCallsHoldThroughFormalPath 41/TestGovernanceBeforeExecution 111/TestFormalWrapperAdmission 31 全 0 fail; Judge 语义逐字保留(Hold 非 Denial/critical 恒审批/nil 门 off)",
+          "run.go 零级联核实(仅 plugin.Governor 接口消费); 全回归十包绿; comment_policy 本单 0 finding",
+          "R30 裁断三: ApprovalRequest 匿名嵌入权衡成立(外部审批文件回写子测实证工具链存活); S1 建议(键面锚)留后续"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/policy.go",
+          "plugin/approval.go",
+          "plugin/skeleton_assert.go",
+          "tests/integration/capabilities/governance_test.go",
+          "tests/integration/capabilities/critical_calls_hold_through_formal_path_test.go"
+        ]
+      },
+      "notes": " | wS1-04.21 完成（波27）"
+    },
+    {
+      "id": "04.22",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule example-file plugin（每窄口一 canonical 范例）",
+        "go test -race ./tests/integration/execution -run '^TestPluginPhaseOrdering$' -count=10（级联强度不降）",
+        "五空相位裁决记录（接消费者或删槽，二选一具名）入 evidence"
+      ],
+      "evidence": {
+        "run_id": "wS2-04.22",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule S4: plugin 0 finding(11 canonical 范例 examples/contract/plugin 各含 func Example+契约索引; 红线 11 组 31 条每组<=6)",
+          "五相位裁决(反事实检验): Enricher/ViewSelector/ExternalizePolicy 删(删除前零注册零调用, 结构自证——Pipeline enrichers/views/externals 字段从未被遍历); TransformCall 留(Before 被测对象, 删则正锚缩水); FinalPresenter 留(与 PresentationSink 生产者消费者关系); Phase 枚举 6-4, PhaseRequestEnrich-PhaseCallTransform 名实对齐(裁断②兼容可接受)",
+          "回归锚 TestPluginPhaseOrdering 7 子测一行未删全绿; 越界申报 tests/state 两行相位常量机械重命名(编译所必需)经核属实",
+          "S1 登记: 反事实证据(零注册零调用计数)入本 evidence; -count=1 抽验 TestPluginPhaseOrdering PASS 留证"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/phases.go",
+          "plugin/skeleton_assert.go",
+          "examples/contract/plugin/",
+          "tests/integration/execution/plugin_phase_ordering_test.go"
+        ]
+      },
+      "notes": " | wS2-04.22 完成（波28）"
+    },
+    {
+      "id": "02.21",
+      "domain": "02-execution",
+      "depends_on": [
+        "00.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule ctx-bare（裸 ctx.Value=0）",
+        "ctx 契约表落 contracts.md（键/类型/取法/缺省，编排者写面申报）",
+        "go test -race ./tests/integration/capabilities -run '^TestFormalWrapperAdmission$' -count=10（级联强度不降）"
+      ],
+      "evidence": {
+        "run_id": "wS2-02.21",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule ctx-bare: 调用点裸读=0, 仅存 CallPassFrom/CallFrameFrom 两 accessor 实现体各 1(baseline 具名登记+tighten 2-1)",
+          "缝值入签名: Governor.Judge/JudgePass 二合一为 Judge(pass CallPass), TriggerSource 入 CallPass 随签名(triggerSourceKey 全删/JudgePass 零引用); ctx 缝契约表落 contracts.md(MUST NOT 新增第三缝)",
+          "五回归锚: TestFormalLoopEnforcesPolicy/TestFormalWrapperAdmission/TestGovernanceBeforeExecution/TestNativeConversationRoundTrip/TestFormalInvokeProducesTrainingRecords 全绿(判裁恰一次 judgeCount==1 不破)",
+          "S3 口径裁决(编排者): 标尺原文含 accessor 分支——'调用点=0+accessor 实现体单次=合法落点按文件具名登记'; 派发单'豁免出表'口径过严已勘误(checker docstring+baseline 修正)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/policy.go",
+          "plugin/phases.go",
+          "task/wrapper.go",
+          "run.go",
+          "examples/contract/plugin/Governor_example.go"
+        ]
+      },
+      "notes": " | wS2-02.21 完成（波30）"
+    },
+    {
+      "id": "00.22",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.21"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py check_runtime_structure.py 500 行规则（run 族单文件≤400 行）",
+        "go test ./tests/integration/host -run '^TestPublicRuntimeEntry$' -count=10",
+        "go test -race ./tests/integration/host -run '^TestFormalAssemblyRequiresGovernance$' -count=10",
+        "全回归十包绿（组合根拆分零语义变化）"
+      ],
+      "evidence": {
+        "run_id": "wS1-00.22",
+        "commands": [
+          "run.go 1740-311 行+7 新文件(opts 143/read 270/run_invoke 180/run_tool 235/run_fact 256/run_request 299/run_commit 166), 最大 311<=400; 67 块逐字位移(verify.py problems=0, 块级恰好命中 1 处, R30 独立抽验 2 块逐字属实)",
+          "四回归锚具名: TestPublicRuntimeEntry(10/10 顶层+40 子)/TestFormalAssemblyRequiresGovernance(10/10+30)/TestDiagnosticEndpointRequiresAuthentication(10/10+50)/TestNativeConversationRoundTrip(10/10+30) 全 -count=10; 十包 go test ./tests/integration/... -count=1 全 ok; 13 包全量 0 FAIL",
+          "架构零新边(import 并集==原 run.go 集)/comment_policy 8 文件 0 finding/14 行契约索引=missing-file-responsibility 规则必需; D1 锚串修正: file-lines 规则不存在改 check_runtime_structure 取证",
+          "无 git 基线(untracked 树)逐字证据=/tmp/verify.py 块校验+R30 抽验(Publish/尾块逐字属实)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "run.go",
+          "opts.go",
+          "read.go",
+          "run_invoke.go",
+          "run_tool.go",
+          "run_fact.go",
+          "run_request.go",
+          "run_commit.go"
+        ]
+      },
+      "notes": " | wS1-00.22 完成（波32）"
+    },
+    {
+      "id": "06.21",
+      "domain": "06-learning",
+      "depends_on": [
+        "00.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule struct-fields: FeedbackEndpointConfig 拆块后<=5f 配置面零债; ExportManifest/SampleProvenance/CaptureLedger/Explanation/FeedbackSubmission 按 S2 类别豁免登记(数据面, 口径勘误波28)",
+        "go test -race ./tests/integration/learning -run ^TestAuthorizedTrainingExport$ -count=10（级联强度不降）",
+        "go test -race ./tests/integration/learning -run ^TestFeedbackHTTPContract$ -count=10",
+        "go test -race ./tests/integration/capabilities -run ^TestExecutionResourceLifecycle$ -count=10"
+      ],
+      "notes": " | W4 扩容(波26): 拆块范围加 FeedbackEndpointConfig/FeedbackSubmission（06.7 新产债） | 口径勘误(波28): S2 豁免级联——数据面移出拆块面, FeedbackEndpointConfig 保留收敛 | wS2-06.21 完成（波28）",
+      "evidence": {
+        "run_id": "wS2-06.21",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule struct-fields: FeedbackEndpointConfig 6f-0(零选择构造 NewFeedbackEndpoint+WithFeedbackToken/WithFeedbackLimits, 与 04.21 Open+With* 同构), baseline 行出表 stale 0",
+          "五项数据面豁免具名登记(引入叶+保真理由): ExportManifest 06.4/SampleProvenance 06.4/CaptureLedger 06.3/Explanation 04.2/FeedbackSubmission 06.7",
+          "四回归锚逐锚: TestFeedbackHTTPContract 131/TestAuthorizedTrainingExport 161/TestExportTracesFormalRecords 51/TestExecutionResourceLifecycle 91 全 0 fail; 反馈契约语义(derive-on-change/幂等/具名拒/双门认证)零改动",
+          "条件2: 域 tasks.md 06.21 行勘误口径已回写(编排者代行)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "rl/feedback_endpoint.go",
+          "rl/skeleton_assert.go",
+          "tests/integration/learning/feedback_http_test.go"
+        ]
+      }
+    },
+    {
+      "id": "00.23",
+      "domain": "00-foundation",
+      "depends_on": [
+        "04.22"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule S4（红线维度单列：filter detail 含红线——42 口红线达标, 残值 9 口补差归属 00.24）",
+        "红线清单落盘逐口核对（42 口 143 条清单表入 evidence）",
+        "doc-only 等值见证: 29 文件 comment-strip code-identical"
+      ],
+      "notes": " | D1 锚串修正(波31): redline-doc 规则名不存在, 以 S4 红线维度同构口径取证 | wS3-00.23 完成（波31）",
+      "evidence": {
+        "run_id": "wS3-00.23",
+        "commands": [
+          "42 口/143 条红线清单落盘(10 包 doc-only): task 4 口/state 9/rl 6/workspace 2/tool-exec 1/tool-mcp 4/tool-remote 3/telemetry 3/memory-search 4/memory 主包 6; S4 红线维度 58-9",
+          "残值 9 口独立核验精确(query DetailSource/LeaseExplainer+evolution 6+HostBridge)——裁断3 归属 00.24 补差已登记",
+          "doc-only 等值见证: 29 文件 comment-strip code-identical/零行为变化; 十包绿零影响; comment_policy 逐文件 delta=0",
+          "D4 对账摘要: S4 baseline 58 行=42(本叶)+5(02.22 agent)+2(query 已有)+9(残值); D1 锚串已修正"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "task/commit.go",
+          "state/store.go",
+          "rl/export.go",
+          "memory/guard.go",
+          "telemetry/otel.go"
+        ]
+      }
+    },
+    {
+      "id": "00.24",
+      "domain": "00-foundation",
+      "depends_on": [
+        "04.22",
+        "00.23"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule contract-surface（范例存在性）（全接口范例存在且≤1 页）",
+        "范例编译+范例自测全绿"
+      ],
+      "notes": " | 裁断3 挂账(波31): 9 口红线补差归本叶——query DetailSource/LeaseExplainer(09.21 盲测锚B 消费面)+evolution 6 口(Digest/StructuralGate/ObservedFacts/Refine/ReflectionInput/WatermarkGate)+根 HostBridge; S4=范例∧红线合取, 本叶落范例时一并出表 | wS3-00.24 完成（波32）",
+      "evidence": {
+        "run_id": "wS3-00.24",
+        "commands": [
+          "范例全仓 58 新例(15 包 69 口=58+04.22 的 11), 0 孤儿 0 缺失(orphan 比对); 9 口红线补差(query 2+evolution 6+HostBridge)MUST/MUST NOT 齐备",
+          "S4 出清: baseline 58 行 contract-surface 删除, --rule S4 gate=0/stale=0/warn=0; 零影响=十包绿+examples vet 0+comment_policy 0 命中",
+          "范例质量(R30 抽验 4 例): 真驱动真实契约(var _ 接口断言绑定)/红线负例具名拒演示/Cleaner 谓词修正后语义正确; 措辞降格=临时 runner 可执行零 panic(15 包, 后删除)",
+          "D1 锚串修正: example-file 规则不存在改 contract-surface; 页长 132 行=无判定规则已申报; host_bridge 2 条既有 finding 挂账申报"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "examples/contract/",
+          "query/snapshot.go",
+          "query/explain.go",
+          "evolution/digest.go",
+          "host_bridge.go",
+          "scripts/check_concept_budget.py"
+        ]
+      }
+    },
+    {
+      "id": "09.21",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "05.21",
+        "00.22",
+        "00.24",
+        "00.P0.3",
+        "00.26"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "盲测锚A: 派不知情 agent 仅读 plugin 接口文件+范例实现一新窄口（编译过+负向用例过=达标）",
+        "盲测锚B: 派不知情 agent 仅读 query 读口+范例实现一新读源（同判据）",
+        "盲测报告入 evidence（两轮均达标方可勾）"
+      ],
+      "notes": " | 盲测第一轮结果(波33, 负结果入库): A(TransformCall 面)=部分达标——TransformCall 红线可写对(1 正 3 负+变异反证), 但 After 侧 PostCommitObserver/FinalPresenter 写不动(Presentation/event.EventID 类型底座不在契约面, 范例引用未定义符号); 7 项\"须读源码才懂\"清单含 PhaseRiskPolicy 双面歧义/transform error 后果未写/空 RiskLevel 语义陷阱。B(query 读源)=部分达标——可编译可跑(6 测+变异反证), 但 SourcePosition 命名类型硬阻塞/ObjectRef 相等语义与 Order 序契约缺失/Detail.Blocked 无范例/授权错误分层靠读实现——\"独立实现性中等, session 明细残/blocked 缺/授权错误会答错名\"。判定=未达标, 09.21 保持 planned, 待接口自足性补差叶(建议 00.26: 类型底座入契约面+装配图+负向范例+error 后果文档+Phase 映射注释)后重测 | 依赖补 00.26(接口自足性补差)后方可重测第二轮 | W2 挂账(波34): Detail.Blocked/ObligationProgress 无范例=盲测 B 侧具名阻塞未在派发单七缺口内——第二轮盲测 B 侧复判前须补 Blocked 范例(doc/范例级); 勾选口径: 00.26 七缺口=派发单口径, 不含该项 | blind-round2-09.21 完成（波35，双轮盲测后勾）",
+      "evidence": {
+        "run_id": "blind-round2-09.21",
+        "commands": [
+          "盲测锚 A2(plugin, 不知情 agent 仅读接口+范例): 达标——选 PostCommitObserver(最难面, Presentation/After 不在接口文件)写出可编译实现+1 正 3 负测试全过(gap 断言/注册拒绝/形状拒); 报告'没有读任何框架源码写出可编译实现'; 残余 3 点登记为改进项(After 签名指引/空 EventID 语义/FactLookup 关系)",
+          "盲测锚 B2(query, 不知情 agent 三层实现): 达标——Reading/ReadingSource/DetailSource 三层+真实投影 8 测试全过含负例(越权具名拒/owner 拒/冻结不跟随/副本语义)+变异反证两处; 相对第一轮本质提升(第一轮'session 明细残/blocked 缺/授权错误答错名'全消——Blocked 范例/SessionState 来源 doc/身份归一化生效)",
+          "第一轮=基线测量(部分达标, 负结果入库); 00.26 补差后第二轮双锚达标=S5 判据'编译过+负向用例过'满足; 两轮均勾",
+          "残余改进项(不阻塞, 登记): owner 数据字段名靠范例抄(可接受=范例即契约)/DetailState 六 kind 派生规则缺构造范例/NoticePhase 取值集/Advancer 选择推断/红线措辞矛盾已修(Plugin 红线对齐 risk 双面语义)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "/tmp/blind-a2/factid.go",
+          "/tmp/blind-a2/factid_test.go",
+          "/tmp/blind-b2/source.go",
+          "/tmp/blind-b2/source_test.go"
+        ]
+      }
+    },
+    {
+      "id": "04.23",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "00.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule iface-methods memory（端口归并后≤7 接口）",
+        "go test -race ./tests/integration/capabilities -run '^TestMemoryCuration$' -count=10（级联强度不降）",
+        "go test -race ./tests/integration/capabilities -run '^TestSearchRecallsFromRealStore$' -count=10"
+      ],
+      "evidence": {
+        "run_id": "wS2-04.23",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule iface-methods: memory 0 命中(12-7: 删 Projection/FactLog/RelationStore/EventQuerySource/OwnerResolver 五零消费端口; kvPort 5-2; ScopedOriginalStore 5-2 去 bare 读嵌入授权边界收紧; LifecycleStore 4-3 能力改装配入参 fail-closed)",
+          "五回归锚: TestMemoryCuration/TestSearchRecallsFromRealStore/TestRecallEvaluation/TestDurableTaskRoundTrip/TestReplicaMaterialization 全绿; 消费点(run.go supplyRetrieval)零改",
+          "S3-1 补登(归并不是删减字面闭合): 删除 4 个不可达错误名 ErrEventWrite/ErrIndexWrite/ErrMetaWrite/ErrOriginalWrite——全树零引用的死分支, 失败语义未减(segment 屏障 ErrSegmentBarrier/提交屏障 ErrCommitBarrier 具名仍在)",
+          "R30 裁断: 删不可达错误采纳自辩字面补登; 自勾 tasks.md 行越权经评估追认(锚绿内容属实, D1 同款)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "memory/projection.go",
+          "memory/replay.go",
+          "memory/localfile.go",
+          "memory/reference.go",
+          "memory/lifecycle.go",
+          "memory/skeleton_assert.go"
+        ]
+      },
+      "notes": " | wS2-04.23 完成（波29）"
+    },
+    {
+      "id": "00.25",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.21"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "event.Event 语义块文档分组落盘(身份/内容/归属/账目四组 doc-only, 结构零改动)",
+        "python3 scripts/check_concept_budget.py --rule struct-fields: ParsedMeta 按 S2 类别豁免登记(解析结果本体, 数据面, 口径勘误波28)",
+        "go test -race ./tests/integration/state -run ^TestStateOwnsPipeline$ -count=10"
+      ],
+      "notes": " | 口径勘误(波28): ParsedMeta 数据面豁免不瘦身, 收窄为文档分组 | wS2-00.25 完成（波29）",
+      "evidence": {
+        "run_id": "wS2-00.25",
+        "commands": [
+          "Event 16f 四块文档分组(identity/content/ownership/ledger) doc-only: comment-check 等值见证 code identical under comment strip exit 0; 非注释改动 0; 字段数 16 不变",
+          "ParsedMeta/Event 数据面豁免具名登记(引入叶 00.25+保真理由); 锚3 TestStateOwnsPipeline 10/0 零影响",
+          "分组注释形态偏离申报: 块说明并入块首字段 doc 首句(comment_policy doc-not-name-prefixed 硬要求)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "event/types.go",
+          "scripts/check_concept_budget.py"
+        ]
+      }
+    },
+    {
+      "id": "02.22",
+      "domain": "02-execution",
+      "depends_on": [
+        "02.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule iface-methods agent（端口审视后≤5 接口）",
+        "go test -race ./tests/integration/execution -run '^TestNativeConversationRoundTrip$' -count=10",
+        "go test -race ./tests/integration/learning -run '^TestFormalInvokeProducesTrainingRecords$' -count=10"
+      ],
+      "notes": " | 裁断2 反事实补登: Reconciler 保留区分判据=被 Shutdown 关闭语义结构引用(settlePass+Pending 闸)+CloseDrainsObligations 具名拒负锚在场, 区别于 04.23 删的五零引用端口; 生产装配缺口具名挂账(08.4 前承接: 装配或收缩纯测试面) | wS2-02.22 完成（波31）",
+      "evidence": {
+        "run_id": "wS2-02.22",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule iface-methods: agent 字面 5 接口(Agent/DelegationTasks/Recorder/HistoryFace/Reconciler); Producer/ProducerWatch 删并为 Shutdown.Watch(taskID, func() bool) 登记函数(全树零残留)",
+          "拒合并裁决(RequestFace/RequestSnapshotFace): 失败语义分叉实证——requestBoundary 错误冒泡 Drive=决策失败 vs snapshot 错误落 noteRecordingLoss=计数损失, 合并必强加单一错误策略",
+          "四回归锚: TestNativeConversationRoundTrip/TestFormalInvokeProducesTrainingRecords/TestCloseRefusesWhileModelInFlight/TestFormalChainSealsCapture 全绿+CloseDrainsObligations 级联(5 子测含 Reconciler 具名拒)",
+          "红线 16 面(agent 10+run 6); S4 stale 2 行已清(编排者机械维护); Reconciler 反事实已补登(裁断2)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "agent/loop.go",
+          "agent/shutdown.go",
+          "run.go",
+          "tests/integration/execution/close_drains_obligations_test.go"
+        ]
+      }
+    },
+    {
+      "id": "07.22",
+      "domain": "07-evolution",
+      "depends_on": [
+        "00.21",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "python3 scripts/check_concept_budget.py --rule struct-fields evolution（ObservationScan/ScannedFact/ReflectionConfig/TickOutcome 拆块后每结构≤5f）",
+        "go test -race ./tests/integration/evolution -run ^TestReflectionScopeAndWatermark$ -count=10（级联强度不降）",
+        "go test -race ./tests/integration/evolution -run ^TestStructuralEvaluation$ -count=10"
+      ],
+      "evidence": {
+        "run_id": "wS1-07.22",
+        "commands": [
+          "python3 scripts/check_concept_budget.py --rule struct-fields: evolution 本叶对象四结构零告警(ObservationScan 10-5/ScannedFact 7-3/ReflectionConfig 9-4/TickOutcome 6-4; 拆出块均<=5)",
+          "逐锚分跑: TestReflectionScopeAndWatermark 7 子测x10 全绿(水位三态/引导态/digest 确定/防重放零删改); TestStructuralEvaluation 10/10",
+          "级联 96 断言零删(字段路径改写); 新增 reflection_config.go 54 行(S3 勘误: 非 500 行——500 为单文件上限规则名); 越界改 scripts 删 4 行 BASELINE 已申报经 R30 裁断二接受",
+          "全回归十包绿; comment_policy 本单 0 finding"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "evolution/observation.go",
+          "evolution/reflection.go",
+          "evolution/reflection_config.go",
+          "evolution/digest.go",
+          "tests/integration/evolution/reflection_scope_watermark_test.go"
+        ]
+      },
+      "notes": " | wS1-07.22 完成（波27）"
+    },
+    {
+      "id": "00.26",
+      "domain": "00-foundation",
+      "depends_on": [
+        "00.24"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "verification": [
+        "接口自足性补差七项落盘(类型底座入契约面/装配图/负向范例/error 后果文档/Phase 映射注释/空 RiskLevel 语义/Order 序与身份相等语义)",
+        "python3 scripts/check_concept_budget.py --rule S4 全局 0(范例+红线合取)",
+        "go build ./... + go test ./tests/integration/... -count=1 零影响(doc/范例级)"
+      ],
+      "evidence": {
+        "run_id": "wS3-00.26",
+        "commands": [
+          "七缺口 7/7 落盘(派发单口径): 类型底座(ObjectRef 身份表/SourcePosition 文本构造/SessionState 四读数来源/Presentation+EventID 范例)/装配图 9 bullet+Assembly_example 全链可跑/负向范例×3(ErrCallIdentityChanged+error 拒 pass/ErrDetailOutsideScope/ErrDetailAbsent)/error 后果三处同义/Phase 映射+RiskPolicy 双面(one ruling 不重复出分)/空 RiskLevel 语义/Order 序+身份归一化",
+          "语义对齐核(R30 面2): 身份归一化重写与 refIDOf/refIDLess 一致; 空 RiskLevel 落盘契约=按 RiskMedium 保守定级(非拒非免检)——W1 申报措辞回落: 是否留痕由规则/预算/审批门另行裁决(不发明 trace duty 契约)",
+          "S4 前后零影响 69/0/0/ok; 范例语义断言 PASS(空值定级/transform 拒/身份归一/SessionState 1111/双拒具名/order 非降序); 十包绿零影响; comment_policy 0",
+          "W2 挂账: Detail.Blocked 范例未含(派发单七缺口外)——登记 09.21 重测前须补; comment-only 门无基线=流程缺口登记(整场未提交树, HEAD=战役前)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "plugin/phases.go",
+          "plugin/governance.go",
+          "query/types.go",
+          "query/reading.go",
+          "query/snapshot.go",
+          "examples/contract/"
+        ]
+      },
+      "notes": " | wS3-00.26 完成（波34）"
+    },
+    {
+      "id": "09.7",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "00.26",
+        "09.21",
+        "08.4",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "done",
+      "verification": [
+        "终态分块回溯 review 报告落盘(按孙任务×领域×原型对照三轴分类)",
+        "分类三类逐条: ①原型/规划要求且已实现 ②重构前特性当前未实现(缺口) ③新增演化(非原型)",
+        "辩证分析节: 过往契约与行为不作金标准, 穿透行为归因特性需求(每条缺口给特性本质)",
+        "双维判据评估: 简单=概念统一收敛(计数前后对照)/清晰=职责明确+抽象单一+丰富多态(逐口评)",
+        "对照物: prototype 包+docs/wiki+外部批准计划+midterm-review-response(只读回溯)"
+      ],
+      "notes": " | 用户裁定(2026-10-18): review 类工作不强依赖外部资源——deps 解除 08.5/09.6 资源锁, 真实资源面以缺口标注入报告(mock 评估); 08.5/09.5 真实面仍挂 09.5 资源门 | retrospective-09.7 完成（波38，主代理亲做——三轴分类+穿透分析+双维评估） | 分块细化落盘(波39): 五块 1738 行+汇总 T1-T10 裁决清单——三轴 84/24/11",
+      "evidence": {
+        "run_id": "retrospective-09.7",
+        "commands": [
+          "分块细化(用户要求按实现计划拆): 五块 review 落盘 evidence/09.7-review/ 共 1738 行逐叶 119 叶全覆盖——01-foundation.md(29 叶)/02-state-execution.md(23)/03-history-capabilities.md(26)/04-inspection-learning.md(18)/05-evolution-host-acceptance.md(23), 每叶含任务行要求/落点 file:line/三轴 A-B-C/锚证据; 汇总 00-summary.md=跨块去重裁决清单 T1-T10(根入口桩面/golden 4 归因/03.8 义务归属/会话正文所有权/06.6 勾选口径/资源门/Rollback 出口/09.3 口径/接缝组/数字勘误)+辩证五要点",
+          "终态分块回溯 review 落盘 evidence/09.7-retrospective-review.md(174 行): 按孙任务x领域三轴分类(10 域分块表)",
+          "分类三类逐条: A=原型/规划要求且已实现(七模块特性全覆盖且多数深化: 受理协议/持久档/真机判据/检索/训练面); B=缺口具名挂账(真实资源面 5 组+产品面 2 项+继承边界 3 项); C=新增演化(治理/审批/概念收敛/微信宿主/诊断——独立需求归因)",
+          "辩证分析节: 过往契约不作金标准——Receipt/观察分离本质(受理!=执行)/golden 4 处 drift 归因表(裁决方向=改 golden 对齐产品)/概念收敛=扩展边际成本投资/原型未实现清单=诚实边界声明",
+          "双维评估: 简单=11 面量化收敛表(query 12-4/run.go 1740-8 文件/Policy 9f-0/ApprovalRequest 11f-3 块/相位 7-4/agent 7-5/memory 12-7/ctx 3-2/范例红线 0-69 口出清); 清晰=职责明确(10 域禁边)+抽象单一(单方法窄口+拒合并分叉实证)+丰富多态(盲测 A2 最难面实证)。结论=理想工程判据达标",
+          "对照物: prototype 七模块职责声明+docs/wiki+外部批准计划+midterm-review-response+119 叶台账+盲测 A1A2B1B2(真实资源面 mock 标注, 用户裁定)"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "openspec/changes/runtime-rebuild/evidence/09.7-review/00-summary.md",
+          "openspec/changes/runtime-rebuild/evidence/09.7-retrospective-review.md",
+          "prototype/README.md"
+        ]
+      }
+    },
+    {
+      "id": "04.24",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.9",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "title": "长任务执行中续租调用点（R2 残余：Renew 零消费者）",
+      "verification": [
+        "正锚 go test -race ./tests/integration/execution -run ^TestLongExecutionRenewsLease$ -count=10 -json：长执行中续租，租约过期窗内 Sweep 不收割（真实执行路径驱动）",
+        "负锚 go test -race ./tests/integration/execution -run ^TestRenewRefusesExpiredLease$ -count=1 -json：过期租约续租具名拒（ErrLeaseExpired 类）",
+        "消费者锚：tool 执行路径（tool.go 族）真实调用 Manager.Renew（非测试补线）——grep 生产调用点",
+        "全回归 go test ./tests/integration/... -count=1 零影响+build/vet/gofmt"
+      ],
+      "evidence": {
+        "run_id": "lease-renewal-04.24",
+        "commands": [
+          "生产调用点(消费者锚): tool.go:170 manager.Renew=全仓唯一生产调用(RunTool.Call 取租后 renewForCall 启动/defer 收尾, MonitorConfig.Interval 节奏封顶 lease/2); 非空转反例: 摘掉续租调用→TestLongExecutionRenewsLease 立红(held=0), 恢复后 10/0",
+          "A1 正锚 TestLongExecutionRenewsLease -count=10: 10/0(真实执行路径 Assemble→Invoke, 1500ms 窗 15ms Sweep 断言 0 收割+Renewed>=1); A2 负锚 TestRenewRefusesExpiredLease: 过期具名拒 ErrLeaseExpired+Renew 语义收紧(过期不复活, 交 Sweep 显式裁决)",
+          "全回归 10 包 0 FAIL+build/vet/gofmt 干净; comment_policy 本单 0 finding"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tool/exec/tool.go",
+          "tool/exec/exec.go",
+          "tests/integration/execution/lease_renewal_test.go"
+        ]
+      },
+      "notes": " | lease-renewal-04.24 完成（波43）"
+    },
+    {
+      "id": "04.25",
+      "domain": "04-capabilities",
+      "depends_on": [
+        "04.8",
+        "00.P0.3"
+      ],
+      "phase": "implementation",
+      "status": "done",
+      "title": "并发跨 session 串场专项测试（R4 残余：P4 验证面）",
+      "verification": [
+        "正锚 go test -race ./tests/integration/execution -run ^TestConcurrentRunsStayScoped$ -count=10 -json：并发外部 Run（不同 sessionID）历史互不串场（真实组装路径）",
+        "负锚 go test -race ./tests/integration/execution -run ^TestCrossSessionContentIsRefused$ -count=1 -json：跨 session 内容进请求被拒/断言排除（具名）",
+        "消费者锚：agent 上下文组装正式入口（ContextPackage 路径）驱动",
+        "全回归零影响"
+      ],
+      "evidence": {
+        "run_id": "cross-session-04.25",
+        "commands": [
+          "A3 正锚 TestConcurrentRunsStayScoped -count=10: 10/0(4 session x 2 round 并发真实组装, 每请求 marker 集恰 1 session 无外来串场, 请求计数 sessions*(rounds+1) 精确)",
+          "A4 负锚 TestCrossSessionContentIsRefused: AttachReplay 正式注册入口(无 session 链/nil projection 具名拒)+alpha/beta 反事实对照(alpha 有投影/beta 无)排除空排除",
+          "消费者锚: 两锚经 tagent.Assemble+run.Invoke 正式链路, 历史由 memory chain→RebuildProjectionFromWAL 真实重建, 零 mock; 全回归零影响"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "tests/integration/execution/cross_session_scoping_test.go"
+        ]
+      },
+      "notes": " | cross-session-04.25 完成（波43）"
+    },
+    {
+      "id": "09.8",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "09.6",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "done",
+      "title": "收尾账三件清理（T2 残余＋09.6 三待裁入口落地）",
+      "verification": [
+        "锚1 comment_policy 存量清零或规则修订（fragmentation 规则-结构错配按 00.6 式修订）：bash scripts/lint.sh exit 0",
+        "锚2 docs/api 生成面收敛（删 27 stale/生成 33 新增/重生成 13 分歧）：bash scripts/gen_godoc.sh --check exit 0",
+        "锚3 doc-refs 口径落地（裁决=检查器加历史锚定模式，43 条引用按 SHA 全有效）：go run ./scripts/codetools doc-refs docs/wiki docs/*.md exit 0",
+        "锚4 F2 前置：bash scripts/lint.sh 全绿"
+      ],
+      "evidence": {
+        "run_id": "closure-09.8",
+        "commands": [
+          "锚2 docs/api 生成面收敛: 27 stale 删/33 新增/13 分歧重生成(逐包 go list 证已删包), gen_godoc --check exit 0",
+          "锚3 doc-refs 历史锚定口径落地(codetools check.go+3 测试): 43 引用按各文档末次提交快照全锚定 exit 0, wiki 零改动",
+          "锚1 comment_policy 457 条=白名单外注释债(78 文件 tests/integration+prototype+产品)——规则修订 37→0(fragmentation 作用域收窄, 具名理由+pinned 测试); W1 口径: 债清转 09.9 独立批",
+          "锚4 lint.sh 受阻: tracked-hygiene 28=27 删页+build.go(index 事项, R26 波后处理)+proc-refs 8(09.6 已登记待豁免)——转 09.9"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "docs/api/",
+          "scripts/codetools/check.go",
+          "scripts/comment_policy/main.go"
+        ]
+      },
+      "notes": " | closure-09.8 完成（波43）"
+    },
+    {
+      "id": "09.9",
+      "domain": "09-acceptance",
+      "depends_on": [
+        "09.8",
+        "00.P0.3"
+      ],
+      "phase": "acceptance",
+      "status": "done",
+      "title": "注释债清理批（457 条分批清偿+规则豁免落地）",
+      "verification": [
+        "锚1 comment_policy 457→0 分批清偿(tests/integration→prototype→产品侧, 免 --update-baseline)：go run ./scripts/comment_policy -no-baseline . examples/wechat-bot exit 0",
+        "锚2 audit-marker legacy 域名词豁免落地(匹配前掩蔽标识符与领域词组, 影响 24 条)：自测含正负样例",
+        "锚3 proc-refs 8 条豁免规则(检查器对 change 目录引用=合法)或具名重写",
+        "锚4 bash scripts/lint.sh 全绿(F2 前置)"
+      ],
+      "evidence": {
+        "run_id": "comment-debt-09.9",
+        "commands": [
+          "A 单(规则豁免): audit-marker legacy 域名词豁免落地(掩蔽标识符+闭合词表, 30 条豁免同树 37→7, 编排者裁决=接受 30 闭表口径)+正负样例自测; B/C 后续清偿使残留归 0",
+          "B 单(tests/integration): 244→0(29 文件仅注释, 去注释词法取证 code_diff 0, 383 行正文注释折入文档槽 bullet/断言消息); 全回归 10/10 绿",
+          "C 单(prototype+产品): 213→0(48 文件仅注释, prototype 三段式头注释保全); 457=244+213 全清; 全回归绿",
+          "编排者收尾: proc-refs 路线 A 落地(procRefSkip+4 键=检查器/CI 实参形态自引用豁免, exit 0)+重叠扫描去重修复(seenFile, 重叠集自相冲突伪影消除)+两处自有注释归文档槽——comment_policy 全域 0 finding"
+        ],
+        "exit_codes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "artifact_paths": [
+          "scripts/comment_policy/main.go",
+          "scripts/codetools/check.go",
+          "tests/integration/",
+          "prototype/",
+          "memory/",
+          "state/",
+          "rl/",
+          "evolution/"
+        ]
+      },
+      "notes": " | comment-debt-09.9 完成（波44，三单并发+编排者收尾，457→0）"
     }
   ]
 }

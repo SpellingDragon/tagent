@@ -61,18 +61,31 @@ type SessionScope struct {
 }
 
 // Connector opens an explicitly addressed connection to a remote A2A agent.
+//
+// The redline list (2 rules):
+// MUST create a client for the explicit target it is handed.
+// MUST NOT resolve a target by default or reuse the most recent one.
 type Connector interface {
 	// Connect creates a client for the explicit target.
 	Connect(ctx context.Context, target Target, opts ...a2aclient.Option) (*a2aclient.A2AClient, error)
 }
 
 // SessionBinder resolves the session association a remote call runs under.
+//
+// The redline list (2 rules):
+// MUST resolve the session association of the explicit target.
+// MUST NOT hand out a session scope the caller is not authorized to bind.
 type SessionBinder interface {
 	// Bind returns the session scope to use for the explicit target.
 	Bind(ctx context.Context, target Target) (SessionScope, error)
 }
 
 // Dispatcher sends one addressed request and owns the retry shape of that call.
+//
+// The redline list (3 rules):
+// MUST keep the same identity and the same target across every retry it performs.
+// MUST leave one outcome for the call.
+// MUST NOT record a retry as a second call or a second fact.
 type Dispatcher interface {
 	// Send delivers params to target under identity.
 	//

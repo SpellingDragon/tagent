@@ -1,7 +1,7 @@
 // 职责：以锁保护的顺序票据 map 保存事件原文，供 Recall 取回与 JSON 快照恢复。
 // 未实现：落盘持久化、索引、淘汰策略、语义检索。
 // 接线：config 装配 recall 工具与 ResultMemoryPlugin；CompactResults 依 memory_key 折叠。
-
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import (

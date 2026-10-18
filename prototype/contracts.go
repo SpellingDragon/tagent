@@ -1,12 +1,15 @@
 // 职责：模块间的事件、任务、配置、插件和模型请求数据契约。
 // 未实现：网络协议、凭据、持久格式迁移；JSON 快照只保存数据，不保存执行函数。
 // 接线：agent 消费 Event，state 持有 AgentConfig，config 解析 Registry，模型代理接收完整 ModelRequest。
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import "context"
 
+// EventType 是事件类型标识；零值表示插件显式丢弃。
 type EventType int
 
+// EventInput 起的六个常量是核心分派的入口事件；EventModelDelta 另承载模型中间叙述。
 const (
 	EventInput EventType = iota + 1
 	EventToolCall
@@ -19,11 +22,13 @@ const (
 	EventModelDelta
 )
 
+// ToolCall 是一次工具调用：名字与参数。
 type ToolCall struct {
 	Name string
 	Args string
 }
 
+// Event 是管线上的唯一载体：类型、归属、来源，以及按类型使用的载荷字段。
 type Event struct {
 	Type    EventType
 	OwnerID string
@@ -36,8 +41,10 @@ type Event struct {
 	Meta    map[string]string
 }
 
+// ToolFunc 是工具执行体：入参为调用参数，返回文本结果与错误。
 type ToolFunc func(context.Context, string) (string, error)
 
+// ModelRequest 是一次模型调用的完整请求面：身份、模型、系统提示、参数、技能、工具与输入。
 type ModelRequest struct {
 	AgentID      string
 	ModelName    string
@@ -48,14 +55,17 @@ type ModelRequest struct {
 	Inputs       []string
 }
 
+// ModelOutput 是模型产出：工具调用列表、final 文本与中间推理。
 type ModelOutput struct {
 	ToolCalls []ToolCall
 	Output    string
 	Reasoning string
 }
 
+// ModelFunc 是模型调用体，装配方按模型名注册到 Registry。
 type ModelFunc func(context.Context, ModelRequest) (ModelOutput, error)
 
+// ModelTrace 是一次模型调用的完整记录，交给 Record 供训练与监控消费。
 type ModelTrace struct {
 	Request  ModelRequest
 	Response ModelOutput
@@ -69,6 +79,7 @@ type Plugin struct {
 	After  func(context.Context, Event) (Event, error)
 }
 
+// AgentConfig 是一个 agent 的声明面：身份、父子关系、模型与可选执行面。
 type AgentConfig struct {
 	ID           string
 	ParentID     string
@@ -83,6 +94,7 @@ type AgentConfig struct {
 	TaskWindow int
 }
 
+// Config 是一次配置加载的声明面全集。
 type Config struct {
 	Agents []AgentConfig
 }
@@ -107,9 +119,9 @@ type StatePlan struct {
 // （空 Evolution{} 即全恒真），任一段返回 error 即拒绝整体提交；不实现审批等待、重试或灰度。
 // 运行时危险调用的拦截不属于 Evolution，由治理插件在事件管线承担（见 DenylistPlugin）。
 type Evolution struct {
-	Eval      func(StatePlan) error // 评估
-	Benchmark func(StatePlan) error // 基准
-	ApplyGate func(StatePlan) error // 应用门
+	Eval      func(StatePlan) error
+	Benchmark func(StatePlan) error
+	ApplyGate func(StatePlan) error
 }
 
 // Registry 将配置中的名字解析为本进程执行能力，不保存 agent 消费现场。
@@ -121,6 +133,7 @@ type Registry struct {
 	Record  func(ModelTrace)
 }
 
+// Task 是 owner 任务表里的一条执行事实：状态、结果与错误。
 type Task struct {
 	ID      int
 	OwnerID string

@@ -24,6 +24,11 @@ import (
 // The decision entry takes the binding generation effective when the decision
 // starts executing, so a publication during a decision never changes the binding
 // it runs with, and input that is still queued is not bound in advance.
+// The redline list (4 rules):
+// MUST take the binding generation effective at the start of the decision and keep it for what it sets in motion.
+// MUST reduce the model stream to its single terminal through the one reduction entry.
+// MUST NOT run a second tool-iteration loop beside the event loop, and MUST NOT judge a terminal on stream mechanics.
+// MUST NOT report a receipt as a result: an admitted call settles only after its own obligations clear.
 type Agent interface {
 	// Decide runs one model decision for one invocation: it takes the session's
 	// decision slot, borrows the binding generation effective at that moment, and

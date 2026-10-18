@@ -7,6 +7,7 @@ import (
 
 // errNotImplemented is the sentinel error returned by every skeleton stub. The
 // phase-2 implementation replaces each stub with real behavior.
+// 规格: docs/wiki/agent/agent-architecture.md#test-support
 var errNotImplemented = errors.New("phase 2: not implemented")
 
 // skeletonRunner is a compile-time placeholder for the phase-2 scenario runner.

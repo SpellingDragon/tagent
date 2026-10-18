@@ -20,6 +20,7 @@ var (
 	_ *trpcmodel.FunctionDefinitionParam = (*FunctionDefinitionParam)(nil)
 	_ *trpcmodel.Choice                  = (*Choice)(nil)
 	_ *trpcmodel.Usage                   = (*Usage)(nil)
+	_ *trpcmodel.TimingInfo              = (*TimingInfo)(nil)
 	_ *trpcmodel.ResponseError           = (*ResponseError)(nil)
 	_ *trpcmodel.ContentPart             = (*ContentPart)(nil)
 	_ *trpcmodel.Info                    = (*Info)(nil)

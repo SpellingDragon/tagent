@@ -85,6 +85,7 @@
 | `event-metadata-contract` | 事件元数据契约 | 02.1 | R | 06.1 | MetaKey/EventKey canonical 消费方=事件身份 |
 | `event-relation-store` | 事件关系库 | 03.1 | M | 04.8 | 关系图持久化消费方=recall/Query；域声明继承，见 §10.2 |
 | `event-segment-store` | 事件分段存储 | 03.2 | M | — | 分段存储消费方=存储后端（以 03 delta 为准，已落地） |
+  （注记 2026-10-15：03.2「已落地」=存储屏障面；**QueryEvents 读面已随 04.7 落地**（memory/query_events.go 读端口+MemoryEventQuery 确定性实现；真实存储源接线随 Body schema 落定）——见 unblock-04.6-04.7.md §二.2）
 | `event-sourced-projection` | 事件溯源投影 | 03.4 | R | 05.1 | 纯回放一等不变量消费方=投影/冷启重建 |
 | `event-timeline-rendering` | 时间线渲染 | 03.4 | R | 02.5 | 投影为 LLM 输入唯一装配源，消费方=请求装配 |
 | `event-type-unification` | 事件类型单一来源 | 02.1 | R | 03.1 | 常量单一来源消费方=event 包跨包引用 |

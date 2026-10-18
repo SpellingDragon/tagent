@@ -8,8 +8,12 @@
 // trpc.group/trpc-go/trpc-agent-go/model, so one import gives the runtime the
 // native model, request, response and message types without building a mirror
 // schema or a second tool loop. The aliases preserve the native method sets and
-// field layouts exactly: this package adds no wrapper types and no behaviour of
-// its own, and no alias copies or reshapes a native field.
+// field layouts exactly: no alias wraps a native type, copies or reshapes a
+// native field, or adds behaviour of its own. The one behaviour this package
+// owns is the request-scoped terminal reduction over tool-call streams
+// (ReduceChannel/ReduceSeq); terminal.go states that contract, including that
+// the reduction is the single terminal-decision entry point the agent loop
+// consumes.
 package model
 
 import trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -72,9 +76,30 @@ type Choice = trpcmodel.Choice
 // including the usage tail packet that ends a stream.
 type Usage = trpcmodel.Usage
 
+// TimingInfo is an alias for the locked tRPC generation timing record carried by
+// a Usage.
+type TimingInfo = trpcmodel.TimingInfo
+
 // ResponseError is an alias for the locked tRPC API-level error carried by a
 // Response.
 type ResponseError = trpcmodel.ResponseError
+
+// ErrorTypeStreamError, ErrorTypeAPIError, ErrorTypeFlowError, ErrorTypeRunError
+// and ErrorTypeCancelled are aliases for the locked tRPC response error type
+// constants, so the terminal reduction reads the native error categories.
+const (
+	// ErrorTypeStreamError is a stream-level failure carried by a Response.
+	ErrorTypeStreamError = trpcmodel.ErrorTypeStreamError
+	// ErrorTypeAPIError is an API-level failure carried by a Response.
+	ErrorTypeAPIError = trpcmodel.ErrorTypeAPIError
+	// ErrorTypeFlowError is a flow-level failure carried by a Response.
+	ErrorTypeFlowError = trpcmodel.ErrorTypeFlowError
+	// ErrorTypeRunError is a run-level failure carried by a Response.
+	ErrorTypeRunError = trpcmodel.ErrorTypeRunError
+	// ErrorTypeCancelled is a cancellation or timeout failure carried by a
+	// Response.
+	ErrorTypeCancelled = trpcmodel.ErrorTypeCancelled
+)
 
 // ContentPart is an alias for the locked tRPC multimodal content part held by a
 // Message.

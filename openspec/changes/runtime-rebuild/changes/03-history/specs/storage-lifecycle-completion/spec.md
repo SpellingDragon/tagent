@@ -1,7 +1,7 @@
 # storage-lifecycle-completion delta（03-history）
 
 > 复用登记（非规范，不改本条语义）：保留保护与回收协调在同一存储生命周期内；引用计数、先登记后淘汰、无损搬迁允许。
-> 本 delta 只新增「保留保护与回收协调」；本能力其余 Requirement（L1 to L2 compaction is automatically scheduled、L2 to L3 compaction is automatically scheduled、filterTombstoned removes tombstoned events、TTL check uses actual event timestamp）由主 spec `openspec/specs/storage-lifecycle-completion/spec.md` 继承（**证据映射，不改**）。
+> 本 delta 只新增「保留保护与回收协调」；主 spec 中「L1→L2/L2→L3 自动压实」等 Requirement 的处置＝**行为不变量保留（有序压实存在、恢复清点先于回收）、层级机制从零定义**（03.4/03.2 按新计划实现，不搬旧算法——00.2 裁决 B 与报告响应 §三.3 一致）；TTL 实际时间戳/墓碑过滤行为同此口径，非逐条继承旧实现（report-response.md）。
 
 ## ADDED Requirements
 

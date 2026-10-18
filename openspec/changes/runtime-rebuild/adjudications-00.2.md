@@ -56,7 +56,7 @@ task-reentry / event-key-visibility：§10.2 全条改 R 后 §4 标签同步改
 
 ## 三、裁决后终态
 
-- 601 条归属：R 244 · M 268 · H 60 · D 31（空洞 0、未处置 0）
+- 601 条归属：R 242 · M 268 · H 60 · D 31（空洞 0、未处置 0）。注：R244 系裁决时点值；收口（task-reentry/event-key-visibility 两能力全条改 R）后为 242——以 coverage.md §10.1 为准（报告响应修正，report-response.md §三.4）
 - §4 主表 120 能力：R 59 · M 47 · H 9 · D 5
 - 深度边界（诚实声明）：标题级+声明级+17 条正文级；1217 个 Scenario 未逐条审读——M 类 delta 覆盖的语义审定随各域 delta 撰写完成，本登记不替代
 

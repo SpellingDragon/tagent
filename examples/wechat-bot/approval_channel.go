@@ -1,0 +1,196 @@
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/SpellingDragon/tagent/plugin"
+	"trpc.group/trpc-go/trpc-agent-go/log"
+)
+
+// ErrApprovalNotApprover reports a message-channel ruling from a user outside
+// the approver whitelist: an empty whitelist refuses every message ruling.
+var ErrApprovalNotApprover = errors.New("wechat-bot: the sender is not in the approval whitelist")
+
+// ErrApprovalAmbiguous reports a ruling whose digest prefix names more than one
+// pending request: an ambiguous ruling is refused instead of applied to a guess.
+var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one pending approval")
+
+// minApprovalPrefix is the shortest digest prefix a ruling may name.
+const minApprovalPrefix = 4
+
+// approvalSender is the narrow outbound face the gateway announces requests
+// over; *wechat.Bot satisfies it.
+type approvalSender interface {
+	SendTextToUser(ctx context.Context, toUserID, text string) error
+}
+
+// approvalGateway is the host-side approval face: it delivers one request to
+// every configured approver chat and resolves a reply against the manager, so a
+// ruling is bound to the arguments that were held.
+type approvalGateway struct {
+	manager   *plugin.ApprovalManager
+	enabled   bool
+	approvers []string
+
+	mu     sync.RWMutex
+	sender approvalSender
+}
+
+// newApprovalGateway returns the gateway of one governance section: the request
+// directory, the approval validity and the approver whitelist.
+func newApprovalGateway(gov governanceEntry, approvers []string) *approvalGateway {
+	dir := ""
+	if gov.Dir != "" {
+		dir = gov.Dir
+	}
+	ttl := time.Duration(gov.ApprovalTTLMinutes) * time.Minute
+	g := &approvalGateway{
+		manager: plugin.NewApprovalManager(dir, ttl),
+		enabled: gov.Enabled,
+	}
+	for _, id := range approvers {
+		if id = strings.TrimSpace(id); id != "" {
+			g.approvers = append(g.approvers, id)
+		}
+	}
+	g.manager.AddChannel(g)
+	return g
+}
+
+// Manager reports the approval manager the execution policy reads its rulings
+// through.
+func (g *approvalGateway) Manager() *plugin.ApprovalManager { return g.manager }
+
+// Enabled reports whether the host attaches the approval policy of this
+// governance section to the assembly.
+func (g *approvalGateway) Enabled() bool { return g != nil && g.enabled }
+
+// SetSender binds the outbound channel the requests are announced over.
+func (g *approvalGateway) SetSender(sender approvalSender) {
+	g.mu.Lock()
+	g.sender = sender
+	g.mu.Unlock()
+}
+
+// IsApprover reports whether one user may rule over a request through the
+// message channel.
+func (g *approvalGateway) IsApprover(userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	for _, id := range g.approvers {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// Deliver offers one approval request to every configured approver chat. No
+// approver and no sender are named failures: the manager records them as
+// visible delivery gaps and the gate keeps waiting.
+func (g *approvalGateway) Deliver(ctx context.Context, req plugin.ApprovalRequest) error {
+	g.mu.RLock()
+	sender := g.sender
+	g.mu.RUnlock()
+	if len(g.approvers) == 0 {
+		return errors.New("wechat-bot: no approval recipient is configured (app.wechat.approvers)")
+	}
+	if sender == nil {
+		return errors.New("wechat-bot: the wechat sender is not ready")
+	}
+	digest := shortDigest(req.ArgsDigest)
+	text := fmt.Sprintf("⚠ 审批请求（tool=%s）\ndigest: %s\n批准回复: approve %s ｜ 拒绝: reject %s",
+		req.ToolName, digest, digest, digest)
+	var failures []error
+	for _, to := range g.approvers {
+		if err := sender.SendTextToUser(ctx, to, text); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", to, err))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// Resolve reads one ruling reply. It reports handled=false for a message that is
+// not a ruling, so the message continues as a chat turn. A ruling from outside
+// the whitelist, an ambiguous prefix and an unknown prefix are named refusals;
+// the manager decides the matched request under the digest it holds.
+func (g *approvalGateway) Resolve(from, text string) (handled bool, reply string, err error) {
+	status, prefix, ok := parseApprovalReply(text)
+	if !ok {
+		return false, "", nil
+	}
+	by := strings.TrimSpace(from)
+	if by != "cli" && !g.IsApprover(by) {
+		return true, "你没有审批权限（不在 app.wechat.approvers 白名单）。请由审批人经 CLI（wechat-bot approve <digest>）执行。", ErrApprovalNotApprover
+	}
+	req, err := g.match(prefix)
+	if err != nil {
+		log.Warnf("[approval] ruling from %s refused: %v", by, err)
+		return true, "审批失败: " + err.Error(), err
+	}
+	decided, err := g.manager.Decide(req.ID, status, "wechat:"+by)
+	if err != nil {
+		log.Warnf("[approval] decide %s refused: %v", req.ID, err)
+		return true, "审批失败: " + err.Error(), err
+	}
+	log.Infof("[approval] request %s decided %s by %s (tool=%s)", decided.ID, decided.Status, by, decided.ToolName)
+	return true, fmt.Sprintf("审批已记录：%s %s（tool=%s, digest=%s）",
+		decided.ID, decided.Status, decided.ToolName, shortDigest(decided.ArgsDigest)), nil
+}
+
+// match reports the one pending request whose digest starts with the prefix. An
+// unknown prefix and an ambiguous prefix are refused by name.
+func (g *approvalGateway) match(prefix string) (*plugin.ApprovalRequest, error) {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if len(prefix) < minApprovalPrefix {
+		return nil, fmt.Errorf("%w: 前缀至少 %d 位十六进制字符", plugin.ErrApprovalNotFound, minApprovalPrefix)
+	}
+	var found []*plugin.ApprovalRequest
+	for _, req := range g.manager.Pending() {
+		if strings.HasPrefix(strings.ToLower(req.ArgsDigest), prefix) {
+			found = append(found, req)
+		}
+	}
+	switch len(found) {
+	case 0:
+		return nil, fmt.Errorf("%w: 前缀 %s", plugin.ErrApprovalNotFound, prefix)
+	case 1:
+		return found[0], nil
+	default:
+		return nil, fmt.Errorf("%w: 前缀 %s 命中 %d 条", ErrApprovalAmbiguous, prefix, len(found))
+	}
+}
+
+// parseApprovalReply reads one ruling reply: the verb beside the digest prefix
+// an approver answers with. A message that carries neither is not a ruling.
+func parseApprovalReply(text string) (plugin.ApprovalStatus, string, bool) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		return "", "", false
+	}
+	verb, prefix := strings.ToLower(fields[0]), strings.TrimSpace(fields[1])
+	switch verb {
+	case "approve", "批准":
+		return plugin.ApprovalApproved, prefix, true
+	case "reject", "拒绝":
+		return plugin.ApprovalDenied, prefix, true
+	default:
+		return "", "", false
+	}
+}
+
+// shortDigest renders the readable prefix of one argument digest.
+func shortDigest(digest string) string {
+	if len(digest) > 8 {
+		return digest[:8]
+	}
+	return digest
+}

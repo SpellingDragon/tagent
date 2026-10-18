@@ -1,0 +1,400 @@
+package state
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+
+	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/task"
+)
+
+// 契约: docs/wiki/reliability/durable-delivery.md#canonical-fact-resolution
+//
+// FactLog is the durable fact surface one durable commit carrier stores
+// through: put, get, prefix scan and the sync barrier a commit reports its
+// success behind. Its signatures carry built-in types only, so any backend —
+// the memory tier's key-value port among them — satisfies it structurally and
+// no package edge is required in either direction.
+//
+// The redline list (4 rules):
+// MUST stage one key and its value without claiming it durable.
+// MUST complete the write barrier over everything staged before anyone reports durable success.
+// MUST NOT report staged bytes as stored.
+// MUST NOT answer a prefix scan with a subset of the pairs under that prefix.
+type FactLog interface {
+	// Put stages one key and its value.
+	Put(ctx context.Context, key string, value []byte) error
+	// Get returns the value stored under key and whether one is held.
+	Get(ctx context.Context, key string) ([]byte, bool, error)
+	// Scan returns every stored pair under the key prefix as key and value.
+	Scan(ctx context.Context, prefix string) (map[string][]byte, error)
+	// Sync completes the write barrier over everything staged so far, so a
+	// caller reports durable success only behind a barrier that returned.
+	Sync(ctx context.Context) error
+}
+
+// factPrefix and specPrefix locate the two durable record kinds the carrier
+// keeps on one log: the commit facts and the admission material of their tasks.
+// Both reuse the existing persistent identity material (the task_spawned and
+// the settle records), so the durable commit adds no new orchestration
+// persistence format and needs no other database.
+const (
+	factPrefix = "tagent/task/v1/fact:"
+	specPrefix = "tagent/task/v1/spec:"
+)
+
+// mutationKey is the idempotency identity of one mutation: the task it changes
+// and the mutation identifier the record carries.
+type mutationKey struct {
+	task     event.TaskID
+	mutation task.MutationID
+}
+
+// ErrNoticeNotOwed reports an acceptance of a notification the carrier holds no
+// delivery obligation for, so there is no delivery state to advance.
+var ErrNoticeNotOwed = errors.New("state: the notification carries no delivery obligation")
+
+// ErrSpecConflict reports a declaration that would replace the admission
+// material of a task with other content than the material already stored.
+var ErrSpecConflict = errors.New("state: the task's admission material is already declared with other content")
+
+// DurableCommit is the durable carrier behind the task commit port: it stores
+// one self-contained record per mutation identity through a FactLog behind the
+// sync barrier, and holds every committed notification as an open delivery
+// obligation. A repeated record of a mutation identity already stored returns
+// the fact already stored and records no second one — and never advances a
+// delivery state, because an idempotent hit reports a stored fact and not a
+// delivered notification. Only an explicit acceptance by the target moves a
+// delivery, through Accept.
+//
+// The carrier holds no wrapper, binding or lease: the log it stores through is
+// supplied at construction and nothing an earlier run captured is revived.
+type DurableCommit struct {
+	mu        sync.Mutex
+	log       FactLog
+	uncertain task.UncertainProbe
+	revisions map[event.TaskID]int64
+	facts     map[event.TaskID][]task.CommitRecord
+	specs     map[event.TaskID]task.Spec
+	mutations map[mutationKey]task.CommitRecord
+	owed      map[noticeKey]task.OutboxNotice
+}
+
+// DurableCommit satisfies the task commit port.
+var _ task.Commit = (*DurableCommit)(nil)
+
+// NewDurableCommit returns a durable commit carrier over one fact log and
+// loads every fact the log already holds, so a second process over the same log
+// sees exactly the facts the first one committed. uncertain, when it is not
+// nil, marks matching commit attempts as uncertain, so all three commit
+// outcomes stay observable.
+func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
+	d := &DurableCommit{
+		log:       log,
+		uncertain: uncertain,
+		revisions: map[event.TaskID]int64{},
+		facts:     map[event.TaskID][]task.CommitRecord{},
+		specs:     map[event.TaskID]task.Spec{},
+		mutations: map[mutationKey]task.CommitRecord{},
+		owed:      map[noticeKey]task.OutboxNotice{},
+	}
+	if err := d.load(context.Background()); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// load folds every record the log already holds back into the carrier's tables.
+// A committed notification is loaded owed and pending again: the storage layer
+// never records an acceptance, so only the target's explicit acceptance moves
+// one and an unconfirmed delivery is replayed rather than trusted.
+func (d *DurableCommit) load(ctx context.Context) error {
+	specs, err := d.log.Scan(ctx, specPrefix)
+	if err != nil {
+		return err
+	}
+	for key, body := range specs {
+		var spec task.Spec
+		if err := json.Unmarshal(body, &spec); err != nil {
+			return err
+		}
+		d.specs[event.TaskID(key[len(specPrefix):])] = spec
+	}
+	facts, err := d.log.Scan(ctx, factPrefix)
+	if err != nil {
+		return err
+	}
+	byTask := map[event.TaskID][]task.CommitRecord{}
+	for _, body := range facts {
+		record, err := task.DecodeTaskRecord(body)
+		if err != nil {
+			return err
+		}
+		byTask[record.Fact.TaskID] = append(byTask[record.Fact.TaskID], record.Fact)
+	}
+	for taskID, records := range byTask {
+		sort.Slice(records, func(i, j int) bool {
+			return records[i].ExpectedRevision < records[j].ExpectedRevision
+		})
+		for _, record := range records {
+			d.facts[taskID] = append(d.facts[taskID], record)
+			d.mutations[mutationKey{task: taskID, mutation: record.MutationID}] = record
+			if revision := record.ExpectedRevision + 1; revision > d.revisions[taskID] {
+				d.revisions[taskID] = revision
+			}
+			for _, envelope := range record.Outbox {
+				d.owed[noticeKey{task: envelope.Notice.TaskID, round: envelope.Notice.Round,
+					kind: envelope.Notice.Kind, seq: envelope.Notice.Seq}] = task.OutboxNotice{
+					Notice:   envelope,
+					Delivery: task.DeliveryPending,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// Commit implements the task commit port. A record of a mutation identity the
+// carrier already stores returns the fact already stored and records no second
+// fact — and advances no delivery state: the notifications of the stored fact
+// stay owed and pending until their targets explicitly accept them. The same
+// identity beside other content is refused by name, as is a record expecting
+// another revision. A record is staged behind the sync barrier before the
+// carrier reports it committed, so a barrier that fails reports an uncertain
+// outcome instead of a durable success.
+func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (task.CommitResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if record.MutationID == "" {
+		return task.CommitNotCommitted, task.ErrMutationMissing
+	}
+	key := mutationKey{task: record.TaskID, mutation: record.MutationID}
+	if prior, ok := d.mutations[key]; ok {
+		if !sameRecord(prior, record) {
+			return task.CommitNotCommitted, task.ErrMutationConflict
+		}
+		return task.CommitCommitted, nil
+	}
+	if d.uncertain != nil && d.uncertain(record) {
+		return task.CommitUncertain, nil
+	}
+	if current := d.revisions[record.TaskID]; current != record.ExpectedRevision {
+		return task.CommitNotCommitted, task.ErrRevisionConflict
+	}
+	body, err := task.EncodeTaskRecord(task.TaskRecord{Spec: d.specs[record.TaskID], Fact: record})
+	if err != nil {
+		return task.CommitNotCommitted, err
+	}
+	if err := d.log.Put(ctx, factKey(record.TaskID, record.MutationID), body); err != nil {
+		return task.CommitNotCommitted, err
+	}
+	if err := d.log.Sync(ctx); err != nil {
+		return task.CommitUncertain, err
+	}
+	d.revisions[record.TaskID] = record.ExpectedRevision + 1
+	d.facts[record.TaskID] = append(d.facts[record.TaskID], record)
+	d.mutations[key] = record
+	for _, envelope := range record.Outbox {
+		d.owed[noticeKey{task: envelope.Notice.TaskID, round: envelope.Notice.Round,
+			kind: envelope.Notice.Kind, seq: envelope.Notice.Seq}] = task.OutboxNotice{
+			Notice:   envelope,
+			Delivery: task.DeliveryPending,
+		}
+	}
+	return task.CommitCommitted, nil
+}
+
+// Declare stores the admission material of one task — the task_spawned record —
+// beside the commit facts of the same log, so a restore rebuilds the task from
+// material the chain already carries. The declaration is idempotent for the
+// same content and refuses to replace stored material with other content.
+func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec task.Spec) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if prior, ok := d.specs[taskID]; ok && prior != spec {
+		return ErrSpecConflict
+	}
+	body, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	if err := d.log.Put(ctx, specPrefix+string(taskID), body); err != nil {
+		return err
+	}
+	if err := d.log.Sync(ctx); err != nil {
+		return err
+	}
+	d.specs[taskID] = spec
+	return nil
+}
+
+// Accept advances the delivery state of one notification to accepted. This is
+// the only advance there is: a commit never moves a delivery, and an idempotent
+// commit repeat leaves every notification owed and pending. A notification the
+// carrier holds no obligation for is refused by name.
+func (d *DurableCommit) Accept(ctx context.Context, notice task.Notice) (task.DeliveryAcceptance, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	key := noticeKey{task: notice.TaskID, round: notice.Round, kind: notice.Kind, seq: notice.Seq}
+	entry, ok := d.owed[key]
+	if !ok {
+		return task.DeliveryPending, ErrNoticeNotOwed
+	}
+	entry.Delivery = task.DeliveryAccepted
+	d.owed[key] = entry
+	return task.DeliveryAccepted, nil
+}
+
+// Facts returns the records the carrier stored for one task, in commit order.
+func (d *DurableCommit) Facts(taskID event.TaskID) []task.CommitRecord {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]task.CommitRecord(nil), d.facts[taskID]...)
+}
+
+// Revision returns the revision the task is at after the records stored for it.
+func (d *DurableCommit) Revision(taskID event.TaskID) int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.revisions[taskID]
+}
+
+// Outbox returns the notifications one task still owes delivery, each paired
+// with its delivery-layer state, ordered by round, kind and sequence.
+func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var owed []task.OutboxNotice
+	for key, entry := range d.owed {
+		if key.task == taskID {
+			owed = append(owed, entry)
+		}
+	}
+	sort.Slice(owed, func(i, j int) bool {
+		left, right := owed[i].Notice.Notice, owed[j].Notice.Notice
+		if left.Round != right.Round {
+			return left.Round < right.Round
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return left.Seq < right.Seq
+	})
+	return owed
+}
+
+// TaskIDs returns every task the carrier holds facts for, in numeric order.
+func (d *DurableCommit) TaskIDs() []event.TaskID {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ids := make([]event.TaskID, 0, len(d.facts))
+	for taskID := range d.facts {
+		ids = append(ids, taskID)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i] < ids[j]
+	})
+	return ids
+}
+
+// Records returns the durable fact chain of one task as restore links, in
+// commit order: the admission link carries the stored task_spawned material,
+// every later link carries its fact alone.
+func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	records := d.facts[taskID]
+	chain := make([]task.TaskRecord, 0, len(records))
+	for i, fact := range records {
+		link := task.TaskRecord{Fact: fact}
+		if i == 0 {
+			link.Spec = d.specs[taskID]
+		}
+		chain = append(chain, link)
+	}
+	return chain, nil
+}
+
+// sameRecord reports whether a stored record and a repeated one carry the same
+// content: the same expected revision, the same status change and the same
+// outbox.
+func sameRecord(stored, record task.CommitRecord) bool {
+	return stored.ExpectedRevision == record.ExpectedRevision &&
+		stored.Status == record.Status &&
+		equalOutbox(stored.Outbox, record.Outbox)
+}
+
+// equalOutbox reports whether two outboxes carry the same envelopes in the same
+// order.
+func equalOutbox(left, right []task.NoticeEnvelope) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// factKey locates one commit fact on the log by the task it changes and the
+// mutation identity it carries.
+func factKey(taskID event.TaskID, mutation task.MutationID) string {
+	return factPrefix + string(taskID) + "\x00" + string(mutation)
+}
+
+// BindingOwners resolves a restored target's owner against the current
+// orchestration binding: the tool set the current effective generation holds
+// for the owner. A target the owner's current tool set does not hold is
+// refused by name with task.ErrTargetRemoved, so a restore or a replay refuses
+// the re-delivery rather than faking it, silently re-routing it, or serving it
+// from a stale generation. The holder is supplied at construction and nothing
+// is read from a top-level singleton.
+type BindingOwners struct {
+	bindings *Bindings
+}
+
+// BindingOwners satisfies the owner resolution the restore and the replay
+// resolve through.
+var _ task.OwnerBinding = (*BindingOwners)(nil)
+
+// NewBindingOwners returns an owner resolution over one binding holder's
+// current effective generation.
+func NewBindingOwners(bindings *Bindings) *BindingOwners {
+	return &BindingOwners{bindings: bindings}
+}
+
+// OwnerOf reports the owner that target belongs to under the current
+// orchestration binding: the owner whose current tool set still holds the
+// target. An owner the binding does not hold and a target the owner's tool
+// set does not hold are both refused with task.ErrTargetRemoved beside the
+// cause, since either means the current binding carries no such target for
+// that owner.
+func (o *BindingOwners) OwnerOf(ctx context.Context, owner event.AgentID, target event.AgentID) (event.AgentID, error) {
+	if o == nil || o.bindings == nil {
+		return "", ErrBindingHolderMissing
+	}
+	handle, err := o.bindings.Borrow(ctx, owner)
+	if err != nil {
+		return "", fmt.Errorf("%w: owner %s target %s: %v", task.ErrTargetRemoved, owner, target, err)
+	}
+	defer handle.Release(ctx)
+	for _, tool := range handle.Binding.Tools {
+		if tool == nil {
+			continue
+		}
+		declaration := tool.Declaration()
+		if declaration != nil && declaration.Name == string(target) {
+			return owner, nil
+		}
+	}
+	return "", fmt.Errorf("%w: owner %s holds no target %s in its current tool set", task.ErrTargetRemoved, owner, target)
+}

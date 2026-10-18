@@ -58,8 +58,11 @@ const MCPCallInputSchemaJSON = `{
 // Registry is the concurrent-safe map from server name to live native tool set
 // that discovery and the gateway read.
 //
-// Add and Remove move live connections only; neither changes any agent's
-// declared tool set.
+// The redline list (4 rules):
+// MUST be safe for concurrent use.
+// MUST list the registered server names in ascending order.
+// MUST NOT change any agent's declared tool set when a connection is added or removed.
+// MUST NOT hand out a tool set once its registration ended.
 type Registry interface {
 	// Get returns the tool set registered under name and reports whether it is
 	// present.
@@ -80,6 +83,11 @@ type Registry interface {
 
 // Connector builds one native MCP tool set from its connection declaration and
 // brings its session up before the registry hands the tool set out.
+//
+// The redline list (3 rules):
+// MUST build one native tool set from its connection declaration.
+// MUST bring the tool set's session up before the registry hands it out.
+// MUST NOT hand out a tool set whose session is not up.
 type Connector interface {
 	// Connect creates and initializes the native tool set described by config.
 	Connect(ctx context.Context, config trpcmcp.ConnectionConfig, opts ...trpcmcp.ToolSetOption) (*trpcmcp.ToolSet, error)
@@ -87,6 +95,11 @@ type Connector interface {
 
 // Discovery resolves the tools reachable through one registry and re-lists a
 // live tool set.
+//
+// The redline list (3 rules):
+// MUST carry the input schema of every tool it returns.
+// MUST re-list a live tool set instead of reusing a listing taken earlier.
+// MUST NOT list a tool reachable only outside the registry it was handed.
 type Discovery interface {
 	// Discover returns the tools reachable through registry as read for the
 	// current request, and carries the input schema of every tool it returns.
@@ -97,6 +110,10 @@ type Discovery interface {
 }
 
 // DeclarationReloader re-issues the declarations of the built-in gateway tools.
+//
+// The redline list (2 rules):
+// MUST return the declarations in the order they are handed to a request.
+// MUST NOT answer a declaration of a tool the gateway does not serve.
 type DeclarationReloader interface {
 	// ReloadDeclarations returns the declarations of the built-in gateway tools
 	// in the order they are handed to a request.

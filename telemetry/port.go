@@ -20,11 +20,11 @@ import (
 // Observer is the post-commit observation entry: the single callback a runtime
 // invokes for each fact that has committed successfully.
 //
-// Observe runs after the fact is durable, so a slow or failing observer can
-// never hold back that fact or reorder it against other committed facts. A
-// failure is recorded as a gap in the observation record and reported to the
-// caller; the committed fact is never rolled back, and the observed work is
-// never re-run to satisfy an observer.
+// The redline list (4 rules):
+// MUST run after the fact is durable.
+// MUST record a failure as a gap in the observation record and report it to the caller.
+// MUST NOT hold back or reorder a committed fact for a slow or failing observer.
+// MUST NOT roll back the committed fact or re-run the observed work to satisfy an observer.
 type Observer interface {
 	// Observe reports one committed fact to the observation side.
 	//

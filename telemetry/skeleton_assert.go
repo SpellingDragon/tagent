@@ -20,13 +20,34 @@ var (
 	_ func(Recorder, context.Context, event.Event) error  = Recorder.Record
 	_ func(Recorder, context.Context) (SealResult, error) = Recorder.FlushAndWait
 	_ func(Recorder, context.Context) error               = Recorder.Close
+
+	_ func(AuditSink, context.Context, AuditRecord) error = AuditSink.Audit
+
+	_ func(*SDKObserver, context.Context, event.Event) error = (*SDKObserver).Observe
 )
 
 // Interface kinds, asserted so that a later edit cannot turn a declared port
 // into a concrete type without changing this file.
 var (
-	_ Observer = (Observer)(nil)
-	_ Recorder = (Recorder)(nil)
+	_ Observer  = (Observer)(nil)
+	_ Recorder  = (Recorder)(nil)
+	_ AuditSink = (AuditSink)(nil)
+)
+
+// The post-commit observer keeps satisfying the observation port it serves,
+// so a revision that drops it from the bypass stops this block from compiling.
+var _ Observer = (*SDKObserver)(nil)
+
+// The layered audit record keeps every documented field, and every layer name
+// stays a constant of its declared type.
+var _ = AuditRecord{
+	Fact:     "",
+	Attempts: []Attempt{{Layer: LayerTrace, Skipped: false}},
+}
+
+const (
+	_ Layer = LayerTrace
+	_ Layer = LayerMetric
 )
 
 // The declared seal statuses must stay compile-time constants: a variable or a

@@ -41,7 +41,14 @@ var (
 		TaskID:           "",
 		ExpectedRevision: 0,
 		Status:           StatusUnknown,
-		Outbox:           []Notice{},
+		Outbox:           []NoticeEnvelope{},
+	}
+
+	_ = NoticeEnvelope{
+		Notice:         Notice{},
+		Target:         event.Address{},
+		Source:         event.Address{},
+		TargetInstance: "",
 	}
 
 	_ = Notice{
@@ -50,6 +57,20 @@ var (
 		Kind:   NoticeAccepted,
 		Seq:    0,
 		Event:  "",
+	}
+
+	_ = Hold{
+		TaskID:         "",
+		Reason:         "",
+		ApprovalID:     "",
+		ExpectedDigest: "",
+	}
+
+	_ = ApprovalAnswer{
+		ApprovalID:     "",
+		ExpectedDigest: "",
+		Granted:        false,
+		Reason:         "",
 	}
 
 	_ = Obligations{
@@ -79,6 +100,7 @@ const (
 	_ = StatusSettled
 	_ = StatusFailed
 	_ = StatusCancelled
+	_ = StatusAwaitingApproval
 
 	_ = CommitUncertain
 	_ = CommitCommitted
@@ -170,4 +192,71 @@ var (
 	_ func(context.Context, event.TaskID) (Obligations, error)                   = skeletonManager{}.Obligations
 	_ func(context.Context, event.TaskID, HandoffTarget) error                   = skeletonManager{}.Handoff
 	_ func(context.Context, event.TaskID) error                                  = skeletonManager{}.Flush
+)
+
+// The durable restore face keeps its documented shapes: the self-contained
+// restore link beside its codec, the owner-binding port and the named
+// refusals of a restore.
+var (
+	_ = TaskRecord{
+		Spec: Spec{},
+		Fact: CommitRecord{},
+	}
+
+	_ = RestoreOutcome{
+		TaskID:    "",
+		Status:    StatusUnknown,
+		Owner:     "",
+		Recovered: false,
+		Refused:   nil,
+	}
+
+	_ = RestoreReport{
+		Tasks: []RestoreOutcome{},
+	}
+
+	_ error = ErrTargetRemoved
+	_ error = ErrNoOwnerBinding
+	_ error = ErrChainBroken
+
+	_ OwnerBinding = (OwnerBinding)(nil)
+
+	_ func(OwnerBinding, context.Context, event.AgentID, event.AgentID) (event.AgentID, error) = OwnerBinding.OwnerOf
+
+	_ func(TaskRecord) ([]byte, error) = EncodeTaskRecord
+	_ func([]byte) (TaskRecord, error) = DecodeTaskRecord
+
+	_ func(*MemoryRegistry, context.Context, []TaskRecord, OwnerBinding) (RestoreReport, error) = (*MemoryRegistry).Restore
+)
+
+// The handoff, retry and instance-close faces keep their documented shapes: the
+// recorded handoff link, the stable notice sequencer, the frozen-envelope
+// deliverer beside its manager option, and the named refusals and retained
+// material of a closed instance.
+var (
+	_ = HandoffRecord{
+		TaskID:         "",
+		PreviousTarget: event.Address{},
+		SourceInstance: "",
+		Target:         event.Address{},
+		TargetInstance: "",
+	}
+
+	_ EnvelopeDeliverer = (EnvelopeDeliverer)(nil)
+	_ ManagerOption     = (ManagerOption)(nil)
+
+	_ error = ErrNoHandoff
+	_ error = ErrInstanceClosed
+
+	_ func(*NoticeSequencer, event.TaskID, int64, NoticeKind, event.EventID) Notice = (*NoticeSequencer).Issue
+	_ func(*NoticeSequencer, Notice)                                                = (*NoticeSequencer).Observe
+
+	_ func(*MemoryRegistry, context.Context, event.TaskID, NoticeKind, event.EventID) (NoticeEnvelope, error) = (*MemoryRegistry).IssueNotice
+
+	_ func(*MemoryManager, context.Context, event.TaskID) (HandoffRecord, error)        = (*MemoryManager).HandoffOf
+	_ func(*MemoryManager, context.Context, event.InstanceID) error                     = (*MemoryManager).CloseInstance
+	_ func(*MemoryManager, context.Context, event.InstanceID) ([]NoticeEnvelope, error) = (*MemoryManager).Retained
+	_ func(*MemoryManager, context.Context, event.InstanceID) ([]TaskRecord, error)     = (*MemoryManager).RecoveryMaterial
+
+	_ func(EnvelopeDeliverer) ManagerOption = WithEnvelopeDeliverer
 )

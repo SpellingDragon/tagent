@@ -4,6 +4,7 @@
 // 未实现：崩溃一致性/事务/自动重执行；外部资源重挂用 TaskManager.Complete 显式模拟，是明确的 mock 边界。
 // 接线：writer 停壳后 Save（pending 未消费）再 Close 清本进程 mock 任务；reader LoadState →
 // ReloadConfig(删 orphan) → NewAgent/Run 回原队列续跑。仅模拟检查点跨进程，不声称崩溃一致。
+// 契约: docs/wiki/agent/prototype-skeleton.md#inherited-invariants
 package prototype
 
 import (
@@ -26,6 +27,8 @@ const (
 var ticketRe = regexp.MustCompile(`\[memory:([^\]]+)\]`)
 
 // TestAgentRecoverySubprocess 是子进程入口：父测试用环境变量选择 writer/reader 阶段。
+//
+// - 阶段结束时打印 RECOVERY_PHASE_DONE，供父进程在 -test.v 下确认该阶段确实执行而非被跳过。
 func TestAgentRecoverySubprocess(t *testing.T) {
 	phase := os.Getenv(phaseEnv)
 	if phase == "" {
@@ -39,11 +42,12 @@ func TestAgentRecoverySubprocess(t *testing.T) {
 	default:
 		t.Fatalf("未知恢复阶段 %q", phase)
 	}
-	t.Logf("RECOVERY_PHASE_DONE=%s", phase) // -test.v 下父进程据此确认该阶段确实执行而非被跳过
+	t.Logf("RECOVERY_PHASE_DONE=%s", phase)
 }
 
 // TestAgentRecoveryCrossProcess 派两个真实子进程串行执行 write/read 阶段（不得同进程 Clone 冒充）。
-// 子进程用 CommandContext + 超时只防挂；父进程按 -test.v 标记断言两阶段都真实跑过。
+//
+// - 子进程用 CommandContext + 超时只防挂；父进程按 -test.v 标记断言两阶段都真实跑过。
 func TestAgentRecoveryCrossProcess(t *testing.T) {
 	if os.Getenv(phaseEnv) != "" {
 		t.Skip("子进程模式")
@@ -64,15 +68,18 @@ func TestAgentRecoveryCrossProcess(t *testing.T) {
 	}
 }
 
-// recoveryWriter：经真实 agent 让 archive 低密度结果进 Memory 并折成票据，再派一个 running slow 任务；
-// 停消费壳后放待处理 input，Save 退出，最后 Close 清本进程 mock 任务（快照已落盘，不重写）。
+// recoveryWriter 经真实 agent 把 archive 低密度结果折成票据后写出跨进程快照。
+//
+// - 经真实 agent 让 archive 结果进 Memory 并折成票据，再派一个 running slow 任务；不放闸，使 slow 保持 running 至快照保存。
+// - 停消费壳后放待处理 input，Save 退出，最后 Close 清本进程 mock 任务（快照已落盘，不重写）。
+// - orphan 也建出现场（context + 一个已完成任务），随后由 reader 的配置回收。
 func recoveryWriter(t *testing.T, dir string) {
 	long := "ARCHIVE-" + strings.Repeat("y", 200) + bodyMark
 	cfg := writeCfg(t, dir, "w.json", Config{Agents: []AgentConfig{
 		{ID: "owner", Model: "m", Tools: []string{"archive", "slow"}, Plugins: []string{"memo"}},
 		{ID: "orphan", Model: "om", Tools: []string{"noop"}},
 	}})
-	held := make(chan struct{}) // writer 不放闸：slow 保持 running 至快照保存
+	held := make(chan struct{})
 	started := make(chan struct{}, 1)
 	sawFull := make(chan struct{}, 1)
 	noop := make(chan struct{}, 1)
@@ -80,7 +87,7 @@ func recoveryWriter(t *testing.T, dir string) {
 		Models: map[string]ModelFunc{
 			"m": func(_ context.Context, req ModelRequest) (ModelOutput, error) {
 				switch j := joined(req); {
-				case strings.Contains(j, bodyMark): // 归档全文这一轮确实进了模型输入
+				case strings.Contains(j, bodyMark):
 					select {
 					case sawFull <- struct{}{}:
 					default:
@@ -137,7 +144,7 @@ func recoveryWriter(t *testing.T, dir string) {
 	if _, err := ReloadConfig(cfg, state, registry, Evolution{}); err != nil {
 		t.Fatalf("writer reload: %v", err)
 	}
-	owner, err := state.Agent("owner") // 现场句柄：读 Context/Memory/Tasks
+	owner, err := state.Agent("owner")
 	if err != nil {
 		t.Fatalf("writer owner: %v", err)
 	}
@@ -152,12 +159,12 @@ func recoveryWriter(t *testing.T, dir string) {
 	if err := agent.Input(context.Background(), "seed"); err != nil {
 		t.Fatalf("writer seed: %v", err)
 	}
-	await(t, sawFull) // 模型确已看到归档全文，再驱动慢任务
+	await(t, sawFull)
 	if err := agent.Input(context.Background(), "slow-kick"); err != nil {
 		t.Fatalf("writer slow-kick: %v", err)
 	}
 	await(t, started)
-	halt(t, co, do) // 停消费壳；在途任务作为 owner 资源保留
+	halt(t, co, do)
 
 	es := owner.Context()
 	var folded bool
@@ -175,11 +182,10 @@ func recoveryWriter(t *testing.T, dir string) {
 	if !anyTask(owner.Tasks.Snapshot(), func(tk Task) bool { return tk.Call.Name == "slow" && tk.Status == "running" }) {
 		t.Fatalf("writer slow 应仍在途: %+v", owner.Tasks.Snapshot())
 	}
-	if err := agent.Input(context.Background(), "pending"); err != nil { // 停壳后放待处理 input：尚未消费
+	if err := agent.Input(context.Background(), "pending"); err != nil {
 		t.Fatalf("writer pending: %v", err)
 	}
 
-	// orphan 也建出现场（context + 一个已完成任务），随后由 reader 的配置回收。
 	orphan, err := NewAgent("orphan", state, registry, nil)
 	if err != nil {
 		t.Fatalf("writer orphan: %v", err)
@@ -196,12 +202,14 @@ func recoveryWriter(t *testing.T, dir string) {
 	if err := state.Save(filepath.Join(dir, "snap.json")); err != nil {
 		t.Fatalf("writer save: %v", err)
 	}
-	state.Close() // 清理本进程 mock 任务；快照已落盘，不重写
+	state.Close()
 }
 
-// recoveryReader：在另一进程 LoadState，保留有 owner 的现场、回收无 owner 的；再从恢复上下文的真实
-// 票据经模型发 recall（非测试直调 Memory），实际 Recall 结果回流模型，与 pending/旧上下文/重挂结果
-// 合成最终答复。慢任务 id 按 Call.Name 定位，不假定为 1。
+// recoveryReader 在另一进程 LoadState，保留有 owner 的现场、回收无 owner 的。
+//
+// - 生效 prompt 随快照恢复：此刻尚未提供 registry，读到快照值即证明 state 自持、无 registry 读取。
+// - 从恢复上下文的真实票据经模型发 recall（非测试直调 Memory），结果回流模型，与 pending/旧上下文/重挂结果合成最终答复。
+// - 慢任务 id 按 Call.Name 定位，不假定为 1。
 func recoveryReader(t *testing.T, dir string) {
 	state, err := LoadState(filepath.Join(dir, "snap.json"))
 	if err != nil {
@@ -215,7 +223,6 @@ func recoveryReader(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatalf("reader orphan: %v", err)
 	}
-	// 生效 prompt 随快照恢复：此刻尚未提供 registry，读到快照值即证明 state 自持、无 registry 读取。
 	if sp := owner.SystemPrompt(); !strings.Contains(sp, "[tools] archive,slow") {
 		t.Fatalf("恢复现场未带出生效 system prompt: %q", sp)
 	}
@@ -260,7 +267,7 @@ func recoveryReader(t *testing.T, dir string) {
 			case full && tk != nil && strings.Contains(j, "reattached") && lastInput(req) != "":
 				// 投递任务化后，Reply 会 spawn 一条 deliver 任务，其空结果（Data=""）会再驱动一次模型；
 				// 用 lastInput != "" 排除该空驱动（召回全文/重挂结果都是非空），避免无限重投。
-				var parts []string // 最终答复直接由模型所见拼成，自证消费了旧上下文/待处理/召回/重挂
+				var parts []string
 				if hasStr(req.Inputs, "seed") {
 					parts = append(parts, "seed")
 				}
@@ -268,7 +275,7 @@ func recoveryReader(t *testing.T, dir string) {
 					parts = append(parts, "pending")
 				}
 				return out("final[" + strings.Join(append(parts, "recall", "reattach"), "+") + "]"), nil
-			case tk != nil && !full: // 票据在（来自快照），全文未在 → 经真实 recall 工具取回
+			case tk != nil && !full:
 				return toolcall("recall", tk[1]), nil
 			}
 			return ModelOutput{}, nil
@@ -301,7 +308,7 @@ func recoveryReader(t *testing.T, dir string) {
 	cancel, done := launch(t, agent)
 	defer halt(t, cancel, done)
 
-	owner.Tasks.Complete(unknownID, "reattached", nil) // 模拟外部资源重挂回报（明确 mock 边界）
+	owner.Tasks.Complete(unknownID, "reattached", nil)
 	if got := recv(t, replies); got != "final[seed+pending+recall+reattach]" {
 		t.Fatalf("恢复续跑最终答复不符: %q", got)
 	}

@@ -1,6 +1,7 @@
 // 职责：以配置 JSON → NewAgent/Run/Input → 真实插件/任务/模型调用 → Reply 的集成路径验证一级 design 场景①②③④⑥⑦⑧。
 // 未实现：真实 provider/工具/网络；模型与工具均为标准库 mock，不 mock 核心管线，也不为 helper 写逐函数单测。
 // 接线：ReloadConfig/NewAgent 装配 → BaseTAgent.Run 消费事件 → 观察 Deliver 任务、Registry.Record 轨迹与 State.Context。
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import (
@@ -17,8 +18,6 @@ import (
 )
 
 var bg = context.Background()
-
-// ---------- 两文件共用支撑（标准库 mock 与同步屏障，不建 framework harness） ----------
 
 func writeCfg(t *testing.T, dir, name string, cfg Config) string {
 	t.Helper()
@@ -119,8 +118,8 @@ func hasData(es []Event, d string) bool {
 	return false
 }
 
-// lastInput 取模型请求里最后一条上下文事件的数据；用于让 mock 对“本轮触发”收敛（投递任务结果会以空串
-// 再驱动一次模型，lastInput 不再命中任何触发，避免无限重投）。
+// lastInput 取模型请求里最后一条上下文事件的数据，供 mock 对“本轮触发”收敛：投递任务结果的空串再驱动一次模型时
+// 不命中任何触发词，重投不会自激。
 func lastInput(r ModelRequest) string {
 	if len(r.Inputs) == 0 {
 		return ""
@@ -141,8 +140,10 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("等待条件超时")
 }
 
-// ---------- 场景①：异步管线 + 插件看到真实派发 ----------
-
+// TestAgentPipelineAsyncDispatch 验证异步管线：派发即回、快慢任务互不阻塞，插件在 Before/After 看到真实派发。
+//
+// - 慢任务在途时新输入与快结果仍驱动模型 Reply，同批收齐门不存在。
+// - mock 按“新出现的触发词”收敛：递送任务结果的空串与触发词同批到达时 lastInput 会丢失触发语义，seen 集合对任意批序稳定。
 func TestAgentPipelineAsyncDispatch(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "p.json", Config{Agents: []AgentConfig{{
 		ID: "main", Model: "m", Tools: []string{"slow", "fast"}, Plugins: []string{"probe"},
@@ -156,8 +157,6 @@ func TestAgentPipelineAsyncDispatch(t *testing.T) {
 	seen := map[string]bool{}
 	reg := Registry{
 		Models: map[string]ModelFunc{"m": func(_ context.Context, r ModelRequest) (ModelOutput, error) {
-			// 按"新出现的触发词"收敛：投递任务结果（空串）与触发词同批到达时，lastInput 会读到
-			// 空通知而丢失触发语义（全量 race 下实测间歇复现）；seen 集合对任意批序稳定。
 			seenMu.Lock()
 			pick := ""
 			for _, in := range r.Inputs {
@@ -244,7 +243,6 @@ func TestAgentPipelineAsyncDispatch(t *testing.T) {
 		t.Fatalf("期望派发 slow，实得 %q", n)
 	}
 	await(t, started)
-	// 慢任务未放闸：新输入与快结果仍驱动模型 Reply，无同批收齐门。
 	if err := a.Input(bg, "ping"); err != nil {
 		t.Fatal(err)
 	}
@@ -275,10 +273,9 @@ func TestAgentPipelineAsyncDispatch(t *testing.T) {
 	}
 }
 
-// ---------- 场景②⑥：选择性插件、低密度结果票据化与 recall ----------
-
 const bodyMark = "-BODY-END"
 
+// TestAgentSelectiveAdapters 验证选择性插件与低密度结果票据化：插件按 Kinds 闭包变换，大结果外置后经 recall 取回。
 func TestAgentSelectiveAdapters(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "a.json", Config{Agents: []AgentConfig{{
 		ID: "main", Model: "m", Tools: []string{"big", "recall"}, Plugins: []string{"memo", "audit", "post"},
@@ -346,7 +343,7 @@ func TestAgentSelectiveAdapters(t *testing.T) {
 	if err := a.Input(bg, "fetch"); err != nil {
 		t.Fatal(err)
 	}
-	await(t, sawFull) // 首次全文已被模型看到后再补一条输入
+	await(t, sawFull)
 	if err := a.Input(bg, "again"); err != nil {
 		t.Fatal(err)
 	}
@@ -395,8 +392,7 @@ func TestAgentSelectiveAdapters(t *testing.T) {
 	}
 }
 
-// ---------- 场景③：演进只在架构变更时被调 ----------
-
+// TestAgentEvolutionOnlyOnConfigChange 验证演进只在架构变更时被调：Reload 过三段，普通工具执行不过。
 func TestAgentEvolutionOnlyOnConfigChange(t *testing.T) {
 	dir := t.TempDir()
 	one := func(m string) Config {
@@ -448,7 +444,6 @@ func TestAgentEvolutionOnlyOnConfigChange(t *testing.T) {
 	if owner.Definition().Model != "m1" {
 		t.Fatalf("初始模型应为 m1，实得 %q", owner.Definition().Model)
 	}
-	// 替换被拒绝：定义保留旧值；演进段仍能读 Before。
 	if _, err := ReloadConfig(v2, state, reg, evo(true)); err == nil {
 		t.Fatal("演进拒绝应使 ReloadConfig 报错")
 	}
@@ -461,7 +456,6 @@ func TestAgentEvolutionOnlyOnConfigChange(t *testing.T) {
 	if len(c1) != 1 || c1[0].Change.Before.Agents[0].Model != "m1" || c1[0].Change.After.Agents[0].Model != "m2" {
 		t.Fatalf("演进段未取得 Before/After: %+v", c1)
 	}
-	// 接受替换：新定义生效。
 	if _, err := ReloadConfig(v2, state, reg, evo(false)); err != nil {
 		t.Fatalf("reload v2: %v", err)
 	}
@@ -472,7 +466,6 @@ func TestAgentEvolutionOnlyOnConfigChange(t *testing.T) {
 	base := len(plans)
 	mu.Unlock()
 
-	// 普通工具（危险名字）执行不走演进。
 	replies := make(chan string, 8)
 	a, err := NewAgent("main", state, reg, deliver(replies))
 	if err != nil {
@@ -497,8 +490,6 @@ func TestAgentEvolutionOnlyOnConfigChange(t *testing.T) {
 		t.Fatalf("rm 任务未真实执行: %+v", snap)
 	}
 }
-
-// ---------- 场景⑨：config→plan→govern→state 一体双生管道 ----------
 
 // twinRegistry 提供共用的 model/tool/skill，让一体双生管道测试的配置通过 validateRegistry。
 func twinRegistry(rec func(ModelTrace)) Registry {
@@ -560,8 +551,9 @@ func TestAgentTwinTruthyPipeline(t *testing.T) {
 	}
 }
 
-// TestAgentTwinEvolutionRejectKeepsState：Eval/Benchmark/ApplyGate 任一段拒绝时定义、生效 prompt、
-// 现场（context/任务）与 Removes 均不变，错误上抛。
+// TestAgentTwinEvolutionRejectKeepsState 验证任一段拒绝时变更整体不生效。
+//
+// - Eval/Benchmark/ApplyGate 任一拒绝均使定义、生效 prompt、现场（context/任务）与 Removes 保持不变，错误上抛。
 func TestAgentTwinEvolutionRejectKeepsState(t *testing.T) {
 	dir := t.TempDir()
 	reg := twinRegistry(nil)
@@ -618,8 +610,10 @@ func TestAgentTwinEvolutionRejectKeepsState(t *testing.T) {
 	}
 }
 
-// TestAgentTwinEvolutionSegmentOrderAndPlan：三段调用顺序 Eval→Benchmark→ApplyGate，且各段收到的
-// StatePlan 的 Adds/Updates/Removes/Prompts（含新 prompt）一致正确。
+// TestAgentTwinEvolutionSegmentOrderAndPlan 验证三段调用顺序固定为 Eval→Benchmark→ApplyGate，且各段收到一致的 StatePlan。
+//
+// - 各段看到的 Adds/Updates/Removes/Prompts（含新 prompt）一致正确。
+// - 声明顺序打乱不影响执行顺序。
 func TestAgentTwinEvolutionSegmentOrderAndPlan(t *testing.T) {
 	dir := t.TempDir()
 	reg := twinRegistry(nil)
@@ -643,7 +637,6 @@ func TestAgentTwinEvolutionSegmentOrderAndPlan(t *testing.T) {
 			return nil
 		}
 	}
-	// 打乱声明顺序，仍应被执行顺序固定为 Eval→Benchmark→ApplyGate。
 	evo := Evolution{ApplyGate: capture("ApplyGate"), Benchmark: capture("Benchmark"), Eval: capture("Eval")}
 	if _, err := ReloadConfig(v2, state, reg, evo); err != nil {
 		t.Fatalf("reload v2: %v", err)
@@ -686,9 +679,10 @@ func TestAgentTwinEvolutionSegmentOrderAndPlan(t *testing.T) {
 	}
 }
 
-// TestAgentSystemPromptOwnedByState：生效 prompt 由 state 持有——Reload 后 owner.SystemPrompt() 含
-// skill 内容与 tools 行且与模型 trace 一致；仅改 registry.Skills 不 Reload 时请求仍用旧值；再次
-// Reload 后用新值（证明 state 是唯一真源）。
+// TestAgentSystemPromptOwnedByState 验证生效 prompt 由 state 持有，是唯一真源。
+//
+// - Reload 后 owner.SystemPrompt() 含 skill 内容与 tools 行，且与模型 trace 一致。
+// - 仅改 registry.Skills 不 Reload 时请求仍用旧值；再次 Reload 后用新值。
 func TestAgentSystemPromptOwnedByState(t *testing.T) {
 	dir := t.TempDir()
 	cfg := writeCfg(t, dir, "p.json", Config{Agents: []AgentConfig{{
@@ -736,12 +730,10 @@ func TestAgentSystemPromptOwnedByState(t *testing.T) {
 	if got := call(); got != owner.SystemPrompt() {
 		t.Fatalf("模型 trace 的 SystemPrompt 与 state 不符: %q != %q", got, owner.SystemPrompt())
 	}
-	// 仅改 registry.Skills 内容、不 Reload：请求路径仍用 state 保存的旧值。
 	reg.Skills["sk"] = "SKILL-NEW"
 	if got := call(); got != wantOld {
 		t.Fatalf("未 Reload 却改变了请求 prompt: %q", got)
 	}
-	// 再次 Reload：resolve 重算，state 与新值一致，请求随 state 更新。
 	if _, err := ReloadConfig(cfg, state, reg, Evolution{}); err != nil {
 		t.Fatalf("reload again: %v", err)
 	}
@@ -754,8 +746,10 @@ func TestAgentSystemPromptOwnedByState(t *testing.T) {
 	}
 }
 
-// ---------- 场景③④：同 id 热加载复用现场与晚到结果 ----------
-
+// TestAgentHotReloadKeepsLiveState 验证同 id 热加载复用现场：定义与生效 prompt 换新，队列/上下文/任务不动。
+//
+// - 停旧壳不收敛在途任务；换装后晚到结果由新壳消费。
+// - m2 mock 只认 slow-result：递送任务结果的空串再驱动时不命中，避免重复投递。
 func TestAgentHotReloadKeepsLiveState(t *testing.T) {
 	dir := t.TempDir()
 	mk := func(m, sys, skill string, temp float64) Config {
@@ -786,7 +780,6 @@ func TestAgentHotReloadKeepsLiveState(t *testing.T) {
 				return ModelOutput{}
 			}),
 			"m2": capture(func(r ModelRequest) ModelOutput {
-				// 晚到结果驱动一次 m2；投递任务结果（空串）再驱动时不再命中，避免重复投递。
 				if lastInput(r) == "slow-result" {
 					return out("m2-done")
 				}
@@ -824,7 +817,7 @@ func TestAgentHotReloadKeepsLiveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	await(t, started)
-	halt(t, c1, d1) // 停旧壳；在途任务不随壳停止
+	halt(t, c1, d1)
 
 	if _, err := ReloadConfig(v2, state, reg, Evolution{}); err != nil {
 		t.Fatalf("reload v2: %v", err)
@@ -841,7 +834,7 @@ func TestAgentHotReloadKeepsLiveState(t *testing.T) {
 	}
 	c2, d2 := launch(t, s2)
 	defer halt(t, c2, d2)
-	close(release) // 晚到结果进入新壳
+	close(release)
 	if got := recv(t, replies); got != "m2-done" {
 		t.Fatalf("晚到结果未被新壳消费: %q", got)
 	}
@@ -871,8 +864,9 @@ func TestAgentHotReloadKeepsLiveState(t *testing.T) {
 	}
 }
 
-// ---------- 场景⑦：无状态模型代理，成功与失败都经真实 Run 记录完整请求 ----------
-
+// TestAgentModelProxySuccessAndFailure 验证无状态模型代理：成功与失败都经真实 Run 记录完整请求与错误。
+//
+// - echo mock 仅在本轮输入为 hello 时产出；递送任务结果再驱动时收敛为空。
 func TestAgentModelProxySuccessAndFailure(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "p.json", Config{Agents: []AgentConfig{
 		{ID: "ok", Model: "echo", SystemPrompt: "SYS", Skills: []string{"sk"}, Tools: []string{"t1"}, Params: map[string]float64{"temperature": 0.7}},
@@ -883,7 +877,6 @@ func TestAgentModelProxySuccessAndFailure(t *testing.T) {
 	reg := Registry{
 		Models: map[string]ModelFunc{
 			"echo": func(_ context.Context, r ModelRequest) (ModelOutput, error) {
-				// 仅在真实触发轮（末条输入为 hello）产出；投递任务结果再驱动时收敛为空。
 				if lastInput(r) != "hello" {
 					return ModelOutput{}, nil
 				}
@@ -938,8 +931,6 @@ func TestAgentModelProxySuccessAndFailure(t *testing.T) {
 	for i := range tr {
 		switch tr[i].Request.AgentID {
 		case "ok":
-			// 投递任务化后 Reply 会 spawn deliver 任务，其空结果再驱动一次模型（空 Output）；
-			// 只认真正产出 final 的那条轨迹。
 			if tr[i].Response.Output != "" {
 				okT = &tr[i]
 			}
@@ -958,8 +949,7 @@ func TestAgentModelProxySuccessAndFailure(t *testing.T) {
 	}
 }
 
-// ---------- 场景⑧：父 agent 经同一管线委派子 agent ----------
-
+// TestAgentParentChildDelegation 验证父 agent 经同一管线委派子 agent：父子各自持有现场，结果经任务回流。
 func TestAgentParentChildDelegation(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "f.json", Config{Agents: []AgentConfig{
 		{ID: "P", Model: "pm", SystemPrompt: "parent", Tools: []string{"agent:C"}},
@@ -1021,8 +1011,6 @@ func TestAgentParentChildDelegation(t *testing.T) {
 	if pState == cState {
 		t.Fatal("父子应各自拥有现场")
 	}
-	// 投递任务化后任务表同时含工具/子 agent 任务与 deliver 任务：按 Call.Name 归类断言，
-	// 不把 deliver 任务计入工具任务数（deliver 完成时刻不假定）。
 	pt, ct := pState.Tasks.Snapshot(), cState.Tasks.Snapshot()
 	for _, tk := range pt {
 		if tk.OwnerID != "P" {
@@ -1058,8 +1046,9 @@ func TestAgentParentChildDelegation(t *testing.T) {
 	}
 }
 
-// ---------- 场景：投递任务化——失败不终止循环且收敛 ----------
-
+// TestAgentDeliverFailureKeepsLoopAliveAndConverges 验证投递失败不终止循环：失败成为 failed 任务通知，模型据以收敛。
+//
+// - 空 Data 回驱动模型时只计数收敛；再次输入仍能驱动模型并再次投递。
 func TestAgentDeliverFailureKeepsLoopAliveAndConverges(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "d.json", Config{Agents: []AgentConfig{{ID: "main", Model: "m", Tools: []string{"t"}}}})
 	converged := make(chan struct{}, 4)
@@ -1071,7 +1060,6 @@ func TestAgentDeliverFailureKeepsLoopAliveAndConverges(t *testing.T) {
 			case "ping":
 				return out("reply-2"), nil
 			case "":
-				// 投递失败结果（空 Data）回驱动模型：读通知后放弃，不再重投。
 				select {
 				case converged <- struct{}{}:
 				default:
@@ -1105,12 +1093,10 @@ func TestAgentDeliverFailureKeepsLoopAliveAndConverges(t *testing.T) {
 	if got := recv(t, attempts); got != "reply-1" {
 		t.Fatalf("期望投递 reply-1，实得 %q", got)
 	}
-	// 投递失败作为 failed 任务通知回管线；模型据以收敛（循环不死，收到该轮模型调用）。
 	await(t, converged)
 	if !anyTask(owner.Tasks.Snapshot(), func(tk Task) bool { return tk.Call.Name == "deliver" && tk.Status == "failed" }) {
 		t.Fatalf("投递失败未成为 failed 任务: %+v", owner.Tasks.Snapshot())
 	}
-	// 循环仍存活：再次输入仍能驱动模型并再次投递（若失败终止了循环，此处会超时）。
 	if err := a.Input(bg, "ping"); err != nil {
 		t.Fatal(err)
 	}
@@ -1124,15 +1110,13 @@ func TestAgentDeliverFailureKeepsLoopAliveAndConverges(t *testing.T) {
 	}
 }
 
-// ---------- 场景：中间叙述（ModelDelta）进上下文、不进投递 ----------
-
+// TestAgentModelDeltaIntermediateNotDelivered 验证中间叙述进上下文、不进投递：带工具调用时 Output/Reasoning 不外投。
 func TestAgentModelDeltaIntermediateNotDelivered(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "md.json", Config{Agents: []AgentConfig{{ID: "main", Model: "m", Tools: []string{"t"}}}})
 	reg := Registry{
 		Models: map[string]ModelFunc{"m": func(_ context.Context, r ModelRequest) (ModelOutput, error) {
 			switch lastInput(r) {
 			case "go":
-				// 带工具调用：Output/Reasoning 是中间叙述，不应外投。
 				return ModelOutput{Output: "thinking-1", Reasoning: "reason-1", ToolCalls: []ToolCall{{Name: "t", Args: ""}}}, nil
 			case "t-out":
 				return out("final-answer"), nil
@@ -1159,7 +1143,6 @@ func TestAgentModelDeltaIntermediateNotDelivered(t *testing.T) {
 	if got := recv(t, replies); got != "final-answer" {
 		t.Fatalf("仅 final 应外投，实得 %q", got)
 	}
-	// 中间叙述以 EventModelDelta 进上下文投影（Source=model），不进投递通道。
 	owner, _ := state.Agent("main")
 	var sawOut, sawReason bool
 	for _, e := range owner.Context() {
@@ -1183,8 +1166,7 @@ func TestAgentModelDeltaIntermediateNotDelivered(t *testing.T) {
 	}
 }
 
-// ---------- 场景：子 agent 的中间叙述不误收口 ----------
-
+// TestAgentChildIntermediateNotCollected 验证子 agent 的中间叙述不进父任务结果：父只收子 Reply。
 func TestAgentChildIntermediateNotCollected(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "ci.json", Config{Agents: []AgentConfig{
 		{ID: "P", Model: "pm", Tools: []string{"agent:C"}},
@@ -1206,7 +1188,6 @@ func TestAgentChildIntermediateNotCollected(t *testing.T) {
 				case "work-out":
 					return out("child-final"), nil
 				case "task":
-					// 先出中间叙述 + 工具调用：中间叙述不得被子任务当成结果收口。
 					return ModelOutput{Output: "child-thinking", ToolCalls: []ToolCall{{Name: "work", Args: ""}}}, nil
 				}
 				return ModelOutput{}, nil
@@ -1232,15 +1213,15 @@ func TestAgentChildIntermediateNotCollected(t *testing.T) {
 	if got := recv(t, replies); got != "parent-got" {
 		t.Fatalf("子中间叙述被误当收口结果（父应得 parent-got）: %q", got)
 	}
-	// 子现场上下文含中间叙述（进上下文而非投递通道）。
 	cState, _ := state.Agent("C")
 	if !hasData(cState.Context(), "child-thinking") {
 		t.Fatalf("子中间叙述未进子上下文: %+v", cState.Context())
 	}
 }
 
-// ---------- 场景：DenylistPlugin 零执行、模型读到拒绝事实 ----------
-
+// TestAgentDenylistPluginZeroExecution 验证治理插件零执行：拒绝事实经呈现闭包进 Data，工具从未被调用。
+//
+// - 核心不统一拼接事件属性，由插件闭包把 Status/Error 投影给模型。
 func TestAgentDenylistPluginZeroExecution(t *testing.T) {
 	cfg := writeCfg(t, t.TempDir(), "dn.json", Config{Agents: []AgentConfig{{
 		ID: "main", Model: "m", Tools: []string{"danger"}, Plugins: []string{"denylist", "present"},
@@ -1275,7 +1256,6 @@ func TestAgentDenylistPluginZeroExecution(t *testing.T) {
 				return Plugin{Kinds: []EventType{EventToolResult},
 					Before: func(_ context.Context, e Event) (Event, error) {
 						if e.Status == "denied" {
-							// 核心不统一拼接事件属性；由呈现闭包把拒绝事实投影进 Data 供模型读到。
 							e.Data = e.Call.Name + " " + e.Status + ": " + e.Error
 						}
 						return e, nil
@@ -1301,7 +1281,6 @@ func TestAgentDenylistPluginZeroExecution(t *testing.T) {
 	if got := recv(t, replies); got != "aborted" {
 		t.Fatalf("模型应据 denied 事实放弃，实得 %q", got)
 	}
-	// 工具零执行：danger 从未被调用，也不产生 danger 任务。
 	select {
 	case <-dangerHit:
 		t.Fatal("被拒绝的工具仍被执行")
@@ -1311,7 +1290,6 @@ func TestAgentDenylistPluginZeroExecution(t *testing.T) {
 	if anyTask(owner.Tasks.Snapshot(), func(tk Task) bool { return tk.Call.Name == "danger" }) {
 		t.Fatalf("被拒绝的工具仍被派发: %+v", owner.Tasks.Snapshot())
 	}
-	// 模型确实读到拒绝事实（present 闭包把 Status/Error 投影进 Data）。
 	mu.Lock()
 	joinedReq := strings.Join(reqs, "\n---\n")
 	mu.Unlock()
@@ -1320,8 +1298,9 @@ func TestAgentDenylistPluginZeroExecution(t *testing.T) {
 	}
 }
 
-// ---------- 场景：TaskWindow 条数聚合窗（0=即发，>0 攒满批量，Close flush 残余） ----------
-
+// TestAgentTaskWindowBatching 验证条数聚合窗：0=即发，满窗一次可见，Close 前 flush 残余。
+//
+// - Restore 产生的 unknown 通知同样入攒批。
 func TestAgentTaskWindowBatching(t *testing.T) {
 	nextBatch := func(t *testing.T, a *AgentState) []Event {
 		t.Helper()
@@ -1345,12 +1324,12 @@ func TestAgentTaskWindowBatching(t *testing.T) {
 		a := newAgentState(AgentConfig{ID: "a", TaskWindow: 0})
 		defer a.Tasks.Close()
 		a.Tasks.Spawn(ToolCall{Name: "t"}, tool, "user")
-		b1 := nextBatch(t, a) // running 即发，未被攒批
+		b1 := nextBatch(t, a)
 		if len(b1) != 1 || b1[0].Type != EventTaskNotice || b1[0].Status != "running" {
 			t.Fatalf("window0 running 应即发单条: %+v", b1)
 		}
 		close(release)
-		b2 := nextBatch(t, a) // result 即发
+		b2 := nextBatch(t, a)
 		if len(b2) != 1 || b2[0].Type != EventToolResult || b2[0].Status != "completed" {
 			t.Fatalf("window0 result 应即发单条: %+v", b2)
 		}
@@ -1369,19 +1348,18 @@ func TestAgentTaskWindowBatching(t *testing.T) {
 		a := newAgentState(AgentConfig{ID: "a", TaskWindow: 2})
 		defer a.Tasks.Close()
 		a.Tasks.Spawn(ToolCall{Name: "t1"}, tool, "user")
-		// 仅 1 条 running：未满窗，不投递（未唤醒消费者）。
 		select {
 		case <-a.wake:
 			t.Fatal("未满窗却已投递")
 		default:
 		}
 		a.Tasks.Spawn(ToolCall{Name: "t2"}, tool, "user")
-		b1 := nextBatch(t, a) // 满窗：两条 running 一次可见
+		b1 := nextBatch(t, a)
 		if len(b1) != 2 || b1[0].Status != "running" || b1[1].Status != "running" {
 			t.Fatalf("window2 应攒满两条一批投递: %+v", b1)
 		}
 		close(release)
-		b2 := nextBatch(t, a) // 两条 result 满窗一批
+		b2 := nextBatch(t, a)
 		if len(b2) != 2 || b2[0].Type != EventToolResult || b2[1].Type != EventToolResult {
 			t.Fatalf("window2 结果应攒满一批: %+v", b2)
 		}
@@ -1389,7 +1367,6 @@ func TestAgentTaskWindowBatching(t *testing.T) {
 
 	t.Run("Close 前 flush 残余", func(t *testing.T) {
 		a := newAgentState(AgentConfig{ID: "a", TaskWindow: 3})
-		// Restore 产生的 unknown 通知也入攒批；window=3 攒 1 条未满，Close 应 flush 残余。
 		a.Tasks.Restore([]Task{{ID: 1, OwnerID: "a", Source: "x", Call: ToolCall{Name: "t"}, Status: "running"}})
 		a.Tasks.Close()
 		b := nextBatch(t, a)

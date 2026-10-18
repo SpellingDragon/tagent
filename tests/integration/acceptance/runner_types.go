@@ -6,6 +6,7 @@
 // interfaces only and carries no runner logic; the phase-2 implementation
 // fills in the
 // behavior behind these declarations.
+// 规格: docs/wiki/agent/agent-architecture.md#test-support
 package acceptance
 
 import "context"

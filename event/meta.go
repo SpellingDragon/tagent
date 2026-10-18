@@ -1,5 +1,7 @@
 package event
 
+import "strings"
+
 // 契约: docs/wiki/event/event-architecture.md#const-list
 //
 // TypeExternalInput, TypeAgentOutput, TypeActionCommand, TypeThinkingPlan,
@@ -38,3 +40,65 @@ const (
 // prefix is forwarded verbatim, and a pass-through key is never read as a
 // business field.
 const MetaPrefix = "meta_"
+
+// ParsedMeta is the structured form of one event metadata map: the frozen keys
+// declared above, the business entries carried by the pass-through prefix, and
+// every other entry kept verbatim.
+type ParsedMeta struct {
+	// EventKey is the canonical event identity the entry names.
+	EventKey string
+	// PartitionID is the partition the event is filed under.
+	PartitionID string
+	// EventType is the frozen type of the event.
+	EventType string
+	// EventSummary is the short human-readable summary of the event.
+	EventSummary string
+	// TriggerSource names the trigger the event answers.
+	TriggerSource string
+	// SettleTriggerSource names the settle lineage the event reports.
+	SettleTriggerSource string
+	// BundleID is the bundle attribution of the event.
+	BundleID string
+	// PassThrough holds every MetaPrefix entry verbatim: such an entry is
+	// forwarded as it stands and is never read as a frozen business field.
+	PassThrough map[string]string
+	// Unknown holds every entry that is neither a frozen key nor a prefixed key,
+	// kept verbatim so an entry this parser does not model survives unchanged.
+	Unknown map[string]string
+}
+
+// ParseEventMeta projects one metadata map into its structured form. A frozen
+// key lands in its named field, a MetaPrefix entry lands in PassThrough, and any
+// other entry lands in Unknown; no entry is dropped and the input map is left
+// exactly as it was.
+func ParseEventMeta(meta map[string]string) ParsedMeta {
+	parsed := ParsedMeta{
+		PassThrough: map[string]string{},
+		Unknown:     map[string]string{},
+	}
+	for key, value := range meta {
+		switch key {
+		case MetaKeyEventKey:
+			parsed.EventKey = value
+		case MetaKeyPartitionID:
+			parsed.PartitionID = value
+		case MetaKeyEventType:
+			parsed.EventType = value
+		case MetaKeyEventSummary:
+			parsed.EventSummary = value
+		case MetaKeyTriggerSource:
+			parsed.TriggerSource = value
+		case MetaKeySettleTriggerSource:
+			parsed.SettleTriggerSource = value
+		case MetaKeyBundleID:
+			parsed.BundleID = value
+		default:
+			if strings.HasPrefix(key, MetaPrefix) {
+				parsed.PassThrough[key] = value
+				continue
+			}
+			parsed.Unknown[key] = value
+		}
+	}
+	return parsed
+}

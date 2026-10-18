@@ -98,7 +98,7 @@
 
 ## 8. 闸 / 资源点（谁未跑、谁待裁）
 
-- **G1（共享签名与原生接口探针）—— 口径实体化（当前未通过）**：**G1 通过 = 全部域 P0 done**（各 `NN.P0.M` 具备 `go build ./...`、`go vet ./...`、`gofmt -l <包>`（空输出）证据＋每包 `skeleton_assert.go` 编译断言绿）**＋** 骨架评审门 `00.P0.3` 过（CodeReview 子代理＋主代理亲自复核＋**用户确认**，产出评审记录）。候选待核项（`model.Model`/`IterModel`/provider 形态、`plugin.Manager` 与相位元素类型、`tool.Tool`/`CallableTool` 一次受理契约、MCP `ConnectionConfig` 归属、独立 `evaluation` module 是否引入）随骨架落码转为**可编译取证**（详见 `trpc-reuse.md` §待核）。**无 build/vet/gofmt/断言绿证据、无 `00.P0.3` 评审记录，不得宣称 G1 通过**。
+- **G1（共享签名与原生接口探针）—— 口径实体化（当前未通过）**：**G1 通过 = 全部域 P0 done**（各 `NN.P0.M` 具备 `go build ./...`、`go vet ./...`、`gofmt -l <包>`（空输出）证据＋每包 `skeleton_assert.go` 编译断言绿）**＋** 骨架评审门 `00.P0.3` 过（CodeReview 子代理＋主代理亲自复核＋**用户确认**，产出评审记录）。候选待核项（`model.Model`/`IterModel`/provider 形态、`plugin.Manager` 与相位元素类型、`tool.Tool`/`CallableTool` 一次受理契约、MCP `ConnectionConfig` 归属、独立 `evaluation` module 是否引入）随骨架落码转为**可编译取证**（详见 `trpc-reuse.md` §待核）。**无 build/vet/gofmt/断言绿证据、无 `00.P0.3` 评审记录，不得宣称 G1 通过**。**编译门≠原生对齐**：G1 通过不推出原生接口/生命周期时点已对齐——原生探针（Model/IterModel 实调用、plugin.Manager 装配、MCP 真连接）随各域 NN.M 实施取证（trpc-reuse.md 待核表），两口径分列不互替代（报告响应，report-response.md §三.5）。
 - **G2（构造/执行/失败/并发/重启推演）——设计推演/设计验收，非产品观测**：G2 是**实施前**的纵向推演，用于发现设计缺口；**产品观测是 09 证据**，不把未实现当设计闸循环。**G2 目前仍未确认，不得宣称通过**。
 - **G3（逐单精确文件授权）——未闭合**：07/08/09 域候选写域仍为目录/通配，00.6 产品门候选未收窄，全部叶任务读闭包未实测 → 一律 blocked。
 - **资源点（未授权即留欠账）**：rustviking 存储档、真实模型端点、MCP/A2A 服务、embedder 索引、collector/OTel、SFT 制品/tokenizer、微信发送通道、09.4 soak/崩溃恢复。未授权保持 `remaining-required`。

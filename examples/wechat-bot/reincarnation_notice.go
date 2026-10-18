@@ -1,6 +1,10 @@
+// 本文件承载换装后的转世通报：检测、组装、注入与记消费。
+//
+// 契约: docs/wiki/platform/reincarnation-notice.md#overview
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,9 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
-	"trpc.group/trpc-go/trpc-agent-go/model"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 const (
@@ -26,15 +31,9 @@ const (
 	noticeConsumedSuffix = ".notified"
 )
 
-// noticeInjector is the minimal surface of *agent.TagentAgent this feature
-// needs (satisfied by the tagent.New return value used in main.go).
-// 本文件承载换装后的转世通报：检测、组装、注入与记消费。
-//
-// 契约: docs/wiki/platform/reincarnation-notice.md#overview
-// noticeInjector 是本特性用到的最小接口面（只声明注入与读存储两件事）。
+// noticeInjector 是本特性用到的最小接口面：把一条通报交给宿主的内部收件箱。
 type noticeInjector interface {
-	InjectMessageWithSource(source string, msg model.Message)
-	MemStore() memory.MemoryStore
+	InjectInternal(addr event.Address, source string, msg trpcmodel.Message)
 }
 
 // detectReincarnation 判定本次启动是否为转世：只看换装标记是否存在且足够新鲜。标记由保险链在
@@ -74,19 +73,19 @@ func readNoticeMetadata(path string) map[string]string {
 
 // tailQuerier 只声明取尾事件真正用到的能力：完整存储与测试替身都无需实现一堆无关方法即可满足。
 type tailQuerier interface {
-	QueryEvents(memory.QueryOptions) ([]memory.EventReference, error)
+	QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
 }
 
 // fetchWALTail 按时间倒序取该 agent 最新的有限条事件；查询错误一律上抛以走显式降级，不得吞掉。
-func fetchWALTail(store tailQuerier, agentName string, limit int) ([]memory.EventReference, error) {
+func fetchWALTail(ctx context.Context, store tailQuerier, agentName string, limit int) ([]memory.EventReference, error) {
 	if store == nil {
 		return nil, fmt.Errorf("memstore unavailable")
 	}
 	pid := memory.PartitionIDFromName(agentName)
-	return store.QueryEvents(memory.QueryOptions{
+	return store.QueryEvents(ctx, memory.QueryOptions{
 		PartitionIDs: []int{pid},
 		Limit:        limit,
-		OrderBy:      "timestamp_desc",
+		OrderBy:      memory.QueryOrderByDesc,
 	})
 }
 
@@ -96,7 +95,7 @@ func hasOpenBreakpoint(refs []memory.EventReference) bool {
 	if len(refs) == 0 {
 		return false
 	}
-	switch refs[0].EventType {
+	switch refs[0].Type {
 	case "thinking_plan", "action_command":
 		return true
 	default:
@@ -132,13 +131,13 @@ func buildNoticeText(meta map[string]string, refs []memory.EventReference, walEr
 		b.WriteString("（事件存储为空或查询无结果——降级，禁静默）\n")
 	default:
 		for _, r := range refs {
-			summary := r.EventSummary
+			summary := r.Summary
 			if len(summary) > walTailSummaryMaxChars {
 				summary = summary[:walTailSummaryMaxChars] + "…"
 			}
 			summary = strings.ReplaceAll(summary, "\n", " ")
-			fmt.Fprintf(&b, "- [evt_%x|%s] %s (%s)\n",
-				r.EventKey, r.EventType, summary, time.UnixMilli(r.Timestamp).Format("15:04:05"))
+			fmt.Fprintf(&b, "- [evt_%s|%s] %s (%s)\n",
+				r.Key, r.Type, summary, time.UnixMilli(r.Timestamp).Format("15:04:05"))
 		}
 		if hasOpenBreakpoint(refs) {
 			b.WriteString("\n断点判定：最后事件止于回合中途且无收尾 agent_output → 上一世最后一回合**中断于此**；\n续作前先核验该时刻的承诺是否已兑现（对照 WAL 与系统实态），勿凭通报默认成功。\n")
@@ -171,8 +170,9 @@ func waitNoticeAppearance(noticePath string, maxWait, poll time.Duration) bool {
 }
 
 // maybeInjectReincarnationNotice 是一次性启动钩子：轮询标记、判新鲜、组装通报、注入、记消费。
+// tail 为事件尾查询面；nil 表示本进程未接事件存储，通报正文显式写出该降级。
 // 每一步都记日志，任何一步都不允许让机器人起不来。
-func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir string, noticeWait time.Duration) {
+func maybeInjectReincarnationNotice(inj noticeInjector, tail tailQuerier, agentName string, runDir string, noticeWait time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		if exe, err := os.Executable(); err == nil {
 			runDir = filepath.Join(filepath.Dir(exe), runDir)
@@ -192,14 +192,14 @@ func maybeInjectReincarnationNotice(ta noticeInjector, agentName string, runDir 
 	if meta == nil {
 		log.Warnf("[reincarnation] NOTICE archive missing at %s — degraded metadata", noticePath)
 	}
-	refs, walErr := fetchWALTail(ta.MemStore(), agentName, walTailEventLimit)
+	refs, walErr := fetchWALTail(context.Background(), tail, agentName, walTailEventLimit)
 	if walErr != nil {
 		log.Warnf("[reincarnation] WAL tail query failed: %v — degraded scene block", walErr)
 	}
 
 	text := buildNoticeText(meta, refs, walErr)
-	ta.InjectMessageWithSource("reincarnation", model.Message{
-		Role:    model.RoleUser,
+	inj.InjectInternal(event.Address{}, "reincarnation", trpcmodel.Message{
+		Role:    trpcmodel.RoleUser,
 		Content: text,
 	})
 	log.Infof("[reincarnation] notice injected via reincarnation source (%d WAL events, meta=%v)", len(refs), meta != nil)

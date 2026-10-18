@@ -8,10 +8,17 @@
 |---|---|---|
 | AgentID/SessionID | 应用创建；state接纳 | 显式目标；不猜最近会话 |
 | 实例身份 | state实例建立 | 同名重建不同实例；任务来源实例与通知目标实例分别保存 |
+| Assemble(ctx, decl, agents, opts ...Option) | 组合根公共入口（D-M1 起） | 治理/审批/执行档/存储档经 Option 注入（D8 注入缝，非镜像）；无治理拒绝装配（ErrGovernanceMissing）；file/skill/FunctionTool 一律经 wrapper 受理；WithStorage 驱动持久档 |
 | InvocationID | 可信受理/委派入口 | 一次责任范围；同session可有多个调用，默认分开决策 |
 | DecisionID/AttemptID | Agent请求边界/可观察模型尝试 | 每次实际决策/尝试独立；底层不可见重试不伪造 |
 | 原生CallID | provider响应 | 原样保留；与所属实例/invocation/decision共同限定受理去重 |
-| TaskID/轮次/MutationID | task | 执行轮次不等于状态revision；一次mutation独立幂等 |
+| EvaluationCriterionRef（Tools 中 Name=="evaluation" 的 ToolRef） | 07.4 结构评估判据载体 | 组合根/工具解析面解析 AgentSpec.Tools 时 SHALL 跳过该引用（判据载体，非可调用工具）；组合根不得将其列入模型工具面 |
+| Handoff mutation 持久编码 `handoff:<slot>:<json>` | 02.8 Handoff 记账（S1 登记） | handoffTargetOf 为唯一解析点；slot=既有 handoff 事实数+1；同身份异内容冲突对 Handoff 不可达（防冲突由 slot 递增承担）；Restore 据此折叠重放路由迁移 |
+| tool/exec MonitorConfig 四值钉定 | 04.2 执行资源节奏（S3 回写） | interval=30s、stable_duration=60s、interactive_stable_duration=90s、fake_dead_duration=120s（前二 spec 钉定，后二为 04.2 实现取值现具名钉定防漂移）；未知配置键静默不消费、畸形值按名报错、compress 键 MUST NOT 消费不报错 |
+| ctx 缝契约表（S3，波30） | 本变更 ctx 隐式关系全集（02.21） | ①`plugin.callPassKey{}`→CallPass{Final,Risk,TriggerSource}，写=Loop.dispatch(WithCallPass)，读=CallPassFrom 唯一 accessor，缺省=拒受理；②`task.callFrameKey{}`→CallFrame{Identity,Address,Execution}，写=Loop.dispatch/deliveryContext，读=CallFrameFrom 唯一 accessor，缺省=ErrCallFrameMissing。规则：MUST 经 accessor 读写、调用点禁裸 ctx.Value；MUST NOT 新增第三缝（缝值优先入签名）；已删键=triggerSourceKey（随 CallPass.TriggerSource 显式传递） |
+| 03.8 外置生产者义务（T3 裁决） | 宿主契约 | tool/task/tmux 大结果外置的生产者接线义务在宿主侧（wechat-bot host 已承接 file_delivery/file_replica）——组合根不接（NativeAgent 红线3 防宿主工具替换+workspace→task 禁边设计所致）；09.1 收口时核宿主侧接线完整性 |
+| 会话正文与快照契约（T4 裁决） | 组合根/持久化 | 会话正文=执行现场读出面（run 持有）；可序列化现场=facts+配置，正文经 durable 事实链回放恢复（03.3），不停旁挂正文快照——原型"完整现场可快照"本质=可恢复性，由 durable 链+09.4 SIGKILL 实证满足 |
+| 回滚语义（T7 裁决） | 代际不可变 | 回滚=新代重发布旧内容（代际单向性更纯，不复制旧代）；state.Rollback 域内面保留（域测试消费者）；不加公共 Rollback 出口（零独立消费者） || TaskID/轮次/MutationID | task | 执行轮次不等于状态revision；一次mutation独立幂等 |
 | 通知身份 | task | TaskID+轮次+类别+序号；重试沿原身份 |
 | Episode及父子/依赖关系 | 应用业务边界与可信运行时 | 不用session或trace替代；未知谱系明确标注 |
 | session mailbox记账 | state | 接纳（单调序）／认领（pending·claimed）／消费完成三时点分别可读、互不覆盖；同session至多一个有效模型决策，其余排队 |

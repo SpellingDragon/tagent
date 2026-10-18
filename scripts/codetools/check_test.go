@@ -4,6 +4,7 @@ package main
 import (
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -590,6 +591,78 @@ func TestDocRefsDetectsDanglingFileCitations(t *testing.T) {
 	got := docDanglingRefs(doc, dir)
 	require.Equal(t, []string{"agent/gone_test.go"}, got,
 		"only path-like citations that no longer exist may be reported")
+}
+
+// commitTree stages the whole tree of dir and commits it, returning the new commit id.
+// The identity and signing flags are inline so the fixture never depends on the runner's
+// git config, which a test host may not have.
+func commitTree(t *testing.T, dir, message string) string {
+	t.Helper()
+	run := func(args ...string) string {
+		base := []string{"-C", dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com",
+			"-c", "commit.gpgsign=false"}
+		out, err := exec.Command("git", append(base, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-q")
+	run("add", "-A")
+	run("commit", "-q", "-m", message)
+	return run("rev-parse", "HEAD")
+}
+
+// TestDocRefsAnchorsCitationAtDocumentSnapshot pins the historical-snapshot basis.
+// - A wiki page declares what existed when it was written: a later rename must not read as corruption.
+// - The page is measured at its own commit, never at today's tree, so the snapshot commit is the proof.
+func TestDocRefsAnchorsCitationAtDocumentSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n"), 0o644))
+	sha := commitTree(t, dir, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agent", "gone.go")))
+
+	report := scanDocRefs(doc, dir)
+	require.Empty(t, report.Dangling, "a renamed-away file is not corruption of a historical snapshot")
+	require.Equal(t, []string{"agent/gone.go"}, report.Anchored)
+	require.True(t, report.Historical, "docs/wiki is the declared historical root")
+	require.Equal(t, sha, report.Snapshot, "the basis must be the document's own commit, reproducibly")
+}
+
+// TestDocRefsRefusesAnchorForEditedDocument pins that anchoring is a snapshot privilege, not a blanket exemption.
+// - A page carrying uncommitted words was never reviewed against any tree, so its citations must resolve today.
+func TestDocRefsRefusesAnchorForEditedDocument(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n"), 0o644))
+	commitTree(t, dir, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agent", "gone.go")))
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n新增一句未提交的断言。\n"), 0o644))
+
+	report := scanDocRefs(doc, dir)
+	require.Equal(t, []string{"agent/gone.go"}, report.Dangling,
+		"an edited document has no snapshot basis, so the dangling citation stays reported")
+	require.Empty(t, report.Anchored)
+}
+
+// TestDocRefsReportsCitationMissingFromEveryBasis pins the negative control: a path that resolves nowhere still fails.
+// - A cleared gate must not be a vacuous one, so the unresolvable citation is the witness that the scan ran.
+func TestDocRefsReportsCitationMissingFromEveryBasis(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/never.go` 与 `memory/never.go`\n"), 0o644))
+	commitTree(t, dir, "wiki page")
+
+	report := scanDocRefs(doc, dir)
+	require.Equal(t, []string{"agent/never.go", "memory/never.go"}, report.Dangling,
+		"a citation that existed in no commit stays a failure")
+	require.Empty(t, report.Anchored)
 }
 
 // TestProcRefsIgnoresScannerSelfReferences pins both sides of the process-reference rule.

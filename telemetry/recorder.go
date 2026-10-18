@@ -12,13 +12,11 @@ import (
 // admits observation records without ever blocking the caller that produced the
 // fact, and it reports what a writer confirmed once the run is sealed.
 //
-// Admission is bounded by a queue length and a byte budget; a record that would
-// cross either bound is refused and counted in the loss ledger, which is read
-// from counters rather than from the data queue so it stays readable while the
-// queue is full. Sending and closing share one admission protocol, and a run
-// whose writer never confirmed a seal — a crash, a missing flush, or records
-// still in flight — is recorded as partial with its reason and is never
-// reported as complete.
+// The redline list (4 rules):
+// MUST refuse a record that would cross the queue length or the byte budget, and count it in the loss ledger.
+// MUST read the loss ledger from counters that stay readable while the queue is full.
+// MUST NOT block the caller that produced the fact.
+// MUST NOT report a run whose writer never confirmed a seal as complete.
 type Recorder interface {
 	// Record admits one committed fact for asynchronous delivery.
 	//

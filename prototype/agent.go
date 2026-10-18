@@ -1,6 +1,7 @@
 // 职责：事件消费壳——消费 AgentState 队列、按类型分派、驱动插件与模型，模型产出全部回队列。
 // 未实现：背压、流式、持久化、强杀；壳只持 State 与函数字段，停止壳不关 owner 任务。
 // 接线：装配方注入 Run/OnEvents/ModelCompletion/ResolveTool/Deliver/Compact；队列、上下文、任务在 AgentState。
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import "context"
@@ -54,6 +55,11 @@ func (a *BaseTAgent) DefaultRun(ctx context.Context) error {
 
 // DefaultOnEvents 逐事件：Before 插件 → 核心按类型分派并先执行 → After 插件 → 内核追加上下文/投递。
 // 一批已到达事件中有 Input 或 ToolResult 时调用一次模型，不等待其他任务；ToolCall 交任务 API，Reply 只投递。
+//
+// - 插件置 Type=0 即显式丢弃；路由由 Before 后的类型决定，After 变换不改变路由。
+// - ToolCall 与 Compact 在 After 前就执行核心动作，变换不能撤回已发生的派发。
+// - EventReply 经 owner 任务表 Spawn 一条 deliver 任务执行，成败以 ToolResult 回管线；投递失败不终止循环，重投与否属于模型决策。
+// - TaskNotice 只留状态；ModelDelta 是模型中间叙述，进上下文投影，不驱动、不投递。
 func (a *BaseTAgent) DefaultOnEvents(ctx context.Context, events []Event) error {
 	driving := false
 	for _, e := range events {
@@ -62,15 +68,15 @@ func (a *BaseTAgent) DefaultOnEvents(ctx context.Context, events []Event) error 
 			return err
 		}
 		if e.Type == 0 {
-			continue // 插件显式丢弃
+			continue
 		}
-		route := e.Type // 核心按类型决定去向，After 变换不能改路由。
+		route := e.Type
 		switch route {
 		case EventToolCall:
-			a.spawn(e) // 核心先派发
+			a.spawn(e)
 		case EventCompact:
 			if a.Compact != nil {
-				a.Compact() // 核心先折叠
+				a.Compact()
 			}
 		}
 		if e, err = ApplyPlugins(ctx, a.Plugins, e, false); err != nil {
@@ -86,12 +92,9 @@ func (a *BaseTAgent) DefaultOnEvents(ctx context.Context, events []Event) error 
 		case EventReply:
 			a.State.Append(e)
 			if a.Deliver != nil {
-				// 投递任务化：不再直调 Deliver，交给 owner 任务表；成败以 ToolResult 通知回管线，
-				// 循环不因投递失败终止（重投与否是模型决策域，原型不做输出通道治理）。
 				a.State.Tasks.Spawn(ToolCall{Name: "deliver", Args: e.Data}, a.Deliver, e.Source)
 			}
 		case EventTaskNotice, EventModelDelta:
-			// TaskNotice 只留状态；ModelDelta 是模型中间叙述——进上下文投影，不驱动、不投递。
 			a.State.Append(e)
 		}
 	}

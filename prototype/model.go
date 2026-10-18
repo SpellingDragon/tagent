@@ -1,7 +1,7 @@
 // 职责：调用框架已确定实例的模型并记录完整请求/输出/错误用于训练监控。
 // 未实现：调度、重试、缓存、provider 检测、system 组装、流式与计费。
 // 接线：config 在请求时准备模型实例、参数与 system，再调用 CallModel(ctx, model, request, record)。
-
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import "context"

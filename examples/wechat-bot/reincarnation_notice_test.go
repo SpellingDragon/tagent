@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,7 +78,8 @@ type fakeStore struct {
 	lastQuery memory.QueryOptions
 }
 
-func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference, error) {
+// QueryEvents reports the canned tail for the D8 contract tests.
+func (f *fakeStore) QueryEvents(_ context.Context, q memory.QueryOptions) ([]memory.EventReference, error) {
 	f.lastQuery = q
 	if f.err != nil {
 		return nil, f.err
@@ -91,9 +93,9 @@ func (f *fakeStore) QueryEvents(q memory.QueryOptions) ([]memory.EventReference,
 //
 // 契约: docs/wiki/platform/reincarnation-notice.md#breakpoint
 func TestFetchWALTail(t *testing.T) {
-	refs := []memory.EventReference{{EventKey: 1, EventType: "agent_output"}, {EventKey: 2, EventType: "thinking_plan"}}
+	refs := []memory.EventReference{{Key: "1", Type: "agent_output"}, {Key: "2", Type: "thinking_plan"}}
 	store := &fakeStore{refs: refs}
-	got, err := fetchWALTail(store, "tagent", 5)
+	got, err := fetchWALTail(context.Background(), store, "tagent", 5)
 	if err != nil || len(got) != 2 {
 		t.Fatalf("tail query failed: %v %v", got, err)
 	}
@@ -101,21 +103,21 @@ func TestFetchWALTail(t *testing.T) {
 	if len(store.lastQuery.PartitionIDs) != 1 || store.lastQuery.PartitionIDs[0] != wantPID {
 		t.Fatalf("query must pass PartitionIDs=[%d] (agent namespace), got %v", wantPID, store.lastQuery.PartitionIDs)
 	}
-	if store.lastQuery.Limit != 5 || store.lastQuery.OrderBy != "timestamp_desc" {
+	if store.lastQuery.Limit != 5 || store.lastQuery.OrderBy != memory.QueryOrderByDesc {
 		t.Fatalf("limit/orderBy contract broken: %+v", store.lastQuery)
 	}
-	if _, err := fetchWALTail(&fakeStore{err: os.ErrPermission}, "tagent", 5); err == nil {
+	if _, err := fetchWALTail(context.Background(), &fakeStore{err: os.ErrPermission}, "tagent", 5); err == nil {
 		t.Fatal("store error must propagate (D8 forbids silent degradation)")
 	}
-	if _, err := fetchWALTail(nil, "tagent", 5); err == nil {
+	if _, err := fetchWALTail(context.Background(), nil, "tagent", 5); err == nil {
 		t.Fatal("nil store must report unavailability")
 	}
 }
 
 func TestBuildNoticeText(t *testing.T) {
 	refs := []memory.EventReference{
-		{EventKey: 1292834793, EventType: "thinking_plan", EventSummary: "全绿收官：BUILD=0，最后一步换装上线", Timestamp: time.Now().Add(-2 * time.Minute).UnixMilli()},
-		{EventKey: 1292834781, EventType: "external_input", EventSummary: "[task settled] 门禁链 completed → BUILD=0 COMMIT_OK PUSH_OK", Timestamp: time.Now().Add(-4 * time.Minute).UnixMilli()},
+		{Key: "1292834793", Type: "thinking_plan", Summary: "全绿收官：BUILD=0，最后一步换装上线", Timestamp: time.Now().Add(-2 * time.Minute).UnixMilli()},
+		{Key: "1292834781", Type: "external_input", Summary: "[task settled] 门禁链 completed → BUILD=0 COMMIT_OK PUSH_OK", Timestamp: time.Now().Add(-4 * time.Minute).UnixMilli()},
 	}
 
 	t.Run("full_notice_with_breakpoint", func(t *testing.T) {
@@ -140,7 +142,7 @@ func TestBuildNoticeText(t *testing.T) {
 		}
 	})
 	t.Run("closed_turn_no_breakpoint", func(t *testing.T) {
-		closed := []memory.EventReference{{EventKey: 7, EventType: "agent_output", EventSummary: "收尾", Timestamp: time.Now().UnixMilli()}}
+		closed := []memory.EventReference{{Key: "7", Type: "agent_output", Summary: "收尾", Timestamp: time.Now().UnixMilli()}}
 		txt := buildNoticeText(nil, closed, nil)
 		if !strings.Contains(txt, "已闭环") {
 			t.Fatalf("closed-turn marker missing:\n%s", txt)
@@ -150,7 +152,7 @@ func TestBuildNoticeText(t *testing.T) {
 
 func TestHasOpenBreakpoint(t *testing.T) {
 	mk := func(typ string) []memory.EventReference {
-		return []memory.EventReference{{EventType: typ, Timestamp: time.Now().UnixMilli()}}
+		return []memory.EventReference{{Type: typ, Timestamp: time.Now().UnixMilli()}}
 	}
 	if !hasOpenBreakpoint(mk("thinking_plan")) {
 		t.Fatal("newest=thinking_plan must be open")

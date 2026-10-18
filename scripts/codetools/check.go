@@ -19,6 +19,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -822,20 +823,51 @@ var (
 	}
 )
 
-// docDanglingRefs returns path-like citations in doc that resolve to nothing. A renamed or
-// merged-away file leaves a citation pointing at nothing and no comment-level gate can see
-// that, so markdown is scanned for it. Only path-like tokens count (backticked, with a
+// historicalDocRoots names the documentation trees this repository keeps as historical
+// snapshots: the wiki index page declares its own tree one, and says its pages assert
+// against the production implementation they were written beside rather than against
+// today's code. The prefix is what separates a snapshot from a newly written architecture
+// document, so a citation is measured against the snapshot commit for these trees and
+// against the working tree for everything else.
+var historicalDocRoots = []string{"docs/wiki/"}
+
+// docRefReport splits a document's citations by the basis that resolved them: today's
+// tree, the document's own snapshot commit, or nothing at all. Dangling names a citation
+// that resolves in neither basis, Anchored one the snapshot resolved inside a historical
+// root, and OffRoot one it resolved outside such a root. Snapshot is the commit the anchored
+// citations were measured against, and Historical records whether the document sits under
+// a historical root.
+type docRefReport struct {
+	Dangling   []string
+	Anchored   []string
+	OffRoot    []string
+	Snapshot   string
+	Historical bool
+}
+
+// scanDocRefs returns the path-like citations in doc that resolve to nothing. A renamed
+// or merged-away file leaves a citation pointing at nothing and no comment-level gate can
+// see that, so markdown is scanned for it. Only path-like tokens count (backticked, with a
 // separator and a known extension), and only when the first segment is a top-level dir of
 // this repository — otherwise upstream paths, placeholders and bare filenames (which name a
 // convention rather than one file) would be reported as drift they never were.
-func docDanglingRefs(doc, root string) []string {
+//
+// A citation missing from today's tree is measured a second time against the document's own
+// last commit (see snapshotBasis): a historical snapshot must not be judged corrupt because
+// later code was renamed, while a document written now is still measured against today's
+// tree, so "new documents map new code" keeps its teeth.
+func scanDocRefs(doc, root string) docRefReport {
 	raw, err := os.ReadFile(doc)
 	if err != nil {
-		return nil
+		return docRefReport{}
 	}
-	rel := strings.TrimPrefix(filepath.Dir(doc), root+"/")
+	report := docRefReport{Historical: underHistoricalRoot(doc, root)}
+	rel := filepath.ToSlash(filepath.Dir(doc))
+	if abs, ok := relToRoot(doc, root); ok {
+		rel = filepath.ToSlash(filepath.Dir(abs))
+	}
 	seen := map[string]bool{}
-	var out []string
+	var missing [][]string
 	for _, m := range docRefPattern.FindAllStringSubmatch(string(raw), -1) {
 		tok := m[1]
 		if docRefSkip.MatchString(tok) {
@@ -849,6 +881,10 @@ func docDanglingRefs(doc, root string) []string {
 		if !knownTopDirs[head] {
 			continue
 		}
+		if seen[tok] {
+			continue
+		}
+		seen[tok] = true
 		cands := []string{filepath.Join(root, tok), filepath.Join(root, rel, tok),
 			filepath.Join(root, strings.TrimPrefix(tok, "./")),
 			filepath.Join(root, filepath.Base(filepath.Dir(doc)), tok)}
@@ -859,19 +895,116 @@ func docDanglingRefs(doc, root string) []string {
 				break
 			}
 		}
-		if !found && !seen[tok] {
-			seen[tok] = true
-			out = append(out, tok)
+		if !found {
+			missing = append(missing, append([]string{tok}, cands...))
 		}
 	}
-	sort.Strings(out)
-	return out
+	if len(missing) == 0 {
+		return report
+	}
+	sha, ok := snapshotBasis(root, doc)
+	if ok {
+		report.Snapshot = sha
+	}
+	for _, entry := range missing {
+		tok, cands := entry[0], entry[1:]
+		switch {
+		case ok && resolvesAtCommit(root, sha, cands):
+			if report.Historical {
+				report.Anchored = append(report.Anchored, tok)
+			} else {
+				report.OffRoot = append(report.OffRoot, tok)
+			}
+		default:
+			report.Dangling = append(report.Dangling, tok)
+		}
+	}
+	sort.Strings(report.Dangling)
+	sort.Strings(report.Anchored)
+	sort.Strings(report.OffRoot)
+	return report
+}
+
+// docDanglingRefs returns only the citations that resolve nowhere, which is the verdict
+// the gate exits on.
+func docDanglingRefs(doc, root string) []string { return scanDocRefs(doc, root).Dangling }
+
+// underHistoricalRoot reports whether doc sits in a tree declared as a historical snapshot.
+func underHistoricalRoot(doc, root string) bool {
+	rel, ok := relToRoot(doc, root)
+	if !ok {
+		return false
+	}
+	for _, prefix := range historicalDocRoots {
+		if strings.HasPrefix(rel, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// relToRoot expresses path relative to root and reports whether it lies inside it. A path
+// already relative to the repository is taken as is: the doc-refs walk hands out the paths
+// it was given, which are repository-relative, while the root is absolute.
+func relToRoot(path, root string) (string, bool) {
+	if !filepath.IsAbs(path) {
+		rel := filepath.ToSlash(filepath.Clean(path))
+		return rel, !strings.HasPrefix(rel, "../")
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+	return rel, !strings.HasPrefix(rel, "../")
+}
+
+// snapshotBasis returns the commit a document's citations may be measured against: the
+// last commit that touched it, and only while the document still holds that commit's text.
+// An edited document has no snapshot basis — its current words were never reviewed against
+// any tree — so anchoring must not exempt them.
+func snapshotBasis(root, doc string) (string, bool) {
+	rel, ok := relToRoot(doc, root)
+	if !ok {
+		return "", false
+	}
+	out, err := exec.Command("git", "-C", root, "log", "-1", "--format=%H", "--", rel).Output()
+	if err != nil {
+		return "", false
+	}
+	sha := strings.TrimSpace(string(out))
+	if sha == "" {
+		return "", false
+	}
+	if err := exec.Command("git", "-C", root, "diff", "--quiet", sha, "--", rel).Run(); err != nil {
+		return "", false
+	}
+	return sha, true
+}
+
+// resolvesAtCommit reports whether any candidate path exists in commit sha. A path outside
+// the repository cannot be measured, so it never resolves.
+func resolvesAtCommit(root, sha string, cands []string) bool {
+	for _, c := range cands {
+		rel, ok := relToRoot(c, root)
+		if !ok {
+			continue
+		}
+		if exec.Command("git", "-C", root, "cat-file", "-e", sha+":"+rel).Run() == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // runDocRefs scans markdown under the given dirs for dangling citations.
 func runDocRefs(args []string) int {
-	if len(args) == 0 {
-		args = []string{"docs"}
+	fsr := flag.NewFlagSet("doc-refs", flag.ExitOnError)
+	verbose := fsr.Bool("v", false, "print every citation resolved by snapshot anchoring")
+	_ = fsr.Parse(args)
+	dirs := fsr.Args()
+	if len(dirs) == 0 {
+		dirs = []string{"docs"}
 	}
 	root, err := os.Getwd()
 	if err != nil {
@@ -879,17 +1012,34 @@ func runDocRefs(args []string) int {
 		return 2
 	}
 	code := 0
-	for _, dir := range args {
+	anchored, legacy := 0, 0
+	for _, dir := range dirs {
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
 				return nil
 			}
-			for _, tok := range docDanglingRefs(path, root) {
+			report := scanDocRefs(path, root)
+			for _, tok := range report.Dangling {
 				fmt.Printf("DANGLING-DOC-REF %s: %s\n", path, tok)
 				code = 1
 			}
+			for _, tok := range report.Anchored {
+				anchored++
+				if *verbose {
+					fmt.Printf("HISTORICAL-DOC-REF %s: %s (present at %s)\n", path, tok, shortSHA(report.Snapshot))
+				}
+			}
+			for _, tok := range report.OffRoot {
+				legacy++
+				if *verbose {
+					fmt.Printf("SNAPSHOT-DOC-REF %s: %s (present at %s, tree not declared historical)\n", path, tok, shortSHA(report.Snapshot))
+				}
+			}
 			return nil
 		})
+	}
+	if anchored+legacy > 0 {
+		fmt.Printf("doc-refs: %d citation(s) resolve at their document's snapshot commit (%d inside historical roots, %d outside)\n", anchored+legacy, anchored, legacy)
 	}
 	if code == 0 {
 		fmt.Println("doc-refs: no dangling file citations")
@@ -897,10 +1047,22 @@ func runDocRefs(args []string) int {
 	return code
 }
 
+// shortSHA abbreviates a commit for a report line.
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
 // procRefSkip names the files that *implement* these checks. A definition or a
 // test fixture that spells out the path pattern is not a citation, so the gate
 // does not report itself; everything else must state the contract in a long-lived
 // document instead of pointing at a process artifact.
+// The four python/yaml keys at the end are checkers and CI wiring that pass the
+// change directory under inspection as a literal argument: spelling the
+// inspected path is their calling shape, the same self-reference the earlier
+// keys carry, not a citation of a process artifact.
 var procRefSkip = map[string]bool{
 	"scripts/comment_policy/main.go":                true,
 	"scripts/comment_policy/main_test.go":           true,
@@ -910,6 +1072,10 @@ var procRefSkip = map[string]bool{
 	"scripts/codetools/check.go":                    true,
 	"scripts/codetools/check_test.go":               true,
 	"scripts/lint.sh":                               true,
+	"scripts/check_concept_budget.py":               true,
+	"scripts/check_runtime_plan.py":                 true,
+	"scripts/test_check_runtime_workflow.py":        true,
+	".github/workflows/runtime-contracts.yml":       true,
 }
 
 // procRefViolations reports "file:line" of each change-artifact citation under dir.

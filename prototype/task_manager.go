@@ -2,6 +2,7 @@
 // 未实现：重试、TTL、强杀、跨进程重挂；不复制任务 ID 序列。
 // 接线：AgentState 构造 TaskManager，通知一律经 owner.Publish 投回所属管线（单点关系，不另持映射）；
 // Close 取消并等待在途执行，再 flush 条数窗残余。
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import (
@@ -78,7 +79,7 @@ func (m *TaskManager) Complete(id int, output string, err error) {
 			continue
 		}
 		if t.Status != "running" && t.Status != "unknown" {
-			break // terminal：保留旧事实。
+			break
 		}
 		t.Output = output
 		if err != nil {
@@ -191,7 +192,7 @@ func AgentTask(state *State, id string, registry Registry) ToolFunc {
 		}
 		select {
 		case out := <-replies:
-			cancel() // 首个 Reply 即结果，停子消费壳（不关子 owner 资源）。
+			cancel()
 			<-done
 			return out, nil
 		case err := <-done:

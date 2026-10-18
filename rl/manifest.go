@@ -6,11 +6,15 @@ import "github.com/SpellingDragon/tagent/event"
 //
 // SampleProvenance links one exported sample to the records it was produced from:
 // the capture, export, episode, decision and attempt it descends through, each with
-// the version it was read at, and the reward version the sample carries.
+// the version it was read at, and the concrete reward instance the sample carries.
 //
 // A sample whose lineage cannot be established is listed in the rejection ledger
 // rather than written under a guessed link, and its split group names the episodes it
-// shares data with so a leakage-free split stays drawn on real dependencies.
+// shares data with so a leakage-free split stays drawn on real dependencies. The
+// source is pinned to instance versions and never to a rule version alone: the
+// reward the sample carries is named by instance ID and revision, and a sample
+// whose reward instance cannot be pinned is refused rather than written under a
+// derivation rule version that could stand for several records.
 type SampleProvenance struct {
 	// SampleID identifies the exported sample.
 	SampleID string
@@ -26,7 +30,14 @@ type SampleProvenance struct {
 	AttemptID event.AttemptID
 	// Schema is the record schema version the sample was read at.
 	Schema SchemaVersion
-	// RewardVersion is the reward derivation version the sample carries.
+	// RewardInstanceID names the concrete reward instance the sample carries.
+	RewardInstanceID string
+	// RewardRevision is the revision of that reward instance, so a late feedback
+	// derived value is a different citation than the one written earlier.
+	RewardRevision int64
+	// RewardVersion is the reward derivation rule version the sample carries; it
+	// records the rule the value was computed with and is not an instance
+	// identity.
 	RewardVersion string
 	// GroupID names the leakage-free split group the sample was assigned to.
 	GroupID string
@@ -98,15 +109,17 @@ type ExportManifest struct {
 // field or a changed field type stops the package from compiling.
 var (
 	_ = SampleProvenance{
-		SampleID:      "",
-		CaptureID:     "",
-		ExportID:      "",
-		EpisodeID:     "",
-		DecisionID:    "",
-		AttemptID:     "",
-		Schema:        "",
-		RewardVersion: "",
-		GroupID:       "",
+		SampleID:         "",
+		CaptureID:        "",
+		ExportID:         "",
+		EpisodeID:        "",
+		DecisionID:       "",
+		AttemptID:        "",
+		Schema:           "",
+		RewardInstanceID: "",
+		RewardRevision:   0,
+		RewardVersion:    "",
+		GroupID:          "",
 	}
 
 	_ = ProvenanceGap{

@@ -6,16 +6,21 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-	"trpc.group/trpc-go/trpc-agent-go/log"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"trpc.group/trpc-go/trpc-agent-go/model"
+	"github.com/SpellingDragon/tagent/event"
+	"trpc.group/trpc-go/trpc-agent-go/log"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
-// maybeConsumeSystemAlert is the one-shot startup hook: wait for the event
-// loop to settle, inject any pending restart failure, mark consumed. Every
-// step is logged; nothing here may crash the bot.
-func maybeConsumeSystemAlert(ta *agent.TagentAgent, runDir string, delay time.Duration) {
+// alertInjector is the narrow inbox face the startup alert is queued into.
+type alertInjector interface {
+	InjectInternal(addr event.Address, source string, msg trpcmodel.Message)
+}
+
+// maybeConsumeSystemAlert is the one-shot startup hook: wait for the runtime to
+// settle, queue any pending restart failure for the first user turn, mark
+// consumed. Every step is logged; nothing here may crash the bot.
+func maybeConsumeSystemAlert(inj alertInjector, runDir string, delay time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		if exe, err := os.Executable(); err == nil {
 			runDir = filepath.Join(filepath.Dir(exe), runDir)
@@ -32,11 +37,11 @@ func maybeConsumeSystemAlert(ta *agent.TagentAgent, runDir string, delay time.Du
 
 	text := fmt.Sprintf("[System Alert] Detected an unprocessed failure record for the previous generation's restart script (run/SYSTEM_ALERT):\n%s",
 		string(data))
-	ta.InjectMessageWithSource("system_alert", model.Message{
-		Role:    model.RoleUser,
+	inj.InjectInternal(event.Address{}, "system_alert", trpcmodel.Message{
+		Role:    trpcmodel.RoleUser,
 		Content: text,
 	})
-	log.Infof("[system-alert] staged failure injected via system_alert source (%d bytes)", len(data))
+	log.Infof("[system-alert] staged failure queued via system_alert source (%d bytes)", len(data))
 
 	if err := os.Rename(alertPath, alertPath+".consumed"); err != nil {
 		log.Warnf("[system-alert] consume-marker rename failed: %v", err)

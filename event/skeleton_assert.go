@@ -31,6 +31,7 @@ var (
 		DecisionID:   "",
 		AttemptID:    "",
 		CallID:       "",
+		ApprovalID:   "",
 	}
 
 	_ = Address{

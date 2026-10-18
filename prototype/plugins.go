@@ -1,7 +1,7 @@
 // 职责：按明确 Kinds 在事件前后选择性变换，并提供结果外置插件与折叠。
 // 未实现：插件管理器、优先级、失败回滚、异步投递；顺序由调用方切片固定。
 // 接线：agent 循环调 ApplyPlugins；config 用 ResultMemoryPlugin 装配；模型消费后调 CompactResults。
-
+// 契约: docs/wiki/agent/prototype-skeleton.md#six-pieces
 package prototype
 
 import "context"

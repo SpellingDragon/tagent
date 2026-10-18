@@ -1,5 +1,45 @@
 
-send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进可解析的会话， 通道与目标在装配期由闭包固定，模型只给正文。投递本体由
+本文件承载换装后的转世通报：检测、组装、注入与记消费。
+
+send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进调用方的会话，
+通道由装配期闭包固定，模型只给正文；送达目标取自本次调用的显式会址，不猜、不回退他会话。 投递本体由
+
+VARIABLES
+
+var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one pending approval")
+    ErrApprovalAmbiguous reports a ruling whose digest prefix names more than
+    one pending request: an ambiguous ruling is refused instead of applied to a
+    guess.
+
+var ErrApprovalNotApprover = errors.New("wechat-bot: the sender is not in the approval whitelist")
+    ErrApprovalNotApprover reports a message-channel ruling from a user outside
+    the approver whitelist: an empty whitelist refuses every message ruling.
+
+var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was already admitted")
+    ErrDuplicateInbound reports an inbound message whose identity was already
+    admitted: one channel delivery drives one invocation.
+
+var ErrNoChatAddress = errors.New("wechat-bot: the inbound message names no chat identity")
+    ErrNoChatAddress reports an inbound message that names no chat identity.
+    The refusal is the whole answer: a message without an address is never
+    routed to a session that belongs to somebody else.
+
+var ErrNoEntryAgent = errors.New("wechat-bot: the host document names no declared entry agent")
+    ErrNoEntryAgent reports a host document that names no entry agent or names
+    an agent it does not declare.
+
+var ErrSessionPrefixMissing = errors.New("wechat-bot: the session router carries no session prefix")
+    ErrSessionPrefixMissing reports a router constructed without the explicit
+    session prefix its address spelling starts with.
+
+var ErrTargetRebind = errors.New("wechat-bot: the address is already bound to another chat identity")
+    ErrTargetRebind reports a second chat identity claimed for an address that
+    already delivered to another chat. The bound target is the delivery identity
+    of that session and is never rewritten by a later claim.
+
+var ErrUnknownProvider = errors.New("wechat-bot: the host document declares no such provider")
+    ErrUnknownProvider reports an agent whose provider name resolves to no
+    provider entry of the document.
 
 FUNCTIONS
 
@@ -97,8 +137,8 @@ func (s *SeenStore) CheckAndMark(key string) bool
     false if it was already seen (duplicate — drop). Marking is persisted
     immediately (atomic write) so a crash right after cannot replay the message.
 
-type SendFunc func(ctx context.Context, content string) (targetLabel string, err error)
-    SendFunc 是组合根注入的发送缝：把一条正文送进宿主唯一的发送通路， 返回实际送达目标的标签；error
+type SendFunc func(ctx context.Context, addr event.Address, content string) (targetLabel string, err error)
+    SendFunc 是组合根注入的发送缝：把一条正文按显式会址送进宿主唯一的发送通路， 返回实际送达目标的标签；error
     携带具名拒绝原因，由工具层转写为结果文本。
 
 type SendTool struct {
@@ -123,21 +163,61 @@ func (t *SendTool) Declaration() *tool.Declaration
 func (t *SendTool) SetSend(send SendFunc)
     SetSend 绑定发送缝：通道与目标定位由装配闭包固定，不经参数出入。
 
+type SessionRouter struct {
+	// Has unexported fields.
+}
+    SessionRouter maps one explicit chat identity to the session address the
+    runtime is driven at, and holds the delivery identity of each address it
+    admitted.
+
+    The mapping is injective in its spelling: one chat identity has exactly
+    one session identity and two chat identities never share one, so a restart
+    re-derives the same addresses instead of inventing a fresh history.
+
+func NewSessionRouter(agentID event.AgentID, prefix string) (*SessionRouter, error)
+    NewSessionRouter returns the router of one declared agent beside the
+    explicit session prefix its addresses are spelled with. A missing agent
+    or prefix is refused at construction, so no address is ever built from a
+    default.
+
+func (r *SessionRouter) AddressFor(chatID string) (event.Address, error)
+    AddressFor returns the explicit address of one chat identity: the declared
+    agent beside the session identity that identity spells. The chat identity is
+    percent-escaped, so the spelling is injective over every byte a channel may
+    carry and two chats never collapse onto one session.
+
+func (r *SessionRouter) Bind(addr event.Address, chatID string) error
+    Bind records the chat identity a drive was admitted for as the delivery
+    identity of its address: a later explicit send from that address reaches the
+    chat its own drive came from. A rebound address keeps its first identity and
+    reports the conflict instead of silently retargeting the session.
+
+func (r *SessionRouter) NextInvocation(addr event.Address) event.InvocationID
+    NextInvocation mints the responsibility range identity of one drive of the
+    address. The identity is unique per drive and derived from the address,
+    so a range never collides with the range of another session.
+
+func (r *SessionRouter) TakeUndelivered(addr event.Address, history []model.Message) []model.Message
+    TakeUndelivered returns the transcript messages the address accumulated
+    since the previous take and records them as consumed. Delivery reads one
+    session's own transcript only, so a reply never carries another session's
+    turn.
+
+func (r *SessionRouter) Target(addr event.Address) (string, bool)
+    Target reports the chat identity bound to exactly this address. An address
+    no drive ever bound answers not-ok: the delivery face then refuses instead
+    of resolving a most-recent chat of another session.
+
 type WechatAppConfig struct {
-	ConfigDir       string `json:"config_dir"`
-	TokenFile       string `json:"token_file"`
-	ContextTokenDir string `json:"context_token_dir"`
-	WorkspaceDir    string `json:"workspace_dir"`
+	ConfigDir       string `yaml:"config_dir" json:"config_dir"`
+	TokenFile       string `yaml:"token_file" json:"token_file"`
+	ContextTokenDir string `yaml:"context_token_dir" json:"context_token_dir"`
+	WorkspaceDir    string `yaml:"workspace_dir" json:"workspace_dir"`
 	// Approvers：可经消息通道批准 critical 操作的用户 ID 白名单。
-	// 空 = 消息通道批准关闭（安全默认——digest 随请求明文送达，任意可达者可批准），
-	// 批准仅经 CLI（wechat-bot approve <digest>）。
-	Approvers []string `json:"approvers,omitempty"`
+	// 空 = 消息通道批准关闭（安全默认），批准仅经 CLI（wechat-bot approve <digest>）。
+	Approvers []string `yaml:"approvers" json:"approvers,omitempty"`
 }
     WechatAppConfig holds WeChat-specific configuration.
 
 func (c *WechatAppConfig) EnsureDirs() error
-    EnsureDirs creates necessary WeChat directories.
-
-func (c WechatAppConfig) IsApprover(userID string) bool
-    IsApprover reports whether the user id may approve via the message channel
-    (8.2: empty whitelist denies everyone — approval goes via CLI).
+    EnsureDirs creates the directories the channel and the workspace need.

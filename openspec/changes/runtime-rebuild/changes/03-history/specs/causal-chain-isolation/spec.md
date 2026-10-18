@@ -23,8 +23,9 @@ MemoryPlugin.lastEventKeys SHALL be keyed by a composite of PartitionID and Sess
 
 #### Scenario: Session ID unavailable
 
-- **WHEN** inv.Session is nil or Session.ID is empty
-- **THEN** events are keyed by PartitionID only (degraded to current behavior, no crash)
+- **WHEN** inv.Session is nil or Session.ID is empty（正常入口）
+- **THEN** 具名拒绝建立因果链（fail-closed），MUST NOT 降级为 PartitionID-only 键接进普通多用户链（报告响应裁决 report-response.md §三.2）
+- **AND** 旧数据（历史 partition-only 键）仅可经 09.2 迁移隔离域显式导入并标记隔离来源，不进入新链
 
 #### Scenario: 回放不跨会话连链
 

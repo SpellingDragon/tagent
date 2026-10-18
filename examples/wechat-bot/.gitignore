@@ -126,3 +126,13 @@ openspec/
 # 主动送达面（send 工具）源码与测试：白名单制必须点名，否则新文件永远不进版本控制。
 !send_tool.go
 !send_tool_test.go
+
+# 宿主运行时与会话路由：装配入口、会址解析与审批裁决通道，同样必须点名。
+!host_runtime.go
+!session_routing.go
+!approval_channel.go
+!main_test.go
+!session_routing_test.go
+
+# 出站文件投递的副本生命周期：同样必须点名。
+!file_replica.go

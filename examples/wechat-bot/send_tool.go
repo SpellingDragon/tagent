@@ -1,6 +1,6 @@
-// send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进可解析的会话，
-// 通道与目标在装配期由闭包固定，模型只给正文。投递本体由 hostSender 承担（与被动通道同一实现），
-// 本文件是该面的消费者，不持任何发送状态，发送方身份在工具之外由装配固定。
+// send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进调用方的会话，
+// 通道由装配期闭包固定，模型只给正文；送达目标取自本次调用的显式会址，不猜、不回退他会话。
+// 投递本体由 hostSender 承担（与被动通道同一实现），本文件是该面的消费者，不持任何发送状态。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#outbound-delivery
 package main
 
@@ -11,7 +11,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/agent"
+	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/task"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -19,12 +20,12 @@ import (
 // contentMaxBytes 是单次送达正文的字节上界：一条微信消息不是语料库。
 const contentMaxBytes = 8 * 1024
 
-// sendToolID 是注册表登记 id 与 yaml ToolRef 的 id 共用的工具名。
+// sendToolID 是声明侧 ToolRef 与工具实例共用的工具名。
 const sendToolID = "send"
 
-// SendFunc 是组合根注入的发送缝：把一条正文送进宿主唯一的发送通路，
+// SendFunc 是组合根注入的发送缝：把一条正文按显式会址送进宿主唯一的发送通路，
 // 返回实际送达目标的标签；error 携带具名拒绝原因，由工具层转写为结果文本。
-type SendFunc func(ctx context.Context, content string) (targetLabel string, err error)
+type SendFunc func(ctx context.Context, addr event.Address, content string) (targetLabel string, err error)
 
 // SendTool 是模型可见的主动送达面。
 //
@@ -52,7 +53,7 @@ type sendArgs struct {
 func (t *SendTool) Declaration() *tool.Declaration {
 	return &tool.Declaration{
 		Name:        "send",
-		Description: "把内容显式送达微信用户：content 是正文（上限 8KiB）。这是与回合触发源无关的主动通道——你在非用户回合想对用户说的话，不经此调用不会自动送达。发送目标与发送通道由宿主固定（本会话盖章 > 最近活跃会话），不是参数；失败以 [send_denied] 结果文本回给你，回合照常继续。",
+		Description: "把内容显式送达微信用户：content 是正文（上限 8KiB）。这是与回合触发源无关的主动通道——你在非用户回合想对用户说的话，不经此调用不会自动送达。发送目标取自本次调用的会话地址及其绑定会话，不是参数；失败以 [send_denied] 结果文本回给你，回合照常继续。",
 		InputSchema: &tool.Schema{
 			Type: "object",
 			Properties: map[string]*tool.Schema{
@@ -89,7 +90,11 @@ func (t *SendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if t.send == nil {
 		return t.denied("宿主未接线发送缝，本次发送无法执行"), nil
 	}
-	label, err := t.send(ctx, args.Content)
+	addr, ok := callAddress(ctx)
+	if !ok {
+		return t.denied("本次调用不携带显式会话地址，无法确定送达目标"), nil
+	}
+	label, err := t.send(ctx, addr, args.Content)
 	if err != nil {
 		return t.denied(err.Error()), nil
 	}
@@ -97,10 +102,19 @@ func (t *SendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	return "[send_ok] 已送达（目标 " + label + "）；通道=宿主唯一发送通路，长文拆分与附件投递由其一并完成", nil
 }
 
+// callAddress reports the explicit invocation address the call frame carries.
+func callAddress(ctx context.Context) (event.Address, bool) {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok || !frame.Address.IsComplete() {
+		return event.Address{}, false
+	}
+	return frame.Address, true
+}
+
 // denied 把一次拒绝渲染为结果文本：具名原因加目标规则现状，run 级 debug 日志即观测面。
 func (t *SendTool) denied(reason string) string {
 	log.Debugf("[send] refused: %s", reason)
-	return fmt.Sprintf("[send_denied] %s；目标规则：本会话盖章 > 最近活跃", reason)
+	return fmt.Sprintf("[send_denied] %s；目标规则：本会话地址绑定的会话（不经最近活跃回退）", reason)
 }
 
 // unknownFields 点名声明之外的参数字段，排序保证文案可复现。
@@ -115,10 +129,8 @@ func unknownFields(probe map[string]json.RawMessage) []string {
 	return out
 }
 
-// sendToolFactory 产出注册表侧的工厂：工具实例只持发送缝，宿主通路经缝晚绑定。
-// 工厂按 id 登记：只有 yaml 声明了 {kind: tool, id: send} 的 agent 看得见它——授予即授权。
-func sendToolFactory(seam *hostSendSeam) agent.PlainToolFactory {
-	return func(agent.PlainToolFactoryConfig) (tool.CallableTool, error) {
-		return NewSendTool(seam.send), nil
-	}
+// sendToolFactory 产出声明侧的工具实例：工具只持发送缝，宿主通路经缝晚绑定。
+// 只有声明了 {kind: tool, id: send} 的 agent 拿到它——授予即授权。
+func sendToolFactory(seam *hostSendSeam) tool.CallableTool {
+	return NewSendTool(seam.Send)
 }

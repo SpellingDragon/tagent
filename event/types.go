@@ -68,25 +68,42 @@ func (a Address) IsComplete() bool {
 
 // Event is one immutable runtime fact: the canonical key it is stored under, its
 // frozen type, the time it was recorded, its metadata projection, the native
-// model payload it carries, and the identities that scope it.
+// model payload it carries, and the identities that scope it. Its fields form
+// four blocks — identity, content, ownership and ledger — and the doc of the
+// first field of each names the block and what its fields share.
 //
 // G0 (payload carrying) is not settled yet: if the design rules for a local
 // shadow message, the Message field below changes to that local type instead of
 // the native model message.
 type Event struct {
-	// Key is the canonical identity of the event, in its hex form.
+	// Key is the canonical identity of the event, in its hex form. It heads the
+	// identity block, with Type and Timestamp: what the stored fact is on its
+	// own. An event is quoted by Key alone; Type and Timestamp describe that
+	// fact and never re-identify it.
 	Key EventID
 	// Type is the frozen event type, one of the Type constants of this package.
 	Type string
 	// Timestamp is the time the event was recorded.
 	Timestamp time.Time
+
 	// Meta carries the event metadata entries keyed by the MetaKey constants of
-	// this package.
+	// this package. It heads the content block, with Message: what the event
+	// carries. Meta and Message are two faces of one fact, and neither is a
+	// second representation of the other.
 	Meta map[string]string
 	// Message is the native model payload the event carries.
 	Message model.Message
 
-	// Owner is the address that owns the event.
+	// Owner is the address that owns the event. It heads the ownership block,
+	// with Source, Target, InvocationID, TaskID, InstanceID, EpisodeID,
+	// DecisionID and AttemptID: the addresses and identifiers that place the
+	// event.
+	//
+	// Source and Target are the addresses the event came from and is delivered
+	// to; the source instance and the notification target instance are kept
+	// apart, and Target is never defaulted. The identifiers scope the event to
+	// one responsibility range, task, runtime instance, episode, model decision
+	// and model attempt, and stay empty where the event falls outside of them.
 	Owner Address
 	// Source is the address the event came from; the source instance and the
 	// notification target instance are kept apart.
@@ -109,8 +126,15 @@ type Event struct {
 	DecisionID DecisionID
 	// AttemptID scopes the event to one observable model attempt.
 	AttemptID AttemptID
+
 	// CallID is the native provider call identifier, kept byte-identical and
-	// never regenerated. It is not globally unique, so the deduplication scope
-	// always includes InstanceID, InvocationID and DecisionID with it.
+	// never regenerated. It heads the ledger block, with ApprovalID; those two
+	// keys are what the deduplication scope and the approval record book the
+	// call by. It is not globally unique, so the deduplication scope always
+	// includes InstanceID, InvocationID and DecisionID with it.
 	CallID string
+	// ApprovalID is the approval ticket identity of the call this event records:
+	// tagent issues it when the host parks the call in a hold, and it is globally
+	// unique. It is empty when the call needs no approval.
+	ApprovalID string
 }

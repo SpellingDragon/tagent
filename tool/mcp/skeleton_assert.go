@@ -41,6 +41,21 @@ var (
 	_ trpctool.ToolSet    = (*trpcmcp.ToolSet)(nil)
 )
 
+// Phase 2 implementation relationships: the live registry, the native
+// connector, the registry discovery and the fixed gateway tools satisfy the
+// declared faces, and the discovered tool and the named discovery failures
+// keep their own shapes. A changed face stops this block from compiling.
+var (
+	_ Registry              = (*ServerRegistry)(nil)
+	_ Connector             = (*NativeConnector)(nil)
+	_ Discovery             = (*RegistryDiscovery)(nil)
+	_ DeclarationReloader   = (*Gateways)(nil)
+	_ trpctool.CallableTool = (*CallTool)(nil)
+	_ trpctool.CallableTool = (*DiscoverTool)(nil)
+	_ trpctool.Tool         = (*DiscoveredTool)(nil)
+	_ error                 = (*ServerFailures)(nil)
+)
+
 // Gateway identifiers must stay compile-time constants: a variable or a
 // computed value stops this block from compiling.
 const (
