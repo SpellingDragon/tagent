@@ -827,21 +827,21 @@ var (
 // snapshots: the wiki index page declares its own tree one, and says its pages assert
 // against the production implementation they were written beside rather than against
 // today's code. The prefix is what separates a snapshot from a newly written architecture
-// document, so a citation is measured against the snapshot commit for these trees and
-// against the working tree for everything else.
+// document, so a citation inside these trees that is missing today is measured against the
+// commit that introduced the citing line, and against the working tree everywhere else.
 var historicalDocRoots = []string{"docs/wiki/"}
 
 // docRefReport splits a document's citations by the basis that resolved them: today's
-// tree, the document's own snapshot commit, or nothing at all. Dangling names a citation
-// that resolves in neither basis, Anchored one the snapshot resolved inside a historical
-// root, and OffRoot one it resolved outside such a root. Snapshot is the commit the anchored
-// citations were measured against, and Historical records whether the document sits under
-// a historical root.
+// tree, the commit that introduced the citing line, or nothing at all. Dangling names a
+// citation that resolves in neither basis, Anchored one whose introducing commit resolved
+// inside a historical root, and OffRoot one it resolved outside such a root. Anchors maps
+// every anchored citation to the commit it was measured against, and Historical records
+// whether the document sits under a historical root.
 type docRefReport struct {
 	Dangling   []string
 	Anchored   []string
 	OffRoot    []string
-	Snapshot   string
+	Anchors    map[string]string
 	Historical bool
 }
 
@@ -852,10 +852,12 @@ type docRefReport struct {
 // this repository — otherwise upstream paths, placeholders and bare filenames (which name a
 // convention rather than one file) would be reported as drift they never were.
 //
-// A citation missing from today's tree is measured a second time against the document's own
-// last commit (see snapshotBasis): a historical snapshot must not be judged corrupt because
-// later code was renamed, while a document written now is still measured against today's
-// tree, so "new documents map new code" keeps its teeth.
+// A citation missing from today's tree is measured a second time against the commit that
+// introduced its citing line (see citationBasis): a historical snapshot must not be judged
+// corrupt because later code was renamed, nor because an unrelated commit (front matter, a
+// banner) moved the document's own last commit forward — the basis follows the citation, not
+// the document. A document carrying uncommitted words has no basis at all (see
+// uneditedDocument), so "new documents map new code" keeps its teeth.
 func scanDocRefs(doc, root string) docRefReport {
 	raw, err := os.ReadFile(doc)
 	if err != nil {
@@ -902,14 +904,17 @@ func scanDocRefs(doc, root string) docRefReport {
 	if len(missing) == 0 {
 		return report
 	}
-	sha, ok := snapshotBasis(root, doc)
-	if ok {
-		report.Snapshot = sha
-	}
+	committed := uneditedDocument(root, doc)
+	report.Anchors = map[string]string{}
 	for _, entry := range missing {
 		tok, cands := entry[0], entry[1:]
+		sha, ok := "", false
+		if committed {
+			sha, ok = citationBasis(root, doc, tok)
+		}
 		switch {
 		case ok && resolvesAtCommit(root, sha, cands):
+			report.Anchors[tok] = sha
 			if report.Historical {
 				report.Anchored = append(report.Anchored, tok)
 			} else {
@@ -959,16 +964,20 @@ func relToRoot(path, root string) (string, bool) {
 	return rel, !strings.HasPrefix(rel, "../")
 }
 
-// snapshotBasis returns the commit a document's citations may be measured against: the
-// last commit that touched it, and only while the document still holds that commit's text.
-// An edited document has no snapshot basis — its current words were never reviewed against
-// any tree — so anchoring must not exempt them.
-func snapshotBasis(root, doc string) (string, bool) {
+// citationBasis returns the commit that introduced token's citing line into doc: the tree
+// the sentence was written against. Anchoring per citation rather than per document is the
+// point — an unrelated commit that touches the page (front matter, a banner) moves the
+// document's own last commit without touching the sentence, and must not re-date it. -G
+// rather than -S is deliberate: a commit that rewrites the citing line moves the basis with
+// it, so a citation is always measured against the words actually present today. The search
+// is scoped to doc's own history, never to the repository's commits at large.
+func citationBasis(root, doc, token string) (string, bool) {
 	rel, ok := relToRoot(doc, root)
 	if !ok {
 		return "", false
 	}
-	out, err := exec.Command("git", "-C", root, "log", "-1", "--format=%H", "--", rel).Output()
+	out, err := exec.Command("git", "-C", root, "log", "-1", "--format=%H",
+		"-G"+regexp.QuoteMeta(token), "--", rel).Output()
 	if err != nil {
 		return "", false
 	}
@@ -976,10 +985,28 @@ func snapshotBasis(root, doc string) (string, bool) {
 	if sha == "" {
 		return "", false
 	}
-	if err := exec.Command("git", "-C", root, "diff", "--quiet", sha, "--", rel).Run(); err != nil {
-		return "", false
-	}
 	return sha, true
+}
+
+// uneditedDocument reports whether doc still carries exactly its committed text. A page
+// with uncommitted words was never reviewed against any tree, so none of its citations may
+// be anchored: anchoring stays a snapshot privilege, not a blanket exemption.
+func uneditedDocument(root, doc string) bool {
+	rel, ok := relToRoot(doc, root)
+	if !ok {
+		return false
+	}
+	return exec.Command("git", "-C", root, "diff", "--quiet", "HEAD", "--", rel).Run() == nil
+}
+
+// shallowRepository reports whether the clone was truncated. Citation provenance then has
+// no reachable introducing commit: the search silently lands on the graft point, whose tree
+// is today's tree minus whatever the last commits removed, so a clean page reads as drift.
+// The gate stays red — the citation is unproven — but it must say why, or the reader renames
+// paths to appease a checkout depth.
+func shallowRepository(root string) bool {
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--is-shallow-repository").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
 // resolvesAtCommit reports whether any candidate path exists in commit sha. A path outside
@@ -1026,20 +1053,23 @@ func runDocRefs(args []string) int {
 			for _, tok := range report.Anchored {
 				anchored++
 				if *verbose {
-					fmt.Printf("HISTORICAL-DOC-REF %s: %s (present at %s)\n", path, tok, shortSHA(report.Snapshot))
+					fmt.Printf("HISTORICAL-DOC-REF %s: %s (introduced at %s)\n", path, tok, shortSHA(report.Anchors[tok]))
 				}
 			}
 			for _, tok := range report.OffRoot {
 				legacy++
 				if *verbose {
-					fmt.Printf("SNAPSHOT-DOC-REF %s: %s (present at %s, tree not declared historical)\n", path, tok, shortSHA(report.Snapshot))
+					fmt.Printf("SNAPSHOT-DOC-REF %s: %s (introduced at %s, tree not declared historical)\n", path, tok, shortSHA(report.Anchors[tok]))
 				}
 			}
 			return nil
 		})
 	}
 	if anchored+legacy > 0 {
-		fmt.Printf("doc-refs: %d citation(s) resolve at their document's snapshot commit (%d inside historical roots, %d outside)\n", anchored+legacy, anchored, legacy)
+		fmt.Printf("doc-refs: %d citation(s) resolve at the commit that introduced them (%d inside historical roots, %d outside)\n", anchored+legacy, anchored, legacy)
+	}
+	if code != 0 && shallowRepository(root) {
+		fmt.Fprintln(os.Stderr, "doc-refs: this clone has truncated history, so an introducing commit may be unreachable and an anchor failure is not proof of drift; fetch full history (CI: actions/checkout fetch-depth: 0)")
 	}
 	if code == 0 {
 		fmt.Println("doc-refs: no dangling file citations")

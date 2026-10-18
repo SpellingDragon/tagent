@@ -192,7 +192,7 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(payload["counts"]["scenario_count"], 10)
 
     def test_contract_only_mode_with_plan_graph(self):
-        graph = REPO / "openspec" / "changes" / "runtime-rebuild" / "task-graph.json"
+        graph = REPO / "openspec" / "changes" / "archive" / "2026-10-18-runtime-rebuild" / "task-graph.json"
         code, out, err = run_checker("--contract", str(REAL_CONTRACT), "--check-contract",
                                      "--plan-graph", str(graph), "--json")
         self.assertEqual(code, 0, out + err)

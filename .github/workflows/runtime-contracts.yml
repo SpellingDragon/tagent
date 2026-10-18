@@ -70,7 +70,10 @@ jobs:
       # package is *.go: a bare `.` would recurse the whole root module.
       PRODUCT_PACKAGES: "*.go event config state agent task memory workspace plugin model telemetry rl evolution query tool"
     steps:
+      # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Checker selftests are pure Python; the product gates below additionally
       # need the Go toolchain (floor >=1.24.1) and the pinned openspec CLI.
@@ -165,7 +168,10 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_implementation == 'true' || inputs.evidence_json != '' || inputs.test_log != '') }}
     runs-on: ubuntu-latest
     steps:
+      # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Half a real-acceptance input is a parameter error: never fall through to
       # a silent "nothing to compare" success.
