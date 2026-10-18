@@ -1,0 +1,85 @@
+name: Feature request / 功能请求
+description: 提出能力诉求。仓库处于 pre-release，不承诺兼容性、排期或迁移路径。
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        功能请求描述**问题与影响面**，不预设实现。当前仓库为 v0.3.0 pre-release：接受一个请求不等于承诺兼容或迁移，破坏性变更会记入 `CHANGELOG.md` 的 Breaking Changes。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题 / 场景
+      description: 现在做不了什么、在什么部署形态下发生、代价是什么。
+      placeholder: |
+        在 常驻 / 微信宿主 / 单进程 形态下，我希望……
+        目前只能……，代价是……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望能力
+      description: 期望的对外行为与边界；不要求给出实现方案。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 模块归属
+      description: 按包名选择；跨包或不确定时选 unknown。
+      options:
+        - root (assembly / run*.go / CLI)
+        - agent
+        - config
+        - event
+        - evolution
+        - memory
+        - model
+        - plugin
+        - query
+        - rl
+        - state
+        - task
+        - telemetry
+        - tool/exec
+        - tool/mcp
+        - tool/remote
+        - workspace
+        - examples/wechat-bot
+        - docs / scripts / CI
+        - unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响面
+      description: 是否触碰公共 API、配置键、持久化格式或数据迁移；pre-release 下这些都可能 breaking。
+      placeholder: |
+        - 公共 API: 新增 / 修改 / 无
+        - 配置: 新增键 / 删除键 / 无（严格解码，未知键拒启动）
+        - 持久化: 格式变化 / 需重建 / 无
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案（可选）
+      description: 现在如何绕过、为什么不够。
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息（可选）
+      description: 相关文档、规格、上游依赖（如 trpc-agent-go）或示例。
+    validations:
+      required: false

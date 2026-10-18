@@ -143,6 +143,11 @@
       "role": "impl-subpackage",
       "required": false,
       "reason": "memory 实现子包（检索端口/混合融合）：索引非真源，读 memory 原文引用与 event 身份。随 04.P0.4 骨架登记（主编排者，2026-10-13）。"
+    },
+    {
+      "pattern": "bench",
+      "role": "benchmark",
+      "edges": []
     }
   ],
   "edges": [

@@ -6,6 +6,7 @@
 |---|---|
 | `github.com/SpellingDragon/tagent` | [github_com__SpellingDragon__tagent.md](github_com__SpellingDragon__tagent.md) |
 | `github.com/SpellingDragon/tagent/agent` | [github_com__SpellingDragon__tagent__agent.md](github_com__SpellingDragon__tagent__agent.md) |
+| `github.com/SpellingDragon/tagent/bench` | [github_com__SpellingDragon__tagent__bench.md](github_com__SpellingDragon__tagent__bench.md) |
 | `github.com/SpellingDragon/tagent/config` | [github_com__SpellingDragon__tagent__config.md](github_com__SpellingDragon__tagent__config.md) |
 | `github.com/SpellingDragon/tagent/event` | [github_com__SpellingDragon__tagent__event.md](github_com__SpellingDragon__tagent__event.md) |
 | `github.com/SpellingDragon/tagent/evolution` | [github_com__SpellingDragon__tagent__evolution.md](github_com__SpellingDragon__tagent__evolution.md) |
@@ -52,4 +53,4 @@
 | `github.com/SpellingDragon/tagent/workspace` | [github_com__SpellingDragon__tagent__workspace.md](github_com__SpellingDragon__tagent__workspace.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：47。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：48。文档覆盖由 scripts/comment_policy 单点判定。

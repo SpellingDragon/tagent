@@ -1,0 +1,153 @@
+# provider-contract — the provider behaviour contract, checked without any
+# credential. Every target below drives a deterministic mock provider (or the
+# native protocol reduction) and compares its behaviour against the contract
+# declaration cited in the test file, so a drifting mock or a silently renamed
+# test cannot pass as provider evidence.
+#
+# Trigger: workflow_dispatch only. It is deliberately absent from push and
+# pull_request, so it can never become a required per-PR status; run it on demand
+# after touching the model protocol, the tool face, the request assembly or the
+# declaration surface.
+#
+# Credential need: none. The targets use mocks and self-contained fixtures, so
+# this workflow is safe to run on a fork or a credential-free machine. A SKIP
+# line inside the run is a failure here: these checks are not resource-gated.
+#
+# Zero-match guard: go test -run exits 0 when its regex matches nothing, and a
+# renamed test would turn this workflow silently green. The first step therefore
+# asserts each declared test function exists by name, and the final step asserts
+# a PASS line per target plus the absence of SKIP and "no tests to run".
+#
+# The contract citations recorded in the run summary name what each mock is being
+# compared against (agent execution/turn outcome, task lifecycle admission,
+# platform assembly/config surface); they come from the tests' own `契约:` lines.
+name: provider-contract
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-contract
+  cancel-in-progress: false
+
+jobs:
+  provider-contract:
+    name: provider-contract (mock vs declared contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # A zero-match -run is a green lie; this step is its negative anchor.
+      - name: Assert every declared target resolves to a test function
+        run: |
+          set -euo pipefail
+          targets=(
+            "TestModelTerminalProtocol|tests/integration/execution/model_terminal_protocol_test.go"
+            "TestNativeConversationRoundTrip|tests/integration/execution/native_conversation_roundtrip_test.go"
+            "TestNativeToolAdmission|tests/integration/execution/native_tool_admission_test.go"
+            "TestRequestCarriesProjectedBudget|tests/integration/host/request_boundary_test.go"
+            "TestConfigurationContract|tests/integration/config/config_contract_test.go"
+          )
+          missing=0
+          for target in "${targets[@]}"; do
+            name="${target%%|*}"
+            file="${target#*|}"
+            if [ ! -f "$file" ]; then
+              echo "::error::declared provider-contract target file ${file} is missing"
+              missing=1
+              continue
+            fi
+            if ! grep -q "^func ${name}(" "$file"; then
+              echo "::error::declared provider-contract test ${name} is absent from ${file}; the -run regex would match nothing and go test would exit 0"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "provider-contract: all declared targets resolve to a test function"
+
+      - name: Run provider contract (mock vs declared contract)
+        run: |
+          set -euo pipefail
+          go test ./tests/integration/execution/ \
+            -run '^(TestModelTerminalProtocol|TestNativeConversationRoundTrip|TestNativeToolAdmission)$' \
+            -count=1 -v | tee execution.log
+          go test ./tests/integration/host/ \
+            -run '^(TestRequestCarriesProjectedBudget)$' \
+            -count=1 -v | tee host.log
+          go test ./tests/integration/config/ \
+            -run '^(TestConfigurationContract)$' \
+            -count=1 -v | tee config.log
+
+      - name: Record the declared contract behind each mock
+        run: |
+          set -euo pipefail
+          targets=(
+            "TestModelTerminalProtocol|tests/integration/execution/model_terminal_protocol_test.go"
+            "TestNativeConversationRoundTrip|tests/integration/execution/native_conversation_roundtrip_test.go"
+            "TestNativeToolAdmission|tests/integration/execution/native_tool_admission_test.go"
+            "TestRequestCarriesProjectedBudget|tests/integration/host/request_boundary_test.go"
+            "TestConfigurationContract|tests/integration/config/config_contract_test.go"
+          )
+          {
+            echo "### provider contract: declared contract behind each mock"
+            echo ""
+            echo "| test | contract declaration |"
+            echo "|---|---|"
+            for target in "${targets[@]}"; do
+              name="${target%%|*}"
+              file="${target#*|}"
+              citation="$(grep -m1 '契约:' "$file" | sed 's|^[[:space:]]*//[[:space:]]*||')"
+              if [ -z "$citation" ]; then
+                echo "::error::${name} carries no 契约: line, so the mock is compared against no declaration"
+                exit 1
+              fi
+              echo "| \`${name}\` | ${citation} |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The positive anchors are the per-target PASS lines; the negative anchors
+      # are the absence of SKIP and of a vacuous "no tests to run" warning.
+      - name: Assert the contract was exercised (no skip, no zero match)
+        run: |
+          set -euo pipefail
+          if grep -hq -- '--- SKIP' execution.log host.log config.log; then
+            grep -h -- '--- SKIP' execution.log host.log config.log
+            echo "::error::a provider contract test skipped; these targets are credential-free and must always run"
+            exit 1
+          fi
+          if grep -hq 'no tests to run' execution.log host.log config.log; then
+            echo "::error::go test reported no tests to run; a -run regex matched nothing"
+            exit 1
+          fi
+          for pair in \
+            "execution.log|TestModelTerminalProtocol" \
+            "execution.log|TestNativeConversationRoundTrip" \
+            "execution.log|TestNativeToolAdmission" \
+            "host.log|TestRequestCarriesProjectedBudget" \
+            "config.log|TestConfigurationContract"; do
+            log="${pair%%|*}"
+            test="${pair#*|}"
+            if ! grep -q -- "--- PASS: ${test}" "$log"; then
+              echo "::error::${test} produced no PASS line in ${log}"
+              exit 1
+            fi
+          done
+          echo "provider-contract: all declared targets passed"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: provider-contract-logs
+          path: |
+            execution.log
+            host.log
+            config.log
+          if-no-files-found: warn

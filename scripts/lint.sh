@@ -3,6 +3,7 @@
 #   * the directory set the comment-policy baseline was generated over
 #   * formatting, build and vet
 #   * the comment-policy ratchet (no new violations beyond the recorded baseline)
+#   * the markdown document-budget ratchet (total docs may only shrink)
 #
 # usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet]
 #   --strict           require zero findings (the converged end state, §D8)
@@ -15,7 +16,7 @@ set -euo pipefail
 # POLICY_DIRS is the canonical scan set: both modules, every package directory
 # that holds Go sources. Keeping it here (rather than in each caller) prevents a
 # baseline generated over one set from being checked against another.
-POLICY_DIRS=(. examples/wechat-bot)
+POLICY_DIRS=(. examples/wechat-bot examples/cli-host)
 
 only=""
 strict=""
@@ -62,6 +63,13 @@ if [ -z "$only" ] || [ "$only" = "policy" ]; then
   [ -n "$update" ] && args+=(-update-baseline)
   [ -n "$strict" ] && args+=(-strict)
   run go run "${args[@]}" "${POLICY_DIRS[@]}"
+
+  # markdown 总量棘轮：基线 scripts/doc_budget.json，口径见 check_doc_budget.py docstring。
+  # 只降不升——--update-baseline 传下去的是 --tighten，它只会把基线往下写。
+  echo "lint: markdown doc budget (ratchet)"
+  doc_args=(scripts/check_doc_budget.py)
+  [ -n "$update" ] && doc_args+=(--tighten)
+  run python3 "${doc_args[@]}"
 fi
 
 # 标识不承载迭代编号（specs/architecture-guardrails：测试标识不承载迭代编号）

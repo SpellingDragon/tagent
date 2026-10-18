@@ -28,6 +28,7 @@
 
 ---
 
+<a id="cli-host-build"></a>
 ## 三、构建
 
 ```bash
@@ -40,6 +41,7 @@ go mod verify                                   # 校验和必须与 go.sum 一�
 
 ---
 
+<a id="cli-host-test"></a>
 ## 四、测试
 
 ```bash

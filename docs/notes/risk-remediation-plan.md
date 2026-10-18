@@ -14,3 +14,15 @@
 **并发分片（触碰集不相交）**：单A=docs/wiki/README.md＋.github/workflows；单B=根 README.md（新建）；单C=state/task/agent 包 *_test.go（新增白盒测试）；单D=go.mod 注释＋docs/OPERATION.md＋docs/notes 分区方案节。
 
 **验收通则**：逐锚独立 exit；白盒测试须断言内部不变量（非 API 复述）；文档修正须引用实测事实；全回归 `go test ./tests/integration/... -count=1` 零影响。
+
+## 第二批（2026-10-18 外部评估第二轮，按严重度）
+
+| # | 风险 | 处置 | 分片 | 判定 |
+|---|---|---|---|---|
+| R-G | 测试结构偏科（memory 5.7K/rl 7.4K/evolution 4.2K 零白盒） | 白盒按体量×不可见性补三包（压实/分区/召回断裂；导出/替换/账本；后验/作用域）＋包级覆盖率基线门 | 单A | 中 |
+| R-H | 文档/规格熵（1855 篇/213K 行≈代码 4 倍） | markdown 只降不升棘轮门＋openspec archive 只读标记；移出主仓=裁定项 | 单B | 中 |
+| R-I | 真实 LLM 验收缺位（CI 全 mock） | nightly/weekly 真实冒烟 workflow（记录模型版本）＋provider 契约独立 workflow（不阻每 PR） | 单C | 中 |
+| R-J | 依赖 fork＋缺规模证据 | stream-close 4 commit 本地 patch 收口评估＋公开 benchmark（吞吐/恢复时延/内存基线） | 单D | 中 |
+| R-K | 采用门槛高 | CONTRIBUTING＋issue 模板；CLI/HTTP 第二宿主=裁定项；module 路径=裁定项 | 单E | 小 |
+
+**裁定项（列清单等用户）**：openspec archive 移出主仓 or 只读化；module 路径迁稳定命名空间（breaking）；CLI/HTTP 第二宿主示例立项。

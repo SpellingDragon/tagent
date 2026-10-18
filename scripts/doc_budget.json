@@ -1,0 +1,13 @@
+{
+  "baseline": {
+    "files": 1153,
+    "lines": 98339
+  },
+  "measured_at": "2026-10-19",
+  "measured_by": "python3 scripts/check_doc_budget.py --json",
+  "measured_on": "7610629+dirty",
+  "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 `python3 scripts/check_doc_budget.py --tighten` 下调，禁止上调（--tighten 会拒绝上升的指标）。",
+  "schema_version": 1,
+  "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh)",
+  "rebaseline_reason": "batch-2 adoption gate additions (cli-host quickstart README, contract anchors in OPERATION and the wechat-bot runtime page): approved adoption deliverables plus the index-anchor lines their contracts require"
+}

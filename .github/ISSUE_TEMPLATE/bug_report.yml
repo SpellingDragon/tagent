@@ -1,0 +1,99 @@
+name: Bug report / 缺陷报告
+description: 行为与预期或文档不符时使用；安全漏洞不要走公开 issue。
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认问题能在当前 `dev`/`main` 上复现，并附上**原文输出**（日志、堆栈、退出码），不要用"看起来失败"代替证据。
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 能定位到具体构建/提交最好；涉及第二个 module 时一并注明。
+      placeholder: |
+        - tagent 版本 / 提交: v0.3.0 / 7610629
+        - Go 版本: go1.27.1
+        - OS / 架构: macOS 14.7.2 arm64
+        - 部署形态: 单进程 / 常驻 / 微信宿主 (examples/wechat-bot)
+        - 是否涉及 examples/wechat-bot 独立 module: 是 / 否
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 模块归属
+      description: 按包名选择；跨包或不确定时选 unknown，由维护者重分派。
+      options:
+        - root (assembly / run*.go / CLI)
+        - agent
+        - config
+        - event
+        - evolution
+        - memory
+        - model
+        - plugin
+        - query
+        - rl
+        - state
+        - task
+        - telemetry
+        - tool/exec
+        - tool/mcp
+        - tool/remote
+        - workspace
+        - examples/wechat-bot
+        - docs / scripts / CI
+        - unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 最小可复现步骤；命令、配置键与输入按实际顺序列出。
+      placeholder: |
+        1. 配置: ...
+        2. 执行: go test ./... -run ... 或具体入口
+        3. 触发条件: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 期望发生什么，依据是什么（规格、文档、CHANGELOG 条目）。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生什么；请粘贴原始输出与退出码，日志过长时保留关键段。
+    validations:
+      required: true
+
+  - type: textarea
+    id: gates
+    attributes:
+      label: 已跑过的门禁（可选）
+      description: 若问题与门禁相关，贴命令与输出尾部。
+      placeholder: |
+        - bash scripts/lint.sh: ...
+        - go test ./... -short -count=1: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息（可选）
+      description: 配置片段（请脱敏）、相关 issue/PR、回退尝试。
+    validations:
+      required: false
