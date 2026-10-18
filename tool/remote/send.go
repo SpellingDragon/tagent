@@ -88,7 +88,9 @@ func (t *Tool) Declaration() *trpctool.Declaration {
 
 // Call sends the message to the explicitly named agent and answers with the
 // text its reply carries. A name the caller's declaration does not carry, and a
-// call beside no attribution, are refused by name.
+// call beside no attribution, are refused by name. A resolver answer counts only
+// beside its ok: one the resolver declines to attribute keeps the zero identity
+// and is refused by the dispatcher instead of accepted as a partial attribution.
 func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var args callArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
@@ -103,7 +105,9 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	identity := CallIdentity{}
 	if t.identity != nil {
-		identity, _ = t.identity(ctx)
+		if resolved, ok := t.identity(ctx); ok {
+			identity = resolved
+		}
 	}
 	params := a2aprotocol.SendMessageParams{
 		Message: a2aprotocol.NewMessage(a2aprotocol.MessageRoleUser, []a2aprotocol.Part{a2aprotocol.NewTextPart(args.Message)}),

@@ -299,7 +299,7 @@ func (e *ResultExternalizer) boundedPreview(body []byte, ref memory.OriginalRef)
 	if runes := []rune(head); len(runes) > bound {
 		head = string(runes[:bound])
 	}
-	return fmt.Sprintf("%s\n[externalized result: %d characters in total, original %s kept; read it in segments of at most %d bytes from offset 0]",
+	return fmt.Sprintf("%s\n[externalized result: %d bytes in total, original %s kept; read it in segments of at most %d bytes from offset 0]",
 		head, len(body), ref.Key, e.segmentBytes)
 }
 

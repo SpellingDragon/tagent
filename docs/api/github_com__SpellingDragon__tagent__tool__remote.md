@@ -235,7 +235,10 @@ func NewTool(dispatcher Dispatcher, endpoints *Endpoints, identity IdentityResol
 func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error)
     Call sends the message to the explicitly named agent and answers with the
     text its reply carries. A name the caller's declaration does not carry,
-    and a call beside no attribution, are refused by name.
+    and a call beside no attribution, are refused by name. A resolver answer
+    counts only beside its ok: one the resolver declines to attribute keeps
+    the zero identity and is refused by the dispatcher instead of accepted as a
+    partial attribution.
 
 func (t *Tool) Declaration() *trpctool.Declaration
     Declaration returns the fixed declaration of the remote call tool.
