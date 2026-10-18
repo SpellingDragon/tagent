@@ -1,3 +1,5 @@
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+
 # 认知资产防线（cognitive-asset-guard）
 
 > 定位：保护「认知资产真源」（`resources/prompts/**`、`skills/**`、`scripts/**` + 主配置 yaml）不被自治 agent 或外力静默污染。起因是 09-30 生产 desc-patch 事件——远端 agent 把归因错误的伪因果方法论写入工具描述真源，热重载下每代生效、系统内无纠错力量。

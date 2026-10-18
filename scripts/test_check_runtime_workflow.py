@@ -38,7 +38,7 @@ GATE_STEPS = [
      ["check_runtime_architecture.py --check-policy", "--json"]),
     ("Scenarios contract",
      ["check_runtime_evidence.py --check-contract",
-      "--plan-graph openspec/changes/runtime-rebuild/task-graph.json"]),
+      "--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json"]),
     ("Build (root module)",
      ["go build ./..."]),
     ("Vet (root module)",
@@ -51,8 +51,8 @@ GATE_STEPS = [
      ["comment_policy -no-baseline $PRODUCT_PACKAGES", '"$count" != "0"']),
     ("Tracked hygiene",
      ["codetools tracked-hygiene"]),
-    ("OpenSpec strict (runtime-rebuild)",
-     ["openspec validate runtime-rebuild --strict", "--no-interactive"]),
+    ("OpenSpec strict (all specs)",
+     ["openspec validate --all --strict", "--no-interactive"]),
 ]
 
 
@@ -214,7 +214,7 @@ class WorkflowTest(unittest.TestCase):
         # cross-checked against the manifest, not silently accepted.
         step = self.text.split("Scenarios contract", 1)[1].split("- name:", 1)[0]
         self.assertIn("--check-contract", step)
-        self.assertIn("--plan-graph openspec/changes/runtime-rebuild/task-graph.json", step)
+        self.assertIn("--plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json", step)
 
 
 if __name__ == "__main__":

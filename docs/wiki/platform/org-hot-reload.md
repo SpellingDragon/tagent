@@ -1,3 +1,5 @@
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+
 # 组织级热重载（配置换代、单一应用记录与无锁读面）
 
 <a id="overview"></a>

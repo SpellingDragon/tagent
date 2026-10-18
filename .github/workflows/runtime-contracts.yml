@@ -18,11 +18,15 @@
 # scripts/test_check_runtime_workflow.py 对 golden 钉住，防漂移。根包用 *.go 是因为
 # `gofmt -l .`/`comment_policy .` 会递归整个根 module（含 scripts/tests/prototype）。
 #
-# 双 module 覆盖缺口（如实登记，不掩盖）：examples/wechat-bot 的 build/vet/test 目前都
-# 不可编译——main.go 仍引用已删除包 tagent/agent/governance、tagent/memory/engine
-# （08-host design.md 明示“当前不可编译”，迁移属 08.2）。按 00.6 判定口径“因依赖未实施
-# 红则不纳入本 workflow，如实注明”，本轮不含 bot module 步骤；08.2 落地后补入：
-# go -C examples/wechat-bot build ./... / vet ./... / test ./... -short -count=1。
+# 双 module 现状（2026-10-18 实测，不再是缺口）：examples/wechat-bot 是独立 module（无
+# go.work，根 module 的 ./... 到不了它），rebuild 落地后已重新可编译并通过自身测试——以
+# `git archive HEAD` 的干净树实测：
+#   go -C examples/wechat-bot build ./...                  → RC=0
+#   go -C examples/wechat-bot vet ./...                    → RC=0
+#   go -C examples/wechat-bot test ./... -short -count=1   → ok（9 个测试文件）
+# 这三步由 ci.yml 的 Build/Vet/Test (bot module) 承担；本 workflow 只管根 module 产品门，
+# 不重复 bot 步骤（重复会造两处升级点）。“当前不可编译（main.go 引用已删除包
+# tagent/agent/governance、tagent/memory/engine）”是 rebuild 过渡期记录，已失效。
 #
 # 本 workflow 不代表产品行为通过；openspec strict 步骤只校验 runtime-rebuild 变更，
 # 不代表全部规格通过。也不是旧产品门的替代（ci.yml/lint.sh/race_check.sh/gen_godoc.sh
@@ -96,7 +100,7 @@ jobs:
 
       # Fails honestly while the domain artifacts are still being written; no bypass.
       - name: Plan contract
-        run: "python scripts/check_runtime_plan.py --change-dir openspec/changes/runtime-rebuild --json"
+        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/check_runtime_plan.py --change-dir openspec/changes/archive/2026-10-18-runtime-rebuild --json; else echo 'no active change; the plan contract gate has no object (archive-only), skipped'; fi"
 
       - name: Architecture policy
         run: "python scripts/check_runtime_architecture.py --check-policy --json"
@@ -112,7 +116,7 @@ jobs:
         run: "python scripts/check_runtime_architecture.py --implementation --json"
 
       - name: Scenarios contract
-        run: "python scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/runtime-rebuild/task-graph.json --json"
+        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json; else echo 'no active change; the scenarios contract gate has no object (archive-only), skipped'; fi"
 
       # ---- root-module product gates (same scope as local verification) ----
       - name: Build (root module)
@@ -148,8 +152,9 @@ jobs:
       - name: Tracked hygiene
         run: go run ./scripts/codetools tracked-hygiene
 
-      - name: OpenSpec strict (runtime-rebuild)
-        run: openspec validate runtime-rebuild --strict --no-interactive
+      - name: OpenSpec strict (all specs)
+        # 归档后 change 不再位于活动目录: 该步改为校验全部主规格(含本次合成的 121 项)。
+        run: openspec validate --all --strict --no-interactive
 
   real-acceptance:
     name: explicit-real-acceptance

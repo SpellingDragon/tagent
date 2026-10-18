@@ -1,3 +1,5 @@
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+
 # 组件级评估套件（evals）
 
 `evals` 是**组件级行为评估**的执行体：`go test ./evals/` 用 mock 即可跑并进 CI；需要真实 LLM 的项是 opt-in（与 `tests/` 同样的跳过约定）。它的定位是**用断言把"记忆命脉"和"工具面路由"钉住**，而不是衡量模型聪明程度。

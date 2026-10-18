@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """check_runtime_plan.py — OpenSpec 规划期检查（格式/结构有效，不是产品验证）。
 
-检查对象：某个 change 目录（默认 openspec/changes/runtime-rebuild）。
+检查对象：某个 change 目录（默认 openspec/changes/archive/2026-10-18-runtime-rebuild）。
 检查内容：
   * task-graph.json 的形状、id 全覆盖、依赖无重复/无未知/无自环/无环；
   * 两阶段修订硬校验：24 个骨架任务 NN.P0.M 的 phase 必须为 skeleton
@@ -69,7 +69,7 @@ P0_RANGES = (
     ("05", 2), ("06", 2), ("07", 2), ("08", 2), ("09", 1),
 )
 # 概念收敛战役（2026-10-17 用户裁定：破坏式收敛/全仓规划按痛点排波/双轨验收标尺，
-# 见 openspec/changes/runtime-rebuild/concept-slim-plan.md）：13 个收敛叶任务
+# 见 openspec/changes/archive/2026-10-18-runtime-rebuild/concept-slim-plan.md）：13 个收敛叶任务
 # （00.21–00.25 / 02.21–02.22 / 04.21–04.23 / 05.21 / 06.21 / 09.21），
 # 编号非连续故单列显式清单；01–09 域收敛叶同样受 00.P0.3 阶段门约束。
 SLIM_IDS = (
@@ -137,7 +137,7 @@ def parse_args(argv):
     parser.add_argument(
         "--change-dir",
         default=os.path.join("openspec", "changes", "runtime-rebuild"),
-        help="待检查的 change 目录（默认 openspec/changes/runtime-rebuild）",
+        help="待检查的 change 目录（默认 openspec/changes/archive/2026-10-18-runtime-rebuild）",
     )
     parser.add_argument(
         "--plan-graph",

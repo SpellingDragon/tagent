@@ -1,3 +1,5 @@
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+
 # tagent/prompt 模块架构文档
 
 ## 一、模块定位

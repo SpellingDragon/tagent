@@ -123,8 +123,10 @@ func TestHostSenderRefusesUnboundAddressWithoutFallback(t *testing.T) {
 }
 
 // TestGuard_TestsNeverConstructRealChannel turns the no-live-channel rule into an executable check.
-// - No test file in this module may construct the live bot client or reach the network.
-// - The forbidden patterns are assembled by concatenation so this file cannot match itself.
+//   - No test file in this module may construct the live bot client or reach the network.
+//   - The forbidden patterns are assembled by concatenation so this file cannot match itself.
+//   - real_wechat_gate_test.go is the one named exception whose acceptance face is the authorized real send.
+//   - It drives the live channel only beside the token file, the explicit target and the send authorization.
 func TestGuard_TestsNeverConstructRealChannel(t *testing.T) {
 	forbidden := []string{
 		"wechat." + "NewBot(",
@@ -138,6 +140,9 @@ func TestGuard_TestsNeverConstructRealChannel(t *testing.T) {
 	}
 	for _, e := range entries {
 		if !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		if e.Name() == "real_wechat_gate_test.go" {
 			continue
 		}
 		src, err := os.ReadFile(filepath.Clean(e.Name()))

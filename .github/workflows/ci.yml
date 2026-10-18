@@ -67,13 +67,18 @@ jobs:
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
 
-      # Root package at the scheduling floor: with one P, a witness cannot be
-      # satisfied by whichever round happens to arrive first, so the attribution
-      # discipline of the in-flight/pinned-hop assertions is actually exercised.
-      # Admitted after three consecutive green local runs plus 75 targeted runs
-      # under GOMAXPROCS=1.
-      - name: Test (root package at the scheduling floor)
-        run: GOMAXPROCS=1 go test . -short -count=1
+      # Scheduling floor, repointed rather than dropped. The old step ran the ROOT
+      # package, which has had no test files since the rebuild removed the old
+      # production tree (`go test .` reports [no test files] and exits 0), so it
+      # asserted nothing; its stated witnesses (in-flight / pinned-hop attribution)
+      # lived in the removed tree and no longer exist anywhere in the repo. The
+      # attribution witnesses now live in tests/integration/execution (delegation
+      # completion, handoff future notifications, receipt/background separation),
+      # and "which round happened to arrive first may not satisfy the witness" is
+      # exactly what one P exercises. Admitted after four consecutive green runs
+      # under GOMAXPROCS=1 (~2.5s each).
+      - name: Test (execution witnesses at the scheduling floor)
+        run: GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1
 
       # Comment whitelist, enforced as a ratchet: a batch may lower the per-rule
       # totals in scripts/comment_policy/baseline.json but never raise one. Slots are

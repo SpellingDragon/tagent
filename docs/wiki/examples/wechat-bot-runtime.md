@@ -1,3 +1,5 @@
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+
 # wechat-bot 运行面：入站去重、文件收发与投递目标
 
 `examples/wechat-bot` 是 tagent 的微信网关示例，独立 go.mod。它把 IM 消息喂给 `TagentAgent`，再把回复投回微信。本页承载这条链路上**只有示例侧才知道**的判据：窄接口边界、去重键分层、文件识别规则、投递目标回退，以及不进 CI 的真链路验收。
