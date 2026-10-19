@@ -7,57 +7,58 @@ import (
 	"strings"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // leaseGuard is the canonical retention protection port: one hold per (original, holder),
 // carried by the lease its release must bring back.
 type leaseGuard struct {
-	held map[string]memory.ProtectionLease
+	held map[string]ledger.ProtectionLease
 	next int
 }
 
 func newLeaseGuard() *leaseGuard {
-	return &leaseGuard{held: map[string]memory.ProtectionLease{}}
+	return &leaseGuard{held: map[string]ledger.ProtectionLease{}}
 }
 
-func holdKey(ref memory.OriginalRef, holder memory.HolderID) string {
+func holdKey(ref ledger.OriginalRef, holder ledger.HolderID) string {
 	return string(ref.Key) + "\x00" + string(holder)
 }
 
 // Hold registers one protection hold on the original of ref for holder and returns the
 // lease its release must carry back.
-func (g *leaseGuard) Hold(_ context.Context, ref memory.OriginalRef, holder memory.HolderID) (memory.ProtectionLease, error) {
+func (g *leaseGuard) Hold(_ context.Context, ref ledger.OriginalRef, holder ledger.HolderID) (ledger.ProtectionLease, error) {
 	if holder == "" {
-		return "", memory.ErrHolderRequired
+		return "", ledger.ErrHolderRequired
 	}
 	key := holdKey(ref, holder)
 	if lease, ok := g.held[key]; ok {
 		return lease, nil
 	}
 	g.next++
-	lease := memory.ProtectionLease(fmt.Sprintf("lease-%d", g.next))
+	lease := ledger.ProtectionLease(fmt.Sprintf("lease-%d", g.next))
 	g.held[key] = lease
 	return lease, nil
 }
 
 // Release drops the hold of holder on the original of ref under the lease that hold
 // returned, and refuses a lease that is not the hold's current one.
-func (g *leaseGuard) Release(_ context.Context, ref memory.OriginalRef, holder memory.HolderID, lease memory.ProtectionLease) error {
+func (g *leaseGuard) Release(_ context.Context, ref ledger.OriginalRef, holder ledger.HolderID, lease ledger.ProtectionLease) error {
 	key := holdKey(ref, holder)
 	current, ok := g.held[key]
 	if !ok {
 		return nil
 	}
 	if current != lease {
-		return memory.ErrLeaseMismatch
+		return ledger.ErrLeaseMismatch
 	}
 	delete(g.held, key)
 	return nil
 }
 
 // Protected reports whether the original of ref is still held.
-func (g *leaseGuard) Protected(_ context.Context, ref memory.OriginalRef) (bool, error) {
+func (g *leaseGuard) Protected(_ context.Context, ref ledger.OriginalRef) (bool, error) {
 	prefix := string(ref.Key) + "\x00"
 	for key := range g.held {
 		if strings.HasPrefix(key, prefix) {
@@ -67,7 +68,7 @@ func (g *leaseGuard) Protected(_ context.Context, ref memory.OriginalRef) (bool,
 	return false, nil
 }
 
-var _ memory.Guard = (*leaseGuard)(nil)
+var _ ledger.Guard = (*leaseGuard)(nil)
 
 // ExampleGuard holds one original, reports it as protected, releases it under its lease
 // and reports that a foreign lease is refused while the hold still stands.
@@ -76,7 +77,7 @@ var _ memory.Guard = (*leaseGuard)(nil)
 func ExampleGuard() {
 	ctx := context.Background()
 	guard := newLeaseGuard()
-	ref := memory.OriginalRef{
+	ref := ledger.OriginalRef{
 		Key:             "event-1",
 		Owner:           event.Address{AgentID: "assistant", SessionID: "session-1"},
 		Format:          "text",
@@ -87,14 +88,14 @@ func ExampleGuard() {
 	if err != nil {
 		return
 	}
-	if _, err := guard.Hold(ctx, ref, ""); !errors.Is(err, memory.ErrHolderRequired) {
+	if _, err := guard.Hold(ctx, ref, ""); !errors.Is(err, ledger.ErrHolderRequired) {
 		return
 	}
 	protected, err := guard.Protected(ctx, ref)
 	if err != nil || !protected {
 		return
 	}
-	if err := guard.Release(ctx, ref, "reclaimer", memory.ProtectionLease("lease-other")); !errors.Is(err, memory.ErrLeaseMismatch) {
+	if err := guard.Release(ctx, ref, "reclaimer", ledger.ProtectionLease("lease-other")); !errors.Is(err, ledger.ErrLeaseMismatch) {
 		return
 	}
 	if err := guard.Release(ctx, ref, "reclaimer", lease); err != nil {

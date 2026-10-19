@@ -7,11 +7,12 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // scenarioNamedTool is the named tool one restored target resolves against.
@@ -115,12 +116,12 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	spec := scenarioSettleSpec()
 	settle := scenarioSettleRecord()
 	taskID := settle.TaskID
-	cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-	tier, err := memory.OpenTier(ctx, cfg)
+	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 	if err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}
@@ -148,11 +149,11 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	observations["duplicate_reported_as_delivered"] = delivered
 	refs = append(refs, string(taskID))
 
-	reopened, err := memory.OpenTier(ctx, cfg)
+	reopened, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen the storage tier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(memory.TierFactLog(reopened), nil)
+	restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
 	if err != nil {
 		t.Fatalf("reopen the durable commit: %v", err)
 	}

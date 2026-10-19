@@ -6,6 +6,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 )
 
@@ -14,7 +15,7 @@ import (
 // table holds.
 type observedSource struct {
 	events []memory.EventReference
-	refs   map[event.EventID]memory.OriginalRef
+	refs   map[event.EventID]ledger.OriginalRef
 }
 
 // QueryEvents returns the matching set filtered, totally ordered by (Timestamp, Key),
@@ -50,7 +51,7 @@ func (s *observedSource) QueryEvents(_ context.Context, opts memory.QueryOptions
 
 // Reference returns the recall reference the event key was landed with, and reports
 // whether the table holds one.
-func (s *observedSource) Reference(key event.EventID) (memory.OriginalRef, bool) {
+func (s *observedSource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
 	ref, ok := s.refs[key]
 	return ref, ok
 }
@@ -68,7 +69,7 @@ func ExampleReferenceSource() {
 			{Key: "event-2", PartitionID: 1, Type: "conversation", Timestamp: 20},
 			{Key: "event-1", PartitionID: 1, Type: "conversation", Timestamp: 10},
 		},
-		refs: map[event.EventID]memory.OriginalRef{"event-1": {Key: "event-1", Format: "text"}},
+		refs: map[event.EventID]ledger.OriginalRef{"event-1": {Key: "event-1", Format: "text"}},
 	}
 
 	page, err := source.QueryEvents(ctx, memory.QueryOptions{PartitionID: 1, Limit: 1, OrderBy: memory.QueryOrderByAsc})

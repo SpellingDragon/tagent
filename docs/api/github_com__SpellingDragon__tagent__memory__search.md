@@ -84,7 +84,7 @@ type Fusion interface {
 	// A fused set is complete as given and hands out no continuation: its
 	// NextCursor stays zero, and paging is answered by the retrieval port from
 	// the legs before they fuse, not by the fusion.
-	Fuse(ctx context.Context, strategy Strategy, vector, keyword []memory.OriginalRef) (Result, error)
+	Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error)
 }
 
     Fusion is the hybrid recall port: it merges the vector leg and the keyword
@@ -195,7 +195,7 @@ type RRFFusion struct{}
     - A fused hit stays a reference, so a fused set is never a second copy of
     the text behind it.
 
-func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []memory.OriginalRef) (Result, error)
+func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error)
     Fuse merges the two legs under strategy and returns the ordered reference
     set they fuse into, on the terms of the Fusion port.
 
@@ -209,7 +209,7 @@ type ReferenceSource interface {
 
 	// Reference returns the recall reference the event key was landed with,
 	// and reports whether the table holds one.
-	Reference(key event.EventID) (memory.OriginalRef, bool)
+	Reference(key event.EventID) (ledger.OriginalRef, bool)
 }
     ReferenceSource is the query face a retrieval reads through: the event
     references a QueryOptions matches, and the recall reference of any event
@@ -225,7 +225,7 @@ type ReferenceSource interface {
 type Result struct {
 	// Refs is the reference set of the result, ordered from the best hit to the
 	// worst.
-	Refs []memory.OriginalRef
+	Refs []ledger.OriginalRef
 	// NextCursor is the continuation token for the page after this result: the
 	// zero cursor means this is the last page and no page follows, never an
 	// unknown one. A cursor is opaque and is only carried back unchanged in the

@@ -16,10 +16,11 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // wechatOutbound 是宿主发送通路对通道实例的窄依赖面：文本、媒体、typing 与 context-token。
@@ -314,7 +315,7 @@ func main() {
 		workspaceDir: wechatCfg.WorkspaceDir,
 	}
 	if wechatCfg.WorkspaceDir != "" {
-		replicas, err := newWorkspaceReplicas(wechatCfg.WorkspaceDir, deliveryOwner(doc.Entry), memory.NewMemoryOriginalStore(), 0)
+		replicas, err := newWorkspaceReplicas(wechatCfg.WorkspaceDir, deliveryOwner(doc.Entry), ledger.NewMemoryOriginalStore(), 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Wire the delivery replicas failed: %v\n", err)
 			os.Exit(1)

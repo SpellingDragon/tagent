@@ -16,6 +16,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/model"
 )
@@ -123,10 +124,10 @@ func (e *evalCountingEmbedder) count() int {
 // given root and returns the tier, so the formal assembly opened over the same
 // root reads exactly what this process committed. The returned tier keeps the
 // scoped read face the original bytes are read back through.
-func seedEvalCorpus(t *testing.T, root string) *memory.Tier {
+func seedEvalCorpus(t *testing.T, root string) *ledger.Tier {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
 	if err != nil {
 		t.Fatalf("OpenTier(localfile): %v", err)
 	}
@@ -136,7 +137,7 @@ func seedEvalCorpus(t *testing.T, root string) *memory.Tier {
 		if err != nil {
 			t.Fatalf("DecodeEventBody(%s): %v", ev.key, err)
 		}
-		if err := tier.Segments.StoreEvent(ctx, memory.SegmentRecord{
+		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
 			PartitionID: memory.PartitionIDFromName(ev.partition),
 			WindowTS:    ev.at,
 			Seq:         ev.seq,
@@ -169,7 +170,7 @@ func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *tag
 	}}
 	opts := []tagent.Option{tagent.WithGovernance(passPolicy{})}
 	if storeRoot != "" {
-		opts = append(opts, tagent.WithStorage(memory.StorageConfig{Type: memory.StorageLocalFile, Root: storeRoot}))
+		opts = append(opts, tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: storeRoot}))
 	}
 	if embedder != nil {
 		opts = append(opts, tagent.WithEmbedder(embedder))
@@ -403,11 +404,11 @@ func TestRecallEvaluation(t *testing.T) {
 				t.Fatalf("recall reference of %s = %+v, want the reference its body was landed with", ref.Key, ref)
 			}
 		}
-		scoped, ok := tier.Originals.(memory.ScopedOriginalStore)
+		scoped, ok := tier.Originals.(ledger.ScopedOriginalStore)
 		if !ok {
 			t.Fatalf("the real file tier serves no scoped read face: %T", tier.Originals)
 		}
-		exact, _ := scopedReadBack(t, scoped, memory.ReadScope{
+		exact, _ := scopedReadBack(t, scoped, ledger.ReadScope{
 			Owner:           realOwnerOf(),
 			Format:          realEventFormat,
 			RetentionPolicy: realEventRetention,

@@ -1,16 +1,10 @@
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 //
-// Package memory is the runtime's durable original-text layer: it names one
-// stored original and the reference metadata that scopes it, commits those bytes
-// and returns them byte for byte, and carries the ordered projection and the
-// retention guard built beside them.
-//
-// The package speaks the fact vocabulary of the event package and nothing above
-// it, so the durable side cannot be reversed into the intelligent or governing
-// side. This is the phase 1 skeleton of that layer: the shapes and the contracts
-// that bind them, together with the scoped read face an authorized read runs
-// through.
-package memory
+// Original references and the read scope that authorizes them: one reference
+// names one stored original together with the metadata that scopes it, and the
+// scoped read face serves only the references registered inside the scope the
+// read runs under. See doc.go for the package's place in the memory axis.
+package ledger
 
 import (
 	"context"

@@ -14,23 +14,25 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/state"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
-// durableChain adapts one tier's fact log to the memory.EventChain port: the
+// durableChain adapts one tier's fact log to the replay.EventChain port: the
 // facts a process committed survive its exit, so a rebuild after reopening the
 // same tier replays exactly what a fresh process sees.
 type durableChain struct {
-	log *memory.TierFacts
+	log *ledger.TierFacts
 }
 
-var _ memory.EventChain = durableChain{}
+var _ replay.EventChain = durableChain{}
 
 const chainPrefix = "evt:"
 
-func (c durableChain) commit(ctx context.Context, fact memory.ChainFact) error {
+func (c durableChain) commit(ctx context.Context, fact replay.ChainFact) error {
 	payload, err := json.Marshal(fact)
 	if err != nil {
 		return err
@@ -41,9 +43,9 @@ func (c durableChain) commit(ctx context.Context, fact memory.ChainFact) error {
 	return c.log.Sync(ctx)
 }
 
-func (c durableChain) ScanFrom(ctx context.Context, after event.EventID, limit int) ([]memory.ChainFact, error) {
+func (c durableChain) ScanFrom(ctx context.Context, after event.EventID, limit int) ([]replay.ChainFact, error) {
 	if limit < 1 {
-		return nil, memory.ErrChainPageLimit
+		return nil, replay.ErrChainPageLimit
 	}
 	pairs, err := c.log.Scan(ctx, chainPrefix)
 	if err != nil {
@@ -59,9 +61,9 @@ func (c durableChain) ScanFrom(ctx context.Context, after event.EventID, limit i
 	if len(keys) > limit {
 		keys = keys[:limit]
 	}
-	out := make([]memory.ChainFact, 0, len(keys))
+	out := make([]replay.ChainFact, 0, len(keys))
 	for _, key := range keys {
-		var fact memory.ChainFact
+		var fact replay.ChainFact
 		if err := json.Unmarshal(pairs[key], &fact); err != nil {
 			return nil, err
 		}
@@ -70,14 +72,14 @@ func (c durableChain) ScanFrom(ctx context.Context, after event.EventID, limit i
 	return out, nil
 }
 
-func (c durableChain) Fact(ctx context.Context, key event.EventID) (memory.ChainFact, bool, error) {
+func (c durableChain) Fact(ctx context.Context, key event.EventID) (replay.ChainFact, bool, error) {
 	value, held, err := c.log.Get(ctx, chainPrefix+string(key))
 	if err != nil || !held {
-		return memory.ChainFact{}, false, err
+		return replay.ChainFact{}, false, err
 	}
-	var fact memory.ChainFact
+	var fact replay.ChainFact
 	if err := json.Unmarshal(value, &fact); err != nil {
-		return memory.ChainFact{}, false, err
+		return replay.ChainFact{}, false, err
 	}
 	return fact, true, nil
 }
@@ -94,12 +96,12 @@ func (c durableChain) Fact(ctx context.Context, key event.EventID) (memory.Chain
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func TestProjectionReplayAndBudget(t *testing.T) {
 	ctx := context.Background()
-	session := memory.ChainKey{PartitionID: 1, SessionID: event.SessionID("s1")}
+	session := replay.ChainKey{PartitionID: 1, SessionID: event.SessionID("s1")}
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	at := func(step int) time.Time { return base.Add(time.Duration(step) * time.Minute) }
 
-	factOf := func(key, typ, summary, content string, when time.Time) memory.ChainFact {
-		return memory.ChainFact{
+	factOf := func(key, typ, summary, content string, when time.Time) replay.ChainFact {
+		return replay.ChainFact{
 			Key:     event.EventID(key),
 			Chain:   session,
 			Type:    typ,
@@ -108,36 +110,36 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			Time:    when,
 		}
 	}
-	entryOf := func(fact memory.ChainFact) memory.ProjectionEntry {
-		return memory.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time}
+	entryOf := func(fact replay.ChainFact) replay.ProjectionEntry {
+		return replay.ProjectionEntry{Key: fact.Key, Type: fact.Type, Summary: fact.Summary, Content: fact.Content, Time: fact.Time}
 	}
 
 	t.Run("G2.1 逐字节重建 snapshot+尾部: snapshot and multi-page tail rebuild byte for byte", func(t *testing.T) {
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		chain := durableChain{log: memory.TierFactLog(tier)}
-		run := []memory.ChainFact{
+		chain := durableChain{log: ledger.TierFactLog(tier)}
+		run := []replay.ChainFact{
 			factOf("k-0001", event.TypeExternalInput, "user asks", "请分析这份报告并给出结论，注意第三段的数据异常。", at(1)),
 			factOf("k-0002", event.TypeAgentOutput, "analysis result", strings.Repeat("分析结果正文，与摘要完全不同。", 8), at(2)),
 			factOf("k-0003", event.TypeActionCommand, "tool call grep", "grep -n TODO src/*.go", at(3)),
 			factOf("k-0004", event.TypeThinkingPlan, "plan step", "先看目录结构，再读入口文件。", at(4)),
 		}
-		toolChain := memory.ProjectionEntry{
+		toolChain := replay.ProjectionEntry{
 			Type:    event.TypeActionCommand,
 			Summary: "tool chain",
 			Content: "- 工具链: grep -n TODO → sed -n 1,20p",
 			Time:    at(3),
 		}
-		tail := []memory.ChainFact{
+		tail := []replay.ChainFact{
 			factOf("k-0005", event.TypeAgentOutput, "tail output", "尾部输出正文，绝不等于摘要。", at(5)),
 			factOf("k-0006", event.TypeExternalInput, "tail input", "尾部输入原文。", at(6)),
 			factOf("k-0007", event.TypeThinkingPlan, "tail plan", "尾部冥想正文。", at(7)),
 		}
 
-		projA := memory.NewReplayProjection()
+		projA := replay.NewReplayProjection()
 		for _, fact := range run {
 			projA.Append(ctx, entryOf(fact))
 		}
@@ -146,8 +148,8 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Fold: %v", err)
 		}
-		if summary.Type != memory.CompactionEventType {
-			t.Fatalf("fold summary type = %q, want %q", summary.Type, memory.CompactionEventType)
+		if summary.Type != replay.CompactionEventType {
+			t.Fatalf("fold summary type = %q, want %q", summary.Type, replay.CompactionEventType)
 		}
 		for _, fact := range tail {
 			projA.Append(ctx, entryOf(fact))
@@ -156,7 +158,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if payload == nil {
 			t.Fatal("Fold left no compaction payload on the projection")
 		}
-		baseline := memory.RenderProjection(projA.Entries())
+		baseline := replay.RenderProjection(projA.Entries())
 
 		for _, fact := range run {
 			if err := chain.commit(ctx, fact); err != nil {
@@ -167,10 +169,10 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal compaction: %v", err)
 		}
-		if err := chain.commit(ctx, memory.ChainFact{
+		if err := chain.commit(ctx, replay.ChainFact{
 			Key:     event.EventID("k-0004c"),
 			Chain:   session,
-			Type:    memory.CompactionEventType,
+			Type:    replay.CompactionEventType,
 			Summary: "compaction",
 			Content: string(compactionBytes),
 			Time:    at(4),
@@ -183,23 +185,23 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			}
 		}
 
-		reopened, err := memory.OpenTier(ctx, cfg)
+		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		replay := durableChain{log: memory.TierFactLog(reopened)}
-		projB := memory.NewReplayProjection()
-		relations := memory.NewMemoryRelations()
-		report, err := memory.RebuildProjectionFromWAL(ctx, projB, replay, relations, session, memory.RebuildOptions{PageSize: 1})
+		reopenedChain := durableChain{log: ledger.TierFactLog(reopened)}
+		projB := replay.NewReplayProjection()
+		relations := replay.NewMemoryRelations()
+		report, err := replay.RebuildProjectionFromWAL(ctx, projB, reopenedChain, relations, session, replay.RebuildOptions{PageSize: 1})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
 		if !report.Scanned || report.Fallback || report.Partial || report.Skipped != "" {
 			t.Fatalf("rebuild report = %+v, want a clean scanned snapshot rebuild", report)
 		}
-		if !bytes.Equal(memory.RenderProjection(projB.Entries()), baseline) {
+		if !bytes.Equal(replay.RenderProjection(projB.Entries()), baseline) {
 			t.Fatalf("rebuilt render differs from the pre-restart render:\n got: %s\nwant: %s",
-				memory.RenderProjection(projB.Entries()), baseline)
+				replay.RenderProjection(projB.Entries()), baseline)
 		}
 		if projB.Len() != projA.Len() {
 			t.Fatalf("rebuilt entries = %d, want %d (snapshot refs and the whole tail)", projB.Len(), projA.Len())
@@ -208,11 +210,11 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			t.Fatalf("full boundary = %q/%q, want the payload value k-0004", projB.FullBoundary(), report.FullBoundary)
 		}
 		meditation := map[event.EventID]bool{}
-		for _, key := range projB.MeditationKeys() {
+		for _, key := range projB.ConsumedKeys() {
 			meditation[key] = true
 		}
 		if !meditation["k-0004"] || !meditation["k-0007"] {
-			t.Fatalf("meditation keys = %v, want both the snapshot and the tail keys reseeded", projB.MeditationKeys())
+			t.Fatalf("meditation keys = %v, want both the snapshot and the tail keys reseeded", projB.ConsumedKeys())
 		}
 		if parent, err := relations.GetParent("k-0005"); err != nil || parent != event.EventID("k-0003") {
 			t.Fatalf("tail link parent = %q (%v), want the last retained snapshot ref", parent, err)
@@ -220,15 +222,15 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 	})
 
 	t.Run("G2.2 无 compaction 有界 fallback: an unfactored chain replays under the bound, never as empty", func(t *testing.T) {
-		chain := memory.NewMemoryEventChain()
+		chain := replay.NewMemoryEventChain()
 		for i := 1; i <= 5; i++ {
 			key := event.EventID("f-000" + string(rune('0'+i)))
 			if err := chain.Commit(ctx, factOf(string(key), event.TypeAgentOutput, "out", "正文"+string(rune('0'+i)), at(i))); err != nil {
 				t.Fatalf("Commit %s: %v", key, err)
 			}
 		}
-		proj := memory.NewReplayProjection()
-		report, err := memory.RebuildProjectionFromWAL(ctx, proj, chain, memory.NewMemoryRelations(), session, memory.RebuildOptions{FallbackBound: 3})
+		proj := replay.NewReplayProjection()
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{FallbackBound: 3})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -246,8 +248,8 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 
 	t.Run("G2.3 大结果仅票据不复发全文: a large result is presented as a ticket, never re-carrying the full text", func(t *testing.T) {
 		full := strings.Repeat("大结果正文。", 300)
-		large := memory.ChainFact{Key: "big-1", Chain: session, Type: event.TypeAgentOutput, Summary: "big result", Content: full, Time: at(1)}
-		proj := memory.NewReplayProjection()
+		large := replay.ChainFact{Key: "big-1", Chain: session, Type: event.TypeAgentOutput, Summary: "big result", Content: full, Time: at(1)}
+		proj := replay.NewReplayProjection()
 		proj.Append(ctx, entryOf(large))
 
 		first, err := proj.AssembleBudget(ctx, 200)
@@ -268,7 +270,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			t.Fatalf("original layer = %d bytes kept=%v, want the full text kept apart from the view", len(original), kept)
 		}
 		decision, recorded := proj.Decision("big-1")
-		if !recorded || decision.Mode != memory.PresentationTicket {
+		if !recorded || decision.Mode != replay.PresentationTicket {
 			t.Fatalf("recorded decision = %+v (%v), want a ticket decision", decision, recorded)
 		}
 
@@ -285,15 +287,15 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 	})
 
 	t.Run("G2.4 预算组装含恢复提示: the assembly after a rebuild carries the recovery hint first", func(t *testing.T) {
-		chain := memory.NewMemoryEventChain()
+		chain := replay.NewMemoryEventChain()
 		if err := chain.Commit(ctx, factOf("r-0001", event.TypeAgentOutput, "out", "恢复后的正文。", at(1))); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
 		if err := chain.Commit(ctx, factOf("r-0002", event.TypeExternalInput, "in", "恢复后的输入。", at(2))); err != nil {
 			t.Fatalf("Commit: %v", err)
 		}
-		proj := memory.NewReplayProjection()
-		report, err := memory.RebuildProjectionFromWAL(ctx, proj, chain, memory.NewMemoryRelations(), session, memory.RebuildOptions{})
+		proj := replay.NewReplayProjection()
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -307,19 +309,19 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if len(out) < 3 {
 			t.Fatalf("assembly returned %d entries, want the hint and the rebuilt entries", len(out))
 		}
-		if out[0].Type != memory.ProjectionTypeRecoveryHint || !strings.Contains(out[0].Content, "recovery:") {
+		if out[0].Type != replay.ProjectionTypeRecoveryHint || !strings.Contains(out[0].Content, "recovery:") {
 			t.Fatalf("first assembled entry = %+v, want the recovery hint first", out[0])
 		}
 		hint := proj.RecoveryHint()
-		if hint == nil || hint.Type != memory.ProjectionTypeRecoveryHint {
+		if hint == nil || hint.Type != replay.ProjectionTypeRecoveryHint {
 			t.Fatalf("RecoveryHint = %+v, want the recorded hint", hint)
 		}
 	})
 
 	t.Run("G2.5 同 session 因果链不跨会话误连: the causal chain is isolated per session", func(t *testing.T) {
-		other := memory.ChainKey{PartitionID: 1, SessionID: event.SessionID("s2")}
-		chain := memory.NewMemoryEventChain()
-		facts := []memory.ChainFact{
+		other := replay.ChainKey{PartitionID: 1, SessionID: event.SessionID("s2")}
+		chain := replay.NewMemoryEventChain()
+		facts := []replay.ChainFact{
 			factOf("s1-1", event.TypeExternalInput, "a", "会话一输入。", at(1)),
 			{Key: "s2-1", Chain: other, Type: event.TypeExternalInput, Summary: "b", Content: "会话二输入。", Time: at(2)},
 			factOf("s1-2", event.TypeAgentOutput, "c", "会话一输出。", at(3)),
@@ -330,9 +332,9 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 				t.Fatalf("Commit %s: %v", fact.Key, err)
 			}
 		}
-		relations := memory.NewMemoryRelations()
-		proj := memory.NewReplayProjection()
-		report, err := memory.RebuildProjectionFromWAL(ctx, proj, chain, relations, session, memory.RebuildOptions{})
+		relations := replay.NewMemoryRelations()
+		proj := replay.NewReplayProjection()
+		report, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, relations, session, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
@@ -351,15 +353,15 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if parent, err := relations.GetParent("s2-2"); err != nil || parent != "" {
 			t.Fatalf("s2 chain parent = %q (%v), want no cross-session link", parent, err)
 		}
-		if _, err := memory.RebuildProjectionFromWAL(ctx, memory.NewReplayProjection(), chain, relations,
-			memory.ChainKey{PartitionID: 1}, memory.RebuildOptions{}); !errors.Is(err, memory.ErrChainKeyRequired) {
+		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), chain, relations,
+			replay.ChainKey{PartitionID: 1}, replay.RebuildOptions{}); !errors.Is(err, replay.ErrChainKeyRequired) {
 			t.Fatalf("empty-session rebuild error = %v, want ErrChainKeyRequired", err)
 		}
 	})
 
 	t.Run("G2.6 投影进入实际请求: the replayed projection is assembled into the actual request", func(t *testing.T) {
-		chain := memory.NewMemoryEventChain()
-		for _, fact := range []memory.ChainFact{
+		chain := replay.NewMemoryEventChain()
+		for _, fact := range []replay.ChainFact{
 			factOf("q-0001", event.TypeExternalInput, "in", "进入请求的输入原文。", at(1)),
 			factOf("q-0002", event.TypeThinkingPlan, "plan", "进入请求的思考正文。", at(2)),
 			factOf("q-0003", event.TypeActionCommand, "call", "进入请求的工具调用。", at(3)),
@@ -368,8 +370,8 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 				t.Fatalf("Commit %s: %v", fact.Key, err)
 			}
 		}
-		proj := memory.NewReplayProjection()
-		if _, err := memory.RebuildProjectionFromWAL(ctx, proj, chain, memory.NewMemoryRelations(), session, memory.RebuildOptions{}); err != nil {
+		proj := replay.NewReplayProjection()
+		if _, err := replay.RebuildProjectionFromWAL(ctx, proj, chain, replay.NewMemoryRelations(), session, replay.RebuildOptions{}); err != nil {
 			t.Fatalf("RebuildProjectionFromWAL: %v", err)
 		}
 		presented, err := proj.AssembleBudget(ctx, 100)

@@ -1,4 +1,4 @@
-package memory
+package meditation
 
 import (
 	"context"
@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
 // TestFoldIsPrecomputedNotInline pins the fold to consumption: the tick folds and files the fold fact, the assembly only reads.
@@ -19,45 +22,45 @@ import (
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 func TestFoldIsPrecomputedNotInline(t *testing.T) {
 	ctx := context.Background()
-	session := ChainKey{PartitionID: 1, SessionID: event.SessionID("s-fold")}
-	at := func(step int) time.Time { return curationNow.Add(time.Duration(step) * time.Minute) }
+	session := replay.ChainKey{PartitionID: 1, SessionID: event.SessionID("s-fold")}
+	at := func(step int) time.Time { return meditationNow.Add(time.Duration(step) * time.Minute) }
 
-	store := NewMemoryLifecycleStore(LifecycleCapabilities{})
-	retention := NewRetention(NewMemoryGuard())
-	lifecycle, err := NewLifecycle(LifecycleConfig{GlobalTTLDays: -1}, retention, store, LifecycleCapabilities{})
+	store := ledger.NewMemoryLifecycleStore(ledger.LifecycleCapabilities{})
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	lifecycle, err := ledger.NewLifecycle(ledger.LifecycleConfig{GlobalTTLDays: -1}, retention, store, ledger.LifecycleCapabilities{})
 	if err != nil {
 		t.Fatalf("open the lifecycle: %v", err)
 	}
 	lifecycle.RecoveryComplete()
 
-	projection := NewReplayProjection()
-	run := []ProjectionEntry{
+	projection := replay.NewReplayProjection()
+	run := []replay.ProjectionEntry{
 		{Key: "aa03", Type: event.TypeAgentOutput, Summary: "linked probe", Content: "第一段正文", Time: at(1)},
 		{Key: "aa04", Type: event.TypeActionCommand, Summary: "tool call", Content: "grep -n TODO src", Time: at(2)},
 		{Key: "aa05", Type: event.TypeAgentOutput, Summary: "recent probe", Content: "第二段正文", Time: at(3)},
 		{Type: event.TypeActionCommand, Summary: "tool chain", Content: "- 工具链: grep → sed", Time: at(4)},
 	}
-	chain := NewMemoryEventChain()
+	chain := replay.NewMemoryEventChain()
 	for _, entry := range run {
 		projection.Append(ctx, entry)
 		if entry.Key == "" {
 			continue
 		}
-		if err := chain.Commit(ctx, ChainFact{Key: entry.Key, Chain: session, Type: entry.Type, Summary: entry.Summary, Content: entry.Content, Time: entry.Time}); err != nil {
+		if err := chain.Commit(ctx, replay.ChainFact{Key: entry.Key, Chain: session, Type: entry.Type, Summary: entry.Summary, Content: entry.Content, Time: entry.Time}); err != nil {
 			t.Fatalf("commit source fact %q: %v", entry.Key, err)
 		}
 	}
 
-	requests := NewCompressRequests()
-	var folds []CompactionFact
-	curation, err := NewCuration(CurationPolicy{MaxCards: 2, MinScore: 10}, retention, lifecycle, nil,
+	requests := memory.NewCompressRequests()
+	var folds []replay.CompactionFact
+	meditation, err := NewMeditation(MeditationPolicy{MaxCards: 2, MinScore: 10}, retention, lifecycle, nil,
 		WithCompressRequests(requests),
-		WithCurationCards(func(context.Context) ([]CurationCard, error) { return curationCards(), nil }),
-		WithCurationProducts(func(context.Context, CurationArtifact) error { return nil }),
-		WithCurationPreFold(
-			func(context.Context) (*ReplayProjection, error) { return projection, nil },
-			func(ctx context.Context, payload CompactionFact) error {
-				fact, err := CompactionChainFact(session, payload, curationNow)
+		WithMeditationCards(func(context.Context) ([]MeditationCard, error) { return meditationCards(), nil }),
+		WithMeditationProducts(func(context.Context, MeditationArtifact) error { return nil }),
+		WithMeditationPreFold(
+			func(context.Context) (*replay.ReplayProjection, error) { return projection, nil },
+			func(ctx context.Context, payload replay.CompactionFact) error {
+				fact, err := CompactionChainFact(session, payload, meditationNow)
 				if err != nil {
 					return err
 				}
@@ -70,12 +73,12 @@ func TestFoldIsPrecomputedNotInline(t *testing.T) {
 		),
 	)
 	if err != nil {
-		t.Fatalf("open the curation engine: %v", err)
+		t.Fatalf("open the meditation engine: %v", err)
 	}
-	if _, filed, err := curation.Judge(ctx, curationNow, curationCards()); err != nil || !filed {
+	if _, filed, err := meditation.Judge(ctx, meditationNow, meditationCards()); err != nil || !filed {
 		t.Fatalf("judge the over-limit sequence = (filed %v, %v), want the request it files", filed, err)
 	}
-	tick, err := curation.Tick(ctx, curationNow)
+	tick, err := meditation.Tick(ctx, meditationNow)
 	if err != nil {
 		t.Fatalf("tick: %v", err)
 	}
@@ -96,12 +99,12 @@ func TestFoldIsPrecomputedNotInline(t *testing.T) {
 		t.Fatalf("fold fact = (held %v, %v), want the compaction fact committed into the state", held, err)
 	}
 	entries := projection.Entries()
-	if len(entries) != 3 || entries[0].Type != CompactionEventType || !strings.HasPrefix(entries[0].Content, "compaction: ") {
+	if len(entries) != 3 || entries[0].Type != replay.CompactionEventType || !strings.HasPrefix(entries[0].Content, "compaction: ") {
 		t.Fatalf("folded entries = %+v, want the compaction line first", entries)
 	}
 
 	before := scanAll(t, ctx, chain)
-	folded := make([]ProjectionEntry, len(entries))
+	folded := make([]replay.ProjectionEntry, len(entries))
 	copy(folded, entries)
 	assembled, err := projection.AssembleBudget(ctx, 1000)
 	if err != nil {
@@ -114,7 +117,7 @@ func TestFoldIsPrecomputedNotInline(t *testing.T) {
 	if !reflect.DeepEqual(projection.Entries(), folded) {
 		t.Fatalf("projection entries after assembly = %+v, want the folded result unchanged", projection.Entries())
 	}
-	if len(assembled) != len(entries) || assembled[0].Type != CompactionEventType {
+	if len(assembled) != len(entries) || assembled[0].Type != replay.CompactionEventType {
 		t.Fatalf("assembled entries = %+v, want the folded projection read as it stands", assembled)
 	}
 
@@ -129,7 +132,7 @@ func TestFoldIsPrecomputedNotInline(t *testing.T) {
 
 // scanAll reads every fact of one chain in write order, so a comparison sees the
 // chain as it stands rather than one page of it.
-func scanAll(t *testing.T, ctx context.Context, chain EventChain) []ChainFact {
+func scanAll(t *testing.T, ctx context.Context, chain replay.EventChain) []replay.ChainFact {
 	t.Helper()
 	facts, err := chain.ScanFrom(ctx, "", 1024)
 	if err != nil {

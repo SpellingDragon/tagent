@@ -13,7 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/rl"
 
@@ -36,9 +36,9 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		writePromptAt(t, filepath.Join(root, "prompts", "system.md"), "prompt body v1\n")
 		writeSkillAt(t, root, "greet", "greet body v1\n")
 		base := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-		proj := memory.NewReplayProjection()
-		proj.Append(ctx, memory.ProjectionEntry{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in", Content: "投影原文一", Time: base})
-		proj.Append(ctx, memory.ProjectionEntry{Key: "p-0002", Type: event.TypeAgentOutput, Summary: "out", Content: "投影原文二", Time: base.Add(time.Minute)})
+		proj := replay.NewReplayProjection()
+		proj.Append(ctx, replay.ProjectionEntry{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in", Content: "投影原文一", Time: base})
+		proj.Append(ctx, replay.ProjectionEntry{Key: "p-0002", Type: event.TypeAgentOutput, Summary: "out", Content: "投影原文二", Time: base.Add(time.Minute)})
 		var run *tagent.Run
 		seen := 0
 		provider := &learnModel{name: "model-a", answer: func(req *model.Request) *model.Response {

@@ -13,42 +13,43 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // The declared shapes and their fields.
 var (
 	_ = Replica{
-		Original:  memory.OriginalRef{},
+		Original:  ledger.OriginalRef{},
 		Path:      "",
 		CreatedAt: time.Time{},
 		ActiveRW:  false,
 	}
 
 	_ = Externalized{
-		Original: memory.OriginalRef{},
+		Original: ledger.OriginalRef{},
 		Preview:  "",
-		Segment:  memory.SegmentRequest{},
+		Segment:  ledger.SegmentRequest{},
 	}
 
 	// The byte-bounded segment entry and the result it is read back as stay the
 	// memory segment shapes: a byte offset and a byte bound on the way in, the
 	// segment bytes, the resumption position and an EOF flag on the way out, and
 	// never a line count.
-	_ = memory.SegmentRequest{
-		From:     memory.SegmentPosition{},
+	_ = ledger.SegmentRequest{
+		From:     ledger.SegmentPosition{},
 		MaxBytes: 0,
 	}
 
-	_ = memory.SegmentResult{
+	_ = ledger.SegmentResult{
 		Body: []byte{},
-		Next: memory.SegmentPosition{},
+		Next: ledger.SegmentPosition{},
 		EOF:  false,
 	}
 )
 
 // The exported port methods must keep exactly these signatures.
 var (
-	_ func(Externalizer, context.Context, memory.OriginalRef, []byte) (Externalized, error) = Externalizer.Externalize
+	_ func(Externalizer, context.Context, ledger.OriginalRef, []byte) (Externalized, error) = Externalizer.Externalize
 
 	_ func(Cleaner, context.Context) error = Cleaner.CleanupStartup
 
@@ -102,23 +103,23 @@ var (
 
 // The materialisation and read methods must keep exactly these signatures.
 var (
-	_ func(string, memory.ScopedOriginalStore, memory.ReadScope, ...MaterializerOption) (*Materializer, error) = NewMaterializer
+	_ func(string, ledger.ScopedOriginalStore, ledger.ReadScope, ...MaterializerOption) (*Materializer, error) = NewMaterializer
 
 	_ func(*Materializer) *ReplicaReader = (*Materializer).Reader
 
 	_ func(*ReplicaCleaner) MaterializerOption = WithCleaner
 
-	_ func(*Materializer, context.Context, memory.OriginalRef, string) (Replica, error) = (*Materializer).Materialize
+	_ func(*Materializer, context.Context, ledger.OriginalRef, string) (Replica, error) = (*Materializer).Materialize
 
-	_ func(*Materializer, context.Context, memory.OriginalRef, string) (*ActiveReplica, error) = (*Materializer).Open
+	_ func(*Materializer, context.Context, ledger.OriginalRef, string) (*ActiveReplica, error) = (*Materializer).Open
 
 	_ func(*ActiveReplica) = (*ActiveReplica).Close
 
 	_ func(*Materializer, context.Context, event.EventID) (bool, error) = (*Materializer).Rebuildable
 
-	_ func(*ReplicaReader) memory.ReadScope = (*ReplicaReader).Scope
+	_ func(*ReplicaReader) ledger.ReadScope = (*ReplicaReader).Scope
 
-	_ func(*ReplicaReader, context.Context, memory.OriginalRef, string, memory.SegmentRequest) (memory.SegmentResult, error) = (*ReplicaReader).ReadSegment
+	_ func(*ReplicaReader, context.Context, ledger.OriginalRef, string, ledger.SegmentRequest) (ledger.SegmentResult, error) = (*ReplicaReader).ReadSegment
 )
 
 // The reclamation defaults must stay compile-time constants: a variable or a computed

@@ -10,6 +10,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -29,7 +30,7 @@ type Externalizer interface {
 	// of it, and returns the bounded preview and the segment entry for it. A replica
 	// write that fails is reported as ErrReplicaWriteFailed, while the returned
 	// reference stays effective.
-	Externalize(ctx context.Context, ref memory.OriginalRef, body []byte) (Externalized, error)
+	Externalize(ctx context.Context, ref ledger.OriginalRef, body []byte) (Externalized, error)
 }
 
 // Externalized is one externalized oversized result: the durable reference its bytes
@@ -38,21 +39,21 @@ type Externalizer interface {
 type Externalized struct {
 	// Original is the reference the original bytes were committed under. It stays
 	// effective even when the replica write failed.
-	Original memory.OriginalRef
+	Original ledger.OriginalRef
 	// Preview is the bounded text presented in place of the whole result.
 	Preview string
 	// Segment is the byte-bounded entry a later read reaches the whole original
-	// through, on exactly the terms of memory.SegmentRequest and
-	// memory.SegmentResult: the entry names the byte position the read starts at
+	// through, on exactly the terms of ledger.SegmentRequest and
+	// ledger.SegmentResult: the entry names the byte position the read starts at
 	// and the maximum number of bytes one segment returns, and the read answers
 	// with the segment bytes, the byte position the next segment resumes from and
 	// whether the end of the original was reached. A zero MaxBytes is served as
-	// memory.DefaultSegmentMaxBytes and never as an unbounded read, segments are
+	// ledger.DefaultSegmentMaxBytes and never as an unbounded read, segments are
 	// cut at byte boundaries whatever the content holds and concatenate back to
 	// the exact bytes of the original, and a segment that reaches the end reports
 	// EOF with a zero Next that carries no resumption point. A line count bounds
 	// no byte at all, so the entry carries a byte offset and a byte bound only.
-	Segment memory.SegmentRequest
+	Segment ledger.SegmentRequest
 }
 
 // ErrReplicaWriteFailed reports that an oversized result was committed as an original,
@@ -156,9 +157,9 @@ type ResultScope struct {
 // keep the references of different scopes apart. Every producer derives its reference
 // here, so a result is committed under one identity regardless of which of the four
 // producers externalized it.
-func OriginalRefFor(scope ResultScope, body []byte) memory.OriginalRef {
+func OriginalRefFor(scope ResultScope, body []byte) ledger.OriginalRef {
 	digest := sha256.Sum256(body)
-	return memory.OriginalRef{
+	return ledger.OriginalRef{
 		Key:             event.EventID(hex.EncodeToString(digest[:])),
 		Owner:           scope.Owner,
 		Format:          scope.Format,
@@ -177,7 +178,7 @@ func OriginalRefFor(scope ResultScope, body []byte) memory.OriginalRef {
 // and stays beside the original: a failed replica write never discards the original it
 // was made from, and a replica reclaimed later is materialised again from that original.
 type ResultExternalizer struct {
-	originals    memory.OriginalStore
+	originals    ledger.OriginalStore
 	materializer *Materializer
 	threshold    int
 	consumer     string
@@ -230,7 +231,7 @@ func WithPreviewRunes(runes int) ExternalizerOption {
 // NewResultExternalizer returns the externalize path over originals, with the
 // threshold, the preview bound and the optional replica materializer the caller names.
 // A nil original store is refused by name before any result could be externalized.
-func NewResultExternalizer(originals memory.OriginalStore, options ...ExternalizerOption) (*ResultExternalizer, error) {
+func NewResultExternalizer(originals ledger.OriginalStore, options ...ExternalizerOption) (*ResultExternalizer, error) {
 	if originals == nil {
 		return nil, ErrOriginalStoreRequired
 	}
@@ -239,7 +240,7 @@ func NewResultExternalizer(originals memory.OriginalStore, options ...Externaliz
 		threshold:    ThresholdForMaxTokens(0),
 		consumer:     "externalize",
 		previewRunes: DefaultPreviewRunes,
-		segmentBytes: memory.DefaultSegmentMaxBytes,
+		segmentBytes: ledger.DefaultSegmentMaxBytes,
 	}
 	for _, option := range options {
 		option(externalizer)
@@ -276,9 +277,9 @@ func (e *ResultExternalizer) DecideExternalize(ctx context.Context, id event.Eve
 // A reference outside the scope the wired materializer reads in is refused by name
 // before any original is committed, and a replica write that fails is reported as
 // ErrReplicaWriteFailed beside the still effective reference and its preview.
-func (e *ResultExternalizer) Externalize(ctx context.Context, ref memory.OriginalRef, body []byte) (Externalized, error) {
+func (e *ResultExternalizer) Externalize(ctx context.Context, ref ledger.OriginalRef, body []byte) (Externalized, error) {
 	if ref.Key == "" {
-		return Externalized{}, memory.ErrKeyRequired
+		return Externalized{}, ledger.ErrKeyRequired
 	}
 	if e.materializer != nil && ref.ReadScope() != e.materializer.Reader().Scope() {
 		return Externalized{}, ErrReplicaUnauthorized
@@ -289,7 +290,7 @@ func (e *ResultExternalizer) Externalize(ctx context.Context, ref memory.Origina
 	externalized := Externalized{
 		Original: ref,
 		Preview:  e.boundedPreview(body, ref),
-		Segment:  memory.SegmentRequest{From: memory.SegmentPosition{}, MaxBytes: e.segmentBytes},
+		Segment:  ledger.SegmentRequest{From: ledger.SegmentPosition{}, MaxBytes: e.segmentBytes},
 	}
 	if e.materializer == nil {
 		return externalized, nil
@@ -305,7 +306,7 @@ func (e *ResultExternalizer) Externalize(ctx context.Context, ref memory.Origina
 // segment entry the whole of it is read back through. The leading run is cut at a rune
 // boundary and is already over by the time the ticket is appended, so the preview stays
 // a presentation of the original and never stands in for it.
-func (e *ResultExternalizer) boundedPreview(body []byte, ref memory.OriginalRef) string {
+func (e *ResultExternalizer) boundedPreview(body []byte, ref ledger.OriginalRef) string {
 	bound := e.previewRunes
 	if quarter := e.threshold / 4; quarter < bound {
 		bound = quarter
@@ -424,11 +425,11 @@ func (t *BoundedTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // ticket names is over the interception threshold, and the request records who judged it
 // and why. A filing that fails is answered as the named refusal, and a judgment with no
 // filing wired is simply not filed.
-func (t *BoundedTool) fileCompressRequest(ctx context.Context, ref memory.OriginalRef) error {
+func (t *BoundedTool) fileCompressRequest(ctx context.Context, ref ledger.OriginalRef) error {
 	if t.filing == nil {
 		return nil
 	}
-	request := memory.CompressRequestFor(CompressProducerToolOverflow, string(ref.Key), CompressReasonToolOverflow)
+	request := event.CompressRequestFor(CompressProducerToolOverflow, string(ref.Key), CompressReasonToolOverflow)
 	if _, err := t.filing(ctx, request); err != nil {
 		return fmt.Errorf("%w: %w", ErrCompressRequestUnfiled, err)
 	}

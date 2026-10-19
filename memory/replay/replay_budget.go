@@ -7,7 +7,7 @@
 // full-text decision makes the two identical. A recorded decision is the basis a
 // replay follows, so a recorded preview is never promoted back to the full text
 // and the original is never reconstructed from a decision.
-package memory
+package replay
 
 import (
 	"context"
@@ -57,26 +57,26 @@ var (
 //   - the original text, the model view and the presentation decision stay layered;
 //   - a rebuild recomputes the deduplication key set from the entries it keeps.
 type ReplayProjection struct {
-	mu         sync.Mutex
-	entries    []ProjectionEntry
-	seen       map[event.EventID]struct{}
-	originals  map[event.EventID]string
-	decisions  map[event.EventID]PresentationDecision
-	meditation map[event.EventID]struct{}
-	foldSeq    int
-	fold       *CompactionFact
-	settles    []ReplaySettle
-	boundary   event.EventID
-	recovery   *ProjectionEntry
+	mu        sync.Mutex
+	entries   []ProjectionEntry
+	seen      map[event.EventID]struct{}
+	originals map[event.EventID]string
+	decisions map[event.EventID]PresentationDecision
+	consumed  map[event.EventID]struct{}
+	foldSeq   int
+	fold      *CompactionFact
+	settles   []ReplaySettle
+	boundary  event.EventID
+	recovery  *ProjectionEntry
 }
 
 // NewReplayProjection returns an empty replayable projection.
 func NewReplayProjection() *ReplayProjection {
 	return &ReplayProjection{
-		seen:       map[event.EventID]struct{}{},
-		originals:  map[event.EventID]string{},
-		decisions:  map[event.EventID]PresentationDecision{},
-		meditation: map[event.EventID]struct{}{},
+		seen:      map[event.EventID]struct{}{},
+		originals: map[event.EventID]string{},
+		decisions: map[event.EventID]PresentationDecision{},
+		consumed:  map[event.EventID]struct{}{},
 	}
 }
 
@@ -97,7 +97,7 @@ func (p *ReplayProjection) Append(ctx context.Context, entry ProjectionEntry) {
 			entry.Content = p.viewOf(decision, entry)
 		}
 		if entry.Type == event.TypeThinkingPlan {
-			p.meditation[entry.Key] = struct{}{}
+			p.consumed[entry.Key] = struct{}{}
 		}
 	}
 	p.entries = append(p.entries, entry)
@@ -293,13 +293,13 @@ func boundedText(text string, n int) string {
 	return string(runes[:n]) + "…"
 }
 
-// seedMeditation marks one meditation key as reseeded, so the meditation state a
+// seedConsumed marks one consumed key as reseeded, so the consumed state a
 // snapshot and its tail carried survives a rebuild.
-func (p *ReplayProjection) seedMeditation(key event.EventID) {
+func (p *ReplayProjection) seedConsumed(key event.EventID) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if key != "" {
-		p.meditation[key] = struct{}{}
+		p.consumed[key] = struct{}{}
 	}
 }
 
@@ -380,16 +380,16 @@ func (p *ReplayProjection) FullBoundary() event.EventID {
 	return p.boundary
 }
 
-// MeditationKeys returns the reseeded meditation keys in order.
-func (p *ReplayProjection) MeditationKeys() []event.EventID {
+// ConsumedKeys returns the reseeded consumed keys in order.
+func (p *ReplayProjection) ConsumedKeys() []event.EventID {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.meditationKeysLocked()
+	return p.consumedKeysLocked()
 }
 
-func (p *ReplayProjection) meditationKeysLocked() []event.EventID {
-	keys := make([]string, 0, len(p.meditation))
-	for key := range p.meditation {
+func (p *ReplayProjection) consumedKeysLocked() []event.EventID {
+	keys := make([]string, 0, len(p.consumed))
+	for key := range p.consumed {
 		keys = append(keys, string(key))
 	}
 	sort.Strings(keys)

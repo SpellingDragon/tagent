@@ -10,7 +10,7 @@
 // reclamation — and a store that cannot protect or coordinate reclamation is
 // reported by name on the durable recovery tier instead of being treated as
 // unprotected success.
-package memory
+package ledger
 
 import (
 	"context"

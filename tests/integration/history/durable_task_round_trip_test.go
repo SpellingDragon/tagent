@@ -7,6 +7,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 
@@ -78,12 +79,12 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	}
 
 	t.Run("G2.1 持久提交往返: durable commit round trip across a restart", func(t *testing.T) {
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -103,11 +104,11 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
 		}
 
-		reopened, err := memory.OpenTier(ctx, cfg)
+		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		restored, err := state.NewDurableCommit(memory.TierFactLog(reopened), nil)
+		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
 		if err != nil {
 			t.Fatalf("reopen NewDurableCommit: %v", err)
 		}
@@ -156,12 +157,12 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.2 重复提交幂等不新增: repeated commit returns the stored fact and delivers nothing", func(t *testing.T) {
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -226,12 +227,12 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.3 未确认投递重放并定位 owner: unconfirmed replay locates its owner and advances only behind acceptance", func(t *testing.T) {
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -247,11 +248,11 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
 		}
 
-		reopened, err := memory.OpenTier(ctx, cfg)
+		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
-		restored, err := state.NewDurableCommit(memory.TierFactLog(reopened), nil)
+		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
 		if err != nil {
 			t.Fatalf("reopen NewDurableCommit: %v", err)
 		}
@@ -335,12 +336,12 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.4 目标已移除明确拒绝: removed target refused by name with its obligation kept", func(t *testing.T) {
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -426,22 +427,22 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 	})
 
 	t.Run("G2.5 无需更换数据库: events and task facts round trip on one database", func(t *testing.T) {
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		ref := memory.OriginalRef{Key: "d5a1", Owner: spec.Source, Format: "text/plain", RetentionPolicy: "keep"}
+		ref := ledger.OriginalRef{Key: "d5a1", Owner: spec.Source, Format: "text/plain", RetentionPolicy: "keep"}
 		if err := tier.Originals.Put(ctx, ref, []byte("原文内容\n")); err != nil {
 			t.Fatalf("Originals.Put: %v", err)
 		}
 		eventBody := []byte("{\"key\":\"e7c2\",\"text\":\"事件体\"}\n")
-		if err := tier.Segments.StoreEvent(ctx, memory.SegmentRecord{
+		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
 			PartitionID: 1, WindowTS: 700, Seq: 1, EventKey: "e7c2", EventTime: 7, Body: eventBody,
 		}); err != nil {
 			t.Fatalf("StoreEvent: %v", err)
 		}
-		durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -457,7 +458,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
 		}
 
-		reopened, err := memory.OpenTier(ctx, cfg)
+		reopened, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier: %v", err)
 		}
@@ -465,14 +466,14 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 			t.Fatalf("reopened capabilities = %+v, want %+v", reopened.Capabilities, tier.Capabilities)
 		}
 		recalled := reopened.Originals.Get(ctx, ref.Key)
-		if recalled.Outcome != memory.RecallFound || string(recalled.Body) != "原文内容\n" {
+		if recalled.Outcome != ledger.RecallFound || string(recalled.Body) != "原文内容\n" {
 			t.Fatalf("reopened original = outcome %v body %q, want the stored bytes", recalled.Outcome, recalled.Body)
 		}
 		stored, held, err := reopened.Segments.GetEvent(ctx, "e7c2")
 		if err != nil || !held || string(stored.Body) != string(eventBody) {
 			t.Fatalf("reopened event = held %v body %q, %v, want the committed event", held, stored.Body, err)
 		}
-		restored, err := state.NewDurableCommit(memory.TierFactLog(reopened), nil)
+		restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
 		if err != nil {
 			t.Fatalf("reopen NewDurableCommit: %v", err)
 		}

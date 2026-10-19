@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/task"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // TestGovernanceRecovery drives the governance recovery surface over the real policy ruling and the real memory tier:
@@ -393,15 +394,15 @@ func recJudge(t *testing.T, policy *plugin.Policy, callID, args string) plugin.D
 // Reopening the same root is the restart these sub-cases recover across.
 func recOpenLog(t *testing.T, root string) plugin.GovernanceEventLog {
 	t.Helper()
-	cfg := memory.StorageConfig{Type: memory.StorageMemory}
+	cfg := ledger.StorageConfig{Type: ledger.StorageMemory}
 	if root != "" {
-		cfg = memory.StorageConfig{Type: memory.StorageLocalFile, Root: root}
+		cfg = ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
 	}
-	tier, err := memory.OpenTier(context.Background(), cfg)
+	tier, err := ledger.OpenTier(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("open the memory tier under %q: %v", root, err)
 	}
-	return memory.TierFactLog(tier)
+	return ledger.TierFactLog(tier)
 }
 
 // recFind reports the newest ledger record filed under the subtype, or nil

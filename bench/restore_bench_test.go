@@ -7,7 +7,8 @@ import (
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // BenchmarkRestoreLatency measures the restart assembly over a durable fact
@@ -16,7 +17,7 @@ import (
 func BenchmarkRestoreLatency(b *testing.B) {
 	for _, facts := range []int{0, 1, 64, 256} {
 		b.Run(fmt.Sprintf("facts=%d", facts), func(b *testing.B) {
-			storage := memory.StorageConfig{Type: memory.StorageLocalFile, Root: b.TempDir()}
+			storage := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: b.TempDir()}
 			writer := assemble(b, tagent.WithStorage(storage))
 			for i := 0; i < facts; i++ {
 				drive(b, writer, i, event.SessionID(fmt.Sprintf("restore-%d", i)))

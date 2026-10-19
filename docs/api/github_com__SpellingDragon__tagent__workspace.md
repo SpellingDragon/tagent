@@ -189,7 +189,7 @@ func NewBoundedTool(inner trpctool.CallableTool, externalizer *ResultExternalize
     a scope that names no owner, format or retention policy are each refused by
     name.
 
-func NewMaterializer(root string, store memory.ScopedOriginalStore, scope memory.ReadScope, options ...MaterializerOption) (*Materializer, error)
+func NewMaterializer(root string, store ledger.ScopedOriginalStore, scope ledger.ReadScope, options ...MaterializerOption) (*Materializer, error)
     NewMaterializer returns a materializer that declares replicas under root
     and reads originals only through store, inside scope. The scope comes from
     the trusted state of the caller rather than from any per-replica request,
@@ -204,13 +204,13 @@ func NewReplicaCleaner(root string, options ...CleanupOption) (*ReplicaCleaner, 
     A root that names nothing is refused by name before any cleaner exists,
     and a period that could never trigger is refused the same way.
 
-func NewResultExternalizer(originals memory.OriginalStore, options ...ExternalizerOption) (*ResultExternalizer, error)
+func NewResultExternalizer(originals ledger.OriginalStore, options ...ExternalizerOption) (*ResultExternalizer, error)
     NewResultExternalizer returns the externalize path over originals,
     with the threshold, the preview bound and the optional replica materializer
     the caller names. A nil original store is refused by name before any result
     could be externalized.
 
-func OriginalRefFor(scope ResultScope, body []byte) memory.OriginalRef
+func OriginalRefFor(scope ResultScope, body []byte) ledger.OriginalRef
     OriginalRefFor returns the reference one result body is committed under
     inside scope: the key is the SHA-256 digest of the body in hex, so the same
     bytes produce the same key whatever producer meets them, while the owner,
@@ -329,21 +329,21 @@ func WithReplicaMaxCount(maxCount int) CleanupOption
 type Externalized struct {
 	// Original is the reference the original bytes were committed under. It stays
 	// effective even when the replica write failed.
-	Original memory.OriginalRef
+	Original ledger.OriginalRef
 	// Preview is the bounded text presented in place of the whole result.
 	Preview string
 	// Segment is the byte-bounded entry a later read reaches the whole original
-	// through, on exactly the terms of memory.SegmentRequest and
-	// memory.SegmentResult: the entry names the byte position the read starts at
+	// through, on exactly the terms of ledger.SegmentRequest and
+	// ledger.SegmentResult: the entry names the byte position the read starts at
 	// and the maximum number of bytes one segment returns, and the read answers
 	// with the segment bytes, the byte position the next segment resumes from and
 	// whether the end of the original was reached. A zero MaxBytes is served as
-	// memory.DefaultSegmentMaxBytes and never as an unbounded read, segments are
+	// ledger.DefaultSegmentMaxBytes and never as an unbounded read, segments are
 	// cut at byte boundaries whatever the content holds and concatenate back to
 	// the exact bytes of the original, and a segment that reaches the end reports
 	// EOF with a zero Next that carries no resumption point. A line count bounds
 	// no byte at all, so the entry carries a byte offset and a byte bound only.
-	Segment memory.SegmentRequest
+	Segment ledger.SegmentRequest
 }
     Externalized is one externalized oversized result: the durable reference its
     bytes were committed under, the bounded preview that stands in for the whole
@@ -355,7 +355,7 @@ type Externalizer interface {
 	// of it, and returns the bounded preview and the segment entry for it. A replica
 	// write that fails is reported as ErrReplicaWriteFailed, while the returned
 	// reference stays effective.
-	Externalize(ctx context.Context, ref memory.OriginalRef, body []byte) (Externalized, error)
+	Externalize(ctx context.Context, ref ledger.OriginalRef, body []byte) (Externalized, error)
 }
 
     Externalizer is the oversized-output port: it commits the durable original
@@ -418,7 +418,7 @@ type Materializer struct {
     so the original's validity and the replica's lifetime stay two separate
     facts.
 
-func (m *Materializer) Materialize(ctx context.Context, ref memory.OriginalRef, consumer string) (Replica, error)
+func (m *Materializer) Materialize(ctx context.Context, ref ledger.OriginalRef, consumer string) (Replica, error)
     Materialize materialises one replica of ref for consumer and returns its
     stable reference. A reference outside the bound read scope is refused
     by name and writes no replica, a replica standing at the target path is
@@ -430,7 +430,7 @@ func (m *Materializer) Materialize(ctx context.Context, ref memory.OriginalRef, 
     active protection on the target until it returns, so no reclamation pass
     takes the replica away across a materialisation.
 
-func (m *Materializer) Open(ctx context.Context, ref memory.OriginalRef, consumer string) (*ActiveReplica, error)
+func (m *Materializer) Open(ctx context.Context, ref ledger.OriginalRef, consumer string) (*ActiveReplica, error)
     Open materialises one working copy of ref for consumer and returns the
     handle that ends its active read/write protection. The protection is
     held before the copy's bytes land and stays held until Close, so every
@@ -468,7 +468,7 @@ type Release func()
 
 type Replica struct {
 	// Original is the durable original this replica was materialised from.
-	Original memory.OriginalRef
+	Original ledger.OriginalRef
 	// Path is the on-disk location of the replica, declared once the replica was
 	// written successfully.
 	Path string
@@ -558,7 +558,7 @@ type ReplicaReader struct {
 }
     ReplicaReader is the authorized segmented read face over replicas:
     it serves byte-bounded segments of replica content on exactly the terms of
-    memory.SegmentRequest and memory.SegmentResult, and only inside one trusted
+    ledger.SegmentRequest and ledger.SegmentResult, and only inside one trusted
     read scope.
 
     Authorization runs through the scoped read face of memory: a request
@@ -569,15 +569,15 @@ type ReplicaReader struct {
     concatenate back to its exact bytes, cut at byte boundaries whatever the
     content holds.
 
-func (r *ReplicaReader) ReadSegment(ctx context.Context, ref memory.OriginalRef, consumer string, req memory.SegmentRequest) (memory.SegmentResult, error)
+func (r *ReplicaReader) ReadSegment(ctx context.Context, ref ledger.OriginalRef, consumer string, req ledger.SegmentRequest) (ledger.SegmentResult, error)
     ReadSegment returns one byte-bounded segment of the replica materialised
-    for ref under consumer, on exactly the terms of memory.SegmentRequest and
-    memory.SegmentResult. A request outside the bound read scope is refused by
+    for ref under consumer, on exactly the terms of ledger.SegmentRequest and
+    ledger.SegmentResult. A request outside the bound read scope is refused by
     name and serves no byte, a missing replica is materialised again from its
     original before any byte is served, and an ineffective original refuses the
     read by name instead of handing out bytes no replica carries.
 
-func (r *ReplicaReader) Scope() memory.ReadScope
+func (r *ReplicaReader) Scope() ledger.ReadScope
     Scope returns the trusted read scope the reader serves inside, so a consumer
     can record which authority a result was read under.
 
@@ -607,7 +607,7 @@ func (e *ResultExternalizer) Exceeds(chars int) bool
     over the threshold and has to take the externalize path. The four producers
     decide here, so no producer carries a bound of its own.
 
-func (e *ResultExternalizer) Externalize(ctx context.Context, ref memory.OriginalRef, body []byte) (Externalized, error)
+func (e *ResultExternalizer) Externalize(ctx context.Context, ref ledger.OriginalRef, body []byte) (Externalized, error)
     Externalize commits body as the durable original of ref, materialises
     an optional replica of it, and answers with the bounded preview and the
     segment entry for it. The original is committed before the preview exists,

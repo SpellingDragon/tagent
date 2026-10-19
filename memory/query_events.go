@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // QueryOrderByAsc and QueryOrderByDesc are the two orderings a query names:
@@ -193,7 +194,7 @@ func (q *MemoryEventQuery) Store(ctx context.Context, rec EventRecord) error {
 		return err
 	}
 	if rec.Key == "" {
-		return ErrEventKeyRequired
+		return ledger.ErrEventKeyRequired
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()

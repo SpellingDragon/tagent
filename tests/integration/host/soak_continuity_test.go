@@ -28,12 +28,13 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // soakModeResident, soakModeCrash, soakModeReader, soakModeHot and soakModeLeak
@@ -540,7 +541,7 @@ func assembleSoakRuntime(t *testing.T, ctx context.Context, root string) (*tagen
 
 // soakStorage names the durable tier one soak runtime persists under.
 func soakStorage(root string) tagent.Option {
-	return tagent.WithStorage(memory.StorageConfig{Type: memory.StorageLocalFile, Root: root})
+	return tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
 }
 
 // soakDeclaration is the one-agent declaration the soak runtime is assembled

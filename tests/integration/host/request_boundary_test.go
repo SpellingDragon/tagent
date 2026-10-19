@@ -12,7 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/model"
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
@@ -158,8 +158,8 @@ func TestRequestCarriesProjectedBudget(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
-	proj := memory.NewReplayProjection()
-	for _, entry := range []memory.ProjectionEntry{
+	proj := replay.NewReplayProjection()
+	for _, entry := range []replay.ProjectionEntry{
 		{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in", Content: "投影原文一", Time: base},
 		{Key: "p-0002", Type: event.TypeAgentOutput, Summary: "out", Content: "投影原文二", Time: base.Add(time.Minute)},
 	} {

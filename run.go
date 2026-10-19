@@ -25,7 +25,6 @@ import (
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/query"
@@ -36,6 +35,8 @@ import (
 	"github.com/SpellingDragon/tagent/view"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // NativeAgent is what the embedding process contributes for one declared
@@ -197,14 +198,14 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.authority = state.NewAuthority()
 	r.store = state.NewMemoryStore(r.authority)
 	var durable *state.DurableCommit
-	var tier *memory.Tier
+	var tier *ledger.Tier
 	if cfg.storage != nil {
-		opened, err := memory.OpenTier(ctx, *cfg.storage)
+		opened, err := ledger.OpenTier(ctx, *cfg.storage)
 		if err != nil {
 			return nil, err
 		}
 		tier = opened
-		durable, err = state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err = state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			return nil, err
 		}

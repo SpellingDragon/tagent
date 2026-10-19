@@ -9,7 +9,7 @@
 // the single source of truth for that count; this layer registers what is held
 // and the original time the key reclassifies under once released, and keeps no
 // second lease system of its own.
-package memory
+package ledger
 
 import (
 	"context"

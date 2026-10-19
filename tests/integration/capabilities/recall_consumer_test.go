@@ -12,6 +12,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 )
 
@@ -149,27 +150,27 @@ func TestRecallConsumer(t *testing.T) {
 		})
 
 		t.Run("hybrid fusion merges both legs by reciprocal rank", func(t *testing.T) {
-			refA := memory.OriginalRef{Key: "0a", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
-			refB := memory.OriginalRef{Key: "0b", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
-			refC := memory.OriginalRef{Key: "0c", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
-			fused, err := search.NewRRFFusion().Fuse(ctx, search.StrategyHybrid, []memory.OriginalRef{refA, refB}, []memory.OriginalRef{refB, refC})
+			refA := ledger.OriginalRef{Key: "0a", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
+			refB := ledger.OriginalRef{Key: "0b", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
+			refC := ledger.OriginalRef{Key: "0c", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
+			fused, err := search.NewRRFFusion().Fuse(ctx, search.StrategyHybrid, []ledger.OriginalRef{refA, refB}, []ledger.OriginalRef{refB, refC})
 			if err != nil {
 				t.Fatalf("Fuse(hybrid): %v", err)
 			}
-			if !reflect.DeepEqual(fused.Refs, []memory.OriginalRef{refB, refA, refC}) {
+			if !reflect.DeepEqual(fused.Refs, []ledger.OriginalRef{refB, refA, refC}) {
 				t.Fatalf("fused order = %v, want [B A C] by reciprocal rank k=%d", fused.Refs, search.RRFRankConstant)
 			}
 			if fused.NextCursor != "" {
 				t.Fatalf("NextCursor = %q on a fused set, want zero: a fused set is complete and hands out no continuation", fused.NextCursor)
 			}
 
-			tieA := memory.OriginalRef{Key: "0a", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
-			tieB := memory.OriginalRef{Key: "0b", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
-			tied, err := search.NewRRFFusion().Fuse(ctx, search.StrategyHybrid, []memory.OriginalRef{tieA}, []memory.OriginalRef{tieB})
+			tieA := ledger.OriginalRef{Key: "0a", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
+			tieB := ledger.OriginalRef{Key: "0b", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"}
+			tied, err := search.NewRRFFusion().Fuse(ctx, search.StrategyHybrid, []ledger.OriginalRef{tieA}, []ledger.OriginalRef{tieB})
 			if err != nil {
 				t.Fatalf("Fuse(hybrid tie): %v", err)
 			}
-			if !reflect.DeepEqual(tied.Refs, []memory.OriginalRef{tieB, tieA}) {
+			if !reflect.DeepEqual(tied.Refs, []ledger.OriginalRef{tieB, tieA}) {
 				t.Fatalf("tie order = %v, want the larger event key first [B A]", tied.Refs)
 			}
 		})
@@ -197,7 +198,7 @@ func TestRecallConsumer(t *testing.T) {
 
 	t.Run("failure", func(t *testing.T) {
 		t.Run("hybrid without a vector leg answers byte-identical to keyword_only", func(t *testing.T) {
-			keyword := []memory.OriginalRef{
+			keyword := []ledger.OriginalRef{
 				{Key: "0a", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"},
 				{Key: "0b", Owner: event.Address{AgentID: "agent", SessionID: "s1"}, Format: "text/plain", RetentionPolicy: "keep"},
 			}

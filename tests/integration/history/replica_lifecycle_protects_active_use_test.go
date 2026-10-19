@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/workspace"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // TestReplicaLifecycleProtectsActiveUse proves the active-use protection contract of the replica lifecycle on the formal workspace face.
@@ -28,14 +29,14 @@ import (
 func TestReplicaLifecycleProtectsActiveUse(t *testing.T) {
 	ctx := context.Background()
 	owner := event.Address{AgentID: event.AgentID("agent-a"), SessionID: event.SessionID("session-a")}
-	scope := memory.ReadScope{Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
-	ref := memory.OriginalRef{Key: "result-a", Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
+	scope := ledger.ReadScope{Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
+	ref := ledger.OriginalRef{Key: "result-a", Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
 	firstBody := []byte("working copy bytes: the exact original bytes one replica carries")
 	movedBody := []byte("moved-on bytes: the true source answers different bytes now")
 
-	seeded := func(t *testing.T, body []byte) memory.ScopedOriginalStore {
+	seeded := func(t *testing.T, body []byte) ledger.ScopedOriginalStore {
 		t.Helper()
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -49,7 +50,7 @@ func TestReplicaLifecycleProtectsActiveUse(t *testing.T) {
 		}
 		return cleaner
 	}
-	materializerFor := func(t *testing.T, root string, store memory.ScopedOriginalStore, cleaner *workspace.ReplicaCleaner) *workspace.Materializer {
+	materializerFor := func(t *testing.T, root string, store ledger.ScopedOriginalStore, cleaner *workspace.ReplicaCleaner) *workspace.Materializer {
 		t.Helper()
 		materializer, err := workspace.NewMaterializer(root, store, scope, workspace.WithCleaner(cleaner))
 		if err != nil {

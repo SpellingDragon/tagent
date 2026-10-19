@@ -15,7 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/model"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -227,9 +227,9 @@ func TestConcurrentRunsStayScoped(t *testing.T) {
 func TestCrossSessionContentIsRefused(t *testing.T) {
 	ctx := context.Background()
 	const alphaContent = "alpha-only fact: the private material of session alpha"
-	alpha := memory.ChainKey{PartitionID: 1, SessionID: "session-alpha"}
-	chain := memory.NewMemoryEventChain()
-	if err := chain.Commit(ctx, memory.ChainFact{
+	alpha := replay.ChainKey{PartitionID: 1, SessionID: "session-alpha"}
+	chain := replay.NewMemoryEventChain()
+	if err := chain.Commit(ctx, replay.ChainFact{
 		Key:     event.EventID("a-0001"),
 		Chain:   alpha,
 		Type:    event.TypeExternalInput,
@@ -239,8 +239,8 @@ func TestCrossSessionContentIsRefused(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("commit the alpha fact: %v", err)
 	}
-	projection := memory.NewReplayProjection()
-	if _, err := memory.RebuildProjectionFromWAL(ctx, projection, chain, memory.NewMemoryRelations(), alpha, memory.RebuildOptions{}); err != nil {
+	projection := replay.NewReplayProjection()
+	if _, err := replay.RebuildProjectionFromWAL(ctx, projection, chain, replay.NewMemoryRelations(), alpha, replay.RebuildOptions{}); err != nil {
 		t.Fatalf("rebuild the alpha chain: %v", err)
 	}
 

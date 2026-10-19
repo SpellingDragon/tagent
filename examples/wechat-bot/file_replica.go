@@ -9,8 +9,9 @@ import (
 	"strings"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/workspace"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // resultCopy 是一个大结果的投递副本：通道读取的路径，以及覆盖它的活跃保护的释放动作。
@@ -38,8 +39,8 @@ const replicaRetention = "delivery"
 
 // replicaStore 是投递生命周期需要的原文面：外置原文的提交面，以及材料化副本所用的受限读取面。
 type replicaStore interface {
-	memory.OriginalStore
-	memory.ScopedOriginalStore
+	ledger.OriginalStore
+	ledger.ScopedOriginalStore
 }
 
 // deliveryOwner 是宿主投递副本归属的会址：宿主进程自身而非某一个会话，
@@ -73,7 +74,7 @@ func newWorkspaceReplicas(workspaceDir string, owner event.Address, store replic
 	if err != nil {
 		return nil, err
 	}
-	readScope := memory.ReadScope{Owner: scope.Owner, Format: scope.Format, RetentionPolicy: scope.RetentionPolicy}
+	readScope := ledger.ReadScope{Owner: scope.Owner, Format: scope.Format, RetentionPolicy: scope.RetentionPolicy}
 	materializer, err := workspace.NewMaterializer(root, store, readScope, workspace.WithCleaner(cleaner))
 	if err != nil {
 		return nil, err

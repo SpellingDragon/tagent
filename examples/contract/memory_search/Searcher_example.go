@@ -3,19 +3,20 @@ package memorysearchexample
 import (
 	"context"
 
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/search"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // authorizedSearcher is the canonical authorized-scope query port: it answers inside the
 // partitions the caller is authorized to read and never widens to the whole store.
 type authorizedSearcher struct {
-	authorized map[string][]memory.OriginalRef
+	authorized map[string][]ledger.OriginalRef
 }
 
 // Search returns the reference set of q, bounded by the page the query asks for.
 func (s *authorizedSearcher) Search(_ context.Context, q search.Query) (search.Result, error) {
-	refs := make([]memory.OriginalRef, 0, q.Limit)
+	refs := make([]ledger.OriginalRef, 0, q.Limit)
 	for _, partition := range q.Partitions {
 		for _, ref := range s.authorized[partition] {
 			refs = append(refs, ref)
@@ -36,7 +37,7 @@ var _ search.Searcher = (*authorizedSearcher)(nil)
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
 func ExampleSearcher() {
 	ctx := context.Background()
-	searcher := &authorizedSearcher{authorized: map[string][]memory.OriginalRef{
+	searcher := &authorizedSearcher{authorized: map[string][]ledger.OriginalRef{
 		"partition-1": {{Key: "event-1", Format: "text"}, {Key: "event-2", Format: "text"}},
 	}}
 

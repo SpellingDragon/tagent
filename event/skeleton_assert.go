@@ -46,6 +46,17 @@ var (
 	_ func(Address) bool = Address.IsComplete
 )
 
+// The compress request family keeps its declared shapes: the judgment a producer
+// files, its identity derivation and the frozen type it is read as.
+var (
+	_ = CompressRequest{ID: "", Producer: "", Reason: "", Subject: "", At: time.Time{}}
+
+	_ func(string, string, string) CompressRequest = CompressRequestFor
+)
+
+// CompressRequestType is a frozen type word, not a computed value.
+const _ = CompressRequestType
+
 // The frozen type and metadata names must stay compile-time constants: a
 // variable or a computed value stops this block from compiling.
 const (

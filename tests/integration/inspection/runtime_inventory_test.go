@@ -11,10 +11,11 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // planAgents reads the configured agent identities out of the same
@@ -183,11 +184,11 @@ func newRuntimeFixture(t *testing.T) *runtimeFixture {
 	addrA := event.Address{AgentID: event.AgentID("agent-a"), SessionID: event.SessionID("s1")}
 	addrB := event.Address{AgentID: event.AgentID("agent-b"), SessionID: event.SessionID("s1")}
 	addrC := event.Address{AgentID: event.AgentID("agent-c"), SessionID: event.SessionID("s1")}
-	tier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 	if err != nil {
 		t.Fatalf("NewDurableCommit: %v", err)
 	}

@@ -10,6 +10,7 @@
 | `github.com/SpellingDragon/tagent/config` | [github_com__SpellingDragon__tagent__config.md](github_com__SpellingDragon__tagent__config.md) |
 | `github.com/SpellingDragon/tagent/event` | [github_com__SpellingDragon__tagent__event.md](github_com__SpellingDragon__tagent__event.md) |
 | `github.com/SpellingDragon/tagent/evolution` | [github_com__SpellingDragon__tagent__evolution.md](github_com__SpellingDragon__tagent__evolution.md) |
+| `github.com/SpellingDragon/tagent/evolution/meditation` | [github_com__SpellingDragon__tagent__evolution__meditation.md](github_com__SpellingDragon__tagent__evolution__meditation.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/agent` | [github_com__SpellingDragon__tagent__examples__contract__agent.md](github_com__SpellingDragon__tagent__examples__contract__agent.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/evolution` | [github_com__SpellingDragon__tagent__examples__contract__evolution.md](github_com__SpellingDragon__tagent__examples__contract__evolution.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/memory` | [github_com__SpellingDragon__tagent__examples__contract__memory.md](github_com__SpellingDragon__tagent__examples__contract__memory.md) |
@@ -26,6 +27,8 @@
 | `github.com/SpellingDragon/tagent/examples/contract/tool_remote` | [github_com__SpellingDragon__tagent__examples__contract__tool_remote.md](github_com__SpellingDragon__tagent__examples__contract__tool_remote.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/workspace` | [github_com__SpellingDragon__tagent__examples__contract__workspace.md](github_com__SpellingDragon__tagent__examples__contract__workspace.md) |
 | `github.com/SpellingDragon/tagent/memory` | [github_com__SpellingDragon__tagent__memory.md](github_com__SpellingDragon__tagent__memory.md) |
+| `github.com/SpellingDragon/tagent/memory/ledger` | [github_com__SpellingDragon__tagent__memory__ledger.md](github_com__SpellingDragon__tagent__memory__ledger.md) |
+| `github.com/SpellingDragon/tagent/memory/replay` | [github_com__SpellingDragon__tagent__memory__replay.md](github_com__SpellingDragon__tagent__memory__replay.md) |
 | `github.com/SpellingDragon/tagent/memory/search` | [github_com__SpellingDragon__tagent__memory__search.md](github_com__SpellingDragon__tagent__memory__search.md) |
 | `github.com/SpellingDragon/tagent/model` | [github_com__SpellingDragon__tagent__model.md](github_com__SpellingDragon__tagent__model.md) |
 | `github.com/SpellingDragon/tagent/plugin` | [github_com__SpellingDragon__tagent__plugin.md](github_com__SpellingDragon__tagent__plugin.md) |
@@ -55,4 +58,4 @@
 | `github.com/SpellingDragon/tagent/workspace` | [github_com__SpellingDragon__tagent__workspace.md](github_com__SpellingDragon__tagent__workspace.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：50。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：53。文档覆盖由 scripts/comment_policy 单点判定。

@@ -1,4 +1,4 @@
-package memory
+package replay
 
 import (
 	"context"
@@ -9,6 +9,9 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 )
+
+// settleNow is the pass time the settle invariants judge age against.
+var settleNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
 // TestSettleLandsAsReplaySettle pins the settled presentation as a fact: one settle fact per decision, none for a skipped entry.
 // - a degraded presentation lands one replay-settle fact with its entry, ticket mode and preview
@@ -29,7 +32,7 @@ func TestSettleLandsAsReplaySettle(t *testing.T) {
 		Type:    event.TypeAgentOutput,
 		Summary: "big result",
 		Content: strings.Repeat("x", 1800),
-		Time:    curationNow,
+		Time:    settleNow,
 	}
 	skipped := ChainFact{
 		Key:     "skip-1",
@@ -37,7 +40,7 @@ func TestSettleLandsAsReplaySettle(t *testing.T) {
 		Type:    event.TypeAgentOutput,
 		Summary: strings.Repeat("s", 300),
 		Content: strings.Repeat("y", 1800),
-		Time:    curationNow.Add(time.Minute),
+		Time:    settleNow.Add(time.Minute),
 	}
 	for _, fact := range []ChainFact{large, skipped} {
 		if err := chain.Commit(ctx, fact); err != nil {
@@ -100,4 +103,15 @@ func TestSettleLandsAsReplaySettle(t *testing.T) {
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("fact chain after assembly = %+v, want it exactly as it stood", after)
 	}
+}
+
+// scanAll reads every fact of one chain in write order, so a comparison sees the
+// chain as it stands rather than one page of it.
+func scanAll(t *testing.T, ctx context.Context, chain EventChain) []ChainFact {
+	t.Helper()
+	facts, err := chain.ScanFrom(ctx, "", 1024)
+	if err != nil {
+		t.Fatalf("scan the chain: %v", err)
+	}
+	return facts
 }

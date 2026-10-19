@@ -532,7 +532,7 @@ func WithReflectionAnchors(path string) Option
     no path carries no reflection anchor store, and its reflection face reports
     that absence instead of a watermark of its own.
 
-func WithStorage(cfg memory.StorageConfig) Option
+func WithStorage(cfg ledger.StorageConfig) Option
     WithStorage opens the named storage tier for this assembly and stores the
     task facts through it: every fact the run commits lands on the tier's own
     fact log, and the chains that log already holds are folded back at assembly.
@@ -648,7 +648,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     acquired. MUST NOT carry a stand-in governance in a formal assembly.
     MUST NOT return a half-assembled run beside a publication failure.
 
-func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *memory.ReplayProjection) error
+func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *replay.ReplayProjection) error
     AttachReplay registers the replayed projection of one session chain on this
     assembly: every request of that session carries the chain's budget assembly
     in front of its transcript, mapped under the frozen event-type→role table.

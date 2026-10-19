@@ -16,9 +16,10 @@ import (
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/workspace"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 type fileCall struct {
@@ -366,7 +367,7 @@ type fileRig struct {
 	host         *hostRuntime
 	model        *scriptModel
 	out          *fileChannel
-	store        *memory.MemoryOriginalStore
+	store        *ledger.MemoryOriginalStore
 	replicas     *workspaceReplicas
 	workspaceDir string
 }
@@ -396,7 +397,7 @@ func newFileRig(t *testing.T, workspaceDir string, maxTokens int) *fileRig {
 		t.Fatalf("assemble the host: %v", err)
 	}
 
-	store := memory.NewMemoryOriginalStore()
+	store := ledger.NewMemoryOriginalStore()
 	replicas, err := newWorkspaceReplicas(workspaceDir, deliveryOwner(doc.Entry), store, maxTokens)
 	if err != nil {
 		t.Fatalf("wire the delivery replicas: %v", err)
@@ -577,7 +578,7 @@ func TestFileRoundTrip(t *testing.T) {
 		}
 		ref := workspace.OriginalRefFor(rig.replicas.scope, body)
 		recalled := rig.store.Get(context.Background(), ref.Key)
-		if recalled.Outcome != memory.RecallFound || !bytes.Equal(recalled.Body, body) {
+		if recalled.Outcome != ledger.RecallFound || !bytes.Equal(recalled.Body, body) {
 			t.Fatalf("the original of the large result reads back as %v, want the committed bytes", recalled.Outcome)
 		}
 		if err := rig.replicas.CleanupStartup(context.Background()); err != nil {

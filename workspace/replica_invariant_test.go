@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // invariantScope is the trusted read scope the replica tests run inside.
-func invariantScope() memory.ReadScope {
-	return memory.ReadScope{
+func invariantScope() ledger.ReadScope {
+	return ledger.ReadScope{
 		Owner:           event.Address{AgentID: "agent-a", SessionID: "session-1"},
 		Format:          "tool-output",
 		RetentionPolicy: "keep",
@@ -24,9 +25,9 @@ func invariantScope() memory.ReadScope {
 }
 
 // invariantRef builds one durable original reference inside the trusted scope.
-func invariantRef(key string) memory.OriginalRef {
+func invariantRef(key string) ledger.OriginalRef {
 	scope := invariantScope()
-	return memory.OriginalRef{
+	return ledger.OriginalRef{
 		Key:             event.EventID(key),
 		Owner:           scope.Owner,
 		Format:          scope.Format,
@@ -35,10 +36,10 @@ func invariantRef(key string) memory.OriginalRef {
 }
 
 // invariantMaterializer builds one materializer over a fresh in-memory original store.
-func invariantMaterializer(t *testing.T, options ...MaterializerOption) (*Materializer, *memory.MemoryOriginalStore, string) {
+func invariantMaterializer(t *testing.T, options ...MaterializerOption) (*Materializer, *ledger.MemoryOriginalStore, string) {
 	t.Helper()
 	root := t.TempDir()
-	store := memory.NewMemoryOriginalStore()
+	store := ledger.NewMemoryOriginalStore()
 	materializer, err := NewMaterializer(root, store, invariantScope(), options...)
 	if err != nil {
 		t.Fatalf("assemble the materializer: %v", err)
@@ -47,7 +48,7 @@ func invariantMaterializer(t *testing.T, options ...MaterializerOption) (*Materi
 }
 
 // invariantPut commits one original body under the scope and answers its reference.
-func invariantPut(t *testing.T, store *memory.MemoryOriginalStore, key string, body []byte) memory.OriginalRef {
+func invariantPut(t *testing.T, store *ledger.MemoryOriginalStore, key string, body []byte) ledger.OriginalRef {
 	t.Helper()
 	ref := invariantRef(key)
 	if err := store.Put(context.Background(), ref, body); err != nil {
@@ -184,7 +185,7 @@ func TestReplicaIdentityInvariants(t *testing.T) {
 
 	t.Run("a linked parent refuses the materialisation", func(t *testing.T) {
 		root := t.TempDir()
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		materializer, err := NewMaterializer(root, store, invariantScope())
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)
@@ -207,12 +208,12 @@ func TestReplicaIdentityInvariants(t *testing.T) {
 	})
 
 	t.Run("the construction refusals are named", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if _, err := NewMaterializer("", store, invariantScope()); !errors.Is(err, ErrReplicaRootRequired) {
 			t.Fatalf("empty root = %v, want %v", err, ErrReplicaRootRequired)
 		}
-		if _, err := NewMaterializer(t.TempDir(), store, memory.ReadScope{}); !errors.Is(err, memory.ErrScopeRequired) {
-			t.Fatalf("empty scope = %v, want %v", err, memory.ErrScopeRequired)
+		if _, err := NewMaterializer(t.TempDir(), store, ledger.ReadScope{}); !errors.Is(err, ledger.ErrScopeRequired) {
+			t.Fatalf("empty scope = %v, want %v", err, ledger.ErrScopeRequired)
 		}
 		root := t.TempDir()
 		cleaner, err := NewReplicaCleaner(t.TempDir())
@@ -226,13 +227,13 @@ func TestReplicaIdentityInvariants(t *testing.T) {
 }
 
 // invariantMaterializerAt builds one materializer at an already chosen root over the given store.
-func invariantMaterializerAt(t *testing.T, root string, store memory.ScopedOriginalStore) (*Materializer, *memory.MemoryOriginalStore, string) {
+func invariantMaterializerAt(t *testing.T, root string, store ledger.ScopedOriginalStore) (*Materializer, *ledger.MemoryOriginalStore, string) {
 	t.Helper()
 	materializer, err := NewMaterializer(root, store, invariantScope())
 	if err != nil {
 		t.Fatalf("assemble the second materializer: %v", err)
 	}
-	memoryStore, ok := store.(*memory.MemoryOriginalStore)
+	memoryStore, ok := store.(*ledger.MemoryOriginalStore)
 	if !ok {
 		t.Fatalf("store = %T, want the in-memory original store", store)
 	}
@@ -307,7 +308,7 @@ func TestReplicaLifecycleInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("assemble the cleaner: %v", err)
 		}
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		materializer, err := NewMaterializer(root, store, invariantScope(), WithCleaner(cleaner))
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)
@@ -360,7 +361,7 @@ func TestReplicaLifecycleInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("assemble the cleaner: %v", err)
 		}
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		materializer, err := NewMaterializer(root, store, invariantScope(), WithCleaner(cleaner))
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)
@@ -403,15 +404,15 @@ func TestReplicaLifecycleInvariants(t *testing.T) {
 		}
 		outside := invariantRef("original-1")
 		outside.Owner = event.Address{AgentID: "agent-b", SessionID: "session-9"}
-		if _, err := reader.ReadSegment(ctx, outside, "tool", memory.SegmentRequest{}); !errors.Is(err, ErrReplicaUnauthorized) {
+		if _, err := reader.ReadSegment(ctx, outside, "tool", ledger.SegmentRequest{}); !errors.Is(err, ErrReplicaUnauthorized) {
 			t.Fatalf("read outside the scope = %v, want %v", err, ErrReplicaUnauthorized)
 		}
-		if _, err := reader.ReadSegment(ctx, invariantRef("no-such-original"), "tool", memory.SegmentRequest{}); !errors.Is(err, ErrOriginalIneffective) {
+		if _, err := reader.ReadSegment(ctx, invariantRef("no-such-original"), "tool", ledger.SegmentRequest{}); !errors.Is(err, ErrOriginalIneffective) {
 			t.Fatalf("read of an ineffective original = %v, want %v", err, ErrOriginalIneffective)
 		}
 
 		var collected []byte
-		request := memory.SegmentRequest{MaxBytes: 5}
+		request := ledger.SegmentRequest{MaxBytes: 5}
 		for range 20 {
 			segment, err := reader.ReadSegment(ctx, ref, "tool", request)
 			if err != nil {
@@ -419,7 +420,7 @@ func TestReplicaLifecycleInvariants(t *testing.T) {
 			}
 			collected = append(collected, segment.Body...)
 			if segment.EOF {
-				if segment.Next != (memory.SegmentPosition{}) {
+				if segment.Next != (ledger.SegmentPosition{}) {
 					t.Fatalf("EOF next = %+v, want no resumption point", segment.Next)
 				}
 				break
@@ -440,8 +441,8 @@ func TestReplicaLifecycleInvariants(t *testing.T) {
 		if _, err := materializer.Open(ctx, ref, "tool"); !errors.Is(err, ErrReplicaProtectionUnavailable) {
 			t.Fatalf("open without a cleaner = %v, want %v", err, ErrReplicaProtectionUnavailable)
 		}
-		if _, err := materializer.Open(ctx, invariantRef(""), "tool"); !errors.Is(err, memory.ErrKeyRequired) {
-			t.Fatalf("open without a key = %v, want %v", err, memory.ErrKeyRequired)
+		if _, err := materializer.Open(ctx, invariantRef(""), "tool"); !errors.Is(err, ledger.ErrKeyRequired) {
+			t.Fatalf("open without a key = %v, want %v", err, ledger.ErrKeyRequired)
 		}
 	})
 }

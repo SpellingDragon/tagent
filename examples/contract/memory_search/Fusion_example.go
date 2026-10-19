@@ -4,8 +4,9 @@ import (
 	"context"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/search"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // rankFusion is the canonical hybrid recall port: it merges the vector leg and the keyword
@@ -15,16 +16,16 @@ type rankFusion struct{}
 
 // Fuse merges the two legs under strategy and returns the ordered reference set they fuse
 // into.
-func (rankFusion) Fuse(_ context.Context, strategy search.Strategy, vector, keyword []memory.OriginalRef) (search.Result, error) {
+func (rankFusion) Fuse(_ context.Context, strategy search.Strategy, vector, keyword []ledger.OriginalRef) (search.Result, error) {
 	switch strategy {
 	case search.StrategyVectorOnly:
-		return search.Result{Refs: append([]memory.OriginalRef(nil), vector...)}, nil
+		return search.Result{Refs: append([]ledger.OriginalRef(nil), vector...)}, nil
 	case search.StrategyKeywordOnly:
-		return search.Result{Refs: append([]memory.OriginalRef(nil), keyword...)}, nil
+		return search.Result{Refs: append([]ledger.OriginalRef(nil), keyword...)}, nil
 	}
 	seen := make(map[event.EventID]struct{}, len(vector)+len(keyword))
-	fused := make([]memory.OriginalRef, 0, len(vector)+len(keyword))
-	for _, leg := range [][]memory.OriginalRef{vector, keyword} {
+	fused := make([]ledger.OriginalRef, 0, len(vector)+len(keyword))
+	for _, leg := range [][]ledger.OriginalRef{vector, keyword} {
 		for _, ref := range leg {
 			if _, ok := seen[ref.Key]; ok {
 				continue
@@ -45,9 +46,9 @@ var _ search.Fusion = rankFusion{}
 func ExampleFusion() {
 	ctx := context.Background()
 	var fusion search.Fusion = rankFusion{}
-	shared := memory.OriginalRef{Key: "event-2", Format: "text"}
-	vector := []memory.OriginalRef{{Key: "event-1", Format: "text"}, shared}
-	keyword := []memory.OriginalRef{shared, {Key: "event-3", Format: "text"}}
+	shared := ledger.OriginalRef{Key: "event-2", Format: "text"}
+	vector := []ledger.OriginalRef{{Key: "event-1", Format: "text"}, shared}
+	keyword := []ledger.OriginalRef{shared, {Key: "event-3", Format: "text"}}
 
 	fused, err := fusion.Fuse(ctx, search.StrategyHybrid, vector, keyword)
 	if err != nil || len(fused.Refs) != 3 || fused.NextCursor != "" {

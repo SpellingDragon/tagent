@@ -15,6 +15,7 @@ import (
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // EventBody is the body schema of one committed event: the fields a query
@@ -53,7 +54,7 @@ var ErrBodyKeyMismatch = errors.New("memory: event body key disagrees with the s
 // event carrying no key is refused by name.
 func BodyFromEvent(ev event.Event, format, retentionPolicy string) (EventBody, error) {
 	if ev.Key == "" {
-		return EventBody{}, ErrEventKeyRequired
+		return EventBody{}, ledger.ErrEventKeyRequired
 	}
 	return EventBody{
 		Key:             ev.Key,
@@ -101,6 +102,6 @@ func (b EventBody) Record(partitionID int, windowTS int64) EventRecord {
 // stays undeclared here — the original store computes it over the bytes it
 // commits, so a derived reference never carries a completeness claim of its
 // own.
-func (b EventBody) Ref() OriginalRef {
-	return OriginalRef{Key: b.Key, Owner: b.Owner, Format: b.Format, RetentionPolicy: b.RetentionPolicy}
+func (b EventBody) Ref() ledger.OriginalRef {
+	return ledger.OriginalRef{Key: b.Key, Owner: b.Owner, Format: b.Format, RetentionPolicy: b.RetentionPolicy}
 }

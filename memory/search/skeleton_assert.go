@@ -13,6 +13,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // The declared shapes and their fields.
@@ -30,7 +31,7 @@ var (
 	}
 
 	_ = Result{
-		Refs:       []memory.OriginalRef{},
+		Refs:       []ledger.OriginalRef{},
 		NextCursor: Cursor(""),
 	}
 )
@@ -54,7 +55,7 @@ var (
 var (
 	_ func(Searcher, context.Context, Query) (Result, error) = Searcher.Search
 
-	_ func(Fusion, context.Context, Strategy, []memory.OriginalRef, []memory.OriginalRef) (Result, error) = Fusion.Fuse
+	_ func(Fusion, context.Context, Strategy, []ledger.OriginalRef, []ledger.OriginalRef) (Result, error) = Fusion.Fuse
 )
 
 // The declared ports must stay interface types, and the carried fusion keeps

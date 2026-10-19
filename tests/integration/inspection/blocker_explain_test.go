@@ -15,7 +15,6 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
@@ -23,6 +22,8 @@ import (
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // bxExecutor is the deterministic execution face of these sub-cases: it owns
@@ -604,11 +605,11 @@ func TestExplainRuntimeBlockers(t *testing.T) {
 
 	t.Run("S5 重启与存储失败可辨: a restored chain lists its owed obligations and an unreadable source refuses by name", func(t *testing.T) {
 		ctx := context.Background()
-		tier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+		tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -669,7 +670,7 @@ func TestExplainRuntimeBlockers(t *testing.T) {
 			t.Fatalf("live obligations after the drained queue = (%+v, %v), want every accepted delivery settled", obligations, err)
 		}
 
-		durable2, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		durable2, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit over the same log: %v", err)
 		}

@@ -7,7 +7,7 @@
 // the per-partition capacity bound. An unset field falls back to the default
 // and an explicit value wins, so no composition root hardcodes a second copy of
 // the default beside the config it was handed.
-package memory
+package ledger
 
 import "time"
 

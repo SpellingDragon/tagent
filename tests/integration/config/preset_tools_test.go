@@ -15,6 +15,7 @@ import (
 	orgconfig "github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/state"
 
@@ -85,7 +86,7 @@ func TestPresetToolsAssemble(t *testing.T) {
 		"agent-preset": {Model: provider},
 	},
 		tagent.WithGovernance(presetGovernance{}),
-		tagent.WithStorage(memory.StorageConfig{Type: memory.StorageLocalFile, Root: storeRoot}),
+		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: storeRoot}),
 	)
 	if err != nil {
 		t.Fatalf("assemble the preset declaration: %v", err)
@@ -174,7 +175,7 @@ agents:
 func seedPresetRecall(t *testing.T, root string) {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: root})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
 	if err != nil {
 		t.Fatalf("OpenTier(localfile): %v", err)
 	}
@@ -193,7 +194,7 @@ func seedPresetRecall(t *testing.T, root string) {
 	if err != nil {
 		t.Fatalf("Encode(%s): %v", presetRecallKey, err)
 	}
-	if err := tier.Segments.StoreEvent(ctx, memory.SegmentRecord{
+	if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
 		PartitionID: memory.PartitionIDFromName(presetRecallPartition),
 		WindowTS:    1000,
 		Seq:         0,

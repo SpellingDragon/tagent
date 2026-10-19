@@ -11,7 +11,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/state"
@@ -222,7 +222,7 @@ func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (stat
 // replayEntry is one session chain's projection registered for replay: the
 // projection itself beside the budget the request boundary assembles it under.
 type replayEntry struct {
-	projection *memory.ReplayProjection
+	projection *replay.ReplayProjection
 	budget     int
 }
 
@@ -231,7 +231,7 @@ type replayEntry struct {
 // in front of its transcript, mapped under the frozen event-type→role table.
 // A chain that names no session is refused by name: assembling one would join
 // every user of the partition into one transcript.
-func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *memory.ReplayProjection) error {
+func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *replay.ReplayProjection) error {
 	if chain.SessionID == "" {
 		return agent.ErrRequestChainSessionRequired
 	}

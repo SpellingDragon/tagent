@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // 契约: docs/wiki/memory/memory-architecture.md#inmemory-retrieval
@@ -26,7 +26,7 @@ type Fusion interface {
 	// A fused set is complete as given and hands out no continuation: its
 	// NextCursor stays zero, and paging is answered by the retrieval port from
 	// the legs before they fuse, not by the fusion.
-	Fuse(ctx context.Context, strategy Strategy, vector, keyword []memory.OriginalRef) (Result, error)
+	Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error)
 }
 
 // Strategy parameterizes how the retrieval legs of a query are combined. It is
@@ -78,7 +78,7 @@ var _ Fusion = RRFFusion{}
 
 // Fuse merges the two legs under strategy and returns the ordered reference
 // set they fuse into, on the terms of the Fusion port.
-func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []memory.OriginalRef) (Result, error) {
+func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
@@ -101,8 +101,8 @@ func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []
 // carries the leg's references in the leg's order and hands out no
 // continuation. It is the single path both keyword-only and the empty-vector
 // hybrid fallback answer through, so their answers are one answer.
-func keywordOnly(keyword []memory.OriginalRef) Result {
-	refs := make([]memory.OriginalRef, len(keyword))
+func keywordOnly(keyword []ledger.OriginalRef) Result {
+	refs := make([]ledger.OriginalRef, len(keyword))
 	copy(refs, keyword)
 	return Result{Refs: refs}
 }
@@ -113,10 +113,10 @@ func keywordOnly(keyword []memory.OriginalRef) Result {
 // descending score with ties broken toward the larger event key. A reference
 // appearing in both legs carries both contributions; the same reference twice
 // inside one leg is counted at its first rank only.
-func reciprocalRank(vector, keyword []memory.OriginalRef) Result {
-	scores := map[memory.OriginalRef]float64{}
-	accumulate := func(leg []memory.OriginalRef) {
-		seen := make(map[memory.OriginalRef]bool, len(leg))
+func reciprocalRank(vector, keyword []ledger.OriginalRef) Result {
+	scores := map[ledger.OriginalRef]float64{}
+	accumulate := func(leg []ledger.OriginalRef) {
+		seen := make(map[ledger.OriginalRef]bool, len(leg))
 		for rank, ref := range leg {
 			if seen[ref] {
 				continue
@@ -128,7 +128,7 @@ func reciprocalRank(vector, keyword []memory.OriginalRef) Result {
 	accumulate(vector)
 	accumulate(keyword)
 
-	refs := make([]memory.OriginalRef, 0, len(scores))
+	refs := make([]ledger.OriginalRef, 0, len(scores))
 	for ref := range scores {
 		refs = append(refs, ref)
 	}

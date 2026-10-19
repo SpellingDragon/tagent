@@ -10,13 +10,14 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // passPolicy is the deterministic stand-in of the real governance policy the
@@ -49,7 +50,7 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 	t.Run("the formal register lands a self-contained chain a restart restores", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-chain"}
 		provider := &chainModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 			if len(req.Messages) == 1 {
@@ -121,12 +122,12 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 	t.Run("a chain carrying no admission material is refused by name and reports no recovery", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
-		tier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
+		tier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("open the fixture tier: %v", err)
 		}
-		fixture, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+		fixture, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			t.Fatalf("build the fixture chain: %v", err)
 		}

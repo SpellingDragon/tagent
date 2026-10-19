@@ -13,13 +13,14 @@ import (
 	"sync"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // observedEntry is one landed event: the query record the read face filters
 // and orders on, and the reference the recall path reads the original under.
 type observedEntry struct {
 	record EventRecord
-	ref    OriginalRef
+	ref    ledger.OriginalRef
 }
 
 // StoreQuerySource is the query source over the observation table: it answers
@@ -41,7 +42,7 @@ func NewStoreQuerySource() *StoreQuerySource {
 // the original under. A body whose canonical key disagrees with the stored key
 // is refused by name. A repeat of one event key keeps the record of the higher
 // window, and a repeat at the same window is an idempotent no-op.
-func (s *StoreQuerySource) LandEvent(ctx context.Context, stored StoredEvent) error {
+func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEvent) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -67,7 +68,7 @@ func (s *StoreQuerySource) LandEvent(ctx context.Context, stored StoredEvent) er
 // ObserveStore lands every event the store has published into the table. An
 // already landed event keeps its record and only the events not yet landed are
 // decoded and added, so observing twice over unchanged state moves nothing.
-func (s *StoreQuerySource) ObserveStore(ctx context.Context, store *FileSegmentStore) error {
+func (s *StoreQuerySource) ObserveStore(ctx context.Context, store *ledger.FileSegmentStore) error {
 	events, err := store.Events(ctx)
 	if err != nil {
 		return err
@@ -97,12 +98,12 @@ func (s *StoreQuerySource) ObservedCount() int {
 
 // Reference returns the recall reference the event key was landed with, and
 // reports whether the table holds one.
-func (s *StoreQuerySource) Reference(key event.EventID) (OriginalRef, bool) {
+func (s *StoreQuerySource) Reference(key event.EventID) (ledger.OriginalRef, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, held := s.entries[key]
 	if !held {
-		return OriginalRef{}, false
+		return ledger.OriginalRef{}, false
 	}
 	return entry.ref, true
 }

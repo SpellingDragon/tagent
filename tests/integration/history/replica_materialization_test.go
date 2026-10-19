@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/workspace"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // TestReplicaMaterialization proves the workspace replica materialisation contract on the frozen 03.6 face, in the six G2 sequences.
@@ -29,14 +30,14 @@ func TestReplicaMaterialization(t *testing.T) {
 	ctx := context.Background()
 	ownerA := event.Address{AgentID: event.AgentID("agent-a"), SessionID: event.SessionID("session-a")}
 	ownerB := event.Address{AgentID: event.AgentID("agent-b"), SessionID: event.SessionID("session-b")}
-	scopeA := memory.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-	scopeB := memory.ReadScope{Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
+	scopeA := ledger.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+	scopeB := ledger.ReadScope{Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
 	body := []byte("replica body: exactly these bytes reach the replica and every segment of it")
-	refA := memory.OriginalRef{Key: "result-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-	refB := memory.OriginalRef{Key: "result-b", Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
-	refSameBlob := memory.OriginalRef{Key: "result-a", Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
+	refA := ledger.OriginalRef{Key: "result-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+	refB := ledger.OriginalRef{Key: "result-b", Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
+	refSameBlob := ledger.OriginalRef{Key: "result-a", Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
 
-	materializer := func(t *testing.T, root string, store memory.ScopedOriginalStore, scope memory.ReadScope) *workspace.Materializer {
+	materializer := func(t *testing.T, root string, store ledger.ScopedOriginalStore, scope ledger.ReadScope) *workspace.Materializer {
 		t.Helper()
 		mat, err := workspace.NewMaterializer(root, store, scope)
 		if err != nil {
@@ -54,10 +55,10 @@ func TestReplicaMaterialization(t *testing.T) {
 			t.Fatalf("replica %s holds %d bytes, want the exact original bytes", path, len(got))
 		}
 	}
-	walkSegments := func(t *testing.T, reader *workspace.ReplicaReader, ref memory.OriginalRef, consumer string, max int64) []byte {
+	walkSegments := func(t *testing.T, reader *workspace.ReplicaReader, ref ledger.OriginalRef, consumer string, max int64) []byte {
 		t.Helper()
 		var out []byte
-		req := memory.SegmentRequest{MaxBytes: max}
+		req := ledger.SegmentRequest{MaxBytes: max}
 		for {
 			result, err := reader.ReadSegment(ctx, ref, consumer, req)
 			if err != nil {
@@ -72,7 +73,7 @@ func TestReplicaMaterialization(t *testing.T) {
 	}
 
 	t.Run("G2.1 物化引用稳定不互覆盖: every target resolves to its own stable path across owner, tool and restart", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, refA, body); err != nil {
 			t.Fatalf("Put refA: %v", err)
 		}
@@ -135,7 +136,7 @@ func TestReplicaMaterialization(t *testing.T) {
 	})
 
 	t.Run("G2.2 显式安全复用: a replica already on disk is reused and never refuses a second replica", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, refA, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -170,7 +171,7 @@ func TestReplicaMaterialization(t *testing.T) {
 	})
 
 	t.Run("G2.3 多副本并存合法: replicas of one original stand side by side while the blob stays deduplicated", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, refA, body); err != nil {
 			t.Fatalf("Put refA: %v", err)
 		}
@@ -189,7 +190,7 @@ func TestReplicaMaterialization(t *testing.T) {
 		matB := materializer(t, root, store, scopeB)
 		type target struct {
 			mat      *workspace.Materializer
-			ref      memory.OriginalRef
+			ref      ledger.OriginalRef
 			consumer string
 		}
 		targets := []target{
@@ -225,7 +226,7 @@ func TestReplicaMaterialization(t *testing.T) {
 	})
 
 	t.Run("G2.4 副本缺失按原文重物化: a missing replica is written again, and a path is declared only where the write succeeded", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, refA, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -255,7 +256,7 @@ func TestReplicaMaterialization(t *testing.T) {
 			t.Fatalf("remove replica: %v", err)
 		}
 		reader := mat.Reader()
-		segment, err := reader.ReadSegment(ctx, refA, "tool-shell", memory.SegmentRequest{})
+		segment, err := reader.ReadSegment(ctx, refA, "tool-shell", ledger.SegmentRequest{})
 		if err != nil {
 			t.Fatalf("ReadSegment over the missing replica: %v", err)
 		}
@@ -282,9 +283,9 @@ func TestReplicaMaterialization(t *testing.T) {
 	})
 
 	t.Run("G2.5 原文失效副本不假称可重建: an ineffective original presents rebuildability as false and refuses the rebuild", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore(memory.WithRetentionWindow("transient", time.Second))
-		refT := memory.OriginalRef{Key: "result-t", Owner: ownerA, Format: "tool-output", RetentionPolicy: "transient"}
-		scopeT := memory.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "transient"}
+		store := ledger.NewMemoryOriginalStore(ledger.WithRetentionWindow("transient", time.Second))
+		refT := ledger.OriginalRef{Key: "result-t", Owner: ownerA, Format: "tool-output", RetentionPolicy: "transient"}
+		scopeT := ledger.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "transient"}
 		if err := store.Put(ctx, refT, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -336,7 +337,7 @@ func TestReplicaMaterialization(t *testing.T) {
 	})
 
 	t.Run("G2.6 授权外分段读拒绝: segmented reads outside the bound read scope are refused and serve no byte", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, refA, body); err != nil {
 			t.Fatalf("Put refA: %v", err)
 		}
@@ -350,8 +351,8 @@ func TestReplicaMaterialization(t *testing.T) {
 			t.Fatalf("reader scope = %+v, want the trusted scope it was bound to", reader.Scope())
 		}
 
-		wanted := bytes.Repeat([]byte("x"), int(memory.DefaultSegmentMaxBytes)+100)
-		refBig := memory.OriginalRef{Key: "result-big", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+		wanted := bytes.Repeat([]byte("x"), int(ledger.DefaultSegmentMaxBytes)+100)
+		refBig := ledger.OriginalRef{Key: "result-big", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
 		if err := store.Put(ctx, refBig, wanted); err != nil {
 			t.Fatalf("Put refBig: %v", err)
 		}
@@ -376,15 +377,15 @@ func TestReplicaMaterialization(t *testing.T) {
 			t.Fatal("the segments served do not match the replica on disk")
 		}
 
-		bounded, err := reader.ReadSegment(ctx, refBig, "tool-shell", memory.SegmentRequest{})
+		bounded, err := reader.ReadSegment(ctx, refBig, "tool-shell", ledger.SegmentRequest{})
 		if err != nil {
 			t.Fatalf("ReadSegment with a zero MaxBytes: %v", err)
 		}
-		if len(bounded.Body) != int(memory.DefaultSegmentMaxBytes) || bounded.EOF || bounded.Next.Offset != memory.DefaultSegmentMaxBytes {
+		if len(bounded.Body) != int(ledger.DefaultSegmentMaxBytes) || bounded.EOF || bounded.Next.Offset != ledger.DefaultSegmentMaxBytes {
 			t.Fatalf("zero MaxBytes served %d bytes (EOF %v, next %d), want the finite default bound", len(bounded.Body), bounded.EOF, bounded.Next.Offset)
 		}
 
-		refused, err := reader.ReadSegment(ctx, refB, "tool-shell", memory.SegmentRequest{})
+		refused, err := reader.ReadSegment(ctx, refB, "tool-shell", ledger.SegmentRequest{})
 		if !errors.Is(err, workspace.ErrReplicaUnauthorized) {
 			t.Fatalf("segment read of the foreign owner = %v, want ErrReplicaUnauthorized", err)
 		}
@@ -395,8 +396,8 @@ func TestReplicaMaterialization(t *testing.T) {
 			t.Fatalf("materialisation outside the bound scope = %v, want ErrReplicaUnauthorized", err)
 		}
 
-		forged := memory.OriginalRef{Key: refB.Key, Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-		outside, err := reader.ReadSegment(ctx, forged, "tool-shell", memory.SegmentRequest{})
+		forged := ledger.OriginalRef{Key: refB.Key, Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+		outside, err := reader.ReadSegment(ctx, forged, "tool-shell", ledger.SegmentRequest{})
 		if !errors.Is(err, workspace.ErrOriginalIneffective) {
 			t.Fatalf("segment read of a key registered outside the scope = %v, want a refusal that leaks nothing", err)
 		}

@@ -1024,7 +1024,11 @@ func resolvesAtCommit(root, sha string, cands []string) bool {
 	return false
 }
 
-// runDocRefs scans markdown under the given dirs for dangling citations.
+// runDocRefs scans markdown under the given dirs for dangling citations. A
+// citation in a historical-verbatim page whose target never existed at its
+// introducing commit is named as a historical description (the page describes
+// an old shape) and does not fail the gate; a dangling citation outside a
+// historical root still does.
 func runDocRefs(args []string) int {
 	fsr := flag.NewFlagSet("doc-refs", flag.ExitOnError)
 	verbose := fsr.Bool("v", false, "print every citation resolved by snapshot anchoring")
@@ -1047,6 +1051,10 @@ func runDocRefs(args []string) int {
 			}
 			report := scanDocRefs(path, root)
 			for _, tok := range report.Dangling {
+				if underHistoricalRoot(path, root) {
+					fmt.Printf("HISTORICAL-DESCRIPTION-REF %s: %s (target never present at the citing commit)\n", path, tok)
+					continue
+				}
 				fmt.Printf("DANGLING-DOC-REF %s: %s\n", path, tok)
 				code = 1
 			}

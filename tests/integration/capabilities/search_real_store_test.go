@@ -16,6 +16,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/model"
 )
@@ -37,9 +38,9 @@ type realStoreEvent struct {
 // tier its events are committed into, the observation table its query face
 // reads, and the searcher and scoped reader standing on them.
 type realStoreChain struct {
-	tier     *memory.Tier
-	scoped   memory.ScopedOriginalStore
-	store    *memory.FileSegmentStore
+	tier     *ledger.Tier
+	scoped   ledger.ScopedOriginalStore
+	store    *ledger.FileSegmentStore
 	source   *memory.StoreQuerySource
 	seam     *memory.VectorSeam
 	searcher *search.StoreSearcher
@@ -102,11 +103,11 @@ func realBodyOf(t *testing.T, ev realStoreEvent) []byte {
 func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 	t.Helper()
 	ctx := context.Background()
-	tier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 	if err != nil {
 		t.Fatalf("OpenTier(localfile): %v", err)
 	}
-	scoped, ok := tier.Originals.(memory.ScopedOriginalStore)
+	scoped, ok := tier.Originals.(ledger.ScopedOriginalStore)
 	if !ok {
 		t.Fatalf("the real file tier serves no scoped read face: %T", tier.Originals)
 	}
@@ -117,7 +118,7 @@ func newRealStoreChain(t *testing.T, embedder memory.Embedder) *realStoreChain {
 		if err != nil {
 			t.Fatalf("DecodeEventBody(%s): %v", ev.key, err)
 		}
-		if err := tier.Segments.StoreEvent(ctx, memory.SegmentRecord{
+		if err := tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
 			PartitionID: memory.PartitionIDFromName(ev.partition),
 			WindowTS:    ev.at,
 			Seq:         ev.seq,
@@ -207,7 +208,7 @@ func (c *realStoreChain) recall(t *testing.T, text, partition, strategy string, 
 }
 
 // originalKeysOf returns the event keys of the reference set in order.
-func originalKeysOf(refs []memory.OriginalRef) []event.EventID {
+func originalKeysOf(refs []ledger.OriginalRef) []event.EventID {
 	keys := make([]event.EventID, 0, len(refs))
 	for _, ref := range refs {
 		keys = append(keys, ref.Key)
@@ -226,21 +227,21 @@ func eventKeysOf(refs []memory.EventReference) []event.EventID {
 
 // scopedReadBack returns the exact recall of key inside scope and the bytes its
 // segmented walk concatenates back to.
-func scopedReadBack(t *testing.T, scoped memory.ScopedOriginalStore, scope memory.ReadScope, key event.EventID) ([]byte, []byte) {
+func scopedReadBack(t *testing.T, scoped ledger.ScopedOriginalStore, scope ledger.ReadScope, key event.EventID) ([]byte, []byte) {
 	t.Helper()
 	ctx := context.Background()
-	reader, err := memory.NewScopedReader(scoped, scope)
+	reader, err := ledger.NewScopedReader(scoped, scope)
 	if err != nil {
 		t.Fatalf("NewScopedReader: %v", err)
 	}
 	result := reader.Get(ctx, key)
-	if result.Outcome != memory.RecallFound {
+	if result.Outcome != ledger.RecallFound {
 		t.Fatalf("Get(%s) outcome = %v, want RecallFound: the scoped read serves the committed original", key, result.Outcome)
 	}
 	var walked []byte
-	position := memory.SegmentPosition{}
+	position := ledger.SegmentPosition{}
 	for {
-		segment, err := reader.ReadSegment(ctx, key, memory.SegmentRequest{From: position, MaxBytes: 8})
+		segment, err := reader.ReadSegment(ctx, key, ledger.SegmentRequest{From: position, MaxBytes: 8})
 		if err != nil {
 			t.Fatalf("ReadSegment(%s at %d): %v", key, position.Offset, err)
 		}
@@ -347,7 +348,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 		if got := originalKeysOf(hybrid.Refs); !reflect.DeepEqual(got, want) {
 			t.Fatalf("hybrid recall keys = %v, want %v: the vector leg recalls the context first, then the weaker fingerprint neighbours", got, want)
 		}
-		exact, walked := scopedReadBack(t, chain.scoped, memory.ReadScope{
+		exact, walked := scopedReadBack(t, chain.scoped, ledger.ReadScope{
 			Owner:           realOwnerOf(),
 			Format:          realEventFormat,
 			RetentionPolicy: realEventRetention,
@@ -425,28 +426,28 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	t.Run("a reader outside the reference scope is refused by name", func(t *testing.T) {
 		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
 		chain.landStore(t)
-		inside := memory.ReadScope{Owner: realOwnerOf(), Format: realEventFormat, RetentionPolicy: realEventRetention}
+		inside := ledger.ReadScope{Owner: realOwnerOf(), Format: realEventFormat, RetentionPolicy: realEventRetention}
 		exact, _ := scopedReadBack(t, chain.scoped, inside, "0a01")
 		if !bytes.Equal(exact, []byte(chain.events[0].original)) {
 			t.Fatalf("in-scope recall read %q, want the committed original byte for byte", exact)
 		}
-		outside := memory.ReadScope{
+		outside := ledger.ReadScope{
 			Owner:           event.Address{AgentID: "agent-other", SessionID: "session-other"},
 			Format:          realEventFormat,
 			RetentionPolicy: realEventRetention,
 		}
-		stranger, err := memory.NewScopedReader(chain.scoped, outside)
+		stranger, err := ledger.NewScopedReader(chain.scoped, outside)
 		if err != nil {
 			t.Fatalf("NewScopedReader(outside): %v", err)
 		}
 		hidden := stranger.Get(ctx, "0a01")
-		if hidden.Outcome != memory.RecallMissing {
+		if hidden.Outcome != ledger.RecallMissing {
 			t.Fatalf("out-of-scope Get(0a01) outcome = %v, want RecallMissing: a key whose references lie outside the scope reads as missing and leaks nothing", hidden.Outcome)
 		}
-		if _, err := stranger.ReadSegment(ctx, "0a01", memory.SegmentRequest{MaxBytes: 8}); !errors.Is(err, memory.ErrOriginalMissing) {
+		if _, err := stranger.ReadSegment(ctx, "0a01", ledger.SegmentRequest{MaxBytes: 8}); !errors.Is(err, ledger.ErrOriginalMissing) {
 			t.Fatalf("out-of-scope ReadSegment(0a01) = %v, want the named refusal ErrOriginalMissing", err)
 		}
-		if _, err := memory.NewScopedReader(chain.scoped, memory.ReadScope{}); !errors.Is(err, memory.ErrScopeRequired) {
+		if _, err := ledger.NewScopedReader(chain.scoped, ledger.ReadScope{}); !errors.Is(err, ledger.ErrScopeRequired) {
 			t.Fatalf("NewScopedReader(zero scope) = %v, want the named refusal ErrScopeRequired", err)
 		}
 	})
@@ -460,8 +461,8 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 			t.Fatalf("full recall keys = %v, want %v", got, want)
 		}
 		var (
-			pages   [][]memory.OriginalRef
-			union   []memory.OriginalRef
+			pages   [][]ledger.OriginalRef
+			union   []ledger.OriginalRef
 			cursor  search.Cursor
 			pageSet = map[event.EventID]bool{}
 		)
@@ -524,7 +525,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 		if len(recalled.Refs) == 0 || recalled.Refs[0].Key != "0a01" {
 			t.Fatalf("endpoint recall keys = %v, want the context 0a01 first: the retrieval text is no stored substring, so an empty answer names a zero-output endpoint", originalKeysOf(recalled.Refs))
 		}
-		exact, _ := scopedReadBack(t, chain.scoped, memory.ReadScope{
+		exact, _ := scopedReadBack(t, chain.scoped, ledger.ReadScope{
 			Owner:           realOwnerOf(),
 			Format:          realEventFormat,
 			RetentionPolicy: realEventRetention,

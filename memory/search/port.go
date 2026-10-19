@@ -18,6 +18,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // ErrQueryTextMissing reports a retrieval request that carries no retrieval
@@ -169,7 +170,7 @@ func (q Query) QueryOptions() memory.QueryOptions {
 type Result struct {
 	// Refs is the reference set of the result, ordered from the best hit to the
 	// worst.
-	Refs []memory.OriginalRef
+	Refs []ledger.OriginalRef
 	// NextCursor is the continuation token for the page after this result: the
 	// zero cursor means this is the last page and no page follows, never an
 	// unknown one. A cursor is opaque and is only carried back unchanged in the

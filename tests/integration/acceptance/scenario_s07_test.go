@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/workspace"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // scenarioOriginalBody is the original text the reference drive commits.
@@ -36,12 +38,12 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 
 	ownerA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 	ownerB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
-	scopeA := memory.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-	refA := memory.OriginalRef{Key: "result-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-	refB := memory.OriginalRef{Key: "result-a", Owner: ownerB, Format: "text/markdown", RetentionPolicy: "keep"}
+	scopeA := ledger.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+	refA := ledger.OriginalRef{Key: "result-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+	refB := ledger.OriginalRef{Key: "result-a", Owner: ownerB, Format: "text/markdown", RetentionPolicy: "keep"}
 
-	store := memory.NewMemoryOriginalStore(memory.WithRetentionWindow("keep", 24*time.Hour))
-	for _, ref := range []memory.OriginalRef{refA, refB} {
+	store := ledger.NewMemoryOriginalStore(ledger.WithRetentionWindow("keep", 24*time.Hour))
+	for _, ref := range []ledger.OriginalRef{refA, refB} {
 		if err := store.Put(ctx, ref, scenarioOriginalBody); err != nil {
 			t.Fatalf("put the original of %s/%s: %v", ref.Owner.AgentID, ref.Format, err)
 		}
@@ -49,7 +51,7 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 	registered := store.References(refA.Key)
 	observations["distinct_owner_references"] = len(registered)
 	bothKept := len(registered) == 2
-	for _, want := range []memory.OriginalRef{refA, refB} {
+	for _, want := range []ledger.OriginalRef{refA, refB} {
 		matched := false
 		for _, ref := range registered {
 			if ref.Owner == want.Owner && ref.Format == want.Format && ref.RetentionPolicy == want.RetentionPolicy {
@@ -63,15 +65,15 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 	observations["owner_references_nonoverwriting"] = bothKept
 	observations["same_bytes_content_equal"] = store.BlobCount() == 1
 	recalled := store.Get(ctx, refA.Key)
-	observations["original_bytes_equal_readback"] = recalled.Outcome == memory.RecallFound &&
+	observations["original_bytes_equal_readback"] = recalled.Outcome == ledger.RecallFound &&
 		bytes.Equal(recalled.Body, scenarioOriginalBody)
 	refs = append(refs, string(refA.Key))
 
 	root := t.TempDir()
-	if err := store.Put(ctx, memory.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}, scenarioReplicaBody); err != nil {
+	if err := store.Put(ctx, ledger.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}, scenarioReplicaBody); err != nil {
 		t.Fatalf("put the replica original: %v", err)
 	}
-	replicaRef := memory.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
+	replicaRef := ledger.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
 	materializer, err := workspace.NewMaterializer(root, store, scopeA)
 	if err != nil {
 		t.Fatalf("open the materializer: %v", err)
@@ -100,10 +102,10 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 		err == nil && bytes.Equal(rebuilt, scenarioReplicaBody)
 	refs = append(refs, string(replicaRef.Key))
 
-	small := memory.ProjectionEntry{Key: "entry-small", Type: event.TypeAgentOutput, Summary: "small", Content: "short body", Time: time.Unix(0, 0)}
+	small := replay.ProjectionEntry{Key: "entry-small", Type: event.TypeAgentOutput, Summary: "small", Content: "short body", Time: time.Unix(0, 0)}
 	largeBody := strings.Repeat("大结果正文。", 300)
-	large := memory.ProjectionEntry{Key: "entry-large", Type: event.TypeAgentOutput, Summary: "large", Content: largeBody, Time: time.Unix(60, 0)}
-	projection := memory.NewReplayProjection()
+	large := replay.ProjectionEntry{Key: "entry-large", Type: event.TypeAgentOutput, Summary: "large", Content: largeBody, Time: time.Unix(60, 0)}
+	projection := replay.NewReplayProjection()
 	projection.Append(ctx, small)
 	projection.Append(ctx, large)
 	assembled, err := projection.AssembleBudget(ctx, 200)
@@ -120,12 +122,12 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 			continue
 		}
 		switch decision.Mode {
-		case memory.PresentationFull:
+		case replay.PresentationFull:
 			full++
 		default:
 			other++
 		}
-		if (entry.Content == original) != (decision.Mode == memory.PresentationFull) {
+		if (entry.Content == original) != (decision.Mode == replay.PresentationFull) {
 			iff = false
 		}
 	}

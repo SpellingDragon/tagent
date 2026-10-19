@@ -6,10 +6,11 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // scenarioSite names one established session site of the query drive.
@@ -146,11 +147,11 @@ func TestScenario08QueryWithoutOtel(t *testing.T) {
 	const instance event.InstanceID = "instance-1"
 	addrA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 	addrB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
-	tier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 	if err != nil {
 		t.Fatalf("open the storage tier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 	if err != nil {
 		t.Fatalf("open the durable commit: %v", err)
 	}

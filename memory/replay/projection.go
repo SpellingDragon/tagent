@@ -8,7 +8,7 @@
 // synthetic refs carry their full text in the payload under a negative key,
 // positive keys hydrate from the chain — and the tail is paged by minimum event
 // key and appended in EventKey write order, never by timestamp approximation.
-package memory
+package replay
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // ProjectionEntry is one ordered item of a projection: the canonical identity of
@@ -185,13 +186,13 @@ func (c *MemoryEventChain) Commit(ctx context.Context, fact ChainFact) error {
 		return err
 	}
 	if fact.Key == "" {
-		return ErrEventKeyRequired
+		return ledger.ErrEventKeyRequired
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if prior, held := c.facts[fact.Key]; held {
 		if prior.Content != fact.Content || prior.Summary != fact.Summary || prior.Type != fact.Type {
-			return ErrContentConflict
+			return ledger.ErrContentConflict
 		}
 		return nil
 	}
@@ -261,7 +262,7 @@ func NewMemoryRelations() *MemoryRelations {
 // SetParent sets the parent of child, or clears it when parent is empty.
 func (r *MemoryRelations) SetParent(child event.EventID, parent event.EventID) error {
 	if child == "" {
-		return ErrKeyRequired
+		return ledger.ErrKeyRequired
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -283,7 +284,7 @@ func (r *MemoryRelations) GetParent(child event.EventID) (event.EventID, error) 
 // CompactionFact is the compaction payload one fold leaves on the fact chain:
 // the summary entry the fold reports first, the retained refs of the folded run
 // in their interleaved payload order, the event-key boundary the snapshot
-// covers and the meditation keys it reseeds. The payload is committed to the
+// covers and the consumed keys it reseeds. The payload is committed to the
 // chain as one compaction event, and the compaction event itself never enters
 // the projection as an entry.
 type CompactionFact struct {
@@ -296,9 +297,9 @@ type CompactionFact struct {
 	// the tail strictly after it, using this payload value and never a timestamp
 	// approximation.
 	FullBoundary event.EventID `json:"full_boundary"`
-	// MeditationKeys are the meditation keys the snapshot reseeds; the tail's own
-	// meditation keys are reseeded beside them from the replayed tail.
-	MeditationKeys []event.EventID `json:"meditation_keys,omitempty"`
+	// ConsumedKeys are the consumed keys the snapshot reseeds; the tail's own
+	// consumed keys are reseeded beside them from the replayed tail.
+	ConsumedKeys []event.EventID `json:"consumed_keys,omitempty"`
 }
 
 // CompactionRef is one ref of a compaction payload. A synthetic ref carries its
@@ -356,9 +357,9 @@ type RebuildReport struct {
 	Partial bool
 	// Missing lists the snapshot keys the chain could not hydrate.
 	Missing []event.EventID
-	// Meditation lists the meditation keys reseeded, from the snapshot and the
+	// Consumed lists the consumed keys reseeded, from the snapshot and the
 	// tail together.
-	Meditation []event.EventID
+	Consumed []event.EventID
 	// FullBoundary is the boundary value the compaction payload carried.
 	FullBoundary event.EventID
 }
@@ -445,7 +446,7 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 		target.Append(ctx, entryOf(fact))
 		report.Entries++
 		if fact.Type == event.TypeThinkingPlan {
-			report.Meditation = append(report.Meditation, fact.Key)
+			report.Consumed = append(report.Consumed, fact.Key)
 		}
 	}
 	if compaction != nil {
@@ -457,7 +458,7 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 		target.boundary = payload.FullBoundary
 		target.Append(ctx, entryOfRef(payload.Summary))
 		report.Entries++
-		report.Meditation = append(report.Meditation, payload.MeditationKeys...)
+		report.Consumed = append(report.Consumed, payload.ConsumedKeys...)
 		for _, ref := range payload.Refs {
 			if SyntheticKey(ref.Key) {
 				target.Append(ctx, entryOfRef(ref))
@@ -506,8 +507,8 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 			}
 		}
 	}
-	for _, key := range report.Meditation {
-		target.seedMeditation(key)
+	for _, key := range report.Consumed {
+		target.seedConsumed(key)
 	}
 	target.noteRecovery(report.Entries, report.Fallback)
 	if report.Partial {

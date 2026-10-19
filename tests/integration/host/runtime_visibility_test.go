@@ -26,7 +26,6 @@ import (
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/rl"
@@ -34,6 +33,8 @@ import (
 	"github.com/SpellingDragon/tagent/telemetry"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // visibilityRecorder is the training record face of these checks: it accepts the
@@ -376,7 +377,7 @@ func TestRuntimeVisibility(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		root := t.TempDir()
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: root}
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
 		anchors := filepath.Join(root, "anchors.json")
 		first, _ := visibilityRun(t, ctx, tagent.WithStorage(cfg), tagent.WithReflectionAnchors(anchors))
 		visibilityInvoke(t, ctx, first, "inv-durable", "session-durable")

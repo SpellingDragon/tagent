@@ -25,9 +25,10 @@ import (
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/evolution"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	openaimodel "trpc.group/trpc-go/trpc-agent-go/model/openai"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // mockModelName is the model reference the credential-free path resolves to.
@@ -152,8 +153,8 @@ func assemble(ctx context.Context, cfg cliConfig) (*tagent.Run, error) {
 		tagent.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
 	}
 	if cfg.dataDir != "" {
-		opts = append(opts, tagent.WithStorage(memory.StorageConfig{
-			Type: memory.StorageLocalFile,
+		opts = append(opts, tagent.WithStorage(ledger.StorageConfig{
+			Type: ledger.StorageLocalFile,
 			Root: cfg.dataDir,
 		}))
 	}

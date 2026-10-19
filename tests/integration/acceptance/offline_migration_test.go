@@ -15,6 +15,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 )
@@ -165,11 +166,11 @@ func newInventory(t *testing.T, ctx context.Context, commit *state.DurableCommit
 // commit carrier and the original face of the same tier.
 func openNewPath(t *testing.T) (*state.DurableCommit, *memory.ArchiveOriginals) {
 	t.Helper()
-	tier, err := memory.OpenTier(context.Background(), memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+	tier, err := ledger.OpenTier(context.Background(), ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	commit, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+	commit, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 	if err != nil {
 		t.Fatalf("NewDurableCommit: %v", err)
 	}
@@ -345,11 +346,11 @@ func TestOfflineMigration(t *testing.T) {
 		referenceInventory := newInventory(t, ctx, referenceCommit, referenceOriginals, reference)
 
 		dumpRoot := buildArchive(t)
-		dumpTier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+		dumpTier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		dumpCommit, err := state.NewDurableCommit(memory.TierFactLog(dumpTier), nil)
+		dumpCommit, err := state.NewDurableCommit(ledger.TierFactLog(dumpTier), nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
 		}
@@ -370,11 +371,11 @@ func TestOfflineMigration(t *testing.T) {
 		}
 
 		logRoot := buildArchive(t)
-		logTier, err := memory.OpenTier(ctx, memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()})
+		logTier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()})
 		if err != nil {
 			t.Fatalf("OpenTier: %v", err)
 		}
-		logFault := &faultLog{inner: memory.TierFactLog(logTier), budget: 2}
+		logFault := &faultLog{inner: ledger.TierFactLog(logTier), budget: 2}
 		logCommit, err := state.NewDurableCommit(logFault, nil)
 		if err != nil {
 			t.Fatalf("NewDurableCommit: %v", err)
@@ -383,7 +384,7 @@ func TestOfflineMigration(t *testing.T) {
 		if _, err := state.MigrateArchive(ctx, logRoot, logCommit, logOriginals); !errors.Is(err, errInjected) {
 			t.Fatalf("interrupted MigrateArchive err = %v, want %v", err, errInjected)
 		}
-		logCommit, err = state.NewDurableCommit(memory.TierFactLog(logTier), nil)
+		logCommit, err = state.NewDurableCommit(ledger.TierFactLog(logTier), nil)
 		if err != nil {
 			t.Fatalf("rebuild NewDurableCommit: %v", err)
 		}

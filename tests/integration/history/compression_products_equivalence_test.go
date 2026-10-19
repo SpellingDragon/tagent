@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
 // TestCompressionProductsAreEquivalent pins the compression products to their inputs, whichever path minted them.
@@ -33,11 +36,11 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 		}
 
 		requests := memory.NewCompressRequests()
-		var products []memory.CurationArtifact
+		var products []meditation.MeditationArtifact
 		consumer := newCompressionCuration(t,
-			memory.WithCompressRequests(requests),
-			memory.WithCurationCards(compressionCardSource()),
-			memory.WithCurationProducts(func(_ context.Context, artifact memory.CurationArtifact) error {
+			meditation.WithCompressRequests(requests),
+			meditation.WithMeditationCards(compressionCardSource()),
+			meditation.WithMeditationProducts(func(_ context.Context, artifact meditation.MeditationArtifact) error {
 				products = append(products, artifact)
 				return nil
 			}),
@@ -64,8 +67,8 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 		}
 
 		artifact := *directReport.Artifact
-		if artifact.Type != memory.CurationArtifactType {
-			t.Fatalf("artifact type = %q, want the frozen %q", artifact.Type, memory.CurationArtifactType)
+		if artifact.Type != meditation.MeditationArtifactType {
+			t.Fatalf("artifact type = %q, want the frozen %q", artifact.Type, meditation.MeditationArtifactType)
 		}
 		if artifact.Summary != "需求原文 / 实现摘要" {
 			t.Fatalf("artifact summary = %q, want the deterministic condensation of the overflow run", artifact.Summary)
@@ -103,7 +106,7 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 
 		decision, recorded := first.Decision("cc-1")
 		preview := strings.Repeat("A", 128) + "…"
-		if !recorded || decision.Key != "cc-1" || decision.Mode != memory.PresentationTicket || decision.Preview != preview {
+		if !recorded || decision.Key != "cc-1" || decision.Mode != replay.PresentationTicket || decision.Preview != preview {
 			t.Fatalf("ticket decision = %+v (%v), want a ticket over cc-1 with the bounded preview", decision, recorded)
 		}
 		if len(firstEntries) != 3 || firstEntries[0].Key != "cc-1" {
@@ -129,9 +132,9 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 		if settle.Entry != "cc-1" || settle.Mode != decision.Mode || settle.Preview != decision.Preview {
 			t.Fatalf("settle fact = %+v, want the entry, mode and preview of the ticket decision", settle)
 		}
-		identity := memory.ReplaySettleFor(decision)
-		if settle.ID != identity.ID || settle.FactKey() != string(settle.ID) || settle.FactType() != memory.ReplaySettleType {
-			t.Fatalf("settle identity = (%q, %q, %q), want the decision identity read as %q", settle.FactKey(), settle.FactType(), settle.ID, memory.ReplaySettleType)
+		identity := replay.ReplaySettleFor(decision)
+		if settle.ID != identity.ID || settle.FactKey() != string(settle.ID) || settle.FactType() != replay.ReplaySettleType {
+			t.Fatalf("settle identity = (%q, %q, %q), want the decision identity read as %q", settle.FactKey(), settle.FactType(), settle.ID, replay.ReplaySettleType)
 		}
 		if settleOf(t, second.Settles(), "cc-1").ID != identity.ID {
 			t.Fatal("one ticket decision settled under two identities")
@@ -143,19 +146,19 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 
 	t.Run("fold 同一投影同一折叠线: one projection folds to one line", func(t *testing.T) {
 		ctx := context.Background()
-		session := memory.ChainKey{PartitionID: 1, SessionID: event.SessionID("s-compression")}
-		chain := memory.NewMemoryEventChain()
+		session := replay.ChainKey{PartitionID: 1, SessionID: event.SessionID("s-compression")}
+		chain := replay.NewMemoryEventChain()
 		consumerProjection := newCompressionProjection(t)
 		requests := memory.NewCompressRequests()
-		var folds []memory.CompactionFact
+		var folds []replay.CompactionFact
 		consumer := newCompressionCuration(t,
-			memory.WithCompressRequests(requests),
-			memory.WithCurationCards(compressionCardSource()),
-			memory.WithCurationProducts(func(context.Context, memory.CurationArtifact) error { return nil }),
-			memory.WithCurationPreFold(
-				func(context.Context) (*memory.ReplayProjection, error) { return consumerProjection, nil },
-				func(ctx context.Context, payload memory.CompactionFact) error {
-					fact, err := memory.CompactionChainFact(session, payload, compressionNow)
+			meditation.WithCompressRequests(requests),
+			meditation.WithMeditationCards(compressionCardSource()),
+			meditation.WithMeditationProducts(func(context.Context, meditation.MeditationArtifact) error { return nil }),
+			meditation.WithMeditationPreFold(
+				func(context.Context) (*replay.ReplayProjection, error) { return consumerProjection, nil },
+				func(ctx context.Context, payload replay.CompactionFact) error {
+					fact, err := meditation.CompactionChainFact(session, payload, compressionNow)
 					if err != nil {
 						return err
 					}
@@ -179,7 +182,7 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 		}
 
 		directProjection := newCompressionProjection(t)
-		direct, err := memory.Prefold(ctx, directProjection)
+		direct, err := meditation.Prefold(ctx, directProjection)
 		if err != nil {
 			t.Fatalf("Prefold: %v", err)
 		}
@@ -189,21 +192,21 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 		if direct.Summary.Content != "compaction: 需求原文; 实现摘要; 验证命令; 收尾记录; tool chain" {
 			t.Fatalf("fold line = %q, want the summaries of the folded entries in order", direct.Summary.Content)
 		}
-		if direct.Summary.Type != memory.CompactionEventType || direct.FullBoundary != "cc-4" {
+		if direct.Summary.Type != replay.CompactionEventType || direct.FullBoundary != "cc-4" {
 			t.Fatalf("fold summary = %+v boundary = %q, want the compaction type and the last keyed entry", direct.Summary, direct.FullBoundary)
 		}
 		if refs := compressionRefKeys(direct.Refs); !reflect.DeepEqual(refs, []event.EventID{"cc-3", "-ref-1-4"}) {
 			t.Fatalf("fold refs = %v, want the synthetic ref and the retained tool fact in payload order", refs)
 		}
 
-		identity := memory.CompactionFactKey(direct)
-		if memory.CompactionFactKey(tick.Folds[0]) != identity {
+		identity := meditation.CompactionFactKey(direct)
+		if meditation.CompactionFactKey(tick.Folds[0]) != identity {
 			t.Fatal("one fold payload answered two identities")
 		}
 		if _, held, err := chain.Fact(ctx, identity); err != nil || !held {
 			t.Fatalf("fold fact = (held %v, %v), want the compaction fact committed under the fold identity", held, err)
 		}
-		later, err := memory.CompactionChainFact(session, direct, compressionNow.Add(time.Hour))
+		later, err := meditation.CompactionChainFact(session, direct, compressionNow.Add(time.Hour))
 		if err != nil {
 			t.Fatalf("CompactionChainFact: %v", err)
 		}
@@ -211,7 +214,7 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 			t.Fatalf("fold fact a hour later = (%q, %v), want the identity %q under another commit moment", later.Key, later.Time, identity)
 		}
 		entries := consumerProjection.Entries()
-		if len(entries) == 0 || entries[0].Type != memory.CompactionEventType || entries[0].Content != direct.Summary.Content {
+		if len(entries) == 0 || entries[0].Type != replay.CompactionEventType || entries[0].Content != direct.Summary.Content {
 			t.Fatalf("folded entries = %+v, want the compaction line read first", entries)
 		}
 	})
@@ -221,8 +224,8 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 var compressionNow = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 
 // compressionCards is the card sequence every compression path is driven with: four cards over a bound of two.
-func compressionCards() []memory.CurationCard {
-	return []memory.CurationCard{
+func compressionCards() []meditation.MeditationCard {
+	return []meditation.MeditationCard{
 		{Key: "cc-1", Type: event.TypeExternalInput, Summary: "需求原文", RecordedAt: compressionNow.Add(-72 * time.Hour)},
 		{Key: "cc-2", Type: event.TypeAgentOutput, Summary: "实现摘要", RecordedAt: compressionNow.Add(-48 * time.Hour), Links: 1},
 		{Key: "cc-3", Type: event.TypeActionCommand, Summary: "验证命令", RecordedAt: compressionNow.Add(-2 * time.Hour), Links: 3},
@@ -231,9 +234,9 @@ func compressionCards() []memory.CurationCard {
 }
 
 // compressionCardsReversed is the same material arriving in the opposite order: the arrival order names nothing about the material.
-func compressionCardsReversed() []memory.CurationCard {
+func compressionCardsReversed() []meditation.MeditationCard {
 	cards := compressionCards()
-	reversed := make([]memory.CurationCard, 0, len(cards))
+	reversed := make([]meditation.MeditationCard, 0, len(cards))
 	for i := len(cards) - 1; i >= 0; i-- {
 		reversed = append(reversed, cards[i])
 	}
@@ -241,13 +244,13 @@ func compressionCardsReversed() []memory.CurationCard {
 }
 
 // compressionCardSource is the static card source a consumer tick curates.
-func compressionCardSource() memory.CurationCards {
-	return func(context.Context) ([]memory.CurationCard, error) { return compressionCards(), nil }
+func compressionCardSource() meditation.MeditationCards {
+	return func(context.Context) ([]meditation.MeditationCard, error) { return compressionCards(), nil }
 }
 
 // compressionEntries is the projection of the same material: one large entry that settles on a ticket, one keyless tool chain and two short entries.
-func compressionEntries() []memory.ProjectionEntry {
-	return []memory.ProjectionEntry{
+func compressionEntries() []replay.ProjectionEntry {
+	return []replay.ProjectionEntry{
 		{Key: "cc-1", Type: event.TypeExternalInput, Summary: "需求原文", Content: strings.Repeat("A", 600), Time: compressionNow.Add(-72 * time.Hour)},
 		{Key: "cc-2", Type: event.TypeAgentOutput, Summary: "实现摘要", Content: "实现摘要正文", Time: compressionNow.Add(-48 * time.Hour)},
 		{Key: "cc-3", Type: event.TypeActionCommand, Summary: "验证命令", Content: "验证命令正文", Time: compressionNow.Add(-2 * time.Hour)},
@@ -257,10 +260,10 @@ func compressionEntries() []memory.ProjectionEntry {
 }
 
 // newCompressionProjection returns a projection of the compression material, appended in payload order.
-func newCompressionProjection(t *testing.T) *memory.ReplayProjection {
+func newCompressionProjection(t *testing.T) *replay.ReplayProjection {
 	t.Helper()
 	ctx := context.Background()
-	projection := memory.NewReplayProjection()
+	projection := replay.NewReplayProjection()
 	for _, entry := range compressionEntries() {
 		projection.Append(ctx, entry)
 	}
@@ -268,7 +271,7 @@ func newCompressionProjection(t *testing.T) *memory.ReplayProjection {
 }
 
 // assembleCompression assembles one fresh projection under the ticket budget and answers it with its settle facts.
-func assembleCompression(t *testing.T, ctx context.Context) (*memory.ReplayProjection, []memory.ProjectionEntry) {
+func assembleCompression(t *testing.T, ctx context.Context) (*replay.ReplayProjection, []replay.ProjectionEntry) {
 	t.Helper()
 	projection := newCompressionProjection(t)
 	entries, err := projection.AssembleBudget(ctx, 55)
@@ -279,16 +282,16 @@ func assembleCompression(t *testing.T, ctx context.Context) (*memory.ReplayProje
 }
 
 // newCompressionCuration returns a curation engine over its own retention ledger and lifecycle, so two paths never share a pass.
-func newCompressionCuration(t *testing.T, options ...memory.CurationOption) *memory.Curation {
+func newCompressionCuration(t *testing.T, options ...meditation.MeditationOption) *meditation.Meditation {
 	t.Helper()
-	store := memory.NewMemoryLifecycleStore(memory.LifecycleCapabilities{})
-	retention := memory.NewRetention(memory.NewMemoryGuard())
-	lifecycle, err := memory.NewLifecycle(memory.LifecycleConfig{GlobalTTLDays: -1}, retention, store, memory.LifecycleCapabilities{})
+	store := ledger.NewMemoryLifecycleStore(ledger.LifecycleCapabilities{})
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	lifecycle, err := ledger.NewLifecycle(ledger.LifecycleConfig{GlobalTTLDays: -1}, retention, store, ledger.LifecycleCapabilities{})
 	if err != nil {
 		t.Fatalf("open the lifecycle: %v", err)
 	}
 	lifecycle.RecoveryComplete()
-	curation, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 2, Keep: 2, MinScore: 1}, retention, lifecycle, nil, options...)
+	curation, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 2, Keep: 2, MinScore: 1}, retention, lifecycle, nil, options...)
 	if err != nil {
 		t.Fatalf("open the curation engine: %v", err)
 	}
@@ -296,7 +299,7 @@ func newCompressionCuration(t *testing.T, options ...memory.CurationOption) *mem
 }
 
 // settleOf returns the settle fact one entry settled under.
-func settleOf(t *testing.T, settles []memory.ReplaySettle, entry event.EventID) memory.ReplaySettle {
+func settleOf(t *testing.T, settles []replay.ReplaySettle, entry event.EventID) replay.ReplaySettle {
 	t.Helper()
 	for _, settle := range settles {
 		if settle.Entry == entry {
@@ -304,11 +307,11 @@ func settleOf(t *testing.T, settles []memory.ReplaySettle, entry event.EventID) 
 		}
 	}
 	t.Fatalf("settle facts = %+v, want one for %q", settles, entry)
-	return memory.ReplaySettle{}
+	return replay.ReplaySettle{}
 }
 
 // compressionRefKeys lists the keys of one fold payload in payload order.
-func compressionRefKeys(refs []memory.CompactionRef) []event.EventID {
+func compressionRefKeys(refs []replay.CompactionRef) []event.EventID {
 	keys := make([]event.EventID, 0, len(refs))
 	for _, ref := range refs {
 		keys = append(keys, ref.Key)

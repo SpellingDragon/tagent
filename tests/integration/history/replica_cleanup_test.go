@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/workspace"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // TestReplicaCleanup proves the temporary-replica reclamation contract on the frozen workspace face:
@@ -25,11 +26,11 @@ import (
 func TestReplicaCleanup(t *testing.T) {
 	ctx := context.Background()
 	owner := event.Address{AgentID: event.AgentID("agent-a"), SessionID: event.SessionID("session-a")}
-	scope := memory.ReadScope{Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
+	scope := ledger.ReadScope{Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
 	body := []byte("replica body: exactly these bytes reach the replica and every segment of it")
-	ref := memory.OriginalRef{Key: "result-a", Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
+	ref := ledger.OriginalRef{Key: "result-a", Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
 
-	materializer := func(t *testing.T, root string, store memory.ScopedOriginalStore) *workspace.Materializer {
+	materializer := func(t *testing.T, root string, store ledger.ScopedOriginalStore) *workspace.Materializer {
 		t.Helper()
 		mat, err := workspace.NewMaterializer(root, store, scope)
 		if err != nil {
@@ -117,7 +118,7 @@ func TestReplicaCleanup(t *testing.T) {
 	}
 
 	t.Run("G2.1 启动清理: startup reclamation takes back the leftovers of a previous run and the replica is rebuilt at its stable path", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -170,7 +171,7 @@ func TestReplicaCleanup(t *testing.T) {
 	})
 
 	t.Run("G2.2 周期清理: the running cleaner reclaims by age and by count on its period, and its end is confirmed", func(t *testing.T) {
-		ageStore := memory.NewMemoryOriginalStore()
+		ageStore := ledger.NewMemoryOriginalStore()
 		if err := ageStore.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -209,7 +210,7 @@ func TestReplicaCleanup(t *testing.T) {
 		requireStanding(t, fresh.Path)
 		requireBody(t, fresh.Path)
 
-		countStore := memory.NewMemoryOriginalStore()
+		countStore := ledger.NewMemoryOriginalStore()
 		if err := countStore.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -294,7 +295,7 @@ func TestReplicaCleanup(t *testing.T) {
 	})
 
 	t.Run("G2.3 活跃读写的副本不删: a replica an active read/write handle holds is left alone by every trigger until it is released", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -365,7 +366,7 @@ func TestReplicaCleanup(t *testing.T) {
 		}
 		requireGone(t, held.Path)
 
-		stressStore := memory.NewMemoryOriginalStore()
+		stressStore := ledger.NewMemoryOriginalStore()
 		if err := stressStore.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -452,7 +453,7 @@ func TestReplicaCleanup(t *testing.T) {
 	})
 
 	t.Run("G2.4 用户文件不动: reclamation never touches a user file, whatever it is named and however hard it is linked", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
@@ -565,7 +566,7 @@ func TestReplicaCleanup(t *testing.T) {
 			t.Fatalf("prepare outside inner file: %v", err)
 		}
 
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		if err := store.Put(ctx, ref, body); err != nil {
 			t.Fatalf("Put: %v", err)
 		}

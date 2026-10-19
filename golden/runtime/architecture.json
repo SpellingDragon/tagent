@@ -151,6 +151,24 @@
       "reason": "memory 实现子包（检索端口/混合融合）：索引非真源，读 memory 原文引用与 event 身份。随 04.P0.4 骨架登记（主编排者，2026-10-13）。"
     },
     {
+      "pattern": "memory/ledger",
+      "role": "durable-facts",
+      "required": true,
+      "reason": "持久原文与保留事实的存储单元：原文引用/完整性、保留期与生命周期、守卫与存储档适配（词汇/接线/策略三文件挂法）。只凭 event 身份表达事实，不依赖根 memory 的投影面（package-restructure 02.1）。"
+    },
+    {
+      "pattern": "memory/replay",
+      "role": "read-projection",
+      "required": true,
+      "reason": "重放读出单元：投影、预算、settle 与冷启动重建（package-restructure 02.2）。读 ledger 事实与 event 身份，不反向依赖根 memory。"
+    },
+    {
+      "pattern": "evolution/meditation",
+      "role": "self-improve",
+      "required": true,
+      "reason": "冥想＝自进化引擎的凝缩机制：卡片词汇、绑定判定策略与消费接线（package-restructure 01.1）。消费 memory 的保留/压缩请求事实与 replay 的 folding 载荷。"
+    },
+    {
       "pattern": "bench",
       "role": "benchmark",
       "edges": [],
@@ -187,12 +205,15 @@
         "memory/rustviking",
         "event",
         "memory/search",
+        "memory/ledger",
+        "memory/replay",
+        "evolution/meditation",
         "bench",
         "tool/subagent",
         "view"
       ],
       "forbidden": [],
-      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记）。"
+      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记）。"
     },
     {
       "from": "event",
@@ -312,7 +333,8 @@
     {
       "from": "memory",
       "allow": [
-        "event"
+        "event",
+        "memory/ledger"
       ],
       "forbidden": [
         "agent",
@@ -321,7 +343,7 @@
         "rl",
         "evolution"
       ],
-      "reason": "持久事实只发事件；不得反向依赖上层的智能与治理。"
+      "reason": "持久事实只发事件；不得反向依赖上层的智能与治理。根 memory 只声明自己的读出面（事件体、查询、迁移、压缩请求日志），其声明中出现的原文引用与引用面直接引 memory/ledger 的词汇，根不再复制子包声明的兼容别名面（package-restructure D3）。"
     },
     {
       "from": "memory/localfile",
@@ -350,10 +372,62 @@
       "reason": "存储档实现只依赖 memory 领域接口与事件。"
     },
     {
+      "from": "memory/ledger",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "task",
+        "plugin",
+        "rl",
+        "evolution",
+        "memory",
+        "memory/replay"
+      ],
+      "reason": "原文与保留事实只凭 event 身份表达，不依赖根 memory 的投影面或重放读出，也不反向依赖上层智能与治理。"
+    },
+    {
+      "from": "memory/replay",
+      "allow": [
+        "event",
+        "memory/ledger"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "task",
+        "plugin",
+        "rl",
+        "evolution",
+        "memory"
+      ],
+      "reason": "重放读出只读 ledger 事实与 event 身份；不依赖根 memory 的读出面，避免与根成环。"
+    },
+    {
+      "from": "evolution/meditation",
+      "allow": [
+        "event",
+        "memory",
+        "memory/ledger",
+        "memory/replay"
+      ],
+      "forbidden": [
+        "agent",
+        "state",
+        "task",
+        "plugin",
+        "rl"
+      ],
+      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；不依赖执行器/状态容器/训练。"
+    },
+    {
       "from": "workspace",
       "allow": [
         "memory",
-        "event"
+        "event",
+        "memory/ledger"
       ],
       "forbidden": [
         "agent",
@@ -362,7 +436,7 @@
         "rl",
         "evolution"
       ],
-      "reason": "副本是原文（memory/OriginalStore）的临时物化，必须能读原文重建（副本依赖原文）；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理。"
+      "reason": "副本是原文的临时物化，必须能读原文重建（副本依赖原文）：原文引用与存储端口直接引 memory/ledger 的声明，压缩请求事实引 event 词汇，请求日志引 memory；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理。"
     },
     {
       "from": "plugin",
@@ -474,7 +548,8 @@
       "from": "memory/search",
       "allow": [
         "memory",
-        "event"
+        "event",
+        "memory/ledger"
       ],
       "forbidden": [
         "agent",
@@ -482,7 +557,7 @@
         "task",
         "rl"
       ],
-      "reason": "memory 实现子包（检索端口/混合融合）：读 memory 原文引用与 event 身份；索引非真源。由主编排者随 04.P0.4 骨架登记（层E收口，2026-10-13）。"
+      "reason": "memory 实现子包（检索端口/混合融合）：读原文引用（直接引 memory/ledger 声明）、根 memory 的查询与嵌入端口、event 身份；索引非真源。由主编排者随 04.P0.4 骨架登记（层E收口，2026-10-13；memory/ledger 边随 package-restructure D3 别名面删除显式登记）。"
     },
     {
       "from": "bench",

@@ -1,5 +1,20 @@
 package event // import "github.com/SpellingDragon/tagent/event"
 
+The compress request family: the judgment that material is due for compression,
+stated as the fact it is — who judged, why, what was judged and the identity
+the judgment is quoted by — and never as the instruction that performs the
+compression. A producer files the request it judged, a consumer reads it,
+compresses the material the request names and files the product it minted. A
+repeated judgment keeps the identity and the first filing moment of the request
+already on record, so one body of material carries one request however often it
+is judged.
+
+The judgment is vocabulary rather than a domain mechanism: the mechanisms that
+judge it (workspace on a tool result, evolution/meditation on a card sequence)
+and the log that files it (memory) live in three domains, and the event axis is
+the one package all three already speak. The producer and the reason a mechanism
+states stay with that mechanism; this file states the fact they are quoted by.
+
 Package event is the runtime's event identity and fact carrier: it defines the
 typed identifiers an event carries, the address of the agent session an event
 belongs to, and the event payload itself.
@@ -47,6 +62,9 @@ const (
     summary, the trigger source, the settle trigger lineage and the bundle
     attribution.
 
+const CompressRequestType = "compress.request"
+    CompressRequestType is the frozen type of a compress request fact.
+
 const MetaPrefix = "meta_"
     MetaPrefix marks a pass-through business metadata key: any key carrying
     this prefix is forwarded verbatim, and a pass-through key is never read as a
@@ -75,6 +93,40 @@ type AgentID string
 type AttemptID string
     AttemptID identifies one observable model attempt; a retry hidden below the
     decision boundary does not fake a new attempt.
+
+type CompressRequest struct {
+	// ID is the identity of the judgment: the content-addressed key the request
+	// is quoted by, derived from the producer, the subject and the reason.
+	ID EventID
+	// Producer names the mechanism that judged the material due for compression.
+	Producer string
+	// Reason states why that mechanism judged it due.
+	Reason string
+	// Subject is the identity of the material judged: the content-addressed key
+	// of the sequence or result the request names.
+	Subject string
+	// At is the moment the judgment was filed.
+	At time.Time
+}
+    CompressRequest is one compress request fact: the judgment that material is
+    over its bound. It names who judged, why, what was judged and the identity
+    the request is quoted by, and it is immutable once filed — the same judgment
+    files the same identity, and a retry never refiles it under a second one.
+
+func CompressRequestFor(producer, subject, reason string) CompressRequest
+    CompressRequestFor returns the request fact one judgment files: the identity
+    is content-addressed over the producer, the subject and the reason, so the
+    same judgment always answers the same identity and a re-judgment adds no
+    second request. The filing moment stays zero for the log to stamp on first
+    filing.
+
+func (r CompressRequest) FactKey() string
+    FactKey returns the compress request's identity as a fact key:
+    the content-addressed key one judgment is quoted by, unchanged by every
+    re-filing of that judgment.
+
+func (r CompressRequest) FactType() string
+    FactType returns the frozen type a compress request is read as.
 
 type DecisionID string
     DecisionID identifies one model decision boundary.

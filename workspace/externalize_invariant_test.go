@@ -15,20 +15,21 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // invariantCountingStore counts the original commits one externalize path makes.
 type invariantCountingStore struct {
-	*memory.MemoryOriginalStore
+	*ledger.MemoryOriginalStore
 	mu     sync.Mutex
 	puts   int
 	putErr error
 }
 
 // Put records the commit and reports the configured failure.
-func (s *invariantCountingStore) Put(ctx context.Context, ref memory.OriginalRef, body []byte) error {
+func (s *invariantCountingStore) Put(ctx context.Context, ref ledger.OriginalRef, body []byte) error {
 	s.mu.Lock()
 	s.puts++
 	failure := s.putErr
@@ -56,7 +57,7 @@ func invariantResultScope() ResultScope {
 }
 
 // invariantExternalizer builds one externalize path over the given store.
-func invariantExternalizer(t *testing.T, originals memory.OriginalStore, options ...ExternalizerOption) *ResultExternalizer {
+func invariantExternalizer(t *testing.T, originals ledger.OriginalStore, options ...ExternalizerOption) *ResultExternalizer {
 	t.Helper()
 	externalizer, err := NewResultExternalizer(originals, options...)
 	if err != nil {
@@ -120,7 +121,7 @@ func TestExternalizeThresholdInvariants(t *testing.T) {
 	})
 
 	t.Run("only a count above the threshold is externalized", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		externalizer := invariantExternalizer(t, store, WithMaxTokens(100))
 		if externalizer.Threshold() != 200 {
 			t.Fatalf("threshold = %d, want 200", externalizer.Threshold())
@@ -146,7 +147,7 @@ func TestExternalizeThresholdInvariants(t *testing.T) {
 	})
 
 	t.Run("the preview is bounded by the named runes and the threshold quarter", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		body := []byte(strings.Repeat("界", 300))
 
 		narrow := invariantExternalizer(t, store, WithMaxTokens(40), WithPreviewRunes(10))
@@ -200,7 +201,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 	resultScope := invariantResultScope()
 
 	t.Run("the original is committed before any preview exists", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		externalizer := invariantExternalizer(t, store)
 		body := []byte("a result body below the default preview bound")
 		ref := OriginalRefFor(resultScope, body)
@@ -215,14 +216,14 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 		if store.commits() != 1 {
 			t.Fatalf("commits = %d, want the original committed exactly once", store.commits())
 		}
-		if recalled := store.GetScoped(ctx, ref.Key, scope); recalled.Outcome != memory.RecallFound {
+		if recalled := store.GetScoped(ctx, ref.Key, scope); recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("recall = %v, want the original committed before the preview answered", recalled.Outcome)
 		}
-		if externalized.Segment.From != (memory.SegmentPosition{}) {
+		if externalized.Segment.From != (ledger.SegmentPosition{}) {
 			t.Fatalf("segment start = %+v, want the first byte", externalized.Segment.From)
 		}
-		if externalized.Segment.MaxBytes != memory.DefaultSegmentMaxBytes {
-			t.Fatalf("segment bound = %d, want %d bytes", externalized.Segment.MaxBytes, memory.DefaultSegmentMaxBytes)
+		if externalized.Segment.MaxBytes != ledger.DefaultSegmentMaxBytes {
+			t.Fatalf("segment bound = %d, want %d bytes", externalized.Segment.MaxBytes, ledger.DefaultSegmentMaxBytes)
 		}
 		if !strings.Contains(externalized.Preview, string(body)) {
 			t.Fatalf("preview = %q, want the short body presented whole", externalized.Preview)
@@ -231,7 +232,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 
 	t.Run("a failed commit answers no preview", func(t *testing.T) {
 		refused := errors.New("the original store refused the bytes")
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore(), putErr: refused}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore(), putErr: refused}
 		externalizer := invariantExternalizer(t, store)
 		body := []byte("bytes that were never committed")
 		externalized, err := externalizer.Externalize(ctx, OriginalRefFor(resultScope, body), body)
@@ -248,7 +249,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 
 	t.Run("a reference outside the materializer scope is refused before the commit", func(t *testing.T) {
 		root := t.TempDir()
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		materializer, err := NewMaterializer(root, store, scope)
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)
@@ -276,7 +277,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(root, "replica")); err != nil {
 			t.Fatalf("plant the linked parent: %v", err)
 		}
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		materializer, err := NewMaterializer(root, store, scope)
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)
@@ -295,7 +296,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 		if externalized.Original != ref || externalized.Preview == "" {
 			t.Fatalf("externalized = %+v, want the effective reference and its preview kept beside the failure", externalized)
 		}
-		if recalled := store.GetScoped(ctx, ref.Key, scope); recalled.Outcome != memory.RecallFound {
+		if recalled := store.GetScoped(ctx, ref.Key, scope); recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("recall = %v, want the original still effective after the replica failure", recalled.Outcome)
 		}
 		entries, err := os.ReadDir(outside)
@@ -334,7 +335,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 
 	t.Run("the replica of a successful externalization answers the original", func(t *testing.T) {
 		root := t.TempDir()
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		materializer, err := NewMaterializer(root, store, scope)
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)
@@ -373,7 +374,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 	scope := invariantResultScope()
 
 	t.Run("the construction refusals are named", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		externalizer := invariantExternalizer(t, store)
 		if _, err := NewBoundedTool(nil, externalizer, scope); !errors.Is(err, ErrToolRequired) {
 			t.Fatalf("missing tool = %v, want %v", err, ErrToolRequired)
@@ -388,7 +389,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 	})
 
 	t.Run("a result inside the bound reaches the model unchanged", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		externalizer := invariantExternalizer(t, store, WithMaxTokens(2))
 		bounded, err := NewBoundedTool(invariantFakeTool{decl: declaration, result: "ok"}, externalizer, scope)
 		if err != nil {
@@ -410,7 +411,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 	})
 
 	t.Run("a nil result and an unserializable result are not intercepted", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		externalizer := invariantExternalizer(t, store, WithMaxTokens(2))
 
 		empty, err := NewBoundedTool(invariantFakeTool{decl: declaration}, externalizer, scope)
@@ -440,7 +441,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 	})
 
 	t.Run("an oversized result is committed and answered with its preview", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		externalizer := invariantExternalizer(t, store, WithMaxTokens(2))
 		result := strings.Repeat("oversized output ", 10)
 		bounded, err := NewBoundedTool(invariantFakeTool{decl: declaration, result: result}, externalizer, scope)
@@ -467,7 +468,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 		}
 		ref := OriginalRefFor(scope, body)
 		recalled := store.GetScoped(ctx, ref.Key, invariantScope())
-		if recalled.Outcome != memory.RecallFound {
+		if recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("recall = %v, want the oversized body committed as the original", recalled.Outcome)
 		}
 		if string(recalled.Body) != string(body) {
@@ -476,7 +477,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 	})
 
 	t.Run("a tool error passes through without a commit", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		externalizer := invariantExternalizer(t, store, WithMaxTokens(2))
 		refused := errors.New("the wrapped tool failed")
 		bounded, err := NewBoundedTool(invariantFakeTool{decl: declaration, result: "partial", err: refused}, externalizer, scope)
@@ -501,7 +502,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(root, "replica")); err != nil {
 			t.Fatalf("plant the linked parent: %v", err)
 		}
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		materializer, err := NewMaterializer(root, store, invariantScope())
 		if err != nil {
 			t.Fatalf("assemble the materializer: %v", err)

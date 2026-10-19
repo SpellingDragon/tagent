@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -31,7 +33,7 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 	}
 
 	t.Run("an over-threshold result files the request it judged", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		requests := memory.NewCompressRequests()
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: result},
 			invariantExternalizer(t, store, WithMaxTokens(2)), scope, requests)
@@ -45,7 +47,7 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 			t.Fatalf("result = %v, want the preview of the kept original", got)
 		}
 		ref := OriginalRefFor(scope, body)
-		if recalled := store.GetScoped(ctx, ref.Key, invariantScope()); recalled.Outcome != memory.RecallFound {
+		if recalled := store.GetScoped(ctx, ref.Key, invariantScope()); recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("recall of the judged original = %v, want it kept by the same call", recalled.Outcome)
 		}
 
@@ -63,8 +65,8 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 		if request.Subject != string(ref.Key) {
 			t.Fatalf("request subject = %q, want the identity of the judged original %q", request.Subject, ref.Key)
 		}
-		if request.FactType() != memory.CompressRequestType || request.FactKey() != string(request.ID) {
-			t.Fatalf("request fact = (%q, %q), want its identity read as %q", request.FactKey(), request.FactType(), memory.CompressRequestType)
+		if request.FactType() != event.CompressRequestType || request.FactKey() != string(request.ID) {
+			t.Fatalf("request fact = (%q, %q), want its identity read as %q", request.FactKey(), request.FactType(), event.CompressRequestType)
 		}
 		if request.At.IsZero() {
 			t.Fatal("the request carries no filing moment, want the moment it was filed")
@@ -72,7 +74,7 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 	})
 
 	t.Run("a result inside the bound files nothing", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		requests := memory.NewCompressRequests()
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: "ok"},
 			invariantExternalizer(t, store, WithMaxTokens(2)), scope, requests)
@@ -85,7 +87,7 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 	})
 
 	t.Run("a repeated judgment keeps the request on record", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		requests := memory.NewCompressRequests()
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: result},
 			invariantExternalizer(t, store, WithMaxTokens(2)), scope, requests)
@@ -101,7 +103,7 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 	})
 
 	t.Run("a filing that failed is reported beside the preview", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		refused := errors.New("the request log is unreachable")
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: result},
 			invariantExternalizer(t, store, WithMaxTokens(2)), scope, refused)
@@ -115,13 +117,13 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 			t.Fatalf("result = %v, want the preview the kept original still answers", got)
 		}
 		ref := OriginalRefFor(scope, body)
-		if recalled := store.GetScoped(ctx, ref.Key, invariantScope()); recalled.Outcome != memory.RecallFound {
+		if recalled := store.GetScoped(ctx, ref.Key, invariantScope()); recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("recall of the judged original = %v, want it kept despite the unfiled judgment", recalled.Outcome)
 		}
 	})
 
 	t.Run("a tool with no filing wired judges nothing", func(t *testing.T) {
-		store := &invariantCountingStore{MemoryOriginalStore: memory.NewMemoryOriginalStore()}
+		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
 		bounded, err := NewBoundedTool(invariantFakeTool{decl: declaration, result: result},
 			invariantExternalizer(t, store, WithMaxTokens(2)), scope)
 		if err != nil {
@@ -146,8 +148,8 @@ func invariantBoundedTool(t *testing.T, inner trpctool.CallableTool, externalize
 	case *memory.CompressRequests:
 		file = named.Produce
 	case error:
-		file = func(context.Context, memory.CompressRequest) (memory.CompressRequest, error) {
-			return memory.CompressRequest{}, named
+		file = func(context.Context, event.CompressRequest) (event.CompressRequest, error) {
+			return event.CompressRequest{}, named
 		}
 	default:
 		t.Fatalf("unsupported filing %T", filing)

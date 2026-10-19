@@ -5,11 +5,12 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // restartOwnerTool is the named tool stub the current orchestration binding
@@ -45,7 +46,7 @@ func restartMailbox(t *testing.T, ctx context.Context, store *state.MemoryStore,
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
-	cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: t.TempDir()}
+	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 	oldTarget := event.Address{AgentID: "agent-recv", SessionID: "session-old"}
 	newTarget := event.Address{AgentID: "agent-recv", SessionID: "session-new"}
 	const sourceInstance event.InstanceID = "instance-source"
@@ -80,11 +81,11 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	authority1, store1 := openStore()
 	authority2, store2 := openStore()
 
-	tier, err := memory.OpenTier(ctx, cfg)
+	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("OpenTier: %v", err)
 	}
-	durable, err := state.NewDurableCommit(memory.TierFactLog(tier), nil)
+	durable, err := state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 	if err != nil {
 		t.Fatalf("NewDurableCommit: %v", err)
 	}
@@ -150,11 +151,11 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 		t.Fatalf("new-instance mailbox = %+v, want the started notification never delivered to the new instance", got)
 	}
 
-	reopened, err := memory.OpenTier(ctx, cfg)
+	reopened, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
 		t.Fatalf("reopen OpenTier: %v", err)
 	}
-	restored, err := state.NewDurableCommit(memory.TierFactLog(reopened), nil)
+	restored, err := state.NewDurableCommit(ledger.TierFactLog(reopened), nil)
 	if err != nil {
 		t.Fatalf("reopen NewDurableCommit: %v", err)
 	}

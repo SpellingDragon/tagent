@@ -1,4 +1,4 @@
-package memory
+package meditation
 
 import (
 	"context"
@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
-// curationNow is the pass time every curation invariant judges age against.
-var curationNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+// meditationNow is the pass time every meditation invariant judges age against.
+var meditationNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
-// TestCurationPassInvariants pins one pass: each card takes one fate, kept tickets keep their first stamp, and the artifact is a new reference over its refs.
+// TestMeditationPassInvariants pins one pass: each card takes one fate, kept tickets keep their first stamp, and the artifact is a new reference over its refs.
 // - a sequence within the bound retains every card and produces no artifact
 // - every card of a triggered sequence carries exactly one of retain, evict or protect
 // - only the oldest cards beyond the bound are judged for eviction, and each evicted card was tombstoned through the lifecycle
@@ -22,35 +24,35 @@ var curationNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 // - the artifact identity is content-addressed over its refs, so the same condensation mints the same identity
 // - the card sequence handed in is left byte for byte as it arrived
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
-func TestCurationPassInvariants(t *testing.T) {
+func TestMeditationPassInvariants(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a sequence within the bound retains every card and produces no artifact", func(t *testing.T) {
-		curation, _, store := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
-		report, err := curation.Curate(ctx, curationNow, curationCards()[:2])
+		meditation, _, store := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		report, err := meditation.Curate(ctx, meditationNow, meditationCards()[:2])
 		if err != nil {
 			t.Fatalf("curate a sequence within the bound: %v", err)
 		}
 		if report.Triggered || report.Artifact != nil {
-			t.Fatalf("an untriggered pass = (triggered %v, artifact %v), want no curation at all", report.Triggered, report.Artifact)
+			t.Fatalf("an untriggered pass = (triggered %v, artifact %v), want no meditation at all", report.Triggered, report.Artifact)
 		}
 		if len(report.Fates) != 2 {
 			t.Fatalf("fates of an untriggered sequence = %v, want one fate per card", report.Fates)
 		}
 		for key, fate := range report.Fates {
-			if fate != CurationRetain {
+			if fate != MeditationRetain {
 				t.Fatalf("fate of %q = %q, want retain", key, fate)
 			}
 		}
-		if len(store.tombstones) != 0 {
-			t.Fatalf("tombstones of an untriggered pass = %v, want none", store.tombstones)
+		if len(tombstonedCards(t, store)) != 0 {
+			t.Fatalf("tombstones of an untriggered pass = %v, want none", tombstonedCards(t, store))
 		}
 	})
 
 	t.Run("every card of a triggered sequence carries exactly one fate", func(t *testing.T) {
-		curation, retention, store := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		meditation, retention, store := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, retention, "aa02")
-		report, err := curation.Curate(ctx, curationNow, curationCards())
+		report, err := meditation.Curate(ctx, meditationNow, meditationCards())
 		if err != nil {
 			t.Fatalf("curate an over-limit sequence: %v", err)
 		}
@@ -62,15 +64,15 @@ func TestCurationPassInvariants(t *testing.T) {
 		}
 		for key, fate := range report.Fates {
 			switch fate {
-			case CurationRetain, CurationEvict, CurationProtect:
+			case MeditationRetain, MeditationEvict, MeditationProtect:
 			default:
 				t.Fatalf("fate of %q = %q, want one of the three channels", key, fate)
 			}
 		}
-		if got := report.Fates["aa05"]; got != CurationRetain {
+		if got := report.Fates["aa05"]; got != MeditationRetain {
 			t.Fatalf("fate of a card inside the sequence bound = %q, want retain", got)
 		}
-		if got := report.Fates["aa02"]; got != CurationProtect {
+		if got := report.Fates["aa02"]; got != MeditationProtect {
 			t.Fatalf("fate of a card another holder protects = %q, want protect", got)
 		}
 		if len(report.Evicted) != 1 || report.Evicted[0] != "aa01" {
@@ -84,15 +86,15 @@ func TestCurationPassInvariants(t *testing.T) {
 				t.Fatalf("a protected or kept card %q was tombstoned", key)
 			}
 		}
-		if len(store.tombstones) != 1 {
-			t.Fatalf("tombstones = %v, want exactly the evicted card", store.tombstones)
+		if len(tombstonedCards(t, store)) != 1 {
+			t.Fatalf("tombstones = %v, want exactly the evicted card", tombstonedCards(t, store))
 		}
 	})
 
 	t.Run("each kept ticket reads back under its first registration", func(t *testing.T) {
-		curation, retention, _ := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		meditation, retention, _ := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, retention, "aa02")
-		report, err := curation.Curate(ctx, curationNow, curationCards())
+		report, err := meditation.Curate(ctx, meditationNow, meditationCards())
 		if err != nil {
 			t.Fatalf("curate an over-limit sequence: %v", err)
 		}
@@ -103,10 +105,10 @@ func TestCurationPassInvariants(t *testing.T) {
 		if len(artifact.Refs) != 2 || artifact.Refs[0] != "aa03" || artifact.Refs[1] != "aa04" {
 			t.Fatalf("artifact refs = %v, want the kept tickets in value order", artifact.Refs)
 		}
-		if artifact.Key != curationArtifactKey(artifact.Refs) {
+		if artifact.Key != meditationArtifactKey(artifact.Refs) {
 			t.Fatalf("artifact key = %q, want the content-addressed identity of its refs", artifact.Key)
 		}
-		if artifact.Type != CurationArtifactType || artifact.Sunk != 0 {
+		if artifact.Type != MeditationArtifactType || artifact.Sunk != 0 {
 			t.Fatalf("artifact = %+v, want a whole condensed card with nothing sunk", artifact)
 		}
 		for _, ref := range artifact.Refs {
@@ -129,15 +131,15 @@ func TestCurationPassInvariants(t *testing.T) {
 	})
 
 	t.Run("a re-run never re-stamps a registered ticket", func(t *testing.T) {
-		curation, retention, _ := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		meditation, retention, _ := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, retention, "aa02")
-		if _, err := curation.Curate(ctx, curationNow, curationCards()); err != nil {
-			t.Fatalf("first curation pass: %v", err)
+		if _, err := meditation.Curate(ctx, meditationNow, meditationCards()); err != nil {
+			t.Fatalf("first meditation pass: %v", err)
 		}
-		restamped := curationCards()
-		restamped[2].RecordedAt = curationNow.Add(-time.Minute)
-		if _, err := curation.Curate(ctx, curationNow, restamped); err != nil {
-			t.Fatalf("second curation pass: %v", err)
+		restamped := meditationCards()
+		restamped[2].RecordedAt = meditationNow.Add(-time.Minute)
+		if _, err := meditation.Curate(ctx, meditationNow, restamped); err != nil {
+			t.Fatalf("second meditation pass: %v", err)
 		}
 		record, registered := retention.Record("aa03")
 		if !registered {
@@ -149,20 +151,20 @@ func TestCurationPassInvariants(t *testing.T) {
 	})
 
 	t.Run("the same condensation mints the same artifact identity", func(t *testing.T) {
-		left := curationArtifactKey([]event.EventID{"aa03", "aa04"})
-		right := curationArtifactKey([]event.EventID{"aa04", "aa03"})
+		left := meditationArtifactKey([]event.EventID{"aa03", "aa04"})
+		right := meditationArtifactKey([]event.EventID{"aa04", "aa03"})
 		if left != right {
 			t.Fatalf("artifact identities %q and %q differ for the same refs", left, right)
 		}
-		curation, retention, _ := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		meditation, retention, _ := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, retention, "aa02")
-		first, err := curation.Curate(ctx, curationNow, curationCards())
+		first, err := meditation.Curate(ctx, meditationNow, meditationCards())
 		if err != nil {
-			t.Fatalf("first curation pass: %v", err)
+			t.Fatalf("first meditation pass: %v", err)
 		}
-		second, err := curation.Curate(ctx, curationNow, curationCards())
+		second, err := meditation.Curate(ctx, meditationNow, meditationCards())
 		if err != nil {
-			t.Fatalf("second curation pass: %v", err)
+			t.Fatalf("second meditation pass: %v", err)
 		}
 		if first.Artifact == nil || second.Artifact == nil || first.Artifact.Key != second.Artifact.Key {
 			t.Fatalf("artifact identities of two identical passes = (%v, %v), want one identity", first.Artifact, second.Artifact)
@@ -170,53 +172,53 @@ func TestCurationPassInvariants(t *testing.T) {
 	})
 
 	t.Run("the card sequence handed in is left as it arrived", func(t *testing.T) {
-		curation, retention, _ := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		meditation, retention, _ := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, retention, "aa02")
-		cards := curationCards()
-		before := curationCards()
-		if _, err := curation.Curate(ctx, curationNow, cards); err != nil {
+		cards := meditationCards()
+		before := meditationCards()
+		if _, err := meditation.Curate(ctx, meditationNow, cards); err != nil {
 			t.Fatalf("curate an over-limit sequence: %v", err)
 		}
 		if len(cards) != len(before) {
-			t.Fatalf("cards after curation = %d, want the %d handed in", len(cards), len(before))
+			t.Fatalf("cards after meditation = %d, want the %d handed in", len(cards), len(before))
 		}
 		for i := range cards {
 			if cards[i].Key != before[i].Key || cards[i].Type != before[i].Type ||
 				cards[i].Summary != before[i].Summary || cards[i].Links != before[i].Links ||
 				!cards[i].RecordedAt.Equal(before[i].RecordedAt) {
-				t.Fatalf("card %d after curation = %+v, want %+v", i, cards[i], before[i])
+				t.Fatalf("card %d after meditation = %+v, want %+v", i, cards[i], before[i])
 			}
 		}
 	})
 }
 
-// TestCurationFallbackInvariants pins a failing condensation: the overflow run becomes a count line, its holdings stay held, and the pass reports no error.
+// TestMeditationFallbackInvariants pins a failing condensation: the overflow run becomes a count line, its holdings stay held, and the pass reports no error.
 // - a failing condensation sinks the whole overflow run into the count line
 // - the failure is recorded in the sink account and the pass still returns no error
 // - the references the failed pass keeps stay held against eviction
 // - an artifact with sunk lines reports the count it collapsed instead of an intact summary
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
-func TestCurationFallbackInvariants(t *testing.T) {
+func TestMeditationFallbackInvariants(t *testing.T) {
 	ctx := context.Background()
 	failure := errors.New("condenser endpoint unreachable")
-	lifecycleStore := NewMemoryLifecycleStore(LifecycleCapabilities{})
-	retention := NewRetention(NewMemoryGuard())
-	lifecycle, err := NewLifecycle(LifecycleConfig{GlobalTTLDays: -1}, retention, lifecycleStore, LifecycleCapabilities{})
+	lifecycleStore := ledger.NewMemoryLifecycleStore(ledger.LifecycleCapabilities{})
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	lifecycle, err := ledger.NewLifecycle(ledger.LifecycleConfig{GlobalTTLDays: -1}, retention, lifecycleStore, ledger.LifecycleCapabilities{})
 	if err != nil {
 		t.Fatalf("open the lifecycle: %v", err)
 	}
 	lifecycle.RecoveryComplete()
-	curation, err := NewCuration(CurationPolicy{MaxCards: 1, MinScore: 10}, retention, lifecycle,
-		func(context.Context, CurationRun, time.Time) (string, error) { return "", failure })
+	meditation, err := NewMeditation(MeditationPolicy{MaxCards: 1, MinScore: 10}, retention, lifecycle,
+		func(context.Context, MeditationRun, time.Time) (string, error) { return "", failure })
 	if err != nil {
-		t.Fatalf("open the curation engine: %v", err)
+		t.Fatalf("open the meditation engine: %v", err)
 	}
-	cards := []CurationCard{
-		{Key: "bb01", Type: "tool.result", Summary: "probe one", RecordedAt: curationNow.Add(-72 * time.Hour)},
-		{Key: "bb02", Type: "agent.output", Summary: "probe two", Links: 2, RecordedAt: curationNow.Add(-60 * time.Hour)},
-		{Key: "bb03", Type: "external.input", Summary: "probe three", RecordedAt: curationNow.Add(-time.Hour)},
+	cards := []MeditationCard{
+		{Key: "bb01", Type: "tool.result", Summary: "probe one", RecordedAt: meditationNow.Add(-72 * time.Hour)},
+		{Key: "bb02", Type: "agent.output", Summary: "probe two", Links: 2, RecordedAt: meditationNow.Add(-60 * time.Hour)},
+		{Key: "bb03", Type: "external.input", Summary: "probe three", RecordedAt: meditationNow.Add(-time.Hour)},
 	}
-	report, err := curation.Curate(ctx, curationNow, cards)
+	report, err := meditation.Curate(ctx, meditationNow, cards)
 	if err != nil {
 		t.Fatalf("curate under a failing condensation: %v", err)
 	}
@@ -237,40 +239,40 @@ func TestCurationFallbackInvariants(t *testing.T) {
 	if err != nil || !held {
 		t.Fatalf("kept reference under a degraded pass = (held %v, %v), want it still protected", held, err)
 	}
-	if report.Fates["bb01"] != CurationEvict || report.Fates["bb03"] != CurationRetain {
+	if report.Fates["bb01"] != MeditationEvict || report.Fates["bb03"] != MeditationRetain {
 		t.Fatalf("fates under a degraded pass = %v, want the unprotected overflow evicted and the window retained", report.Fates)
 	}
 }
 
-// TestCurationRefusesAmbiguousCards pins the refusal of a card without a ticket or a sequence repeating one, leaving no fate, artifact or tombstone behind.
+// TestMeditationRefusesAmbiguousCards pins the refusal of a card without a ticket or a sequence repeating one, leaving no fate, artifact or tombstone behind.
 // - a card without an event key is refused by name
 // - a sequence repeating one ticket is refused by name
 // - a refused sequence leaves no fate, no artifact and no tombstone behind
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
-func TestCurationRefusesAmbiguousCards(t *testing.T) {
+func TestMeditationRefusesAmbiguousCards(t *testing.T) {
 	ctx := context.Background()
-	curation, _, store := newCurationUnderTest(t, CurationPolicy{MaxCards: 1, MinScore: 10})
-	for name, cards := range map[string][]CurationCard{
-		"card without a ticket": {{Key: "", RecordedAt: curationNow}},
+	meditation, _, store := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 1, MinScore: 10})
+	for name, cards := range map[string][]MeditationCard{
+		"card without a ticket": {{Key: "", RecordedAt: meditationNow}},
 		"sequence repeating one ticket": {
-			{Key: "cc01", RecordedAt: curationNow.Add(-48 * time.Hour)},
-			{Key: "cc01", RecordedAt: curationNow.Add(-time.Hour)},
+			{Key: "cc01", RecordedAt: meditationNow.Add(-48 * time.Hour)},
+			{Key: "cc01", RecordedAt: meditationNow.Add(-time.Hour)},
 		},
 	} {
-		report, err := curation.Curate(ctx, curationNow, cards)
-		if !errors.Is(err, ErrCurationCardKey) {
-			t.Fatalf("%s = %v, want ErrCurationCardKey", name, err)
+		report, err := meditation.Curate(ctx, meditationNow, cards)
+		if !errors.Is(err, ErrMeditationCardKey) {
+			t.Fatalf("%s = %v, want ErrMeditationCardKey", name, err)
 		}
 		if report.Triggered || report.Artifact != nil || len(report.Fates) != 0 {
 			t.Fatalf("%s left a report behind: %+v", name, report)
 		}
 	}
-	if len(store.tombstones) != 0 {
-		t.Fatalf("tombstones after refused sequences = %v, want none", store.tombstones)
+	if len(tombstonedCards(t, store)) != 0 {
+		t.Fatalf("tombstones after refused sequences = %v, want none", tombstonedCards(t, store))
 	}
 }
 
-// TestCurationConsumesCompressionRequests pins the consumer tick: one filed request drives one pass, and its product is committed before the request retires.
+// TestMeditationConsumesCompressionRequests pins the consumer tick: one filed request drives one pass, and its product is committed before the request retires.
 // - a pending request naming the curated sequence drives exactly one pass and is retired
 // - the condensed artifact is committed into the state as the product of that pass
 // - the eviction of the pass still travels the one tombstone channel the lifecycle owns
@@ -280,18 +282,18 @@ func TestCurationRefusesAmbiguousCards(t *testing.T) {
 // - a tick without its request log, card source or product sink is refused by name
 //
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
-func TestCurationConsumesCompressionRequests(t *testing.T) {
+func TestMeditationConsumesCompressionRequests(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a pending request drives one pass and its product is committed", func(t *testing.T) {
-		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, fixture.retention, "aa02")
-		request, filed, err := fixture.curation.Judge(ctx, curationNow, fixture.cards)
+		request, filed, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards)
 		if err != nil || !filed {
 			t.Fatalf("judge the over-limit sequence = (%+v, %v, %v), want the request it files", request, filed, err)
 		}
 
-		tick, err := fixture.curation.Tick(ctx, curationNow)
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
 		if err != nil {
 			t.Fatalf("tick: %v", err)
 		}
@@ -309,8 +311,8 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 			t.Fatalf("products = %+v, want the artifact of the pass committed into the state", tick.Products)
 		}
 		var product event.Fact = tick.Products[0]
-		if product.FactType() != CurationArtifactType || product.FactKey() != string(artifact.Key) {
-			t.Fatalf("product fact = (%q, %q), want the artifact identity read as %q", product.FactKey(), product.FactType(), CurationArtifactType)
+		if product.FactType() != MeditationArtifactType || product.FactKey() != string(artifact.Key) {
+			t.Fatalf("product fact = (%q, %q), want the artifact identity read as %q", product.FactKey(), product.FactType(), MeditationArtifactType)
 		}
 		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 0 {
 			t.Fatalf("pending after the tick = (%v, %v), want the request retired", pending, err)
@@ -318,21 +320,21 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 		if _, marked := fixture.store.Tombstoned("aa01"); !marked {
 			t.Fatal("the evicted card was not tombstoned through the lifecycle")
 		}
-		if len(fixture.store.tombstones) != 1 {
-			t.Fatalf("tombstones = %v, want exactly the evicted card", fixture.store.tombstones)
+		if len(tombstonedCards(t, fixture.store)) != 1 {
+			t.Fatalf("tombstones = %v, want exactly the evicted card", tombstonedCards(t, fixture.store))
 		}
 	})
 
 	t.Run("a product commit that failed keeps the request pending", func(t *testing.T) {
-		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, fixture.retention, "aa02")
-		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
 			t.Fatalf("judge the over-limit sequence: %v", err)
 		}
 		refused := errors.New("the state refused the artifact")
 		fixture.sinkErr = refused
 
-		tick, err := fixture.curation.Tick(ctx, curationNow)
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
 		if err != nil {
 			t.Fatalf("tick under a refused commit: %v", err)
 		}
@@ -347,7 +349,7 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 		}
 
 		fixture.sinkErr = nil
-		if tick, err = fixture.curation.Tick(ctx, curationNow); err != nil || len(tick.Products) != 1 {
+		if tick, err = fixture.meditation.Tick(ctx, meditationNow); err != nil || len(tick.Products) != 1 {
 			t.Fatalf("tick after the commit was accepted = (%+v, %v), want the product committed", tick, err)
 		}
 		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 0 {
@@ -356,17 +358,17 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 	})
 
 	t.Run("a request naming other material curates nothing", func(t *testing.T) {
-		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, fixture.retention, "aa02")
-		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
 			t.Fatalf("judge the over-limit sequence: %v", err)
 		}
-		other, err := fixture.requests.Produce(ctx, CompressRequestFor("another.producer", "another-material", "another ground"))
+		other, err := fixture.requests.Produce(ctx, event.CompressRequestFor("another.producer", "another-material", "another ground"))
 		if err != nil {
 			t.Fatalf("file the unrelated judgment: %v", err)
 		}
 
-		if tick, err := fixture.curation.Tick(ctx, curationNow); err != nil || len(tick.Read) != 1 {
+		if tick, err := fixture.meditation.Tick(ctx, meditationNow); err != nil || len(tick.Read) != 1 {
 			t.Fatalf("tick = (%+v, %v), want only the request naming the curated sequence", tick, err)
 		}
 		condensed := len(fixture.products)
@@ -378,11 +380,11 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 			t.Fatalf("pending = (%v, %v), want the unrelated request left awaiting its own consumer", pending, err)
 		}
 
-		fixture.cards = curationCards()[:2]
-		if request, filed, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil || filed || request.ID != "" {
+		fixture.cards = meditationCards()[:2]
+		if request, filed, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil || filed || request.ID != "" {
 			t.Fatalf("judgment of a sequence within the bound = (%+v, %v, %v), want no request", request, filed, err)
 		}
-		if tick, err := fixture.curation.Tick(ctx, curationNow); err != nil || len(tick.Read) != 0 || len(tick.Reports) != 0 {
+		if tick, err := fixture.meditation.Tick(ctx, meditationNow); err != nil || len(tick.Read) != 0 || len(tick.Reports) != 0 {
 			t.Fatalf("tick over a sequence within the bound = (%+v, %v), want no pass", tick, err)
 		}
 		if len(fixture.products) != condensed {
@@ -391,12 +393,12 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 	})
 
 	t.Run("a retired request is never compressed twice", func(t *testing.T) {
-		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, fixture.retention, "aa02")
-		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
 			t.Fatalf("judge the over-limit sequence: %v", err)
 		}
-		first, err := fixture.curation.Tick(ctx, curationNow)
+		first, err := fixture.meditation.Tick(ctx, meditationNow)
 		if err != nil || len(first.Products) != 1 {
 			t.Fatalf("first tick = (%+v, %v), want the condensed product", first, err)
 		}
@@ -405,7 +407,7 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 			t.Fatal("the kept ticket carries no registration")
 		}
 
-		second, err := fixture.curation.Tick(ctx, curationNow.Add(time.Hour))
+		second, err := fixture.meditation.Tick(ctx, meditationNow.Add(time.Hour))
 		if err != nil {
 			t.Fatalf("second tick: %v", err)
 		}
@@ -419,38 +421,38 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 		if !stillRegistered || !kept.RecordedAt.Equal(record.RecordedAt) || kept.Type != record.Type {
 			t.Fatalf("registration after the second tick = (%s, %s), want the first (%s, %s) kept", kept.RecordedAt, kept.Type, record.RecordedAt, record.Type)
 		}
-		if len(fixture.store.tombstones) != 1 {
-			t.Fatalf("tombstones = %v, want the one eviction", fixture.store.tombstones)
+		if len(tombstonedCards(t, fixture.store)) != 1 {
+			t.Fatalf("tombstones = %v, want the one eviction", tombstonedCards(t, fixture.store))
 		}
 	})
 
 	t.Run("a tick without its consumer faces is refused by name", func(t *testing.T) {
-		curation, _, _ := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
-		if _, err := curation.Tick(ctx, curationNow); !errors.Is(err, ErrCurationRequestsUnwired) {
-			t.Fatalf("tick without the request log = %v, want %v", err, ErrCurationRequestsUnwired)
+		meditation, _, _ := newMeditationUnderTest(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		if _, err := meditation.Tick(ctx, meditationNow); !errors.Is(err, ErrMeditationRequestsUnwired) {
+			t.Fatalf("tick without the request log = %v, want %v", err, ErrMeditationRequestsUnwired)
 		}
 
-		requests := NewCompressRequests()
-		noCards, err := NewCuration(CurationPolicy{MaxCards: 2, MinScore: 10}, curation.retention, curation.lifecycle, nil, WithCompressRequests(requests))
+		requests := memory.NewCompressRequests()
+		noCards, err := NewMeditation(MeditationPolicy{MaxCards: 2, MinScore: 10}, meditation.retention, meditation.lifecycle, nil, WithCompressRequests(requests))
 		if err != nil {
-			t.Fatalf("open the curation engine: %v", err)
+			t.Fatalf("open the meditation engine: %v", err)
 		}
-		if _, err := noCards.Tick(ctx, curationNow); !errors.Is(err, ErrCurationCardsUnwired) {
-			t.Fatalf("tick without the card source = %v, want %v", err, ErrCurationCardsUnwired)
+		if _, err := noCards.Tick(ctx, meditationNow); !errors.Is(err, ErrMeditationCardsUnwired) {
+			t.Fatalf("tick without the card source = %v, want %v", err, ErrMeditationCardsUnwired)
 		}
 
-		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
 		holdTicket(t, ctx, fixture.retention, "aa02")
-		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
 			t.Fatalf("judge the over-limit sequence: %v", err)
 		}
-		fixture.curation.products = nil
-		tick, err := fixture.curation.Tick(ctx, curationNow)
+		fixture.meditation.products = nil
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
 		if err != nil {
 			t.Fatalf("tick without the product sink: %v", err)
 		}
-		if len(tick.Failures) != 1 || !errors.Is(tick.Failures[0], ErrCurationProductsUnwired) {
-			t.Fatalf("tick failures = %v, want %v", tick.Failures, ErrCurationProductsUnwired)
+		if len(tick.Failures) != 1 || !errors.Is(tick.Failures[0], ErrMeditationProductsUnwired) {
+			t.Fatalf("tick failures = %v, want %v", tick.Failures, ErrMeditationProductsUnwired)
 		}
 		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 1 {
 			t.Fatalf("pending without a product sink = (%v, %v), want the request still awaited", pending, err)
@@ -458,40 +460,40 @@ func TestCurationConsumesCompressionRequests(t *testing.T) {
 	})
 }
 
-// curationFixture is the consumer stack one tick drives: the engine over a
+// meditationFixture is the consumer stack one tick drives: the engine over a
 // request log, a card sequence it reads back and the products it committed.
-type curationFixture struct {
-	curation  *Curation
-	retention *Retention
-	requests  *CompressRequests
-	store     *MemoryLifecycleStore
-	cards     []CurationCard
-	products  []CurationArtifact
-	sinkErr   error
+type meditationFixture struct {
+	meditation *Meditation
+	retention  *ledger.Retention
+	requests   *memory.CompressRequests
+	store      *ledger.MemoryLifecycleStore
+	cards      []MeditationCard
+	products   []MeditationArtifact
+	sinkErr    error
 }
 
-// newConsumingCuration opens a curation engine whose tick reads the compress
+// newConsumingMeditation opens a meditation engine whose tick reads the compress
 // requests filed into its log, curates the card sequence it holds and commits the
 // products into the fixture, recording a commit failure the case configures.
-func newConsumingCuration(t *testing.T, policy CurationPolicy) *curationFixture {
+func newConsumingMeditation(t *testing.T, policy MeditationPolicy) *meditationFixture {
 	t.Helper()
-	store := NewMemoryLifecycleStore(LifecycleCapabilities{})
-	retention := NewRetention(NewMemoryGuard())
-	lifecycle, err := NewLifecycle(LifecycleConfig{GlobalTTLDays: -1}, retention, store, LifecycleCapabilities{})
+	store := ledger.NewMemoryLifecycleStore(ledger.LifecycleCapabilities{})
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	lifecycle, err := ledger.NewLifecycle(ledger.LifecycleConfig{GlobalTTLDays: -1}, retention, store, ledger.LifecycleCapabilities{})
 	if err != nil {
 		t.Fatalf("open the lifecycle: %v", err)
 	}
 	lifecycle.RecoveryComplete()
-	fixture := &curationFixture{
+	fixture := &meditationFixture{
 		retention: retention,
-		requests:  NewCompressRequests(),
+		requests:  memory.NewCompressRequests(),
 		store:     store,
-		cards:     curationCards(),
+		cards:     meditationCards(),
 	}
-	curation, err := NewCuration(policy, retention, lifecycle, nil,
+	meditation, err := NewMeditation(policy, retention, lifecycle, nil,
 		WithCompressRequests(fixture.requests),
-		WithCurationCards(func(context.Context) ([]CurationCard, error) { return fixture.cards, nil }),
-		WithCurationProducts(func(_ context.Context, artifact CurationArtifact) error {
+		WithMeditationCards(func(context.Context) ([]MeditationCard, error) { return fixture.cards, nil }),
+		WithMeditationProducts(func(_ context.Context, artifact MeditationArtifact) error {
 			if fixture.sinkErr != nil {
 				return fixture.sinkErr
 			}
@@ -500,36 +502,36 @@ func newConsumingCuration(t *testing.T, policy CurationPolicy) *curationFixture 
 		}),
 	)
 	if err != nil {
-		t.Fatalf("open the curation engine: %v", err)
+		t.Fatalf("open the meditation engine: %v", err)
 	}
-	fixture.curation = curation
+	fixture.meditation = meditation
 	return fixture
 }
 
-// newCurationUnderTest opens a curation engine over an in-memory lifecycle whose
-// TTL window is exempt, so only the curation pass files fates.
-func newCurationUnderTest(t *testing.T, policy CurationPolicy) (*Curation, *Retention, *MemoryLifecycleStore) {
+// newMeditationUnderTest opens a meditation engine over an in-memory lifecycle whose
+// TTL window is exempt, so only the meditation pass files fates.
+func newMeditationUnderTest(t *testing.T, policy MeditationPolicy) (*Meditation, *ledger.Retention, *ledger.MemoryLifecycleStore) {
 	t.Helper()
-	store := NewMemoryLifecycleStore(LifecycleCapabilities{})
-	retention := NewRetention(NewMemoryGuard())
-	lifecycle, err := NewLifecycle(LifecycleConfig{GlobalTTLDays: -1}, retention, store, LifecycleCapabilities{})
+	store := ledger.NewMemoryLifecycleStore(ledger.LifecycleCapabilities{})
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	lifecycle, err := ledger.NewLifecycle(ledger.LifecycleConfig{GlobalTTLDays: -1}, retention, store, ledger.LifecycleCapabilities{})
 	if err != nil {
 		t.Fatalf("open the lifecycle: %v", err)
 	}
 	lifecycle.RecoveryComplete()
-	curation, err := NewCuration(policy, retention, lifecycle, nil)
+	meditation, err := NewMeditation(policy, retention, lifecycle, nil)
 	if err != nil {
-		t.Fatalf("open the curation engine: %v", err)
+		t.Fatalf("open the meditation engine: %v", err)
 	}
-	return curation, retention, store
+	return meditation, retention, store
 }
 
 // holdTicket registers one standing hold on a ticket under a holder beside the
-// curation pass, as a recovery resource does.
-func holdTicket(t *testing.T, ctx context.Context, retention *Retention, key event.EventID) {
+// meditation pass, as a recovery resource does.
+func holdTicket(t *testing.T, ctx context.Context, retention *ledger.Retention, key event.EventID) {
 	t.Helper()
-	if _, err := retention.Register(ctx, key, "recovery:inventory", RetentionRecord{
-		Kind:       RetentionRecovery,
+	if _, err := retention.Register(ctx, key, "recovery:inventory", ledger.RetentionRecord{
+		Kind:       ledger.RetentionRecovery,
 		Type:       cardByKey(t, key).Type,
 		RecordedAt: cardByKey(t, key).RecordedAt,
 	}); err != nil {
@@ -537,28 +539,42 @@ func holdTicket(t *testing.T, ctx context.Context, retention *Retention, key eve
 	}
 }
 
-// curationCards returns the six-card sequence the curation invariants fold: two
+// meditationCards returns the six-card sequence the meditation invariants fold: two
 // oldest cards below the value floor, two value cards beyond the bound, and a
 // two-card window inside it.
-func curationCards() []CurationCard {
-	return []CurationCard{
-		{Key: "aa01", Type: "tool.result", Summary: "oldest probe", RecordedAt: curationNow.Add(-72 * time.Hour)},
-		{Key: "aa02", Type: "agent.output", Summary: "held probe", RecordedAt: curationNow.Add(-60 * time.Hour)},
-		{Key: "aa03", Type: "agent.output", Summary: "linked probe", Links: 2, RecordedAt: curationNow.Add(-48 * time.Hour)},
-		{Key: "aa04", Type: "external.input", Summary: "skeleton probe", Links: 1, RecordedAt: curationNow.Add(-36 * time.Hour)},
-		{Key: "aa05", Type: "external.input", Summary: "recent probe", RecordedAt: curationNow.Add(-2 * time.Hour)},
-		{Key: "aa06", Type: "tool.result", Summary: "newest probe", RecordedAt: curationNow.Add(-time.Hour)},
+func meditationCards() []MeditationCard {
+	return []MeditationCard{
+		{Key: "aa01", Type: "tool.result", Summary: "oldest probe", RecordedAt: meditationNow.Add(-72 * time.Hour)},
+		{Key: "aa02", Type: "agent.output", Summary: "held probe", RecordedAt: meditationNow.Add(-60 * time.Hour)},
+		{Key: "aa03", Type: "agent.output", Summary: "linked probe", Links: 2, RecordedAt: meditationNow.Add(-48 * time.Hour)},
+		{Key: "aa04", Type: "external.input", Summary: "skeleton probe", Links: 1, RecordedAt: meditationNow.Add(-36 * time.Hour)},
+		{Key: "aa05", Type: "external.input", Summary: "recent probe", RecordedAt: meditationNow.Add(-2 * time.Hour)},
+		{Key: "aa06", Type: "tool.result", Summary: "newest probe", RecordedAt: meditationNow.Add(-time.Hour)},
 	}
 }
 
 // cardByKey returns the card of the invariant sequence one ticket names.
-func cardByKey(t *testing.T, key event.EventID) CurationCard {
+func cardByKey(t *testing.T, key event.EventID) MeditationCard {
 	t.Helper()
-	for _, card := range curationCards() {
+	for _, card := range meditationCards() {
 		if card.Key == key {
 			return card
 		}
 	}
 	t.Fatalf("card %q is not part of the invariant sequence", key)
-	return CurationCard{}
+	return MeditationCard{}
+}
+
+// tombstonedCards returns the card tickets of the invariant sequence one store
+// tombstoned, in sequence order, so a case names which cards it evicted rather
+// than how many it happened to hold.
+func tombstonedCards(t *testing.T, store *ledger.MemoryLifecycleStore) []event.EventID {
+	t.Helper()
+	var marked []event.EventID
+	for _, card := range meditationCards() {
+		if _, held := store.Tombstoned(card.Key); held {
+			marked = append(marked, card.Key)
+		}
+	}
+	return marked
 }

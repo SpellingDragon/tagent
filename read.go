@@ -7,6 +7,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
@@ -76,7 +77,7 @@ type retrievalSupply struct {
 // alone — the zero-change behaviour the embedding contract states. The
 // embedding text of one event is its stored content, falling back to its
 // stored summary when the content is empty.
-func supplyRetrieval(ctx context.Context, tier *memory.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
+func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Embedder) (*retrievalSupply, error) {
 	source := memory.NewStoreQuerySource()
 	if err := source.ObserveStore(ctx, tier.Segments); err != nil {
 		return nil, err

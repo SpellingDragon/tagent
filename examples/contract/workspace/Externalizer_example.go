@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/workspace"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // errReplicaWrite is what the replica writer behind the canonical externalizer reports for a
@@ -18,14 +19,14 @@ var errReplicaWrite = errors.New("workspace: the replica could not be written")
 // still-effective reference instead of discarding the original.
 type keptOriginals struct {
 	originals map[string][]byte
-	replica   func(memory.OriginalRef, []byte) error
+	replica   func(ledger.OriginalRef, []byte) error
 }
 
 // Externalize commits body as the durable original of ref and returns the bounded preview
 // with the segment entry for it.
-func (e *keptOriginals) Externalize(_ context.Context, ref memory.OriginalRef, body []byte) (workspace.Externalized, error) {
+func (e *keptOriginals) Externalize(_ context.Context, ref ledger.OriginalRef, body []byte) (workspace.Externalized, error) {
 	if ref.Key == "" {
-		return workspace.Externalized{}, memory.ErrKeyRequired
+		return workspace.Externalized{}, ledger.ErrKeyRequired
 	}
 	if e.originals == nil {
 		e.originals = map[string][]byte{}
@@ -39,7 +40,7 @@ func (e *keptOriginals) Externalize(_ context.Context, ref memory.OriginalRef, b
 	out := workspace.Externalized{
 		Original: ref,
 		Preview:  string(preview),
-		Segment:  memory.SegmentRequest{MaxBytes: memory.DefaultSegmentMaxBytes},
+		Segment:  ledger.SegmentRequest{MaxBytes: ledger.DefaultSegmentMaxBytes},
 	}
 	if err := e.replica(ref, body); err != nil {
 		return out, fmt.Errorf("%w: %w", workspace.ErrReplicaWriteFailed, err)
@@ -56,9 +57,9 @@ var _ workspace.Externalizer = (*keptOriginals)(nil)
 // 契约: docs/wiki/agent/compression-and-telemetry.md#output-overflow
 func ExampleExternalizer() {
 	ctx := context.Background()
-	externalizer := &keptOriginals{replica: func(memory.OriginalRef, []byte) error { return errReplicaWrite }}
+	externalizer := &keptOriginals{replica: func(ledger.OriginalRef, []byte) error { return errReplicaWrite }}
 	body := make([]byte, 128)
-	ref := memory.OriginalRef{Key: "blob-1", Format: "text/plain"}
+	ref := ledger.OriginalRef{Key: "blob-1", Format: "text/plain"}
 
 	out, err := externalizer.Externalize(ctx, ref, body)
 	if !errors.Is(err, workspace.ErrReplicaWriteFailed) {

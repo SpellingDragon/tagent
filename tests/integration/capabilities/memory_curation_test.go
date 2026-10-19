@@ -8,17 +8,19 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // curStack is the real curation stack one case drives: the shared guard, the
 // retention ledger over it, the lifecycle owning the one tombstone channel,
 // and the original store the facts live in.
 type curStack struct {
-	retention      *memory.Retention
-	lifecycle      *memory.Lifecycle
-	lifecycleStore *memory.MemoryLifecycleStore
-	originals      *memory.MemoryOriginalStore
+	retention      *ledger.Retention
+	lifecycle      *ledger.Lifecycle
+	lifecycleStore *ledger.MemoryLifecycleStore
+	originals      *ledger.MemoryOriginalStore
 }
 
 // newCurStack wires the real curation stack: the retention ledger over the
@@ -28,14 +30,14 @@ type curStack struct {
 // arms it.
 func newCurStack(t *testing.T) *curStack {
 	t.Helper()
-	retention := memory.NewRetention(memory.NewMemoryGuard())
-	caps := memory.LifecycleCapabilities{
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	caps := ledger.LifecycleCapabilities{
 		DurableRecovery: true,
 		Protection:      true,
 		Reclamation:     true,
 	}
-	lifecycleStore := memory.NewMemoryLifecycleStore(caps)
-	lifecycle, err := memory.NewLifecycle(memory.LifecycleConfig{}, retention, lifecycleStore, caps)
+	lifecycleStore := ledger.NewMemoryLifecycleStore(caps)
+	lifecycle, err := ledger.NewLifecycle(ledger.LifecycleConfig{}, retention, lifecycleStore, caps)
 	if err != nil {
 		t.Fatalf("NewLifecycle: %v", err)
 	}
@@ -44,7 +46,7 @@ func newCurStack(t *testing.T) *curStack {
 		retention:      retention,
 		lifecycle:      lifecycle,
 		lifecycleStore: lifecycleStore,
-		originals:      memory.NewMemoryOriginalStore(),
+		originals:      ledger.NewMemoryOriginalStore(),
 	}
 }
 
@@ -59,8 +61,8 @@ func curOriginalOf(key event.EventID) []byte {
 }
 
 // curRefOf is the reference metadata one card original is registered under.
-func curRefOf(key event.EventID) memory.OriginalRef {
-	return memory.OriginalRef{
+func curRefOf(key event.EventID) ledger.OriginalRef {
+	return ledger.OriginalRef{
 		Key:             key,
 		Owner:           curOwnerOf(),
 		Format:          "text/plain",
@@ -71,7 +73,7 @@ func curRefOf(key event.EventID) memory.OriginalRef {
 // seedCur commits every card original under its reference and files its key
 // under the lifecycle enumeration, then returns the committed state the pass
 // must leave untouched.
-func seedCur(t *testing.T, stack *curStack, cards []memory.CurationCard) map[event.EventID]curCommitted {
+func seedCur(t *testing.T, stack *curStack, cards []meditation.MeditationCard) map[event.EventID]curCommitted {
 	t.Helper()
 	ctx := context.Background()
 	committed := map[event.EventID]curCommitted{}
@@ -80,7 +82,7 @@ func seedCur(t *testing.T, stack *curStack, cards []memory.CurationCard) map[eve
 		if err := stack.originals.Put(ctx, curRefOf(card.Key), body); err != nil {
 			t.Fatalf("Put(%s): %v", card.Key, err)
 		}
-		stack.lifecycleStore.Put(memory.StoredKey{
+		stack.lifecycleStore.Put(ledger.StoredKey{
 			Key:        card.Key,
 			Type:       card.Type,
 			Partition:  1,
@@ -95,7 +97,7 @@ func seedCur(t *testing.T, stack *curStack, cards []memory.CurationCard) map[eve
 // reference metadata, captured before the pass so any rewrite is visible.
 type curCommitted struct {
 	body []byte
-	refs []memory.OriginalRef
+	refs []ledger.OriginalRef
 }
 
 // assertCurUntouched checks that every original still reads back byte for
@@ -106,7 +108,7 @@ func assertCurUntouched(t *testing.T, stack *curStack, committed map[event.Event
 	ctx := context.Background()
 	for key, want := range committed {
 		result := stack.originals.Get(ctx, key)
-		if result.Outcome != memory.RecallFound {
+		if result.Outcome != ledger.RecallFound {
 			t.Fatalf("Get(%s) outcome = %v, want RecallFound: curation never removes an original here", key, result.Outcome)
 		}
 		if !reflect.DeepEqual(result.Body, want.body) {
@@ -120,7 +122,7 @@ func assertCurUntouched(t *testing.T, stack *curStack, committed map[event.Event
 
 // curFailCondenser is the condensation that always fails: the seat an LLM
 // curation would take, answering with a named failure.
-func curFailCondenser(context.Context, memory.CurationRun, time.Time) (string, error) {
+func curFailCondenser(context.Context, meditation.MeditationRun, time.Time) (string, error) {
 	return "", errors.New("condense call refused")
 }
 
@@ -136,8 +138,8 @@ func TestMemoryCuration(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 
-	curCards := func() []memory.CurationCard {
-		return []memory.CurationCard{
+	curCards := func() []meditation.MeditationCard {
+		return []meditation.MeditationCard{
 			{Key: "card-1", Type: event.TypeExternalInput, Summary: "迁移计划上文", RecordedAt: now.Add(-72 * time.Hour), Links: 0},
 			{Key: "card-2", Type: event.TypeAgentOutput, Summary: "灰度演练记录", RecordedAt: now.Add(-60 * time.Hour), Links: 1},
 			{Key: "card-3", Type: event.TypeThinkingPlan, Summary: "复盘记录", RecordedAt: now.Add(-48 * time.Hour), Links: 3},
@@ -151,9 +153,9 @@ func TestMemoryCuration(t *testing.T) {
 		stack := newCurStack(t)
 		cards := curCards()
 		committed := seedCur(t, stack, cards)
-		engine, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
+		engine, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
 		if err != nil {
-			t.Fatalf("NewCuration: %v", err)
+			t.Fatalf("NewMeditation: %v", err)
 		}
 		report, err := engine.Curate(ctx, now, cards)
 		if err != nil {
@@ -165,8 +167,8 @@ func TestMemoryCuration(t *testing.T) {
 		assertCurUntouched(t, stack, committed)
 
 		artifact := *report.Artifact
-		if artifact.Type != memory.CurationArtifactType {
-			t.Fatalf("artifact type = %q, want %q", artifact.Type, memory.CurationArtifactType)
+		if artifact.Type != meditation.MeditationArtifactType {
+			t.Fatalf("artifact type = %q, want %q", artifact.Type, meditation.MeditationArtifactType)
 		}
 		for _, card := range cards {
 			if artifact.Key == card.Key {
@@ -178,7 +180,7 @@ func TestMemoryCuration(t *testing.T) {
 		}
 		for _, ref := range artifact.Refs {
 			result := stack.originals.Get(ctx, ref)
-			if result.Outcome != memory.RecallFound || !reflect.DeepEqual(result.Body, curOriginalOf(ref)) {
+			if result.Outcome != ledger.RecallFound || !reflect.DeepEqual(result.Body, curOriginalOf(ref)) {
 				t.Fatalf("recall of artifact ref %s = %v, want the committed original byte for byte: the artifact stays traceable to the facts", ref, result.Outcome)
 			}
 		}
@@ -188,9 +190,9 @@ func TestMemoryCuration(t *testing.T) {
 		stack := newCurStack(t)
 		cards := curCards()
 		committed := seedCur(t, stack, cards)
-		engine, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
+		engine, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
 		if err != nil {
-			t.Fatalf("NewCuration: %v", err)
+			t.Fatalf("NewMeditation: %v", err)
 		}
 		report, err := engine.Curate(ctx, now, cards)
 		if err != nil {
@@ -202,11 +204,11 @@ func TestMemoryCuration(t *testing.T) {
 			t.Fatalf("artifact refs = %v, want %v: the key cards survive as references in value order", artifact.Refs, wantRefs)
 		}
 		for _, ref := range wantRefs {
-			if report.Fates[ref] != memory.CurationProtect {
+			if report.Fates[ref] != meditation.MeditationProtect {
 				t.Fatalf("fate of %s = %v, want protect: the referenced original is never deleted", ref, report.Fates[ref])
 			}
 		}
-		if report.Fates["card-1"] != memory.CurationEvict {
+		if report.Fates["card-1"] != meditation.MeditationEvict {
 			t.Fatalf("fate of card-1 = %v, want evict: the unprotected low-value overflow card is evicted", report.Fates["card-1"])
 		}
 		if !reflect.DeepEqual(report.Evicted, []event.EventID{"card-1"}) {
@@ -214,7 +216,7 @@ func TestMemoryCuration(t *testing.T) {
 		}
 
 		result := stack.originals.Get(ctx, "card-1")
-		if result.Outcome != memory.RecallFound || !reflect.DeepEqual(result.Body, committed["card-1"].body) {
+		if result.Outcome != ledger.RecallFound || !reflect.DeepEqual(result.Body, committed["card-1"].body) {
 			t.Fatalf("recall of the evicted card-1 = %v, want the committed original until reclamation", result.Outcome)
 		}
 		if _, marked := stack.lifecycleStore.Tombstoned("card-1"); !marked {
@@ -230,7 +232,7 @@ func TestMemoryCuration(t *testing.T) {
 		}
 		for _, ref := range wantRefs {
 			result := stack.originals.Get(ctx, ref)
-			if result.Outcome != memory.RecallFound || !reflect.DeepEqual(result.Body, committed[ref].body) {
+			if result.Outcome != ledger.RecallFound || !reflect.DeepEqual(result.Body, committed[ref].body) {
 				t.Fatalf("recall of referenced %s after reclamation = %v, want the committed original byte for byte", ref, result.Outcome)
 			}
 			if _, marked := stack.lifecycleStore.Tombstoned(ref); marked {
@@ -244,9 +246,9 @@ func TestMemoryCuration(t *testing.T) {
 		stack := newCurStack(t)
 		cards := curCards()
 		committed := seedCur(t, stack, cards)
-		engine, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, curFailCondenser)
+		engine, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, curFailCondenser)
 		if err != nil {
-			t.Fatalf("NewCuration: %v", err)
+			t.Fatalf("NewMeditation: %v", err)
 		}
 		report, err := engine.Curate(ctx, now, cards)
 		if err != nil {
@@ -267,13 +269,13 @@ func TestMemoryCuration(t *testing.T) {
 		assertCurUntouched(t, stack, committed)
 		for _, card := range cards {
 			result := stack.originals.Get(ctx, card.Key)
-			if result.Outcome != memory.RecallFound || !reflect.DeepEqual(result.Body, committed[card.Key].body) {
+			if result.Outcome != ledger.RecallFound || !reflect.DeepEqual(result.Body, committed[card.Key].body) {
 				t.Fatalf("recall of %s after the degraded pass = %v, want the committed original byte for byte", card.Key, result.Outcome)
 			}
 		}
-		healthy, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
+		healthy, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
 		if err != nil {
-			t.Fatalf("NewCuration(after failure): %v", err)
+			t.Fatalf("NewMeditation(after failure): %v", err)
 		}
 		again, err := healthy.Curate(ctx, now, cards)
 		if err != nil || again.Artifact == nil || len(again.Failures) != 0 {
@@ -285,17 +287,17 @@ func TestMemoryCuration(t *testing.T) {
 		stack := newCurStack(t)
 		cards := curCards()
 		committed := seedCur(t, stack, cards)
-		shared := memory.HolderID("shared:outbox-obligation")
-		if _, err := stack.retention.Register(ctx, "card-6", shared, memory.RetentionRecord{
-			Kind:       memory.RetentionUnconfirmed,
+		shared := ledger.HolderID("shared:outbox-obligation")
+		if _, err := stack.retention.Register(ctx, "card-6", shared, ledger.RetentionRecord{
+			Kind:       ledger.RetentionUnconfirmed,
 			Type:       event.TypeAgentOutput,
 			RecordedAt: now.Add(-2 * time.Hour),
 		}); err != nil {
 			t.Fatalf("Hold(card-6): %v", err)
 		}
-		engine, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 3, Keep: 1, MinScore: 6}, stack.retention, stack.lifecycle, nil)
+		engine, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 3, Keep: 1, MinScore: 6}, stack.retention, stack.lifecycle, nil)
 		if err != nil {
-			t.Fatalf("NewCuration: %v", err)
+			t.Fatalf("NewMeditation: %v", err)
 		}
 		report, err := engine.Curate(ctx, now, cards)
 		if err != nil {
@@ -305,40 +307,40 @@ func TestMemoryCuration(t *testing.T) {
 		if len(report.Fates) != len(cards) {
 			t.Fatalf("fates cover %d cards, want %d: every card is filed under exactly one channel", len(report.Fates), len(cards))
 		}
-		counts := map[memory.CurationFate]int{}
+		counts := map[meditation.MeditationFate]int{}
 		for key, fate := range report.Fates {
 			switch fate {
-			case memory.CurationRetain, memory.CurationEvict, memory.CurationProtect:
+			case meditation.MeditationRetain, meditation.MeditationEvict, meditation.MeditationProtect:
 				counts[fate]++
 			default:
 				t.Fatalf("fate of %s = %q, want one of retain/evict/protect: no fourth channel exists", key, fate)
 			}
 		}
-		if counts[memory.CurationRetain] == 0 || counts[memory.CurationEvict] == 0 || counts[memory.CurationProtect] == 0 {
+		if counts[meditation.MeditationRetain] == 0 || counts[meditation.MeditationEvict] == 0 || counts[meditation.MeditationProtect] == 0 {
 			t.Fatalf("fate counts = %v, want every channel exercised", counts)
 		}
-		if report.Fates["card-6"] != memory.CurationProtect {
+		if report.Fates["card-6"] != meditation.MeditationProtect {
 			t.Fatalf("fate of card-6 = %v, want protect: a standing hold keeps the original out of every eviction", report.Fates["card-6"])
 		}
 
 		for _, card := range cards {
 			_, marked := stack.lifecycleStore.Tombstoned(card.Key)
-			if marked != (report.Fates[card.Key] == memory.CurationEvict) {
+			if marked != (report.Fates[card.Key] == meditation.MeditationEvict) {
 				t.Fatalf("tombstone of %s = %v under fate %v, want the evicted set and the tombstoned set identical", card.Key, marked, report.Fates[card.Key])
 			}
 		}
 		for _, key := range report.Evicted {
 			result := stack.originals.Get(ctx, key)
-			if result.Outcome != memory.RecallFound || !reflect.DeepEqual(result.Body, committed[key].body) {
+			if result.Outcome != ledger.RecallFound || !reflect.DeepEqual(result.Body, committed[key].body) {
 				t.Fatalf("recall of evicted %s = %v, want the bytes untouched until reclamation: eviction rewrites nothing", key, result.Outcome)
 			}
 		}
 
-		if err := stack.lifecycle.Delete(ctx, "card-6", now); !errors.Is(err, memory.ErrProtected) {
+		if err := stack.lifecycle.Delete(ctx, "card-6", now); !errors.Is(err, ledger.ErrProtected) {
 			t.Fatalf("Delete(card-6) = %v, want the named refusal ErrProtected", err)
 		}
 		for _, ref := range report.Artifact.Refs {
-			if err := stack.lifecycle.Delete(ctx, ref, now); !errors.Is(err, memory.ErrProtected) {
+			if err := stack.lifecycle.Delete(ctx, ref, now); !errors.Is(err, ledger.ErrProtected) {
 				t.Fatalf("Delete(referenced %s) = %v, want the named refusal ErrProtected", ref, err)
 			}
 		}
@@ -349,9 +351,9 @@ func TestMemoryCuration(t *testing.T) {
 		stack := newCurStack(t)
 		cards := curCards()
 		seedCur(t, stack, cards)
-		engine, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 6, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
+		engine, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 6, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
 		if err != nil {
-			t.Fatalf("NewCuration: %v", err)
+			t.Fatalf("NewMeditation: %v", err)
 		}
 		within, err := engine.Curate(ctx, now, cards)
 		if err != nil {
@@ -361,14 +363,14 @@ func TestMemoryCuration(t *testing.T) {
 			t.Fatalf("within-bound pass = triggered %v artifact %v evicted %v, want no curation at all", within.Triggered, within.Artifact, within.Evicted)
 		}
 		for _, card := range cards {
-			if within.Fates[card.Key] != memory.CurationRetain {
+			if within.Fates[card.Key] != meditation.MeditationRetain {
 				t.Fatalf("within-bound fate of %s = %v, want retain", card.Key, within.Fates[card.Key])
 			}
 		}
 
-		over, err := memory.NewCuration(memory.CurationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
+		over, err := meditation.NewMeditation(meditation.MeditationPolicy{MaxCards: 3, Keep: 2, MinScore: 6}, stack.retention, stack.lifecycle, nil)
 		if err != nil {
-			t.Fatalf("NewCuration(over bound): %v", err)
+			t.Fatalf("NewMeditation(over bound): %v", err)
 		}
 		first, err := over.Curate(ctx, now, cards)
 		if err != nil {
@@ -385,8 +387,8 @@ func TestMemoryCuration(t *testing.T) {
 			t.Fatalf("two identical passes disagree on the artifact: %v vs %v, want one content-addressed identity", first.Artifact, second.Artifact)
 		}
 		for _, card := range cards {
-			left := memory.AssessValue(card, now)
-			right := memory.AssessValue(card, now)
+			left := meditation.AssessValue(card, now)
+			right := meditation.AssessValue(card, now)
 			if left != right {
 				t.Fatalf("AssessValue(%s) = %+v then %+v, want a pure deterministic assessment", card.Key, left, right)
 			}

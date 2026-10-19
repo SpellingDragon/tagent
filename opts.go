@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/state"
@@ -42,7 +43,7 @@ type assemblyConfig struct {
 	approver    task.Approver
 	policy      plugin.Governor
 	enforcement plugin.Enforcement
-	storage     *memory.StorageConfig
+	storage     *ledger.StorageConfig
 	embedder    memory.Embedder
 	recorder    rl.Recorder
 	observer    telemetry.Observer
@@ -94,7 +95,7 @@ func WithEnforcement(grade plugin.Enforcement) Option {
 // fact log, and the chains that log already holds are folded back at assembly.
 // An assembly beside no storage keeps its facts in memory and restores
 // nothing.
-func WithStorage(cfg memory.StorageConfig) Option {
+func WithStorage(cfg ledger.StorageConfig) Option {
 	return func(c *assemblyConfig) { c.storage = &cfg }
 }
 

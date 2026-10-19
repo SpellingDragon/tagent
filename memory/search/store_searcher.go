@@ -22,6 +22,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // ErrCursorUnbound reports a continuation cursor that does not bind to the
@@ -49,7 +50,7 @@ type ReferenceSource interface {
 
 	// Reference returns the recall reference the event key was landed with,
 	// and reports whether the table holds one.
-	Reference(key event.EventID) (memory.OriginalRef, bool)
+	Reference(key event.EventID) (ledger.OriginalRef, bool)
 }
 
 // VectorSource is the embedding seam a retrieval borrows its vectors from: the
@@ -134,7 +135,7 @@ func (s *StoreSearcher) Search(ctx context.Context, q Query) (Result, error) {
 // the query text on the query semantics of the read face, inside the partition
 // set this search is authorized for. The page bound is left to the port, so the
 // leg carries the whole matching set and the page is cut after the fusion.
-func (s *StoreSearcher) keywordLeg(ctx context.Context, q Query, partitions []int) ([]memory.OriginalRef, error) {
+func (s *StoreSearcher) keywordLeg(ctx context.Context, q Query, partitions []int) ([]ledger.OriginalRef, error) {
 	opts := q.QueryOptions()
 	opts.PartitionIDs = partitions
 	opts.Limit = 0
@@ -150,7 +151,7 @@ func (s *StoreSearcher) keywordLeg(ctx context.Context, q Query, partitions []in
 // of the query text. A searcher with no seam or no embedder, and an embedder
 // that fails or returns no vector, all answer an empty leg, which is the
 // keyword-only fallback rather than a failed retrieval.
-func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int, strategy Strategy) ([]memory.OriginalRef, error) {
+func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int, strategy Strategy) ([]ledger.OriginalRef, error) {
 	if strategy == StrategyKeywordOnly || s.vectors == nil || s.embedder == nil {
 		return nil, nil
 	}
@@ -167,7 +168,7 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 		return nil, err
 	}
 	type scoredRef struct {
-		ref   memory.OriginalRef
+		ref   ledger.OriginalRef
 		score float64
 		key   event.EventID
 	}
@@ -194,7 +195,7 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 		return hits[i].key > hits[j].key
 	})
 	refs = nil
-	out := make([]memory.OriginalRef, 0, len(hits))
+	out := make([]ledger.OriginalRef, 0, len(hits))
 	for _, hit := range hits {
 		out = append(out, hit.ref)
 	}
@@ -203,8 +204,8 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 
 // referencesOf resolves the recall reference of each event reference, dropping
 // the hits the observation table holds no reference for.
-func (s *StoreSearcher) referencesOf(refs []memory.EventReference) []memory.OriginalRef {
-	out := make([]memory.OriginalRef, 0, len(refs))
+func (s *StoreSearcher) referencesOf(refs []memory.EventReference) []ledger.OriginalRef {
+	out := make([]ledger.OriginalRef, 0, len(refs))
 	for _, ref := range refs {
 		if original, held := s.source.Reference(ref.Key); held {
 			out = append(out, original)
@@ -217,10 +218,10 @@ func (s *StoreSearcher) referencesOf(refs []memory.EventReference) []memory.Orig
 // result position a continuation cursor names, and the continuation token for
 // the page after this one. The zero NextCursor means this is the last page, so
 // a cursor is handed out only while references remain behind the page.
-func (s *StoreSearcher) page(refs []memory.OriginalRef, offset int, q Query) Result {
+func (s *StoreSearcher) page(refs []ledger.OriginalRef, offset int, q Query) Result {
 	limit := q.PageLimit()
 	if offset >= len(refs) {
-		return Result{Refs: []memory.OriginalRef{}}
+		return Result{Refs: []ledger.OriginalRef{}}
 	}
 	end := offset + limit
 	next := Cursor("")
@@ -229,7 +230,7 @@ func (s *StoreSearcher) page(refs []memory.OriginalRef, offset int, q Query) Res
 	} else {
 		end = len(refs)
 	}
-	page := make([]memory.OriginalRef, end-offset)
+	page := make([]ledger.OriginalRef, end-offset)
 	copy(page, refs[offset:end])
 	return Result{Refs: page, NextCursor: next}
 }

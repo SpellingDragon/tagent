@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
 // TestPartitionIdentityIsOneStableMapping pins one name-to-partition mapping whose cache is never the source of truth.
@@ -57,14 +59,14 @@ func TestPartitionIdentityIsOneStableMapping(t *testing.T) {
 func TestCapacityEvictionStaysInsideOnePartition(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	keys := []StoredKey{
+	keys := []ledger.StoredKey{
 		{Key: "ca01", Type: "tool.result", Partition: 0, RecordedAt: now.Add(-10 * time.Hour)},
 		{Key: "ca02", Type: "tool.result", Partition: 0, RecordedAt: now.Add(-time.Hour)},
 		{Key: "ca03", Type: "tool.result", Partition: 1, RecordedAt: now.Add(-100 * time.Hour)},
 		{Key: "ca04", Type: "tool.result", Partition: 2, RecordedAt: now.Add(-90 * time.Hour)},
 	}
 
-	lifecycle, store, _ := newLifecycleUnderTest(t, LifecycleConfig{GlobalTTLDays: -1, MaxEventsPerPartition: 1})
+	lifecycle, store, _ := newLifecycleUnderTest(t, ledger.LifecycleConfig{GlobalTTLDays: -1, MaxEventsPerPartition: 1})
 	for _, key := range keys {
 		store.Put(key)
 	}
@@ -80,16 +82,16 @@ func TestCapacityEvictionStaysInsideOnePartition(t *testing.T) {
 			t.Fatalf("a partition at its bound lost %q, want a capacity pass that never crosses partitions", key)
 		}
 	}
-	if len(store.keys) != len(keys) {
-		t.Fatalf("stored keys after eviction = %d, want all %d kept until compaction", len(store.keys), len(keys))
+	if held := storedKeys(t, store); len(held) != len(keys) {
+		t.Fatalf("stored keys after eviction = %d, want all %d kept until compaction", len(held), len(keys))
 	}
 
-	protected, protectedStore, retention := newLifecycleUnderTest(t, LifecycleConfig{GlobalTTLDays: -1, MaxEventsPerPartition: 1})
+	protected, protectedStore, retention := newLifecycleUnderTest(t, ledger.LifecycleConfig{GlobalTTLDays: -1, MaxEventsPerPartition: 1})
 	for _, key := range keys {
 		protectedStore.Put(key)
 	}
-	if _, err := retention.Register(ctx, "ca01", "recovery:inventory", RetentionRecord{
-		Kind: RetentionRecovery, Type: "tool.result", RecordedAt: now.Add(-10 * time.Hour),
+	if _, err := retention.Register(ctx, "ca01", "recovery:inventory", ledger.RetentionRecord{
+		Kind: ledger.RetentionRecovery, Type: "tool.result", RecordedAt: now.Add(-10 * time.Hour),
 	}); err != nil {
 		t.Fatalf("hold the oldest key of the over-capacity partition: %v", err)
 	}
@@ -103,7 +105,7 @@ func TestCapacityEvictionStaysInsideOnePartition(t *testing.T) {
 	if _, marked := protectedStore.Tombstoned("ca01"); marked {
 		t.Fatal("the protected key was tombstoned in the store")
 	}
-	if _, held := protectedStore.keys["ca02"]; !held {
+	if held := storedKeys(t, protectedStore); !holdsKey(held, "ca02") {
 		t.Fatal("the over-capacity partition dropped its newer key, want both keys kept")
 	}
 }
@@ -118,15 +120,15 @@ func TestCapacityEvictionStaysInsideOnePartition(t *testing.T) {
 func TestLeaseSegmentsProtectOnlyTheirOwnKeys(t *testing.T) {
 	ctx := context.Background()
 	recordedAt := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	retention := NewRetention(NewMemoryGuard())
-	leaseA, err := retention.Register(ctx, "da01", "recovery:inventory", RetentionRecord{
-		Kind: RetentionRecovery, Type: "tool.result", RecordedAt: recordedAt,
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	leaseA, err := retention.Register(ctx, "da01", "recovery:inventory", ledger.RetentionRecord{
+		Kind: ledger.RetentionRecovery, Type: "tool.result", RecordedAt: recordedAt,
 	})
 	if err != nil {
 		t.Fatalf("hold the first key: %v", err)
 	}
-	leaseB, err := retention.Register(ctx, "da02", "recovery:inventory", RetentionRecord{
-		Kind: RetentionRecovery, Type: "agent.output", RecordedAt: recordedAt.Add(time.Hour),
+	leaseB, err := retention.Register(ctx, "da02", "recovery:inventory", ledger.RetentionRecord{
+		Kind: ledger.RetentionRecovery, Type: "agent.output", RecordedAt: recordedAt.Add(time.Hour),
 	})
 	if err != nil {
 		t.Fatalf("hold the second key: %v", err)
@@ -134,21 +136,21 @@ func TestLeaseSegmentsProtectOnlyTheirOwnKeys(t *testing.T) {
 	if leaseA == leaseB {
 		t.Fatalf("two holds share the lease %q, want one lease per hold", leaseA)
 	}
-	if err := retention.Retire(ctx, "da02", "recovery:inventory", leaseA); !errors.Is(err, ErrLeaseMismatch) {
-		t.Fatalf("releasing the second key under the first key's lease = %v, want ErrLeaseMismatch", err)
+	if err := retention.Retire(ctx, "da02", "recovery:inventory", leaseA); !errors.Is(err, ledger.ErrLeaseMismatch) {
+		t.Fatalf("releasing the second key under the first key's lease = %v, want ledger.ErrLeaseMismatch", err)
 	}
 	if held, err := retention.Held(ctx, "da02"); err != nil || !held {
 		t.Fatalf("second key after a foreign release = (held %v, %v), want it still protected", held, err)
 	}
 
-	leaseDelivery, err := retention.Register(ctx, "da01", "unsettled:delivery", RetentionRecord{
-		Kind: RetentionUnconfirmed, Type: "tool.result", RecordedAt: recordedAt.Add(-time.Hour),
+	leaseDelivery, err := retention.Register(ctx, "da01", "unsettled:delivery", ledger.RetentionRecord{
+		Kind: ledger.RetentionUnconfirmed, Type: "tool.result", RecordedAt: recordedAt.Add(-time.Hour),
 	})
 	if err != nil {
 		t.Fatalf("hold the first key for a second holder: %v", err)
 	}
-	if err := retention.Retire(ctx, "da01", "unsettled:delivery", leaseA); !errors.Is(err, ErrLeaseMismatch) {
-		t.Fatalf("releasing a holder's hold under another holder's lease = %v, want ErrLeaseMismatch", err)
+	if err := retention.Retire(ctx, "da01", "unsettled:delivery", leaseA); !errors.Is(err, ledger.ErrLeaseMismatch) {
+		t.Fatalf("releasing a holder's hold under another holder's lease = %v, want ledger.ErrLeaseMismatch", err)
 	}
 	if held, err := retention.Held(ctx, "da01"); err != nil || !held {
 		t.Fatalf("first key after a foreign release = (held %v, %v), want it still protected", held, err)
@@ -178,7 +180,7 @@ func TestLeaseSegmentsProtectOnlyTheirOwnKeys(t *testing.T) {
 	if !registered {
 		t.Fatal("the released key lost its registration")
 	}
-	if !record.RecordedAt.Equal(recordedAt) || record.Kind != RetentionRecovery || record.Type != "tool.result" {
+	if !record.RecordedAt.Equal(recordedAt) || record.Kind != ledger.RetentionRecovery || record.Type != "tool.result" {
 		t.Fatalf("registration after release = %+v, want the first registration kept verbatim", record)
 	}
 }
@@ -192,11 +194,11 @@ func TestLeaseSegmentsProtectOnlyTheirOwnKeys(t *testing.T) {
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
 func TestOneKeyFilesUnderOnePartition(t *testing.T) {
 	ctx := context.Background()
-	tier, err := OpenTier(ctx, StorageConfig{Type: StorageMemory})
+	tier, err := ledger.OpenTier(ctx, ledger.StorageConfig{Type: ledger.StorageMemory})
 	if err != nil {
 		t.Fatalf("open the in-memory tier: %v", err)
 	}
-	committed := SegmentRecord{
+	committed := ledger.SegmentRecord{
 		PartitionID: 0, WindowTS: 10, Seq: 1, EventKey: "ea01", EventTime: 10, Body: []byte(`{"probe":"one"}`),
 	}
 	if err := tier.Segments.StoreEvent(ctx, committed); err != nil {
@@ -209,15 +211,15 @@ func TestOneKeyFilesUnderOnePartition(t *testing.T) {
 		t.Fatalf("event count after a repeat = %d, want the one committed event", count)
 	}
 
-	refused := map[string]SegmentRecord{
+	refused := map[string]ledger.SegmentRecord{
 		"another partition": {PartitionID: 1, WindowTS: 10, Seq: 1, EventKey: "ea01", EventTime: 10, Body: committed.Body},
 		"another window":    {PartitionID: 0, WindowTS: 11, Seq: 1, EventKey: "ea01", EventTime: 11, Body: committed.Body},
 		"another slot":      {PartitionID: 0, WindowTS: 10, Seq: 2, EventKey: "ea01", EventTime: 10, Body: committed.Body},
 		"other bytes":       {PartitionID: 0, WindowTS: 10, Seq: 1, EventKey: "ea01", EventTime: 10, Body: []byte(`{"probe":"two"}`)},
 	}
 	for name, record := range refused {
-		if err := tier.Segments.StoreEvent(ctx, record); !errors.Is(err, ErrContentConflict) {
-			t.Fatalf("committing the same key under %s = %v, want ErrContentConflict", name, err)
+		if err := tier.Segments.StoreEvent(ctx, record); !errors.Is(err, ledger.ErrContentConflict) {
+			t.Fatalf("committing the same key under %s = %v, want ledger.ErrContentConflict", name, err)
 		}
 	}
 	if count := tier.Segments.EventCount(); count != 1 {
@@ -233,7 +235,7 @@ func TestOneKeyFilesUnderOnePartition(t *testing.T) {
 }
 
 // TestRebuildRefusesToPassABrokenChainAsWhole pins the replay refusal: a broken chain is named partial, never presented as a whole rebuild.
-// - a chain missing a snapshot ref returns ErrRebuildPartial and names the missing key
+// - a chain missing a snapshot ref returns replay.ErrRebuildPartial and names the missing key
 // - the entries the broken chain could restore are still restored, under a partial report
 // - a compaction payload that cannot be read back is refused by name
 // - a chain read that fails is refused by name and is never reported as a scanned chain
@@ -245,28 +247,28 @@ func TestOneKeyFilesUnderOnePartition(t *testing.T) {
 func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
-	chainKey := ChainKey{PartitionID: 7, SessionID: "fa-session"}
+	chainKey := replay.ChainKey{PartitionID: 7, SessionID: "fa-session"}
 
-	compaction := func(refs []CompactionRef) ChainFact {
-		payload, err := json.Marshal(CompactionFact{
-			Summary:        CompactionRef{Key: "-sum", Type: "agent.output", Summary: "folded run", Content: "folded run text", Time: at},
-			Refs:           refs,
-			FullBoundary:   "fb02",
-			MeditationKeys: []event.EventID{"fm01"},
+	compaction := func(refs []replay.CompactionRef) replay.ChainFact {
+		payload, err := json.Marshal(replay.CompactionFact{
+			Summary:      replay.CompactionRef{Key: "-sum", Type: "agent.output", Summary: "folded run", Content: "folded run text", Time: at},
+			Refs:         refs,
+			FullBoundary: "fb02",
+			ConsumedKeys: []event.EventID{"fm01"},
 		})
 		if err != nil {
 			t.Fatalf("marshal the compaction payload: %v", err)
 		}
-		return ChainFact{Key: "fb01", Chain: chainKey, Type: CompactionEventType, Content: string(payload), Time: at}
+		return replay.ChainFact{Key: "fb01", Chain: chainKey, Type: replay.CompactionEventType, Content: string(payload), Time: at}
 	}
-	newChain := func(t *testing.T, refs []CompactionRef) *MemoryEventChain {
+	newChain := func(t *testing.T, refs []replay.CompactionRef) *replay.MemoryEventChain {
 		t.Helper()
-		chain := NewMemoryEventChain()
-		facts := []ChainFact{
+		chain := replay.NewMemoryEventChain()
+		facts := []replay.ChainFact{
 			compaction(refs),
 			{Key: "fb02", Chain: chainKey, Type: "agent.output", Summary: "ticket two", Content: "ticket two text", Time: at},
 			{Key: "fb03", Chain: chainKey, Type: "external.input", Summary: "tail", Content: "tail text", Time: at.Add(time.Minute)},
-			{Key: "fb04", Chain: ChainKey{PartitionID: 7, SessionID: "fa-other"}, Type: "external.input", Summary: "other", Content: "other text", Time: at},
+			{Key: "fb04", Chain: replay.ChainKey{PartitionID: 7, SessionID: "fa-other"}, Type: "external.input", Summary: "other", Content: "other text", Time: at},
 		}
 		for _, fact := range facts {
 			if err := chain.Commit(ctx, fact); err != nil {
@@ -275,15 +277,15 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 		}
 		return chain
 	}
-	wholeRefs := []CompactionRef{
+	wholeRefs := []replay.CompactionRef{
 		{Key: "fb02", Type: "agent.output", Summary: "ticket two"},
 		{Key: "-syn", Type: "tool.result", Summary: "synthetic", Content: "synthetic text", Time: at},
 	}
 
 	t.Run("a whole snapshot and a bounded tail restore in order", func(t *testing.T) {
-		target := NewReplayProjection()
-		relations := NewMemoryRelations()
-		report, err := RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), relations, chainKey, RebuildOptions{})
+		target := replay.NewReplayProjection()
+		relations := replay.NewMemoryRelations()
+		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), relations, chainKey, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("rebuild a whole chain: %v", err)
 		}
@@ -315,17 +317,17 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 				t.Fatal("a fact of another session entered the projection")
 			}
 		}
-		if keys := target.MeditationKeys(); len(keys) != 1 || keys[0] != "fm01" {
-			t.Fatalf("meditation keys = %v, want the snapshot's key reseeded", keys)
+		if keys := target.ConsumedKeys(); len(keys) != 1 || keys[0] != "fm01" {
+			t.Fatalf("consumed keys = %v, want the snapshot's key reseeded", keys)
 		}
 	})
 
 	t.Run("a missing snapshot ref is refused by name and reported partial", func(t *testing.T) {
-		target := NewReplayProjection()
-		refs := append(append([]CompactionRef{}, wholeRefs...), CompactionRef{Key: "fb09", Type: "agent.output", Summary: "gone"})
-		report, err := RebuildProjectionFromWAL(ctx, target, newChain(t, refs), NewMemoryRelations(), chainKey, RebuildOptions{})
-		if !errors.Is(err, ErrRebuildPartial) {
-			t.Fatalf("rebuild over a missing ref = %v, want ErrRebuildPartial", err)
+		target := replay.NewReplayProjection()
+		refs := append(append([]replay.CompactionRef{}, wholeRefs...), replay.CompactionRef{Key: "fb09", Type: "agent.output", Summary: "gone"})
+		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, refs), replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+		if !errors.Is(err, replay.ErrRebuildPartial) {
+			t.Fatalf("rebuild over a missing ref = %v, want replay.ErrRebuildPartial", err)
 		}
 		if !report.Partial || len(report.Missing) != 1 || report.Missing[0] != "fb09" {
 			t.Fatalf("report = (partial %v, missing %v), want the missing key named", report.Partial, report.Missing)
@@ -336,20 +338,20 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	})
 
 	t.Run("a compaction payload that cannot be read back is refused by name", func(t *testing.T) {
-		chain := NewMemoryEventChain()
-		if err := chain.Commit(ctx, ChainFact{Key: "fb01", Chain: chainKey, Type: CompactionEventType, Content: "{not a payload", Time: at}); err != nil {
+		chain := replay.NewMemoryEventChain()
+		if err := chain.Commit(ctx, replay.ChainFact{Key: "fb01", Chain: chainKey, Type: replay.CompactionEventType, Content: "{not a payload", Time: at}); err != nil {
 			t.Fatalf("commit the corrupt compaction: %v", err)
 		}
-		if _, err := RebuildProjectionFromWAL(ctx, NewReplayProjection(), chain, NewMemoryRelations(), chainKey, RebuildOptions{}); !errors.Is(err, ErrCompactionCorrupt) {
-			t.Fatalf("rebuild over a corrupt payload = %v, want ErrCompactionCorrupt", err)
+		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), chain, replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{}); !errors.Is(err, replay.ErrCompactionCorrupt) {
+			t.Fatalf("rebuild over a corrupt payload = %v, want replay.ErrCompactionCorrupt", err)
 		}
 	})
 
 	t.Run("a failed chain read is refused and not reported as a scanned chain", func(t *testing.T) {
-		report, err := RebuildProjectionFromWAL(ctx, NewReplayProjection(), failingChain{err: errors.New("segment read failed")},
-			NewMemoryRelations(), chainKey, RebuildOptions{})
-		if !errors.Is(err, ErrChainScan) {
-			t.Fatalf("rebuild over a failing read = %v, want ErrChainScan", err)
+		report, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), failingChain{err: errors.New("segment read failed")},
+			replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
+		if !errors.Is(err, replay.ErrChainScan) {
+			t.Fatalf("rebuild over a failing read = %v, want replay.ErrChainScan", err)
 		}
 		if report.Scanned || report.Entries != 0 {
 			t.Fatalf("report of a failing read = (scanned %v, entries %d), want no scanned chain", report.Scanned, report.Entries)
@@ -357,7 +359,7 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	})
 
 	t.Run("an empty chain is reported as scanned empty", func(t *testing.T) {
-		report, err := RebuildProjectionFromWAL(ctx, NewReplayProjection(), NewMemoryEventChain(), NewMemoryRelations(), chainKey, RebuildOptions{})
+		report, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), replay.NewMemoryEventChain(), replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("rebuild an empty chain: %v", err)
 		}
@@ -367,20 +369,20 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 	})
 
 	t.Run("an empty session is refused by name", func(t *testing.T) {
-		if _, err := RebuildProjectionFromWAL(ctx, NewReplayProjection(), NewMemoryEventChain(), NewMemoryRelations(),
-			ChainKey{PartitionID: 7}, RebuildOptions{}); !errors.Is(err, ErrChainKeyRequired) {
-			t.Fatalf("rebuild under an empty session = %v, want ErrChainKeyRequired", err)
+		if _, err := replay.RebuildProjectionFromWAL(ctx, replay.NewReplayProjection(), replay.NewMemoryEventChain(), replay.NewMemoryRelations(),
+			replay.ChainKey{PartitionID: 7}, replay.RebuildOptions{}); !errors.Is(err, replay.ErrChainKeyRequired) {
+			t.Fatalf("rebuild under an empty session = %v, want replay.ErrChainKeyRequired", err)
 		}
 	})
 
 	t.Run("a non-empty projection is skipped with its reason", func(t *testing.T) {
-		target := NewReplayProjection()
-		target.Append(ctx, ProjectionEntry{Key: "fb10", Type: "tool.result", Content: "already here"})
-		report, err := RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), NewMemoryRelations(), chainKey, RebuildOptions{})
+		target := replay.NewReplayProjection()
+		target.Append(ctx, replay.ProjectionEntry{Key: "fb10", Type: "tool.result", Content: "already here"})
+		report, err := replay.RebuildProjectionFromWAL(ctx, target, newChain(t, wholeRefs), replay.NewMemoryRelations(), chainKey, replay.RebuildOptions{})
 		if err != nil {
 			t.Fatalf("rebuild over a non-empty projection: %v", err)
 		}
-		if report.Skipped != RebuildSkipNotEmpty || report.Entries != 0 {
+		if report.Skipped != replay.RebuildSkipNotEmpty || report.Entries != 0 {
 			t.Fatalf("report = (skipped %q, entries %d), want the skip reason and nothing appended", report.Skipped, report.Entries)
 		}
 		if len(target.Entries()) != 1 {
@@ -393,24 +395,45 @@ func TestRebuildRefusesToPassABrokenChainAsWhole(t *testing.T) {
 // it reports a failed read rather than on what it could have replayed.
 type failingChain struct{ err error }
 
-func (f failingChain) ScanFrom(context.Context, event.EventID, int) ([]ChainFact, error) {
+func (f failingChain) ScanFrom(context.Context, event.EventID, int) ([]replay.ChainFact, error) {
 	return nil, f.err
 }
 
-func (f failingChain) Fact(context.Context, event.EventID) (ChainFact, bool, error) {
-	return ChainFact{}, false, f.err
+func (f failingChain) Fact(context.Context, event.EventID) (replay.ChainFact, bool, error) {
+	return replay.ChainFact{}, false, f.err
 }
 
 // newLifecycleUnderTest opens a lifecycle over an in-memory store whose recovery
 // inventory already completed, so a scan runs without the arming grace.
-func newLifecycleUnderTest(t *testing.T, cfg LifecycleConfig) (*Lifecycle, *MemoryLifecycleStore, *Retention) {
+func newLifecycleUnderTest(t *testing.T, cfg ledger.LifecycleConfig) (*ledger.Lifecycle, *ledger.MemoryLifecycleStore, *ledger.Retention) {
 	t.Helper()
-	store := NewMemoryLifecycleStore(LifecycleCapabilities{})
-	retention := NewRetention(NewMemoryGuard())
-	lifecycle, err := NewLifecycle(cfg, retention, store, LifecycleCapabilities{})
+	store := ledger.NewMemoryLifecycleStore(ledger.LifecycleCapabilities{})
+	retention := ledger.NewRetention(ledger.NewMemoryGuard())
+	lifecycle, err := ledger.NewLifecycle(cfg, retention, store, ledger.LifecycleCapabilities{})
 	if err != nil {
 		t.Fatalf("open the lifecycle: %v", err)
 	}
 	lifecycle.RecoveryComplete()
 	return lifecycle, store, retention
+}
+
+// storedKeys returns the keys one in-memory store still holds, so a comparison
+// sees what the lifecycle kept rather than one key.
+func storedKeys(t *testing.T, store *ledger.MemoryLifecycleStore) []ledger.StoredKey {
+	t.Helper()
+	keys, err := store.EnumerateKeys(context.Background())
+	if err != nil {
+		t.Fatalf("enumerate the stored keys: %v", err)
+	}
+	return keys
+}
+
+// holdsKey reports whether one stored key set carries the named key.
+func holdsKey(keys []ledger.StoredKey, key event.EventID) bool {
+	for _, stored := range keys {
+		if stored.Key == key {
+			return true
+		}
+	}
+	return false
 }

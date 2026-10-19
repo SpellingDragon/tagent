@@ -5,7 +5,7 @@
 // decision carries — and quoted by the identity that decision answers. A
 // settled decision lands one fact; an entry the budget skipped settles nothing
 // and lands none.
-package memory
+package replay
 
 import (
 	"crypto/sha256"

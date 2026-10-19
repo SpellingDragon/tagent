@@ -15,7 +15,6 @@ import (
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
@@ -23,6 +22,8 @@ import (
 	"github.com/SpellingDragon/tagent/workspace"
 	a2aprotocol "trpc.group/trpc-go/trpc-a2a-go/protocol"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // TestAddressedDelivery checks the explicit target, kept attribution and named refusal of a delivery.
@@ -315,7 +316,7 @@ func TestAddressedDelivery(t *testing.T) {
 
 		owner := event.Address{AgentID: "agent-a", SessionID: "session-addressed"}
 		scope := workspace.ResultScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
-		originals := memory.NewMemoryOriginalStore()
+		originals := ledger.NewMemoryOriginalStore()
 		externalizer, err := workspace.NewResultExternalizer(originals, workspace.WithMaxTokens(16000))
 		if err != nil {
 			t.Fatalf("build the externalizer: %v", err)
@@ -382,7 +383,7 @@ func TestAddressedDelivery(t *testing.T) {
 		if !strings.Contains(observation.Content, string(ref.Key)) || !strings.Contains(observation.Content, "externalized result") {
 			t.Fatalf("settled observation = %q, want the ticket of the kept original %s", observation.Content, ref.Key)
 		}
-		if recalled := originals.Get(ctx, ref.Key); recalled.Outcome != memory.RecallFound {
+		if recalled := originals.Get(ctx, ref.Key); recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("original %s = outcome %v, want the remote result kept whole by the formal chain", ref.Key, recalled.Outcome)
 		}
 

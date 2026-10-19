@@ -14,11 +14,12 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/workspace"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
 // largeResultTool is one native callable tool with a fixed result: the generic tool
@@ -48,14 +49,14 @@ type refusingOriginalStore struct {
 }
 
 // Put refuses every commit with its cause.
-func (s *refusingOriginalStore) Put(_ context.Context, _ memory.OriginalRef, _ []byte) error {
+func (s *refusingOriginalStore) Put(_ context.Context, _ ledger.OriginalRef, _ []byte) error {
 	s.puts++
 	return s.cause
 }
 
 // Get reports a failed read, so no refusal is read as a missing original.
-func (s *refusingOriginalStore) Get(_ context.Context, key event.EventID) memory.RecallResult {
-	return memory.RecallResult{Key: key, Outcome: memory.RecallFailed, Err: s.cause}
+func (s *refusingOriginalStore) Get(_ context.Context, key event.EventID) ledger.RecallResult {
+	return ledger.RecallResult{Key: key, Outcome: ledger.RecallFailed, Err: s.cause}
 }
 
 // ReadSegment refuses the segmented read with its cause.
@@ -63,7 +64,7 @@ func (s *refusingOriginalStore) ReadSegment(context.Context, event.EventID, int,
 	return nil, s.cause
 }
 
-var _ memory.OriginalStore = (*refusingOriginalStore)(nil)
+var _ ledger.OriginalStore = (*refusingOriginalStore)(nil)
 
 // TestLargeResultRestart proves the unified externalize path on the frozen 03.8 face.
 //
@@ -79,9 +80,9 @@ func TestLargeResultRestart(t *testing.T) {
 	ctx := context.Background()
 	owner := event.Address{AgentID: event.AgentID("agent-large"), SessionID: event.SessionID("session-large")}
 	scope := workspace.ResultScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
-	readScope := memory.ReadScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
+	readScope := ledger.ReadScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
 
-	externalizer := func(t *testing.T, originals memory.OriginalStore, options ...workspace.ExternalizerOption) *workspace.ResultExternalizer {
+	externalizer := func(t *testing.T, originals ledger.OriginalStore, options ...workspace.ExternalizerOption) *workspace.ResultExternalizer {
 		t.Helper()
 		built, err := workspace.NewResultExternalizer(originals, options...)
 		if err != nil {
@@ -108,7 +109,7 @@ func TestLargeResultRestart(t *testing.T) {
 		}
 		return body
 	}
-	requirePreview := func(t *testing.T, got any, ref memory.OriginalRef) string {
+	requirePreview := func(t *testing.T, got any, ref ledger.OriginalRef) string {
 		t.Helper()
 		preview, ok := got.(string)
 		if !ok {
@@ -117,12 +118,12 @@ func TestLargeResultRestart(t *testing.T) {
 		if !strings.Contains(preview, string(ref.Key)) {
 			t.Fatalf("preview does not carry the ticket of original %s: %q", ref.Key, preview[:min(len(preview), 200)])
 		}
-		if !strings.Contains(preview, fmt.Sprintf("at most %d bytes from offset 0", memory.DefaultSegmentMaxBytes)) {
+		if !strings.Contains(preview, fmt.Sprintf("at most %d bytes from offset 0", ledger.DefaultSegmentMaxBytes)) {
 			t.Fatalf("preview does not name the segment entry: %q", preview[min(len(preview), 160):])
 		}
 		return preview
 	}
-	walkSegments := func(t *testing.T, reader *workspace.ReplicaReader, ref memory.OriginalRef, entry memory.SegmentRequest) ([]byte, int) {
+	walkSegments := func(t *testing.T, reader *workspace.ReplicaReader, ref ledger.OriginalRef, entry ledger.SegmentRequest) ([]byte, int) {
 		t.Helper()
 		var out []byte
 		segments := 0
@@ -142,7 +143,7 @@ func TestLargeResultRestart(t *testing.T) {
 	}
 
 	t.Run("G2.1 大结果先存原文再有界预览: the original is kept whole before the preview and its entry exist", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
 		big := strings.Repeat("大结果-", 12000)
 		tool := boundedTool(t, ext, big)
@@ -163,7 +164,7 @@ func TestLargeResultRestart(t *testing.T) {
 			t.Fatalf("preview does not start with the original bytes")
 		}
 		recalled := store.Get(ctx, ref.Key)
-		if recalled.Outcome != memory.RecallFound {
+		if recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("Get(%s) = outcome %v, want the committed original", ref.Key, recalled.Outcome)
 		}
 		assertSameBytes(t, "Get("+string(ref.Key)+")", recalled.Body, body)
@@ -183,7 +184,7 @@ func TestLargeResultRestart(t *testing.T) {
 			t.Fatalf("ThresholdForMaxTokens(-5) = %d, want the default window to give 16000", got)
 		}
 
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
 		if ext.Threshold() != 32000 {
 			t.Fatalf("externalizer threshold = %d, want 32000", ext.Threshold())
@@ -197,7 +198,7 @@ func TestLargeResultRestart(t *testing.T) {
 		if returned, ok := got.(string); !ok || returned != atThreshold {
 			t.Fatalf("Call at the threshold returned %T, want the original string untouched", got)
 		}
-		if recalled := store.Get(ctx, workspace.OriginalRefFor(scope, serialized(t, atThreshold)).Key); recalled.Outcome != memory.RecallMissing {
+		if recalled := store.Get(ctx, workspace.OriginalRefFor(scope, serialized(t, atThreshold)).Key); recalled.Outcome != ledger.RecallMissing {
 			t.Fatalf("a result at the threshold was externalized: outcome %v", recalled.Outcome)
 		}
 
@@ -209,7 +210,7 @@ func TestLargeResultRestart(t *testing.T) {
 		}
 		requirePreview(t, got, workspace.OriginalRefFor(scope, serialized(t, overThreshold)))
 
-		defaultExt := externalizer(t, memory.NewMemoryOriginalStore())
+		defaultExt := externalizer(t, ledger.NewMemoryOriginalStore())
 		if defaultExt.Threshold() != 16000 {
 			t.Fatalf("default externalizer threshold = %d, want 16000", defaultExt.Threshold())
 		}
@@ -233,12 +234,12 @@ func TestLargeResultRestart(t *testing.T) {
 		root := t.TempDir()
 		memoryRoot := filepath.Join(root, "memory")
 		scratch := filepath.Join(root, "scratch")
-		cfg := memory.StorageConfig{Type: memory.StorageLocalFile, Root: memoryRoot}
-		firstTier, err := memory.OpenTier(ctx, cfg)
+		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: memoryRoot}
+		firstTier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("OpenTier(localfile): %v", err)
 		}
-		firstScoped, ok := firstTier.Originals.(memory.ScopedOriginalStore)
+		firstScoped, ok := firstTier.Originals.(ledger.ScopedOriginalStore)
 		if !ok {
 			t.Fatalf("localfile originals do not implement the scoped read face")
 		}
@@ -279,11 +280,11 @@ func TestLargeResultRestart(t *testing.T) {
 			t.Fatalf("Rebuildable(%s) = %v, %v, want the original to stay effective after the replica was reclaimed", ref.Key, rebuildable, err)
 		}
 
-		secondTier, err := memory.OpenTier(ctx, cfg)
+		secondTier, err := ledger.OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("reopen OpenTier(localfile): %v", err)
 		}
-		secondScoped, ok := secondTier.Originals.(memory.ScopedOriginalStore)
+		secondScoped, ok := secondTier.Originals.(ledger.ScopedOriginalStore)
 		if !ok {
 			t.Fatalf("reopened localfile originals do not implement the scoped read face")
 		}
@@ -299,7 +300,7 @@ func TestLargeResultRestart(t *testing.T) {
 			t.Fatalf("reopened threshold = %d, want the same %d", secondExt.Threshold(), firstExt.Threshold())
 		}
 		recalled := secondTier.Originals.Get(ctx, ref.Key)
-		if recalled.Outcome != memory.RecallFound {
+		if recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("reopened Get(%s) = outcome %v, want the committed original", ref.Key, recalled.Outcome)
 		}
 		assertSameBytes(t, "reopened Get("+string(ref.Key)+")", recalled.Body, body)
@@ -328,7 +329,7 @@ func TestLargeResultRestart(t *testing.T) {
 	})
 
 	t.Run("G2.4 统一外置路径: tool, task, tmux and overflow results take one path and one threshold", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
 		big := strings.Repeat("统一外置-", 8000)
 		body := serialized(t, big)
@@ -358,11 +359,11 @@ func TestLargeResultRestart(t *testing.T) {
 			}
 			previews = append(previews, requirePreview(t, externalized.Preview, ref))
 			recalled := store.Get(ctx, ref.Key)
-			if recalled.Outcome != memory.RecallFound {
+			if recalled.Outcome != ledger.RecallFound {
 				t.Fatalf("Get(%s) after Externalize(%s) = outcome %v, want found", ref.Key, format, recalled.Outcome)
 			}
 			assertSameBytes(t, "Externalize("+format+") original", recalled.Body, body)
-			if externalized.Segment.MaxBytes != memory.DefaultSegmentMaxBytes {
+			if externalized.Segment.MaxBytes != ledger.DefaultSegmentMaxBytes {
 				t.Fatalf("Externalize(%s) segment entry = %+v, want the shared byte bound", format, externalized.Segment)
 			}
 		}
@@ -403,7 +404,7 @@ func TestLargeResultRestart(t *testing.T) {
 	})
 
 	t.Run("G2.5 nil 结果不拦截: a nil result is handed back and commits nothing", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
 		before := store.BlobCount()
 		got, err := boundedTool(t, ext, nil).Call(ctx, []byte(`{}`))
@@ -433,7 +434,7 @@ func TestLargeResultRestart(t *testing.T) {
 	})
 
 	t.Run("副本写失败仍保留原文: a replica write failure is reported beside the effective original", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		big := strings.Repeat("d", 40000)
 		blockedRoot := filepath.Join(t.TempDir(), "blocked")
 		if err := os.WriteFile(blockedRoot, []byte("not a directory"), 0o600); err != nil {
@@ -452,14 +453,14 @@ func TestLargeResultRestart(t *testing.T) {
 		ref := workspace.OriginalRefFor(scope, body)
 		requirePreview(t, got, ref)
 		recalled := store.Get(ctx, ref.Key)
-		if recalled.Outcome != memory.RecallFound {
+		if recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("Get(%s) = outcome %v, want the original kept beside the failed replica", ref.Key, recalled.Outcome)
 		}
 		assertSameBytes(t, "Get("+string(ref.Key)+") after a failed replica write", recalled.Body, body)
 	})
 
 	t.Run("G2.6 正式链消费者锚: the assembled run hands the model the preview of the kept original", func(t *testing.T) {
-		store := memory.NewMemoryOriginalStore()
+		store := ledger.NewMemoryOriginalStore()
 		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
 		big := strings.Repeat("大结果-", 12000)
 		inner := &largeResultTool{
@@ -516,11 +517,11 @@ func TestLargeResultRestart(t *testing.T) {
 		if !strings.Contains(observation.Content, string(ref.Key)) {
 			t.Fatalf("the settled observation omits the ticket of original %s", ref.Key)
 		}
-		if !strings.Contains(observation.Content, fmt.Sprintf("at most %d bytes from offset 0", memory.DefaultSegmentMaxBytes)) {
+		if !strings.Contains(observation.Content, fmt.Sprintf("at most %d bytes from offset 0", ledger.DefaultSegmentMaxBytes)) {
 			t.Fatalf("the settled observation omits the segment entry")
 		}
 		recalled := store.Get(ctx, ref.Key)
-		if recalled.Outcome != memory.RecallFound {
+		if recalled.Outcome != ledger.RecallFound {
 			t.Fatalf("Get(%s) = outcome %v, want the original committed by the assembled run", ref.Key, recalled.Outcome)
 		}
 		assertSameBytes(t, "assembled Get("+string(ref.Key)+")", recalled.Body, body)

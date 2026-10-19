@@ -7,7 +7,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/task"
 )
@@ -28,7 +28,7 @@ func TestFactCategoryContract(t *testing.T) {
 		rl.FeedbackRecord{FeedbackID: "feedback-1"},
 		rl.RewardRecord{InstanceID: "reward-1", Revision: 1},
 		config.Declaration{Entry: "main", Baseline: "v1"},
-		memory.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
+		ledger.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
 	}
 
 	seen := map[string]string{}
@@ -57,11 +57,14 @@ func TestFactCategoryContract(t *testing.T) {
 // TestFactCategorySeals pins the identity seal of every registered family.
 // - a fact restated on a non-identity field answers the same key and type
 // - a fact re-identified answers a different key
-// - the seven families answer the type words the vocabulary registers
+// - every registered family answers the type word the vocabulary registers
 //
 // 契约: docs/FACT-VOCABULARY.md#families
 func TestFactCategorySeals(t *testing.T) {
 	stamp := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	judged := event.CompressRequestFor("memory.curation", "seq-1", "the card sequence exceeds the curation bound")
+	restamped := judged
+	restamped.At = stamp
 	cases := []struct {
 		family       string
 		fact         event.Fact
@@ -113,10 +116,17 @@ func TestFactCategorySeals(t *testing.T) {
 		},
 		{
 			family:       "reference",
-			fact:         memory.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
-			restated:     memory.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-2"}, Format: "text/markdown"},
-			reidentified: memory.OriginalRef{Key: "blob-2", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
+			fact:         ledger.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
+			restated:     ledger.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-2"}, Format: "text/markdown"},
+			reidentified: ledger.OriginalRef{Key: "blob-2", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
 			kind:         "memory.original",
+		},
+		{
+			family:       "compress request",
+			fact:         judged,
+			restated:     restamped,
+			reidentified: event.CompressRequestFor("memory.curation", "seq-2", "the card sequence exceeds the curation bound"),
+			kind:         "compress.request",
 		},
 	}
 
