@@ -27,7 +27,7 @@ var registeredTopDirs = map[string]bool{
 	"memory": true, "model": true, "modelutil": true, "openspec": true, "plugin": true,
 	"query": true, "rl": true, "state": true, "task": true, "telemetry": true,
 	"prompt": true, "prototype": true, "resources": true,
-	"bench": true, "scripts": true, "tests": true, "testutil": true, "tool": true,
+	"bench": true, "scripts": true, "view": true, "tests": true, "testutil": true, "tool": true,
 	"workspace": true,
 }
 
