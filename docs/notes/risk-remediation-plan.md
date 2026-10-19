@@ -38,3 +38,14 @@
 | F5 配置描述前后插件 | AgentSpec.Plugins 驱动管线 | 链路在、golden 经替身注入未验配置面 | **补 S11**（插件按声明序执行） |
 
 **S11 场景设计**：——一份 config.Declaration（父 agent 带工具插件管线+子 agent 声明 Model/Files/Tools/Plugins）→ 外部输入事件准入 → LLM 决策委派子 agent（task 受理收据）→ 子 agent 用自己装配的模型/prompt 应答 → 结算通知回调父会址 → 前后插件按声明序执行。观测键：子模型名/prompt 来源/委派 task 身份/通知定向/插件执行序。
+
+## 2026-10-19 第四轮复核（R1–R6）
+
+| # | 风险 | 实证 | 判定 |
+|---|---|---|---|
+| R1 | bus factor=1 | docs/OPERATION.md 接手指南在位 | 结构性，缓解已尽合理 |
+| R2 | 依赖 fork 未回正 | go.mod 的 replace 仍在（SpellingDragon/trpc-agent-go v1.11.2-tagent.1），等上游 PR #2637 | 已知缓解，回正条件在 go.mod TODO(upstream) |
+| R3 | 大重构中途 | 六域收归/0 债务/命门补实/A2A 对齐全部落定，lint 与 golden 全绿 | 已收尾 |
+| R4 | 文档熵 | docs/ 177 篇/59K 行（二手数字偏大）；doc budget 棘轮"只降不升"在位 | 棘轮门治理中 |
+| R5 | 真实 LLM 验收 | real-smoke.yml 与 provider-contract.yml 已在（schedule 触发） | 非缺位＝低频，缓解在位 |
+| R6 | 采用门槛 | CLI 第二宿主已有；module 路径经裁决 A 正名 | **已裁决**：`github.com/SpellingDragon/tagent` 为稳定命名空间 |

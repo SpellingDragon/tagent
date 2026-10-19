@@ -1,6 +1,6 @@
 # tagent
 
-事件驱动的 agent 运行时：事件进入总线，由任务、模型与工具协作产出结果。Go 单仓（module `github.com/SpellingDragon/tagent`）；微信宿主是独立 module 的宿主示例，不反向依赖宿主代码。
+事件驱动的 agent 运行时：事件进入总线，由任务、模型与工具协作产出结果。Go 单仓（module `github.com/SpellingDragon/tagent`，稳定命名空间）；微信宿主是独立 module 的宿主示例，不反向依赖宿主代码。
 
 ## 项目定位
 
