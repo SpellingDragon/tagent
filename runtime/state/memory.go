@@ -120,9 +120,8 @@ func (m *MemoryStore) Establish(ctx context.Context, addr event.Address, instanc
 	}
 	opened := &site{
 		session: Session{
-			Address:     addr,
-			Instance:    instance,
-			Invocations: map[event.InvocationID]InvocationProjection{},
+			Address:  addr,
+			Instance: instance,
 		},
 		nextSeq: 1,
 	}
@@ -184,17 +183,10 @@ func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Addr
 // reference into the site itself.
 func snapshot(s *Session) *Session {
 	out := &Session{
-		Address:     s.Address,
-		Instance:    s.Instance,
-		Consumed:    s.Consumed,
-		Mailbox:     append([]MailboxEntry(nil), s.Mailbox...),
-		Invocations: make(map[event.InvocationID]InvocationProjection, len(s.Invocations)),
-	}
-	for id, projection := range s.Invocations {
-		out.Invocations[id] = InvocationProjection{
-			InvocationID: projection.InvocationID,
-			Pending:      append([]task.Notice(nil), projection.Pending...),
-		}
+		Address:  s.Address,
+		Instance: s.Instance,
+		Consumed: s.Consumed,
+		Mailbox:  append([]MailboxEntry(nil), s.Mailbox...),
 	}
 	return out
 }

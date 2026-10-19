@@ -45,7 +45,7 @@ func ExampleCommit() {
 		MutationID: "mutation-1",
 		TaskID:     "task-1",
 		Status:     task.StatusRunning,
-		Outbox:     []task.NoticeEnvelope{{}},
+		Outbox:     []task.Envelope{{}},
 	}
 
 	if result, err := log.Commit(ctx, record); err != nil || result != task.CommitCommitted {

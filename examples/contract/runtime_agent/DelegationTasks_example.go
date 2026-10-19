@@ -13,13 +13,13 @@ import (
 // obligations still open and delivers them.
 type delegationLedger struct {
 	status map[event.TaskID]task.Status
-	owed   map[event.TaskID][]task.NoticeEnvelope
+	owed   map[event.TaskID][]task.Envelope
 }
 
 func newDelegationLedger() *delegationLedger {
 	return &delegationLedger{
 		status: map[event.TaskID]task.Status{},
-		owed:   map[event.TaskID][]task.NoticeEnvelope{},
+		owed:   map[event.TaskID][]task.Envelope{},
 	}
 }
 
@@ -36,7 +36,7 @@ func (l *delegationLedger) Admit(_ context.Context, spec task.Spec) (task.Admiss
 }
 
 // Advance moves one task to the next status and books the notifications it still owes.
-func (l *delegationLedger) Advance(_ context.Context, taskID event.TaskID, to task.Status, _ task.MutationID, outbox []task.NoticeEnvelope) (task.CommitResult, error) {
+func (l *delegationLedger) Advance(_ context.Context, taskID event.TaskID, to task.Status, _ task.MutationID, outbox []task.Envelope) (task.CommitResult, error) {
 	if _, ok := l.status[taskID]; !ok {
 		return task.CommitNotCommitted, task.ErrTaskNotFound
 	}
@@ -84,7 +84,7 @@ func ExampleDelegationTasks() {
 		return
 	}
 	notice := task.Notice{TaskID: receipt.TaskID, Round: 1, Kind: task.NoticeSettled}
-	if _, err := ledger.Advance(ctx, receipt.TaskID, task.StatusSettled, "mutation-1", []task.NoticeEnvelope{
+	if _, err := ledger.Advance(ctx, receipt.TaskID, task.StatusSettled, "mutation-1", []task.Envelope{
 		{Notice: notice, Target: target},
 	}); err != nil {
 		return

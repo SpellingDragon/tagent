@@ -66,8 +66,8 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 		}
 		return authority, store
 	}
-	deliver := func(store *state.MemoryStore, attempts *[]task.NoticeEnvelope) task.EnvelopeDeliverer {
-		return func(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+	deliver := func(store *state.MemoryStore, attempts *[]task.Envelope) task.EnvelopeDeliverer {
+		return func(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 			*attempts = append(*attempts, envelope)
 			if err := store.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{Target: envelope.Target, TargetInstance: envelope.TargetInstance}); err != nil {
 				return task.DeliveryRejected, err
@@ -89,7 +89,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDurableCommit: %v", err)
 	}
-	var attempts1 []task.NoticeEnvelope
+	var attempts1 []task.Envelope
 	registry := task.NewMemoryRegistry(durable, task.NewMemoryAdmission())
 	manager := task.NewMemoryManager(registry, nil, task.WithEnvelopeDeliverer(deliver(store1, &attempts1)))
 	spec := task.Spec{
@@ -117,7 +117,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if before.Target != oldTarget || before.TargetInstance != sourceInstance {
 		t.Fatalf("envelope = %+v, want the started notification frozen beside %v / %s", before, oldTarget, sourceInstance)
 	}
-	if result, err := registry.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress:"+string(taskID)+":1"), []task.NoticeEnvelope{before}); result != task.CommitCommitted || err != nil {
+	if result, err := registry.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress:"+string(taskID)+":1"), []task.Envelope{before}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("advance progress = (%v, %v), want the notification committed beside its frozen routing", result, err)
 	}
 	if err := manager.Handoff(ctx, taskID, task.HandoffTarget{Target: newTarget, TargetInstance: targetInstance}); err != nil {
@@ -174,7 +174,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("hold the binding: %v", err)
 	}
-	var attempts2 []task.NoticeEnvelope
+	var attempts2 []task.Envelope
 	registry2 := task.NewMemoryRegistry(restored, task.NewMemoryAdmission())
 	manager2 := task.NewMemoryManager(registry2, nil, task.WithEnvelopeDeliverer(deliver(store2, &attempts2)))
 	report, err := registry2.Restore(ctx, chain, state.NewBindingOwners(bindings))
@@ -198,7 +198,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if after.Source != before.Source {
 		t.Fatalf("source = %+v, want the frozen source %+v kept beside the new target", after.Source, before.Source)
 	}
-	if result, err := registry2.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress:"+string(taskID)+":2"), []task.NoticeEnvelope{after}); result != task.CommitCommitted || err != nil {
+	if result, err := registry2.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress:"+string(taskID)+":2"), []task.Envelope{after}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("advance progress = (%v, %v), want the future notification committed beside its frozen routing", result, err)
 	}
 
@@ -222,7 +222,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 		t.Fatalf("repeated flush offered %d further notifications, want none beyond the two already accepted", len(attempts2)-2)
 	}
 	duplicate := deliver(store2, &attempts2)
-	for _, envelope := range []task.NoticeEnvelope{before, after} {
+	for _, envelope := range []task.Envelope{before, after} {
 		if outcome, err := duplicate(transport, envelope); outcome != task.DeliveryAccepted || err != nil {
 			t.Fatalf("duplicate transport = (%v, %v), want the repeated delivery recognized as the same notification", outcome, err)
 		}

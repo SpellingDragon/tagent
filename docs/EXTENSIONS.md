@@ -54,7 +54,7 @@
 | `TypeFeedback` | `feedback` | `user` |
 | `TypeGovernance` | `governance` | `user` |
 
-**Notice 族**是任务通知的词汇（`runtime/task/registry.go`），扩展者只需认身份而不必碰载荷：`task.Notice{TaskID, Round, Kind, Seq, Event}`，`Kind` 取 `accepted` / `progress` / `settled` / `failed` / `cancelled` 之一。通知自己的身份是 **`TaskID + Round + Kind + Seq`**，`Event` 指向已提交的事实供消费者还原输入，但**不替代**通知身份：同一身份重复投递不记录第二个事实，重试保留原身份。投递路由另存 `task.NoticeEnvelope{Notice, Target, Source, TargetInstance}`，目标地址与目标实例在提交那一刻冻结，重建或移交的实例不会重路由一条已提交的通知。
+**Notice 族**是任务通知的词汇（`runtime/task/registry.go`），扩展者只需认身份而不必碰载荷：`task.Notice{TaskID, Round, Kind, Seq, Event}`，`Kind` 取 `accepted` / `progress` / `settled` / `failed` / `cancelled` 之一。通知自己的身份是 **`TaskID + Round + Kind + Seq`**，`Event` 指向已提交的事实供消费者还原输入，但**不替代**通知身份：同一身份重复投递不记录第二个事实，重试保留原身份。投递路由另存 `task.Envelope{Notice, Target, Source, TargetInstance}`，目标地址与目标实例在提交那一刻冻结，重建或移交的实例不会重路由一条已提交的通知。
 
 ---
 

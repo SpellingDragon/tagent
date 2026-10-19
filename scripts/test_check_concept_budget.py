@@ -495,7 +495,7 @@ class SelfCheckTest(unittest.TestCase):
 
     def test_self_check_catches_compliant_symbol_in_baseline(self):
         original = budget.BASELINE
-        budget.BASELINE = original + (("struct-fields", "agent/delegate.go:Delegation", 5),)
+        budget.BASELINE = original + (("struct-fields", "runtime/agent/delegate.go:Delegation", 5),)
         try:
             report = lib.Report("selftest")
             budget.check_baseline_table(report, str(REPO_ROOT))

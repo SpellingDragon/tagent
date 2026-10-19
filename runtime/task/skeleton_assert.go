@@ -41,10 +41,10 @@ var (
 		TaskID:           "",
 		ExpectedRevision: 0,
 		Status:           StatusUnknown,
-		Outbox:           []NoticeEnvelope{},
+		Outbox:           []Envelope{},
 	}
 
-	_ = NoticeEnvelope{
+	_ = Envelope{
 		Notice:         Notice{},
 		Target:         event.Address{},
 		Source:         event.Address{},
@@ -187,12 +187,12 @@ var (
 	_ func(*NoticeSequencer, event.TaskID, int64, NoticeKind, event.EventID) Notice = (*NoticeSequencer).Issue
 	_ func(*NoticeSequencer, Notice)                                                = (*NoticeSequencer).Observe
 
-	_ func(*MemoryRegistry, context.Context, event.TaskID, NoticeKind, event.EventID) (NoticeEnvelope, error) = (*MemoryRegistry).IssueNotice
+	_ func(*MemoryRegistry, context.Context, event.TaskID, NoticeKind, event.EventID) (Envelope, error) = (*MemoryRegistry).IssueNotice
 
-	_ func(*MemoryManager, context.Context, event.TaskID) (HandoffRecord, error)        = (*MemoryManager).HandoffOf
-	_ func(*MemoryManager, context.Context, event.InstanceID) error                     = (*MemoryManager).CloseInstance
-	_ func(*MemoryManager, context.Context, event.InstanceID) ([]NoticeEnvelope, error) = (*MemoryManager).Retained
-	_ func(*MemoryManager, context.Context, event.InstanceID) ([]TaskRecord, error)     = (*MemoryManager).RecoveryMaterial
+	_ func(*MemoryManager, context.Context, event.TaskID) (HandoffRecord, error)    = (*MemoryManager).HandoffOf
+	_ func(*MemoryManager, context.Context, event.InstanceID) error                 = (*MemoryManager).CloseInstance
+	_ func(*MemoryManager, context.Context, event.InstanceID) ([]Envelope, error)   = (*MemoryManager).Retained
+	_ func(*MemoryManager, context.Context, event.InstanceID) ([]TaskRecord, error) = (*MemoryManager).RecoveryMaterial
 
 	_ func(EnvelopeDeliverer) ManagerOption = WithEnvelopeDeliverer
 )

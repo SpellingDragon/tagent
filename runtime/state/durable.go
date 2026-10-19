@@ -333,7 +333,7 @@ func sameRecord(stored, record task.CommitRecord) bool {
 
 // equalOutbox reports whether two outboxes carry the same envelopes in the same
 // order.
-func equalOutbox(left, right []task.NoticeEnvelope) bool {
+func equalOutbox(left, right []task.Envelope) bool {
 	if len(left) != len(right) {
 		return false
 	}

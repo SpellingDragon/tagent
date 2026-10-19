@@ -78,36 +78,38 @@ NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
 # ---- 债务清单（baseline）：现状超标件，只降不升；每清一户删一行 ----
 # 生成口径：本检查器对当前树的实测值。S1 的 observed 是接口方法数，S2 是导出字段数，
 # S3 是该文件的裸 ctx.Value 调用数；S4 是布尔债务（observed=None）。
+#
+# 键一律是**当前树路径**：包迁移（query/→memory/query/、agent/→runtime/agent/、
+# state/→runtime/state/、task/→runtime/task/、event/→api/event/、config/→api/config/、
+# governance/→evolution/governance/、host_bridge.go→cli/host_face.go、diagnostics.go→host_face.go）只做键正名，
+# observed 不动——路径对齐不是豁免扩张。已清零的条目按棘轮生命周期删除，不得回填。
 BASELINE = (
-    # S1 iface-methods — 12 项（observed=实测接口方法数）
-    ("iface-methods", "agent/delegate.go:DelegationTasks", 4),
-    ("iface-methods", "agent/loop.go:Recorder", 3),
-    ("iface-methods", "evolution/gate.go:StructuralGate", 3),
-    ("iface-methods", "evolution/refine/refine.go:Refine", 3),
+    # S1 iface-methods — 10 项（observed=实测接口方法数）
+    ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
+    ("iface-methods", "runtime/agent/loop.go:Recorder", 3),
     ("iface-methods", "rl/produce.go:Recorder", 3),
-    ("iface-methods", "state/durable.go:FactLog", 4),
-    ("iface-methods", "state/store.go:Store", 4),
-    ("iface-methods", "task/registry.go:Manager", 4),
-    ("iface-methods", "task/registry.go:Registry", 4),
+    ("iface-methods", "runtime/state/durable.go:FactLog", 4),
+    ("iface-methods", "runtime/state/store.go:Store", 4),
+    ("iface-methods", "runtime/task/registry.go:Manager", 4),
+    ("iface-methods", "runtime/task/registry.go:Registry", 4),
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
     ("iface-methods", "tool/mcp/adapter.go:Registry", 5),
     ("iface-methods", "memory/replica/cleaner.go:Cleaner", 5),
     # S2 struct-fields — 53 项（observed=实测导出字段数）
-    ("struct-fields", "agent/delegate.go:Delegation", 8),
-    ("struct-fields", "agent/invocation.go:Invocation", 6),
+    ("struct-fields", "runtime/agent/delegate.go:Delegation", 8),
     ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
-    ("struct-fields", "config/config.go:AgentSpec", 8),
+    ("struct-fields", "api/config/config.go:AgentSpec", 8),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
     # 七个冻结键各自成一格，前缀透传与未建模条目必须原样留存（PassThrough/Unknown）——
     # 字段即被解析元数据的原样形状，瘦身会丢掉“不丢条目”的保真承诺，故不瘦身。
-    ("struct-fields", "event/meta.go:ParsedMeta", 9),
+    ("struct-fields", "api/event/meta.go:ParsedMeta", 9),
     # event.Event 16f（S2 类别豁免先例，具名）：事件事实本体＝数据面，16 个字段是事件
     # 身份/内容/归属/账目四块的数据语义（序列化保真面），不拆构造、不拆块；可读性由
-    # event/types.go 的语义块文档分组承担。
-    ("struct-fields", "event/types.go:Event", 16),
+    # api/event/types.go 的语义块文档分组承担。
+    ("struct-fields", "api/event/types.go:Event", 16),
     ("struct-fields", "evolution/posterior.go:Evaluation", 6),
     ("struct-fields", "evolution/refine/refine.go:RefineRecord", 7),
-    ("struct-fields", "host_bridge.go:ApprovalDecision", 8),
+    ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
     ("struct-fields", "evolution/meditation/vocabulary.go:MeditationArtifact", 6),
     ("struct-fields", "memory/event_body.go:EventBody", 8),
     ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
@@ -117,17 +119,17 @@ BASELINE = (
     ("struct-fields", "memory/replay.go:DeliveryRecord", 8),
     ("struct-fields", "memory/search/port.go:Query", 9),
     ("struct-fields", "memory/ledger/segment_store.go:SegmentRecord", 6),
-    ("struct-fields", "governance/denial.go:DenialRecord", 9),
-    ("struct-fields", "governance/goal.go:Goal", 6),
-    ("struct-fields", "query/explain.go:Blocker", 6),
-    ("struct-fields", "query/explain.go:LeaseLedgerCounts", 6),
-    ("struct-fields", "query/explain.go:LeaseRetention", 9),
-    ("struct-fields", "query/inventory.go:InventoryCounts", 6),
-    ("struct-fields", "query/inventory.go:NoticeEntry", 9),
-    ("struct-fields", "query/inventory.go:SessionEntry", 6),
-    ("struct-fields", "query/snapshot.go:DetailState", 6),
-    ("struct-fields", "query/subscribe.go:Update", 6),
-    ("struct-fields", "query/types.go:ObjectRef", 7),
+    ("struct-fields", "evolution/governance/denial.go:DenialRecord", 9),
+    ("struct-fields", "evolution/governance/goal.go:Goal", 6),
+    ("struct-fields", "memory/query/explain.go:Blocker", 6),
+    ("struct-fields", "memory/query/explain.go:LeaseLedgerCounts", 6),
+    ("struct-fields", "memory/query/explain.go:LeaseRetention", 9),
+    ("struct-fields", "memory/query/inventory.go:InventoryCounts", 6),
+    ("struct-fields", "memory/query/inventory.go:NoticeEntry", 9),
+    ("struct-fields", "memory/query/inventory.go:SessionEntry", 6),
+    ("struct-fields", "memory/query/snapshot.go:DetailState", 6),
+    ("struct-fields", "memory/query/subscribe.go:Update", 6),
+    ("struct-fields", "memory/query/types.go:ObjectRef", 7),
     ("struct-fields", "rl/capture.go:CaptureManifest", 9),
     ("struct-fields", "rl/capture.go:RequestSnapshot", 11),
     # 数据保真面（记录 schema＝序列化载体，字段为数据语义本体非配置选择面——
@@ -141,7 +143,8 @@ BASELINE = (
     ("struct-fields", "rl/feedback.go:FeedbackRecord", 10),
     # 06.7 反馈 HTTP 面一次受理的结果（引入叶）：绑定态与派生奖励实例是回复体
     # 的全部语义，omitempty 逐字段声明的键集即线格式契约，拆块即回复面漂移。
-    ("struct-fields", "rl/feedback_endpoint.go:FeedbackSubmission", 9),    # 06.5 新产数据面（SFT 清洗样本/记录/结果/请求/训练用途声明＝数据录入保真面，
+    ("struct-fields", "rl/feedback_endpoint.go:FeedbackSubmission", 9),
+    # 06.5 新产数据面（SFT 清洗样本/记录/结果/请求/训练用途声明＝数据录入保真面，
     # S2 类别豁免；引入叶 06.5——清洗=标记/过滤不改原数据，字段=记录语义本体）
     ("struct-fields", "rl/sft.go:SFTExample", 9),
     ("struct-fields", "rl/sft.go:SFTCleanRecord", 8),
@@ -149,7 +152,7 @@ BASELINE = (
     ("struct-fields", "rl/sft_qualification.go:TrainingUseConsumer", 6),
     # 08.4 新产数据面（诊断读出报告＝数据保真面非配置选择面，S2 类别豁免；
     # 引入叶 08.4——七段读出是报告语义本体，同 Explanation 先例）
-    ("struct-fields", "diagnostics.go:DiagnosticReport", 7),
+    ("struct-fields", "host_face.go:DiagnosticReport", 7),
     # 06.1 旧格式只读导入：兼容范围的字段面，字段即被导入数据的原样形状。
     ("struct-fields", "rl/import.go:LegacyRecord", 6),
     # 06.4 训练导出（引入叶）：运行级清单聚合样本谱系、分组与拒收账，是逐字节
@@ -166,16 +169,16 @@ BASELINE = (
     # 06.3 采集账目（引入叶）：准入/拒收/写错/在飞四类计数是丢失账本体，
     # Dropped() 由分类计数合成，拆块即审计面需要二次归并。
     ("struct-fields", "rl/sink.go:CaptureLedger", 8),
-    ("struct-fields", "state/resources.go:SkillLoad", 6),
-    ("struct-fields", "state/session.go:MailboxEntry", 6),
-    ("struct-fields", "task/spec.go:Spec", 8),
-    ("struct-fields", "task/wrapper.go:Result", 6),
+    ("struct-fields", "runtime/state/resources.go:SkillLoad", 6),
+    ("struct-fields", "runtime/state/session.go:MailboxEntry", 6),
+    ("struct-fields", "runtime/task/spec.go:Spec", 8),
+    ("struct-fields", "runtime/task/wrapper.go:Result", 6),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
-    ("ctx-bare", "governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
-    ("ctx-bare", "task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
+    ("ctx-bare", "evolution/governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
+    ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。
 )

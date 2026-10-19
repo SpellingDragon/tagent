@@ -587,16 +587,16 @@ func (inv *Inventory) readTasks(ctx context.Context, g *gathering) {
 	sort.Slice(g.tasks, func(i, j int) bool { return g.tasks[i].TaskID < g.tasks[j].TaskID })
 }
 
-// readInvocations projects the invocation dimension from the sites that hold or
-// project an invocation and from the responsibility range each task and its
-// obligations name.
+// readInvocations projects the invocation dimension from the sites whose
+// execution slot holds an invocation and from the responsibility range each
+// task and its obligations name.
 func (inv *Inventory) readInvocations(g *gathering) {
 	drafts := map[event.InvocationID]*invocationDraft{}
 	draft := func(id event.InvocationID) *invocationDraft {
 		if existing, ok := drafts[id]; ok {
 			return existing
 		}
-		created := &invocationDraft{id: id, pending: map[task.Notice]bool{}, rank: 4}
+		created := &invocationDraft{id: id, pending: map[task.Notice]bool{}, rank: 3}
 		drafts[id] = created
 		return created
 	}
@@ -605,13 +605,6 @@ func (inv *Inventory) readInvocations(g *gathering) {
 			entry := draft(reading.invocation)
 			entry.locate(1, reading.session.Address, reading.session.Instance)
 			entry.decision = reading.decision
-		}
-		for _, projection := range reading.session.Invocations {
-			entry := draft(projection.InvocationID)
-			entry.locate(2, reading.session.Address, reading.session.Instance)
-			for _, notice := range projection.Pending {
-				entry.pending[notice] = true
-			}
 		}
 	}
 	for _, t := range g.tasks {
@@ -623,7 +616,7 @@ func (inv *Inventory) readInvocations(g *gathering) {
 			continue
 		}
 		entry := draft(owner)
-		entry.locate(3, t.Spec.Source, t.Spec.InstanceID)
+		entry.locate(2, t.Spec.Source, t.Spec.InstanceID)
 		for _, open := range t.Obligations.Open {
 			if open.Notice != (task.Notice{}) {
 				entry.pending[open.Notice] = true
@@ -652,8 +645,8 @@ type invocationDraft struct {
 }
 
 // locate records the site of this invocation from the source given, where a
-// lower rank is a stronger locator: a held slot, then a session projection,
-// then the admission address of a task, and rank four is the unset start.
+// lower rank is a stronger locator: a held slot, then the admission address of
+// a task, and rank three is the unset start.
 func (d *invocationDraft) locate(rank int, addr event.Address, instance event.InstanceID) {
 	if rank < d.rank {
 		d.rank = rank

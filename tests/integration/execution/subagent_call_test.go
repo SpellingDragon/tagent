@@ -150,7 +150,7 @@ type subagentCallRig struct {
 	tasks        *delegationFace
 	ledger       *agent.Delegator
 	loop         *agent.Loop
-	arrived      chan task.NoticeEnvelope
+	arrived      chan task.Envelope
 }
 
 // newSubagentCallRig returns the real faces of one sub-agent call, before any generation
@@ -161,7 +161,7 @@ func newSubagentCallRig(t *testing.T) *subagentCallRig {
 		instance:     event.InstanceID("instance-subagent-call"),
 		invocationID: event.InvocationID("inv-subagent-call"),
 		bindings:     state.NewBindings(),
-		arrived:      make(chan task.NoticeEnvelope, 4),
+		arrived:      make(chan task.Envelope, 4),
 	}
 	admission := task.NewMemoryAdmission()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
@@ -212,7 +212,7 @@ func (r *subagentCallRig) start(t *testing.T, provider model.Model, tools []trpc
 // accept reports the delivery-layer outcome of one notification beside the routing its
 // envelope froze and hands the settled notification back into the invocation that issued
 // the call.
-func (r *subagentCallRig) accept(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+func (r *subagentCallRig) accept(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	if err := r.ledger.Observe(ctx, envelope.Notice); err != nil {
 		return task.DeliveryRejected, err
 	}
@@ -321,14 +321,14 @@ func findMessage(messages []model.Message, callID string, role model.Role) *mode
 }
 
 // awaitEnvelope waits for one notification envelope to reach the deliverer.
-func awaitEnvelope(t *testing.T, ch <-chan task.NoticeEnvelope) task.NoticeEnvelope {
+func awaitEnvelope(t *testing.T, ch <-chan task.Envelope) task.Envelope {
 	t.Helper()
 	select {
 	case envelope := <-ch:
 		return envelope
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the terminal notification")
-		return task.NoticeEnvelope{}
+		return task.Envelope{}
 	}
 }
 

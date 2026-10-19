@@ -252,7 +252,7 @@ func newRuntimeFixture(t *testing.T) *runtimeFixture {
 		t.Fatalf("Declare task-1: %v", err)
 	}
 	notices := make([]task.Notice, 0, 4)
-	envelopes := make([]task.NoticeEnvelope, 0, 4)
+	envelopes := make([]task.Envelope, 0, 4)
 	for seq := int64(0); seq < 4; seq++ {
 		notice := task.Notice{
 			TaskID: task1,
@@ -262,7 +262,7 @@ func newRuntimeFixture(t *testing.T) *runtimeFixture {
 			Event:  event.EventID(fmt.Sprintf("evt-%d", seq+1)),
 		}
 		notices = append(notices, notice)
-		envelopes = append(envelopes, task.NoticeEnvelope{Notice: notice, Target: addrB, Source: addrA, TargetInstance: instance})
+		envelopes = append(envelopes, task.Envelope{Notice: notice, Target: addrB, Source: addrA, TargetInstance: instance})
 	}
 	if err := store.TrackDelivery(ctx, task1, task.HandoffTarget{Target: addrB, TargetInstance: instance}); err != nil {
 		t.Fatalf("TrackDelivery: %v", err)

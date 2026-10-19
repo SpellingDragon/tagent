@@ -35,7 +35,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("issue the notification before the handoff: %v", err)
 		}
-		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", []NoticeEnvelope{before}); err != nil || result != CommitCommitted {
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", []Envelope{before}); err != nil || result != CommitCommitted {
 			t.Fatalf("commit the notification before the handoff = (%v, %v), want a committed change", result, err)
 		}
 		if err := manager.Handoff(ctx, taskID, invariantHandoffTarget); err != nil {
@@ -125,7 +125,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("issue the notification before the handoff: %v", err)
 		}
-		if _, err := registry.Advance(ctx, taskID, StatusRunning, "running", []NoticeEnvelope{before}); err != nil {
+		if _, err := registry.Advance(ctx, taskID, StatusRunning, "running", []Envelope{before}); err != nil {
 			t.Fatalf("commit the notification before the handoff: %v", err)
 		}
 		if err := manager.Handoff(ctx, taskID, invariantHandoffTarget); err != nil {
@@ -135,7 +135,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("issue the notification after the handoff: %v", err)
 		}
-		if _, err := registry.Advance(ctx, taskID, StatusProgress, "progress", []NoticeEnvelope{after}); err != nil {
+		if _, err := registry.Advance(ctx, taskID, StatusProgress, "progress", []Envelope{after}); err != nil {
 			t.Fatalf("commit the notification after the handoff: %v", err)
 		}
 		chain, err := manager.RecoveryMaterial(ctx, "instance-b")
@@ -253,7 +253,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("issue the notification: %v", err)
 		}
-		if _, err := registry.Advance(ctx, taskID, StatusRunning, "running", []NoticeEnvelope{envelope}); err != nil {
+		if _, err := registry.Advance(ctx, taskID, StatusRunning, "running", []Envelope{envelope}); err != nil {
 			t.Fatalf("commit the notification: %v", err)
 		}
 		chain, err := manager.RecoveryMaterial(ctx, "instance-a")
@@ -284,7 +284,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 
 	t.Run("a settled link closes the execution obligation and keeps the delivery obligation", func(t *testing.T) {
 		registry, _ := invariantRegistry(t)
-		envelope := NoticeEnvelope{
+		envelope := Envelope{
 			Notice:         Notice{TaskID: "task-1", Round: 1, Kind: NoticeSettled, Event: "fact-1"},
 			Target:         invariantTaskAddress,
 			Source:         invariantTaskAddress,
@@ -296,7 +296,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 				Fact: CommitRecord{MutationID: "admit:task-1", TaskID: "task-1", ExpectedRevision: 0, Status: StatusAccepted},
 			},
 			{
-				Fact: CommitRecord{MutationID: "settled", TaskID: "task-1", ExpectedRevision: 1, Status: StatusSettled, Outbox: []NoticeEnvelope{envelope}},
+				Fact: CommitRecord{MutationID: "settled", TaskID: "task-1", ExpectedRevision: 1, Status: StatusSettled, Outbox: []Envelope{envelope}},
 			},
 		}
 		report, err := registry.Restore(ctx, chain, invariantOwners{})

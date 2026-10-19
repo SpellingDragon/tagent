@@ -519,7 +519,7 @@ func (r *delegationRig) deliverProgress(t *testing.T, ctx context.Context, taskI
 	notice := delegationNotice(taskID, task.NoticeProgress, seq)
 	result, err := r.tasks.Advance(ctx, taskID, task.StatusProgress,
 		task.MutationID(fmt.Sprintf("progress:%s:%d", taskID, seq)),
-		[]task.NoticeEnvelope{{
+		[]task.Envelope{{
 			Notice:         notice,
 			Target:         spec.Target,
 			Source:         spec.Source,

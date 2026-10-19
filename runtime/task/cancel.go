@@ -89,7 +89,7 @@ func (m *MemoryManager) RecordStop(ctx context.Context, evidence StopEvidence) e
 		TaskID:           evidence.TaskID,
 		ExpectedRevision: entry.revision,
 		Status:           StatusCancelled,
-		Outbox:           []NoticeEnvelope{entry.envelope(notice)},
+		Outbox:           []Envelope{entry.envelope(notice)},
 	}
 	if result, known, err := entry.repeatOf(record); known {
 		if result != CommitCommitted {

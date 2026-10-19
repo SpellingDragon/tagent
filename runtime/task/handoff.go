@@ -150,10 +150,10 @@ func (m *MemoryManager) CloseInstance(ctx context.Context, instance event.Instan
 // beside the routing its envelope froze, ordered by the stable notification
 // identity. This is what CloseInstance keeps and what RecoveryMaterial carries:
 // a retained notification is never dropped and never delivered elsewhere.
-func (m *MemoryManager) Retained(ctx context.Context, instance event.InstanceID) ([]NoticeEnvelope, error) {
+func (m *MemoryManager) Retained(ctx context.Context, instance event.InstanceID) ([]Envelope, error) {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
-	var kept []NoticeEnvelope
+	var kept []Envelope
 	for _, entry := range m.registry.tasks {
 		for _, open := range entry.obligations {
 			if !owesDelivery(open.obligation.Kind) || open.envelope.TargetInstance != instance {
@@ -263,12 +263,12 @@ func (s *NoticeSequencer) Observe(notice Notice) {
 // under, or of the explicit handoff already applied. A handoff touches only the
 // notifications issued after it, so the envelopes already issued keep the
 // routing they froze and a retry of one never re-resolves a current target.
-func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (NoticeEnvelope, error) {
+func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (Envelope, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.tasks[taskID]
 	if !ok {
-		return NoticeEnvelope{}, ErrTaskNotFound
+		return Envelope{}, ErrTaskNotFound
 	}
 	notice := r.seq.Issue(taskID, entry.round, kind, fact)
 	return entry.envelope(notice), nil
@@ -280,7 +280,7 @@ func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, k
 // delivered beside the routing its envelope froze. A manager attached to one
 // offers every notification by its own envelope, so a retry repeats the frozen
 // routing and no delivery ever resolves a current target.
-type EnvelopeDeliverer func(ctx context.Context, envelope NoticeEnvelope) (DeliveryAcceptance, error)
+type EnvelopeDeliverer func(ctx context.Context, envelope Envelope) (DeliveryAcceptance, error)
 
 // ManagerOption configures an in-memory task manager at construction.
 type ManagerOption func(*MemoryManager)
@@ -296,7 +296,7 @@ func WithEnvelopeDeliverer(deliver EnvelopeDeliverer) ManagerOption {
 // deliverOne offers one notification for delivery, beside the routing its
 // envelope froze when an envelope deliverer is attached, and as the bare
 // notification identity otherwise.
-func (m *MemoryManager) deliverOne(ctx context.Context, envelope NoticeEnvelope) (DeliveryAcceptance, error) {
+func (m *MemoryManager) deliverOne(ctx context.Context, envelope Envelope) (DeliveryAcceptance, error) {
 	if m.deliverEnvelope != nil {
 		return m.deliverEnvelope(ctx, envelope)
 	}
@@ -310,7 +310,7 @@ func owesDelivery(kind ObligationKind) bool {
 }
 
 // sortEnvelopes orders notifications by their stable identity.
-func sortEnvelopes(envelopes []NoticeEnvelope) {
+func sortEnvelopes(envelopes []Envelope) {
 	sort.Slice(envelopes, func(i, j int) bool {
 		left, right := envelopes[i].Notice, envelopes[j].Notice
 		if left.TaskID != right.TaskID {

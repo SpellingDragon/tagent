@@ -316,7 +316,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			Seq:    0,
 			Event:  "evt-9",
 		}
-		envelope := task.NoticeEnvelope{
+		envelope := task.Envelope{
 			Notice:         notice,
 			Target:         event.Address{AgentID: "agent-a", SessionID: "session-a"},
 			Source:         event.Address{AgentID: "agent-b", SessionID: "session-b"},
@@ -327,7 +327,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			TaskID:           "task-f",
 			ExpectedRevision: 0,
 			Status:           task.StatusSettled,
-			Outbox:           []task.NoticeEnvelope{envelope},
+			Outbox:           []task.Envelope{envelope},
 		}
 
 		first, err := carrier.Commit(ctx, record)
@@ -363,7 +363,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 		ctx := context.Background()
 		carrier := task.NewMemoryCommit(nil)
 		notice := task.Notice{TaskID: "task-g", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-g"}
-		frozen := task.NoticeEnvelope{
+		frozen := task.Envelope{
 			Notice:         notice,
 			Target:         event.Address{AgentID: "agent-a", SessionID: "session-a"},
 			Source:         event.Address{AgentID: "agent-b", SessionID: "session-b"},
@@ -374,7 +374,7 @@ func TestIdentityAndCommitContract(t *testing.T) {
 			TaskID:           "task-g",
 			ExpectedRevision: 0,
 			Status:           task.StatusSettled,
-			Outbox:           []task.NoticeEnvelope{frozen},
+			Outbox:           []task.Envelope{frozen},
 		}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("commit = (%v, %v), want (committed, nil)", result, err)
 		}

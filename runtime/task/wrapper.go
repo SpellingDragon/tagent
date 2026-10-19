@@ -305,7 +305,7 @@ func (w *Wrapper) execute(ctx context.Context, frame CallFrame, taskID event.Tas
 		return
 	}
 	result, err := w.manager.registry.Advance(ctx, taskID, status,
-		MutationID(fmt.Sprintf("settle:%s:%d", taskID, round)), []NoticeEnvelope{envelope})
+		MutationID(fmt.Sprintf("settle:%s:%d", taskID, round)), []Envelope{envelope})
 	if err != nil || result != CommitCommitted {
 		return
 	}

@@ -37,12 +37,12 @@ func TestHandoffFutureNotifications(t *testing.T) {
 	const sourceInstance event.InstanceID = "instance-source"
 	const targetInstance event.InstanceID = "instance-target"
 
-	var attempts []task.NoticeEnvelope
-	accept := func(envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+	var attempts []task.Envelope
+	accept := func(envelope task.Envelope) (task.DeliveryAcceptance, error) {
 		return task.DeliveryPending, nil
 	}
 	manager := task.NewMemoryManager(registry, nil, task.WithEnvelopeDeliverer(
-		func(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+		func(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 			attempts = append(attempts, envelope)
 			return accept(envelope)
 		}))
@@ -69,13 +69,13 @@ func TestHandoffFutureNotifications(t *testing.T) {
 		return receipt.TaskID
 	}
 
-	issue := func(t *testing.T, taskID event.TaskID, fact event.EventID, mutation task.MutationID) task.NoticeEnvelope {
+	issue := func(t *testing.T, taskID event.TaskID, fact event.EventID, mutation task.MutationID) task.Envelope {
 		t.Helper()
 		envelope, err := registry.IssueNotice(ctx, taskID, task.NoticeProgress, fact)
 		if err != nil {
 			t.Fatalf("issue notice: %v", err)
 		}
-		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, mutation, []task.NoticeEnvelope{envelope}); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, mutation, []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want the notification committed beside its frozen routing", result, err)
 		}
 		return envelope
@@ -200,7 +200,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 			}
 		}
 
-		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, "progress-claims-1", []task.NoticeEnvelope{before}); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, "progress-claims-1", []task.Envelope{before}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("repeated mutation = (%v, %v), want the fact already stored", result, err)
 		}
 		repeated := 0
@@ -357,7 +357,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 	t.Run("progress notifications keep stable ordered seqs", func(t *testing.T) {
 		attempts = nil
 		taskID := register(t, "seq", sourceInstance, oldTarget)
-		notices := make([]task.NoticeEnvelope, 0, 3)
+		notices := make([]task.Envelope, 0, 3)
 		for i := 0; i < 3; i++ {
 			fact := event.EventID(fmt.Sprintf("evt-seq-%d", i))
 			envelope, err := registry.IssueNotice(ctx, taskID, task.NoticeProgress, fact)

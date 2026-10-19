@@ -108,7 +108,7 @@ type DelegationTasks interface {
 	Admit(ctx context.Context, spec task.Spec) (task.AdmissionReceipt, error)
 	// Advance moves one task to the next status and submits the change beside its
 	// pending notifications to the commit carrier first.
-	Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.NoticeEnvelope) (task.CommitResult, error)
+	Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error)
 	// Obligations reports the obligations the task still owes, each classified
 	// by the wait it is in.
 	Obligations(ctx context.Context, taskID event.TaskID) (task.Obligations, error)
@@ -343,7 +343,7 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
 		return task.Notice{}, fmt.Errorf("%w: %s", ErrDelegationTerminal, taskID)
 	}
 	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact}
-	envelope := task.NoticeEnvelope{
+	envelope := task.Envelope{
 		Notice:         notice,
 		Target:         entry.record.Target,
 		Source:         entry.record.Target,
@@ -352,7 +352,7 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
 	mutation := task.MutationID(fmt.Sprintf("settle:%s:%d", taskID, entry.round))
 	d.mu.Unlock()
 
-	result, err := d.tasks.Advance(ctx, taskID, status, mutation, []task.NoticeEnvelope{envelope})
+	result, err := d.tasks.Advance(ctx, taskID, status, mutation, []task.Envelope{envelope})
 	if err != nil {
 		return task.Notice{}, err
 	}

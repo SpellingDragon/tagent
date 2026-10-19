@@ -275,7 +275,7 @@ func (f *invariantShutdownTasks) Admit(context.Context, task.Spec) (task.Admissi
 }
 
 // Advance reports the transition committed.
-func (f *invariantShutdownTasks) Advance(context.Context, event.TaskID, task.Status, task.MutationID, []task.NoticeEnvelope) (task.CommitResult, error) {
+func (f *invariantShutdownTasks) Advance(context.Context, event.TaskID, task.Status, task.MutationID, []task.Envelope) (task.CommitResult, error) {
 	return task.CommitCommitted, nil
 }
 

@@ -431,7 +431,7 @@ func newDeliveryChain(t *testing.T, deliverTo ...event.AgentID) *deliveryChain {
 		}),
 	)
 	chain.manager = task.NewMemoryManager(chain.registry, nil, task.WithEnvelopeDeliverer(
-		func(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+		func(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 			_, err := chain.face.Send(ctx, state.Delivery{
 				Target:         envelope.Target,
 				TargetInstance: envelope.TargetInstance,
@@ -488,14 +488,14 @@ func (c *deliveryChain) register(t *testing.T, name string, target event.Address
 }
 
 // issue records one progress notification of the task beside its frozen routing.
-func (c *deliveryChain) issue(t *testing.T, taskID event.TaskID, fact event.EventID) task.NoticeEnvelope {
+func (c *deliveryChain) issue(t *testing.T, taskID event.TaskID, fact event.EventID) task.Envelope {
 	t.Helper()
 	ctx := context.Background()
 	envelope, err := c.registry.IssueNotice(ctx, taskID, task.NoticeProgress, fact)
 	if err != nil {
 		t.Fatalf("issue %s: %v", fact, err)
 	}
-	if result, err := c.registry.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress-"+string(fact)), []task.NoticeEnvelope{envelope}); result != task.CommitCommitted || err != nil {
+	if result, err := c.registry.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress-"+string(fact)), []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("commit %s = (%v, %v), want the notification committed", fact, result, err)
 	}
 	return envelope

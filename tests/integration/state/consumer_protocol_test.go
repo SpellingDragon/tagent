@@ -24,9 +24,9 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 		registry := task.NewMemoryRegistry(commit, task.NewMemoryAdmission())
 		target := event.Address{AgentID: "agent-d", SessionID: "session-d"}
 		source := event.Address{AgentID: "agent-d", SessionID: "session-source"}
-		var delivered []task.NoticeEnvelope
+		var delivered []task.Envelope
 		manager := task.NewMemoryManager(registry, nil, task.WithEnvelopeDeliverer(
-			func(_ context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+			func(_ context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 				delivered = append(delivered, envelope)
 				return task.DeliveryAccepted, nil
 			}))
@@ -48,14 +48,14 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 			Seq:    0,
 			Event:  event.EventID("fact-delivery"),
 		}
-		envelope := task.NoticeEnvelope{
+		envelope := task.Envelope{
 			Notice:         notice,
 			Target:         target,
 			Source:         source,
 			TargetInstance: event.InstanceID("instance-d"),
 		}
 		result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled,
-			task.MutationID("settle:"+string(receipt.TaskID)), []task.NoticeEnvelope{envelope})
+			task.MutationID("settle:"+string(receipt.TaskID)), []task.Envelope{envelope})
 		if err != nil || result != task.CommitCommitted {
 			t.Fatalf("commit the settled transition = (%v, %v), want the one recorded fact", result, err)
 		}

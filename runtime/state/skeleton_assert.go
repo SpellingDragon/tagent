@@ -113,11 +113,10 @@ var (
 	}
 
 	_ = Session{
-		Address:     event.Address{},
-		Instance:    "",
-		Mailbox:     []MailboxEntry{},
-		Consumed:    0,
-		Invocations: map[event.InvocationID]InvocationProjection{},
+		Address:  event.Address{},
+		Instance: "",
+		Mailbox:  []MailboxEntry{},
+		Consumed: 0,
 	}
 
 	_ = MailboxEntry{
@@ -131,11 +130,6 @@ var (
 
 	_ = ConsumeReceipt{
 		Completed: false,
-	}
-
-	_ = InvocationProjection{
-		InvocationID: "",
-		Pending:      []task.Notice{},
 	}
 )
 

@@ -18,7 +18,7 @@
 | 词汇 | `api/event/` `api/model/` `api/config/` `api/plugin/` `api/view/` | 事件契约与元数据、模型抽象、声明式配置装载（严格解码）、插件阶段、呈现词汇 |
 | 核心 | `runtime/task/` `runtime/state/` `runtime/agent/` `memory/` | 任务生命周期、绑定与现场、事件循环、原文/投影与召回（含 `memory/replica/` 临时副本） |
 | 供面 | `tool/`（`mcp/` `exec/` `remote/`）、`rl/`、`evolution/`（`meditation/` `refine/` `consolidation/` `governance/`）、`telemetry/`、`memory/query/` | 工具与外部执行、训练数据侧、自进化、观测实现、只读查询 |
-| 组合根 | 根包（11 文件：`tagent.go` `run*.go` `prepare.go` `read.go` `diagnostics.go` `skeleton_assert.go`） | 装配、公共入口、诊断注入点；`opts.go` 的装配选项并入 `run.go` |
+| 组合根 | 根包（11 文件：`tagent.go` `run*.go` `prepare.go` `read.go` `host_face.go` `skeleton_assert.go`） | 装配、公共入口、诊断注入点；`opts.go` 的装配选项并入 `run.go` |
 | 宿主壳 | `cli/` | 命令面（`invoke`/`query`/`start`）与宿主转换面（`HostBridge`/回执/审批）；位于组合根之上（`cli`→根），运行时不反向依赖 |
 | 宿主 | `examples/wechat-bot/`（独立 module） | 微信宿主：收发、去重、投递回执；经 `replace` 指向本仓 |
 

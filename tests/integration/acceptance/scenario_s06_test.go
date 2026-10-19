@@ -26,11 +26,11 @@ func (s scenarioNamedTool) Declaration() *trpctool.Declaration {
 // scenarioOffers records the notifications one deliverer was offered.
 type scenarioOffers struct {
 	mu      sync.Mutex
-	offered []task.NoticeEnvelope
+	offered []task.Envelope
 }
 
 // deliver records one offered envelope.
-func (o *scenarioOffers) deliver(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+func (o *scenarioOffers) deliver(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.offered = append(o.offered, envelope)
@@ -38,10 +38,10 @@ func (o *scenarioOffers) deliver(ctx context.Context, envelope task.NoticeEnvelo
 }
 
 // snapshot reports the envelopes offered so far.
-func (o *scenarioOffers) snapshot() []task.NoticeEnvelope {
+func (o *scenarioOffers) snapshot() []task.Envelope {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	out := make([]task.NoticeEnvelope, len(o.offered))
+	out := make([]task.Envelope, len(o.offered))
 	copy(out, o.offered)
 	return out
 }
@@ -69,7 +69,7 @@ func scenarioSettleRecord() task.CommitRecord {
 		TaskID:           "task-1",
 		ExpectedRevision: 1,
 		Status:           task.StatusSettled,
-		Outbox: []task.NoticeEnvelope{{
+		Outbox: []task.Envelope{{
 			Notice: task.Notice{
 				TaskID: "task-1",
 				Round:  1,

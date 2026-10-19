@@ -50,7 +50,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		Seq:    0,
 		Event:  "evt-settle-1",
 	}
-	envelope := task.NoticeEnvelope{
+	envelope := task.Envelope{
 		Notice:         notice,
 		Target:         spec.Target,
 		Source:         spec.Source,
@@ -61,7 +61,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		TaskID:           "task-1",
 		ExpectedRevision: 1,
 		Status:           task.StatusSettled,
-		Outbox:           []task.NoticeEnvelope{envelope},
+		Outbox:           []task.Envelope{envelope},
 	}
 	holdTarget := func(t *testing.T, names ...string) *state.Bindings {
 		t.Helper()

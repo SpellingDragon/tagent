@@ -58,7 +58,7 @@ func WithConcurrencyLimit(limit int) RegistryOption {
 // notification froze beside its delivery bookkeeping.
 type obligationEntry struct {
 	obligation Obligation
-	envelope   NoticeEnvelope
+	envelope   Envelope
 	answered   bool
 }
 
@@ -200,7 +200,7 @@ func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec,
 // notifications to the commit carrier first. A repeated mutation returns the fact
 // already stored and records no second one; a change the carrier refuses leaves the
 // task where it is; a task that holds its terminal fact moves no more.
-func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []NoticeEnvelope) (CommitResult, error) {
+func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []Envelope) (CommitResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.tasks[taskID]
@@ -355,8 +355,8 @@ func (r *MemoryRegistry) activeCountLocked() int {
 // notifications. The routing is frozen into the notification at its creation and
 // is never resolved again later, so a restart or a handoff never re-routes a
 // notification that was already created.
-func (t *memoryTask) envelope(notice Notice) NoticeEnvelope {
-	envelope := NoticeEnvelope{
+func (t *memoryTask) envelope(notice Notice) Envelope {
+	envelope := Envelope{
 		Notice:         notice,
 		Target:         t.spec.Target,
 		Source:         t.spec.Source,
@@ -371,12 +371,12 @@ func (t *memoryTask) envelope(notice Notice) NoticeEnvelope {
 
 // envelopeOf freezes the delivery routing of one notification of the named task
 // and reports whether the registry holds that task at all.
-func (r *MemoryRegistry) envelopeOf(taskID event.TaskID, notice Notice) (NoticeEnvelope, bool) {
+func (r *MemoryRegistry) envelopeOf(taskID event.TaskID, notice Notice) (Envelope, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry, ok := r.tasks[taskID]
 	if !ok {
-		return NoticeEnvelope{}, false
+		return Envelope{}, false
 	}
 	return entry.envelope(notice), true
 }

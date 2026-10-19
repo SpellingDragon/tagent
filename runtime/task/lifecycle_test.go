@@ -29,7 +29,7 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
 			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
 		}
-		settled := []NoticeEnvelope{invariantEnvelope(taskID, NoticeSettled, 0)}
+		settled := []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}
 		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", settled); err != nil || result != CommitCommitted {
 			t.Fatalf("settle the task = (%v, %v), want a committed change", result, err)
 		}
@@ -207,7 +207,7 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 			t.Fatalf("obligations after a dedup admission = (%+v, %v), want no second obligation", got, err)
 		}
 		envelope := invariantEnvelope(first.TaskID, NoticeSettled, 0)
-		if _, err := registry.Advance(ctx, first.TaskID, StatusSettled, "settled", []NoticeEnvelope{envelope}); err != nil {
+		if _, err := registry.Advance(ctx, first.TaskID, StatusSettled, "settled", []Envelope{envelope}); err != nil {
 			t.Fatalf("settle the task beside its notification: %v", err)
 		}
 		settled, err := manager.Obligations(ctx, first.TaskID)
@@ -258,8 +258,8 @@ func invariantRegister(t *testing.T, registry *MemoryRegistry, callID, dedup str
 }
 
 // invariantEnvelope builds one notification of the named task with the routing the declaration froze.
-func invariantEnvelope(taskID event.TaskID, kind NoticeKind, seq int64) NoticeEnvelope {
-	return NoticeEnvelope{
+func invariantEnvelope(taskID event.TaskID, kind NoticeKind, seq int64) Envelope {
+	return Envelope{
 		Notice:         Notice{TaskID: taskID, Round: 1, Kind: kind, Seq: seq, Event: "fact-1"},
 		Target:         invariantTaskAddress,
 		Source:         invariantTaskAddress,

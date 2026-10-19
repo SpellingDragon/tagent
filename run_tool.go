@@ -28,7 +28,7 @@ import (
 // site its frozen routing names and reports the delivery-layer outcome. The
 // route is registered with the state owner first, so the acceptance lands in
 // the owner's own bookkeeping instead of a copy of it.
-func (r *Run) deliver(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+func (r *Run) deliver(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	if err := r.store.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{
 		Target:         envelope.Target,
 		TargetInstance: envelope.TargetInstance,

@@ -188,7 +188,7 @@ func (s *Shutdown) Admit(ctx context.Context, spec task.Spec) (task.AdmissionRec
 // Advance moves one task to the next status beside its pending notifications.
 // A transition of work already accepted is settlement, so the gate never
 // refuses it.
-func (s *Shutdown) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.NoticeEnvelope) (task.CommitResult, error) {
+func (s *Shutdown) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error) {
 	return s.face.Advance(ctx, taskID, to, mutation, outbox)
 }
 

@@ -955,23 +955,6 @@ type Governance interface {
     MUST NOT count an inapplicable or disabled check as evidence that passed.
     MUST NOT draw a quality conclusion from the answers of an injected stand-in.
 
-type InvocationProjection struct {
-	// InvocationID identifies the invocation this projection belongs to.
-	InvocationID event.InvocationID
-	// Pending lists the notification identities whose obligations are still
-	// open.
-	Pending []task.Notice
-}
-    InvocationProjection is the reduction a session holds for one invocation:
-    the identity of the invocation and the notifications whose obligations are
-    still pending for it.
-
-    Pending is a projection and not a second source of truth: every entry is the
-    notification identity projected from the task Manager's obligation ledger,
-    so a notice is pending while — and only while — its obligation is still open
-    in that ledger. Closing or retiring a site keeps an undelivered obligation
-    in the ledger for a recoverable path, so the projection never drops it.
-
 type LeaseRef struct {
 	// Kind names the resource kind.
 	Kind string
@@ -1615,14 +1598,10 @@ type Session struct {
 	// never a watermark that discards the entries below it. A new input is
 	// accepted without waiting for this position to advance.
 	Consumed AcceptSeq
-	// Invocations holds the reduction projection of every invocation the site
-	// admitted.
-	Invocations map[event.InvocationID]InvocationProjection
 }
 
     Session is the state owner's site for one explicit (agent, session) address:
-    the mailbox bookkeeping of the site and the reduction projection of each
-    invocation it admitted.
+    the mailbox bookkeeping of the site.
 
 type SkillLoad struct {
 	// Skill is the skill name the load was asked for.

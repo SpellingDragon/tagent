@@ -211,7 +211,7 @@ func (r *customEventRig) consume(ctx context.Context, provider *customEventModel
 
 // envelope reports the acceptance of every notification the manager offers for
 // delivery, so the delivery face of this rig books the outcomes it is handed.
-func (r *customEventRig) envelope(context.Context, task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+func (r *customEventRig) envelope(context.Context, task.Envelope) (task.DeliveryAcceptance, error) {
 	return task.DeliveryAccepted, nil
 }
 

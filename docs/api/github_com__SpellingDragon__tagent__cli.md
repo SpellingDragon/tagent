@@ -106,6 +106,7 @@ func (c *CLI) Serve(ctx context.Context, listener net.Listener) error
     getting a second one from the runtime.
 
 type CLIOption func(*CLI)
+
     CLIOption configures the host shell at construction.
 
 func WithDiagnostics(switches tagent.DiagnosticSwitches) CLIOption

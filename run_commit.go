@@ -150,7 +150,7 @@ func (f closeFace) Admit(ctx context.Context, spec task.Spec) (task.AdmissionRec
 }
 
 // Advance moves one task to the next status through the registry.
-func (f closeFace) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.NoticeEnvelope) (task.CommitResult, error) {
+func (f closeFace) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error) {
 	return f.registry.Advance(ctx, taskID, to, mutation, outbox)
 }
 

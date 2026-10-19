@@ -108,8 +108,8 @@ func TestTaskLifecycle(t *testing.T) {
 			t.Fatalf("advance = (%v, %v), want the unknown status refused", result, err)
 		}
 		progress := task.Notice{TaskID: taskA, Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "evt-progress-a"}
-		progressEnvelope := task.NoticeEnvelope{Notice: progress, Target: specA.Target, Source: specA.Source, TargetInstance: specA.InstanceID}
-		if result, err := registry.Advance(ctx, taskA, task.StatusProgress, "progress-a", []task.NoticeEnvelope{progressEnvelope}); result != task.CommitCommitted || err != nil {
+		progressEnvelope := task.Envelope{Notice: progress, Target: specA.Target, Source: specA.Source, TargetInstance: specA.InstanceID}
+		if result, err := registry.Advance(ctx, taskA, task.StatusProgress, "progress-a", []task.Envelope{progressEnvelope}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want task-a reporting progress", result, err)
 		}
 		if open, err := manager.Obligations(ctx, taskA); err != nil || open.Count != 2 {
@@ -119,7 +119,7 @@ func TestTaskLifecycle(t *testing.T) {
 		}
 
 		settled := task.Notice{TaskID: taskA, Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "evt-settled-a"}
-		outbox := []task.NoticeEnvelope{{Notice: settled, Target: specA.Target, Source: specA.Source, TargetInstance: specA.InstanceID}}
+		outbox := []task.Envelope{{Notice: settled, Target: specA.Target, Source: specA.Source, TargetInstance: specA.InstanceID}}
 		if result, err := registry.Advance(ctx, taskA, task.StatusSettled, "settle-a", outbox); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want task-a settled", result, err)
 		}
@@ -208,7 +208,7 @@ func TestTaskLifecycle(t *testing.T) {
 		// The cancelled notification was committed beside the delivery routing
 		// frozen at the stop: target, source and target instance are filled from
 		// the declaration the task was admitted under.
-		var cancelled []task.NoticeEnvelope
+		var cancelled []task.Envelope
 		for _, record := range carrier.Facts(taskB) {
 			for _, envelope := range record.Outbox {
 				if envelope.Notice.Kind == task.NoticeCancelled {
@@ -244,9 +244,9 @@ func TestTaskLifecycle(t *testing.T) {
 		}
 		first := task.Notice{TaskID: taskC, Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "evt-progress-c-0"}
 		second := task.Notice{TaskID: taskC, Round: 1, Kind: task.NoticeProgress, Seq: 1, Event: "evt-progress-c-1"}
-		firstEnvelope := task.NoticeEnvelope{Notice: first, Target: specC.Target, Source: specC.Source, TargetInstance: specC.InstanceID}
-		secondEnvelope := task.NoticeEnvelope{Notice: second, Target: specC.Target, Source: specC.Source, TargetInstance: specC.InstanceID}
-		if result, err := registry.Advance(ctx, taskC, task.StatusProgress, "progress-c", []task.NoticeEnvelope{firstEnvelope, secondEnvelope}); result != task.CommitCommitted || err != nil {
+		firstEnvelope := task.Envelope{Notice: first, Target: specC.Target, Source: specC.Source, TargetInstance: specC.InstanceID}
+		secondEnvelope := task.Envelope{Notice: second, Target: specC.Target, Source: specC.Source, TargetInstance: specC.InstanceID}
+		if result, err := registry.Advance(ctx, taskC, task.StatusProgress, "progress-c", []task.Envelope{firstEnvelope, secondEnvelope}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want task-c reporting progress", result, err)
 		}
 		if err := manager.Flush(ctx, taskC); err != nil {

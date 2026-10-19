@@ -15,12 +15,12 @@ import (
 // scenarioDeliveries records the notifications one deliverer was offered.
 type scenarioDeliveries struct {
 	mu      sync.Mutex
-	offered []task.NoticeEnvelope
+	offered []task.Envelope
 	accept  task.DeliveryAcceptance
 }
 
 // deliver offers one envelope to the delivery of the drive.
-func (d *scenarioDeliveries) deliver(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+func (d *scenarioDeliveries) deliver(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.offered = append(d.offered, envelope)
@@ -28,10 +28,10 @@ func (d *scenarioDeliveries) deliver(ctx context.Context, envelope task.NoticeEn
 }
 
 // snapshot reports the envelopes offered so far.
-func (d *scenarioDeliveries) snapshot() []task.NoticeEnvelope {
+func (d *scenarioDeliveries) snapshot() []task.Envelope {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	out := make([]task.NoticeEnvelope, len(d.offered))
+	out := make([]task.Envelope, len(d.offered))
 	copy(out, d.offered)
 	return out
 }
@@ -80,14 +80,14 @@ func scenarioAdmitRunning(t *testing.T, face *scenarioTaskFace, name string, ins
 
 // scenarioIssueProgress commits one progress notification beside its frozen
 // routing and reports the envelope it issued.
-func scenarioIssueProgress(t *testing.T, face *scenarioTaskFace, taskID event.TaskID, fact event.EventID, mutation task.MutationID) task.NoticeEnvelope {
+func scenarioIssueProgress(t *testing.T, face *scenarioTaskFace, taskID event.TaskID, fact event.EventID, mutation task.MutationID) task.Envelope {
 	t.Helper()
 	ctx := context.Background()
 	envelope, err := face.IssueNotice(ctx, taskID, task.NoticeProgress, fact)
 	if err != nil {
 		t.Fatalf("issue the notification of %s: %v", taskID, err)
 	}
-	if result, err := face.Advance(ctx, taskID, task.StatusProgress, mutation, []task.NoticeEnvelope{envelope}); result != task.CommitCommitted || err != nil {
+	if result, err := face.Advance(ctx, taskID, task.StatusProgress, mutation, []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("commit the notification of %s = (%v, %v), want the notification committed beside its frozen routing", taskID, result, err)
 	}
 	return envelope

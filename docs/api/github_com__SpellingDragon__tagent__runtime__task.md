@@ -322,7 +322,7 @@ type CommitRecord struct {
 	// self-contained envelope with a stable identity and the target, source and
 	// target instance frozen at this transition, so a repeated delivery does not
 	// record a second fact and a retry never re-resolves a target.
-	Outbox []NoticeEnvelope
+	Outbox []Envelope
 }
     CommitRecord is the self-contained unit a commit port stores: the expected
     revision it applies to, the status change it carries, and the notifications
@@ -385,7 +385,28 @@ func (d Denied) PairedResult(callID string) Result
     refusal reaches the model as corrective material beside the native error
     response.
 
-type EnvelopeDeliverer func(ctx context.Context, envelope NoticeEnvelope) (DeliveryAcceptance, error)
+type Envelope struct {
+	// Notice is the stable identity of the notification.
+	Notice Notice
+	// Target is the address the notification is delivered to, frozen at the
+	// transition that committed it.
+	Target event.Address
+	// Source is the address the notification comes from, frozen beside the
+	// target; the source and the target are kept apart.
+	Source event.Address
+	// TargetInstance is the runtime instance that receives the notification,
+	// frozen beside the target address, so a rebuilt or handed-off instance never
+	// re-routes a committed notification.
+	TargetInstance event.InstanceID
+}
+    Envelope is the self-contained delivery unit of one notification: the stable
+    notice identity beside the delivery routing frozen when the transition
+    that carried it was committed. A retry delivers by the envelope it carries
+    and never resolves a current target: after a restart or a handoff,
+    a committed notification keeps the target it was frozen under, and only the
+    notifications created after a handoff freeze the new target.
+
+type EnvelopeDeliverer func(ctx context.Context, envelope Envelope) (DeliveryAcceptance, error)
 
     EnvelopeDeliverer reports the delivery-layer outcome of one notification
     delivered beside the routing its envelope froze. A manager attached to one
@@ -668,7 +689,7 @@ func (m *MemoryManager) RecoveryMaterial(ctx context.Context, instance event.Ins
     of a closed instance are kept by the recovery path either way, never dropped
     with the instance that owned them.
 
-func (m *MemoryManager) Retained(ctx context.Context, instance event.InstanceID) ([]NoticeEnvelope, error)
+func (m *MemoryManager) Retained(ctx context.Context, instance event.InstanceID) ([]Envelope, error)
     Retained reports the notifications one instance still owes delivery on, each
     beside the routing its envelope froze, ordered by the stable notification
     identity. This is what CloseInstance keeps and what RecoveryMaterial
@@ -689,7 +710,7 @@ func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...Regis
     before the registry reports it, so a change the carrier did not store is
     never made visible.
 
-func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []NoticeEnvelope) (CommitResult, error)
+func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to Status, mutation MutationID, outbox []Envelope) (CommitResult, error)
     Advance moves one task to the next status and submits the change beside
     its pending notifications to the commit carrier first. A repeated mutation
     returns the fact already stored and records no second one; a change the
@@ -700,7 +721,7 @@ func (r *MemoryRegistry) Cancel(ctx context.Context, taskID event.TaskID) error
     Cancel requests cancellation of the named task only; it does not cancel
     other invocations of the same session.
 
-func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (NoticeEnvelope, error)
+func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, kind NoticeKind, fact event.EventID) (Envelope, error)
     IssueNotice allocates the stable identity of one notification of the named
     task and freezes its delivery routing into the envelope it returns: the
     target, source and target instance of the declaration the task was admitted
@@ -788,27 +809,6 @@ func (n Notice) FactKey() string
 func (n Notice) FactType() string
     FactType returns the notification category as the fact type: the category is
     part of the notice's own identity, so a repeated delivery keeps its type.
-
-type NoticeEnvelope struct {
-	// Notice is the stable identity of the notification.
-	Notice Notice
-	// Target is the address the notification is delivered to, frozen at the
-	// transition that committed it.
-	Target event.Address
-	// Source is the address the notification comes from, frozen beside the
-	// target; the source and the target are kept apart.
-	Source event.Address
-	// TargetInstance is the runtime instance that receives the notification,
-	// frozen beside the target address, so a rebuilt or handed-off instance never
-	// re-routes a committed notification.
-	TargetInstance event.InstanceID
-}
-    NoticeEnvelope is the self-contained delivery unit of one notification:
-    the stable notice identity beside the delivery routing frozen when the
-    transition that carried it was committed. A retry delivers by the envelope
-    it carries and never resolves a current target: after a restart or a
-    handoff, a committed notification keeps the target it was frozen under,
-    and only the notifications created after a handoff freeze the new target.
 
 type NoticeKind string
     NoticeKind identifies the category of a notification within an execution
@@ -906,7 +906,7 @@ type Obligations struct {
 type OutboxNotice struct {
 	// Notice is the self-contained notification owed: its stable identity beside
 	// the delivery routing frozen at the transition that committed it.
-	Notice NoticeEnvelope
+	Notice Envelope
 	// Delivery is the delivery-layer state of the notification. The storage
 	// layer leaves every notification pending: only an explicit acceptance by
 	// the target moves it.

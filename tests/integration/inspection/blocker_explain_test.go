@@ -576,8 +576,8 @@ func TestExplainRuntimeBlockers(t *testing.T) {
 			t.Fatalf("blockers before the refused delivery = %+v, want none recorded before their owner records them", beforeFlush.Blockers)
 		}
 		notice3 := task.Notice{TaskID: task3, Round: 1, Kind: task.NoticeSettled, Seq: 3, Event: event.EventID("evt-task3")}
-		envelope := task.NoticeEnvelope{Notice: notice3, Target: f.addrB, Source: f.addrA, TargetInstance: f.instance}
-		if result, err := f.registry.Advance(f.ctx, task3, task.StatusSettled, task.MutationID("settle:"+string(task3)), []task.NoticeEnvelope{envelope}); err != nil || result != task.CommitCommitted {
+		envelope := task.Envelope{Notice: notice3, Target: f.addrB, Source: f.addrA, TargetInstance: f.instance}
+		if result, err := f.registry.Advance(f.ctx, task3, task.StatusSettled, task.MutationID("settle:"+string(task3)), []task.Envelope{envelope}); err != nil || result != task.CommitCommitted {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)
 		}
 		framed := task.WithCallFrame(f.ctx, task.CallFrame{
@@ -636,7 +636,7 @@ func TestExplainRuntimeBlockers(t *testing.T) {
 			t.Fatalf("Declare: %v", err)
 		}
 		notices := make([]task.Notice, 0, 4)
-		envelopes := make([]task.NoticeEnvelope, 0, 4)
+		envelopes := make([]task.Envelope, 0, 4)
 		for seq := int64(0); seq < 4; seq++ {
 			notice := task.Notice{
 				TaskID: taskID,
@@ -646,7 +646,7 @@ func TestExplainRuntimeBlockers(t *testing.T) {
 				Event:  event.EventID(fmt.Sprintf("evt-r%d", seq)),
 			}
 			notices = append(notices, notice)
-			envelopes = append(envelopes, task.NoticeEnvelope{Notice: notice, Target: addrB, Source: addrA, TargetInstance: instance})
+			envelopes = append(envelopes, task.Envelope{Notice: notice, Target: addrB, Source: addrA, TargetInstance: instance})
 		}
 		if result, err := registry.Advance(ctx, taskID, task.StatusSettled, task.MutationID("settle:"+string(taskID)), envelopes); err != nil || result != task.CommitCommitted {
 			t.Fatalf("Advance settle = %v, %v, want committed", result, err)

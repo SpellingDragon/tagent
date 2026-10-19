@@ -212,7 +212,7 @@ type DelegationTasks interface {
 	Admit(ctx context.Context, spec task.Spec) (task.AdmissionReceipt, error)
 	// Advance moves one task to the next status and submits the change beside its
 	// pending notifications to the commit carrier first.
-	Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.NoticeEnvelope) (task.CommitResult, error)
+	Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error)
 	// Obligations reports the obligations the task still owes, each classified
 	// by the wait it is in.
 	Obligations(ctx context.Context, taskID event.TaskID) (task.Obligations, error)
@@ -641,7 +641,7 @@ func (s *Shutdown) Admit(ctx context.Context, spec task.Spec) (task.AdmissionRec
     is recorded beside the close face so its obligation stays in the drain until
     real settlement; a dedup or a refusal added no obligation and settles none.
 
-func (s *Shutdown) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.NoticeEnvelope) (task.CommitResult, error)
+func (s *Shutdown) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error)
     Advance moves one task to the next status beside its pending notifications.
     A transition of work already accepted is settlement, so the gate never
     refuses it.

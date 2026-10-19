@@ -108,7 +108,7 @@ func scenarioBlockedTask(t *testing.T, durable *state.DurableCommit, registry *t
 	if err != nil {
 		t.Fatalf("issue the blocked notification: %v", err)
 	}
-	if result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, "settle-a", []task.NoticeEnvelope{envelope}); result != task.CommitCommitted || err != nil {
+	if result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, "settle-a", []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("settle the blocked task = (%v, %v), want the settle committed", result, err)
 	}
 	if err := manager.CloseInstance(ctx, closedInstance); err != nil {

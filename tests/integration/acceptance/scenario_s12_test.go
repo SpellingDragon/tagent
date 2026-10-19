@@ -82,7 +82,7 @@ type scenarioSourceOutcome struct {
 	callID   string
 	receipt  task.AdmissionReceipt
 	early    bool
-	envelope task.NoticeEnvelope
+	envelope task.Envelope
 	requests []model.Request
 }
 
@@ -250,7 +250,7 @@ type scenarioSubagentRig struct {
 	bindings     *state.Bindings
 	ledger       *agent.Delegator
 	loop         *agent.Loop
-	arrived      chan task.NoticeEnvelope
+	arrived      chan task.Envelope
 }
 
 // scenarioDelegationFace is the task face the ledger settles its delegations
@@ -269,7 +269,7 @@ func newScenarioSubagentRig(t *testing.T) *scenarioSubagentRig {
 		instance:     event.InstanceID("instance-scenario-subagent"),
 		invocationID: event.InvocationID("inv-scenario-subagent"),
 		bindings:     state.NewBindings(),
-		arrived:      make(chan task.NoticeEnvelope, 4),
+		arrived:      make(chan task.Envelope, 4),
 	}
 	admission := task.NewMemoryAdmission()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
@@ -318,7 +318,7 @@ func (r *scenarioSubagentRig) hold(t *testing.T, provider model.Model, issuer ev
 // accept reports the delivery-layer outcome of one notification beside the
 // routing its envelope froze and hands the settled notification back into the
 // invocation that issued the call.
-func (r *scenarioSubagentRig) accept(ctx context.Context, envelope task.NoticeEnvelope) (task.DeliveryAcceptance, error) {
+func (r *scenarioSubagentRig) accept(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	if err := r.ledger.Observe(ctx, envelope.Notice); err != nil {
 		return task.DeliveryRejected, err
 	}
@@ -354,14 +354,14 @@ func scenarioSubagentBuilder(provider trpcmodel.Model) subagent.Builder {
 
 // scenarioAwaitEnvelope waits for one notification envelope to reach the
 // deliverer.
-func scenarioAwaitEnvelope(t *testing.T, ch <-chan task.NoticeEnvelope) task.NoticeEnvelope {
+func scenarioAwaitEnvelope(t *testing.T, ch <-chan task.Envelope) task.Envelope {
 	t.Helper()
 	select {
 	case envelope := <-ch:
 		return envelope
 	case <-time.After(scenarioTimeout):
 		t.Fatal("timed out waiting for the terminal notification")
-		return task.NoticeEnvelope{}
+		return task.Envelope{}
 	}
 }
 

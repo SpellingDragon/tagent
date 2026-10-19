@@ -17,13 +17,13 @@ import (
 // reuses an identity with different content is rejected.
 type MutationID string
 
-// NoticeEnvelope is the self-contained delivery unit of one notification: the
+// Envelope is the self-contained delivery unit of one notification: the
 // stable notice identity beside the delivery routing frozen when the transition
 // that carried it was committed. A retry delivers by the envelope it carries and
 // never resolves a current target: after a restart or a handoff, a committed
 // notification keeps the target it was frozen under, and only the notifications
 // created after a handoff freeze the new target.
-type NoticeEnvelope struct {
+type Envelope struct {
 	// Notice is the stable identity of the notification.
 	Notice Notice
 	// Target is the address the notification is delivered to, frozen at the
@@ -54,7 +54,7 @@ type CommitRecord struct {
 	// self-contained envelope with a stable identity and the target, source and
 	// target instance frozen at this transition, so a repeated delivery does not
 	// record a second fact and a retry never re-resolves a target.
-	Outbox []NoticeEnvelope
+	Outbox []Envelope
 }
 
 // CommitResult is the outcome a commit port reports for one CommitRecord. The
@@ -125,7 +125,7 @@ type UncertainProbe func(CommitRecord) bool
 type OutboxNotice struct {
 	// Notice is the self-contained notification owed: its stable identity beside
 	// the delivery routing frozen at the transition that committed it.
-	Notice NoticeEnvelope
+	Notice Envelope
 	// Delivery is the delivery-layer state of the notification. The storage
 	// layer leaves every notification pending: only an explicit acceptance by
 	// the target moves it.

@@ -247,7 +247,6 @@ func TestMailboxSnapshotInvariants(t *testing.T) {
 		read.Mailbox[0].Claim = ClaimConsumed
 		read.Mailbox = append(read.Mailbox, MailboxEntry{AcceptSeq: 99})
 		read.Consumed = 42
-		read.Invocations["forged"] = InvocationProjection{InvocationID: "forged"}
 		again, err := store.Site(ctx, invariantReader, invariantAddress, "instance-a")
 		if err != nil {
 			t.Fatalf("read the site again: %v", err)
@@ -260,9 +259,6 @@ func TestMailboxSnapshotInvariants(t *testing.T) {
 		}
 		if got := again.Consumed; got != 0 {
 			t.Fatalf("consumption position after a reader's edit = %d, want the site's own", got)
-		}
-		if _, ok := again.Invocations["forged"]; ok {
-			t.Fatal("a reader's projection reached the site's own table")
 		}
 	})
 
@@ -415,9 +411,9 @@ func invariantNotice(taskID event.TaskID, seq int64) task.Notice {
 
 // invariantRecord builds one commit record of the invariants' task at the revision named.
 func invariantRecord(taskID event.TaskID, revision int64, status task.Status, notices ...task.Notice) task.CommitRecord {
-	outbox := make([]task.NoticeEnvelope, 0, len(notices))
+	outbox := make([]task.Envelope, 0, len(notices))
 	for _, notice := range notices {
-		outbox = append(outbox, task.NoticeEnvelope{
+		outbox = append(outbox, task.Envelope{
 			Notice:         notice,
 			Target:         invariantAddress,
 			Source:         invariantAddress,
