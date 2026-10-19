@@ -76,7 +76,7 @@ bash scripts/check-openspec.sh
 | 命令 | 结果 |
 |---|---|
 | `go build ./...` / `go vet ./...` | exit 0 |
-| `go test ./... -short -count=1` | exit 0，0 个 `FAIL`（实测时 16 个包 `ok`；包数随新增测试增长，以复跑为准） |
+| `go test ./... -short -count=1` | exit 0，0 个 `FAIL`（实测时 35 个包 `ok`；包数随新增测试增长，以复跑为准） |
 | bot module 的 build / vet / test | 三步 exit 0，`ok wechat-bot` |
 | `go mod verify` | `all modules verified` |
 | `bash scripts/lint.sh` | `lint: ok` |

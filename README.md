@@ -46,9 +46,9 @@ bash scripts/lint.sh                    # 仓库门禁：格式、构建、vet�
 | [`docs/notes/risk-remediation-plan.md`](docs/notes/risk-remediation-plan.md) | 当期风险处置计划（分片、验收通则） |
 | [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账：变更的 proposal/design/tasks 与波次记录 |
 
-## 版本姿态（pre-release）
+## 版本说明
 
-- 当前为 **v0.3.0 pre-release**（见 `CHANGELOG.md`）：单人维护、**不承诺迁移**；API 与配置面仍在快速变动，破坏性变更直接记入 `CHANGELOG.md` 的 Breaking Changes。
+- 当前版本 **v0.3.0**，变更记录与升级注意事项见 `CHANGELOG.md`。
 - 配置装载是**严格 YAML/JSON**：未知键拒绝启动而非静默忽略（`api/config` 的 `unknown field` 判定）；升级前先核对配置键。
 
 ## 依赖注记
