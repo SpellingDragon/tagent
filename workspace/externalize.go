@@ -92,6 +92,18 @@ const (
 	FormatOverflow = "overflow"
 )
 
+// CompressProducerToolOverflow names the threshold judgment of a tool result and
+// CompressReasonToolOverflow states why that judgment files a compress request: a
+// result over the interception threshold is material due for compression, and the
+// judgment is on record whether or not the externalization that answers it holds.
+const (
+	// CompressProducerToolOverflow names the tool-result threshold judgment.
+	CompressProducerToolOverflow = "workspace.tool-overflow"
+	// CompressReasonToolOverflow states why the tool-result judgment files a
+	// request.
+	CompressReasonToolOverflow = "the tool result exceeds the interception threshold"
+)
+
 // ThresholdForMaxTokens returns the character count above which a result is
 // externalized: MaxTokens/2*4, the one formula every producer decides on. A zero or
 // negative MaxTokens is read as DefaultMaxTokens, so the threshold is always finite and
@@ -116,6 +128,12 @@ var ErrResultScopeRequired = errors.New("workspace: the result scope names no ow
 // ErrToolRequired reports a bounded tool constructed without the native callable tool it
 // intercepts, so there is no call whose result could be bounded.
 var ErrToolRequired = errors.New("workspace: the bounded tool wraps no callable tool")
+
+// ErrCompressRequestUnfiled reports an overflow judgment whose compress request could not
+// be filed. The judgment is the record that the result was over its bound, so the refusal
+// is reported beside the preview the committed original still answers instead of dropping
+// a result whose original is safe.
+var ErrCompressRequestUnfiled = errors.New("workspace: the compress request of an overflow judgment was not filed")
 
 // ResultScope names the reference metadata one producer commits its oversized results
 // under: the owner the result is produced for, the format it is produced in, and the
@@ -317,12 +335,25 @@ type BoundedTool struct {
 	inner        trpctool.CallableTool
 	externalizer *ResultExternalizer
 	scope        ResultScope
+	filing       memory.CompressRequestFiling
+}
+
+// BoundedToolOption names one setting of the bounded tool at construction time.
+type BoundedToolOption func(*BoundedTool)
+
+// WithCompressRequestFiling wires where an overflow judgment files the compress
+// request fact it is. The request is filed before the externalization that still
+// completes inside the same call, so the preview is served without waiting for a
+// consumer while the judgment stays on record for one.
+func WithCompressRequestFiling(filing memory.CompressRequestFiling) BoundedToolOption {
+	return func(tool *BoundedTool) { tool.filing = filing }
 }
 
 // NewBoundedTool returns the bounded tool over inner, committing oversized results
-// under scope through externalizer. A missing tool, a missing externalizer and a scope
-// that names no owner, format or retention policy are each refused by name.
-func NewBoundedTool(inner trpctool.CallableTool, externalizer *ResultExternalizer, scope ResultScope) (*BoundedTool, error) {
+// under scope through externalizer and filing the judgment of each overflow where the
+// options name. A missing tool, a missing externalizer and a scope that names no owner,
+// format or retention policy are each refused by name.
+func NewBoundedTool(inner trpctool.CallableTool, externalizer *ResultExternalizer, scope ResultScope, options ...BoundedToolOption) (*BoundedTool, error) {
 	if inner == nil {
 		return nil, ErrToolRequired
 	}
@@ -332,7 +363,11 @@ func NewBoundedTool(inner trpctool.CallableTool, externalizer *ResultExternalize
 	if scope.Format == "" || scope.RetentionPolicy == "" || scope.Owner.IsZero() {
 		return nil, ErrResultScopeRequired
 	}
-	return &BoundedTool{inner: inner, externalizer: externalizer, scope: scope}, nil
+	bounded := &BoundedTool{inner: inner, externalizer: externalizer, scope: scope}
+	for _, option := range options {
+		option(bounded)
+	}
+	return bounded, nil
 }
 
 // BoundedTool satisfies the native callable tool port.
@@ -343,17 +378,18 @@ var _ trpctool.CallableTool = (*BoundedTool)(nil)
 func (t *BoundedTool) Declaration() *trpctool.Declaration { return t.inner.Declaration() }
 
 // Call runs one native call and bounds what it returns: a result whose serialized form
-// is over the threshold is committed as a durable original and answered with its bounded
-// preview and ticket, an error from the wrapped tool is passed through untouched, a nil
-// result is not intercepted, a result that cannot be serialized is handed back unchanged
-// because no size could bound it, and a result inside the bound is returned exactly as
-// the tool produced it.
+// is over the threshold files the compress request of that judgment and is committed as
+// a durable original, answered with its bounded preview and ticket — an error from the
+// wrapped tool is passed through untouched, a nil result is not intercepted, a result
+// that cannot be serialized is handed back unchanged because no size could bound it, and
+// a result inside the bound is returned exactly as the tool produced it.
 //
 // An original that could not be committed is reported as an error with no preview, so a
 // ticket never names an original that was not kept. A replica that could not be written
 // is reported beside the preview the committed original still answers: the preview is
 // returned together with ErrReplicaWriteFailed rather than dropping a result whose
-// original is safe.
+// original is safe. A request that could not be filed is reported beside that same
+// preview as ErrCompressRequestUnfiled, so an unfiled judgment is never taken for none.
 func (t *BoundedTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	result, err := t.inner.Call(ctx, jsonArgs)
 	if err != nil {
@@ -369,9 +405,32 @@ func (t *BoundedTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if !t.externalizer.Exceeds(len(body)) {
 		return result, nil
 	}
-	externalized, err := t.externalizer.Externalize(ctx, OriginalRefFor(t.scope, body), body)
+	ref := OriginalRefFor(t.scope, body)
+	unfiled := t.fileCompressRequest(ctx, ref)
+	externalized, err := t.externalizer.Externalize(ctx, ref, body)
 	if err != nil && !errors.Is(err, ErrReplicaWriteFailed) {
 		return nil, fmt.Errorf("workspace: externalizing the oversized result: %w", err)
 	}
-	return externalized.Preview, err
+	if err != nil && unfiled != nil {
+		return externalized.Preview, errors.Join(err, unfiled)
+	}
+	if err != nil {
+		return externalized.Preview, err
+	}
+	return externalized.Preview, unfiled
+}
+
+// fileCompressRequest files the request fact of one overflow judgment: the result the
+// ticket names is over the interception threshold, and the request records who judged it
+// and why. A filing that fails is answered as the named refusal, and a judgment with no
+// filing wired is simply not filed.
+func (t *BoundedTool) fileCompressRequest(ctx context.Context, ref memory.OriginalRef) error {
+	if t.filing == nil {
+		return nil
+	}
+	request := memory.CompressRequestFor(CompressProducerToolOverflow, string(ref.Key), CompressReasonToolOverflow)
+	if _, err := t.filing(ctx, request); err != nil {
+		return fmt.Errorf("%w: %w", ErrCompressRequestUnfiled, err)
+	}
+	return nil
 }

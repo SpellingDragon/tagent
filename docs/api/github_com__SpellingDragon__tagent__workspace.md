@@ -60,6 +60,19 @@ const (
     result share one threshold and one preview form, and none of them grows a
     truncation of its own.
 
+const (
+	// CompressProducerToolOverflow names the tool-result threshold judgment.
+	CompressProducerToolOverflow = "workspace.tool-overflow"
+	// CompressReasonToolOverflow states why the tool-result judgment files a
+	// request.
+	CompressReasonToolOverflow = "the tool result exceeds the interception threshold"
+)
+    CompressProducerToolOverflow names the threshold judgment of a tool
+    result and CompressReasonToolOverflow states why that judgment files a
+    compress request: a result over the interception threshold is material
+    due for compression, and the judgment is on record whether or not the
+    externalization that answers it holds.
+
 const CharsPerToken = 4
     CharsPerToken is the character estimate one token carries when the
     interception threshold is computed, so the bound is expressed in the
@@ -110,6 +123,12 @@ var ErrCleanupTargetOutOfRange = errors.New("workspace: cleanup target lies outs
     ErrCleanupTargetOutOfRange reports an active read/write handle asked
     to protect a path outside this workspace's own replica area. Nothing is
     protected and nothing is ever reclaimed outside that area.
+
+var ErrCompressRequestUnfiled = errors.New("workspace: the compress request of an overflow judgment was not filed")
+    ErrCompressRequestUnfiled reports an overflow judgment whose compress
+    request could not be filed. The judgment is the record that the result was
+    over its bound, so the refusal is reported beside the preview the committed
+    original still answers instead of dropping a result whose original is safe.
 
 var ErrOriginalIneffective = errors.New("workspace: the original is ineffective, its replica cannot be rebuilt")
     ErrOriginalIneffective reports a replica that cannot be materialised again
@@ -163,11 +182,12 @@ var ErrToolRequired = errors.New("workspace: the bounded tool wraps no callable 
 
 FUNCTIONS
 
-func NewBoundedTool(inner trpctool.CallableTool, externalizer *ResultExternalizer, scope ResultScope) (*BoundedTool, error)
+func NewBoundedTool(inner trpctool.CallableTool, externalizer *ResultExternalizer, scope ResultScope, options ...BoundedToolOption) (*BoundedTool, error)
     NewBoundedTool returns the bounded tool over inner, committing oversized
-    results under scope through externalizer. A missing tool, a missing
-    externalizer and a scope that names no owner, format or retention policy are
-    each refused by name.
+    results under scope through externalizer and filing the judgment of each
+    overflow where the options name. A missing tool, a missing externalizer and
+    a scope that names no owner, format or retention policy are each refused by
+    name.
 
 func NewMaterializer(root string, store memory.ScopedOriginalStore, scope memory.ReadScope, options ...MaterializerOption) (*Materializer, error)
     NewMaterializer returns a materializer that declares replicas under root
@@ -240,22 +260,34 @@ type BoundedTool struct {
 
 func (t *BoundedTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
     Call runs one native call and bounds what it returns: a result whose
-    serialized form is over the threshold is committed as a durable original and
-    answered with its bounded preview and ticket, an error from the wrapped tool
-    is passed through untouched, a nil result is not intercepted, a result that
-    cannot be serialized is handed back unchanged because no size could bound
-    it, and a result inside the bound is returned exactly as the tool produced
-    it.
+    serialized form is over the threshold files the compress request of
+    that judgment and is committed as a durable original, answered with its
+    bounded preview and ticket — an error from the wrapped tool is passed
+    through untouched, a nil result is not intercepted, a result that cannot
+    be serialized is handed back unchanged because no size could bound it,
+    and a result inside the bound is returned exactly as the tool produced it.
 
     An original that could not be committed is reported as an error with
     no preview, so a ticket never names an original that was not kept.
     A replica that could not be written is reported beside the preview the
     committed original still answers: the preview is returned together with
     ErrReplicaWriteFailed rather than dropping a result whose original is safe.
+    A request that could not be filed is reported beside that same preview as
+    ErrCompressRequestUnfiled, so an unfiled judgment is never taken for none.
 
 func (t *BoundedTool) Declaration() *trpctool.Declaration
     Declaration returns the declaration of the wrapped tool unchanged, so
     bounding a result changes nothing the model is told about the tool itself.
+
+type BoundedToolOption func(*BoundedTool)
+    BoundedToolOption names one setting of the bounded tool at construction
+    time.
+
+func WithCompressRequestFiling(filing memory.CompressRequestFiling) BoundedToolOption
+    WithCompressRequestFiling wires where an overflow judgment files the
+    compress request fact it is. The request is filed before the externalization
+    that still completes inside the same call, so the preview is served without
+    waiting for a consumer while the judgment stays on record for one.
 
 type Cleaner interface {
 	// CleanupStartup reclaims the temporary replicas left behind by a previous run.

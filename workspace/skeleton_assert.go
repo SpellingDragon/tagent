@@ -70,6 +70,19 @@ var (
 // ErrReplicaWriteFailed must stay a named error value.
 var _ error = ErrReplicaWriteFailed
 
+// The compress request judgment face keeps its declared shapes: the producer and
+// reason one overflow judgment files under, the filing option and its refusal.
+var (
+	_ = CompressProducerToolOverflow
+	_ = CompressReasonToolOverflow
+
+	_ BoundedToolOption = func(*BoundedTool) {}
+
+	_ func(memory.CompressRequestFiling) BoundedToolOption = WithCompressRequestFiling
+
+	_ error = ErrCompressRequestUnfiled
+)
+
 // The replica materialisation shapes: the materializer, the authorized segmented
 // read face derived from it, and the named refusals they report.
 var (

@@ -1,5 +1,14 @@
 package memory // import "github.com/SpellingDragon/tagent/memory"
 
+The compress request family: the judgment that material is due for compression,
+stated as the fact it is — who judged, why, what was judged and the identity
+the judgment is quoted by — and never as the instruction that performs the
+compression. A producer files the request it judged, a consumer reads it,
+compresses the material the request names and files the product it minted. A
+repeated judgment keeps the identity and the first filing moment of the request
+already on record, so one body of material carries one request however often it
+is judged.
+
 The memory curation pass: the deterministic value assessment, the trigger and
 the condensed artifact of one over-limit card sequence. Curation files every
 card's fate under exactly one of the three channels — retain, evict or protect
@@ -50,6 +59,11 @@ The identity to partition mapping of the memory side: one name resolves to one
 stable partition ID, so every writer and every authorized read scope that names
 it meets the same partition and no two runs disagree.
 
+The pre-fold face of the compression consumers: the fold a consumer runs when
+it consumes a compress request, the compaction fact it files into the state, and
+the fold identity that fact is quoted by. A pre-fold runs ahead of the request
+boundary, so the assembly path reads the folded projection and never folds it.
+
 Cold-start replay: the projection is the pure replay of one fact chain.
 
 The projection holds no state outside the fact chain: a rebuild replays the
@@ -91,6 +105,12 @@ full-text decision makes the two identical. A recorded decision is the basis a
 replay follows, so a recorded preview is never promoted back to the full text
 and the original is never reconstructed from a decision.
 
+The replay settle family: the presentation decision one assembly settled on,
+stated as the fact it is — which entry, which presentation and the text the
+decision carries — and quoted by the identity that decision answers. A settled
+decision lands one fact; an entry the budget skipped settles nothing and lands
+none.
+
 Retention leases.
 
 A retention lease is held by the shared resource owner — the recovery resource
@@ -116,6 +136,19 @@ an event after the table observes it, and never at the moment its bytes happen
 to be committed.
 
 CONSTANTS
+
+const (
+	// CompressProducerCuration names the curation bound judgment.
+	CompressProducerCuration = "memory.curation"
+	// CompressReasonCuration states why the curation bound judgment files a
+	// request.
+	CompressReasonCuration = "the card sequence exceeds the curation bound"
+)
+    CompressProducerCuration names the mechanism that judges a card sequence
+    against the curation bound, and CompressReasonCuration states why that
+    judgment files a request. The producer and the reason are part of the
+    request identity, so the same material judged by two mechanisms stays two
+    facts.
 
 const (
 	// CurationLinkWeight is the value one standing causal link adds.
@@ -160,6 +193,9 @@ const CompactionEventType = event.TypeContextCompress
     committed to the fact chain under. A compaction fact is consumed as the
     snapshot it carries and never enters the projection as an entry of its own.
 
+const CompressRequestType = "compress.request"
+    CompressRequestType is the frozen type of a compress request fact.
+
 const CurationArtifactType = "memory.condensed_card"
     CurationArtifactType is the frozen type label of the condensed card artifact
     one curation pass leaves behind.
@@ -186,8 +222,20 @@ const RebuildSkipNotEmpty = "projection not empty"
     RebuildSkipNotEmpty is the recorded reason of a rebuild that found a
     non-empty projection: the projection is never replaced by a replay.
 
+const ReplaySettleType = "replay.settle"
+    ReplaySettleType is the frozen type of a replay settle fact.
+
 VARIABLES
 
+var (
+	// ErrCompressRequestUnnamed reports a judgment that names no producer, no
+	// subject or no reason: no identity is derived from it and no consumer could
+	// tell what it asks for.
+	ErrCompressRequestUnnamed = errors.New("memory: a compress request names no producer, subject or reason")
+	// ErrCompressRequestNotPending reports a retirement of a request that does not
+	// await consumption: a repeated retirement never retires a second one.
+	ErrCompressRequestNotPending = errors.New("memory: no compress request awaits consumption under that identity")
+)
 var (
 	// ErrCurationUnwired reports a curation engine constructed without the
 	// retention ledger or the lifecycle it coordinates with.
@@ -198,6 +246,17 @@ var (
 	// ErrCurationCardKey reports a card that carries no event key, or a
 	// sequence that repeats one: no fate could be filed under it.
 	ErrCurationCardKey = errors.New("memory: curation card carries no unique event key")
+	// ErrCurationRequestsUnwired reports a consumer tick attempted without the
+	// request log it consumes: a tick that cannot read the judgments it answers
+	// would compress material no producer judged due.
+	ErrCurationRequestsUnwired = errors.New("memory: curation consumer needs the compress request log")
+	// ErrCurationCardsUnwired reports a consumer tick attempted without the card
+	// sequence source: the tick names no material it could curate.
+	ErrCurationCardsUnwired = errors.New("memory: curation consumer needs the card sequence source")
+	// ErrCurationProductsUnwired reports a condensed pass whose product has
+	// nowhere to be committed: the artifact would be counted as held while no
+	// state carries it.
+	ErrCurationProductsUnwired = errors.New("memory: curation consumer needs the product sink")
 )
 var (
 	// ErrCapabilityIncomplete reports a durable recovery tier whose store lacks
@@ -219,6 +278,21 @@ var (
 	ErrLifecycleUnwired = errors.New("memory: lifecycle needs a retention ledger and a store")
 )
 var (
+	// ErrFoldEmpty reports a fold of an empty projection: there is no run to
+	// collapse and no compaction payload to leave on the fact chain.
+	ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry")
+	// ErrPrefoldUnwired reports a pre-fold asked without the projection it
+	// folds: no material is named and no compaction fact could be filed.
+	ErrPrefoldUnwired = errors.New("memory: pre-fold needs the projection of the material it folds")
+	// ErrCurationProjectionUnwired reports a consumer tick pre-folding without
+	// the projection source: the tick names no material it could fold.
+	ErrCurationProjectionUnwired = errors.New("memory: curation consumer pre-fold needs the projection source")
+	// ErrCurationFoldsUnwired reports a pre-fold whose compaction fact has
+	// nowhere to be committed: the fold would be counted while no state carries
+	// it.
+	ErrCurationFoldsUnwired = errors.New("memory: curation consumer pre-fold needs the fold sink")
+)
+var (
 	// ErrChainKeyRequired reports a chain key that names no session, so a replay
 	// under it would join one user's facts to a shared partition chain.
 	ErrChainKeyRequired = errors.New("memory: chain key names no session")
@@ -238,18 +312,15 @@ var (
 	// partial and is never reported as a byte-exact rebuild.
 	ErrRebuildPartial = errors.New("memory: rebuild is partial: the fact chain misses snapshot keys")
 )
-var (
-	// ErrFoldEmpty reports a fold of an empty projection: there is no run to
-	// collapse and no compaction payload to leave on the fact chain.
-	ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry")
-	// ErrBudgetInvalid reports a budget assembly asked to pack a request under a
-	// non-positive token budget.
-	ErrBudgetInvalid = errors.New("memory: budget assembly needs a positive token budget")
-)
 var ErrBodyKeyMismatch = errors.New("memory: event body key disagrees with the stored event key")
     ErrBodyKeyMismatch reports a committed body whose canonical key disagrees
     with the key it is stored under, so the body cannot stand for that event.
 
+var (
+	// ErrBudgetInvalid reports a budget assembly asked to pack a request under a
+	// non-positive token budget.
+	ErrBudgetInvalid = errors.New("memory: budget assembly needs a positive token budget")
+)
 var ErrCommitBarrier = errors.New("memory: commit barrier failed")
     ErrCommitBarrier reports a commit whose barrier did not complete, so nothing
     of it is published.
@@ -360,6 +431,12 @@ var ErrUnstage = errors.New("memory: staged writes could not be unstaged")
 
 FUNCTIONS
 
+func CompactionFactKey(payload CompactionFact) event.EventID
+    CompactionFactKey derives the identity the fold fact of one compaction
+    payload is filed under: content-addressed over the summary it reports,
+    the boundary it covers and the refs it retains in payload order, so one fold
+    files one fact and a re-file keeps that identity.
+
 func PartitionIDFromName(name string) int
     PartitionIDFromName derives the stable partition ID of one name: the FNV-1a
     hash of the name folded into the ten-bit partition range. The same name
@@ -428,6 +505,12 @@ type ChainFact struct {
     carry built-in and event types only, so the storage layers' canonical facts
     map onto them without a package edge.
 
+func CompactionChainFact(chain ChainKey, payload CompactionFact, at time.Time) (ChainFact, error)
+    CompactionChainFact returns the state fact one compaction payload is
+    committed as: the compaction event a replay reads back, filed under the fold
+    identity the payload answers. A payload that cannot be written back as a
+    chain fact is reported by name.
+
 type ChainKey struct {
 	// PartitionID is the partition the chain's facts are filed under.
 	PartitionID int
@@ -462,6 +545,13 @@ type CompactionFact struct {
     chain as one compaction event, and the compaction event itself never enters
     the projection as an entry.
 
+func Prefold(ctx context.Context, projection *ReplayProjection) (CompactionFact, error)
+    Prefold folds the projection a consumer owns ahead of assembly and answers
+    the compaction payload the fold left, so the fold fact is filed when
+    its request is consumed and the request boundary only reads the folded
+    projection. A projection already carrying a compaction payload is answered
+    with it: one body of material folds once.
+
 type CompactionRef struct {
 	// Key is the ref identity: negative for a synthetic ref, a canonical fact
 	// key for a ref the chain hydrates.
@@ -481,6 +571,76 @@ type CompactionRef struct {
     hydrates its entry from the fact chain and carries no text of its own — the
     payload never stands in for the chain.
 
+type CompressRequest struct {
+	// ID is the identity of the judgment: the content-addressed key the request
+	// is quoted by, derived from the producer, the subject and the reason.
+	ID event.EventID
+	// Producer names the mechanism that judged the material due for compression.
+	Producer string
+	// Reason states why that mechanism judged it due.
+	Reason string
+	// Subject is the identity of the material judged: the content-addressed key
+	// of the sequence or result the request names.
+	Subject string
+	// At is the moment the judgment was filed.
+	At time.Time
+}
+    CompressRequest is one compress request fact: the judgment that material is
+    over its bound. It names who judged, why, what was judged and the identity
+    the request is quoted by, and it is immutable once filed — the same judgment
+    files the same identity, and a retry never refiles it under a second one.
+
+func CompressRequestFor(producer, subject, reason string) CompressRequest
+    CompressRequestFor returns the request fact one judgment files: the identity
+    is content-addressed over the producer, the subject and the reason, so the
+    same judgment always answers the same identity and a re-judgment adds no
+    second request. The filing moment stays zero for the log to stamp on first
+    filing.
+
+func (r CompressRequest) FactKey() string
+    FactKey returns the compress request's identity as a fact key:
+    the content-addressed key one judgment is quoted by, unchanged by every
+    re-filing of that judgment.
+
+func (r CompressRequest) FactType() string
+    FactType returns the frozen type a compress request is read as.
+
+type CompressRequestFiling func(ctx context.Context, request CompressRequest) (CompressRequest, error)
+    CompressRequestFiling files one compress request into the log its consumer
+    reads and answers the request as it stands on record, so a repeated judgment
+    keeps the identity and the filing moment of the first one. A filing that
+    fails is reported by name and a judgment is never dropped silently.
+
+type CompressRequests struct {
+	// Has unexported fields.
+}
+    CompressRequests is the in-process log of compress request facts:
+    every request filed, the order it was filed in and the ones still awaiting
+    consumption. The log is the identity authority of the family — a filed
+    request is answered as it stands on record, so one judgment keeps its
+    identity and first filing moment — and a request leaves the pending set
+    exactly once, when its consumer retires it after the products of its
+    compression are committed.
+
+func NewCompressRequests() *CompressRequests
+    NewCompressRequests returns an empty request log.
+
+func (l *CompressRequests) Consume(ctx context.Context, key event.EventID) error
+    Consume retires one request once the products of its compression are
+    committed. A request that does not await consumption is refused by name,
+    so a retirement is never counted twice.
+
+func (l *CompressRequests) Pending(ctx context.Context) ([]CompressRequest, error)
+    Pending lists the requests awaiting consumption, in filing order, exactly as
+    they stand on record.
+
+func (l *CompressRequests) Produce(ctx context.Context, request CompressRequest) (CompressRequest, error)
+    Produce files one compress request and answers it as it stands on record:
+    a judgment already filed is answered with the recorded request,
+    so its identity and filing moment never move and no second entry is added.
+    A request naming no producer, subject or reason is refused by name, and the
+    filing moment of a request that carries none is stamped on the first filing.
+
 type Condenser func(ctx context.Context, run CurationRun, now time.Time) (string, error)
     Condenser folds one over-limit card run into its condensed summary:
     the seat an LLM curation would take beside the deterministic engineering
@@ -498,13 +658,21 @@ type Curation struct {
     through the one tombstone channel the lifecycle owns. The engine rewrites no
     original fact and no reference metadata, whatever the outcome.
 
-func NewCuration(policy CurationPolicy, retention *Retention, lifecycle *Lifecycle, condense Condenser) (*Curation, error)
+    A consumer tick drives the same pass from the compress request facts its
+    producers filed: the request is the judgment that material is over its
+    bound and the tick is the compression that answers it. A wired pre-fold
+    lets the tick fold the compressed projection and commit its compaction fact,
+    so the assembly path reads a folded projection.
+
+func NewCuration(policy CurationPolicy, retention *Retention, lifecycle *Lifecycle, condense Condenser, options ...CurationOption) (*Curation, error)
     NewCuration returns the curation engine over the retention ledger and the
     lifecycle it drives: the ledger holds what the artifact references and the
     lifecycle owns the tombstone channel every eviction travels. A nil condenser
     runs the deterministic engineering condensation. The retention ledger must
     be the one the lifecycle was built over, so a reference the pass holds is
-    the protection the eviction consults.
+    the protection the eviction consults. The options wire the consumer face:
+    the request log a tick consumes, the card sequence it curates and the state
+    its product facts are committed into.
 
 func (c *Curation) Curate(ctx context.Context, now time.Time, cards []CurationCard) (CurationReport, error)
     Curate runs one curation pass over the card sequence at the given time.
@@ -521,6 +689,26 @@ func (c *Curation) Curate(ctx context.Context, now time.Time, cards []CurationCa
     step degrades that card to retention with its failure recorded in the sink
     account, so the pass degrades instead of collapsing and no outcome rewrites
     an original fact.
+
+func (c *Curation) Judge(ctx context.Context, now time.Time, cards []CurationCard) (CompressRequest, bool, error)
+    Judge files the request fact the card sequence's bound judgment is:
+    a sequence at or within the bound files nothing and answers false, and an
+    over-limit one files the request naming the sequence, the curation producer
+    and the bound reason, and answers that request with true. The judgment is
+    filed under the sequence's content-addressed identity, so judging one body
+    of material again files no second request and keeps the first filing moment.
+    A sequence no fate could be filed over is refused by name and files nothing.
+
+func (c *Curation) Tick(ctx context.Context, now time.Time) (CurationTick, error)
+    Tick runs one curation tick at now: it reads the card sequence it curates
+    and the compress requests pending in the request log, and for each pending
+    request naming that sequence it runs one pass, commits the condensed
+    artifact the pass minted into the state, pre-folds the compressed projection
+    once through the wired pre-fold, commits the compaction fact and retires the
+    request. A request naming other material stays pending, and a pass, commit,
+    pre-fold or retirement that failed keeps its request pending and lands in
+    the tick account, so a request is never counted consumed before the products
+    of its compression are held.
 
 type CurationArtifact struct {
 	// Key is the content-addressed identity of the artifact: the same
@@ -546,6 +734,14 @@ type CurationArtifact struct {
     degraded to the engineering fallback, and is zero while a condensation
     holds.
 
+func (a CurationArtifact) FactKey() string
+    FactKey returns the condensed artifact's identity as a fact key:
+    the content-addressed key of the card references it carries, so the same
+    condensation answers the same key every time it is asked.
+
+func (a CurationArtifact) FactType() string
+    FactType returns the frozen type a condensed artifact is read as.
+
 type CurationCard struct {
 	// Key is the [evt_key] ticket of the fact the card line carries.
 	Key event.EventID
@@ -563,6 +759,12 @@ type CurationCard struct {
     the [evt_key] ticket of the fact behind it, its frozen type, the small
     rendering text of the line, the time the fact was recorded, and the count of
     standing causal links — references and parent keys — that point at the fact.
+
+type CurationCards func(ctx context.Context) ([]CurationCard, error)
+    CurationCards reads the card sequence one curation tick curates: the cards
+    of the partition the tick owns, oldest first as the caller renders them.
+    A read that fails is reported by name and a tick never curates a partial
+    sequence.
 
 type CurationFate string
     CurationFate names the one channel a card's curation fate is filed under:
@@ -586,6 +788,35 @@ const (
 	// reference stands.
 	CurationProtect CurationFate = "protect"
 )
+type CurationFolds func(ctx context.Context, fact CompactionFact) error
+    CurationFolds commits the compaction fact one pre-fold left into the state:
+    the fold fact its request is answered with. A commit that fails is reported
+    by name, so a fold is never counted as held before the state carries it.
+
+type CurationOption func(*Curation)
+    CurationOption names one setting of the curation engine at construction
+    time.
+
+func WithCompressRequests(requests *CompressRequests) CurationOption
+    WithCompressRequests wires the compress request log the consumer tick reads:
+    the requests its producers filed, and the retirement a tick performs once
+    the products of one compression are committed.
+
+func WithCurationCards(cards CurationCards) CurationOption
+    WithCurationCards wires the card sequence source the consumer tick curates.
+    A failed read is reported by name and never read as an empty sequence.
+
+func WithCurationPreFold(projection CurationProjection, folds CurationFolds) CurationOption
+    WithCurationPreFold wires the consumer-side fold: the projection a tick
+    folds when it consumes a compress request and the state its compaction fact
+    is committed into. The request stays pending until the fold fact is held,
+    so the assembly path never folds inline.
+
+func WithCurationProducts(products CurationSink) CurationOption
+    WithCurationProducts wires the state face the consumer tick commits its
+    product facts into: the condensed artifact of every pass that condensed a
+    run.
+
 type CurationPolicy struct {
 	// MaxCards is the card sequence bound: a sequence of at most this many
 	// cards is never curated, and a longer one triggers the pass. A bound
@@ -603,6 +834,11 @@ type CurationPolicy struct {
     CurationPolicy shapes one curation pass: the sequence bound that triggers
     it, how many key cards survive as artifact references, and the value floor
     below which an unprotected overflow card is evicted.
+
+type CurationProjection func(ctx context.Context) (*ReplayProjection, error)
+    CurationProjection reads the replay projection one consumer tick pre-folds:
+    the material its compress requests name. A read that fails is reported by
+    name and a tick never folds a partial projection.
 
 type CurationReport struct {
 	// Triggered reports whether the card sequence ran over the bound and the
@@ -635,6 +871,37 @@ type CurationRun struct {
     CurationRun is the over-limit card run one condensation folds: the cards
     that overflowed the sequence bound, oldest first, and the key cards the pass
     keeps as artifact references beside them.
+
+type CurationSink func(ctx context.Context, artifact CurationArtifact) error
+    CurationSink commits the product fact one curation pass minted into the
+    state: the condensed artifact, filed under its content-addressed identity.
+    A commit that fails is reported by name, so a product is never counted as
+    held before the state carries it.
+
+type CurationTick struct {
+	// Read is the requests the tick took in: the pending requests naming the card
+	// sequence it curates, in filing order.
+	Read []CompressRequest
+	// Reports is one curation report per request whose pass completed, in the
+	// order the requests were read.
+	Reports []CurationReport
+	// Products is the artifact facts the tick committed into the state, one per
+	// condensed pass.
+	Products []CurationArtifact
+	// Folds is the compaction facts the tick's pre-folds committed into the
+	// state, one per folded projection of the tick.
+	Folds []CompactionFact
+	// Failures is the sink account of the tick: the pass, commit, pre-fold and
+	// retirement failures it degraded under, recorded and never swallowed
+	// silently.
+	Failures []error
+}
+    CurationTick is what one curation tick did: the request facts it took in,
+    the passes they drove, the product facts it committed into the state, the
+    fold facts its pre-folds left and the failures it degraded under. A request
+    stays pending until the products and the fold fact of its compression are
+    committed, so the account names every request whose compression is still
+    owed.
 
 type CurationValue struct {
 	// Key is the card the assessment describes.
@@ -1657,9 +1924,14 @@ func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]Pr
     hint first when one applies. A recorded decision is followed unconditionally
     — the view a replay reproduces never drifts with the remaining budget —
     while an unrecorded entry degrades from the full text to a ticket and then
-    to the summary until the budget is met, recording the decision it settled
-    on. An entry that fits none of them is skipped without a record, so a later
-    assembly under a larger budget can still present it in full.
+    to the summary until the budget is met, settling on the decision it recorded
+    as one replay-settle fact. An entry that fits none of them is skipped
+    without a record and without a settle fact, so a later assembly under a
+    larger budget can still present it in full.
+
+    The source facts are read and never written: the assembly files settle facts
+    on the projection's own settle account, so the fact chain it replayed is
+    exactly as it stood.
 
 func (p *ReplayProjection) Compaction() *CompactionFact
     Compaction returns the compaction payload the last fold left, nil before
@@ -1711,12 +1983,51 @@ func (p *ReplayProjection) RecordDecision(key event.EventID, decision Presentati
 func (p *ReplayProjection) RecoveryHint() *ProjectionEntry
     RecoveryHint returns the recovery hint entry a rebuild left, nil before one.
 
+func (p *ReplayProjection) Settles() []ReplaySettle
+    Settles returns a copy of the replay-settle facts the assembly recorded,
+    in settlement order: one fact per decision the assembly settled on, and none
+    for an entry it skipped.
+
 type ReplayReport struct {
 	// Outcomes lists the per-delivery outcomes of the replay.
 	Outcomes []ReplayOutcome
 }
     ReplayReport is the report one replay returns, one outcome per delivery,
     in the order the pending obligations were handed in.
+
+type ReplaySettle struct {
+	// ID is the identity of the settled decision: the content-addressed key the
+	// fact is quoted by, derived from the entry, the mode and the preview.
+	ID event.EventID
+	// Entry is the entry the assembly settled.
+	Entry event.EventID
+	// Mode is the presentation the assembly settled on.
+	Mode PresentationMode
+	// Preview is the bounded text the settled presentation carries, empty for a
+	// full-text settlement.
+	Preview string
+	// At is the moment the settlement was recorded.
+	At time.Time
+}
+    ReplaySettle is the fact one presentation decision is filed as: the entry
+    the assembly settled, the presentation it settled on, the bounded text
+    that presentation carries and the moment the settlement was recorded.
+    The identity is the decision's own, so the same decision always answers the
+    same fact.
+
+func ReplaySettleFor(decision PresentationDecision) ReplaySettle
+    ReplaySettleFor returns the settle fact one presentation decision is
+    filed as: the identity is content-addressed over the entry, the mode and
+    the preview, so the same decision always answers the same identity and a
+    repeated settlement adds no second fact. The recording moment stays zero for
+    the caller to stamp.
+
+func (s ReplaySettle) FactKey() string
+    FactKey returns the settle fact's identity: the decision identity the fact
+    is quoted by, unchanged by the moment it was recorded.
+
+func (s ReplaySettle) FactType() string
+    FactType returns the frozen type a settle fact is read as.
 
 type Retention struct {
 	// Has unexported fields.

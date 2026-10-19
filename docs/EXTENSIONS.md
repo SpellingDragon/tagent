@@ -73,7 +73,7 @@
 ---
 
 <a id="consumer-protocol"></a>
-## 四、消费器协议：三个实例，一条协议
+## 四、消费器协议：三个实例、六个面，一条协议
 
 消费 event 的不止一处：回合驱动、时间驱动与宿主的外部驱动各跑一个循环。它们**共用一条协议**，差别只在驱动源（`agent/loop.go` 与 `evolution/reflection.go`）：
 
@@ -89,6 +89,17 @@
 | 宿主循环（外部驱动） | 宿主自己的调度与传输（`Run` 的 sink、`task.WithEnvelopeDeliverer`） | 宿主选中并交进 `Ready` 的事实 | 宿主自己提交的事实：框架在此只给边界，不给循环 |
 
 回合实例与时间实例**不互相收编**：`Tick` 没有 Invocation 与决策语义，把它塞进 `Loop` 的一个相位会造出一个不存在的相位。两个框架内实例由同一条协议用例固定——各读一条事实、各产一条新事实、源事实不变（`tests/integration/evolution/consumer_protocol_test.go`）。
+
+第二辑把同一条协议钉在框架内的**六个消费面**上：它们不各跑一个循环，而是各读一处已提交的事实身份，按自己的义务产/投递/裁决/收尾/观察/导出。六个面各有一个同名协议用例 `TestSecondWaveConsumersShareTheProtocol`，分住在 `tests/integration/` 的 inspection、state、execution、host、learning 五个归属包。
+
+| 面 | 归属（包·入口） | 驱动源 | 产出事实族 | 禁止项 |
+|---|---|---|---|---|
+| Subscribe（推消费） | `query`·`Projection.Follow` | 一次 `Snapshot` 建立的订阅（`Subscription{Revision, Filter}`）之后的增量 | 无：增量是本代投影的读视图（upsert/delete/gap/reset），不登记族 | 不改写源；gap 与 reset 必须具名，不许静默跳过；不许跨代续订 |
+| Deliverer（投递消费） | `task`·`EnvelopeDeliverer`（`WithEnvelopeDeliverer`） | `Flush` 面对的投递义务（`ObligationAwaitingDelivery`） | `task` 通知族的投递状态（同一通知身份不新增行，义务清账在台账） | 不重路由已冻结的 envelope；无显式接受即不清义务；拒绝必须留下原因 |
+| Apply（裁决消费） | `state`·`Publisher.Publish` / `Rollback` | 候选（`Candidate`）与 `Governance.Check` 的裁决 | `state` 发布台账（`PublicationRecord`，代际＋指纹）；不新增任务事实链行 | 同指纹不得重复发布（`PublishUnchanged`）；不得跳过 `PublishContract.Required`；不改写候选 |
+| Shutdown（收尾消费） | `agent`·`Shutdown.Close` | 关停请求（`CloseRequest{Address, Deadline}`）的结算趟 | 无新任务事实：`DrainReport` 是读数（`Drained`/`Unsettled`） | 不把 false 或超时读成结束；不越过 deadline 静默收尾；关停中不受理新输入 |
+| Observer（观察消费） | `telemetry`·`SDKObserver.Observe`（`plugin.NewCommitObserver` 的 After 趟） | 已提交事实的 `event.EventID`，提交之后 | 零：`AuditRecord` 是观测证据，不产事实 | 不产事实、不回滚、不重跑；不触碰源事实；OTel 关闭只记 skipped，审计仍须落地 |
+| Exporter（导出消费） | `rl`·`TrainingExporter.Export` / `SealSnapshot` | 授权调用（`ExportRequest{PartitionIDs}`，授权先于任何读） | `rl` 制品事实：导出快照（`Provenance.ExportID` 是快照身份，行内引用源事实的 `EventKey`） | 不越权读；不改写源事实；不覆盖已封印身份（`ErrExportConflict`）；不把部分当完整 |
 
 ---
 
@@ -179,3 +190,31 @@ agents:
 拒绝都点名：`preset: the declared tool carries no wiring`（声明了 `recall` 或 `call_subagent` 却没有对应面）、`knowledge: the reference names no local source`、`knowledge: a remote endpoint is not wired`、`knowledge: the reference names no known tool`、`preset: the parameter value cannot be read`。契约在 `tool/subagent/presets.go`，装配面核对见 `tests/integration/config/preset_tools_test.go`。
 
 **当前边界（写在这里以免扩展者猜）**：pipeline 元素由宿主经 `tagent.NativeAgent.Plugins` 贡献，声明里的 `plugins:` 名单是声明侧的次序意图，`tagent.Assemble` 不把它解析成元素。所以"声明序"要生效，宿主按同一名单贡献元素；S11 正是这么驱动的（`tests/integration/acceptance/scenario_s11_test.go`）。运行手册与门禁清单见 `docs/OPERATION.md`。
+
+---
+
+<a id="reduction-map"></a>
+## 七、化归判据对照表：16 面三问归位
+
+新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：module 根加 15 个一级产品族（`tool` 的 exec/mcp/remote/subagent 四个适配器算一族，`memory` 的存储档与检索子包算子包；`prototype` 是历史参照，不在产品面内）。
+
+| # | 面（包） | ① 是不是事实 | ② 谁消费它 | ③ 什么时态 | 归位轴 |
+|---|---|---|---|---|---|
+| 1 | `tagent`（module 根） | 否：只装配与发布 | 宿主导入入口；`Assemble` 读声明 | 无（组合） | 边界 |
+| 2 | `agent` | 否：消费 ready 与回填，产物经 `rl.Recorder` 提交 | 回合驱动自己消费；宿主读回执与终态 | 在途（决策） | 执行器 |
+| 3 | `config` | 是：声明族（规范指纹身份） | 组合根与热重载候选；`state` 读绑定 | 存续 | 事实 |
+| 4 | `event` | 是：核心事件族（`Key` 身份） | 全部消费面的输入词汇 | 事实本体 | 事实 |
+| 5 | `evolution` | 否：产物是 `TypeExternalInput` 事件，归 `event` 族 | `Tick` 读事实链；`Loop` 再消费它产出的输入 | 回放（watermark 之后） | 消费 |
+| 6 | `memory` | 是：引用票据族（原文 `Key` 身份） | 组装与检索面读；策展消费读压缩请求 | 存续 | 时态 |
+| 7 | `model` | 否：锁定 tRPC 原生模型协议 | `agent` 的单次决策调用 | 无（边界） | 边界 |
+| 8 | `plugin` | 否：Before 改调用、After 只读观察，呈现词汇在 `view` | pipeline 按相位派发 | 观测 | 消费 |
+| 9 | `query` | 否：只读投影（快照/游标/订阅） | 模型/SDK/CLI/诊断/看板/训练 | 回放 | 时态 |
+| 10 | `rl` | 是：训练记录三族＋导出快照制品 | 训练导出、SFT 消费、看板 | 在途（记录）/ 制品（快照） | 事实 |
+| 11 | `state` | 否：绑定、邮箱、发布台账的唯一持有者 | `agent`/`task`/`query` 读绑定与发布代 | 存续 | 时态 |
+| 12 | `task` | 是：通知族（四元组身份） | `Deliverer`、`Loop` 回填、关停收尾 | 在途（义务） | 事实 |
+| 13 | `telemetry` | 否：观测旁路，只读消费 | audit sink 与 OTel 后端读记录 | 观测 | 消费 |
+| 14 | `tool`（exec/mcp/remote/subagent） | 否：执行适配；调用记录落 `event` | `agent` 经工具面执行调用 | 无（执行边界） | 执行器 |
+| 15 | `view` | 否：呈现词汇（`Presentation`/`RenderedView`） | 宿主通道读呈现 | 产物 | 时态 |
+| 16 | `workspace` | 否：临时副本，不持真源 | `memory` 与 `tool` 读副本 | 存续（临时） | 时态 |
+
+对照结论：本变更只重排压缩三件（01，落在 `memory`/`workspace`/`tool` 三个面内），其余面按上表归位、不改行为；六个消费面的声明见第四节，产物的事实族归属见 `docs/FACT-VOCABULARY.md` 的附表。三问答不出来就不是新能力，而是既有能力的字段——这是本表要拦的那类偏差。

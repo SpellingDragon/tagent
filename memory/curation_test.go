@@ -270,6 +270,242 @@ func TestCurationRefusesAmbiguousCards(t *testing.T) {
 	}
 }
 
+// TestCurationConsumesCompressionRequests pins the consumer tick: one filed request drives one pass, and its product is committed before the request retires.
+// - a pending request naming the curated sequence drives exactly one pass and is retired
+// - the condensed artifact is committed into the state as the product of that pass
+// - the eviction of the pass still travels the one tombstone channel the lifecycle owns
+// - a request naming other material and a sequence within the bound curate nothing and leave the log as it stood
+// - a product commit that failed keeps its request pending and lands in the tick account
+// - a retired request is never re-condensed and never re-stamps a registration
+// - a tick without its request log, card source or product sink is refused by name
+//
+// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
+func TestCurationConsumesCompressionRequests(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a pending request drives one pass and its product is committed", func(t *testing.T) {
+		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		request, filed, err := fixture.curation.Judge(ctx, curationNow, fixture.cards)
+		if err != nil || !filed {
+			t.Fatalf("judge the over-limit sequence = (%+v, %v, %v), want the request it files", request, filed, err)
+		}
+
+		tick, err := fixture.curation.Tick(ctx, curationNow)
+		if err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		if len(tick.Failures) != 0 {
+			t.Fatalf("tick failures = %v, want none", tick.Failures)
+		}
+		if len(tick.Read) != 1 || tick.Read[0].ID != request.ID {
+			t.Fatalf("requests taken in = %+v, want the filed request %q", tick.Read, request.ID)
+		}
+		if len(tick.Reports) != 1 || !tick.Reports[0].Triggered || tick.Reports[0].Artifact == nil {
+			t.Fatalf("reports = %+v, want one triggered pass with its artifact", tick.Reports)
+		}
+		artifact := *tick.Reports[0].Artifact
+		if len(tick.Products) != 1 || tick.Products[0].Key != artifact.Key {
+			t.Fatalf("products = %+v, want the artifact of the pass committed into the state", tick.Products)
+		}
+		var product event.Fact = tick.Products[0]
+		if product.FactType() != CurationArtifactType || product.FactKey() != string(artifact.Key) {
+			t.Fatalf("product fact = (%q, %q), want the artifact identity read as %q", product.FactKey(), product.FactType(), CurationArtifactType)
+		}
+		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 0 {
+			t.Fatalf("pending after the tick = (%v, %v), want the request retired", pending, err)
+		}
+		if _, marked := fixture.store.Tombstoned("aa01"); !marked {
+			t.Fatal("the evicted card was not tombstoned through the lifecycle")
+		}
+		if len(fixture.store.tombstones) != 1 {
+			t.Fatalf("tombstones = %v, want exactly the evicted card", fixture.store.tombstones)
+		}
+	})
+
+	t.Run("a product commit that failed keeps the request pending", func(t *testing.T) {
+		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		refused := errors.New("the state refused the artifact")
+		fixture.sinkErr = refused
+
+		tick, err := fixture.curation.Tick(ctx, curationNow)
+		if err != nil {
+			t.Fatalf("tick under a refused commit: %v", err)
+		}
+		if len(tick.Failures) != 1 || !errors.Is(tick.Failures[0], refused) {
+			t.Fatalf("tick failures = %v, want the refused commit recorded", tick.Failures)
+		}
+		if len(tick.Products) != 0 {
+			t.Fatalf("products = %+v, want none committed", tick.Products)
+		}
+		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 1 {
+			t.Fatalf("pending under a refused commit = (%v, %v), want the request still awaited", pending, err)
+		}
+
+		fixture.sinkErr = nil
+		if tick, err = fixture.curation.Tick(ctx, curationNow); err != nil || len(tick.Products) != 1 {
+			t.Fatalf("tick after the commit was accepted = (%+v, %v), want the product committed", tick, err)
+		}
+		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 0 {
+			t.Fatalf("pending after the product was committed = (%v, %v), want the request retired", pending, err)
+		}
+	})
+
+	t.Run("a request naming other material curates nothing", func(t *testing.T) {
+		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		other, err := fixture.requests.Produce(ctx, CompressRequestFor("another.producer", "another-material", "another ground"))
+		if err != nil {
+			t.Fatalf("file the unrelated judgment: %v", err)
+		}
+
+		if tick, err := fixture.curation.Tick(ctx, curationNow); err != nil || len(tick.Read) != 1 {
+			t.Fatalf("tick = (%+v, %v), want only the request naming the curated sequence", tick, err)
+		}
+		condensed := len(fixture.products)
+		if condensed != 1 {
+			t.Fatalf("products after the first tick = %d, want the one condensation", condensed)
+		}
+		pending, err := fixture.requests.Pending(ctx)
+		if err != nil || len(pending) != 1 || pending[0].ID != other.ID {
+			t.Fatalf("pending = (%v, %v), want the unrelated request left awaiting its own consumer", pending, err)
+		}
+
+		fixture.cards = curationCards()[:2]
+		if request, filed, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil || filed || request.ID != "" {
+			t.Fatalf("judgment of a sequence within the bound = (%+v, %v, %v), want no request", request, filed, err)
+		}
+		if tick, err := fixture.curation.Tick(ctx, curationNow); err != nil || len(tick.Read) != 0 || len(tick.Reports) != 0 {
+			t.Fatalf("tick over a sequence within the bound = (%+v, %v), want no pass", tick, err)
+		}
+		if len(fixture.products) != condensed {
+			t.Fatalf("products = %+v, want none over a sequence within the bound", fixture.products)
+		}
+	})
+
+	t.Run("a retired request is never compressed twice", func(t *testing.T) {
+		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		first, err := fixture.curation.Tick(ctx, curationNow)
+		if err != nil || len(first.Products) != 1 {
+			t.Fatalf("first tick = (%+v, %v), want the condensed product", first, err)
+		}
+		record, registered := fixture.retention.Record("aa03")
+		if !registered {
+			t.Fatal("the kept ticket carries no registration")
+		}
+
+		second, err := fixture.curation.Tick(ctx, curationNow.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("second tick: %v", err)
+		}
+		if len(second.Read) != 0 || len(second.Reports) != 0 || len(second.Products) != 0 {
+			t.Fatalf("second tick = (%+v), want a retired request to drive nothing", second)
+		}
+		if len(fixture.products) != 1 {
+			t.Fatalf("products = %+v, want the one condensation", fixture.products)
+		}
+		kept, stillRegistered := fixture.retention.Record("aa03")
+		if !stillRegistered || !kept.RecordedAt.Equal(record.RecordedAt) || kept.Type != record.Type {
+			t.Fatalf("registration after the second tick = (%s, %s), want the first (%s, %s) kept", kept.RecordedAt, kept.Type, record.RecordedAt, record.Type)
+		}
+		if len(fixture.store.tombstones) != 1 {
+			t.Fatalf("tombstones = %v, want the one eviction", fixture.store.tombstones)
+		}
+	})
+
+	t.Run("a tick without its consumer faces is refused by name", func(t *testing.T) {
+		curation, _, _ := newCurationUnderTest(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		if _, err := curation.Tick(ctx, curationNow); !errors.Is(err, ErrCurationRequestsUnwired) {
+			t.Fatalf("tick without the request log = %v, want %v", err, ErrCurationRequestsUnwired)
+		}
+
+		requests := NewCompressRequests()
+		noCards, err := NewCuration(CurationPolicy{MaxCards: 2, MinScore: 10}, curation.retention, curation.lifecycle, nil, WithCompressRequests(requests))
+		if err != nil {
+			t.Fatalf("open the curation engine: %v", err)
+		}
+		if _, err := noCards.Tick(ctx, curationNow); !errors.Is(err, ErrCurationCardsUnwired) {
+			t.Fatalf("tick without the card source = %v, want %v", err, ErrCurationCardsUnwired)
+		}
+
+		fixture := newConsumingCuration(t, CurationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.curation.Judge(ctx, curationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		fixture.curation.products = nil
+		tick, err := fixture.curation.Tick(ctx, curationNow)
+		if err != nil {
+			t.Fatalf("tick without the product sink: %v", err)
+		}
+		if len(tick.Failures) != 1 || !errors.Is(tick.Failures[0], ErrCurationProductsUnwired) {
+			t.Fatalf("tick failures = %v, want %v", tick.Failures, ErrCurationProductsUnwired)
+		}
+		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 1 {
+			t.Fatalf("pending without a product sink = (%v, %v), want the request still awaited", pending, err)
+		}
+	})
+}
+
+// curationFixture is the consumer stack one tick drives: the engine over a
+// request log, a card sequence it reads back and the products it committed.
+type curationFixture struct {
+	curation  *Curation
+	retention *Retention
+	requests  *CompressRequests
+	store     *MemoryLifecycleStore
+	cards     []CurationCard
+	products  []CurationArtifact
+	sinkErr   error
+}
+
+// newConsumingCuration opens a curation engine whose tick reads the compress
+// requests filed into its log, curates the card sequence it holds and commits the
+// products into the fixture, recording a commit failure the case configures.
+func newConsumingCuration(t *testing.T, policy CurationPolicy) *curationFixture {
+	t.Helper()
+	store := NewMemoryLifecycleStore(LifecycleCapabilities{})
+	retention := NewRetention(NewMemoryGuard())
+	lifecycle, err := NewLifecycle(LifecycleConfig{GlobalTTLDays: -1}, retention, store, LifecycleCapabilities{})
+	if err != nil {
+		t.Fatalf("open the lifecycle: %v", err)
+	}
+	lifecycle.RecoveryComplete()
+	fixture := &curationFixture{
+		retention: retention,
+		requests:  NewCompressRequests(),
+		store:     store,
+		cards:     curationCards(),
+	}
+	curation, err := NewCuration(policy, retention, lifecycle, nil,
+		WithCompressRequests(fixture.requests),
+		WithCurationCards(func(context.Context) ([]CurationCard, error) { return fixture.cards, nil }),
+		WithCurationProducts(func(_ context.Context, artifact CurationArtifact) error {
+			if fixture.sinkErr != nil {
+				return fixture.sinkErr
+			}
+			fixture.products = append(fixture.products, artifact)
+			return nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("open the curation engine: %v", err)
+	}
+	fixture.curation = curation
+	return fixture
+}
+
 // newCurationUnderTest opens a curation engine over an in-memory lifecycle whose
 // TTL window is exempt, so only the curation pass files fates.
 func newCurationUnderTest(t *testing.T, policy CurationPolicy) (*Curation, *Retention, *MemoryLifecycleStore) {

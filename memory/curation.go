@@ -204,17 +204,63 @@ type CurationReport struct {
 	Failures []error
 }
 
+// CurationCards reads the card sequence one curation tick curates: the cards of
+// the partition the tick owns, oldest first as the caller renders them. A read
+// that fails is reported by name and a tick never curates a partial sequence.
+type CurationCards func(ctx context.Context) ([]CurationCard, error)
+
+// CurationSink commits the product fact one curation pass minted into the state:
+// the condensed artifact, filed under its content-addressed identity. A commit
+// that fails is reported by name, so a product is never counted as held before
+// the state carries it.
+type CurationSink func(ctx context.Context, artifact CurationArtifact) error
+
+// CurationTick is what one curation tick did: the request facts it took in, the
+// passes they drove, the product facts it committed into the state, the fold
+// facts its pre-folds left and the failures it degraded under. A request stays
+// pending until the products and the fold fact of its compression are committed,
+// so the account names every request whose compression is still owed.
+type CurationTick struct {
+	// Read is the requests the tick took in: the pending requests naming the card
+	// sequence it curates, in filing order.
+	Read []CompressRequest
+	// Reports is one curation report per request whose pass completed, in the
+	// order the requests were read.
+	Reports []CurationReport
+	// Products is the artifact facts the tick committed into the state, one per
+	// condensed pass.
+	Products []CurationArtifact
+	// Folds is the compaction facts the tick's pre-folds committed into the
+	// state, one per folded projection of the tick.
+	Folds []CompactionFact
+	// Failures is the sink account of the tick: the pass, commit, pre-fold and
+	// retirement failures it degraded under, recorded and never swallowed
+	// silently.
+	Failures []error
+}
+
 // Curation is the memory curation engine: it assesses card value
 // deterministically, triggers on the sequence bound, condenses the over-limit
 // run into a new artifact that relates to the existing facts through its key
 // references, holds those references against eviction, and evicts the rest
 // through the one tombstone channel the lifecycle owns. The engine rewrites
 // no original fact and no reference metadata, whatever the outcome.
+//
+// A consumer tick drives the same pass from the compress request facts its
+// producers filed: the request is the judgment that material is over its bound
+// and the tick is the compression that answers it. A wired pre-fold lets the
+// tick fold the compressed projection and commit its compaction fact, so the
+// assembly path reads a folded projection.
 type Curation struct {
-	policy    CurationPolicy
-	retention *Retention
-	lifecycle *Lifecycle
-	condense  Condenser
+	policy     CurationPolicy
+	retention  *Retention
+	lifecycle  *Lifecycle
+	condense   Condenser
+	requests   *CompressRequests
+	cards      CurationCards
+	products   CurationSink
+	projection CurationProjection
+	folds      CurationFolds
 }
 
 var (
@@ -227,15 +273,50 @@ var (
 	// ErrCurationCardKey reports a card that carries no event key, or a
 	// sequence that repeats one: no fate could be filed under it.
 	ErrCurationCardKey = errors.New("memory: curation card carries no unique event key")
+	// ErrCurationRequestsUnwired reports a consumer tick attempted without the
+	// request log it consumes: a tick that cannot read the judgments it answers
+	// would compress material no producer judged due.
+	ErrCurationRequestsUnwired = errors.New("memory: curation consumer needs the compress request log")
+	// ErrCurationCardsUnwired reports a consumer tick attempted without the card
+	// sequence source: the tick names no material it could curate.
+	ErrCurationCardsUnwired = errors.New("memory: curation consumer needs the card sequence source")
+	// ErrCurationProductsUnwired reports a condensed pass whose product has
+	// nowhere to be committed: the artifact would be counted as held while no
+	// state carries it.
+	ErrCurationProductsUnwired = errors.New("memory: curation consumer needs the product sink")
 )
+
+// CurationOption names one setting of the curation engine at construction time.
+type CurationOption func(*Curation)
+
+// WithCompressRequests wires the compress request log the consumer tick reads:
+// the requests its producers filed, and the retirement a tick performs once the
+// products of one compression are committed.
+func WithCompressRequests(requests *CompressRequests) CurationOption {
+	return func(curation *Curation) { curation.requests = requests }
+}
+
+// WithCurationCards wires the card sequence source the consumer tick curates. A
+// failed read is reported by name and never read as an empty sequence.
+func WithCurationCards(cards CurationCards) CurationOption {
+	return func(curation *Curation) { curation.cards = cards }
+}
+
+// WithCurationProducts wires the state face the consumer tick commits its product
+// facts into: the condensed artifact of every pass that condensed a run.
+func WithCurationProducts(products CurationSink) CurationOption {
+	return func(curation *Curation) { curation.products = products }
+}
 
 // NewCuration returns the curation engine over the retention ledger and the
 // lifecycle it drives: the ledger holds what the artifact references and the
 // lifecycle owns the tombstone channel every eviction travels. A nil
 // condenser runs the deterministic engineering condensation. The retention
 // ledger must be the one the lifecycle was built over, so a reference the pass
-// holds is the protection the eviction consults.
-func NewCuration(policy CurationPolicy, retention *Retention, lifecycle *Lifecycle, condense Condenser) (*Curation, error) {
+// holds is the protection the eviction consults. The options wire the consumer
+// face: the request log a tick consumes, the card sequence it curates and the
+// state its product facts are committed into.
+func NewCuration(policy CurationPolicy, retention *Retention, lifecycle *Lifecycle, condense Condenser, options ...CurationOption) (*Curation, error) {
 	if retention == nil || lifecycle == nil {
 		return nil, ErrCurationUnwired
 	}
@@ -245,7 +326,11 @@ func NewCuration(policy CurationPolicy, retention *Retention, lifecycle *Lifecyc
 	if condense == nil {
 		condense = condenseCards
 	}
-	return &Curation{policy: policy, retention: retention, lifecycle: lifecycle, condense: condense}, nil
+	curation := &Curation{policy: policy, retention: retention, lifecycle: lifecycle, condense: condense}
+	for _, option := range options {
+		option(curation)
+	}
+	return curation, nil
 }
 
 // Curate runs one curation pass over the card sequence at the given time.
@@ -391,6 +476,131 @@ func (c *Curation) Curate(ctx context.Context, now time.Time, cards []CurationCa
 	return report, nil
 }
 
+// Judge files the request fact the card sequence's bound judgment is: a sequence
+// at or within the bound files nothing and answers false, and an over-limit one
+// files the request naming the sequence, the curation producer and the bound
+// reason, and answers that request with true. The judgment is filed under the
+// sequence's content-addressed identity, so judging one body of material again
+// files no second request and keeps the first filing moment. A sequence no fate
+// could be filed over is refused by name and files nothing.
+func (c *Curation) Judge(ctx context.Context, now time.Time, cards []CurationCard) (CompressRequest, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return CompressRequest{}, false, err
+	}
+	if c.requests == nil {
+		return CompressRequest{}, false, ErrCurationRequestsUnwired
+	}
+	seen := map[event.EventID]bool{}
+	for _, card := range cards {
+		if card.Key == "" || seen[card.Key] {
+			return CompressRequest{}, false, fmt.Errorf("%w: %q", ErrCurationCardKey, card.Key)
+		}
+		seen[card.Key] = true
+	}
+	if len(cards) <= c.policy.MaxCards {
+		return CompressRequest{}, false, nil
+	}
+	request := CompressRequestFor(CompressProducerCuration, string(curationSequenceKey(cards)), CompressReasonCuration)
+	request.At = now
+	filed, err := c.requests.Produce(ctx, request)
+	if err != nil {
+		return CompressRequest{}, false, err
+	}
+	return filed, true, nil
+}
+
+// Tick runs one curation tick at now: it reads the card sequence it curates and
+// the compress requests pending in the request log, and for each pending request
+// naming that sequence it runs one pass, commits the condensed artifact the pass
+// minted into the state, pre-folds the compressed projection once through the
+// wired pre-fold, commits the compaction fact and retires the request. A request
+// naming other material stays pending, and a pass, commit, pre-fold or retirement
+// that failed keeps its request pending and lands in the tick account, so a
+// request is never counted consumed before the products of its compression are
+// held.
+func (c *Curation) Tick(ctx context.Context, now time.Time) (CurationTick, error) {
+	var tick CurationTick
+	if err := ctx.Err(); err != nil {
+		return tick, err
+	}
+	if c.requests == nil {
+		return tick, ErrCurationRequestsUnwired
+	}
+	if c.cards == nil {
+		return tick, ErrCurationCardsUnwired
+	}
+	cards, err := c.cards(ctx)
+	if err != nil {
+		return tick, fmt.Errorf("memory: reading the curation card sequence: %w", err)
+	}
+	requests, err := c.requests.Pending(ctx)
+	if err != nil {
+		return tick, fmt.Errorf("memory: reading the compress requests: %w", err)
+	}
+	subject := string(curationSequenceKey(cards))
+	prefolded := false
+	for _, request := range requests {
+		if request.Subject != subject {
+			continue
+		}
+		tick.Read = append(tick.Read, request)
+		report, err := c.Curate(ctx, now, cards)
+		if err != nil {
+			tick.Failures = append(tick.Failures, err)
+			continue
+		}
+		tick.Reports = append(tick.Reports, report)
+		if report.Artifact != nil {
+			if c.products == nil {
+				tick.Failures = append(tick.Failures, ErrCurationProductsUnwired)
+				continue
+			}
+			if err := c.products(ctx, *report.Artifact); err != nil {
+				tick.Failures = append(tick.Failures, err)
+				continue
+			}
+			tick.Products = append(tick.Products, *report.Artifact)
+		}
+		if c.projection != nil && !prefolded {
+			payload, err := c.prefold(ctx)
+			if err != nil {
+				tick.Failures = append(tick.Failures, err)
+				continue
+			}
+			tick.Folds = append(tick.Folds, payload)
+			prefolded = true
+		}
+		if err := c.requests.Consume(ctx, request.ID); err != nil {
+			tick.Failures = append(tick.Failures, err)
+		}
+	}
+	return tick, nil
+}
+
+// prefold folds the projection the tick's consumer owns and commits the
+// compaction fact it left into the state: the fold runs at consumption time and
+// the request boundary reads its result.
+func (c *Curation) prefold(ctx context.Context) (CompactionFact, error) {
+	if c.projection == nil {
+		return CompactionFact{}, ErrCurationProjectionUnwired
+	}
+	if c.folds == nil {
+		return CompactionFact{}, ErrCurationFoldsUnwired
+	}
+	projection, err := c.projection(ctx)
+	if err != nil {
+		return CompactionFact{}, fmt.Errorf("memory: reading the projection to pre-fold: %w", err)
+	}
+	payload, err := Prefold(ctx, projection)
+	if err != nil {
+		return CompactionFact{}, err
+	}
+	if err := c.folds(ctx, payload); err != nil {
+		return CompactionFact{}, err
+	}
+	return payload, nil
+}
+
 // condenseCards is the deterministic engineering condensation: the overflow
 // run folded into one bounded line, oldest first. It is the production
 // condenser beside no model and the shape the degraded fallback returns to,
@@ -411,6 +621,21 @@ func condenseCards(ctx context.Context, run CurationRun, _ time.Time) (string, e
 		joined = joined[:curationSummaryLimit]
 	}
 	return joined, nil
+}
+
+// curationSequenceKey derives the identity of one card sequence from the keys,
+// types and recorded times of its cards: the same body of material always answers
+// the same identity, so the bound judgment filed over it is quoted by one key for
+// as long as that material stands. The order the cards arrived in names nothing
+// about the material, so the parts are sorted before they are hashed.
+func curationSequenceKey(cards []CurationCard) event.EventID {
+	parts := make([]string, 0, len(cards))
+	for _, card := range cards {
+		parts = append(parts, string(card.Key)+"|"+card.Type+"|"+card.RecordedAt.UTC().Format(time.RFC3339Nano))
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return event.EventID("seq-" + hex.EncodeToString(sum[:8]))
 }
 
 // curationArtifactKey derives the content-addressed identity of one condensed

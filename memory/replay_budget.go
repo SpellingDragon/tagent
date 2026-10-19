@@ -14,7 +14,6 @@ import (
 	"errors"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,9 +36,6 @@ const (
 )
 
 var (
-	// ErrFoldEmpty reports a fold of an empty projection: there is no run to
-	// collapse and no compaction payload to leave on the fact chain.
-	ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry")
 	// ErrBudgetInvalid reports a budget assembly asked to pack a request under a
 	// non-positive token budget.
 	ErrBudgetInvalid = errors.New("memory: budget assembly needs a positive token budget")
@@ -69,6 +65,7 @@ type ReplayProjection struct {
 	meditation map[event.EventID]struct{}
 	foldSeq    int
 	fold       *CompactionFact
+	settles    []ReplaySettle
 	boundary   event.EventID
 	recovery   *ProjectionEntry
 }
@@ -104,96 +101,6 @@ func (p *ReplayProjection) Append(ctx context.Context, entry ProjectionEntry) {
 		}
 	}
 	p.entries = append(p.entries, entry)
-}
-
-// Fold collapses the foldable run of the projection into one compaction entry
-// and returns its summary entry, so the collapsed text is reported as a fact of
-// the chain rather than kept beside it.
-//
-// The retained refs keep the payload order: a keyless tool-chain entry becomes a
-// synthetic ref carrying its full text in the payload, a keyed entry of a
-// retained type becomes a positive ref the fact chain hydrates back, and the
-// remaining entries are represented by the summary alone. The compaction payload
-// records the fullBoundary value the tail is replayed after, and the summary
-// entry is returned first on every restore.
-func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return ProjectionEntry{}, err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.entries) == 0 {
-		return ProjectionEntry{}, ErrFoldEmpty
-	}
-	p.foldSeq++
-	seq := strconv.Itoa(p.foldSeq)
-	minTs := p.entries[0].Time
-	summaries := make([]string, 0, len(p.entries))
-	refEntries := make([]ProjectionEntry, 0, len(p.entries))
-	refs := make([]CompactionRef, 0, len(p.entries))
-	boundary := event.EventID("")
-	for i, entry := range p.entries {
-		if entry.Time.Before(minTs) {
-			minTs = entry.Time
-		}
-		summaries = append(summaries, entry.Summary)
-		if entry.Key == "" || SyntheticKey(entry.Key) {
-			ref := CompactionRef{
-				Key:     event.EventID("-ref-" + seq + "-" + strconv.Itoa(i)),
-				Type:    entry.Type,
-				Summary: entry.Summary,
-				Content: entry.Content,
-				Time:    entry.Time,
-			}
-			refs = append(refs, ref)
-			refEntries = append(refEntries, entryOfRef(ref))
-			continue
-		}
-		if RetainRefType(entry.Type) {
-			refs = append(refs, CompactionRef{
-				Key:     entry.Key,
-				Type:    entry.Type,
-				Summary: entry.Summary,
-				Time:    entry.Time,
-			})
-			refEntries = append(refEntries, ProjectionEntry{
-				Key:     entry.Key,
-				Type:    entry.Type,
-				Summary: entry.Summary,
-				Content: p.originals[entry.Key],
-				Time:    entry.Time,
-			})
-		}
-		if string(entry.Key) > string(boundary) {
-			boundary = entry.Key
-		}
-	}
-	summaryRef := CompactionRef{
-		Key:     event.EventID("-" + strconv.FormatInt(minTs.UnixNano(), 10)),
-		Type:    CompactionEventType,
-		Summary: "compaction",
-		Content: "compaction: " + strings.Join(summaries, "; "),
-		Time:    minTs,
-	}
-	payload := CompactionFact{
-		Summary:        summaryRef,
-		Refs:           refs,
-		FullBoundary:   boundary,
-		MeditationKeys: p.meditationKeysLocked(),
-	}
-	p.fold = &payload
-	p.boundary = boundary
-	summaryEntry := entryOfRef(summaryRef)
-	p.entries = append([]ProjectionEntry{summaryEntry}, refEntries...)
-	return summaryEntry, nil
-}
-
-// RetainRefType reports whether an entry of the frozen event type is kept as a
-// retained ref by a fold instead of being represented by the summary alone: the
-// tool and task facts a fold must not lose, while the conversational entries are
-// what the summary speaks for.
-func RetainRefType(typ string) bool {
-	return typ == event.TypeActionCommand || typ == event.TypeTaskSettled
 }
 
 // Rebuild replaces the whole projection with the one the recorded decisions
@@ -239,9 +146,14 @@ func (p *ReplayProjection) Rebuild(ctx context.Context, decisions []Presentation
 // first when one applies. A recorded decision is followed unconditionally — the
 // view a replay reproduces never drifts with the remaining budget — while an
 // unrecorded entry degrades from the full text to a ticket and then to the
-// summary until the budget is met, recording the decision it settled on. An
-// entry that fits none of them is skipped without a record, so a later assembly
-// under a larger budget can still present it in full.
+// summary until the budget is met, settling on the decision it recorded as one
+// replay-settle fact. An entry that fits none of them is skipped without a
+// record and without a settle fact, so a later assembly under a larger budget
+// can still present it in full.
+//
+// The source facts are read and never written: the assembly files settle facts
+// on the projection's own settle account, so the fact chain it replayed is
+// exactly as it stood.
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -325,6 +237,9 @@ func (p *ReplayProjection) recordLocked(key event.EventID, decision Presentation
 		return
 	}
 	p.decisions[key] = decision
+	settle := ReplaySettleFor(decision)
+	settle.At = time.Now().UTC()
+	p.settles = append(p.settles, settle)
 	for i, entry := range p.entries {
 		if entry.Key == key {
 			p.entries[i].Content = p.viewOf(decision, entry)
@@ -438,6 +353,17 @@ func (p *ReplayProjection) Decision(key event.EventID) (PresentationDecision, bo
 	defer p.mu.Unlock()
 	decision, recorded := p.decisions[key]
 	return decision, recorded
+}
+
+// Settles returns a copy of the replay-settle facts the assembly recorded, in
+// settlement order: one fact per decision the assembly settled on, and none for
+// an entry it skipped.
+func (p *ReplayProjection) Settles() []ReplaySettle {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]ReplaySettle, len(p.settles))
+	copy(out, p.settles)
+	return out
 }
 
 // Compaction returns the compaction payload the last fold left, nil before any.

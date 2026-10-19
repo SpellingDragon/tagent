@@ -107,6 +107,14 @@ var (
 
 	_ func(*ReplayProjection, context.Context, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudget
 
+	_ func(*ReplayProjection) []ReplaySettle = (*ReplayProjection).Settles
+
+	_ func(context.Context, *ReplayProjection) (CompactionFact, error) = Prefold
+
+	_ func(CompactionFact) event.EventID = CompactionFactKey
+
+	_ func(ChainKey, CompactionFact, time.Time) (ChainFact, error) = CompactionChainFact
+
 	_ func(Guard, context.Context, OriginalRef, HolderID) (ProtectionLease, error) = Guard.Hold
 
 	_ func(Guard, context.Context, OriginalRef, HolderID, ProtectionLease) error = Guard.Release
@@ -191,6 +199,7 @@ var (
 	_ = ChainFact{Key: "", Chain: ChainKey{}, Type: "", Summary: "", Content: "", Time: time.Time{}}
 	_ = CompactionFact{Summary: CompactionRef{}, Refs: []CompactionRef{}, FullBoundary: "", MeditationKeys: []event.EventID{}}
 	_ = CompactionRef{Key: "", Type: "", Summary: "", Content: "", Time: time.Time{}}
+	_ = ReplaySettle{ID: "", Entry: "", Mode: PresentationUnrecorded, Preview: "", At: time.Time{}}
 	_ = RebuildOptions{PageSize: 0, FallbackBound: 0}
 	_ = RebuildReport{Entries: 0, Fallback: false, Dropped: 0, Scanned: false, Skipped: "", Partial: false, Missing: []event.EventID{}, Meditation: []event.EventID{}, FullBoundary: ""}
 
@@ -258,6 +267,44 @@ var (
 	_ error = ErrEnumerationIncomplete
 	_ error = ErrProtected
 	_ error = ErrLifecycleUnwired
+)
+
+// The compress request family keeps its declared shapes: the judgment a producer
+// files, the log that holds it, the consumer faces a curation tick reads and the
+// product fact the tick commits.
+var (
+	_ = CompressRequest{ID: "", Producer: "", Reason: "", Subject: "", At: time.Time{}}
+	_ = CurationTick{Read: []CompressRequest{}, Reports: []CurationReport{}, Products: []CurationArtifact{}, Folds: []CompactionFact{}, Failures: []error{}}
+
+	_ CompressRequestFiling = func(context.Context, CompressRequest) (CompressRequest, error) { return CompressRequest{}, nil }
+	_ CurationCards         = func(context.Context) ([]CurationCard, error) { return nil, nil }
+	_ CurationSink          = func(context.Context, CurationArtifact) error { return nil }
+	_ CurationProjection    = func(context.Context) (*ReplayProjection, error) { return nil, nil }
+	_ CurationFolds         = func(context.Context, CompactionFact) error { return nil }
+	_ CurationOption        = func(*Curation) {}
+
+	_ ReplaySettle = ReplaySettle{ID: "", Entry: "", Mode: PresentationUnrecorded, Preview: "", At: time.Time{}}
+
+	_ func(PresentationDecision) ReplaySettle                = ReplaySettleFor
+	_ func(CurationProjection, CurationFolds) CurationOption = WithCurationPreFold
+
+	_ func() *CompressRequests                                                           = NewCompressRequests
+	_ func(*CompressRequests, context.Context, CompressRequest) (CompressRequest, error) = (*CompressRequests).Produce
+	_ func(*CompressRequests, context.Context) ([]CompressRequest, error)                = (*CompressRequests).Pending
+	_ func(*CompressRequests, context.Context, event.EventID) error                      = (*CompressRequests).Consume
+
+	_ func(*Curation, context.Context, time.Time, []CurationCard) (CurationReport, error)        = (*Curation).Curate
+	_ func(*Curation, context.Context, time.Time, []CurationCard) (CompressRequest, bool, error) = (*Curation).Judge
+	_ func(*Curation, context.Context, time.Time) (CurationTick, error)                          = (*Curation).Tick
+
+	_ error = ErrCompressRequestUnnamed
+	_ error = ErrCompressRequestNotPending
+	_ error = ErrCurationRequestsUnwired
+	_ error = ErrCurationCardsUnwired
+	_ error = ErrCurationProductsUnwired
+	_ error = ErrPrefoldUnwired
+	_ error = ErrCurationProjectionUnwired
+	_ error = ErrCurationFoldsUnwired
 )
 
 // The archive original-text face keeps its documented shapes: the adapter over
