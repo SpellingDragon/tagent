@@ -1,0 +1,13 @@
+refactor(convergence): unify the fact vocabulary, declare the consumer protocol, home the view types
+
+Fact category contract in event (FactKey/FactType): seven families implement it
+in their own packages (Event, Notice, the rl record trio, Declaration via its
+fingerprint with no new architecture edge, and the memory original reference)
+beside the FACT-VOCABULARY page registering each family identity and locking
+mechanism.
+
+The consumer protocol (read a fact identity, consume, produce new facts, never
+mutate the source) is declared in EXTENSIONS with its three instances and
+attested for the turn-driven and time-driven loops. Presentation vocabulary
+moves to the view package so plugin carries extension interfaces only.
+Behaviour is unchanged: the deterministic golden stays 11/11 match and lint ok.

@@ -33,6 +33,7 @@ import (
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/view"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -133,7 +134,7 @@ type Run struct {
 	enforcement plugin.Enforcement
 	recorder    rl.Recorder
 	observer    telemetry.Observer
-	presented   []plugin.Presentation
+	presented   []view.Presentation
 	snapshots   []RequestSnapshotRecord
 	fixers      map[event.AgentID]*fileFixer
 	replays     map[event.SessionID]replayEntry

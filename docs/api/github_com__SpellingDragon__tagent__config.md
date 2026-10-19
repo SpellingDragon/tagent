@@ -91,6 +91,18 @@ func (d *Declaration) Clone() *Declaration
     Clone returns a deep copy of the declaration. Mutating the copy never
     changes the original, and the copy owns its own raw document.
 
+func (d Declaration) FactKey() string
+    FactKey returns the declaration's identity as a fact key: the canonical
+    organization fingerprint in its hex spelling (see Fingerprint). That
+    identity is synthesised from the declaration surface alone, so reloading
+    equivalent content answers the same key and any change to the surface
+    answers a different one. The raw source document and every live binding
+    stay outside it, and a declaration the canonical encoding cannot represent
+    answers no key: the empty string, which names no fact.
+
+func (d Declaration) FactType() string
+    FactType returns the frozen type a declaration is read as.
+
 func (d *Declaration) RawDocument() map[string]any
     RawDocument returns the decoded source document as a deep copy, so callers
     may mutate the result without touching the declaration.

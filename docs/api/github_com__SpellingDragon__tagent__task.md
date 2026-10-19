@@ -775,6 +775,19 @@ type Notice struct {
     A repeated delivery of the same identity does not record a second fact,
     and a retry keeps the original identity.
 
+func (n Notice) FactKey() string
+    FactKey returns the notice's stable identity as a fact key: the four-tuple
+    TaskID+Round+Kind+Seq the notice's own identity stays at, synthesised into
+    the one canonical spelling "%s:%d:%s:%d". The event reference the notice
+    points at never replaces that identity, so a retried delivery answers the
+    same key. The runtime mints task identities as "task-<n>" and every kind is
+    one of the closed NoticeKind words, so the colon join stays injective over
+    the notices this package produces.
+
+func (n Notice) FactType() string
+    FactType returns the notification category as the fact type: the category is
+    part of the notice's own identity, so a repeated delivery keeps its type.
+
 type NoticeEnvelope struct {
 	// Notice is the stable identity of the notification.
 	Notice Notice

@@ -676,6 +676,15 @@ func AttemptOf(id event.AttemptID, decisionID event.DecisionID, episodeID event.
     actually served the attempt rather than the one in effect when the record
     was written. A response naming no identity is recorded unversioned.
 
+func (r AttemptRecord) FactKey() string
+    FactKey returns the attempt's identity as a fact key: the attempt ID the
+    record is stored under. A retry hidden below the decision boundary is not a
+    second attempt, so the key of one attempt stays the ID it was recorded with.
+
+func (r AttemptRecord) FactType() string
+    FactType returns the record kind an attempt line is read as; the record
+    family keeps one frozen type per record kind.
+
 type Capture interface {
 	// Snapshot fixes the model, the generation parameters and the visible prompt,
 	// skill and tool set of req before the request starts, and returns the
@@ -1417,6 +1426,15 @@ type FeedbackRecord struct {
     separate: a late feedback is read as new evidence and never as a rewrite of
     anything already derived.
 
+func (r FeedbackRecord) FactKey() string
+    FactKey returns the feedback's identity as a fact key: the feedback ID the
+    record is stored under. A second record under one ID is either the same
+    record (idempotent) or refused as a conflict on the write path, so one
+    feedback ID never names two facts.
+
+func (r FeedbackRecord) FactType() string
+    FactType returns the record kind a feedback line is read as.
+
 type FeedbackSubmission struct {
 	// State names how the submission was attributed.
 	State FeedbackBindingState `json:"state"`
@@ -2154,6 +2172,15 @@ type RewardRecord struct {
     late feedback is a different record — so the instance ID and revision are
     what a consumer cites, and a record without an instance identity cannot be
     cited at all.
+
+func (r RewardRecord) FactKey() string
+    FactKey returns the reward's identity as a fact key: the instance ID a
+    derivation takes, because a rule version alone never identifies a reward
+    record — the same rule deriving a value from late feedback is a different
+    record, and a record without an instance identity could not be cited at all.
+
+func (r RewardRecord) FactType() string
+    FactType returns the record kind a reward line is read as.
 
 type RewardRule struct {
 	// Version is the rule version a derived value is stamped with.

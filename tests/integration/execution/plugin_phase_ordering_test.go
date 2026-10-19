@@ -16,6 +16,7 @@ import (
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/view"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -341,7 +342,7 @@ type phaseRig struct {
 	mu        sync.Mutex
 	recorded  []task.Result
 	shown     []approvalSeen
-	after     []plugin.Presentation
+	after     []view.Presentation
 	recordErr error
 	approve   task.Approver
 }
@@ -491,7 +492,7 @@ func (r *phaseRig) approvals() []approvalSeen {
 }
 
 // capture keeps one After pass presentation the loop handed to the sink.
-func (r *phaseRig) capture(presentation plugin.Presentation) {
+func (r *phaseRig) capture(presentation view.Presentation) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.after = append(r.after, presentation)
@@ -499,14 +500,14 @@ func (r *phaseRig) capture(presentation plugin.Presentation) {
 
 // presentations reports the After pass outcomes the loop handed to the sink,
 // as a copy the caller owns.
-func (r *phaseRig) presentations() []plugin.Presentation {
+func (r *phaseRig) presentations() []view.Presentation {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]plugin.Presentation, 0, len(r.after))
+	out := make([]view.Presentation, 0, len(r.after))
 	for _, presentation := range r.after {
 		got := presentation
-		got.Views = append([]plugin.RenderedView(nil), presentation.Views...)
-		got.Gaps = append([]plugin.ObservationGap(nil), presentation.Gaps...)
+		got.Views = append([]view.RenderedView(nil), presentation.Views...)
+		got.Gaps = append([]view.ObservationGap(nil), presentation.Gaps...)
 		out = append(out, got)
 	}
 	return out

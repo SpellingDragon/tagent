@@ -51,7 +51,8 @@
 | `github.com/SpellingDragon/tagent/tool/mcp` | [github_com__SpellingDragon__tagent__tool__mcp.md](github_com__SpellingDragon__tagent__tool__mcp.md) |
 | `github.com/SpellingDragon/tagent/tool/remote` | [github_com__SpellingDragon__tagent__tool__remote.md](github_com__SpellingDragon__tagent__tool__remote.md) |
 | `github.com/SpellingDragon/tagent/tool/subagent` | [github_com__SpellingDragon__tagent__tool__subagent.md](github_com__SpellingDragon__tagent__tool__subagent.md) |
+| `github.com/SpellingDragon/tagent/view` | [github_com__SpellingDragon__tagent__view.md](github_com__SpellingDragon__tagent__view.md) |
 | `github.com/SpellingDragon/tagent/workspace` | [github_com__SpellingDragon__tagent__workspace.md](github_com__SpellingDragon__tagent__workspace.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：49。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：50。文档覆盖由 scripts/comment_policy 单点判定。

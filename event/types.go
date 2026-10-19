@@ -1,4 +1,5 @@
 // 契约: docs/wiki/event/event-architecture.md#overview
+// 契约: docs/FACT-VOCABULARY.md#fact-category
 //
 // Package event is the runtime's event identity and fact carrier: it defines
 // the typed identifiers an event carries, the address of the agent session an
@@ -7,7 +8,9 @@
 // The payload keeps the native locked tRPC model message, so no second message
 // representation is built beside it. Every identifier is a distinct string type,
 // so a session identifier cannot be passed where an agent identifier is
-// expected.
+// expected. The package also declares Fact, the fact category contract each fact
+// family satisfies in its own package; the families are registered in the fact
+// vocabulary page.
 package event
 
 import (

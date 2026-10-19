@@ -12,6 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/view"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -357,7 +358,7 @@ func (l *Loop) currentRecorder() Recorder {
 // observers left. The sink is the read-out face the presentation is handed to —
 // the inspection face of the run — while the loop keeps the committed fact
 // itself and never retracts it for anything this presentation carries.
-type PresentationSink func(presentation plugin.Presentation)
+type PresentationSink func(presentation view.Presentation)
 
 // SetPresentations attaches the presentation sink this loop hands each After
 // pass outcome to. The After pass itself runs either way — exactly once per
@@ -374,7 +375,7 @@ func (l *Loop) SetPresentations(sink PresentationSink) {
 // publish hands one After pass presentation to the attached sink, or drops the
 // presentation while no sink is attached: the drop is the presentation's own,
 // and the committed fact it was rendered from stays untouched.
-func (l *Loop) publish(presentation plugin.Presentation) {
+func (l *Loop) publish(presentation view.Presentation) {
 	l.mu.Lock()
 	sink := l.present
 	l.mu.Unlock()

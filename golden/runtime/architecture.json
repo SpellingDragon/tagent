@@ -79,6 +79,12 @@
       "reason": "阶段化插件职责；绑定由 state 持有、组合根构造。"
     },
     {
+      "pattern": "view",
+      "role": "presentation-vocabulary",
+      "required": true,
+      "reason": "提交后呈现的词汇层（view）：一份已提交事实的 After 趟读出（Presentation/ObservationGap/RenderedView）；无行为、不持有事实、只引 event 的事实身份（fact-loop-convergence 03.3 登记）。"
+    },
+    {
       "pattern": "model",
       "role": "model-protocol",
       "required": true,
@@ -182,10 +188,11 @@
         "event",
         "memory/search",
         "bench",
-        "tool/subagent"
+        "tool/subagent",
+        "view"
       ],
       "forbidden": [],
-      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核）。"
+      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记）。"
     },
     {
       "from": "event",
@@ -204,6 +211,27 @@
         "evolution"
       ],
       "reason": "事件是纯叶子：不得 import 任何其他一方包。"
+    },
+    {
+      "from": "view",
+      "allow": [
+        "event"
+      ],
+      "forbidden": [
+        "config",
+        "state",
+        "agent",
+        "task",
+        "memory",
+        "workspace",
+        "plugin",
+        "model",
+        "telemetry",
+        "rl",
+        "evolution",
+        "."
+      ],
+      "reason": "呈现词汇是纯叶子：只引 event 的事实身份（EventID），不引用任何其他一方包；呈现不写、不读存储、不驱动执行（fact-loop-convergence D3）。"
     },
     {
       "from": "config",
@@ -257,13 +285,14 @@
         "state",
         "model",
         "plugin",
-        "task"
+        "task",
+        "view"
       ],
       "forbidden": [
         "rl",
         "evolution"
       ],
-      "reason": "执行器借 state 绑定并处理任务义务；plan 明确允许在确有必要时直接 import task 以避免影子接口。"
+      "reason": "执行器借 state 绑定并处理任务义务；plan 明确允许在确有必要时直接 import task 以避免影子接口；提交后呈现的交付面 PresentationSink 以 view 词汇传读（fact-loop-convergence 03.2）。"
     },
     {
       "from": "task",
@@ -338,7 +367,8 @@
     {
       "from": "plugin",
       "allow": [
-        "event"
+        "event",
+        "view"
       ],
       "forbidden": [
         "agent",
@@ -346,7 +376,7 @@
         "rl",
         "evolution"
       ],
-      "reason": "插件按阶段执行，由组合根构造、state 持有；只以事件表达观测。"
+      "reason": "插件按阶段执行，由组合根构造、state 持有；只以事件表达观测；After 趟读出呈现词汇并以 view 类型返回（事实类型声明已自 plugin 迁出到 view，fact-loop-convergence 03.1/03.2）。"
     },
     {
       "from": "telemetry",

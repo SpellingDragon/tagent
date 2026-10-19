@@ -1,13 +1,13 @@
 {
   "baseline": {
-    "files": 1159,
-    "lines": 98706
+    "files": 1165,
+    "lines": 98918
   },
   "measured_at": "2026-10-19",
   "measured_by": "python3 scripts/check_doc_budget.py --json",
-  "measured_on": "7610629+dirty",
+  "measured_on": "1abd845+dirty",
   "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 `python3 scripts/check_doc_budget.py --tighten` 下调，禁止上调（--tighten 会拒绝上升的指标）。",
+  "rebaseline_reason": "①上一批锁入：fact-loop-convergence 计划五件套 +5 篇/+154 行与 docs/FACT-VOCABULARY.md 首版，均为批准的交付面（派发时实测 1164/98860）；②本批下调 98925 → 98918（-7 行）：FACT-VOCABULARY 补齐七族登记并删去「未落两族待裁定」一节（-12 行）、七族表/身份拼写说明（+5 行），净减 7 行，实测=基线且无新增篇目；批内未压缩其他文档凑数",
   "schema_version": 1,
-  "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh)",
-  "rebaseline_reason": "+1 篇 docs/EXTENSIONS.md（161 行）：call-subagent-tool change 任务 3.2 的扩展点落点文档（plugin 四相位窄口 / event 词汇 / event-loop 消费点 / call_subagent 双源 / 预置工具示例），批末对账理由=新增篇目本身是批准的交付物，其余文档未压缩以凑数；同时沿用 call-subagent-tool change planning set (proposal/design/tasks/spec/ORCHESTRATION) 的前次对账"
+  "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh)"
 }

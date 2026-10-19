@@ -14,6 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
 	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/view"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -87,7 +88,7 @@ var (
 	// The After pass presentations settle on the diagnostic read face of the
 	// assembled run, so the host reads the rendered views and the visible
 	// observation gaps beside the committed facts.
-	_ func(*Run) []plugin.Presentation = (*Run).Presentations
+	_ func(*Run) []view.Presentation = (*Run).Presentations
 
 	// The safe request snapshots settle on the diagnostic read face of the
 	// assembled run, so the host reads the fixed copy each model request was

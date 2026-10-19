@@ -13,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/view"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -198,7 +199,7 @@ func (p observePlugin) ObserveCommit(ctx context.Context, id event.EventID) erro
 // the visible gaps its failed observers left, kept as the read-out the host
 // inspects. The presentation is observation only — the committed fact it was
 // rendered from is never rolled back or withheld for anything it carries.
-func (r *Run) takePresentation(presentation plugin.Presentation) {
+func (r *Run) takePresentation(presentation view.Presentation) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.presented = append(r.presented, presentation)
@@ -208,14 +209,14 @@ func (r *Run) takePresentation(presentation plugin.Presentation) {
 // diagnostic read face, in the order the facts committed, as a copy the caller
 // owns. The presentations are read-out material beside the committed facts;
 // reading them moves nothing.
-func (r *Run) Presentations() []plugin.Presentation {
+func (r *Run) Presentations() []view.Presentation {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]plugin.Presentation, 0, len(r.presented))
+	out := make([]view.Presentation, 0, len(r.presented))
 	for _, presentation := range r.presented {
 		got := presentation
-		got.Views = append([]plugin.RenderedView(nil), presentation.Views...)
-		got.Gaps = append([]plugin.ObservationGap(nil), presentation.Gaps...)
+		got.Views = append([]view.RenderedView(nil), presentation.Views...)
+		got.Gaps = append([]view.ObservationGap(nil), presentation.Gaps...)
 		out = append(out, got)
 	}
 	return out

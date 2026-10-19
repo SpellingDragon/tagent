@@ -709,21 +709,6 @@ type Governor interface {
     Before pass that call carries. MUST NOT execute the call, and MUST NOT
     bypass a hold it rendered. MUST NOT report a hold as a denial.
 
-type ObservationGap struct {
-	// Plugin is the stable name of the plugin whose observation failed.
-	Plugin string
-
-	// Fact is the committed fact the observation failed on.
-	Fact event.EventID
-
-	// Err is the error the observation failed with.
-	Err error
-}
-    ObservationGap is the visible gap one failed post-commit observation
-    leaves behind: the plugin that failed, the committed fact it failed to
-    observe and the error it failed with. The gap is the record of the failure;
-    the committed fact is untouched by it.
-
 type ObservationSink interface {
 	// Observe reports one committed fact to the observation side. The fact is
 	// passed unchanged and is never rewritten here. A returned error records a
@@ -828,7 +813,7 @@ func NewPipeline(plugins []Plugin) (Pipeline, error)
     interface of its own phase each refuse the pipeline by name instead of being
     trimmed in silence.
 
-func (p Pipeline) After(ctx context.Context, fact event.EventID) Presentation
+func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation
     After runs the After pass over one fact whose canonical commit already
     happened: every observer reads the fact first, then every presenter renders
     it. The pass runs after the commit and never before it, so a refused call
@@ -979,36 +964,6 @@ type PostCommitObserver interface {
     The redline list (3 rules): MUST observe a fact whose canonical commit
     already happened. MUST NOT roll the committed fact back or re-run the work
     when the observation fails. MUST NOT write the fact it observes.
-
-type Presentation struct {
-	// Fact is the committed fact the pass read.
-	Fact event.EventID
-
-	// Views holds the rendered presentations, in pipeline order.
-	Views []RenderedView
-
-	// Gaps holds the visible observation gaps, in pipeline order.
-	Gaps []ObservationGap
-}
-    Presentation is the After pass outcome of one committed fact: the views the
-    final presenters rendered beside the visible gaps the failed observers left.
-    It never carries an error and never withholds the fact: the committed fact
-    is already durable when the pass runs, and no outcome of this pass may
-    retract it.
-
-type RenderedView struct {
-	// Plugin is the stable name of the presenter that rendered the view.
-	Plugin string
-
-	// Text is the presentation text the presenter rendered.
-	Text string
-
-	// Dropped reports whether the channel dropped this presentation.
-	Dropped bool
-}
-    RenderedView is the final presentation one presenter rendered for a fact:
-    the rendered text beside whether the channel dropped it. A dropped view
-    drops the presentation only; the committed fact stays.
 
 type RiskAssessor interface {
 	AssessRisk(ctx context.Context, call *trpcmodel.ToolCall) RiskLevel

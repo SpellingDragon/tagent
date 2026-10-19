@@ -15,17 +15,17 @@
 |---|---|---|---|---|
 | `PhaseCallTransform` | `TransformCall(ctx, *model.ToolCall) error` | Before 趟，admission 之前、副作用之前 | 这一次工具调用本身：可改工具名与参数，不改 `CallID` 与已解析的可信作用域 | 返回 error 即拒绝**整趟**：该调用不执行、不记录，也不产生 `CallPass`；移动 `CallID` 报 `plugin.ErrCallIdentityChanged` |
 | `PhaseRiskPolicy` | `RiskAssessor.AssessRisk(ctx, *model.ToolCall) RiskLevel` 与 `Governor` | Before 趟，全部 transform 之后 | 同一个调用的风险等级与执行前裁决：等级只评级一次，裁决读它而不重算 | 相位内两个面可只实现其一或都实现，一个都不实现按"相位无实现"拒绝 |
-| `PhasePostCommitObserve` | `ObserveCommit(ctx, event.EventID) error` | After 趟，先于全部 presenter | 一个**已提交**事实的只读观察 | 失败不返回错误、不回滚事实：失败落成 `plugin.ObservationGap`（插件名+事实+错误） |
-| `PhaseFinalPresentation` | `Present(ctx, event.EventID) (string, bool)` | After 趟，最后 | 一个已提交事实的呈现文本，以及通道是否丢弃它 | 丢弃只丢呈现（`RenderedView.Dropped`），不撤回事实；丢弃必须如实报出 |
+| `PhasePostCommitObserve` | `ObserveCommit(ctx, event.EventID) error` | After 趟，先于全部 presenter | 一个**已提交**事实的只读观察 | 失败不返回错误、不回滚事实：失败落成 `view.ObservationGap`（插件名+事实+错误） |
+| `PhaseFinalPresentation` | `Present(ctx, event.EventID) (string, bool)` | After 趟，最后 | 一个已提交事实的呈现文本，以及通道是否丢弃它 | 丢弃只丢呈现（`view.RenderedView.Dropped`），不撤回事实；丢弃必须如实报出 |
 
 两趟的边界是这段接口的全部意义：
 
 - **Before 一趟**：每个调用恰好一次，先跑全部 transforms（各自在私有副本上改），再跑全部 risk faces，产出 `plugin.CallPass{Final, Risk}`。改后的 `Final` 是**被执行、也被记录**的那一个，且仍要过核心的受理路径（身份、权限、审批、去重都在核心，plugin 不自己执行调用）。没有风险面时 `Risk` 为空，裁决读作 `RiskMedium`——空等级不是一张免检通行证。
-- **After 一趟**：提交之后才跑，先 observers 再 presenters，返回 `plugin.Presentation{Fact, Views, Gaps}` 且**没有 error 返回值**——这个趟的任何失败都不能成为动已提交事实的理由。被拒绝的调用与提交失败的调用不产生呈现。
+- **After 一趟**：提交之后才跑，先 observers 再 presenters，返回 `view.Presentation{Fact, Views, Gaps}` 且**没有 error 返回值**——这个趟的任何失败都不能成为动已提交事实的理由。被拒绝的调用与提交失败的调用不产生呈现。
 
 装配上的三条拒绝（`plugin.NewPipeline` 的原文）：nil 元素报 `plugin: the pipeline holds a nil plugin`；相位不在四个声明相位内报 `plugin: %q serves phase %d, which is not one of the declared phases`；相位合法但没实现该相位的窄接口报 `plugin: %q serves phase %s but implements no narrow interface of that phase`。元素也不得服务两个相位：一个注册元素一个相位，相位的两个面可以同时带。
 
-**与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的元素装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献元素的次序，pipeline 不改写它。契约在 `plugin/phases.go` 与 `plugin/present.go`。
+**与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的元素装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献元素的次序，pipeline 不改写它。契约在 `plugin/phases.go` 与 `plugin/present.go`，呈现词汇（`Presentation`/`RenderedView`/`ObservationGap`）在 `view/presentation.go`，只引用 `event` 的事实身份。
 
 ---
 
@@ -72,8 +72,28 @@
 
 ---
 
+<a id="consumer-protocol"></a>
+## 四、消费器协议：三个实例，一条协议
+
+消费 event 的不止一处：回合驱动、时间驱动与宿主的外部驱动各跑一个循环。它们**共用一条协议**，差别只在驱动源（`agent/loop.go` 与 `evolution/reflection.go`）：
+
+1. **读事实**：按身份引用（`event.EventID`）读一条已提交的事实，读的是事实本身，不是它的副本。
+2. **消费**：用这条事实做一次执行——回合驱动的一次决策、时间驱动的一次反思判定、外部驱动的一轮宿主消费。
+3. **产新事实**：产物以**自己的身份**提交到持久层，并在自己的证据里引用读到的身份（决策记录的 `InputEvents`、反思扫描的判定依据）；产物与源事实是两条事实。
+4. **不许的两件事**：不许修改源事实——事实不可变、产出即锁定；不许绕过持久层——产物必须作为事实提交，只在内存里返回一个值不算产出。
+
+| 实例 | 驱动源 | 读的事实 | 产出的新事实（族） |
+|---|---|---|---|
+| `Loop.Drive`（回合驱动，`agent/loop.go`） | 一次 invocation 的 `Ready` 输入，以及终态通知的 `Backflow` 回填 | ready 输入里的事件，身份即 `event.EventID` | 决策记录与尝试记录（`rl.DecisionRecord` / `rl.AttemptRecord`，经 `agent.Recorder` 在产生点提交） |
+| `Reflection.Tick`（时间驱动，`evolution/reflection.go`） | 宿主按节拍调用 `Tick`，节奏下限由 `ReflectionCadence` 判定 | 事实链上 watermark 之后、lineage 非自管的已提交事实（观察面） | 反思输入事件（`event.TypeExternalInput`，lineage 为 reflection）；它再交给回合驱动消费 |
+| 宿主循环（外部驱动） | 宿主自己的调度与传输（`Run` 的 sink、`task.WithEnvelopeDeliverer`） | 宿主选中并交进 `Ready` 的事实 | 宿主自己提交的事实：框架在此只给边界，不给循环 |
+
+回合实例与时间实例**不互相收编**：`Tick` 没有 Invocation 与决策语义，把它塞进 `Loop` 的一个相位会造出一个不存在的相位。两个框架内实例由同一条协议用例固定——各读一条事实、各产一条新事实、源事实不变（`tests/integration/evolution/consumer_protocol_test.go`）。
+
+---
+
 <a id="subagent-sources"></a>
-## 四、call_subagent：两个装配源，二选一
+## 五、call_subagent：两个装配源，二选一
 
 扩展者只需给**恰好一个**源：一个 agents 文件，或一组显式参数。两者同给不是"后者覆盖前者"，而是具名拒绝。
 
@@ -128,7 +148,7 @@ review the change and answer with the findings
 ---
 
 <a id="preset-tools"></a>
-## 五、预置工具的声明写法
+## 六、预置工具的声明写法
 
 扩展者只需在声明的 `tools:` 里引用预置名，参数名是闭集；引用一个预置名之外的引用不会被拒，它留给宿主贡献的工具解析。
 

@@ -7,6 +7,9 @@ belongs to, and the event payload itself.
 The payload keeps the native locked tRPC model message, so no second message
 representation is built beside it. Every identifier is a distinct string type,
 so a session identifier cannot be passed where an agent identifier is expected.
+The package also declares Fact, the fact category contract each fact family
+satisfies in its own package; the families are registered in the fact vocabulary
+page.
 
 CONSTANTS
 
@@ -153,8 +156,36 @@ type Event struct {
     shadow message, the Message field below changes to that local type instead
     of the native model message.
 
+func (e Event) FactKey() string
+    FactKey returns the event's canonical key as its fact identity, spelt as the
+    hex string the store holds the event under; Type and Timestamp describe that
+    fact and never re-identify it.
+
+func (e Event) FactType() string
+    FactType returns the event's frozen type, one of the Type constants of this
+    package.
+
 type EventID string
     EventID is the canonical identity of a stored event.
+
+type Fact interface {
+	// FactKey is the identity the fact is quoted by: one fact answers the same
+	// key every time it is asked, and a retry keeps the original identity.
+	FactKey() string
+	// FactType is the frozen type the fact is read as.
+	FactType() string
+}
+    Fact is the fact category contract every fact family satisfies: the identity
+    it is quoted by and the frozen type it is read as. Both questions are
+    asked of the fact as it stands, because a fact is immutable once produced —
+    neither answer is ever re-derived from the store or from the consumer that
+    reads it.
+
+    The identity is a plain string rather than EventID: it is a spelling the
+    vocabulary registers, so a family living in a package that must not import
+    this one still states it. The families, the package each of them lives
+    in and the mechanism that locks each identity are registered in the fact
+    vocabulary page; the event family below is the canonical one.
 
 type InstanceID string
     InstanceID identifies one runtime instance. Rebuilding an agent under the

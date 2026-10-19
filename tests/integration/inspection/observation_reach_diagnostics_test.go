@@ -18,10 +18,10 @@ import (
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/view"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -350,7 +350,7 @@ func TestObservationReachDiagnostics(t *testing.T) {
 
 // runPresentationOf reports the After presentation of the named committed
 // fact, or nil when the run holds none for it.
-func runPresentationOf(run *tagent.Run, id event.EventID) *plugin.Presentation {
+func runPresentationOf(run *tagent.Run, id event.EventID) *view.Presentation {
 	for _, pres := range run.Presentations() {
 		if pres.Fact == id {
 			got := pres

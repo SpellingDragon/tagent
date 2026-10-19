@@ -713,7 +713,7 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     MUST borrow the binding generation effective at each decision's own start.
     MUST NOT let an admission receipt stand for the result of the call.
 
-func (r *Run) Presentations() []plugin.Presentation
+func (r *Run) Presentations() []view.Presentation
     Presentations reports the After pass presentations this run handed to its
     diagnostic read face, in the order the facts committed, as a copy the caller
     owns. The presentations are read-out material beside the committed facts;

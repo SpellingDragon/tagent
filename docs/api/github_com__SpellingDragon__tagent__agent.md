@@ -499,7 +499,7 @@ func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) err
     and confirm its stop only when it really ended. MUST NOT read a cancelled
     request, an emptied queue or an elapsed timeout as a stop.
 
-type PresentationSink func(presentation plugin.Presentation)
+type PresentationSink func(presentation view.Presentation)
     PresentationSink consumes the After pass presentation of one committed fact:
     the views its presenters rendered beside the visible gaps its failed
     observers left. The sink is the read-out face the presentation is handed to

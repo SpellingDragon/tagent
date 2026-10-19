@@ -6,6 +6,7 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/view"
 )
 
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
@@ -100,7 +101,7 @@ var (
 
 	_ func(Pipeline, context.Context, trpcmodel.ToolCall) (CallPass, error) = Pipeline.Before
 
-	_ func(Pipeline, context.Context, event.EventID) Presentation = Pipeline.After
+	_ func(Pipeline, context.Context, event.EventID) view.Presentation = Pipeline.After
 
 	_ error = ErrCallIdentityChanged
 
@@ -239,19 +240,19 @@ var (
 		TriggerSource: "",
 	}
 
-	_ = Presentation{
+	_ = view.Presentation{
 		Fact:  "",
 		Views: nil,
 		Gaps:  nil,
 	}
 
-	_ = ObservationGap{
+	_ = view.ObservationGap{
 		Plugin: "",
 		Fact:   "",
 		Err:    nil,
 	}
 
-	_ = RenderedView{
+	_ = view.RenderedView{
 		Plugin:  "",
 		Text:    "",
 		Dropped: false,
