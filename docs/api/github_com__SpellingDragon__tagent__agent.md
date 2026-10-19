@@ -214,8 +214,12 @@ type Delegation struct {
 
     The call is admitted as a task, so the caller is answered by a receipt and
     this record carries the later progress and terminal of that same task.
-    The delegated turn runs in the session the application selected explicitly,
-    and a delegation never creates a private writable history of its own.
+    The delegated admission keys its own suffix beside the call identity:
+    the tool-call task the wrapper admits for the same native call is a distinct
+    admission, and sharing the key would dedup the delegation into the wrapper's
+    receipt. The delegated turn runs in the session the application selected
+    explicitly, and a delegation never creates a private writable history of its
+    own.
 
 type DelegationTasks interface {
 	// Admit admits one delegated call as a task. A repeated admission of the same

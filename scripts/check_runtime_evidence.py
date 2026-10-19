@@ -38,7 +38,7 @@ import sys
 
 import runtime_checklib as lib
 
-EXPECTED_SCENARIOS = 10
+EXPECTED_SCENARIOS = 12
 # Default verification set: the complete golden. A contract may register named
 # subsets (e.g. "deterministic") that exclude resource-bound scenarios; a subset
 # run must report the outstanding scenarios rather than a full pass.

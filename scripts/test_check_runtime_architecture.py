@@ -229,7 +229,7 @@ class ImplementationTest(unittest.TestCase):
         code, out, err = self.run_impl(go_list_stream(self.policy))
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["in_scope_packages"], 20)
+        self.assertEqual(payload["counts"]["in_scope_packages"], 22)
         self.assertEqual(payload["counts"]["missing_required_packages"], 0)
         self.assertIsNone(payload["productVerified"])
         self.assertTrue(any("injected" in note for note in payload["notes"]))

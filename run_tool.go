@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/agent"
@@ -13,7 +14,9 @@ import (
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/state"
 	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/tool/subagent"
 
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -54,11 +57,16 @@ func (r *Run) suppliers(agents map[event.AgentID]NativeAgent) map[event.AgentID]
 				}
 				return contributed.Model, func(context.Context) error { return nil }, nil
 			},
-			tools: func(context.Context, config.AgentSpec) ([]trpctool.Tool, trpctool.ToolSet, func(context.Context) error, error) {
-				native := make([]trpctool.Tool, 0, len(contributed.Tools))
+			tools: func(ctx context.Context, spec config.AgentSpec) ([]trpctool.Tool, trpctool.ToolSet, func(context.Context) error, error) {
+				native := make([]trpctool.Tool, 0, len(contributed.Tools)+len(spec.Tools))
 				for _, tool := range contributed.Tools {
 					native = append(native, tool)
 				}
+				presets, err := r.presetTools(ctx, agents, id, spec, native)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				native = append(native, presets...)
 				return native, nil, func(context.Context) error { return nil }, nil
 			},
 			prompt: func(_ context.Context, spec config.AgentSpec) (state.PromptSource, error) {
@@ -81,6 +89,160 @@ func (r *Run) suppliers(agents map[event.AgentID]NativeAgent) map[event.AgentID]
 		}
 	}
 	return out
+}
+
+// presetTools resolves the preset references one declaration names into the
+// tools they reference, beside the tools the host contributed: the knowledge
+// and recall references resolve through the preset face of the sub-agent
+// package, and the call_subagent reference resolves through the delegation face
+// of this run. A preset tool the host already contributed under the same name
+// is dropped, so the host contribution stays the one the model sees.
+func (r *Run) presetTools(ctx context.Context, agents map[event.AgentID]NativeAgent, id event.AgentID, spec config.AgentSpec, native []trpctool.Tool) ([]trpctool.Tool, error) {
+	refs := make([]config.ToolRef, 0, len(spec.Tools))
+	delegate := false
+	for _, ref := range spec.Tools {
+		if ref.Name == subagent.CallSubagentRef {
+			delegate = true
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	presets, err := subagent.ResolvePresets(ctx, refs, subagent.PresetOptions{Recall: r.Recall})
+	if err != nil {
+		return nil, err
+	}
+	assembled := append(append([]trpctool.Tool(nil), native...), presets...)
+	if delegate {
+		delegation, err := r.presetSubagent(ctx, agents, id, spec, assembled)
+		if err != nil {
+			return nil, err
+		}
+		presets = append(presets, delegation)
+	}
+	declared := make(map[string]bool, len(native))
+	for _, tool := range native {
+		if declaration := tool.Declaration(); declaration != nil {
+			declared[declaration.Name] = true
+		}
+	}
+	out := make([]trpctool.Tool, 0, len(presets))
+	for _, tool := range presets {
+		name := ""
+		if declaration := tool.Declaration(); declaration != nil {
+			name = declaration.Name
+		}
+		if name != "" && declared[name] {
+			continue
+		}
+		if name != "" {
+			declared[name] = true
+		}
+		out = append(out, tool)
+	}
+	return out, nil
+}
+
+// presetSubagent builds the call_subagent tool one declaration references: the
+// parent assembly is this agent's own declaration — its identity, its model, the
+// tools assembled beside it and the prompt its files carry — and the builder
+// resolves the model, skill and tool references of a delegated assembly against
+// the same pieces. The delegation and borrowing faces are this run's own, so a
+// delegated call is admitted as a task of this run.
+func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]NativeAgent, id event.AgentID, spec config.AgentSpec, assembled []trpctool.Tool) (*subagent.Tool, error) {
+	parent, err := presetAssembly(ctx, spec, assembled)
+	if err != nil {
+		return nil, err
+	}
+	builder := subagent.Builder{
+		Model: func(_ context.Context, name string) (model.Model, error) {
+			if name == "" {
+				return nil, subagent.ErrModelMissing
+			}
+			for _, candidate := range agents {
+				if candidate.Model != nil && candidate.Model.Info().Name == name {
+					return candidate.Model, nil
+				}
+			}
+			return nil, fmt.Errorf("%w: %q", subagent.ErrModelUnresolved, name)
+		},
+		Tools: func(_ context.Context, names []string) ([]trpctool.Tool, error) {
+			byName := make(map[string]trpctool.Tool, len(assembled))
+			for _, tool := range assembled {
+				if declaration := tool.Declaration(); declaration != nil && declaration.Name != "" {
+					byName[declaration.Name] = tool
+				}
+			}
+			out := make([]trpctool.Tool, 0, len(names))
+			for _, name := range names {
+				tool, found := byName[name]
+				if !found {
+					return nil, fmt.Errorf("%w: tool reference %q", subagent.ErrResolverMissing, name)
+				}
+				out = append(out, tool)
+			}
+			return out, nil
+		},
+	}
+	if roots := skillRoots(spec.Files); len(roots) > 0 {
+		repository, err := skill.NewFSRepository(roots...)
+		if err != nil {
+			return nil, fmt.Errorf("tagent: open the skill repository of agent %q: %w", id, err)
+		}
+		builder.Skills = func(context.Context, []string) (skill.Repository, error) { return repository, nil }
+	}
+	return subagent.NewTool(subagent.ToolOptions{
+		Parent:     parent,
+		Builder:    builder,
+		Delegation: r.delegations,
+		Bindings:   r.bindings,
+	})
+}
+
+// presetAssembly resolves the assembly a delegated declaration inherits from:
+// the declaration's own identity, model and assembled tool names beside the
+// prompt its prompt files carry.
+func presetAssembly(ctx context.Context, spec config.AgentSpec, assembled []trpctool.Tool) (*subagent.Assembly, error) {
+	prompt, err := presetPrompt(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	tools := make([]string, 0, len(assembled))
+	for _, tool := range assembled {
+		if declaration := tool.Declaration(); declaration != nil && declaration.Name != "" {
+			tools = append(tools, declaration.Name)
+		}
+	}
+	return &subagent.Assembly{
+		Definition: subagent.Definition{
+			Name:  spec.ID,
+			Model: spec.Model,
+			Tools: tools,
+		},
+		Instruction: prompt,
+	}, nil
+}
+
+// presetPrompt reads the prompt text the declared prompt files carry, in the
+// declaration order, through the request-boundary file source.
+func presetPrompt(ctx context.Context, spec config.AgentSpec) (string, error) {
+	fixer, err := newFileFixer(spec.Files)
+	if err != nil {
+		return "", err
+	}
+	snapshot, err := fixer.fixate(ctx, state.PromptSource{Files: spec.Files})
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(snapshot.Files))
+	for _, file := range snapshot.Files {
+		if file.Ref.Kind != config.FileKindPrompt {
+			continue
+		}
+		if content := strings.TrimSpace(file.Content); content != "" {
+			parts = append(parts, content)
+		}
+	}
+	return strings.Join(parts, "\n\n"), nil
 }
 
 // wrap is the admission wrap every native callable tool of this run is

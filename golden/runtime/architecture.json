@@ -147,7 +147,15 @@
     {
       "pattern": "bench",
       "role": "benchmark",
-      "edges": []
+      "edges": [],
+      "required": true,
+      "reason": "公开基准面（吞吐/恢复时延/内存基线）：只测公共入口，不进运行时依赖闭合。"
+    },
+    {
+      "pattern": "tool/subagent",
+      "role": "adapter",
+      "required": true,
+      "reason": "call_subagent 装配面：agents 文件/显式参数装配经 trpc 构建器落地，执行走既有 agent.Delegate task 化；不重造 provider/stream。"
     }
   ],
   "edges": [
@@ -172,7 +180,9 @@
         "memory/localfile",
         "memory/rustviking",
         "event",
-        "memory/search"
+        "memory/search",
+        "bench",
+        "tool/subagent"
       ],
       "forbidden": [],
       "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核）。"
@@ -443,6 +453,24 @@
         "rl"
       ],
       "reason": "memory 实现子包（检索端口/混合融合）：读 memory 原文引用与 event 身份；索引非真源。由主编排者随 04.P0.4 骨架登记（层E收口，2026-10-13）。"
+    },
+    {
+      "from": "bench",
+      "allow": [],
+      "reason": "基准只经公共入口（根组合面）驱动，不直连内部包。"
+    },
+    {
+      "from": "tool/subagent",
+      "allow": [
+        "agent",
+        "config",
+        "event",
+        "memory",
+        "memory/search",
+        "state",
+        "task"
+      ],
+      "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖。"
     }
   ],
   "external": {

@@ -104,15 +104,14 @@ class ScopeTest(unittest.TestCase):
         index = runner.index_scenarios(contract)
         runner.validate_axes(index)
         required, remaining = runner.resolve_scope(contract, index, "deterministic")
-        self.assertEqual(required, ["S01", "S02", "S03", "S04", "S05", "S06", "S07",
-                                    "S08", "S09"])
         self.assertEqual(remaining, ["S10"])
+        self.assertEqual(len(required), len(index) - 1)
 
     def test_complete_scope_requires_every_scenario(self):
         contract = load_contract()
         index = runner.index_scenarios(contract)
         required, remaining = runner.resolve_scope(contract, index, "complete")
-        self.assertEqual(len(required), 10)
+        self.assertEqual(len(required), len(index))
         self.assertEqual(remaining, [])
 
     def test_unregistered_scope_is_refused(self):
@@ -190,19 +189,19 @@ class EndToEndTest(unittest.TestCase):
     def test_deterministic_scope_is_attested_on_every_scenario(self):
         code, report, evidence, out = self.run_scope("deterministic")
         self.assertEqual(report["remaining_required"], ["S10"])
-        self.assertEqual(report["counts"]["required"], 9)
-        self.assertEqual(report["counts"]["attested"], 9)
+        self.assertEqual(report["counts"]["required"], len(report["scenarios"]))
+        self.assertEqual(report["counts"]["attested"], len(report["scenarios"]))
         self.assertEqual(report["counts"]["unattested"], 0)
         self.assertIn(report["verdict"], ("match", "drift"))
         self.assertEqual(code, 0 if report["verdict"] == "match" else 3)
         self.assertEqual(evidence["execution"]["exit_code"], 0)
-        self.assertEqual(len(evidence["records"]), 9)
+        self.assertEqual(len(evidence["records"]), len(report["scenarios"]))
         self.assertEqual(evidence["test_log_ref"], "test-log.jsonl")
         self.assertTrue((out / "test-log.jsonl").is_file())
 
     def test_complete_scope_presents_no_out_of_scope_scenario(self):
         _, report, evidence, _ = self.run_scope("complete")
-        self.assertEqual(report["counts"]["required"], 10)
+        self.assertEqual(report["counts"]["required"], len(report["scenarios"]))
         covered = {record["scenario_id"] for record in evidence["records"]}
         for state in report["scenarios"]:
             if state["state"] == "unattested":

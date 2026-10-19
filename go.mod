@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/bufbuild/protocompile v0.14.1 // indirect
 	github.com/getkin/kin-openapi v0.124.0 // indirect
 	github.com/go-openapi/jsonpointer v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.8 // indirect
@@ -27,6 +28,7 @@ require (
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+	github.com/yuin/goldmark v1.4.13 // indirect
 	golang.org/x/net v0.47.0 // indirect
 )
 
