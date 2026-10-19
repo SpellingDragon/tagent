@@ -66,6 +66,9 @@ type RewardRecord struct {
 	DerivedFrom []RewardSource
 	// DerivedAt is the time the reward was derived.
 	DerivedAt time.Time
+	// Verdict carries the pass outcome and its reasons for a reward derived
+	// from a verification; it is empty for a reward derived from feedback.
+	Verdict
 }
 
 // RewardSource references one feedback a reward was derived from: the feedback
@@ -96,6 +99,7 @@ var (
 		RuleVersion:  "",
 		DerivedFrom:  []RewardSource{},
 		DerivedAt:    time.Time{},
+		Verdict:      Verdict{},
 	}
 
 	_ = RewardSource{

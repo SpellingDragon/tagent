@@ -74,6 +74,10 @@ type Turn struct {
 	// Terminal is the terminal the latest decision reduced to, or KindUnknown
 	// while no decision reached one.
 	Terminal model.Kind
+	// FinalRound names why the closing round of this drive ran: the round budget
+	// or the time budget was spent, so the latest decision delivers instead of
+	// continuing. It stands empty for a drive that ended on its own terminal.
+	FinalRound FinalRoundReason
 }
 
 // Loop drives the persistent event loop of one invocation: borrow the binding
@@ -88,6 +92,7 @@ type Turn struct {
 // - This loop is the runtime's only tool-call loop: no framework Runner or LLMAgent drives a second loop beside it. The terminal of a decision is read from the reduction outcome and never re-derived here: this file does not classify the six states and does not judge the terminal on stream mechanics.
 // - A decision borrows the binding generation effective when it starts executing and keeps that handle until the work it set in motion has ended, while a publication during the decision never changes the generation it runs with.
 // - A settled task notification backflows to the invocation that issued the call and drives that invocation's next decision, which borrows the generation effective at its own start — never one chosen in advance.
+// - The watchdog budget of a drive is read at the boundary between its rounds: the round that boundary finds the budget spent is the closing round, and the drive ends when that round returns.
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 type Loop struct {
 	borrow   state.Borrow
@@ -104,6 +109,7 @@ type Loop struct {
 	boundary RequestFace
 	snapshot RequestSnapshotFace
 	watch    func(taskID event.TaskID, stopped func() bool) error
+	final    FinalRoundPolicy
 	losses   []RecordingLoss
 }
 
@@ -130,6 +136,7 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // - The settled result facts one decision paired are the stored input the next decision reduces.
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
 // - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
+// - A drive whose budget is spent runs one closing round and ends there: the closing round delivers what the range already produced, its transcript is committed the same way, and the obligation it opens is none.
 func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
 	turn := Turn{InvocationID: inv.InvocationID, Terminal: model.KindUnknown}
 	production := &inFlightProducer{}
@@ -139,14 +146,23 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
 	transcript := append(append([]model.Message(nil), history...), aggregateReady(inv.Ready)...)
 	l.recordEpisode(ctx, inv)
 	inputs := readyEventIDs(inv.Ready)
+	policy := l.finalRound()
+	started := time.Now()
+	rounds := 0
 	for {
-		decision, outcome, receipts, observations, facts, err := l.decide(ctx, inv, transcript, inputs)
+		round := closingRound(policy, rounds, time.Since(started))
+		decision, outcome, receipts, observations, facts, err := l.decide(ctx, inv, transcript, inputs, round)
 		if err != nil {
 			return turn, err
 		}
 		turn.Decisions = append(turn.Decisions, decision)
 		turn.Terminal = outcome.Kind
 		inputs = append(inputs, facts...)
+		if round.final {
+			turn.FinalRound = round.reason
+			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
+			return turn, nil
+		}
 		if len(receipts) == 0 && len(observations) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
 			return turn, nil
@@ -154,6 +170,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
 		transcript = append(transcript, assistantOf(outcome))
 		transcript = append(transcript, receipts...)
 		transcript = append(transcript, observations...)
+		rounds++
 	}
 }
 
@@ -299,8 +316,9 @@ func (p *inFlightProducer) stop() {
 
 // requestBoundary assembles the request-boundary material of one decision
 // through the attached face, or returns an empty view while no face is
-// attached: the request then runs on its transcript alone.
-func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding state.AgentBinding) (BoundaryView, error) {
+// attached: the request then runs on its transcript alone. The boundary of a
+// closing round is marked as such, so the face reads the round a request is.
+func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding state.AgentBinding, final bool) (BoundaryView, error) {
 	l.mu.Lock()
 	face := l.boundary
 	l.mu.Unlock()
@@ -308,9 +326,10 @@ func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding stat
 		return BoundaryView{}, nil
 	}
 	return face(ctx, RequestBoundary{
-		Agent:   inv.Address.AgentID,
-		Chain:   RequestChain{SessionID: inv.Address.SessionID},
-		Binding: binding,
+		Agent:      inv.Address.AgentID,
+		Chain:      RequestChain{SessionID: inv.Address.SessionID},
+		Binding:    binding,
+		FinalRound: final,
 	})
 }
 
@@ -399,7 +418,13 @@ func (l *Loop) publish(presentation view.Presentation) {
 // - The model decision reached its terminal: the session slot is free again while the admitted tools run as background tasks.
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
 // - The model production of one decision is watched beside its invocation identity and confirms its stop when the reduction really ended.
-func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, inputs []event.EventID) (Decision, model.Outcome, []model.Message, []model.Message, []event.EventID, error) {
+// - The closing round marks its request on the boundary, carries the closing instruction after the transcript, runs under the short closing timeout and admits none of the calls it issues.
+func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, inputs []event.EventID, round decisionRound) (Decision, model.Outcome, []model.Message, []model.Message, []event.EventID, error) {
+	if round.final {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, round.timeout)
+		defer cancel()
+	}
 	decisionID := l.nextDecisionID(inv)
 	attemptID := event.AttemptID(fmt.Sprintf("attempt-%s", decisionID))
 	if err := l.occupy(ctx, inv, decisionID); err != nil {
@@ -424,7 +449,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		}
 	}
 	view := modelViewOf(handle.Binding)
-	boundary, err := l.requestBoundary(ctx, inv, handle.Binding)
+	boundary, err := l.requestBoundary(ctx, inv, handle.Binding, round.final)
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
 		_ = handle.Release(ctx)
@@ -433,9 +458,12 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if boundary.PromptVersion != "" {
 		view.promptVersion = boundary.PromptVersion
 	}
-	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript))
+	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript)+1)
 	messages = append(messages, boundary.Messages...)
 	messages = append(messages, transcript...)
+	if round.final {
+		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
+	}
 	req := model.Request{Messages: messages, Tools: tools}
 	l.fixRequestSnapshot(ctx, decisionID, view, handle.Binding, req)
 
@@ -462,10 +490,14 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	var observations []model.Message
 	var facts []event.EventID
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
-		receipts, observations, facts, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
-		if err != nil {
-			_ = handle.Release(ctx)
-			return decision, outcome, nil, nil, nil, err
+		if round.final {
+			receipts = refuseClosingCalls(callsOf(outcome))
+		} else {
+			receipts, observations, facts, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
+			if err != nil {
+				_ = handle.Release(ctx)
+				return decision, outcome, nil, nil, nil, err
+			}
 		}
 	}
 	_ = handle.Release(ctx)

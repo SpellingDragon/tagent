@@ -16,6 +16,13 @@ func ExampleDelegationTasks()
     notification and reports that the obligation cleared only once it was
     delivered.
 
+func ExampleHandoffEnvelope()
+    ExampleHandoffEnvelope renders one cross-agent handoff in structured form:
+    the envelope names the task, the acceptance constraints, the grants,
+    the pending decisions and the refs, validates itself and renders
+    the external-context block a delegated turn reads in front of its
+    natural-language request.
+
 func ExampleHistoryFace()
     ExampleHistoryFace commits the transcript of one ended drive and reads it
     back beside the input the next drive aggregates.

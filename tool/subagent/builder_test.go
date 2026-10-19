@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/SpellingDragon/tagent/runtime/agent"
+
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -17,6 +19,8 @@ import (
 // - every declared reference is resolved through its injected resolver and handed to the tRPC builder
 // - the instruction the assembly carries reaches the model request of the turn
 // - the turn reports the assistant text the model answered with
+// - a turn carrying a handoff hands its external-context block to the model in front of the natural-language request
+// - a turn carrying no handoff hands the model the request alone
 // - an assembly naming no model, an unresolved model and a declared reference list with no resolver are refused by name
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestAssembledAgentServes(t *testing.T) {
@@ -80,6 +84,67 @@ func TestAssembledAgentServes(t *testing.T) {
 		requireNames(t, "skills", skills, []string{"go-service-ops"})
 		requireNames(t, "tools", tools, []string{"exec_run"})
 		requireNames(t, "mcp", mcp, []string{"mcp-lsp"})
+	})
+
+	t.Run("a turn carrying a handoff hands its block in front of the request", func(t *testing.T) {
+		provider := &serveModel{name: "model-reviewer", answer: "review recorded"}
+		builder := Builder{Model: func(context.Context, string) (trpcmodel.Model, error) {
+			return provider, nil
+		}}
+		assembly := &Assembly{Definition: Definition{Name: "reviewer", Model: "model-reviewer"}}
+		handoff := &agent.HandoffEnvelope{
+			Intent:      "review the change",
+			Constraints: []string{"every finding names a file"},
+			Grants:      []string{"tool:exec_run"},
+		}
+		if _, err := builder.Serve(ctx, assembly, Turn{
+			UserID:    "tenant-review",
+			SessionID: "session-review",
+			Input:     "the change under review",
+			Handoff:   handoff,
+		}); err != nil {
+			t.Fatalf("serve one turn carrying a handoff = %v, want the assembled agent to answer", err)
+		}
+		requests := provider.recorded()
+		if len(requests) != 1 {
+			t.Fatalf("model requests = %d, want exactly one turn", len(requests))
+		}
+		content := requestContent(requests[0])
+		block := strings.Index(content, "[handoff envelope]")
+		request := strings.Index(content, "the change under review")
+		if block < 0 {
+			t.Fatalf("model request carries no handoff block: %q", content)
+		}
+		if request < 0 || block > request {
+			t.Fatalf("handoff block sits at %d and the request at %d, want the block in front of the request: %q", block, request, content)
+		}
+		for _, want := range []string{"intent: review the change", "- every finding names a file", "- tool:exec_run"} {
+			if !strings.Contains(content, want) {
+				t.Fatalf("model request carries no %q of the handoff: %q", want, content)
+			}
+		}
+	})
+
+	t.Run("a turn carrying no handoff hands the request alone", func(t *testing.T) {
+		provider := &serveModel{name: "model-reviewer", answer: "review recorded"}
+		builder := Builder{Model: func(context.Context, string) (trpcmodel.Model, error) {
+			return provider, nil
+		}}
+		assembly := &Assembly{Definition: Definition{Name: "reviewer", Model: "model-reviewer"}}
+		if _, err := builder.Serve(ctx, assembly, Turn{
+			UserID:    "tenant-review",
+			SessionID: "session-review",
+			Input:     "the change under review",
+		}); err != nil {
+			t.Fatalf("serve one turn carrying no handoff = %v, want the assembled agent to answer", err)
+		}
+		requests := provider.recorded()
+		if len(requests) != 1 {
+			t.Fatalf("model requests = %d, want exactly one turn", len(requests))
+		}
+		if content := requestContent(requests[0]); strings.Contains(content, "[handoff envelope]") {
+			t.Fatalf("model request carries a handoff block the turn did not declare: %q", content)
+		}
 	})
 
 	t.Run("an assembly naming no model is refused", func(t *testing.T) {
@@ -189,6 +254,14 @@ func (serveSkills) Get(name string) (*skill.Skill, error) {
 // Path reports the directory of the named skill; the stand-in repository holds none.
 func (serveSkills) Path(name string) (string, error) {
 	return "", errors.New("the stand-in repository holds no skill " + name)
+}
+
+// requestContent reports the content of the last message one request carries.
+func requestContent(req trpcmodel.Request) string {
+	if len(req.Messages) == 0 {
+		return ""
+	}
+	return req.Messages[len(req.Messages)-1].Content
 }
 
 // carriesInstruction reports whether one request carries the instruction as a system message.

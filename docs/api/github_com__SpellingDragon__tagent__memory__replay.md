@@ -14,6 +14,10 @@ A compaction payload is restored from the chain exactly as the fold left it
 positive keys hydrate from the chain — and the tail is paged by minimum event
 key and appended in EventKey write order, never by timestamp approximation.
 
+The causal relation ledger: the parent chain one fact chain's replay maintains,
+committed to the append-only journal before the held link moves, and rebuilt
+from that journal when the ledger is opened again.
+
 Presentation decisions and budget assembly.
 
 The projection layers the original text, the model view and the presentation
@@ -84,6 +88,15 @@ var (
 	// ref of the snapshot from the fact chain. The result it accompanies is
 	// partial and is never reported as a byte-exact rebuild.
 	ErrRebuildPartial = errors.New("memory: rebuild is partial: the fact chain misses snapshot keys")
+)
+var (
+	// ErrRelationsJournalUnwired reports a replay check asked of a ledger that
+	// holds no journal, so it has no durable source to compare against.
+	ErrRelationsJournalUnwired = errors.New("memory: the relation ledger holds no journal")
+	// ErrRelationsReplayMismatch reports a journal whose replay names a chain
+	// other than the one the ledger holds, so the served chain is not the durable
+	// record.
+	ErrRelationsReplayMismatch = errors.New("memory: the replayed relation chain differs from the held chain")
 )
 var (
 	// ErrBudgetInvalid reports a budget assembly asked to pack a request under a
@@ -233,18 +246,37 @@ type MemoryRelations struct {
     The replay maintains these links inside one (PartitionID, SessionID) chain,
     so a walk never crosses from one session's chain into another's.
 
-    The ledger is the one relation surface a rebuild writes through: it is the
-    only implementation, so the rebuild names it directly rather than declaring
-    a port with no second implementer behind it.
+    A ledger opened over a journal commits a link to that journal before the
+    held link moves: a SetParent that returns success names a link a later
+    replay reads back, and one that returns an error leaves the held chain as
+    it was. The ledger is the one relation surface a rebuild writes through:
+    it is the only implementation, so the rebuild names it directly rather than
+    declaring a port with no second implementer behind it.
 
 func NewMemoryRelations() *MemoryRelations
-    NewMemoryRelations returns an empty in-memory relation store.
+    NewMemoryRelations returns an empty relation ledger with no journal behind
+    it: its links live for the life of the process and declare no recovery
+    across process exit.
+
+func OpenMemoryRelations(root string) (*MemoryRelations, error)
+    OpenMemoryRelations opens the relation ledger rooted at root: every
+    record the journal holds is replayed into the held chain, and every link a
+    SetParent commits reaches that same journal before the held chain moves.
 
 func (r *MemoryRelations) GetParent(child event.EventID) (event.EventID, error)
     GetParent returns the parent of child, empty when there is none.
 
+func (r *MemoryRelations) Links() map[event.EventID]event.EventID
+    Links returns a copy of the parent links the ledger holds, so a caller can
+    compare a rebuilt chain against the one it serves.
+
 func (r *MemoryRelations) SetParent(child event.EventID, parent event.EventID) error
     SetParent sets the parent of child, or clears it when parent is empty.
+
+func (r *MemoryRelations) VerifyReplay(ctx context.Context) error
+    VerifyReplay reports whether the journal replays to the chain the ledger
+    holds, so a caller can assert the durable record and the served chain agree.
+    A ledger opened without a journal has no replay source and says so.
 
 type PresentationDecision struct {
 	// Key identifies the entry the decision was recorded for.

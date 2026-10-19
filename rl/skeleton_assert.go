@@ -156,6 +156,10 @@ const (
 	_ = BoundInFlight
 	_ = BoundBytes
 	_ = BoundClosed
+
+	_ = VerificationRuleHeuristic
+	_ = VerificationRuleLLMJudge
+	_ = DefaultVerificationPassScore
 )
 
 // The record production face and the versioned line keep their declared shapes:
@@ -327,6 +331,35 @@ var (
 
 	_ func(string, int) (*FileCaptureWriter, error) = NewFileCaptureWriter
 	_ func(string) (CaptureManifest, error)         = ReadCaptureSeal
+)
+
+// The open-domain verification port keeps its declared shape: one judging
+// method, the verdict fields, the offline verifier and the reward entry each
+// stay pinned by name and type.
+var (
+	_ Verifier = (Verifier)(nil)
+
+	_ func(Verifier, context.Context, EpisodeRecord) (Verification, error) = Verifier.Verify
+
+	_ = Verification{
+		Score:   0,
+		Passed:  false,
+		Reasons: []string{},
+	}
+
+	_ = Verdict{
+		Passed:  false,
+		Reasons: []string{},
+	}
+
+	_ func(...HeuristicOption) (*HeuristicVerifier, error)                           = NewHeuristicVerifier
+	_ func(*HeuristicVerifier, context.Context, EpisodeRecord) (Verification, error) = (*HeuristicVerifier).Verify
+	_ func(*HeuristicVerifier) string                                                = (*HeuristicVerifier).RuleVersion
+
+	_ func(Verifier, *RewardLedger, string) (*VerificationConsumer, error)                                                 = NewVerificationConsumer
+	_ func(*VerificationConsumer, context.Context, event.DecisionID, event.AttemptID, EpisodeRecord) (RewardRecord, error) = (*VerificationConsumer).Consume
+
+	_ func(*RewardLedger, event.DecisionID, event.AttemptID, string, Verification) (RewardRecord, error) = (*RewardLedger).RecordVerification
 )
 
 // The default capture bounds stay compile-time constants, so a queue is never

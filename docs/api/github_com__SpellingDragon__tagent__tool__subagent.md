@@ -11,6 +11,10 @@ turn of the agent that builder returns. The provider, the stream and the tool
 protocol stay the tRPC agent's own: this file resolves the reference names an
 assembly carries and drains the events of one turn.
 
+The structured handoff one call_subagent call declares beside its
+natural-language request: the fields the call names, the grants the assembled
+sub-agent actually holds, and the envelope the delegated turn receives.
+
 The preset tools of the configuration face live beside the sub-agent tool
 because they share one composition-root seam: a declared `knowledge`
 reference resolves onto the trpc knowledge tool over a loaded source,
@@ -99,6 +103,10 @@ var ErrFileShape = errors.New("the agents file shape is invalid")
 
 var ErrFileUnreadable = errors.New("the file cannot be read")
     ErrFileUnreadable reports an agents file or prompt file that cannot be read.
+
+var ErrHandoffArguments = errors.New("call_subagent: the handoff names no declared field")
+    ErrHandoffArguments reports a handoff object naming a key the declaration
+    does not name.
 
 var ErrKnowledgeEndpointUnwired = errors.New("knowledge: a remote endpoint is not wired")
     ErrKnowledgeEndpointUnwired reports a knowledge reference naming a remote
@@ -366,9 +374,12 @@ type Turn struct {
 	SessionID string
 	// Input is the request the turn starts from; empty runs on the instruction alone.
 	Input string
+	// Handoff is the structured handoff the turn receives beside that request; nil
+	// when the call declared none.
+	Handoff *agent.HandoffEnvelope
 }
-    Turn names one delegated turn: the session the application selected for it
-    and the request it starts from.
+    Turn names one delegated turn: the session the application selected for it,
+    the request it starts from and the structured handoff that request carries.
 
 type TurnResult struct {
 	// Content is the assistant text of the turn; empty when the turn produced none.

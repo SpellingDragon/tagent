@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/SpellingDragon/tagent/runtime/agent"
+
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
 	trpcevent "trpc.group/trpc-go/trpc-agent-go/event"
@@ -73,8 +75,8 @@ type TurnResult struct {
 	Content string
 }
 
-// Turn names one delegated turn: the session the application selected for it and the
-// request it starts from.
+// Turn names one delegated turn: the session the application selected for it, the
+// request it starts from and the structured handoff that request carries.
 type Turn struct {
 	// UserID is the user the selected session belongs to.
 	UserID string
@@ -82,6 +84,23 @@ type Turn struct {
 	SessionID string
 	// Input is the request the turn starts from; empty runs on the instruction alone.
 	Input string
+	// Handoff is the structured handoff the turn receives beside that request; nil
+	// when the call declared none.
+	Handoff *agent.HandoffEnvelope
+}
+
+// request returns the input one delegated turn hands its agent: the external-context
+// block of the handoff in front of the natural-language request when the turn carries
+// one, and the request alone when it carries none.
+func (t Turn) request() string {
+	if t.Handoff == nil {
+		return t.Input
+	}
+	block := t.Handoff.ExternalContext()
+	if t.Input == "" {
+		return block
+	}
+	return block + "\n" + t.Input
 }
 
 // Build returns the live agent one assembly describes: the model, the skill repository,
@@ -140,8 +159,8 @@ func (b Builder) Serve(ctx context.Context, a *Assembly, turn Turn) (TurnResult,
 	driven := runner.NewRunner(a.Name, built, opts...)
 	defer func() { _ = driven.Close() }()
 	var input trpcmodel.Message
-	if turn.Input != "" {
-		input = trpcmodel.NewUserMessage(turn.Input)
+	if content := turn.request(); content != "" {
+		input = trpcmodel.NewUserMessage(content)
 	}
 	events, err := driven.Run(ctx, turn.UserID, turn.SessionID, input)
 	if err != nil {

@@ -133,6 +133,7 @@ var (
 		InvocationID: "",
 		Decisions:    []Decision{},
 		Terminal:     model.KindUnknown,
+		FinalRound:   FinalRoundNone,
 	}
 
 	_ func(state.Borrow, *state.Occupancy, event.InstanceID, FactResolver) *Loop = NewLoop
@@ -165,6 +166,19 @@ var (
 	// registers each in-flight production beside the work identity it runs
 	// behind and the close confirms its real stop through the predicate.
 	_ func(*Loop, func(event.TaskID, func() bool) error) = (*Loop).SetWatch
+
+	// The watchdog budget is attached through its own setter, so the declared
+	// construction shape above stays exactly as it is: a zero policy keeps every
+	// drive unbounded, and the reasons a closing round runs under are named.
+	_ func(*Loop, FinalRoundPolicy) = (*Loop).SetFinalRound
+
+	_ = FinalRoundPolicy{MaxRounds: 0, Budget: 0, Timeout: 0, Prompt: ""}
+
+	_ FinalRoundReason = FinalRoundNone
+
+	_ FinalRoundReason = FinalRoundRounds
+
+	_ FinalRoundReason = FinalRoundBudget
 
 	// The safe request snapshot face is attached through its own setter, so the
 	// declared construction shape above stays exactly as it is: the face is
@@ -203,6 +217,27 @@ var (
 	_ func(*Loop) []RecordingLoss = (*Loop).RecordingLosses
 )
 
+// The handoff envelope keeps its declared shape: the five fields the four-segment
+// handoff contract maps onto, the validation that refuses an envelope with no
+// intent or no acceptance constraint, and the external-context block a delegated
+// turn carries in front of its request.
+var (
+	_ = HandoffEnvelope{
+		Intent:           "",
+		Constraints:      []string{},
+		Grants:           []string{},
+		PendingDecisions: []string{},
+		Refs:             []event.EventID{},
+	}
+
+	_ func(HandoffEnvelope) error = HandoffEnvelope.Validate
+
+	_ func(HandoffEnvelope) string = HandoffEnvelope.ExternalContext
+
+	_ error = ErrHandoffIntentMissing
+	_ error = ErrHandoffConstraintsMissing
+)
+
 // The request-boundary assembly keeps its declared shape: the causal chain
 // identity the assembly is isolated under, the boundary material the request
 // face reads, the view it returns, and the face setter beside the frozen
@@ -211,7 +246,7 @@ var (
 var (
 	_ = RequestChain{PartitionID: 0, SessionID: ""}
 
-	_ = RequestBoundary{Agent: "", Chain: RequestChain{PartitionID: 0, SessionID: ""}, Binding: state.AgentBinding{}}
+	_ = RequestBoundary{Agent: "", Chain: RequestChain{PartitionID: 0, SessionID: ""}, Binding: state.AgentBinding{}, FinalRound: false}
 
 	_ = BoundaryView{Messages: []model.Message{}, PromptVersion: ""}
 

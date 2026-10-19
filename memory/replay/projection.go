@@ -239,48 +239,6 @@ func (c *MemoryEventChain) Fact(ctx context.Context, key event.EventID) (ChainFa
 	return fact, held, nil
 }
 
-// MemoryRelations is the causal parent ledger between committed facts: the
-// parent of one fact is set and read back here, never on the fact payload. The
-// replay maintains these links inside one (PartitionID, SessionID) chain, so a
-// walk never crosses from one session's chain into another's.
-//
-// The ledger is the one relation surface a rebuild writes through: it is the
-// only implementation, so the rebuild names it directly rather than declaring a
-// port with no second implementer behind it.
-//
-// 契约: docs/wiki/memory/memory-architecture.md#hard-contracts
-type MemoryRelations struct {
-	mu      sync.Mutex
-	parents map[event.EventID]event.EventID
-}
-
-// NewMemoryRelations returns an empty in-memory relation store.
-func NewMemoryRelations() *MemoryRelations {
-	return &MemoryRelations{parents: map[event.EventID]event.EventID{}}
-}
-
-// SetParent sets the parent of child, or clears it when parent is empty.
-func (r *MemoryRelations) SetParent(child event.EventID, parent event.EventID) error {
-	if child == "" {
-		return ledger.ErrKeyRequired
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if parent == "" {
-		delete(r.parents, child)
-		return nil
-	}
-	r.parents[child] = parent
-	return nil
-}
-
-// GetParent returns the parent of child, empty when there is none.
-func (r *MemoryRelations) GetParent(child event.EventID) (event.EventID, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.parents[child], nil
-}
-
 // CompactionFact is the compaction payload one fold leaves on the fact chain:
 // the summary entry the fold reports first, the retained refs of the folded run
 // in their interleaved payload order, the event-key boundary the snapshot

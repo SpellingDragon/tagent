@@ -27,7 +27,8 @@ var ErrRequestChainSessionRequired = errors.New("agent: projected request assemb
 
 // RequestBoundary is the material one request boundary assembles its prefix
 // from: the agent whose request it is, the causal chain the replay is read
-// under and the borrowed binding the fixed file contents are read for.
+// under, the borrowed binding the fixed file contents are read for and whether
+// the request is the closing round of its drive.
 type RequestBoundary struct {
 	// Agent is the agent whose request is being assembled.
 	Agent event.AgentID
@@ -35,6 +36,10 @@ type RequestBoundary struct {
 	Chain RequestChain
 	// Binding is the borrowed binding generation the request runs on.
 	Binding state.AgentBinding
+	// FinalRound marks the request of a drive's closing round: the round the
+	// model delivers in after its budget is spent, whose tool calls are admitted
+	// nowhere. It stands false for every ordinary request.
+	FinalRound bool
 }
 
 // BoundaryView is what the request boundary settled on: the prefix messages

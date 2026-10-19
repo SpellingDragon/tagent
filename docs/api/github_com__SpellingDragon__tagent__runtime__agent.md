@@ -60,6 +60,15 @@ var (
     ErrProducerMissing are the named refusals of the close: each one names the
     case it refuses instead of answering a silent default.
 
+var ErrHandoffConstraintsMissing = errors.New("agent: the handoff envelope names no acceptance constraint")
+    ErrHandoffConstraintsMissing reports an envelope that carries no non-empty
+    acceptance constraint, so no handed-back result could be accepted or refused
+    against it.
+
+var ErrHandoffIntentMissing = errors.New("agent: the handoff envelope names no intent")
+    ErrHandoffIntentMissing reports an envelope that names no intent, so no
+    delegated turn could tell which task it serves.
+
 var ErrRequestChainSessionRequired = errors.New("agent: projected request assembly needs a named session chain")
     ErrRequestChainSessionRequired reports a request assembly under a chain that
     names no session: assembling one would join every user of the partition into
@@ -323,6 +332,85 @@ type FactResolver func(id event.EventID) (model.Message, bool)
     carries. The fact identity comes from the settled notification of a call,
     so the loop pairs the tool message with the call it answers.
 
+type FinalRoundPolicy struct {
+	// MaxRounds bounds the tool rounds one drive may run; 0 removes the bound.
+	MaxRounds int
+	// Budget bounds the time one drive may spend; 0 removes the bound.
+	Budget time.Duration
+	// Timeout bounds the closing round itself; 0 takes defaultFinalRoundTimeout.
+	Timeout time.Duration
+	// Prompt is the closing instruction handed to the model; "" takes
+	// defaultFinalRoundPrompt.
+	Prompt string
+}
+    FinalRoundPolicy is the watchdog budget of one drive: how many tool rounds
+    the drive may run and how long it may spend before its next decision becomes
+    the closing round, the instruction that round carries and the short timeout
+    it runs under.
+
+    The zero policy keeps every drive of the loop unbounded, exactly as a drive
+    runs with no watchdog attached: a loop that attaches no policy never meets
+    a closing round. The closing round is the round the model delivers in —
+    it runs once the budget is spent, it is marked as the closing round on
+    the request boundary of its decision, and the drive ends when it returns.
+    The redline list (4 rules): MUST keep every drive unbounded while both
+    budgets are zero. MUST read the budget at a round boundary and never cut a
+    decision already in flight. MUST run one closing round at most, and end the
+    drive when it returns. MUST NOT admit a tool call the closing round issues:
+    delivering opens no new obligation.
+
+type FinalRoundReason string
+    FinalRoundReason names why the closing round of a drive ran, and stands
+    empty on a drive that ended on its own terminal.
+
+const (
+	// FinalRoundNone reports a round that is not the closing round of its drive.
+	FinalRoundNone FinalRoundReason = ""
+	// FinalRoundRounds reports a closing round the spent round budget owed.
+	FinalRoundRounds FinalRoundReason = "rounds"
+	// FinalRoundBudget reports a closing round the spent time budget owed.
+	FinalRoundBudget FinalRoundReason = "budget"
+)
+    FinalRoundNone, FinalRoundRounds and FinalRoundBudget name the reasons a
+    closing round runs under.
+
+type HandoffEnvelope struct {
+	// Intent is the task the delegated turn exists to serve.
+	Intent string
+	// Constraints lists the acceptance criteria the handed-back result must satisfy.
+	Constraints []string
+	// Grants lists the capabilities the handoff grants the delegated turn, each
+	// named with the kind it belongs to (tool, skill or mcp).
+	Grants []string
+	// PendingDecisions lists the decisions the delegated turn may not take on its own.
+	PendingDecisions []string
+	// Refs names the stored facts the handed-off context starts from.
+	Refs []event.EventID
+}
+    HandoffEnvelope is one cross-agent handoff in structured form: the task the
+    delegated turn serves, the acceptance constraints its result is held to, the
+    capabilities the handoff grants it, the decisions it may not take on its own
+    and the stored facts it starts from. It travels beside the natural-language
+    request of the call and never replaces it.
+
+    The four segments of the handoff contract map onto this record: - the
+    task is Intent; - the context summary is Refs beside the natural-language
+    request; - the deliverable stays the natural-language request's own outcome;
+    - the acceptance criteria are Constraints.
+
+func (h HandoffEnvelope) ExternalContext() string
+    ExternalContext renders the envelope as the structured block one delegated
+    turn carries in front of its natural-language request: the intent,
+    the acceptance constraints, the grants, the pending decisions and the refs,
+    each under its own heading in that fixed order. A list with no entry keeps
+    its heading and states that it carries none, so the shape of the block never
+    depends on its content.
+
+func (h HandoffEnvelope) Validate() error
+    Validate reports whether the envelope names what a delegated turn could
+    serve and be accepted against: a non-empty intent and at least one non-empty
+    constraint.
+
 type HistoryFace interface {
 	// SessionHistory reports the messages the named session accumulated across
 	// the drives that already ended on it.
@@ -380,13 +468,16 @@ type Loop struct {
     independent of the other's terminal. - This loop is the runtime's only
     tool-call loop: no framework Runner or LLMAgent drives a second loop
     beside it. The terminal of a decision is read from the reduction outcome
-    and never re-derived here: this file does not classify the six states
-    and does not judge the terminal on stream mechanics. - A decision
-    borrows the binding generation effective when it starts executing and
-    keeps that handle until the work it set in motion has ended, while a
-    publication during the decision never changes the generation it runs with.
-    - A settled task notification backflows to the invocation that issued
-    the call and drives that invocation's next decision, which borrows the
+    and never re-derived here: this file does not classify the six states and
+    does not judge the terminal on stream mechanics. - A decision borrows the
+    binding generation effective when it starts executing and keeps that handle
+    until the work it set in motion has ended, while a publication during
+    the decision never changes the generation it runs with. - A settled task
+    notification backflows to the invocation that issued the call and drives
+    that invocation's next decision, which borrows the generation effective
+    at its own start — never one chosen in advance. - The watchdog budget of a
+    drive is read at the boundary between its rounds: the round that boundary
+    finds the budget spent is the closing round, and the drive ends when that
 
 func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.InstanceID, facts FactResolver) *Loop
     NewLoop returns the event loop over the state owner's borrowing face,
@@ -414,12 +505,21 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error)
     reads the range's history as it actually ended. - The whole drive is watched
     as one in-flight production beside its invocation identity — the queueing
     waits included — and confirms its stop only when the drive really ended.
+    - A drive whose budget is spent runs one closing round and ends there:
+    the closing round delivers what the range already produced, its transcript
+    is committed the same way, and the obligation it opens is none.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could
     not write, in arrival order, each beside its record identity and the named
     failure that stopped the write. The account is the explicit gap ledger of
     the run: nothing the recorder refused is silently forgotten here.
+
+func (l *Loop) SetFinalRound(policy FinalRoundPolicy)
+    SetFinalRound attaches the watchdog budget the drives of this loop run
+    under. A zero policy keeps every drive unbounded. The setter is separate
+    from the constructor so the declared construction shape of the loop stays as
+    it is.
 
 func (l *Loop) SetHistory(face HistoryFace)
     SetHistory attaches the session transcript face this loop reads the shared
@@ -553,10 +653,15 @@ type RequestBoundary struct {
 	Chain RequestChain
 	// Binding is the borrowed binding generation the request runs on.
 	Binding state.AgentBinding
+	// FinalRound marks the request of a drive's closing round: the round the
+	// model delivers in after its budget is spent, whose tool calls are admitted
+	// nowhere. It stands false for every ordinary request.
+	FinalRound bool
 }
     RequestBoundary is the material one request boundary assembles its prefix
     from: the agent whose request it is, the causal chain the replay is read
-    under and the borrowed binding the fixed file contents are read for.
+    under, the borrowed binding the fixed file contents are read for and whether
+    the request is the closing round of its drive.
 
 type RequestChain struct {
 	// PartitionID is the partition the chain's facts are filed under.
@@ -708,6 +813,10 @@ type Turn struct {
 	// Terminal is the terminal the latest decision reduced to, or KindUnknown
 	// while no decision reached one.
 	Terminal model.Kind
+	// FinalRound names why the closing round of this drive ran: the round budget
+	// or the time budget was spent, so the latest decision delivers instead of
+	// continuing. It stands empty for a drive that ended on its own terminal.
+	FinalRound FinalRoundReason
 }
     Turn is the outcome one invocation's drive reports: the decisions it ran in
     order and the terminal its latest decision reduced to.

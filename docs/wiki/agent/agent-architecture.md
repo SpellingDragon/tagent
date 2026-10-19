@@ -572,7 +572,7 @@ tools:
 
 关于真实框架行为的判据（例如 MemoryPlugin 的用户回声 `OnEvent` 是否**早于**进入模型、基座模型实现 `model.IterModel` 时框架是否真的走 `GenerateContentIter` 而非 channel 回退）一律不许猜：两者都决定执行凭据校验门能否安全地放在真实模型入口，猜错就是每回合误阻断。这类问题由一次性的真机探针harness取证，结论落进测试注释与本页，而不是靠推测写断言。
 
-单元测试的 memory store 根必须**显式挪出仓库工作树**，并按单个测试用例隔离。原因是一条分派顺序事实：`resources.acquire` 在按 memory type 分派**之前**就无条件 `os.MkdirAll(path)` 并取目录写锁（写 `.tagent-writer.lock`），`type: localfile` 还会另建 `relations.journal`——所以"用 `type: memory` 配一个逻辑路径"并不等于不落盘，相对路径会在仓库根造出目录（历史提交里被跟踪的 lock 与 journal 即明证）。
+单元测试的 memory store 根必须**显式挪出仓库工作树**，并按单个测试用例隔离。原因是一条分派顺序事实：`resources.acquire` 在按 memory type 分派**之前**就无条件 `os.MkdirAll(path)` 并取目录写锁（写 `.tagent-writer.lock`），`type: localfile` 还在根下建 `kv/` 分片快照；关系账本由 `replay.OpenMemoryRelations(root)` 显式打开，在同一个根下逐条 fsync 追加 `relations.journal`，并由回放重建同一条关系链——所以"用 `type: memory` 配一个逻辑路径"并不等于不落盘，相对路径会在仓库根造出目录（历史提交里被跟踪的 lock 与 journal 即明证）。
 
 根目录由 `t.TempDir()`／`b.TempDir()` 按用例唯一：同一用例内同名 store 返回同一绝对路径（热更多代"存储段字节不变"与重启模拟所依赖的身份前提由此成立）；不同用例（含 `-count` 重复，每次是全新 `*testing.T`）落在不同根，互不串存储；根不得跨用例共享，否则两个用例的存储接在同一条链上。
 
@@ -584,7 +584,7 @@ tools:
 
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
-| **子 Agent handoff 无结构化 schema** | 跨 Agent 传递依赖 `request` 自然语言 + `event_keys` 票据（票据本身是结构化 hex 契约，有真实 LLM 契约测试守护）；但"意图/约束/权限/未决决策"没有结构化载体 | 定义 handoff envelope（intent/constraints/grants 字段）随 external_context 传递 |
-| **迭代上限无收尾轮** | 撞 `max_tool_iterations` 时进行中的工具调用直接丢弃（实机：plan 子 Agent 3m52s 的文档工作被掐断，靠模型自恢复换路完成） | 预算剩 1 轮时注入收尾提示，让模型保存半成品再终止 |
+| **子 Agent handoff 的结构化载体** | `agent.HandoffEnvelope` 承载 intent/constraints/grants/pending_decisions/refs 五个字段；`call_subagent` 的 `handoff` 参数声明 intent/constraints/pending_decisions/refs，grants 取装配声明的 tool/skill/mcp 引用；该 envelope 经 `subagent.Turn.Handoff` 由 `ExternalContext` 渲染为子 Agent 请求前的结构化块，与既有自然语言 request 并存 | `Validate` 对无 intent 或无验收约束的 handoff 具名拒绝且不建任务；结构化断言见 `TestSubagentHandoffEnvelope` 与 `TestHandoffEnvelopeContract` |
+| **看门狗收尾轮（已闭合）** | `FinalRoundPolicy` 在回合预算/时间预算到期时触发收尾轮：注入收尾指令、短超时保护、该轮工具调用一律不受理（配对回执）、返回后走既有 drain 真实终结——上限生效与优雅收尾两全 | `Loop.SetFinalRound` 生产接线 opt-in（默认零值=今日行为）；断言见 `TestFinalRoundClosingSemantics` 与 `TestFinalRoundClosesBesideRealDrain` |
 | **runEventLoop 单 session** | 一个 TagentAgent 实例绑定一个 (user, session) 循环；多会话需多实例 | 会话路由层（多循环共享引擎与存储） |
 | **冥想无内容价值判据** | 门控判定已解决自触发永动机：触发需新颖性门打开 **且** 距上次**执行** ≥ MinGap（节奏门，`lastMeditation` 锚；曾以“任意 turn 结束算忙”为语义的空闲锚已退役）**且**无在途冥想批（pending 防重入）。新颖性门只回答"有没有新东西"，不回答"新东西值不值得反思"——它看的是"水位之后观察面里有没有非自管新事件"，一句无关闲聊或一条低价值任务事件同样解锁下一轮 | 未消化事件量/★ 卡片密度作为内容价值第三判据（单一取数面，不分形态） |

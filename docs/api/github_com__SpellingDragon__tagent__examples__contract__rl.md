@@ -37,3 +37,8 @@ func ExampleRecorder()
     points they originate, and reports an attempt that names no decision as an
     error rather than dropping it.
 
+func ExampleVerifier()
+    ExampleVerifier judges a compliant episode and a constraint violation
+    through the same port: the compliant record reaches the pass score and the
+    self-cited dependency is reported as a failed verdict rather than an error.
+

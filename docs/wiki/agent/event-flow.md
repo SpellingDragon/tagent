@@ -227,6 +227,6 @@ sequenceDiagram
 
 因此它钉的是装配侧的一条不变量：调用元数据只能随自己的输入流动，不得暂存在共享的实例状态上（同一条理由也决定了 `Run` 的逐调用本地装配）。
 
-## 已知缺口
+## <a id="watchdog-final-round"></a> 已知缺口
 
-事件流层面的缺口（收尾轮、单 session 循环、handoff schema）统一声明于 [agent-architecture.md](agent-architecture.md) 末章「已知缺口与演进方向」。
+**收尾轮缺口已闭合**：`Loop.SetFinalRound` 装上预算后，回合预算（`MaxRounds`）或时间预算（`Budget`）耗尽的回合边界上，下一次决策即收尾轮——请求边界以 `RequestBoundary.FinalRound` 标注、请求尾部携带收尾指令（总结、交付已有产物、关闭引用）、按自己的短超时运行；收尾轮投递既有产物、不受理任何工具调用（每个调用以配对回执如实拒绝），drive 在它返回时结束并走既有 drain（`Shutdown.Close` 的真实终结判定），因此“上限生效＋优雅收尾”两全。零值策略保持 drive 无界，既有超时与上限语义不变。单 session 循环、handoff schema 两项仍声明于 [agent-architecture.md](agent-architecture.md) 末章「已知缺口与演进方向」。

@@ -19,8 +19,9 @@ import (
 
 // TestSubagentToolDeclaration holds the tool contract the model reads and the refusals a call answers with:
 // - the description names the agents file source and every explicit parameter, as two mutually exclusive sources
-// - the input schema declares exactly the argument keys of both sources beside the request input
+// - the input schema declares exactly the argument keys of both sources beside the request input and the structured handoff
 // - both sources at once, a failed assembly, an unreadable file, an undeclared argument and a refused delegation answer a named denial beside no task
+// - a declared handoff is admitted beside its request, while a handoff naming no intent or an undeclared key answers a named denial beside no task
 // - a call carrying no admission identity and a second admission of the same call are answered without a second turn
 // 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
 func TestSubagentToolDeclaration(t *testing.T) {
@@ -39,11 +40,16 @@ func TestSubagentToolDeclaration(t *testing.T) {
 		if !strings.Contains(declaration.Description, "exactly one assembly source") {
 			t.Fatalf("description does not state the sources are exclusive: %q", declaration.Description)
 		}
+		for _, segment := range []string{"structured handoff", "intent", "acceptance constraints"} {
+			if !strings.Contains(declaration.Description, segment) {
+				t.Fatalf("description names no %q of the handoff: %q", segment, declaration.Description)
+			}
+		}
 	})
 
 	t.Run("the input schema declares both sources", func(t *testing.T) {
 		schema := tool.Declaration().InputSchema
-		want := []string{"agents_file", "name", "description", "model", "prompt", "skills", "tools", "mcp", "input"}
+		want := []string{"agents_file", "name", "description", "model", "prompt", "skills", "tools", "mcp", "input", "handoff"}
 		if len(schema.Properties) != len(want) {
 			t.Fatalf("schema properties = %d, want the %d declared arguments", len(schema.Properties), len(want))
 		}
@@ -56,6 +62,9 @@ func TestSubagentToolDeclaration(t *testing.T) {
 			if schema.Properties[key].Type != "array" || schema.Properties[key].Items == nil {
 				t.Fatalf("schema argument %q = %+v, want a string array", key, schema.Properties[key])
 			}
+		}
+		if schema.Properties["handoff"].Type != "object" {
+			t.Fatalf("schema argument %q = %+v, want the structured handoff object", "handoff", schema.Properties["handoff"])
 		}
 	})
 
@@ -96,6 +105,55 @@ func TestSubagentToolDeclaration(t *testing.T) {
 		requireDenial(t, out, ErrArguments)
 		if got := delegation.calls(); got != 0 {
 			t.Fatalf("delegations = %d, want no task from an undeclared argument", got)
+		}
+	})
+
+	t.Run("a declared handoff is admitted beside its request", func(t *testing.T) {
+		delegation := &stubDelegation{}
+		tool := newToolForDeclarationTest(t, delegation)
+		out := callTool(t, tool, map[string]any{
+			"name":   "reviewer",
+			"prompt": "review the change",
+			"handoff": map[string]any{
+				"intent":      "review the change",
+				"constraints": []string{"every finding names a file"},
+			},
+		})
+		if _, ok := out.(task.AdmissionReceipt); !ok {
+			t.Fatalf("call result = %#v, want the admission receipt of the declared handoff", out)
+		}
+		if got := delegation.calls(); got != 1 {
+			t.Fatalf("delegations = %d, want the one task the declared handoff admitted", got)
+		}
+	})
+
+	t.Run("a handoff naming no intent is refused", func(t *testing.T) {
+		delegation := &stubDelegation{}
+		tool := newToolForDeclarationTest(t, delegation)
+		out := callTool(t, tool, map[string]any{
+			"name":    "reviewer",
+			"prompt":  "review the change",
+			"handoff": map[string]any{"constraints": []string{"every finding names a file"}},
+		})
+		requireDenial(t, out, agent.ErrHandoffIntentMissing)
+		if got := delegation.calls(); got != 0 {
+			t.Fatalf("delegations = %d, want no task from a handoff naming no intent", got)
+		}
+	})
+
+	t.Run("a handoff key the declaration does not name is refused", func(t *testing.T) {
+		delegation := &stubDelegation{}
+		tool := newToolForDeclarationTest(t, delegation)
+		out, err := tool.Call(task.WithCallFrame(context.Background(), task.CallFrame{
+			Identity: task.CallIdentity{InvocationID: "inv-caller", DecisionID: "decision-caller", CallID: "call-review"},
+			Address:  event.Address{AgentID: "agent-caller", SessionID: "session-caller"},
+		}), []byte(`{"name":"reviewer","handoff":{"intent":"review","budget":"2"}}`))
+		if err != nil {
+			t.Fatalf("call the tool = %v, want a refusal result", err)
+		}
+		requireDenial(t, out, ErrHandoffArguments)
+		if got := delegation.calls(); got != 0 {
+			t.Fatalf("delegations = %d, want no task from an undeclared handoff key", got)
 		}
 	})
 

@@ -3,6 +3,7 @@ package rl
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -253,6 +254,44 @@ func (l *RewardLedger) StateOf(decision event.DecisionID, attempt event.AttemptI
 	return RewardUnrated
 }
 
+// RecordVerification records one verification verdict as a reward instance at
+// the next revision of the named decision boundary and attempt: the completion
+// share becomes the reward value, and the pass outcome and its reasons ride in
+// the verdict. A verdict outside [0,1] and a rule naming no version are each
+// refused by name, so a verification is a reward derivation rather than a record
+// kind of its own.
+func (l *RewardLedger) RecordVerification(decision event.DecisionID, attempt event.AttemptID, ruleVersion string, verdict Verification) (RewardRecord, error) {
+	if decision == "" {
+		return RewardRecord{}, ErrRewardRecordInvalid
+	}
+	if ruleVersion == "" {
+		return RewardRecord{}, ErrRewardRuleMissing
+	}
+	if err := ValidateVerification(verdict); err != nil {
+		return RewardRecord{}, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	revision := l.nextRevision(decision, attempt)
+	record := RewardRecord{
+		Schema:      SchemaCurrent,
+		InstanceID:  rewardInstanceID(decision, attempt, revision),
+		Revision:    revision,
+		DecisionID:  decision,
+		AttemptID:   attempt,
+		State:       RewardRated,
+		Value:       verdict.Score,
+		RuleVersion: ruleVersion,
+		DerivedAt:   time.Now().UTC(),
+		Verdict: Verdict{
+			Passed:  verdict.Passed,
+			Reasons: append([]string(nil), verdict.Reasons...),
+		},
+	}
+	l.records = append(l.records, record)
+	return record, nil
+}
+
 // Restore records one reward record read back from storage, keeping the
 // identity and revision it was written with. A repeat of the same record is
 // idempotent and different content under one instance identity is the named
@@ -276,7 +315,9 @@ func (l *RewardLedger) Restore(record RewardRecord) error {
 			if prior.Revision != record.Revision || prior.DecisionID != record.DecisionID ||
 				prior.AttemptID != record.AttemptID || prior.State != record.State ||
 				prior.Value != record.Value || prior.RuleVersion != record.RuleVersion ||
-				prior.ModelVersion != record.ModelVersion {
+				prior.ModelVersion != record.ModelVersion ||
+				prior.Verdict.Passed != record.Verdict.Passed ||
+				!slices.Equal(prior.Verdict.Reasons, record.Verdict.Reasons) {
 				return ErrRewardConflict
 			}
 			return nil

@@ -101,6 +101,17 @@ const (
     sink: a config that names no bound takes these, and a negative bound is
     refused rather than read as unlimited.
 
+const (
+	// VerificationRuleHeuristic is the derivation rule version of the offline
+	// heuristic verdict.
+	VerificationRuleHeuristic = "verification.heuristic.v1"
+	// VerificationRuleLLMJudge is the derivation rule version of a verdict
+	// produced through an injected judge.
+	VerificationRuleLLMJudge = "verification.llm_judge.v1"
+	// DefaultVerificationPassScore is the pass score a heuristic verifier takes
+	// when its construction names none.
+	DefaultVerificationPassScore = 0.75
+)
 const DefaultMaxOpenFiles = MaxOpenFilesCap
     DefaultMaxOpenFiles is the open file bound one writer takes when its
     construction names none.
@@ -424,6 +435,22 @@ var (
     by name.
 
 var (
+	// ErrVerificationScoreRange reports a score outside [0,1].
+	ErrVerificationScoreRange = errors.New("rl: the verification score is outside [0,1]")
+	// ErrVerificationPassScore reports a pass score outside (0,1].
+	ErrVerificationPassScore = errors.New("rl: the verification pass score is outside (0,1]")
+	// ErrVerificationRuleMissing reports a verification that names no rule version.
+	ErrVerificationRuleMissing = errors.New("rl: the verification rule names no version")
+	// ErrVerifierMissing reports a verification consumer built beside no verifier.
+	ErrVerifierMissing = errors.New("rl: the verification consumer holds no verifier")
+	// ErrVerificationAccountMissing reports a verification consumer built beside
+	// no reward account.
+	ErrVerificationAccountMissing = errors.New("rl: the verification consumer holds no reward account")
+)
+    ErrVerificationScoreRange and the other verification errors name the way a
+    verdict or a consumer was refused, so a caller routes each by name.
+
+var (
 	// ErrWriterSealed reports an append offered to a writer that already sealed.
 	ErrWriterSealed = errors.New("rl: the capture writer already sealed")
 	// ErrWriterUnsealed reports a seal commit offered to a writer that has not
@@ -526,11 +553,22 @@ func NewFileCaptureWriter(dir string, maxOpenFiles int) (*FileCaptureWriter, err
     than obeyed, a negative bound is refused rather than read as unlimited,
     and no bound opens a second write point beside this one.
 
+func NewHeuristicVerifier(opts ...HeuristicOption) (*HeuristicVerifier, error)
+    NewHeuristicVerifier builds one heuristic verifier over the given options.
+    A pass score outside (0,1] or a rule version naming nothing is refused by
+    name.
+
 func NewModelLease(initial model.Model, version string) (*ModelLease, error)
     NewModelLease returns the lease of one model reference, holding initial as
     the version named by version. An empty version is the unversioned model of a
     deployment that names no generation, and it is recorded unversioned rather
     than assumed to be a current version.
+
+func NewVerificationConsumer(verifier Verifier, rewards *RewardLedger, ruleVersion string) (*VerificationConsumer, error)
+    NewVerificationConsumer builds one verification consumer over a verifier,
+    a reward account and the rule version its verdicts are recorded under.
+    A missing verifier, a missing account and a rule naming no version are each
+    refused by name.
 
 func ParseLine(data []byte) (Line, error)
     ParseLine decodes one versioned record line: it reads the declared schema
@@ -619,6 +657,10 @@ func ValidateListenAddr(addr, token string, allowUnsafe bool) error
     is configured with. A token admits every address; beside no token only
     loopback is admitted, unless the caller passes the explicit unsafe switch.
     The refusal names the three ways out.
+
+func ValidateVerification(verdict Verification) error
+    ValidateVerification reports whether one verdict may be recorded: its score
+    stands in [0,1] and a failed verdict is a result rather than an error.
 
 func VerifySFTArtifact(artifact SFTArtifact) error
     VerifySFTArtifact reports the first violation of one stored artifact:
@@ -1539,6 +1581,38 @@ func (w *FileCaptureWriter) Seal() ([]CaptureFileDigest, WriterSyncResult)
     and the sync result the writer observed. A sync that did not complete is
     reported with its reason and is never presented as a completed sync.
 
+type HeuristicOption func(*HeuristicVerifier)
+    HeuristicOption configures one heuristic verifier.
+
+func WithLLMJudge(judge JudgeFunc) HeuristicOption
+    WithLLMJudge injects one judging strategy in place of the offline heuristic.
+    A nil judge leaves the offline heuristic in place.
+
+func WithPassScore(score float64) HeuristicOption
+    WithPassScore sets the score a verdict must reach to pass.
+
+func WithVerificationRule(version string) HeuristicOption
+    WithVerificationRule sets the derivation rule version the verdict is stamped
+    with.
+
+type HeuristicVerifier struct {
+	// Has unexported fields.
+}
+    HeuristicVerifier is the offline verifier: it computes a verdict from the
+    observations one episode record carries and needs no model. An injected
+    judge replaces the heuristic while the port and the offline default stay in
+    place.
+
+func (v *HeuristicVerifier) RuleVersion() string
+    RuleVersion reports the derivation rule version this verifier stamps its
+    verdicts with.
+
+func (v *HeuristicVerifier) Verify(ctx context.Context, record EpisodeRecord) (Verification, error)
+    Verify judges one episode record: the injected judge runs when one is set
+    and the offline heuristic runs otherwise. The score is checked against
+    [0,1] and Passed is set from the configured pass score, so a reader never
+    re-derives a verdict from a threshold of its own.
+
 type ImportGap struct {
 	// Line is the 1-based line number the gap was found on.
 	Line int `json:"line"`
@@ -1580,6 +1654,12 @@ type ImportResult struct {
     and the explicit gaps. The chains are separate so a legacy row is never read
     as a current record and a current record is never projected into a legacy
     one.
+
+type JudgeFunc func(ctx context.Context, record EpisodeRecord) (Verification, error)
+    JudgeFunc is the injected judging strategy a heuristic verifier delegates
+    to: the same episode record in and the same verdict shape out, so a
+    model-backed judge stays behind the port and the offline path stays the
+    default.
 
 type LegacyRecord struct {
 	// Schema names the legacy schema the row was classified as.
@@ -2126,6 +2206,14 @@ func (l *RewardLedger) Latest(decision event.DecisionID, attempt event.AttemptID
     it was written: a reader cites the instance ID and revision it carries,
     never a regenerated identity.
 
+func (l *RewardLedger) RecordVerification(decision event.DecisionID, attempt event.AttemptID, ruleVersion string, verdict Verification) (RewardRecord, error)
+    RecordVerification records one verification verdict as a reward instance at
+    the next revision of the named decision boundary and attempt: the completion
+    share becomes the reward value, and the pass outcome and its reasons ride
+    in the verdict. A verdict outside [0,1] and a rule naming no version are
+    each refused by name, so a verification is a reward derivation rather than a
+    record kind of its own.
+
 func (l *RewardLedger) Records(decision event.DecisionID, attempt event.AttemptID) []RewardRecord
     Records returns every reward record derived for one decision boundary and
     attempt, in the order they were derived. A late feedback derivation is
@@ -2178,6 +2266,9 @@ type RewardRecord struct {
 	DerivedFrom []RewardSource
 	// DerivedAt is the time the reward was derived.
 	DerivedAt time.Time
+	// Verdict carries the pass outcome and its reasons for a reward derived
+	// from a verification; it is empty for a reward derived from feedback.
+	Verdict
 }
     RewardRecord is a reward derived from feedback for one decision: a derived
     record and not the raw feedback event, carrying the instance it identifies
@@ -2905,6 +2996,58 @@ type TrainingUseConsumer struct {
     TrainingUseConsumer declares one real consumer of the cleaned data:
     the purpose it consumes for, its identity, and the algorithm and sampling
     declaration it runs under. A zero consumer declares no consumer at all.
+
+type Verdict struct {
+	// Passed reports whether the verified episode reached the pass score.
+	Passed bool
+	// Reasons lists the observations the verdict rests on.
+	Reasons []string
+}
+    Verdict is the pass outcome a verification puts beside a reward value and
+    the reasons it rests on.
+
+type Verification struct {
+	// Score is the completion share of the episode, in [0,1]; it is computed
+	// from the episode record and is never a fixed answer comparison.
+	Score float64
+	// Passed reports whether Score reached the verifier's pass score.
+	Passed bool
+	// Reasons lists the observations the verdict rests on, in the order the
+	// verifier read them.
+	Reasons []string
+}
+    Verification is the open-domain verdict of one episode: the completion
+    share, whether it reached the verifier's pass score, and the observations
+    the verdict rests on.
+
+type VerificationConsumer struct {
+	// Has unexported fields.
+}
+    VerificationConsumer judges one episode and records the verdict in the
+    reward account: the completion share becomes the reward value and the pass
+    outcome and its reasons ride beside it, so verification stays a reward
+    derivation rather than a fourth record kind.
+
+func (c *VerificationConsumer) Consume(ctx context.Context, decision event.DecisionID, attempt event.AttemptID, record EpisodeRecord) (RewardRecord, error)
+    Consume judges one episode record and records the verdict for the named
+    decision boundary and attempt. The verdict is recorded as a reward instance
+    at the next revision, so an earlier verified instance keeps the revision it
+    was written under.
+
+type Verifier interface {
+	// Verify judges one episode record and returns its verdict.
+	Verify(ctx context.Context, record EpisodeRecord) (Verification, error)
+}
+    Verifier is the open-domain judging port: one episode record in, one verdict
+    out, with no fixed answer set to compare against. A task whose answer set
+    is not fixed is judged on the observations its episode record carries, and a
+    low score is a result the caller records rather than an error it routes.
+
+    The redline list (4 rules): MUST judge the episode from its own recorded
+    observations and name them in Reasons. MUST return a score in [0,1] and
+    a verdict that a reward record can cite. MUST NOT treat a low score as an
+    error: a failed verdict is a recorded result. MUST NOT read or invent an
+    answer set: an open-domain episode has none.
 
 type VersionedModel struct {
 	// Has unexported fields.

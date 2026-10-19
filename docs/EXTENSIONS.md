@@ -5,7 +5,6 @@
 **姿态一句话**：tagent 的扩展面是**窄口**——一个扩展点只承认一件事，越界的写法不是"没生效"，而是启动或调用时的具名拒绝。四处扩展点互不重叠：plugin 只管一次调用的 Before 趟与一次提交的 After 趟，event 只管词汇与投递身份，event-loop 只管消费与回填，`call_subagent` 只管把一个子 agent 装配成任务。
 
 ---
-
 <a id="pipeline-phases"></a>
 ## 一、plugin：四个相位，每个相位一个窄接口
 
@@ -28,7 +27,6 @@
 **与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的元素装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献元素的次序，pipeline 不改写它。契约在 `api/plugin/phases.go` 与 `api/plugin/present.go`，呈现词汇（`Presentation`/`RenderedView`/`ObservationGap`）在 `api/view/presentation.go`，只引用 `event` 的事实身份。
 
 ---
-
 <a id="event-vocabulary"></a>
 ## 二、event 词汇：一个事实的四个块，八种骨架类型，五类通知
 
@@ -57,7 +55,6 @@
 **Notice 族**是任务通知的词汇（`runtime/task/registry.go`），扩展者只需认身份而不必碰载荷：`task.Notice{TaskID, Round, Kind, Seq, Event}`，`Kind` 取 `accepted` / `progress` / `settled` / `failed` / `cancelled` 之一。通知自己的身份是 **`TaskID + Round + Kind + Seq`**，`Event` 指向已提交的事实供消费者还原输入，但**不替代**通知身份：同一身份重复投递不记录第二个事实，重试保留原身份。投递路由另存 `task.Envelope{Notice, Target, Source, TargetInstance}`，目标地址与目标实例在提交那一刻冻结，重建或移交的实例不会重路由一条已提交的通知。
 
 ---
-
 <a id="event-consumption"></a>
 ## 三、event-loop：Ready → 消费 → Backflow → 投递
 
@@ -71,7 +68,6 @@
 **自定义事件类型就是运行期消息**：`Ready` 里没有类型白名单，一个不在上表里的类型（例如宿主自己的 `meditation_tick`）照样被消费成它自己的那条消息、照样能调用模型与工具、照样经 `Backflow` 回填。唯一不许的是"消费了但什么都没产出还静默返回"：空结果必须以具名错误拒绝投递，而不是投一条空消息——对照用例 `tests/integration/execution/custom_event_loop_test.go` 用 `errCustomEventNoResult` 固定这条语义，S12 用同一消费链固定通知定向（`tests/integration/acceptance/scenario_s12_test.go`）。
 
 ---
-
 <a id="consumer-protocol"></a>
 ## 四、消费器协议：三个实例、六个面，一条协议
 
@@ -102,7 +98,6 @@
 | Exporter（导出消费） | `rl`·`TrainingExporter.Export` / `SealSnapshot` | 授权调用（`ExportRequest{PartitionIDs}`，授权先于任何读） | `rl` 制品事实：导出快照（`Provenance.ExportID` 是快照身份，行内引用源事实的 `EventKey`） | 不越权读；不改写源事实；不覆盖已封印身份（`ErrExportConflict`）；不把部分当完整 |
 
 ---
-
 <a id="subagent-sources"></a>
 ## 五、call_subagent：两个装配源，二选一
 
@@ -157,7 +152,6 @@ review the change and answer with the findings
 **受理不是结果**：一次合法调用立刻返回 `task.AdmissionReceipt`（任务身份），委派回合在受理旁边跑；进度与终态以通知回来，目标是发起调用的那个地址。装配完成后的子 agent 按**它自己的** model / prompt / tools 运行，父的声明只提供继承缺省。
 
 ---
-
 <a id="preset-tools"></a>
 ## 六、预置工具的声明写法
 
@@ -219,3 +213,9 @@ agents:
 | 17 | `memory/replica` | 否：临时副本，不持真源 | `memory` 与 `tool` 读副本 | 存续（临时） | 时态 |
 
 对照结论：本变更只重排压缩三件（01，落在 `memory`/`memory/replica`/`tool` 三个面内），其余面按上表归位、不改行为；六个消费面的声明见第四节，产物的事实族归属见 `docs/FACT-VOCABULARY.md` 的附表。三问答不出来就不是新能力，而是既有能力的字段——这是本表要拦的那类偏差。
+
+---
+<a id="rl-verifier"></a>
+## 八、rl Verifier：开放域判分
+
+`rl.Verifier` 是开放域判分窄口：`Verify(ctx, EpisodeRecord) (Verification, error)` 一个 episode 记录进、一个 `Verification{Score, Passed, Reasons}` 出，不比对固定答案集。默认实现 `HeuristicVerifier` 只看记录自带的可验证信号（身份、会话证据、lineage 引用一致性与依赖票据），离线可跑；`WithLLMJudge` 注入模型判分，`NewVerificationConsumer` 把判分写成 `RewardRecord`（`Value` 是分，`Verdict.Passed`/`Verdict.Reasons` 是判决），不新增第四种记录族。契约在 `rl/verifier.go`，范例见 `examples/contract/rl/Verifier_example.go`。

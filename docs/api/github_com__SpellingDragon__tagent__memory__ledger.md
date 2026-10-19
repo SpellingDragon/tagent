@@ -35,6 +35,10 @@ one stored original together with the metadata that scopes it, and the scoped
 read face serves only the references registered inside the scope the read runs
 under. See doc.go for the package's place in the memory axis.
 
+The relation journal: the append-only record of one relation ledger's links and
+the replay that rebuilds them. A record is durable exactly when Append returns
+success, and the rebuilt chain names exactly the records it covers.
+
 Retention leases.
 
 A retention lease is held by the shared resource owner — the recovery resource
@@ -66,6 +70,10 @@ const DefaultSegmentMaxBytes int64 = 64 << 10
     carries a zero MaxBytes, so a request that states no limit stays bounded
     instead of reading an original whole.
 
+const RelationsJournalName = "relations.journal"
+    RelationsJournalName is the file name the relation journal appends to under
+    the root it is opened over.
+
 VARIABLES
 
 var (
@@ -86,6 +94,15 @@ var (
 	// ErrLifecycleUnwired reports a lifecycle constructed without the retention
 	// ledger or the store it coordinates.
 	ErrLifecycleUnwired = errors.New("memory: lifecycle needs a retention ledger and a store")
+)
+var (
+	// ErrRelationsJournalCorrupt reports journal content that cannot be replayed
+	// as the records it claims to hold, so the ledger refuses to open instead of
+	// serving a shortened chain.
+	ErrRelationsJournalCorrupt = errors.New("memory: relations journal holds a record it cannot replay")
+	// ErrRelationsJournalBarrier reports an append whose barrier did not
+	// complete, so the record is not part of the journal.
+	ErrRelationsJournalBarrier = errors.New("memory: relations journal barrier failed")
 )
 var ErrCommitBarrier = errors.New("memory: commit barrier failed")
     ErrCommitBarrier reports a commit whose barrier did not complete, so nothing
@@ -689,6 +706,43 @@ type RecallResult struct {
     RecallResult is the outcome of exact recall for one key: the original bytes
     when they were found, and otherwise a named classification of why they were
     not, so a miss is reported instead of silently omitted.
+
+type RelationRecord struct {
+	// Child is the fact whose parent the record names.
+	Child event.EventID `json:"child"`
+	// Parent is the parent the record names, empty when the child holds none.
+	Parent event.EventID `json:"parent,omitempty"`
+}
+    RelationRecord is one committed link: the child fact and its parent, with an
+    empty parent recording that the child holds no parent.
+
+type RelationsJournal struct {
+	// Has unexported fields.
+}
+    RelationsJournal is the append-only relation record under one root:
+    one JSON record per line, replayed in append order so the last record of a
+    child names its parent. A record whose write or barrier fails is not part of
+    the journal, and a later replay never reads it back.
+
+func OpenRelationsJournal(root string) (*RelationsJournal, error)
+    OpenRelationsJournal opens the relation journal under root, creating the
+    root and the journal file when they do not exist. A journal that exists
+    keeps every complete record it already holds; bytes after the last newline
+    are an append that never returned success and are dropped before the journal
+    is used.
+
+func (j *RelationsJournal) Append(record RelationRecord) error
+    Append commits one record behind the journal's barrier: a success covers
+    the record a later replay reads back, and a failure leaves the journal as it
+    was.
+
+func (j *RelationsJournal) Path() string
+    Path returns the file the journal appends to.
+
+func (j *RelationsJournal) Records(ctx context.Context) ([]RelationRecord, error)
+    Records returns the records the journal holds, in append order. Bytes after
+    the last newline are an append that never returned success and are not a
+    record; a complete line that cannot be read back fails the read by name.
 
 type Retention struct {
 	// Has unexported fields.

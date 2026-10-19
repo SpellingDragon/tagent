@@ -110,7 +110,10 @@ func (t *Tool) Declaration() *trpctool.Declaration {
 			"agents_file names a markdown agents file whose --- frontmatter declares name/description/model/prompt/skills/tools/mcp and whose body is the prompt, " +
 			"while the explicit source declares prompt/model/skills/tools/mcp (and name/description) directly; " +
 			"a field either source leaves undeclared inherits the caller's own value. " +
-			"every refusal - both sources at once, an unreadable file, a missing name, a model or a reference list that cannot be resolved, a refused delegation - " +
+			"a call may declare a structured handoff beside the request: the intent it serves, the acceptance constraints its result is held to, " +
+			"the decisions it may not take on its own and the stored facts it starts from, while its grants are the tool, skill and MCP references the assembled sub-agent declares. " +
+			"every refusal - both sources at once, an unreadable file, a missing name, a model or a reference list that cannot be resolved, a refused delegation, " +
+			"a handoff naming no intent or no acceptance constraint - " +
 			"answers " + deniedMarker + " beside no task.",
 		InputSchema: &trpctool.Schema{
 			Type: "object",
@@ -154,6 +157,7 @@ func (t *Tool) Declaration() *trpctool.Declaration {
 					Type:        "string",
 					Description: "the request the delegated turn starts from; empty runs the assembled instruction alone",
 				},
+				"handoff": handoffSchema(),
 			},
 		},
 	}
@@ -174,6 +178,9 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	}
 	args, unknown, err := parseCallArgs(jsonArgs)
 	if err != nil {
+		if errors.Is(err, ErrHandoffArguments) {
+			return t.denied(err), nil
+		}
 		return nil, err
 	}
 	if len(unknown) > 0 {
@@ -183,7 +190,11 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if err != nil {
 		return t.denied(err), nil
 	}
-	receipt, err := t.admit(ctx, frame, assembly, args.Input)
+	envelope, err := args.envelope(assembly)
+	if err != nil {
+		return t.denied(err), nil
+	}
+	receipt, err := t.admit(ctx, frame, assembly, args.Input, envelope)
 	if err != nil {
 		return t.denied(err), nil
 	}
@@ -193,8 +204,8 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // admit hands one assembled call to the delegation face: the call is admitted under the
 // identity of the decision that issued it, the initiating generation is borrowed for the
 // reference the delegated turn inherits, and a fresh admission starts the delegated turn
-// beside the receipt it already returned.
-func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assembly, input string) (task.AdmissionReceipt, error) {
+// beside the receipt it already returned, carrying the envelope the call declared.
+func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assembly, input string, envelope *agent.HandoffEnvelope) (task.AdmissionReceipt, error) {
 	if !frame.Address.IsComplete() {
 		return task.AdmissionReceipt{}, ErrAddressIncomplete
 	}
@@ -217,7 +228,7 @@ func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assemb
 		return receipt, releaseErr
 	}
 	if receipt.Kind == task.AdmissionFresh {
-		go t.serve(context.WithoutCancel(ctx), receipt.TaskID, assembly, frame.Address, input)
+		go t.serve(context.WithoutCancel(ctx), receipt.TaskID, assembly, frame.Address, input, envelope)
 	}
 	return receipt, nil
 }
@@ -225,12 +236,13 @@ func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assemb
 // serve runs the delegated turn of one fresh admission and reports its terminal: a turn
 // that ends settles its task and one that fails reports the failure. A settle the ledger
 // refuses leaves the task where it is rather than inventing an outcome.
-func (t *Tool) serve(ctx context.Context, taskID event.TaskID, assembly *Assembly, addr event.Address, input string) {
+func (t *Tool) serve(ctx context.Context, taskID event.TaskID, assembly *Assembly, addr event.Address, input string, envelope *agent.HandoffEnvelope) {
 	status := task.StatusSettled
 	_, err := t.builder.Serve(ctx, assembly, Turn{
 		UserID:    string(addr.AgentID),
 		SessionID: string(addr.SessionID),
 		Input:     input,
+		Handoff:   envelope,
 	})
 	if err != nil {
 		status = task.StatusFailed
@@ -275,6 +287,9 @@ type callArgs struct {
 	MCP []string `json:"mcp"`
 	// Input is the request the delegated turn starts from.
 	Input string `json:"input"`
+	// Handoff is the structured handoff the call declares beside that request; nil
+	// when the call declares none.
+	Handoff *handoffArgs `json:"handoff"`
 }
 
 // callArgFields is the closed argument key set the declaration names.
@@ -288,6 +303,7 @@ var callArgFields = map[string]bool{
 	"tools":       true,
 	"mcp":         true,
 	"input":       true,
+	"handoff":     true,
 }
 
 // source names the assembly source one call carries: the agents file and the explicit
@@ -328,6 +344,11 @@ func parseCallArgs(jsonArgs []byte) (callArgs, []string, error) {
 		}
 	}
 	sort.Strings(unknown)
+	if raw, ok := probe["handoff"]; ok {
+		if err := checkHandoffKeys(raw); err != nil {
+			return callArgs{}, nil, err
+		}
+	}
 	var args callArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return callArgs{}, nil, fmt.Errorf("call_subagent: malformed arguments: %w", err)
