@@ -4,6 +4,8 @@
 
 ## 项目定位
 
+术语先查 [`docs/GLOSSARY.md`](docs/GLOSSARY.md)：一页把机制名（冥想／转世／结算／血统／义务／策展／退位）与事实九族对成通用词，本文不重复定义。
+
 - **事件是一等输入**：用户消息、任务结算、系统告警等都以事件进入，消费壳按事件类型路由。
 - **状态、历史、义务各有其主**：`state` 持生效绑定与领域现场，`memory` 持原文与投影写权威，`task` 持转移与通知义务，互不代管。
 - **组合根只装配**：根包 `tagent` 是把组织声明变成活动运行时的唯一装配点（`Assemble`），机制实现位于各领域包，根包不留第二份运行现场。
@@ -40,6 +42,7 @@ bash scripts/lint.sh                    # 仓库门禁：格式、构建、vet�
 
 | 入口 | 内容 |
 |---|---|
+| [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照（一句话定义＋领域类比＋在哪看） |
 | [`docs/api/index.md`](docs/api/index.md) | **API 权威**：由源码注释生成，`gen_godoc --check` 保证与码面同步 |
 | [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim）：机制背景与分叉点，非当期码面事实 |
 | [`internal/prototype/README.md`](internal/prototype/README.md) | 保留的原型骨架（事件消费壳/任务表/记忆票据），用于语义对照，不是现架构 |

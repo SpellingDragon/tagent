@@ -122,6 +122,7 @@ bash scripts/check-openspec.sh
 - **`openspec/specs/` 是已接受需求的真源**；过程记录放 `openspec/changes/`（归档后只读）。脚本与 CI 不得把读者指向过程工件（`proc-refs` 门）。
 - **代码注释只写两种形态**：go doc 契约注释，与指向长期文档的单行索引 `// 契约: <docs 路径>`；机制与理由写 `docs/wiki/` 或 specs（契约见 [`openspec/specs/code-documentation/spec.md`](openspec/specs/code-documentation/spec.md)）。
 - 文档与标识不记录批次号/轮次号。
+- **新文档不新造机制概念**：机制名只取 [`docs/GLOSSARY.md`](docs/GLOSSARY.md) 已登记的词；一句话说不清（且不含表外新词）就说明它只是既有能力的字段，写进现有章节而不是起新名。
 
 ## 八、Issue
 
