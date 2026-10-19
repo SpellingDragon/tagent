@@ -1,5 +1,12 @@
 package plugin // import "github.com/SpellingDragon/tagent/plugin"
 
+The wiring face of the approval channel: the manager that holds requests,
+the option seam that injects its clock and rescan window, and the file-backed
+request directory an external approver writes into. The words it records
+(status, subject, evidence, state, request, channel, delivery gap) are stated
+once in approval.go; this file only keeps and resolves them, so the vocabulary
+has one spelling and the store has one job.
+
 Package plugin declares the ordered per-phase pipeline through which tagent
 injects its differentiated capabilities into the framework event flow: the
 pre-execution call transform and risk ruling, and the post-commit observation
@@ -10,6 +17,14 @@ that phase's one narrow interface. The pre-execution faces form one Before
 pass a request runs exactly once; the post-commit faces form the After pass,
 which reads only facts whose canonical commit already happened and answers with
 a Presentation.
+
+  - the extension-face vocabulary: the phases, the four narrow interfaces,
+    the pipeline that dispatches them, the post-commit observation wiring and
+    the presentation pass;
+  - the extension policies at the governance gate: the pre-execution ruling,
+    the risk rules, the approval channel, the denial ledger, the goal registry
+    and the budget window, each stated in its own file and reaching the pipeline
+    only through the one face it serves.
 
 CONSTANTS
 

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/SpellingDragon/tagent/event"
@@ -13,12 +12,10 @@ import (
 
 // 契约: docs/wiki/agent/agent-architecture.md#package-layout
 //
-// Skeleton compile-time assertions for the phase 1 execution declarations.
-//
-// The phase 2 types that will satisfy Agent do not exist yet, so the placeholder
-// below is the implementation assertion this skeleton can write: the assertions
-// pin every declared method's exact shape and every declared field's name and
-// type.
+// Compile-time assertions for the execution face and the records it carries:
+// the declared method shapes, every declared field name and type, and the named
+// refusals. A renamed field or a widened signature stops this file from
+// compiling.
 var (
 	_ func(Agent, context.Context, Invocation) (Decision, error) = Agent.Decide
 
@@ -38,11 +35,7 @@ var (
 		Address:      event.Address{},
 		Instance:     "",
 		Ready:        []event.Event{},
-		Slot:         DecisionSlot{},
-		Terminal:     model.KindUnknown,
 	}
-
-	_ = DecisionSlot{}
 
 	_ = Decision{
 		DecisionID:   "",
@@ -129,40 +122,6 @@ var (
 	_ error = ErrDrainUnsettled
 	_ error = ErrProducerIdentityMissing
 	_ error = ErrProducerMissing
-)
-
-// errNotImplemented is the sentinel every declared stub returns while the phase 2
-// implementation is absent.
-var errNotImplemented = errors.New("phase 2: not implemented")
-
-// skeletonAgent is a compile-time placeholder for the execution face. It carries
-// the stub methods that satisfy Agent and holds no logic.
-type skeletonAgent struct{}
-
-// Decide implements Agent.Decide as a phase 2 stub.
-func (skeletonAgent) Decide(ctx context.Context, inv Invocation) (Decision, error) {
-	return Decision{}, errNotImplemented
-}
-
-// Delegate implements Agent.Delegate as a phase 2 stub.
-func (skeletonAgent) Delegate(ctx context.Context, req Delegation) (task.AdmissionReceipt, error) {
-	return task.AdmissionReceipt{}, errNotImplemented
-}
-
-// Close implements Agent.Close as a phase 2 stub.
-func (skeletonAgent) Close(ctx context.Context, req CloseRequest) (DrainReport, error) {
-	return DrainReport{}, errNotImplemented
-}
-
-// The execution face is satisfied by its skeleton placeholder.
-var _ Agent = (*skeletonAgent)(nil)
-
-// The declared method signatures are pinned exactly.
-var (
-	_ func(context.Context, Invocation) (Decision, error)              = skeletonAgent{}.Decide
-	_ func(context.Context, Delegation) (task.AdmissionReceipt, error) = skeletonAgent{}.Delegate
-	_ func(context.Context, CloseRequest) (DrainReport, error)         = skeletonAgent{}.Close
-	_ func([]event.Event) error                                        = (*Invocation)(nil).Aggregate
 )
 
 // The persistent event loop keeps its declared shape: the turn one drive

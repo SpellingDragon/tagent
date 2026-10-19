@@ -1,13 +1,13 @@
 {
   "baseline": {
-    "files": 1174,
-    "lines": 99240
+    "files": 1177,
+    "lines": 99306
   },
   "measured_at": "2026-10-19",
   "measured_by": "python3 scripts/check_doc_budget.py --json",
   "measured_on": "ceaf787+dirty",
   "note": "Markdown 体量棘轮基线（只降不升）。实测=基线；减少后用 `python3 scripts/check_doc_budget.py --tighten` 下调，禁止上调（--tighten 会拒绝上升的指标）。",
-  "rebaseline_reason": "①module-convergence 计划四件套 +4 篇/+110 行（proposal/design/tasks/ORCHESTRATION，派发时实测 1165/98918），均为批准的交付面；②02.2/03.1 新增 52 行、无新增篇目：EXTENSIONS 消费者协议第二辑表（六面：面/归属/驱动源/产出事实族/禁止项，+12 行）与 16 面化归判据对照表（+28 行），FACT-VOCABULARY 六面产物事实族附表（+12 行），均为 03.1 要求的新行；批内未压缩其他文档凑数，实测=基线；③D3b（01.5）FACT-VOCABULARY 登记 replay.settle 与 fold/compaction 两族（2 行）＋「投影账本 vs 事实链」边界一句（含空行共 +2 行），合计 +4 行，属派发单要求的词汇表交付面，批内未压缩其他文档凑数，实测=基线; +2 lines: fact families 8/9 (compress.request, memory.condensed_card) closing the D1 vocabulary registration gap；④package-restructure 计划五件套 +5 篇/+136 行（proposal/design/tasks/ORCHESTRATION/specs/package-conventions，派发时实测 1169/99086），均为批准的交付面；⑤03.1 CONTRIBUTING「包结构」节 +18 行（三类文件挂法表＋新包准入三问＋分包三原则，属 03.1 交付面，未压缩其他文档凑数）；⑥03.2 wiki 边界句 0 行（mem_spill/error_tracking 放弃句就地追加进既有 memory 行，等行替换）；批内未压缩其他文档凑数，实测=基线",
+  "rebaseline_reason": "①module-convergence 计划四件套 +4 篇/+110 行（proposal/design/tasks/ORCHESTRATION，派发时实测 1165/98918），均为批准的交付面；②02.2/03.1 新增 52 行、无新增篇目：EXTENSIONS 消费者协议第二辑表（六面：面/归属/驱动源/产出事实族/禁止项，+12 行）与 16 面化归判据对照表（+28 行），FACT-VOCABULARY 六面产物事实族附表（+12 行），均为 03.1 要求的新行；批内未压缩其他文档凑数，实测=基线；③D3b（01.5）FACT-VOCABULARY 登记 replay.settle 与 fold/compaction 两族（2 行）＋「投影账本 vs 事实链」边界一句（含空行共 +2 行），合计 +4 行，属派发单要求的词汇表交付面，批内未压缩其他文档凑数，实测=基线; +2 lines: fact families 8/9 (compress.request, memory.condensed_card) closing the D1 vocabulary registration gap；④package-restructure 计划五件套 +5 篇/+136 行（proposal/design/tasks/ORCHESTRATION/specs/package-conventions，派发时实测 1169/99086），均为批准的交付面；⑤03.1 CONTRIBUTING「包结构」节 +18 行（三类文件挂法表＋新包准入三问＋分包三原则，属 03.1 交付面，未压缩其他文档凑数）；⑥03.2 wiki 边界句 0 行（mem_spill/error_tracking 放弃句就地追加进既有 memory 行，等行替换）；批内未压缩其他文档凑数，实测=基线; +3 files/+66 lines: package-zero-debt planning set (tasks/ORCHESTRATION/spec), approved deliverables, batch-end reconciliation",
   "schema_version": 1,
   "scope": "git index: tracked + untracked-but-not-ignored *.md/*.markdown, excluding generated docs/api/ (owned by gen_godoc.sh)"
 }

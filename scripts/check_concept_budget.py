@@ -79,11 +79,17 @@ NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
 # 生成口径：本检查器对当前树的实测值。S1 的 observed 是接口方法数，S2 是导出字段数，
 # S3 是该文件的裸 ctx.Value 调用数；S4 是布尔债务（observed=None）。
 BASELINE = (
+    ("struct-fields", "evolution/meditation/vocabulary.go:MeditationArtifact", 6),
+    ("struct-fields", "evolution/refine/refine.go:RefineRecord", 7),
+    ("struct-fields", "memory/ledger/segment_store.go:SegmentRecord", 6),
+    ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
+    ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
+    ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
     # S1 iface-methods — 12 项（observed=实测接口方法数）
     ("iface-methods", "agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "agent/loop.go:Recorder", 3),
     ("iface-methods", "evolution/gate.go:StructuralGate", 3),
-    ("iface-methods", "evolution/refine.go:Refine", 3),
+    ("iface-methods", "evolution/refine/refine.go:Refine", 3),
     ("iface-methods", "rl/produce.go:Recorder", 3),
     ("iface-methods", "state/durable.go:FactLog", 4),
     ("iface-methods", "state/store.go:Store", 4),
@@ -95,7 +101,7 @@ BASELINE = (
     # S2 struct-fields — 53 项（observed=实测导出字段数）
     ("struct-fields", "agent/delegate.go:Delegation", 8),
     ("struct-fields", "agent/invocation.go:Invocation", 6),
-    ("struct-fields", "build.go:Deps", 8),
+    ("struct-fields", "tool/subagent/subagent.go:Definition", 8),
     ("struct-fields", "config/config.go:AgentSpec", 8),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
     # 七个冻结键各自成一格，前缀透传与未建模条目必须原样留存（PassThrough/Unknown）——
@@ -106,17 +112,17 @@ BASELINE = (
     # event/types.go 的语义块文档分组承担。
     ("struct-fields", "event/types.go:Event", 16),
     ("struct-fields", "evolution/posterior.go:Evaluation", 6),
-    ("struct-fields", "evolution/refine.go:RefineRecord", 7),
+    ("struct-fields", "evolution/refine/refine.go:RefineRecord", 7),
     ("struct-fields", "host_bridge.go:ApprovalDecision", 8),
-    ("struct-fields", "memory/curation.go:CurationArtifact", 6),
+    ("struct-fields", "evolution/meditation/vocabulary.go:MeditationArtifact", 6),
     ("struct-fields", "memory/event_body.go:EventBody", 8),
-    ("struct-fields", "memory/projection.go:ChainFact", 6),
-    ("struct-fields", "memory/projection.go:RebuildReport", 9),
+    ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
+    ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
     ("struct-fields", "memory/query_events.go:EventRecord", 7),
     ("struct-fields", "memory/query_events.go:QueryOptions", 9),
     ("struct-fields", "memory/replay.go:DeliveryRecord", 8),
     ("struct-fields", "memory/search/port.go:Query", 9),
-    ("struct-fields", "memory/segment_store.go:SegmentRecord", 6),
+    ("struct-fields", "memory/ledger/segment_store.go:SegmentRecord", 6),
     ("struct-fields", "plugin/denial.go:DenialRecord", 9),
     ("struct-fields", "plugin/goal.go:Goal", 6),
     ("struct-fields", "query/explain.go:Blocker", 6),

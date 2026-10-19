@@ -2,7 +2,6 @@ package state
 
 import (
 	"context"
-	"errors"
 
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
@@ -16,12 +15,10 @@ import (
 
 // 契约: docs/wiki/platform/org-hot-reload.md#overview
 //
-// Skeleton compile-time assertions for the phase 1 state declarations.
-//
-// The phase 2 types that will satisfy Store and Borrow do not exist yet, so the
-// placeholders below are the only implementation assertion the skeleton can
-// write: the assertions pin every declared method's exact shape, every declared
-// field's name and type, and every declared constant's type.
+// Compile-time assertions for the state ports and the records they carry: every
+// declared method shape, every declared field name and type, the named refusals
+// and the vocabulary constants that must stay compile-time constants. A renamed
+// field or a widened signature stops this file from compiling.
 var (
 	_ func(Store, context.Context, event.Address, event.InstanceID) (*Session, error) = Store.Establish
 
@@ -154,44 +151,6 @@ const (
 	_ PlanChangeKind = PlanChangeRemoved
 )
 
-// skeletonStore is a compile-time placeholder for the shared state face. It
-// carries the stub methods that satisfy Store and holds no logic.
-type skeletonStore struct{}
-
-// Establish implements Store.Establish as a phase 2 stub.
-func (skeletonStore) Establish(ctx context.Context, addr event.Address, instance event.InstanceID) (*Session, error) {
-	return nil, errors.New("phase 2: not implemented")
-}
-
-// Publish implements Store.Publish as a phase 2 stub.
-func (skeletonStore) Publish(ctx context.Context, plan StatePlan) (Publication, error) {
-	return Publication{}, errors.New("phase 2: not implemented")
-}
-
-// CloseSession implements Store.CloseSession as a phase 2 stub.
-func (skeletonStore) CloseSession(ctx context.Context, addr event.Address) error {
-	return errors.New("phase 2: not implemented")
-}
-
-// AcceptNotice implements Store.AcceptNotice as a phase 2 stub.
-func (skeletonStore) AcceptNotice(ctx context.Context, notice task.Notice) error {
-	return errors.New("phase 2: not implemented")
-}
-
-// skeletonBorrow is a compile-time placeholder for the borrowing face. It
-// carries the stub method that satisfies Borrow and holds no logic.
-type skeletonBorrow struct{}
-
-// Borrow implements Borrow.Borrow as a phase 2 stub.
-func (skeletonBorrow) Borrow(ctx context.Context, agentID event.AgentID) (*BindingHandle, error) {
-	return nil, errors.New("phase 2: not implemented")
-}
-
-// BorrowDerived implements Borrow.BorrowDerived as a phase 2 stub.
-func (skeletonBorrow) BorrowDerived(ctx context.Context, ref BindingRef) (*BindingHandle, error) {
-	return nil, errors.New("phase 2: not implemented")
-}
-
 // The publication entry keeps its documented shapes: the identity one
 // publication assigns, the dispositions the publish precondition contract
 // records, and the self-contained record the publication recorder commits.
@@ -266,12 +225,6 @@ var (
 	_ Governance          = (Governance)(nil)
 	_ PublicationRecorder = (PublicationRecorder)(nil)
 	_ Borrow              = (*Publisher)(nil)
-)
-
-// The port interfaces are satisfied by their skeleton placeholders.
-var (
-	_ Store  = (*skeletonStore)(nil)
-	_ Borrow = (*skeletonBorrow)(nil)
 )
 
 // The durable commit face keeps its documented shapes: the byte-level fact

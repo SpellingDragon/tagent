@@ -8,6 +8,9 @@
 // phase's one narrow interface. The pre-execution faces form one Before pass a request
 // runs exactly once; the post-commit faces form the After pass, which reads only facts
 // whose canonical commit already happened and answers with a Presentation.
+//
+//   - the extension-face vocabulary: the phases, the four narrow interfaces, the pipeline that dispatches them, the post-commit observation wiring and the presentation pass;
+//   - the extension policies at the governance gate: the pre-execution ruling, the risk rules, the approval channel, the denial ledger, the goal registry and the budget window, each stated in its own file and reaching the pipeline only through the one face it serves.
 package plugin
 
 import (

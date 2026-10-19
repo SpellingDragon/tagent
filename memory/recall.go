@@ -4,8 +4,8 @@
 // bound per generation and borrowed by the async pipeline that runs after the
 // event is already stored, so the event path never waits for a vector and a
 // runtime without an embedder configured behaves exactly as it did before the
-// seam existed. The real embedding endpoint and the recall quality run belong
-// to the resource-gated acceptance work; this file only carries the seam.
+// seam existed. An embedder that is never bound leaves the seam idle: the fact
+// is stored and no vector is produced, so recall runs on keywords alone.
 package memory
 
 import (

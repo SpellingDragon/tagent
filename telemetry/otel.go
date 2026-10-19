@@ -50,6 +50,11 @@ const (
 // skipped attempt is a legitimate recorded state, not a silent omission: an
 // audit reader sees which layers the SDK attempted and which it deliberately
 // left alone.
+//
+// An attempt here is an observation attempt at one SDK layer, never a model
+// attempt: the remembered form of a model attempt is a record of the training
+// surface, and the identity of a model attempt is the event package's
+// AttemptID. The three readings stay apart and none is decoded as another.
 type Attempt struct {
 	// Layer names the layer the attempt was made at.
 	Layer Layer

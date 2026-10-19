@@ -5,16 +5,16 @@ scope a recall query may read in, returns the reference set a query hit,
 and fuses the vector leg and the keyword leg into that one set.
 
 The port speaks references, not facts. The index behind it is a derived,
-replaceable structure, so a hit names the stored original and the text stays
-behind the original store: the index is never the source of truth, and a hit
-is never served as a second copy of the text. This is the phase 1 skeleton:
-it declares the port and holds no behaviour.
+replaceable structure, so a hit names the stored original and the text
+stays behind the original store: the index is never the source of truth,
+and a hit is never served as a second copy of the text. The package declares
+the port and carries the fusion rule beside it; the store-backed searcher is the
+implementation a runtime wires the port to.
 
-Skeleton compile-time assertions for the phase 1 retrieval port. The phase 2
-types that satisfy the ports do not exist yet, so there is no implementation
-assertion to write; the assertions below pin what the skeleton proves on its
-own: every declared field name and type, every declared method signature,
-and every value that must stay a compile-time constant.
+Skeleton compile-time assertions for the retrieval port: the declared query
+and result fields, every declared method signature, the named refusals and the
+strategy values that must stay compile-time constants. A renamed field or a
+widened signature stops this file from compiling.
 
 The retrieval over a real store: both legs of one query read through the
 QueryEvents face of the observation table, the keyword leg matches the query
@@ -58,11 +58,9 @@ var ErrStrategyUnknown = errors.New("search: the query names an unknown strategy
     vocabulary, so no rule could decide how its legs combine.
 
 var ErrStrategyUnwired = errors.New("search: the vector-only strategy has no consumer and is not implemented")
-    ErrStrategyUnwired reports the vector-only strategy: it declares no consumer
-    anywhere in the runtime and is therefore not implemented. The constant stays
-    declared so the strategy vocabulary does not change underneath callers,
-    and a query naming it is refused by name instead of being answered by an
-    implementation nobody asked for.
+    ErrStrategyUnwired reports a query naming the vector-only strategy:
+    retrieval runs hybrid or keyword-only, so a query that names the vector leg
+    alone is refused by name rather than answered by a rule no caller asked for.
 
 TYPES
 
@@ -129,17 +127,6 @@ type Query struct {
 	// upper one.
 	Since time.Time
 	Until time.Time
-	// Relations restricts the query to the events standing in a causal relation
-	// to the given keys; it is empty when no relation restriction applies.
-	//
-	// Unimplemented by adjudication: no consumer of relation-filtered retrieval
-	// exists — causal-chain consumption walks the
-	// RelationStore explicitly instead, and content stays separate from
-	// relations by design. The field is kept so the declared query shape does
-	// not change underneath its callers, and no relation filter is ever read:
-	// zero implementation and zero tests stand behind it until a real consumer
-	// names the need.
-	Relations []event.EventID
 	// Limit caps how many references one page carries, so an oversized match
 	// set is consumed page by page rather than whole. A non-positive Limit is
 	// not "no bound": it runs under DefaultLimit (see PageLimit), so every page

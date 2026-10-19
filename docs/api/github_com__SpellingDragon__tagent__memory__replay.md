@@ -372,11 +372,12 @@ type ReplayProjection struct {
 func NewReplayProjection() *ReplayProjection
     NewReplayProjection returns an empty replayable projection.
 
-func (p *ReplayProjection) Append(ctx context.Context, entry ProjectionEntry)
+func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry)
     Append adds the canonical entry of one committed fact: a keyed entry already
     present is appended once, a keyless entry always is. The original text is
     kept apart from the model view, and a recorded decision shapes the view —
-    never the original.
+    never the original. An append is an in-memory mutation, so it takes the
+    port's context with nothing to cancel.
 
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error)
     AssembleBudget packs the projection into one agent request of the given
@@ -426,13 +427,6 @@ func (p *ReplayProjection) Len() int
 
 func (p *ReplayProjection) Original(key event.EventID) (string, bool)
     Original returns the kept original text of one keyed entry.
-
-func (p *ReplayProjection) Rebuild(ctx context.Context, decisions []PresentationDecision) ([]ProjectionEntry, error)
-    Rebuild replaces the whole projection with the one the recorded decisions
-    describe and recomputes the deduplication key set from the entries it keeps.
-    Decisions passed in are recorded first-time-wins: a decision already
-    recorded for a key is never upgraded by a later one, so a recorded preview
-    is never promoted back to the full text.
 
 func (p *ReplayProjection) RecordDecision(key event.EventID, decision PresentationDecision)
     RecordDecision records the presentation decision of one entry and reshapes

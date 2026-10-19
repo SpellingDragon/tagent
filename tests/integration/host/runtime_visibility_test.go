@@ -25,7 +25,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/query"
 	"github.com/SpellingDragon/tagent/rl"
@@ -145,7 +145,7 @@ func TestRuntimeVisibility(t *testing.T) {
 		defer cancel()
 		anchors := filepath.Join(t.TempDir(), "anchors.json")
 		moment := time.Date(2024, time.March, 1, 9, 30, 0, 0, time.UTC)
-		store, err := evolution.NewAnchorStore(anchors)
+		store, err := meditation.NewAnchorStore(anchors)
 		if err != nil {
 			t.Fatalf("open the anchor store: %v", err)
 		}
@@ -395,7 +395,7 @@ func TestRuntimeVisibility(t *testing.T) {
 			t.Fatalf("close the first host: %v", err)
 		}
 		moment := time.Date(2024, time.April, 2, 8, 15, 0, 0, time.UTC)
-		store, err := evolution.NewAnchorStore(anchors)
+		store, err := meditation.NewAnchorStore(anchors)
 		if err != nil {
 			t.Fatalf("reopen the anchor store: %v", err)
 		}

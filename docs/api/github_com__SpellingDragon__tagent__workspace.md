@@ -23,12 +23,11 @@ the governing side. Replicas are materialised under stable paths and read back
 in byte-bounded segments through the scoped read face of memory, so a replica
 never outruns the authorization it was materialised under.
 
-Skeleton compile-time assertions for the phase 1 workspace shapes. The phase 2
-implementation types that will satisfy the two ports do not exist yet, so there
-is no `var _ Iface = (*Impl)(nil)` to write; the assertions below prove what the
-skeleton can prove on its own, pinning every declared field name and type, every
-declared method signature, and every constant that must stay a compile-time
-constant.
+Skeleton compile-time assertions for the workspace ports and their
+implementations: every declared field name and type, every declared method
+signature, the named refusals, and the reclamation defaults that must stay
+compile-time constants. A renamed field or a widened signature stops this file
+from compiling.
 
 CONSTANTS
 
@@ -345,10 +344,12 @@ type Externalized struct {
 	// no byte at all, so the entry carries a byte offset and a byte bound only.
 	Segment ledger.SegmentRequest
 }
-    Externalized is one externalized oversized result: the durable reference its
-    bytes were committed under, the bounded preview that stands in for the whole
-    result, and the byte-bounded segment entry through which the whole original
-    is read back.
+    Externalized is one externalized oversized result: the durable reference
+    its bytes were committed under, the bounded preview that stands in for the
+    whole result, and the byte-bounded segment entry through which the whole
+    original is read back. The ticket a preview carries is a rendering of that
+    ledger reference: its vocabulary and the read contract behind it belong to
+    memory/ledger, and this package only renders it.
 
 type Externalizer interface {
 	// Externalize commits body as the durable original of ref, materialises a replica
@@ -372,12 +373,6 @@ type Externalizer interface {
 type ExternalizerOption func(*ResultExternalizer)
     ExternalizerOption names one setting of the externalize path at construction
     time.
-
-func WithExternalizeConsumer(consumer string) ExternalizerOption
-    WithExternalizeConsumer names the consumer identity replicas of externalized
-    results are materialised for, so two consumers of one original land on their
-    own stable paths instead of overwriting one another. An empty name keeps the
-    default identity.
 
 func WithMaxTokens(maxTokens int) ExternalizerOption
     WithMaxTokens sets the model window the threshold is computed from,
@@ -596,11 +591,13 @@ type ResultExternalizer struct {
     a failed replica write never discards the original it was made from,
     and a replica reclaimed later is materialised again from that original.
 
-func (e *ResultExternalizer) DecideExternalize(ctx context.Context, id event.EventID, size int) (bool, error)
+func (e *ResultExternalizer) DecideExternalize(ctx context.Context, _ event.EventID, size int) (bool, error)
     DecideExternalize answers the overflow decision face of the plugin pipeline:
     a result of size characters is externalized exactly when it exceeds the
     one threshold, so an overflowing result takes the same path as every other
-    oversized result instead of a policy of its own.
+    oversized result instead of a policy of its own. The decision reads the size
+    alone; the identity the result is keyed by is accepted so every decision
+    face of the pipeline takes the same arguments.
 
 func (e *ResultExternalizer) Exceeds(chars int) bool
     Exceeds reports whether a serialized result of the given character count is

@@ -1,11 +1,13 @@
 package memory // import "github.com/SpellingDragon/tagent/memory"
 
-The filing surface of the compress request family: the producer and the reason
-one mechanism states when it judges material due for compression, and the
-in-process log a filed request waits in until its consumer retires it. The fact
-itself — who judged, why, what was judged, and the identity the judgment is
-quoted by — is the event package's vocabulary; this file keeps what the memory
-side owns: the judgment the meditation bound states and the log that holds it.
+Consumer wiring for the compress request family: the producer and the reason
+the meditation bound states when it judges material due for compression,
+and the in-process log a filed request waits in until its consumer retires it.
+
+The fact itself — who judged, why, what was judged, and the identity the
+judgment is quoted by — is event vocabulary (event.CompressRequest). What
+stands here is the memory side of that wiring: the judgment label this package
+contributes and the log that holds it.
 
 Package memory is the runtime's durable original-text layer: it names one stored
 original and the reference metadata that scopes it, commits those bytes and
@@ -48,9 +50,9 @@ change what the query answers.
 The offline binding seam of vector generation for recall: an embedder is bound
 per generation and borrowed by the async pipeline that runs after the event is
 already stored, so the event path never waits for a vector and a runtime without
-an embedder configured behaves exactly as it did before the seam existed. The
-real embedding endpoint and the recall quality run belong to the resource-gated
-acceptance work; this file only carries the seam.
+an embedder configured behaves exactly as it did before the seam existed.
+An embedder that is never bound leaves the seam idle: the fact is stored and no
+vector is produced, so recall runs on keywords alone.
 
 The unconfirmed-delivery replay engine: the obligations a committed record still
 owes, re-delivered at the owner the current orchestration binding resolves. The
@@ -74,10 +76,10 @@ CONSTANTS
 
 const (
 	// CompressProducerMeditation names the meditation bound judgment.
-	CompressProducerMeditation = "memory.curation"
+	CompressProducerMeditation = "memory.meditation"
 	// CompressReasonMeditation states why the meditation bound judgment files a
 	// request.
-	CompressReasonMeditation = "the card sequence exceeds the curation bound"
+	CompressReasonMeditation = "the card sequence exceeds the meditation bound"
 )
     CompressProducerMeditation names the mechanism that judges a card sequence
     against the meditation bound, and CompressReasonMeditation states why

@@ -8,6 +8,15 @@
 // The package is data and ports only. Record identities come from the event
 // package, the observed response is the native model response, and no type here
 // derives an identity, a lineage or a redaction on its own.
+//
+//   - record vocabulary: the versioned schemas, the line envelope and the legacy import (record, line, import)
+//   - capture: the pre-request snapshot port, its redaction policy and the sealed sink (capture, sink, writer)
+//   - production face: the recording port the execution loop attaches (produce)
+//   - feedback and reward: the two ledgers, the feedback binding and the delivery client (feedback, feedback_endpoint, feedback_resolver, http, reward, reward_ledger, replacement)
+//   - export: the exporter over a sealed capture and its provenance manifest (export, export_source, manifest)
+//   - sft: the cleaning, artifact and consumption faces (sft, sft_convert, sft_artifact, sft_consumer, sft_qualification)
+//   - record vocabulary versus event identity: a record's identity is the event package's EpisodeID, DecisionID or AttemptID, no second identity is declared here, and a record type is never read as an event type
+//   - shape pins: the compile-time assertions pin every declared shape and carry no logic of their own
 package rl
 
 import (

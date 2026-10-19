@@ -6,7 +6,11 @@
 //
 // An edit to a prompt, skill or script takes effect by itself, so this package
 // tracks the edit instead of gating it: a file is read hot at the next request
-// boundary, and only a structural change passes the gate declared here.
+// boundary, and only a structural change passes the gate declared here. The
+// three channels that observe, register and consolidate an improvement live
+// beside it, one package per channel: meditation reads the fact chain and
+// condenses it, refine registers a landed edit in git, and consolidation carries
+// the wake-up vocabulary of the memory channel.
 package evolution
 
 import (

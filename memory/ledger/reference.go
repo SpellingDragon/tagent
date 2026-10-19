@@ -136,25 +136,25 @@ type OriginalStore interface {
 
 	// Get returns the exact recall result for key: the original bytes,
 	// byte-identical to the bytes Put accepted, or a named
-	// missing/expired/failed classification (see RecallResult). Wiring Get to
-	// RecallResult gives the classification a real consumer (review gate P2-2).
+	// missing/expired/failed classification (see RecallResult), so a caller
+	// tells the three outcomes apart instead of reading one bare error.
 	//
-	// Migration form: a bare key is not a read authorization (see ReadScope),
-	// and the visibility decision here aggregates every reference of the key
-	// whatever scope it was registered under. Authorized reads run through
-	// ScopedOriginalStore and ScopedReader, where the trusted scope the read
-	// runs inside decides which references take part.
+	// A bare key is not a read authorization (see ReadScope): the visibility
+	// decision here aggregates every reference of the key whatever scope it was
+	// registered under. Authorized reads run through ScopedOriginalStore and
+	// ScopedReader, where the trusted scope the read runs inside decides which
+	// references take part.
 	Get(ctx context.Context, key event.EventID) RecallResult
 
 	// ReadSegment returns at most numLines lines of the original stored under
 	// key starting at line startLine, so an oversized original is consumed by
 	// segment rather than returned whole.
 	//
-	// Migration form: this bounds lines, not bytes — one oversized line is
-	// returned whole whatever numLines is, so it is no byte bound at all. The
-	// byte-bounded face is SegmentRequest and SegmentResult, served by
-	// ScopedReader.ReadSegment and ScopedOriginalStore.ReadSegmentScoped, which
-	// cut at byte boundaries and never at line boundaries.
+	// The bound is a line count, not a byte count: one oversized line is
+	// returned whole whatever numLines is. The byte-bounded face is
+	// SegmentRequest and SegmentResult, served by ScopedReader.ReadSegment and
+	// ScopedOriginalStore.ReadSegmentScoped, which cut at byte boundaries and
+	// never at line boundaries.
 	ReadSegment(ctx context.Context, key event.EventID, startLine, numLines int) ([]byte, error)
 }
 

@@ -9,6 +9,24 @@ The package is data and ports only. Record identities come from the event
 package, the observed response is the native model response, and no type here
 derives an identity, a lineage or a redaction on its own.
 
+  - record vocabulary: the versioned schemas, the line envelope and the legacy
+    import (record, line, import)
+  - capture: the pre-request snapshot port, its redaction policy and the sealed
+    sink (capture, sink, writer)
+  - production face: the recording port the execution loop attaches (produce)
+  - feedback and reward: the two ledgers, the feedback binding and the delivery
+    client (feedback, feedback_endpoint, feedback_resolver, http, reward,
+    reward_ledger, replacement)
+  - export: the exporter over a sealed capture and its provenance manifest
+    (export, export_source, manifest)
+  - sft: the cleaning, artifact and consumption faces (sft, sft_convert,
+    sft_artifact, sft_consumer, sft_qualification)
+  - record vocabulary versus event identity: a record's identity is the event
+    package's EpisodeID, DecisionID or AttemptID, no second identity is declared
+    here, and a record type is never read as an event type
+  - shape pins: the compile-time assertions pin every declared shape and carry
+    no logic of their own
+
 CONSTANTS
 
 const (
@@ -1897,13 +1915,14 @@ type Recorder interface {
     MUST NOT edit the fields of a record it persists or projects. MUST NOT drop
     a record it could not accept without reporting it.
 
-    - The production face of the versioned records: one episode boundary, one
-    model decision, one observable model attempt each write their record through
-    this face, exactly as the production point observed them. - A production
-    point records what it observed and derives nothing: the terminal comes from
-    the single model reduction, the response is the native response the attempt
-    saw, and no record here re-classifies a state of its own. - A recorder error
-    never reaches the model decision: recording is observation, not execution.
+    - The production face of the versioned records: one episode boundary,
+    one model decision, one observable model attempt each write their record
+    through this face, exactly as the production point observed them. - A
+    production point records what it observed and derives nothing: the terminal
+    comes from the single model reduction, the response is the native response
+    the attempt saw, and no record here re-classifies a state of its own. - A
+    recorder error never reaches the model decision: recording is observation,
+    not execution. - The telemetry observation sink shares only the word:
 
 type RecorderAdapter struct {
 	// Has unexported fields.

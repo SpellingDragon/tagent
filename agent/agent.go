@@ -7,8 +7,9 @@
 //
 // The package owns no state of its own. A decision borrows one generation of the
 // state binding and keeps it for the whole decision, and the task layer keeps the
-// obligations of every call the agent admitted. This is the phase 1 skeleton: it
-// declares the shapes of the execution face and holds no behaviour.
+// obligations of every call the agent admitted. The execution face is a port the
+// composition root wires; the loop, the delegation ledger and the close gate are
+// the behaviour behind it.
 package agent
 
 import (

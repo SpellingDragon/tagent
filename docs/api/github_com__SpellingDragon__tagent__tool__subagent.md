@@ -250,6 +250,11 @@ type Delegation interface {
     admission that answers the caller with a receipt, and the terminal report of
     that same task once the delegated turn ends.
 
+    红线清单（2 条）： MUST answer the caller with the admission receipt and report the
+    terminal as a notice of the same task MUST NOT create a private writable
+    history for the delegated turn, nor replace a notice identity with the fact
+    it points at
+
 type Error struct {
 	// Source names the agents file or parameter set the declaration came from.
 	Source string

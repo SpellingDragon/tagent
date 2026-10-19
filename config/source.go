@@ -1,3 +1,8 @@
+// The source-syntax face of the declaration layer: it turns the bytes of a
+// .yaml, .yml or .json source into one sourceNode tree and rejects every other
+// extension by name. The node types are syntax only — they name no declaration
+// word — so decode.go maps this tree onto the vocabulary in config.go and this
+// file never decides what a field means.
 package config
 
 import (

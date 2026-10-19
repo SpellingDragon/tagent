@@ -10,6 +10,86 @@ import (
 
 // 契约: docs/wiki/evolution/evolution-architecture.md#verdict-states
 //
+// EvidenceWindow is the one-shot evidence window of one improvement version.
+//
+// Its origin is the activation moment, the moment a real request first consumed
+// that version, and the version it names is the one actually consumed. A git
+// registration time is a correlation only and never the window's origin, because
+// a file takes effect when it lands on disk and registration may follow the
+// first real consumption. The window is carried by the refinement ledger entry
+// together with the post-hoc report the window produced, so a window always
+// connects back to its result. A window that cannot show activation evidence is
+// judged insufficient with the missing evidence named, and the zero value never
+// means the window is open.
+type EvidenceWindow struct {
+	// Version names the improvement version whose real consumption opened the
+	// window.
+	Version string
+	// ActivatedAt is the activation moment at which a real request first consumed
+	// that version.
+	ActivatedAt time.Time
+	// ActivationEvidence names the evidence that proves the activation moment:
+	// the recorded first real consumption of Version. Its zero value means no
+	// activation evidence is on record and is never read as an opened window.
+	ActivationEvidence EvidenceRef
+}
+
+// PosteriorVerdict is the post-hoc evaluation state of one improvement version after real requests
+// consumed it, judged over its evidence window: healthy, degraded, insufficient or not-due.
+//
+// - healthy: the window reached its judgment point with enough decidable evidence and that evidence shows no degradation.
+// - degraded: the same threshold was met but the evidence shows degradation, which yields a rollback proposal.
+// - insufficient: an attempted judgment aborted because the decidable evidence fell below the threshold or a source was missing or unreachable; the missing evidence is named.
+// - not-due: the window has not reached its judgment point yet, so no judgment is owed.
+// - The states are mutually exclusive and never blurred: insufficient never mixes with degraded (an aborted judgment asserts no degradation), not-due is never read as healthy, and insufficient is never folded into healthy.
+// - This vocabulary is the post-hoc half only and never reused for the structural gate's pre-publication dispositions (GateVerdict); a verdict not produced yet is the empty PosteriorReport, never a fifth verdict, and that empty value is never read as healthy.
+type PosteriorVerdict string
+
+const (
+	// PosteriorHealthy reports a due window whose decidable evidence met the
+	// threshold and showed no degradation.
+	PosteriorHealthy PosteriorVerdict = "healthy"
+
+	// PosteriorDegraded reports a due window whose decidable evidence met the
+	// threshold and showed degradation; it yields a rollback proposal.
+	PosteriorDegraded PosteriorVerdict = "degraded"
+
+	// PosteriorInsufficient reports an attempted judgment that aborted because
+	// the decidable evidence was below threshold or an evidence source was
+	// missing or unreachable; the missing evidence is named. It asserts no
+	// degradation and is never read as healthy.
+	PosteriorInsufficient PosteriorVerdict = "insufficient"
+
+	// PosteriorNotDue reports a window that has not reached its judgment point
+	// yet; it is never read as healthy and yields no rollback proposal.
+	PosteriorNotDue PosteriorVerdict = "not-due"
+)
+
+// PosteriorReport is the post-hoc evaluation report of one improvement version:
+// the four-state verdict, the named reason behind it and the evidence it rests
+// on.
+//
+// The report is kept apart from the structural GateReport: the structural
+// verdicts judge a candidate declaration before publication, the post-hoc
+// states judge an improvement version after real consumption, and neither
+// vocabulary is ever substituted for the other. When the verdict is
+// insufficient, Reason names the missing evidence and the judgment aborts
+// instead of falling back to healthy. Source and statistics fields are declared
+// together with their real reviewer or guardrail consumer, so this report
+// carries no speculative evaluation table. The zero report means no evaluation
+// has run yet; its empty verdict is not a fifth state and is never read as
+// healthy.
+type PosteriorReport struct {
+	// Verdict is the post-hoc state of the improvement version, exactly one of
+	// healthy, degraded, insufficient or not-due.
+	Verdict PosteriorVerdict
+	// Reason is the named reason behind the verdict: the named missing evidence
+	// for insufficient, the named ground for degraded.
+	Reason string
+	// EvidenceRefs names the evidence the verdict rests on.
+	EvidenceRefs []EvidenceRef
+}
+
 // ErrEvaluationUnrecorded reports a completed post-hoc evaluation whose event
 // could not be recorded through the injected recorder. The judgment itself is
 // returned as it stands; only the event is missing, and the caller is told so by

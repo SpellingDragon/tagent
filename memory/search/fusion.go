@@ -50,11 +50,9 @@ const (
 // canonical value the hybrid strategy uses.
 const RRFRankConstant = 60
 
-// ErrStrategyUnwired reports the vector-only strategy: it declares no consumer
-// anywhere in the runtime and is therefore not implemented. The constant stays
-// declared so the strategy vocabulary does not change underneath callers, and
-// a query naming it is refused by name instead of being answered by an
-// implementation nobody asked for.
+// ErrStrategyUnwired reports a query naming the vector-only strategy: retrieval
+// runs hybrid or keyword-only, so a query that names the vector leg alone is
+// refused by name rather than answered by a rule no caller asked for.
 var ErrStrategyUnwired = errors.New("search: the vector-only strategy has no consumer and is not implemented")
 
 // ErrStrategyUnknown reports a query naming a strategy outside the declared

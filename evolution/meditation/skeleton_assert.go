@@ -48,6 +48,7 @@ const (
 
 	_ = RetentionMeditation
 	_ = MeditationArtifactType
+	_ = MeditationHolderPrefix
 )
 
 // The consumer faces keep their declared signatures.

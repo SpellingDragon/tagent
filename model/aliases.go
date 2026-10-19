@@ -84,18 +84,16 @@ type TimingInfo = trpcmodel.TimingInfo
 // Response.
 type ResponseError = trpcmodel.ResponseError
 
-// ErrorTypeStreamError, ErrorTypeAPIError, ErrorTypeFlowError, ErrorTypeRunError
-// and ErrorTypeCancelled are aliases for the locked tRPC response error type
-// constants, so the terminal reduction reads the native error categories.
+// ErrorTypeStreamError, ErrorTypeAPIError and ErrorTypeCancelled are aliases for
+// the locked tRPC response error type constants, so the terminal reduction reads
+// the native error categories. Every constant re-exported here is one the runtime
+// reads: a category no consumer reads is not re-exported, and no second spelling
+// of it is kept beside the reduction that reads it.
 const (
 	// ErrorTypeStreamError is a stream-level failure carried by a Response.
 	ErrorTypeStreamError = trpcmodel.ErrorTypeStreamError
 	// ErrorTypeAPIError is an API-level failure carried by a Response.
 	ErrorTypeAPIError = trpcmodel.ErrorTypeAPIError
-	// ErrorTypeFlowError is a flow-level failure carried by a Response.
-	ErrorTypeFlowError = trpcmodel.ErrorTypeFlowError
-	// ErrorTypeRunError is a run-level failure carried by a Response.
-	ErrorTypeRunError = trpcmodel.ErrorTypeRunError
 	// ErrorTypeCancelled is a cancellation or timeout failure carried by a
 	// Response.
 	ErrorTypeCancelled = trpcmodel.ErrorTypeCancelled

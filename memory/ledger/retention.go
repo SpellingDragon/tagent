@@ -182,19 +182,3 @@ func (r *Retention) Record(key event.EventID) (RetentionRecord, bool) {
 	record, registered := r.records[key]
 	return record, registered
 }
-
-// Holders returns the holders still standing on one key, in order.
-func (r *Retention) Holders(key event.EventID) []HolderID {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	holders := make([]string, 0, len(r.leases[key]))
-	for holder := range r.leases[key] {
-		holders = append(holders, string(holder))
-	}
-	sort.Strings(holders)
-	out := make([]HolderID, 0, len(holders))
-	for _, holder := range holders {
-		out = append(out, HolderID(holder))
-	}
-	return out
-}

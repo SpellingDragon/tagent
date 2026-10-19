@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	evo "github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/refine"
 )
 
 // refineRepo is one throwaway git work tree standing in for the agent's managed
@@ -94,17 +94,17 @@ func (r *refineRepo) state() string {
 // improvementLog records the improvement events the refine surface writes
 // through its injected recorder.
 type improvementLog struct {
-	entries []evo.Improvement
+	entries []refine.Improvement
 }
 
 // record captures one improvement event.
-func (l *improvementLog) record(ctx context.Context, improvement evo.Improvement) error {
+func (l *improvementLog) record(ctx context.Context, improvement refine.Improvement) error {
 	l.entries = append(l.entries, improvement)
 	return nil
 }
 
 // recorder returns the port the refine surface records through.
-func (l *improvementLog) recorder() evo.ImprovementRecorder {
+func (l *improvementLog) recorder() refine.ImprovementRecorder {
 	return l.record
 }
 
@@ -123,14 +123,14 @@ func TestGitNativeRefine(t *testing.T) {
 	t.Run("register commits only the explicit controlled paths under the improvement marker", func(t *testing.T) {
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 
 		repo.write("resources/prompts/SOUL.md", "improved soul\n")
 		repo.write("skills/alpha/SKILL.md", "improved skill\n")
 		repo.write("notes/user.txt", "user scratch\n")
 		repo.git("add", "notes/user.txt")
 
-		record, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "痛点:提示词漂移 → 产物:重写 SOUL.md → 预期收益:回答更稳")
+		record, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "痛点:提示词漂移 → 产物:重写 SOUL.md → 预期收益:回答更稳")
 		if err != nil {
 			t.Fatalf("register of one controlled path must commit: %v", err)
 		}
@@ -148,7 +148,7 @@ func TestGitNativeRefine(t *testing.T) {
 		}
 
 		subject := strings.TrimSpace(repo.git("log", "-1", "--format=%s", record.SHA))
-		if subject != evo.ImprovementMarker+" register" {
+		if subject != refine.ImprovementMarker+" register" {
 			t.Fatalf("the commit subject opens with the improvement marker, got %q", subject)
 		}
 		committed := strings.TrimSpace(repo.git("diff-tree", "--no-commit-id", "--name-only", "-r", record.SHA))
@@ -174,7 +174,7 @@ func TestGitNativeRefine(t *testing.T) {
 	t.Run("a path outside the controlled set refuses the whole registration before git is touched", func(t *testing.T) {
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 		repo.write("notes/user.txt", "user scratch\n")
 		repo.git("add", "notes/user.txt")
 		before := repo.state()
@@ -191,14 +191,14 @@ func TestGitNativeRefine(t *testing.T) {
 			{"a parent directory", []string{".."}},
 			{"an empty path", []string{""}},
 		} {
-			_, err := refine.Register(ctx, cased.paths, "note")
+			_, err := gitRefine.Register(ctx, cased.paths, "note")
 			if err == nil {
 				t.Fatalf("%s: an out-of-scope registration must be refused", cased.name)
 			}
-			if !errors.Is(err, evo.ErrPathOutOfScope) {
+			if !errors.Is(err, refine.ErrPathOutOfScope) {
 				t.Fatalf("%s: the refusal must reach ErrPathOutOfScope, got %v", cased.name, err)
 			}
-			var scopeErr *evo.PathScopeError
+			var scopeErr *refine.PathScopeError
 			if !errors.As(err, &scopeErr) || len(scopeErr.Offending) == 0 || len(scopeErr.Controlled) == 0 {
 				t.Fatalf("%s: the refusal names the offenders and the controlled set, got %#v", cased.name, err)
 			}
@@ -207,7 +207,7 @@ func TestGitNativeRefine(t *testing.T) {
 			}
 		}
 
-		if _, err := refine.Register(ctx, nil, "note"); !errors.Is(err, evo.ErrNoRegisterPaths) {
+		if _, err := gitRefine.Register(ctx, nil, "note"); !errors.Is(err, refine.ErrNoRegisterPaths) {
 			t.Fatalf("a registration with no path is named, got %v", err)
 		}
 		if after := repo.state(); after != before {
@@ -228,10 +228,10 @@ func TestGitNativeRefine(t *testing.T) {
 			t.Fatalf("write controlled file: %v", err)
 		}
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(plain, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(plain, log.recorder(), nil)
 
-		_, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
-		if !errors.Is(err, evo.ErrNotGitRepository) {
+		_, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
+		if !errors.Is(err, refine.ErrNotGitRepository) {
 			t.Fatalf("register outside a git work tree must name ErrNotGitRepository, got %v", err)
 		}
 		if body, err := os.ReadFile(soul); err != nil || string(body) != "edited soul\n" {
@@ -245,10 +245,10 @@ func TestGitNativeRefine(t *testing.T) {
 	t.Run("status lists the marked ledger with its time and the soft reminder names unregistered artifacts", func(t *testing.T) {
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 
 		repo.write("resources/prompts/SOUL.md", "improved soul\n")
-		first, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note-1")
+		first, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note-1")
 		if err != nil {
 			t.Fatalf("register the first improvement: %v", err)
 		}
@@ -258,12 +258,12 @@ func TestGitNativeRefine(t *testing.T) {
 		userSHA := strings.TrimSpace(repo.git("rev-parse", "HEAD"))
 
 		repo.write("skills/alpha/SKILL.md", "improved skill\n")
-		second, err := refine.Register(ctx, []string{"skills/alpha/SKILL.md"}, "note-2")
+		second, err := gitRefine.Register(ctx, []string{"skills/alpha/SKILL.md"}, "note-2")
 		if err != nil {
 			t.Fatalf("register the second improvement: %v", err)
 		}
 
-		ledger, err := refine.Status(ctx)
+		ledger, err := gitRefine.Status(ctx)
 		if err != nil {
 			t.Fatalf("status must list the ledger: %v", err)
 		}
@@ -290,7 +290,7 @@ func TestGitNativeRefine(t *testing.T) {
 		if err := os.Chtimes(soul, later, later); err != nil {
 			t.Fatalf("push the artifact past the last registration: %v", err)
 		}
-		reminders, err := refine.Unregistered(ctx)
+		reminders, err := gitRefine.Unregistered(ctx)
 		if err != nil {
 			t.Fatalf("the soft reminder must be readable: %v", err)
 		}
@@ -305,10 +305,10 @@ func TestGitNativeRefine(t *testing.T) {
 	t.Run("rollback reverts only a marked commit and refuses a user commit", func(t *testing.T) {
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 
 		repo.write("resources/prompts/SOUL.md", "improved soul\n")
-		record, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
+		record, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
 		if err != nil {
 			t.Fatalf("register the improvement to roll back: %v", err)
 		}
@@ -318,14 +318,14 @@ func TestGitNativeRefine(t *testing.T) {
 		userSHA := strings.TrimSpace(repo.git("rev-parse", "HEAD"))
 		eventsAfterRegister := len(log.entries)
 
-		if err := refine.Rollback(ctx, userSHA); !errors.Is(err, evo.ErrCommitNotImprovement) {
+		if err := gitRefine.Rollback(ctx, userSHA); !errors.Is(err, refine.ErrCommitNotImprovement) {
 			t.Fatalf("rollback must refuse a commit without the marker, got %v", err)
 		}
-		if err := refine.Rollback(ctx, "0000000000000000000000000000000000000000"); !errors.Is(err, evo.ErrImprovementUnknown) {
+		if err := gitRefine.Rollback(ctx, "0000000000000000000000000000000000000000"); !errors.Is(err, refine.ErrImprovementUnknown) {
 			t.Fatalf("rollback must refuse a commit that resolves to nothing, got %v", err)
 		}
 
-		if err := refine.Rollback(ctx, record.SHA); err != nil {
+		if err := gitRefine.Rollback(ctx, record.SHA); err != nil {
 			t.Fatalf("rollback of a marked improvement must revert: %v", err)
 		}
 		revertSubject := strings.TrimSpace(repo.git("log", "-1", "--format=%s"))
@@ -336,7 +336,7 @@ func TestGitNativeRefine(t *testing.T) {
 			t.Fatalf("the revert restores the pre-improvement content, got %q", body)
 		}
 
-		ledger, err := refine.Status(ctx)
+		ledger, err := gitRefine.Status(ctx)
 		if err != nil {
 			t.Fatalf("status after a rollback must be readable: %v", err)
 		}
@@ -351,9 +351,9 @@ func TestGitNativeRefine(t *testing.T) {
 	t.Run("registering with nothing to commit is a normal outcome and records no event", func(t *testing.T) {
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 
-		record, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
+		record, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
 		if err != nil {
 			t.Fatalf("registering unchanged content is not a failure: %v", err)
 		}
@@ -368,10 +368,10 @@ func TestGitNativeRefine(t *testing.T) {
 	t.Run("a revert conflict reports details and a registration during an open revert is refused", func(t *testing.T) {
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 
 		repo.write("resources/prompts/SOUL.md", "improved soul\n")
-		record, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
+		record, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note")
 		if err != nil {
 			t.Fatalf("register the improvement to conflict: %v", err)
 		}
@@ -379,11 +379,11 @@ func TestGitNativeRefine(t *testing.T) {
 		repo.git("add", "resources/prompts/SOUL.md")
 		repo.git("commit", "-q", "-m", "user rework")
 
-		err = refine.Rollback(ctx, record.SHA)
-		if !errors.Is(err, evo.ErrRevertConflict) {
+		err = gitRefine.Rollback(ctx, record.SHA)
+		if !errors.Is(err, refine.ErrRevertConflict) {
 			t.Fatalf("a conflicting revert must report ErrRevertConflict, got %v", err)
 		}
-		var conflict *evo.RevertConflictError
+		var conflict *refine.RevertConflictError
 		if !errors.As(err, &conflict) || conflict.SHA != record.SHA || !strings.Contains(conflict.Output, "CONFLICT") {
 			t.Fatalf("the conflict carries its commit and the git output, got %#v", conflict)
 		}
@@ -391,7 +391,7 @@ func TestGitNativeRefine(t *testing.T) {
 			t.Fatalf("the revert stays open for the agent to resolve, got %v", tryErr)
 		}
 
-		if _, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note"); !errors.Is(err, evo.ErrGitOperationInProgress) {
+		if _, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "note"); !errors.Is(err, refine.ErrGitOperationInProgress) {
 			t.Fatalf("a registration during an open revert is refused by name, got %v", err)
 		}
 		repo.git("revert", "--abort")

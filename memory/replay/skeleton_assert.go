@@ -46,8 +46,6 @@ var (
 
 	_ func(*ReplayProjection, context.Context) (ProjectionEntry, error) = (*ReplayProjection).Fold
 
-	_ func(*ReplayProjection, context.Context, []PresentationDecision) ([]ProjectionEntry, error) = (*ReplayProjection).Rebuild
-
 	_ func(*ReplayProjection, context.Context, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudget
 
 	_ func(*ReplayProjection) []ReplaySettle = (*ReplayProjection).Settles

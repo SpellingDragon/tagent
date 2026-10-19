@@ -17,6 +17,8 @@ import (
 // MUST read the loss ledger from counters that stay readable while the queue is full.
 // MUST NOT block the caller that produced the fact.
 // MUST NOT report a run whose writer never confirmed a seal as complete.
+//
+// - The record-writing face of the training surface shares the word and nothing else: that face writes the remembered episode, decision and attempt records, while this sink admits committed events for asynchronous delivery.
 type Recorder interface {
 	// Record admits one committed fact for asynchronous delivery.
 	//

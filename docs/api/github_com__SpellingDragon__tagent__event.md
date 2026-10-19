@@ -204,9 +204,9 @@ type Event struct {
     fields form four blocks — identity, content, ownership and ledger — and the
     doc of the first field of each names the block and what its fields share.
 
-    G0 (payload carrying) is not settled yet: if the design rules for a local
-    shadow message, the Message field below changes to that local type instead
-    of the native model message.
+    The content block carries the native locked tRPC model message: no local
+    message type stands beside it, so a fact stored by one process reads back as
+    the same payload in another.
 
 func (e Event) FactKey() string
     FactKey returns the event's canonical key as its fact identity, spelt as the
@@ -229,15 +229,17 @@ type Fact interface {
 }
     Fact is the fact category contract every fact family satisfies: the identity
     it is quoted by and the frozen type it is read as. Both questions are
-    asked of the fact as it stands, because a fact is immutable once produced —
-    neither answer is ever re-derived from the store or from the consumer that
-    reads it.
+    asked of the fact as it stands, because a fact is immutable once produced
+    — neither answer is ever re-derived from the store or from the consumer
+    that reads it. The identity is a plain string rather than EventID: it is a
+    spelling the vocabulary registers, so a family living in a package that must
+    not import this one still states it. The families, the package each of them
+    lives in and the mechanism that locks each identity are registered in the
+    fact vocabulary page; the event family below is the canonical one.
 
-    The identity is a plain string rather than EventID: it is a spelling the
-    vocabulary registers, so a family living in a package that must not import
-    this one still states it. The families, the package each of them lives
-    in and the mechanism that locks each identity are registered in the fact
-    vocabulary page; the event family below is the canonical one.
+    红线清单（2 条）： MUST answer the same identity and the same frozen type every time
+    one fact is asked MUST NOT re-derive an identity from a non-identity field
+    or rewrite a quoted identity
 
 type InstanceID string
     InstanceID identifies one runtime instance. Rebuilding an agent under the

@@ -35,7 +35,9 @@ type Externalizer interface {
 
 // Externalized is one externalized oversized result: the durable reference its bytes
 // were committed under, the bounded preview that stands in for the whole result, and
-// the byte-bounded segment entry through which the whole original is read back.
+// the byte-bounded segment entry through which the whole original is read back. The
+// ticket a preview carries is a rendering of that ledger reference: its vocabulary and
+// the read contract behind it belong to memory/ledger, and this package only renders it.
 type Externalized struct {
 	// Original is the reference the original bytes were committed under. It stays
 	// effective even when the replica write failed.
@@ -181,10 +183,13 @@ type ResultExternalizer struct {
 	originals    ledger.OriginalStore
 	materializer *Materializer
 	threshold    int
-	consumer     string
 	previewRunes int
 	segmentBytes int64
 }
+
+// externalizeConsumer is the identity replicas of externalized results are materialised
+// for, so a replica lands on the stable path of the one externalize path.
+const externalizeConsumer = "externalize"
 
 // ExternalizerOption names one setting of the externalize path at construction time.
 type ExternalizerOption func(*ResultExternalizer)
@@ -204,17 +209,6 @@ func WithMaxTokens(maxTokens int) ExternalizerOption {
 // committed.
 func WithResultMaterializer(materializer *Materializer) ExternalizerOption {
 	return func(externalizer *ResultExternalizer) { externalizer.materializer = materializer }
-}
-
-// WithExternalizeConsumer names the consumer identity replicas of externalized results
-// are materialised for, so two consumers of one original land on their own stable paths
-// instead of overwriting one another. An empty name keeps the default identity.
-func WithExternalizeConsumer(consumer string) ExternalizerOption {
-	return func(externalizer *ResultExternalizer) {
-		if consumer != "" {
-			externalizer.consumer = consumer
-		}
-	}
 }
 
 // WithPreviewRunes bounds the preview to at most runes leading characters. A zero or
@@ -238,7 +232,6 @@ func NewResultExternalizer(originals ledger.OriginalStore, options ...Externaliz
 	externalizer := &ResultExternalizer{
 		originals:    originals,
 		threshold:    ThresholdForMaxTokens(0),
-		consumer:     "externalize",
 		previewRunes: DefaultPreviewRunes,
 		segmentBytes: ledger.DefaultSegmentMaxBytes,
 	}
@@ -260,8 +253,9 @@ func (e *ResultExternalizer) Exceeds(chars int) bool { return chars > e.threshol
 // DecideExternalize answers the overflow decision face of the plugin pipeline: a result
 // of size characters is externalized exactly when it exceeds the one threshold, so an
 // overflowing result takes the same path as every other oversized result instead of a
-// policy of its own.
-func (e *ResultExternalizer) DecideExternalize(ctx context.Context, id event.EventID, size int) (bool, error) {
+// policy of its own. The decision reads the size alone; the identity the result is keyed
+// by is accepted so every decision face of the pipeline takes the same arguments.
+func (e *ResultExternalizer) DecideExternalize(ctx context.Context, _ event.EventID, size int) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -295,7 +289,7 @@ func (e *ResultExternalizer) Externalize(ctx context.Context, ref ledger.Origina
 	if e.materializer == nil {
 		return externalized, nil
 	}
-	if _, err := e.materializer.Materialize(ctx, ref, e.consumer); err != nil {
+	if _, err := e.materializer.Materialize(ctx, ref, externalizeConsumer); err != nil {
 		return externalized, fmt.Errorf("%w: %w", ErrReplicaWriteFailed, err)
 	}
 	return externalized, nil

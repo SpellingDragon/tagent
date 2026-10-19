@@ -1,10 +1,10 @@
 // 契约: docs/wiki/platform/platform-subsystems.md#workspace-scratch
 //
-// Skeleton compile-time assertions for the phase 1 workspace shapes. The phase 2
-// implementation types that will satisfy the two ports do not exist yet, so there is no
-// `var _ Iface = (*Impl)(nil)` to write; the assertions below prove what the skeleton can
-// prove on its own, pinning every declared field name and type, every declared method
-// signature, and every constant that must stay a compile-time constant.
+// Skeleton compile-time assertions for the workspace ports and their
+// implementations: every declared field name and type, every declared method
+// signature, the named refusals, and the reclamation defaults that must stay
+// compile-time constants. A renamed field or a widened signature stops this file
+// from compiling.
 package workspace
 
 import (

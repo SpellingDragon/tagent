@@ -7,8 +7,9 @@
 // The port speaks references, not facts. The index behind it is a derived,
 // replaceable structure, so a hit names the stored original and the text stays
 // behind the original store: the index is never the source of truth, and a hit
-// is never served as a second copy of the text. This is the phase 1 skeleton:
-// it declares the port and holds no behaviour.
+// is never served as a second copy of the text. The package declares the port
+// and carries the fusion rule beside it; the store-backed searcher is the
+// implementation a runtime wires the port to.
 package search
 
 import (
@@ -16,7 +17,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -98,17 +98,6 @@ type Query struct {
 	// upper one.
 	Since time.Time
 	Until time.Time
-	// Relations restricts the query to the events standing in a causal relation
-	// to the given keys; it is empty when no relation restriction applies.
-	//
-	// Unimplemented by adjudication: no consumer of relation-filtered retrieval
-	// exists — causal-chain consumption walks the
-	// RelationStore explicitly instead, and content stays separate from
-	// relations by design. The field is kept so the declared query shape does
-	// not change underneath its callers, and no relation filter is ever read:
-	// zero implementation and zero tests stand behind it until a real consumer
-	// names the need.
-	Relations []event.EventID
 	// Limit caps how many references one page carries, so an oversized match
 	// set is consumed page by page rather than whole. A non-positive Limit is
 	// not "no bound": it runs under DefaultLimit (see PageLimit), so every page

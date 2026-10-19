@@ -1,17 +1,15 @@
 // 契约: docs/wiki/memory/memory-architecture.md#overview
 //
-// Skeleton compile-time assertions for the phase 1 retrieval port. The phase 2
-// types that satisfy the ports do not exist yet, so there is no implementation
-// assertion to write; the assertions below pin what the skeleton proves on its
-// own: every declared field name and type, every declared method signature, and
-// every value that must stay a compile-time constant.
+// Skeleton compile-time assertions for the retrieval port: the declared query
+// and result fields, every declared method signature, the named refusals and
+// the strategy values that must stay compile-time constants. A renamed field or
+// a widened signature stops this file from compiling.
 package search
 
 import (
 	"context"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -26,7 +24,6 @@ var (
 		Types:      []string{},
 		Since:      time.Time{},
 		Until:      time.Time{},
-		Relations:  []event.EventID{},
 		Limit:      0,
 	}
 

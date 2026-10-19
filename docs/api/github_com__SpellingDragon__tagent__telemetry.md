@@ -39,6 +39,11 @@ type Attempt struct {
     audit reader sees which layers the SDK attempted and which it deliberately
     left alone.
 
+    An attempt here is an observation attempt at one SDK layer, never a model
+    attempt: the remembered form of a model attempt is a record of the training
+    surface, and the identity of a model attempt is the event package's
+    AttemptID. The three readings stay apart and none is decoded as another.
+
 type AuditRecord struct {
 	// Fact is the identity of the committed fact the attempts were made for.
 	Fact event.EventID
@@ -142,6 +147,10 @@ type Recorder interface {
     loss ledger from counters that stay readable while the queue is full.
     MUST NOT block the caller that produced the fact. MUST NOT report a run
     whose writer never confirmed a seal as complete.
+
+    - The record-writing face of the training surface shares the word and
+    nothing else: that face writes the remembered episode, decision and attempt
+    records, while this sink admits committed events for asynchronous delivery.
 
 type SDKObserver struct {
 	// Has unexported fields.

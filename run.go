@@ -24,7 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/agent"
 	"github.com/SpellingDragon/tagent/config"
 	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/query"
@@ -120,7 +120,7 @@ type Run struct {
 	manager     *task.MemoryManager
 	shutdown    *agent.Shutdown
 	delegations *agent.Delegator
-	watermark   evolution.WatermarkGate
+	watermark   meditation.WatermarkGate
 	projection  *query.Projection
 	explainer   *query.Explainer
 	retrieval   *retrievalSupply
@@ -189,7 +189,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		observer:    cfg.observer,
 	}
 	if cfg.reflectionAnchors != "" {
-		anchors, err := evolution.NewAnchorStore(cfg.reflectionAnchors)
+		anchors, err := meditation.NewAnchorStore(cfg.reflectionAnchors)
 		if err != nil {
 			return nil, err
 		}

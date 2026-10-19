@@ -56,18 +56,15 @@ const (
 	ErrorTypeStreamError = trpcmodel.ErrorTypeStreamError
 	// ErrorTypeAPIError is an API-level failure carried by a Response.
 	ErrorTypeAPIError = trpcmodel.ErrorTypeAPIError
-	// ErrorTypeFlowError is a flow-level failure carried by a Response.
-	ErrorTypeFlowError = trpcmodel.ErrorTypeFlowError
-	// ErrorTypeRunError is a run-level failure carried by a Response.
-	ErrorTypeRunError = trpcmodel.ErrorTypeRunError
 	// ErrorTypeCancelled is a cancellation or timeout failure carried by a
 	// Response.
 	ErrorTypeCancelled = trpcmodel.ErrorTypeCancelled
 )
-    ErrorTypeStreamError, ErrorTypeAPIError, ErrorTypeFlowError,
-    ErrorTypeRunError and ErrorTypeCancelled are aliases for the locked tRPC
-    response error type constants, so the terminal reduction reads the native
-    error categories.
+    ErrorTypeStreamError, ErrorTypeAPIError and ErrorTypeCancelled are aliases
+    for the locked tRPC response error type constants, so the terminal reduction
+    reads the native error categories. Every constant re-exported here is
+    one the runtime reads: a category no consumer reads is not re-exported,
+    and no second spelling of it is kept beside the reduction that reads it.
 
 const (
 	// AlertNilStream is reported when the stream handle handed to a reduction
@@ -173,17 +170,6 @@ const (
 	// partial output.
 	KindPartialOnly
 )
-func TerminalKind(resp *Response) (Kind, error)
-    TerminalKind classifies one observed native response into its terminal
-    Kind; it is the per-response classifier the reduction drives, not the
-    request-level entry point. The terminal judgement of a whole tool-call
-    stream is derived only by ReduceChannel or ReduceSeq, which fold every
-    response of one model request into one Outcome.
-
-    A response bearing no terminal evidence of its own, such as a usage-only
-    tail packet, classifies to KindUnknown with ErrNoTerminal; the surrounding
-    reduction settles that unknown at the producer end or alerts it.
-
 type Message = trpcmodel.Message
     Message is an alias for the locked tRPC conversation message, preserving the
     native role, content parts, tool calls and reasoning fields.

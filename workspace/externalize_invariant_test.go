@@ -347,7 +347,7 @@ func TestExternalizeOrderInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("externalize: %v", err)
 		}
-		path := materializer.replicaPath(ref, externalizer.consumer)
+		path := materializer.replicaPath(ref, externalizeConsumer)
 		written, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read the replica: %v", err)

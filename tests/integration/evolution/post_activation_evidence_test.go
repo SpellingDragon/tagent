@@ -8,6 +8,7 @@ import (
 	"time"
 
 	evo "github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/refine"
 	"github.com/SpellingDragon/tagent/model"
 )
 
@@ -51,9 +52,9 @@ func TestPostActivationEvidence(t *testing.T) {
 
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 		repo.write("resources/prompts/SOUL.md", "improved soul\n")
-		record, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "痛点:提示词漂移 → 产物:重写 SOUL.md → 预期收益:回答更稳")
+		record, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "痛点:提示词漂移 → 产物:重写 SOUL.md → 预期收益:回答更稳")
 		if err != nil {
 			t.Fatalf("the registration must commit: %v", err)
 		}
@@ -222,9 +223,9 @@ func TestPostActivationEvidence(t *testing.T) {
 		}
 		repo := newRefineRepo(t)
 		log := &improvementLog{}
-		refine := evo.NewGitRefine(repo.root, log.recorder(), nil)
+		gitRefine := refine.NewGitRefine(repo.root, log.recorder(), nil)
 		repo.write("resources/prompts/SOUL.md", "improved soul\n")
-		record, err := refine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "痛点:回答漂移 → 产物:收紧 SOUL.md → 预期收益:回答更稳")
+		record, err := gitRefine.Register(ctx, []string{"resources/prompts/SOUL.md"}, "痛点:回答漂移 → 产物:收紧 SOUL.md → 预期收益:回答更稳")
 		if err != nil {
 			t.Fatalf("the registration must commit: %v", err)
 		}

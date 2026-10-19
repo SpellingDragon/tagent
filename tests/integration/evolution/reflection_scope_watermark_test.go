@@ -22,7 +22,7 @@ import (
 	"github.com/SpellingDragon/tagent/plugin"
 	"github.com/SpellingDragon/tagent/state"
 
-	evo "github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
 )
 
 // TestReflectionScopeAndWatermark drives the reflection loop over its authorized face, its persisted watermark and its loop-session injection face.
@@ -34,8 +34,8 @@ import (
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 func TestReflectionScopeAndWatermark(t *testing.T) {
 	t.Run("an observation face outside the read scope is refused by name", func(t *testing.T) {
-		scope, err := evo.ResolveObservationScope("agent-a", []string{"agent-b", "agent-z", "agent-y"}, []string{"agent-a", "agent-b"})
-		if !errors.Is(err, evo.ErrObservationScopeOutOfBounds) {
+		scope, err := meditation.ResolveObservationScope("agent-a", []string{"agent-b", "agent-z", "agent-y"}, []string{"agent-a", "agent-b"})
+		if !errors.Is(err, meditation.ErrObservationScopeOutOfBounds) {
 			t.Fatalf("resolve error = %v, want the out-of-bounds refusal", err)
 		}
 		if !strings.Contains(err.Error(), "agent-y, agent-z") {
@@ -48,14 +48,14 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 			t.Fatalf("scope = %+v, want no face assembled from a refused declaration", scope)
 		}
 
-		if _, err := evo.NewReflection(evo.ReflectionConfig{
-			Loop: evo.ReflectionLoop{Agent: "agent-a", Session: "session-meditate"},
-			Face: evo.ReflectionFace{ObservedNamespaces: []string{"agent-z"}},
-		}, nil, nil, nil); !errors.Is(err, evo.ErrObservationScopeOutOfBounds) {
+		if _, err := meditation.NewReflection(meditation.ReflectionConfig{
+			Loop: meditation.ReflectionLoop{Agent: "agent-a", Session: "session-meditate"},
+			Face: meditation.ReflectionFace{ObservedNamespaces: []string{"agent-z"}},
+		}, nil, nil, nil); !errors.Is(err, meditation.ErrObservationScopeOutOfBounds) {
 			t.Fatalf("assembly error = %v, want the refused face refusing the assembly", err)
 		}
 
-		inside, err := evo.ResolveObservationScope("agent-a", []string{"agent-b", "agent-b", "agent-a"}, []string{"agent-b"})
+		inside, err := meditation.ResolveObservationScope("agent-a", []string{"agent-b", "agent-b", "agent-a"}, []string{"agent-b"})
 		if err != nil {
 			t.Fatalf("resolve an authorized face: %v", err)
 		}
@@ -68,7 +68,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 	})
 
 	t.Run("an undeclared face is the agent's own partition and not the read scope", func(t *testing.T) {
-		scope, err := evo.ResolveObservationScope("agent-a", nil, []string{"agent-a", "agent-pool"})
+		scope, err := meditation.ResolveObservationScope("agent-a", nil, []string{"agent-a", "agent-pool"})
 		if err != nil {
 			t.Fatalf("resolve an undeclared face: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		own := rig.ledger.record(externalFact("own-note", "a note on the agent's own partition", time.Unix(0, 0).Add(3*time.Minute)), rig.partition)
 
 		outcome := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute))
-		if outcome.Decision.Disposition != evo.TickFired {
+		if outcome.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("tick disposition = %q (%s), want the own-partition fact to fire the reflection", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}
 		if len(outcome.Scan.Partitions) != 1 || outcome.Scan.Partitions[0].Name != "agent-a" {
@@ -98,7 +98,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 
 		quiet := newReflectionRig(t, reflectionConfig(), t.TempDir())
 		quiet.ledger.record(externalFact("pool-note", "a note from the read scope", time.Unix(0, 0).Add(2*time.Minute)), memory.PartitionIDFromName("agent-pool"))
-		if settled := quiet.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); settled.Decision.Disposition != evo.TickNoNovelty {
+		if settled := quiet.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); settled.Decision.Disposition != meditation.TickNoNovelty {
 			t.Fatalf("tick = %q (%s), want the own partition alone deciding the judgment", settled.Decision.Disposition, settled.Decision.Reason)
 		}
 		if got := quiet.input.injectedCount(); got != 0 {
@@ -119,7 +119,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		}
 
 		outcome := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute))
-		if outcome.Decision.Disposition != evo.TickClosed || !errors.Is(outcome.Decision.Cause, evo.ErrAnchorUnreadable) {
+		if outcome.Decision.Disposition != meditation.TickClosed || !errors.Is(outcome.Decision.Cause, meditation.ErrAnchorUnreadable) {
 			t.Fatalf("tick = (%q, %v), want the gate closed on the unparsable watermark", outcome.Decision.Disposition, outcome.Decision.Cause)
 		}
 		if outcome.Decision.Reason == "" {
@@ -135,27 +135,27 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if err := os.WriteFile(record, []byte(`{}`), 0o644); err != nil {
 			t.Fatalf("repair the anchor record: %v", err)
 		}
-		if repaired := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); repaired.Decision.Disposition != evo.TickFired {
+		if repaired := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); repaired.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("repaired tick = %q (%s), want the same face firing once the watermark is readable", repaired.Decision.Disposition, repaired.Decision.Reason)
 		}
 
-		unreadable, err := evo.NewAnchorStore(dir)
+		unreadable, err := meditation.NewAnchorStore(dir)
 		if err != nil {
 			t.Fatalf("build the store over a directory path: %v", err)
 		}
-		closed, err := evo.NewReflection(reflectionConfig(), unreadable, rig.ledger, rig.input)
+		closed, err := meditation.NewReflection(reflectionConfig(), unreadable, rig.ledger, rig.input)
 		if err != nil {
 			t.Fatalf("assemble over the unreadable store: %v", err)
 		}
-		if got := closed.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute)); !errors.Is(got.Decision.Cause, evo.ErrAnchorUnreadable) {
+		if got := closed.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute)); !errors.Is(got.Decision.Cause, meditation.ErrAnchorUnreadable) {
 			t.Fatalf("unreadable tick = (%q, %v), want the gate closed on an unreadable record", got.Decision.Disposition, got.Decision.Cause)
 		}
 
-		unwired, err := evo.NewReflection(reflectionConfig(), nil, rig.ledger, rig.input)
+		unwired, err := meditation.NewReflection(reflectionConfig(), nil, rig.ledger, rig.input)
 		if err != nil {
 			t.Fatalf("assemble without a watermark source: %v", err)
 		}
-		if got := unwired.Tick(ctx, time.Unix(0, 0).Add(5*time.Minute)); !errors.Is(got.Decision.Cause, evo.ErrWatermarkSourceUnwired) {
+		if got := unwired.Tick(ctx, time.Unix(0, 0).Add(5*time.Minute)); !errors.Is(got.Decision.Cause, meditation.ErrWatermarkSourceUnwired) {
 			t.Fatalf("unwired tick = (%q, %v), want the gate closed on a missing watermark source", got.Decision.Disposition, got.Decision.Cause)
 		}
 
@@ -165,14 +165,14 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if _, err := broken.reflection.FreshSince(ctx, time.Unix(0, 0)); err == nil {
 			t.Fatal("a failed read must be reported as an error, never as nothing fresh")
 		}
-		if got := broken.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); got.Decision.Disposition != evo.TickClosed || got.Decision.Cause == nil {
+		if got := broken.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); got.Decision.Disposition != meditation.TickClosed || got.Decision.Cause == nil {
 			t.Fatalf("tick = (%q, %v), want the gate closed on the unreadable face", got.Decision.Disposition, got.Decision.Cause)
 		}
 		if got := broken.input.injectedCount(); got != 0 {
 			t.Fatalf("injected inputs = %d, want no fallback criterion firing past an unreadable face", got)
 		}
 		broken.ledger.fail(nil)
-		if got := broken.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); got.Decision.Disposition != evo.TickFired {
+		if got := broken.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); got.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("readable tick = %q (%s), want the same face firing once the chain answers", got.Decision.Disposition, got.Decision.Reason)
 		}
 	})
@@ -186,10 +186,10 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		rig := newReflectionRig(t, cfg, dir)
 		rig.ledger.record(externalFact("first-note", "the fact the first reflection covers", time.Unix(0, 0).Add(2*time.Minute)), rig.partition)
 		injected := time.Unix(0, 0).Add(3 * time.Minute)
-		rig.input.arm(evo.ReflectionInFlight)
+		rig.input.arm(meditation.ReflectionInFlight)
 
 		fired := rig.reflection.Tick(ctx, injected)
-		if fired.Decision.Disposition != evo.TickFired || fired.Injection == nil {
+		if fired.Decision.Disposition != meditation.TickFired || fired.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want one injected reflection input", fired.Decision.Disposition, fired.Decision.Reason)
 		}
 		if got := rig.watermark(t); !got.IsZero() {
@@ -198,7 +198,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if _, pending := rig.reflection.Pending(); !pending {
 			t.Fatal("an in-flight reflection input awaits its outcome")
 		}
-		if err := rig.reflection.NoteOutcome(ctx, evo.ReflectionReceipt{Key: fired.Injection.Key, Outcome: evo.ReflectionConsumed, At: injected}); err != nil {
+		if err := rig.reflection.NoteOutcome(ctx, meditation.ReflectionReceipt{Key: fired.Injection.Key, Outcome: meditation.ReflectionConsumed, At: injected}); err != nil {
 			t.Fatalf("settle the consumed turn: %v", err)
 		}
 		if _, pending := rig.reflection.Pending(); pending {
@@ -211,8 +211,8 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 			t.Fatalf("deferral count = %d, want none beside a consumed reflection", got)
 		}
 
-		replay := evo.ReflectionReceipt{Key: fired.Injection.Key, Outcome: evo.ReflectionConsumed, At: injected}
-		if err := rig.reflection.NoteOutcome(ctx, replay); !errors.Is(err, evo.ErrReflectionNotPending) {
+		replay := meditation.ReflectionReceipt{Key: fired.Injection.Key, Outcome: meditation.ReflectionConsumed, At: injected}
+		if err := rig.reflection.NoteOutcome(ctx, replay); !errors.Is(err, meditation.ErrReflectionNotPending) {
 			t.Fatalf("replayed outcome = %v, want the repeated report refused", err)
 		}
 		if got := rig.watermark(t); !got.Equal(injected) {
@@ -224,26 +224,26 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 			t.Fatalf("watermark after a restart = %s, want the persisted %s", got, injected)
 		}
 		restarted.ledger.restore(rig.ledger)
-		if got := restarted.reflection.Tick(ctx, injected.Add(10*time.Minute)); got.Decision.Disposition != evo.TickNoNovelty {
+		if got := restarted.reflection.Tick(ctx, injected.Add(10*time.Minute)); got.Decision.Disposition != meditation.TickNoNovelty {
 			t.Fatalf("restart tick = %q (%s), want the covered fact no longer firing a reflection", got.Decision.Disposition, got.Decision.Reason)
 		}
 		restarted.ledger.record(externalFact("later-note", "a fact newer than the consumed reflection", injected.Add(20*time.Minute)), restarted.partition)
-		if got := restarted.reflection.Tick(ctx, injected.Add(30*time.Minute)); got.Decision.Disposition != evo.TickRhythm {
+		if got := restarted.reflection.Tick(ctx, injected.Add(30*time.Minute)); got.Decision.Disposition != meditation.TickRhythm {
 			t.Fatalf("rhythm tick = %q (%s), want the rhythm floor holding a fresh fact", got.Decision.Disposition, got.Decision.Reason)
 		}
 		if got := restarted.input.injectedCount(); got != 0 {
 			t.Fatalf("injected inputs = %d, want none before the rhythm floor elapses", got)
 		}
 
-		restarted.input.arm(evo.ReflectionInFlight)
+		restarted.input.arm(meditation.ReflectionInFlight)
 		second := restarted.reflection.Tick(ctx, injected.Add(2*time.Hour))
-		if second.Decision.Disposition != evo.TickFired || second.Injection == nil {
+		if second.Decision.Disposition != meditation.TickFired || second.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want the fresh fact firing past the rhythm floor", second.Decision.Disposition, second.Decision.Reason)
 		}
 		if _, pending := restarted.reflection.Pending(); !pending {
 			t.Fatal("an in-flight reflection input stays pending")
 		}
-		if err := restarted.reflection.NoteOutcome(ctx, evo.ReflectionReceipt{Key: "reflection-elsewhere", Outcome: evo.ReflectionConsumed, At: injected.Add(2 * time.Hour)}); !errors.Is(err, evo.ErrReflectionKeyMismatch) {
+		if err := restarted.reflection.NoteOutcome(ctx, meditation.ReflectionReceipt{Key: "reflection-elsewhere", Outcome: meditation.ReflectionConsumed, At: injected.Add(2 * time.Hour)}); !errors.Is(err, meditation.ErrReflectionKeyMismatch) {
 			t.Fatalf("mismatched outcome = %v, want the report about another input refused", err)
 		}
 		if got := restarted.watermark(t); !got.Equal(injected) {
@@ -252,7 +252,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if _, pending := restarted.reflection.Pending(); !pending {
 			t.Fatal("a refused report leaves the pending input awaiting its own outcome")
 		}
-		if err := restarted.reflection.NoteOutcome(ctx, evo.ReflectionReceipt{Key: second.Injection.Key, Outcome: evo.ReflectionConsumed, At: injected.Add(2 * time.Hour)}); err != nil {
+		if err := restarted.reflection.NoteOutcome(ctx, meditation.ReflectionReceipt{Key: second.Injection.Key, Outcome: meditation.ReflectionConsumed, At: injected.Add(2 * time.Hour)}); err != nil {
 			t.Fatalf("settle the in-flight input: %v", err)
 		}
 		if got := restarted.watermark(t); !got.Equal(injected.Add(2 * time.Hour)) {
@@ -267,10 +267,10 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		rig := newReflectionRig(t, reflectionConfig(), t.TempDir())
 		covered := time.Unix(0, 0).Add(2 * time.Minute)
 		key := rig.ledger.record(externalFact("covered-note", "the fact a yielded reflection covered", covered), rig.partition)
-		rig.input.arm(evo.ReflectionDeferred)
+		rig.input.arm(meditation.ReflectionDeferred)
 
 		first := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute))
-		if first.Decision.Disposition != evo.TickFired {
+		if first.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("tick = (%q, %s), want the reflection firing on the covered fact", first.Decision.Disposition, first.Decision.Reason)
 		}
 		if got := rig.watermark(t); !got.IsZero() {
@@ -287,7 +287,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		}
 
 		second := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute))
-		if second.Decision.Disposition != evo.TickFired {
+		if second.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("next tick = (%q, %s), want the same face re-evaluated and firing", second.Decision.Disposition, second.Decision.Reason)
 		}
 		if second.Scan == nil || second.Scan.Verdict.Recent == nil || second.Scan.Verdict.Recent.Identity.Key != key {
@@ -315,11 +315,11 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		long := strings.Repeat("d", 200)
 		for i := 1; i <= 9; i++ {
 			name := fmt.Sprintf("pool-%d", i)
-			rig.ledger.record(lineageFact(fmt.Sprintf("note-%d", i), long, evo.LineageReflection, time.Unix(0, 0).Add(time.Duration(i)*time.Minute)), memory.PartitionIDFromName(name))
+			rig.ledger.record(lineageFact(fmt.Sprintf("note-%d", i), long, meditation.LineageReflection, time.Unix(0, 0).Add(time.Duration(i)*time.Minute)), memory.PartitionIDFromName(name))
 		}
 
 		outcome := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(time.Hour))
-		if outcome.Decision.Disposition != evo.TickNoNovelty {
+		if outcome.Decision.Disposition != meditation.TickNoNovelty {
 			t.Fatalf("tick = (%q, %s), want the self-managed face holding no novelty", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}
 		if outcome.Scan == nil || outcome.Scan.Counts.HydratedTotal != cfg.Face.FactLimit {
@@ -359,20 +359,20 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 			}
 		}
 
-		again, err := evo.NewScanDigest(outcome.Scan, cfg.Face.FactLimit).Render(ctx, evo.Watermark{Moment: outcome.Scan.Watermark})
+		again, err := meditation.NewScanDigest(outcome.Scan, cfg.Face.FactLimit).Render(ctx, meditation.Watermark{Moment: outcome.Scan.Watermark})
 		if err != nil {
 			t.Fatalf("render the same pass: %v", err)
 		}
 		if again.Body != body || again.Omitted != outcome.Digest.Omitted {
 			t.Fatalf("second render =\n%s\nwant the same pass rendering the same summary", again.Body)
 		}
-		if _, err := evo.NewScanDigest(outcome.Scan, cfg.Face.FactLimit).Render(ctx, evo.Watermark{Moment: time.Unix(0, 0)}); !errors.Is(err, evo.ErrDigestScanMismatch) {
+		if _, err := meditation.NewScanDigest(outcome.Scan, cfg.Face.FactLimit).Render(ctx, meditation.Watermark{Moment: time.Unix(0, 0)}); !errors.Is(err, meditation.ErrDigestScanMismatch) {
 			t.Fatalf("mismatched render = %v, want the pass of another window refused", err)
 		}
 		if got := rig.ledger.reads(); got != 1 {
 			t.Fatalf("fact-chain reads = %d, want the rendering reading no fact chain", got)
 		}
-		if _, err := evo.NewScanDigest(nil, 0).Render(ctx, evo.Watermark{}); !errors.Is(err, evo.ErrDigestFaceUnavailable) {
+		if _, err := meditation.NewScanDigest(nil, 0).Render(ctx, meditation.Watermark{}); !errors.Is(err, meditation.ErrDigestFaceUnavailable) {
 			t.Fatalf("empty render = %v, want a digest without a pass refused by name", err)
 		}
 	})
@@ -389,17 +389,17 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		before := rig.ledger.snapshot()
 
 		outcome := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute))
-		if outcome.Decision.Disposition != evo.TickFired || outcome.Injection == nil {
+		if outcome.Decision.Disposition != meditation.TickFired || outcome.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want one injected reflection input", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}
 		input := outcome.Injection.Event
 		if input.Type != event.TypeExternalInput {
 			t.Fatalf("input type = %q, want an explicit input event", input.Type)
 		}
-		if got := input.Meta[event.MetaKeyTriggerSource]; got != evo.LineageReflection {
+		if got := input.Meta[event.MetaKeyTriggerSource]; got != meditation.LineageReflection {
 			t.Fatalf("input trigger source = %q, want the reflection lineage", got)
 		}
-		if !evo.SelfManagedLineage(input.Meta[event.MetaKeyTriggerSource]) || !evo.DeliverableLineage(input.Meta[event.MetaKeyTriggerSource]) {
+		if !meditation.SelfManagedLineage(input.Meta[event.MetaKeyTriggerSource]) || !meditation.DeliverableLineage(input.Meta[event.MetaKeyTriggerSource]) {
 			t.Fatalf("reflection lineage = %q, want a host-visible lineage the freshness judgment reads as self-managed", input.Meta[event.MetaKeyTriggerSource])
 		}
 		if input.Owner != rig.address || input.Source != rig.address || input.Target != rig.address {
@@ -428,7 +428,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the committed reflection fact: %v", err)
 		}
-		if observed.Meta[event.MetaKeyTriggerSource] != evo.LineageReflection || observed.Type != event.TypeExternalInput {
+		if observed.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection || observed.Type != event.TypeExternalInput {
 			t.Fatalf("committed reflection fact = %+v, want the source=meditation input on the chain", observed)
 		}
 		refs, err := rig.ledger.QueryEvents(ctx, memory.QueryOptions{
@@ -446,7 +446,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		}
 
 		next := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute))
-		if next.Decision.Disposition != evo.TickNoNovelty {
+		if next.Decision.Disposition != meditation.TickNoNovelty {
 			t.Fatalf("next tick = %q (%s), want the reflection input never re-arming the judgment that produced it", next.Decision.Disposition, next.Decision.Reason)
 		}
 		if got := rig.input.injectedCount(); got != 1 {
@@ -461,10 +461,10 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 // reflectionConfig is the assembly of one reflecting agent these tests run over:
 // a one-agent loop session, a declared face of its own partition and a cadence
 // wide enough that only the sub-case that names it meets the rhythm floor.
-func reflectionConfig() evo.ReflectionConfig {
-	return evo.ReflectionConfig{
-		Loop:    evo.ReflectionLoop{Agent: "agent-a", Session: "session-meditate"},
-		Cadence: evo.ReflectionCadence{Interval: time.Minute, MinGap: time.Hour},
+func reflectionConfig() meditation.ReflectionConfig {
+	return meditation.ReflectionConfig{
+		Loop:    meditation.ReflectionLoop{Agent: "agent-a", Session: "session-meditate"},
+		Cadence: meditation.ReflectionCadence{Interval: time.Minute, MinGap: time.Hour},
 		Prompt:  "reflect on the observed face",
 	}
 }
@@ -635,11 +635,11 @@ func (l *reflectionLedger) reads() int {
 	return l.read
 }
 
-var _ evo.ObservedFacts = (*reflectionLedger)(nil)
+var _ meditation.ObservedFacts = (*reflectionLedger)(nil)
 
 // The reflection loop satisfies the declared observation-source face of the plugin
 // layer, which is the face a consumer of the loop holds it by.
-var _ plugin.ObservationSource = (*evo.Reflection)(nil)
+var _ plugin.ObservationSource = (*meditation.Reflection)(nil)
 
 // reflectionModel is the native model stand-in of the rig: it records every
 // request the loop assembles and answers it with a completed turn, so a decision
@@ -687,13 +687,13 @@ type loopSessionInput struct {
 	partition int
 
 	mu       sync.Mutex
-	armed    evo.ReflectionOutcome
+	armed    meditation.ReflectionOutcome
 	injected []event.Event
 	seq      int
 }
 
 // arm sets the outcome the next injections report beside the loop's own terminal.
-func (i *loopSessionInput) arm(outcome evo.ReflectionOutcome) {
+func (i *loopSessionInput) arm(outcome meditation.ReflectionOutcome) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.armed = outcome
@@ -701,7 +701,7 @@ func (i *loopSessionInput) arm(outcome evo.ReflectionOutcome) {
 
 // InjectReflection commits the input, drives the agent's own loop session with it
 // and reports the outcome of that turn.
-func (i *loopSessionInput) InjectReflection(ctx context.Context, evt event.Event) (evo.ReflectionReceipt, error) {
+func (i *loopSessionInput) InjectReflection(ctx context.Context, evt event.Event) (meditation.ReflectionReceipt, error) {
 	i.mu.Lock()
 	i.seq++
 	key := event.EventID(fmt.Sprintf("reflection-%d", i.seq))
@@ -721,15 +721,15 @@ func (i *loopSessionInput) InjectReflection(ctx context.Context, evt event.Event
 		Ready:        []event.Event{evt},
 	})
 	if err != nil {
-		return evo.ReflectionReceipt{}, err
+		return meditation.ReflectionReceipt{}, err
 	}
 	if armed != "" {
-		return evo.ReflectionReceipt{Key: key, Outcome: armed, At: evt.Timestamp, Reason: "the sub-case armed this outcome"}, nil
+		return meditation.ReflectionReceipt{Key: key, Outcome: armed, At: evt.Timestamp, Reason: "the sub-case armed this outcome"}, nil
 	}
 	if turn.Terminal != model.KindCompleted {
-		return evo.ReflectionReceipt{Key: key, Outcome: evo.ReflectionDeferred, At: evt.Timestamp, Reason: "the reflection turn did not reach a completed terminal"}, nil
+		return meditation.ReflectionReceipt{Key: key, Outcome: meditation.ReflectionDeferred, At: evt.Timestamp, Reason: "the reflection turn did not reach a completed terminal"}, nil
 	}
-	return evo.ReflectionReceipt{Key: key, Outcome: evo.ReflectionConsumed, At: evt.Timestamp}, nil
+	return meditation.ReflectionReceipt{Key: key, Outcome: meditation.ReflectionConsumed, At: evt.Timestamp}, nil
 }
 
 // injectedCount reports how many reflection inputs were handed to the loop.
@@ -739,7 +739,7 @@ func (i *loopSessionInput) injectedCount() int {
 	return len(i.injected)
 }
 
-var _ evo.ReflectionInput = (*loopSessionInput)(nil)
+var _ meditation.ReflectionInput = (*loopSessionInput)(nil)
 
 // reflectionRig is one reflecting agent assembled over a temp anchor directory, a
 // fact chain and the agent's own loop session: the tick, the watermark record and
@@ -747,9 +747,9 @@ var _ evo.ReflectionInput = (*loopSessionInput)(nil)
 type reflectionRig struct {
 	ledger     *reflectionLedger
 	model      *reflectionModel
-	store      *evo.AnchorStore
+	store      *meditation.AnchorStore
 	input      *loopSessionInput
-	reflection *evo.Reflection
+	reflection *meditation.Reflection
 
 	address   event.Address
 	partition int
@@ -757,7 +757,7 @@ type reflectionRig struct {
 
 // newReflectionRig assembles one reflecting agent over the anchor directory and
 // the loop session its config names.
-func newReflectionRig(t *testing.T, cfg evo.ReflectionConfig, dir string) *reflectionRig {
+func newReflectionRig(t *testing.T, cfg meditation.ReflectionConfig, dir string) *reflectionRig {
 	t.Helper()
 	instance := event.InstanceID("instance-reflect")
 	address := event.Address{AgentID: event.AgentID(cfg.Loop.Agent), SessionID: event.SessionID(cfg.Loop.Session)}
@@ -782,7 +782,7 @@ func newReflectionRig(t *testing.T, cfg evo.ReflectionConfig, dir string) *refle
 	}
 	loop := agent.NewLoop(bindings, state.NewOccupancy(), instance, nil)
 
-	store, err := evo.NewAnchorStore(filepath.Join(dir, "anchors.json"))
+	store, err := meditation.NewAnchorStore(filepath.Join(dir, "anchors.json"))
 	if err != nil {
 		t.Fatalf("build the anchor store: %v", err)
 	}
@@ -793,7 +793,7 @@ func newReflectionRig(t *testing.T, cfg evo.ReflectionConfig, dir string) *refle
 		instance:  instance,
 		partition: memory.PartitionIDFromName(cfg.Loop.Agent),
 	}
-	reflection, err := evo.NewReflection(cfg, store, ledger, input)
+	reflection, err := meditation.NewReflection(cfg, store, ledger, input)
 	if err != nil {
 		t.Fatalf("assemble the reflection: %v", err)
 	}

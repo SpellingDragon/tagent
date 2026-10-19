@@ -76,16 +76,16 @@ const (
 	SignalProducerDone
 )
 
-// TerminalKind classifies one observed native response into its terminal Kind;
+// terminalKind classifies one observed native response into its terminal Kind;
 // it is the per-response classifier the reduction drives, not the request-level
-// entry point. The terminal judgement of a whole tool-call stream is derived
-// only by ReduceChannel or ReduceSeq, which fold every response of one model
-// request into one Outcome.
+// entry point, so it stays internal to this package. The terminal judgement of a
+// whole tool-call stream is derived only by ReduceChannel or ReduceSeq, which
+// fold every response of one model request into one Outcome.
 //
 // A response bearing no terminal evidence of its own, such as a usage-only tail
 // packet, classifies to KindUnknown with ErrNoTerminal; the surrounding
 // reduction settles that unknown at the producer end or alerts it.
-func TerminalKind(resp *Response) (Kind, error) {
+func terminalKind(resp *Response) (Kind, error) {
 	switch signalOf(resp) {
 	case SignalValidTerminal:
 		return KindCompleted, nil
@@ -206,7 +206,7 @@ func (r *Reducer) Observe(resp *Response) Item {
 	if r.standing() {
 		return r.observeLate(resp, sig)
 	}
-	kind, err := TerminalKind(resp)
+	kind, err := terminalKind(resp)
 	item := Item{Signal: sig, Kind: kind, Err: err}
 	switch sig {
 	case SignalUsageTail:

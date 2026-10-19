@@ -10,6 +10,33 @@ imports another tagent package. It describes data and holds no live objects
 Turning a Declaration into live bindings belongs to the composition root and to
 the state owner, not here.
 
+  - config.go states the declaration vocabulary;
+  - decode.go maps a decoded source tree onto it, rejecting every key the
+    surface does not name;
+  - load.go is the assembly entry that reads a source and applies defaults;
+  - source.go decodes the source syntax, while defaults.go, clone.go and
+    fingerprint.go hold the default pass, the deep copy and the content
+    fingerprint.
+
+The strict mapping face of the declaration layer: it maps a decoded source
+tree onto the declaration vocabulary in config.go, rejecting every key the
+surface does not name, every repeated key and every value of the wrong shape,
+and it names the offending source, line and field path in the error. The field
+readers below are the only place the source node shapes are inspected, so the
+declaration types never carry syntax knowledge.
+
+The assembly face of the declaration layer: the one entry that turns a source
+file into a Declaration. Decoding the source syntax belongs to source.go,
+mapping the decoded tree onto the declaration types belongs to decode.go and the
+default pass belongs to defaults.go; this file only sequences them, so a caller
+reads one door instead of three.
+
+The source-syntax face of the declaration layer: it turns the bytes of a .yaml,
+.yml or .json source into one sourceNode tree and rejects every other extension
+by name. The node types are syntax only — they name no declaration word — so
+decode.go maps this tree onto the vocabulary in config.go and this file never
+decides what a field means.
+
 FUNCTIONS
 
 func Fingerprint(d Declaration) (string, error)

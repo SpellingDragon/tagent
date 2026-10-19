@@ -75,9 +75,9 @@ func (a Address) IsComplete() bool {
 // four blocks — identity, content, ownership and ledger — and the doc of the
 // first field of each names the block and what its fields share.
 //
-// G0 (payload carrying) is not settled yet: if the design rules for a local
-// shadow message, the Message field below changes to that local type instead of
-// the native model message.
+// The content block carries the native locked tRPC model message: no local
+// message type stands beside it, so a fact stored by one process reads back as
+// the same payload in another.
 type Event struct {
 	// Key is the canonical identity of the event, in its hex form. It heads the
 	// identity block, with Type and Timestamp: what the stored fact is on its

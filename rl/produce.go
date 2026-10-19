@@ -22,6 +22,7 @@ import (
 // - The production face of the versioned records: one episode boundary, one model decision, one observable model attempt each write their record through this face, exactly as the production point observed them.
 // - A production point records what it observed and derives nothing: the terminal comes from the single model reduction, the response is the native response the attempt saw, and no record here re-classifies a state of its own.
 // - A recorder error never reaches the model decision: recording is observation, not execution.
+// - The telemetry observation sink shares only the word: it consumes committed events, while this face writes remembered records.
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 type Recorder interface {
 	// RecordEpisode writes the episode record of one business process at the

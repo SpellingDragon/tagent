@@ -46,7 +46,17 @@ const (
 // material a condensed artifact still references: the hold a meditation pass
 // takes on each key its artifact cites, so the referenced original is never
 // tombstoned or reclaimed while the artifact can still recall it by key.
+//
+// The registered kind rides the ledger as durable identity: it answers the
+// window lookup of every reference held under it, so its value is fixed
+// vocabulary of the ledger rather than a name this package chooses.
 const RetentionMeditation ledger.RetentionKind = "curation_reference"
+
+// MeditationHolderPrefix is the identity prefix of the holder a meditation pass
+// registers its retention hold under. A holder id is durable ledger identity
+// carried by every reference the hold protects, so the prefix is fixed
+// vocabulary of the ledger rather than a name this package chooses.
+const MeditationHolderPrefix = "curation:"
 
 // MeditationArtifactType is the frozen type label of the condensed card
 // artifact one meditation pass leaves behind.

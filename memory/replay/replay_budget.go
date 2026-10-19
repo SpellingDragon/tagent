@@ -83,8 +83,9 @@ func NewReplayProjection() *ReplayProjection {
 // Append adds the canonical entry of one committed fact: a keyed entry already
 // present is appended once, a keyless entry always is. The original text is
 // kept apart from the model view, and a recorded decision shapes the view —
-// never the original.
-func (p *ReplayProjection) Append(ctx context.Context, entry ProjectionEntry) {
+// never the original. An append is an in-memory mutation, so it takes the port's
+// context with nothing to cancel.
+func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if entry.Key != "" {
@@ -101,44 +102,6 @@ func (p *ReplayProjection) Append(ctx context.Context, entry ProjectionEntry) {
 		}
 	}
 	p.entries = append(p.entries, entry)
-}
-
-// Rebuild replaces the whole projection with the one the recorded decisions
-// describe and recomputes the deduplication key set from the entries it keeps.
-// Decisions passed in are recorded first-time-wins: a decision already recorded
-// for a key is never upgraded by a later one, so a recorded preview is never
-// promoted back to the full text.
-func (p *ReplayProjection) Rebuild(ctx context.Context, decisions []PresentationDecision) ([]ProjectionEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, decision := range decisions {
-		if decision.Key == "" {
-			continue
-		}
-		if _, recorded := p.decisions[decision.Key]; !recorded {
-			p.decisions[decision.Key] = decision
-		}
-	}
-	p.seen = map[event.EventID]struct{}{}
-	out := make([]ProjectionEntry, len(p.entries))
-	for i, entry := range p.entries {
-		if entry.Key != "" {
-			p.seen[entry.Key] = struct{}{}
-			if decision, recorded := p.decisions[entry.Key]; recorded {
-				entry.Content = p.viewOf(decision, entry)
-			} else {
-				entry.Content = p.originals[entry.Key]
-			}
-		}
-		out[i] = entry
-	}
-	p.entries = out
-	result := make([]ProjectionEntry, len(p.entries))
-	copy(result, p.entries)
-	return result, nil
 }
 
 // AssembleBudget packs the projection into one agent request of the given token

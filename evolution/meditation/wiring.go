@@ -252,7 +252,7 @@ func (c *Meditation) Curate(ctx context.Context, now time.Time, cards []Meditati
 	}
 	report.Artifact = &artifact
 
-	holder := ledger.HolderID("curation:" + string(artifact.Key))
+	holder := ledger.HolderID(MeditationHolderPrefix + string(artifact.Key))
 	for _, card := range keep {
 		if _, err := c.retention.Register(ctx, card.Key, holder, ledger.RetentionRecord{
 			Kind:       RetentionMeditation,

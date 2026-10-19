@@ -45,8 +45,8 @@ task intends to deliver.
 
 The package holds the effective bindings and the session sites, and an executor
 borrows a binding for one request rather than keeping a second writable source
-of its own. This is the phase 1 skeleton: it declares shapes and holds no
-behaviour.
+of its own. The store, the borrowing face, the send seam and the durable commit
+carrier are the behaviour behind the ports.
 
 CONSTANTS
 

@@ -5,9 +5,10 @@
 // the status a task moves through, and the ports through which a transition is
 // committed and its notifications are registered.
 //
-// A task is the runtime's unit of responsibility and accounting. This package
-// carries data definitions and contract signatures only; the admission, commit
-// and scheduling behaviour belongs to the implementation behind these ports.
+// A task is the runtime's unit of responsibility and accounting. The admission,
+// commit and scheduling behaviour runs behind those ports in this package: the
+// registry owns the life of a task, the manager owns its obligations, and the
+// commit carrier records the transitions.
 package task
 
 import "github.com/SpellingDragon/tagent/event"

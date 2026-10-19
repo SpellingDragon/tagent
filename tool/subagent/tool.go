@@ -43,6 +43,10 @@ var ErrArguments = errors.New("call_subagent: the arguments do not match the dec
 // Delegation is the task face one sub-agent call is admitted through: the admission that
 // answers the caller with a receipt, and the terminal report of that same task once the
 // delegated turn ends.
+//
+// 红线清单（2 条）：
+// MUST answer the caller with the admission receipt and report the terminal as a notice of the same task
+// MUST NOT create a private writable history for the delegated turn, nor replace a notice identity with the fact it points at
 type Delegation interface {
 	// Delegate admits one sub-agent call as a task and reports its admission receipt.
 	Delegate(ctx context.Context, req agent.Delegation) (task.AdmissionReceipt, error)

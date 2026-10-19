@@ -22,13 +22,12 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 // and loose root files are outside this rule: the former are tool and runtime
 // space, the latter are the composition-root package's own sources.
 var registeredTopDirs = map[string]bool{
-	".github": true, "agent": true, "config": true, "docs": true, "evals": true,
-	"event": true, "evolution": true, "examples": true, "golden": true, "internal": true,
-	"memory": true, "model": true, "modelutil": true, "openspec": true, "plugin": true,
-	"query": true, "rl": true, "state": true, "task": true, "telemetry": true,
-	"prompt": true, "prototype": true, "resources": true,
-	"bench": true, "scripts": true, "view": true, "tests": true, "testutil": true, "tool": true,
-	"workspace": true,
+	".github": true, "agent": true, "bench": true, "config": true, "docs": true,
+	"event": true, "evolution": true, "examples": true, "golden": true,
+	"memory": true, "model": true, "openspec": true, "plugin": true,
+	"prototype": true, "query": true, "resources": true, "rl": true,
+	"scripts": true, "state": true, "task": true, "telemetry": true,
+	"tests": true, "tool": true, "view": true, "workspace": true,
 }
 
 // trackedHygieneFinding is one violation: the path plus the rule that rejected it.

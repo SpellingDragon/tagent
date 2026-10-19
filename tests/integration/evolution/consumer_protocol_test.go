@@ -15,7 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/model"
 	"github.com/SpellingDragon/tagent/rl"
 
-	evo "github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
 )
 
 // TestConsumersShareTheProtocol drives both in-process consumers over one fact each and checks the protocol they share: read, consume, produce.
@@ -85,7 +85,7 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 		before := rig.ledger.snapshot()
 
 		outcome := rig.reflection.Tick(ctx, observed.Add(time.Minute))
-		if outcome.Decision.Disposition != evo.TickFired || outcome.Injection == nil {
+		if outcome.Decision.Disposition != meditation.TickFired || outcome.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want the read fact firing one judgement fact", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}
 		if outcome.Scan == nil || outcome.Scan.Verdict.Recent == nil || outcome.Scan.Verdict.Recent.Identity.Key != sourceKey {
@@ -97,7 +97,7 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the judgement fact: %v", err)
 		}
-		if produced.Type != event.TypeExternalInput || produced.Meta[event.MetaKeyTriggerSource] != evo.LineageReflection {
+		if produced.Type != event.TypeExternalInput || produced.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
 			t.Fatalf("judgement fact = (%q, %q), want a reflection input on the chain", produced.Type, produced.Meta[event.MetaKeyTriggerSource])
 		}
 	})
