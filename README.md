@@ -42,7 +42,7 @@ bash scripts/lint.sh                    # 仓库门禁：格式、构建、vet�
 |---|---|
 | [`docs/api/index.md`](docs/api/index.md) | **API 权威**：由源码注释生成，`gen_godoc --check` 保证与码面同步 |
 | [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim）：机制背景与分叉点，非当期码面事实 |
-| [`prototype/README.md`](prototype/README.md) | 保留的原型骨架（事件消费壳/任务表/记忆票据），用于语义对照，不是现架构 |
+| [`internal/prototype/README.md`](internal/prototype/README.md) | 保留的原型骨架（事件消费壳/任务表/记忆票据），用于语义对照，不是现架构 |
 | [`docs/notes/risk-remediation-plan.md`](docs/notes/risk-remediation-plan.md) | 当期风险处置计划（分片、验收通则） |
 | [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账：变更的 proposal/design/tasks 与波次记录 |
 

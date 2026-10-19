@@ -134,7 +134,7 @@
 
 镜像比对复用 §七 的**同一份**定义（精确 `<stem>.go`，宽容表冻结为 `_real` 一个后缀），不另立第二份变体表：两张表迟早会给出两个答案。
 
-三处豁免各有明确边界，不是宽容而是对象不存在：`examples/contract/` 的文件名是它实现的接口（`<Iface>_example.go`，由 `check_concept_budget.py` 强制），`prototype/` 是历史参照原型，`tests/integration/` 是驱动运行时的夹具包——这三处都没有可供镜像的生产家族。
+三处豁免各有明确边界，不是宽容而是对象不存在：`examples/contract/` 的文件名是它实现的接口（`<Iface>_example.go`，由 `check_concept_budget.py` 强制），`internal/prototype/` 是历史参照原型，`tests/integration/` 是驱动运行时的夹具包——这三处都没有可供镜像的生产家族。
 
 判定逻辑是对文件列表的**纯函数**，单测因此不需要仓库；live 命令只是把目录遍历的结果喂进去。自测 `scripts/test_check_package_layout.sh` 造五个 fixture（干净／变体名／撞名／大写／孤儿测试）跑**真命令**，见证是进程退出码：只打印规则却退出 0 的门、或变成不可达的规则，都会在那里红；干净 fixture 是正向对照，恒红的门过不了它。目录 root 不存在是**不可用输入**，退出 2 而不是 0。
 

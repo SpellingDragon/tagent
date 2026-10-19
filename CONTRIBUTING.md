@@ -6,7 +6,7 @@
 
 - **两个 Go module**：根 module `github.com/SpellingDragon/tagent`，以及 `examples/wechat-bot`（独立 module，无 `go.work`）。根 `./...` 永远不覆盖第二个 module，两者都要构建与测试。
 - **Go 下限** `go 1.24.1`（见 [`go.mod`](go.mod)）。
-- **代码面**：9 个顶层产品包（`api` 5 个子包、`runtime` 3 个、`memory` 7 个、`evolution` 4 个、`tool` 4 个）加 `cli` 宿主壳与 module 根组合根；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。[`prototype/`](prototype/README.md) 是历史参照原型，不是当期架构。
+- **代码面**：9 个顶层产品包（`api` 5 个子包、`runtime` 3 个、`memory` 7 个、`evolution` 4 个、`tool` 4 个）加 `cli` 宿主壳与 module 根组合根；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。[`internal/prototype/`](internal/prototype/README.md) 是历史参照原型，不是当期架构。
 - **门禁工具**：bash、Go、git；spec 门另需 openspec CLI 1.2.0；校验器自测需 python3。
 
 ## 二、包结构
@@ -34,7 +34,7 @@
 |---|---|---|
 | **只写 `lower_snake.go`** | 无大写、连字符或空格：排序、import 差异与大小写不敏感文件系统都依赖唯一拼写。唯一例外是 `examples/contract/` 的 `<Iface>_example.go`（文件名即它实现的接口，由 `check_concept_budget.py` 钉） | `file-name-not-lower-snake` |
 | **每包至多一份 `skeleton_assert.go`** | 编译期形状钉的正名就是这一个；第二种拼写是同一份契约的变体，不是第二个文件，必须并入 | `skeleton-variant` / `skeleton-collision` |
-| **`*_test.go` 镜像生产文件** | 名字是 `<生产文件>_test.go`，让改名压力落在"它是哪个文件的测试"上；宽容表冻结为 `_real` 一个后缀（真实 API 用例）。`prototype/`、`tests/integration/`、`examples/contract/` 无生产家族，不做镜像判定 | `test-mirror-missing` |
+| **`*_test.go` 镜像生产文件** | 名字是 `<生产文件>_test.go`，让改名压力落在"它是哪个文件的测试"上；宽容表冻结为 `_real` 一个后缀（真实 API 用例）。`internal/prototype/`、`tests/integration/`、`examples/contract/` 无生产家族，不做镜像判定 | `test-mirror-missing` |
 
 自检（一条命令同时验三条）：
 
@@ -106,7 +106,7 @@ bash scripts/check-openspec.sh
 
 两面都要，缺一面视为未覆盖：
 
-- **黑盒契约**：[`tests/integration/`](tests/integration/) 只经公共入口驱动真实装配（不导入 `prototype`），按能力域分组；`examples/contract/` 是编译期契约样例。
+- **黑盒契约**：[`tests/integration/`](tests/integration/) 只经公共入口驱动真实装配（不导入 `internal/prototype`），按能力域分组；`examples/contract/` 是编译期契约样例。
 - **白盒不变量**：包内测试文件镜像生产文件命名（`durable_test.go` 守 `durable.go`），断言内部不变量，不是把公共 API 再测一遍。参考 [`runtime/state/durable_test.go`](runtime/state/durable_test.go)、[`runtime/task/lifecycle_test.go`](runtime/task/lifecycle_test.go)、[`runtime/agent/loop_test.go`](runtime/agent/loop_test.go)。
   - 测试 doc 用要点行列出被钉住的事实；错误路径要有**具名拒绝**断言，只测 happy path 不算覆盖。
   - 单条复跑：`go test ./runtime/state -run TestDurableFactChainInvariants -count=1` → `ok …/runtime/state 0.174s`。

@@ -38,7 +38,7 @@ var mirrorVariantSuffixes = []string{"_real"}
 // samples (named by interface), the historical reference prototype, and the
 // integration harness packages. Their production files are fixtures for driving
 // the runtime, so no test file there can mirror a family member.
-var mirrorExemptTrees = []string{contractExamplesDir, "prototype/", "tests/integration/"}
+var mirrorExemptTrees = []string{contractExamplesDir, "internal/prototype/", "tests/integration/"}
 
 // layoutFile is one Go source the layout rules judge, as a repo-relative path.
 type layoutFile struct {

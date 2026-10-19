@@ -23,21 +23,21 @@
 
 ```bash
 # 冒烟（每个基准跑一次，用于确认套件可跑；数值是冷启动样本）
-go test -bench=. -benchtime=1x ./bench/
+go test -bench=. -benchtime=1x ./internal/bench/
 
 # 吞吐基线（5 次取样，取中位数）
 go test -run '^$' -bench '^(BenchmarkAssemble|BenchmarkAssembleInvoke|BenchmarkInvokeTurn|BenchmarkInvokeParallel)$' \
-  -benchtime=2s -count=5 ./bench/
+  -benchtime=2s -count=5 ./internal/bench/
 
 # 常驻内存基线
-go test -run '^$' -bench '^BenchmarkResidentMemory$' -benchtime=2s -count=5 ./bench/
+go test -run '^$' -bench '^BenchmarkResidentMemory$' -benchtime=2s -count=5 ./internal/bench/
 
 # 恢复时延基线（每个子档 20 次重启装配）
-go test -run '^$' -bench '^BenchmarkRestoreLatency$' -benchtime=20x -count=5 ./bench/
+go test -run '^$' -bench '^BenchmarkRestoreLatency$' -benchtime=20x -count=5 ./internal/bench/
 
 # 共享会话历史成本趋势（不是吞吐基线：数值随迭代数增长）
-go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=1000x -count=3 ./bench/
-go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=5000x -count=3 ./bench/
+go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=1000x -count=3 ./internal/bench/
+go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=5000x -count=3 ./internal/bench/
 ```
 
 `go test -bench` 不会运行本包的 Test 函数（本包没有），`-run '^$'` 只是把这一事实写明。
@@ -90,7 +90,7 @@ go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=5000x -coun
 
 - 单基准复跑：`go test -run '^$' -bench '^BenchmarkInvokeTurn$' -benchtime=2s -count=5 ./bench/`
 - 编译与静态检查：`go vet ./bench/`
-- 与产品隔离的证明：`git status --short -- ':!bench'`（本批次不改产品代码）；`go test ./tests/integration/... -count=1` 保持绿。
+- 与产品隔离的证明：`git status --short -- ':!internal/bench'`（本批次不改产品代码）；`go test ./tests/integration/... -count=1` 保持绿。
 - 基准只 import 公开根包与 `config`/`event`/`memory`/`model`/`state`，不触碰内部字段，也不读环境变量。
 
 ## 已知集成待办（本批次白名单外，提交前必须补）

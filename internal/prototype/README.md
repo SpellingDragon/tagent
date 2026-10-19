@@ -175,10 +175,10 @@ owner.Tasks.Complete(1, "外部资源结果", nil) // mock 重挂回报，不重
 
 ```bash
 # 仓库根执行；agent 集成用例覆盖八个目标场景（含真实子进程恢复）
-GOPROXY=off go test ./prototype -run TestAgent -v
-GOPROXY=off go test ./prototype -count=10
-GOPROXY=off go test -race ./prototype -count=10
-GOPROXY=off go vet ./prototype
+GOPROXY=off go test ./internal/prototype -run TestAgent -v
+GOPROXY=off go test ./internal/prototype -count=10
+GOPROXY=off go test -race ./internal/prototype -count=10
+GOPROXY=off go vet ./internal/prototype
 ```
 
 ## 能力 / 未实现 / 接缝

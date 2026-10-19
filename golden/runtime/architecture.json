@@ -21,7 +21,7 @@
       ".tagent-workspace",
       ".pre-isolation-backup"
     ],
-    "reason": "prototype 为历史参照实现、scripts 为仓库工程脚本（含 codetools/comment_policy 的 Go）、tests 为集成测试、examples 为微信独立 module、vendor/node_modules 为第三方；这些都不是根 module 的一方产品包，按域内各自门禁处理。"
+    "reason": "prototype（现居 internal/prototype，按目录名排除）为历史参照实现、scripts 为仓库工程脚本（含 codetools/comment_policy 的 Go）、tests 为集成测试、examples 为微信独立 module、vendor/node_modules 为第三方；这些都不是根 module 的一方产品包，按域内各自门禁处理。"
   },
   "packages": [
     {
@@ -199,11 +199,11 @@
       "reason": "consolidation＝记忆侧巩固通道的事件词汇：巩固唤醒的触发源戳（package-zero-debt Z1）。纯词汇叶子，不依赖任何一方包。"
     },
     {
-      "pattern": "bench",
+      "pattern": "internal/bench",
       "role": "benchmark",
       "edges": [],
       "required": true,
-      "reason": "公开基准面（吞吐/恢复时延/内存基线）：只测公共入口，不进运行时依赖闭合。"
+      "reason": "公开基准面（吞吐/恢复时延/内存基线）：只测公共入口，不进运行时依赖闭合；位于 internal/ 下，外部 module 不得 import。"
     },
     {
       "pattern": "tool/subagent",
@@ -239,7 +239,7 @@
         "evolution/meditation",
         "evolution/refine",
         "evolution/consolidation",
-        "bench",
+        "internal/bench",
         "tool/subagent",
         "api/view",
         "evolution/governance",
@@ -688,7 +688,7 @@
       "reason": "memory 实现子包（检索端口/混合融合）：读原文引用（直接引 memory/ledger 声明）、根 memory 的查询与嵌入端口、event 身份；索引非真源。由主编排者随 04.P0.4 骨架登记（层E收口，2026-10-13；memory/ledger 边随 package-restructure D3 别名面删除显式登记）。"
     },
     {
-      "from": "bench",
+      "from": "internal/bench",
       "allow": [],
       "reason": "基准只经公共入口（根组合面）驱动，不直连内部包。"
     },

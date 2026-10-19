@@ -1,4 +1,4 @@
-package prototype // import "github.com/SpellingDragon/tagent/prototype"
+package prototype // import "github.com/SpellingDragon/tagent/internal/prototype"
 
 职责：事件消费壳——消费 AgentState 队列、按类型分派、驱动插件与模型，模型产出全部回队列。
 未实现：背压、流式、持久化、强杀；壳只持 State 与函数字段，停止壳不关 owner 任务。 接线：装配方注入

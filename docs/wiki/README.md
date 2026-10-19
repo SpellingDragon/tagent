@@ -2,20 +2,20 @@
 
 ## 当前架构速览
 
-**当期架构**＝`runtime-rebuild` 交付的 **16 个产品包 ＋ module 根组合根**（`golden/runtime/architecture.json` 登记的产品包；`go list ./...` 同时列出 tests/examples/scripts/prototype 等非产品包，不计入；交付侧的 10 个二级领域 `00-foundation`…`09-acceptance` 是责任与验收单位，不构成包边界）。`prototype/` 是**保留的历史参照原型**，不在产品包面内（`golden/runtime/architecture.json` 的 scope 显式排除），不描述当期架构。
+**当期架构**＝`runtime-rebuild` 交付的 **16 个产品包 ＋ module 根组合根**（`golden/runtime/architecture.json` 登记的产品包；`go list ./...` 同时列出 tests/examples/scripts/prototype 等非产品包，不计入；交付侧的 10 个二级领域 `00-foundation`…`09-acceptance` 是责任与验收单位，不构成包边界）。`internal/prototype/` 是**保留的历史参照原型**，不在产品包面内（`golden/runtime/architecture.json` 的 scope 显式排除），不描述当期架构。
 
 **本文档树的定位**：本目录 25 篇为历史设计记录（historical-verbatim），逐断言校对的是已移除的生产实现；下方"历史设计声明"列出已确认的分叉点。**当期现实的权威入口如下**：
 
 - **当期 API 与包面**：[docs/api/](../api/index.md)——由 `scripts/gen_godoc.sh` 从码面注释生成（索引自报包总数 47，含 examples/tests/scripts/prototype），与源码同步由 `scripts/lint.sh` 的 docs/api freshness 步判定，是唯一不漂移的 API 参考。
 - **码面分层**（`golden/runtime/architecture.json` 钉定包边；职责自下而上）：**词汇与协议** `event`（纯叶子）· `model`（锁定 tRPC 原生模型协议）→ **声明与状态** `config`（纯组织声明）· `state`（生效绑定、session/mailbox、消费位置的唯一持有者）→ **执行与义务** `agent`（事件调度与单次决策）· `task`（转移与通知义务）· `plugin`（阶段管线）→ **事实与副本** `memory`（原文与可重建投影）· `workspace`（临时副本，不持真源）→ **适配** `tool/exec` · `tool/mcp` · `tool/remote` → **观察与派生** `telemetry`（观测旁路）· `query`（只读投影）· `rl`（训练数据）· `evolution`（自演进）→ **组合根** module 根 `run*.go` 族（唯一装配与发布点）→ **宿主** `examples/wechat-bot`（独立 module）。
 - **实施台账（架构事实）**：[openspec/changes/archive/2026-10-18-runtime-rebuild/](../../openspec/changes/archive/2026-10-18-runtime-rebuild/)——123 叶实施记录/波次台账/问题脉络分析/DoD 终验；当期包边、领域边界与验收口径以该台账与 `golden/runtime/` 为准。
-- **原型（历史参照，非现架构）**：[prototype/README.md](../../prototype/README.md)——事件驱动运行时原型（事件消费壳/消费现场/任务表/记忆票据/配置装配），各文件头"职责/未实现/接线"三段声明；rebuild 落地后它只是历史参照实现，其语义不对应当期码面。
+- **原型（历史参照，非现架构）**：[prototype/README.md](../../internal/prototype/README.md)——事件驱动运行时原型（事件消费壳/消费现场/任务表/记忆票据/配置装配），各文件头"职责/未实现/接线"三段声明；rebuild 落地后它只是历史参照实现，其语义不对应当期码面。
 - **历史文档索引**：下方两节（历史设计声明＋分叉点表）；各篇引用按其快照提交锚定（doc-refs 历史锚定口径）。
 
 
 ## 历史设计声明
 
-本目录 25 篇为历史设计记录：逐断言校对的是**已移除的生产实现**，描述的是彼时的目标形态，而非当前代码事实。当期架构以实现码面为准（见上节"当前架构速览"）；[prototype/README.md](../../prototype/README.md) 亦只作**历史参照**，不是当期架构的权威口径。已确认的分叉点如下：
+本目录 25 篇为历史设计记录：逐断言校对的是**已移除的生产实现**，描述的是彼时的目标形态，而非当前代码事实。当期架构以实现码面为准（见上节"当前架构速览"）；[prototype/README.md](../../internal/prototype/README.md) 亦只作**历史参照**，不是当期架构的权威口径。已确认的分叉点如下：
 
 - **输入折叠**：wiki 输入参与有界投影压缩；原型输入原样保留，仅执行结果选择性外置为票据。
 - **治理范围**：wiki governance 管工具执行（分级/审批/预算）；原型拆分为 Evolution（仅审架构变更）与事件管线上的治理插件（运行时拦截/HITL 接缝）。

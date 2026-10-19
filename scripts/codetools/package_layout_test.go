@@ -59,10 +59,10 @@ func TestPackageLayoutPassesACleanTree(t *testing.T) {
 		"examples/wechat-bot/main.go",
 		"examples/wechat-bot/main_real_test.go",
 		"examples/contract/plugin/Governor_example.go",
-		"prototype/agent.go",
-		"prototype/agent_integration_test.go",
+		"internal/prototype/agent.go",
+		"internal/prototype/agent_integration_test.go",
 		"tests/integration/acceptance/scenario_s01_test.go",
-		"bench/throughput_bench_test.go",
+		"internal/bench/throughput_bench_test.go",
 		"scripts/codetools/check.go",
 		"scripts/codetools/check_test.go",
 	))

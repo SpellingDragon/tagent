@@ -157,7 +157,7 @@ go get trpc.group/trpc-go/trpc-agent-go@v1.11.2
 go mod tidy && go mod verify
 go test ./tests/integration/... -count=1
 go vet ./... && bash scripts/lint.sh
-go test -run '^$' -bench '^(BenchmarkAssemble|BenchmarkAssembleInvoke|BenchmarkInvokeTurn)$' -benchtime=2s -count=5 ./bench/
+go test -run '^$' -bench '^(BenchmarkAssemble|BenchmarkAssembleInvoke|BenchmarkInvokeTurn)$' -benchtime=2s -count=5 ./internal/bench/
 ```
 
 判定：集成套件与 lint 全绿、bench 读数落在 `bench/README.md` 基线的噪声范围内 → 回正成立，删除 D1 登记。若出现失败，失败点即 pin 的真实功能负载，届时再评估 patch。

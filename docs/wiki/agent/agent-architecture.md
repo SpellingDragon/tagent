@@ -5,7 +5,7 @@
 <a id="module-position"></a>
 ## 一、模块定位
 
-`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**。核心设计思想源于 [prototype/agent.go](../../../prototype/agent.go) 的抽象实现，原型用可替换的函数字段定义了一个可扩展的框架骨架。
+`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**。核心设计思想源于 [internal/prototype/agent.go](../../../internal/prototype/agent.go) 的抽象实现，原型用可替换的函数字段定义了一个可扩展的框架骨架。
 
 ### 原型到生产的映射
 
