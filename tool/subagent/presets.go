@@ -19,8 +19,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/search"
 

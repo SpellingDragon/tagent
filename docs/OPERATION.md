@@ -9,7 +9,7 @@
 ## 一、结论层：接手第一天只需三件事
 
 1. **仓库是两个 module**：根 module 与 `examples/wechat-bot`（独立 module，无 `go.work`）。根 `./...` 永远到不了第二个 module，构建/测试/vet 都必须各跑一遍。
-2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+七个文档/脚本门）、`go mod verify`、`bash scripts/check-openspec.sh`、`./scripts/race_check.sh`、`bash scripts/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
+2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+八个文档/脚本门）、`go mod verify`、`bash scripts/check-openspec.sh`、`./scripts/race_check.sh`、`bash scripts/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
 3. **三条风险面**：配置严格解码（未知键**拒启动**）、pre-release 无迁移承诺、依赖 pin 与白盒测试欠账（§七·D）。
 
 ---
@@ -86,12 +86,12 @@ CI 与本地的命令逐字相同。分阶段：
 
 ```bash
 bash scripts/lint.sh                 # 全量（CI 口径）
-bash scripts/lint.sh --only fmt      # 只跑 fmt；build/vet/policy 跳过，七个文档/脚本门照跑
+bash scripts/lint.sh --only fmt      # 只跑 fmt；build/vet/policy 跳过，八个文档/脚本门照跑
 bash scripts/lint.sh --strict        # 要求零发现（收敛终态）
 bash scripts/lint.sh --update-baseline   # 批量降低注释计数后重写基线
 ```
 
-`--only <阶段>` 指定 fmt/build/vet/policy 中**只跑哪一个**；它管不到七个文档/脚本门——那些始终会跑。这就是"只想验文档改动"时最有用的形态。
+`--only <阶段>` 指定 fmt/build/vet/policy 中**只跑哪一个**；它管不到八个文档/脚本门——那些始终会跑。这就是"只想验文档改动"时最有用的形态。
 
 ### 5.2 其余门与常用工具
 
@@ -122,7 +122,7 @@ bash scripts/check_test_merge.sh <baseline-ref> <dir>          # 证明测试合
 > 实测（2026-10-18）：同一天，干净 HEAD 克隆里 `doc-refs` 是绿的（`doc-refs: 43 citation(s) resolve at their document's snapshot commit (41 inside historical roots, 2 outside)`）；而带 27 篇未提交 wiki/操作文档编辑的工作树里，同样是那 43 条引用全部报 `DANGLING-DOC-REF`。引用本身没坏，是锚定基准暂时失效。
 >
 > 单文件因果验证（同一克隆）：给 `docs/wiki/tool/tool-architecture.md` 追加一个空行，该篇的 7 条引用立刻转为 dangling（锚定计数 43 → 36，门 exit 1）；`git checkout` 还原即恢复绿。改动内容无关，**"相对快照提交有本地改动"本身就足以取消锚定**。
-> 处置：文档批次**先落盘再跑该门**；需要当场判真伪时按文件单独跑——`go run ./scripts/codetools doc-refs <单个文件>` 只判该文件的引用。注意 `lint.sh --only <阶段>` 跳不过这道门（七个文档/脚本门始终会跑），没有任何开关能把它绕过。不要为了绿去改引用路径——那会把历史快照改成对今天码面的断言，等于销毁分区语义（见 §八）。
+> 处置：文档批次**先落盘再跑该门**；需要当场判真伪时按文件单独跑——`go run ./scripts/codetools doc-refs <单个文件>` 只判该文件的引用。注意 `lint.sh --only <阶段>` 跳不过这道门（八个文档/脚本门始终会跑），没有任何开关能把它绕过。不要为了绿去改引用路径——那会把历史快照改成对今天码面的断言，等于销毁分区语义（见 §八）。
 
 **(b) bot module 的红与根 module 无关。** 根 `./...` 不含 `examples/wechat-bot`。它的 `build`/`vet`/`test` 在 `lint.sh` 内各有一遍，CI 的 test job 也单列三步。任何"根全绿"的结论都不覆盖它。
 
@@ -247,7 +247,7 @@ docs/
 
 1. **保全**：一律 `git mv`（历史可追），内容逐字不改；迁移只换位置，不改断言。
 2. **重链接**：迁完必须 ① 跑 `doc-refs`；② 全仓 grep 旧路径并修引用（`openspec` 归档里的引用属历史，不改，只在迁移记录中登记）；③ 若迁 `docs/wiki`，同步改 `scripts/codetools/check.go` 的 `historicalDocRoots`；④ 若迁 `docs/api`，同步改 `scripts/gen_godoc.sh` 的输出路径——两处都是硬编码边界，漏改等于把锚定/生成语义留在旧路径。
-3. **分批**：一批只迁一个分区，每批独立 exit 0；迁完跑 `bash scripts/lint.sh --only fmt`（七个文档/脚本门全跑）。**不要在同一个未提交批次里既改 `docs/wiki` 内容又迁它的路径**（§五·3(a)：那会让 43 条锚定引用同时失效，无法判断是迁移错还是锚定基准失效）。
+3. **分批**：一批只迁一个分区，每批独立 exit 0；迁完跑 `bash scripts/lint.sh --only fmt`（八个文档/脚本门全跑）。**不要在同一个未提交批次里既改 `docs/wiki` 内容又迁它的路径**（§五·3(a)：那会让 43 条锚定引用同时失效，无法判断是迁移错还是锚定基准失效）。
 4. **不迁**：`docs/.dev` 与 `docs/notes` 的过程记录除非确定入库，否则保持本地，避免把一次性纪要变成需要长期维护的引用面。
 
 ---

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // Segment names one segment of the structural gate over one candidate: the

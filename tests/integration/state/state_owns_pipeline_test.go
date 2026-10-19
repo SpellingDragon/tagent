@@ -5,13 +5,13 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
-	orgstate "github.com/SpellingDragon/tagent/state"
+	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )

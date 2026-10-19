@@ -13,8 +13,8 @@ import (
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // TestIdentityAndCommitContract checks event identity, native payload fidelity and the layered admission, commit and delivery results.

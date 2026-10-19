@@ -25,9 +25,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/telemetry"
 )
 
@@ -89,26 +89,26 @@ var _ plugin.ObservationSink = (*eventSpy)(nil)
 // records as received and can fail on demand.
 type auditLog struct {
 	mu      sync.Mutex
-	records []telemetry.AuditRecord
+	records []plugin.AuditRecord
 	err     error
 }
 
 // Audit keeps one layered audit record and reports the failure it was armed
 // with.
-func (a *auditLog) Audit(ctx context.Context, record telemetry.AuditRecord) error {
+func (a *auditLog) Audit(ctx context.Context, record plugin.AuditRecord) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.records = append(a.records, record)
 	return a.err
 }
 
-func (a *auditLog) snapshot() []telemetry.AuditRecord {
+func (a *auditLog) snapshot() []plugin.AuditRecord {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return append([]telemetry.AuditRecord(nil), a.records...)
+	return append([]plugin.AuditRecord(nil), a.records...)
 }
 
-var _ telemetry.AuditSink = (*auditLog)(nil)
+var _ plugin.AuditSink = (*auditLog)(nil)
 
 // observePlugin is the registration unit the pipeline dispatches into the
 // post-commit phase: one stable name beside the observation wiring it serves.
@@ -159,7 +159,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		ctx := context.Background()
 		spy := &eventSpy{}
 		store := newCommitSet()
-		pipeline := newObservePipeline(t, plugin.NewCommitObserver(store, spy))
+		pipeline := newObservePipeline(t, telemetry.NewCommitObserver(store, spy))
 		evt := observationFact("fact-a1")
 		store.commit(evt)
 		if got := len(spy.events); got != 0 {
@@ -193,7 +193,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		refusal := errors.New("the collector refused the observation")
 		spy := &eventSpy{err: refusal}
 		store := newCommitSet()
-		pipeline := newObservePipeline(t, plugin.NewCommitObserver(store, spy))
+		pipeline := newObservePipeline(t, telemetry.NewCommitObserver(store, spy))
 		evt := observationFact("fact-b1")
 		store.commit(evt)
 
@@ -233,7 +233,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 			t.Fatalf("NewSDKObserver: %v", err)
 		}
 		store := newCommitSet()
-		pipeline := newObservePipeline(t, plugin.NewCommitObserver(store, obs))
+		pipeline := newObservePipeline(t, telemetry.NewCommitObserver(store, obs))
 		evt := observationFact("fact-c1")
 		store.commit(evt)
 
@@ -252,10 +252,10 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		if len(record.Attempts) != 2 {
 			t.Fatalf("分层尝试数 = %d, want 2", len(record.Attempts))
 		}
-		if record.Attempts[0].Layer != telemetry.LayerTrace || record.Attempts[0].Skipped {
+		if record.Attempts[0].Layer != plugin.LayerTrace || record.Attempts[0].Skipped {
 			t.Fatalf("trace 层尝试未留痕: %+v", record.Attempts[0])
 		}
-		if record.Attempts[1].Layer != telemetry.LayerMetric || record.Attempts[1].Skipped {
+		if record.Attempts[1].Layer != plugin.LayerMetric || record.Attempts[1].Skipped {
 			t.Fatalf("metric 层尝试未留痕: %+v", record.Attempts[1])
 		}
 		exported := spans.GetSpans()
@@ -283,7 +283,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSDKObserver (off): %v", err)
 		}
-		pipelineOff := newObservePipeline(t, plugin.NewCommitObserver(store, obsOff))
+		pipelineOff := newObservePipeline(t, telemetry.NewCommitObserver(store, obsOff))
 		evtOff := observationFact("fact-c2")
 		store.commit(evtOff)
 		presOff := pipelineOff.After(ctx, evtOff.Key)
@@ -317,7 +317,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSDKObserver (off): %v", err)
 		}
-		pipelineOff := newObservePipeline(t, plugin.NewCommitObserver(store, obsOff))
+		pipelineOff := newObservePipeline(t, telemetry.NewCommitObserver(store, obsOff))
 		for _, key := range []event.EventID{"fact-e1", "fact-e2"} {
 			store.commit(observationFact(key))
 			if pres := pipelineOff.After(f.ctx, key); len(pres.Gaps) != 0 {
@@ -339,7 +339,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSDKObserver (on): %v", err)
 		}
-		pipelineOn := newObservePipeline(t, plugin.NewCommitObserver(store, obsOn))
+		pipelineOn := newObservePipeline(t, telemetry.NewCommitObserver(store, obsOn))
 		store.commit(observationFact("fact-e3"))
 		if pres := pipelineOn.After(f.ctx, event.EventID("fact-e3")); len(pres.Gaps) != 0 {
 			t.Fatalf("开启态观察留缺口: %+v", pres.Gaps)
@@ -351,7 +351,7 @@ func TestObservationDoesNotOwnState(t *testing.T) {
 	})
 
 	t.Run("S5 query 读面零遥测依赖: the query package never imports the observation face", func(t *testing.T) {
-		dir := filepath.Join("..", "..", "..", "query")
+		dir := filepath.Join("..", "..", "..", "memory", "query")
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatalf("read query dir: %v", err)
@@ -580,7 +580,7 @@ func TestRealCollectorDelivery(t *testing.T) {
 		t.Fatalf("NewSDKObserver: %v", err)
 	}
 	store := newCommitSet()
-	pipeline := newObservePipeline(t, plugin.NewCommitObserver(store, obs))
+	pipeline := newObservePipeline(t, telemetry.NewCommitObserver(store, obs))
 	for _, key := range []event.EventID{"collector-fact-1", "collector-fact-2"} {
 		evt := observationFact(key)
 		store.commit(evt)

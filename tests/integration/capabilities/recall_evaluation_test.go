@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 const (

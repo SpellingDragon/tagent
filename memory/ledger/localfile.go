@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // kvPair is one key-value entry of a read result or a write batch.

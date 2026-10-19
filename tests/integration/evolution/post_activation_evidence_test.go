@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/model"
 	evo "github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/evolution/refine"
-	"github.com/SpellingDragon/tagent/model"
 )
 
 // TestPostActivationEvidence checks the activation-moment evidence window and the post-hoc evaluation over one version:

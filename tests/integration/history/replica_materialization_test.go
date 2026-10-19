@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/replica"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -37,9 +37,9 @@ func TestReplicaMaterialization(t *testing.T) {
 	refB := ledger.OriginalRef{Key: "result-b", Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
 	refSameBlob := ledger.OriginalRef{Key: "result-a", Owner: ownerB, Format: "tool-output", RetentionPolicy: "keep"}
 
-	materializer := func(t *testing.T, root string, store ledger.ScopedOriginalStore, scope ledger.ReadScope) *workspace.Materializer {
+	materializer := func(t *testing.T, root string, store ledger.ScopedOriginalStore, scope ledger.ReadScope) *replica.Materializer {
 		t.Helper()
-		mat, err := workspace.NewMaterializer(root, store, scope)
+		mat, err := replica.NewMaterializer(root, store, scope)
 		if err != nil {
 			t.Fatalf("NewMaterializer: %v", err)
 		}
@@ -55,7 +55,7 @@ func TestReplicaMaterialization(t *testing.T) {
 			t.Fatalf("replica %s holds %d bytes, want the exact original bytes", path, len(got))
 		}
 	}
-	walkSegments := func(t *testing.T, reader *workspace.ReplicaReader, ref ledger.OriginalRef, consumer string, max int64) []byte {
+	walkSegments := func(t *testing.T, reader *replica.ReplicaReader, ref ledger.OriginalRef, consumer string, max int64) []byte {
 		t.Helper()
 		var out []byte
 		req := ledger.SegmentRequest{MaxBytes: max}
@@ -189,7 +189,7 @@ func TestReplicaMaterialization(t *testing.T) {
 		matA := materializer(t, root, store, scopeA)
 		matB := materializer(t, root, store, scopeB)
 		type target struct {
-			mat      *workspace.Materializer
+			mat      *replica.Materializer
 			ref      ledger.OriginalRef
 			consumer string
 		}
@@ -201,7 +201,7 @@ func TestReplicaMaterialization(t *testing.T) {
 			{matB, refSameBlob, "tool-editor"},
 			{matB, refSameBlob, "task-result"},
 		}
-		replicas := make([]workspace.Replica, len(targets))
+		replicas := make([]replica.Replica, len(targets))
 		failures := make([]error, len(targets))
 		var wait sync.WaitGroup
 		for i, want := range targets {
@@ -213,15 +213,15 @@ func TestReplicaMaterialization(t *testing.T) {
 		}
 		wait.Wait()
 		seen := map[string]bool{}
-		for i, replica := range replicas {
+		for i, made := range replicas {
 			if failures[i] != nil {
 				t.Fatalf("concurrent Materialize %s: %v", targets[i].consumer, failures[i])
 			}
-			if seen[replica.Path] {
-				t.Fatalf("concurrent materialisation collided on %s, want one path per target", replica.Path)
+			if seen[made.Path] {
+				t.Fatalf("concurrent materialisation collided on %s, want one path per target", made.Path)
 			}
-			seen[replica.Path] = true
-			requireBody(t, replica.Path)
+			seen[made.Path] = true
+			requireBody(t, made.Path)
 		}
 	})
 
@@ -271,7 +271,7 @@ func TestReplicaMaterialization(t *testing.T) {
 		}
 		blockedMat := materializer(t, blocked, store, scopeA)
 		failed, err := blockedMat.Materialize(ctx, refA, "tool-shell")
-		if !errors.Is(err, workspace.ErrReplicaWriteFailed) {
+		if !errors.Is(err, replica.ErrReplicaWriteFailed) {
 			t.Fatalf("Materialize under the blocked root = %v, want ErrReplicaWriteFailed", err)
 		}
 		if failed.Path != "" {
@@ -318,7 +318,7 @@ func TestReplicaMaterialization(t *testing.T) {
 		}
 
 		unbuilt, err := mat.Materialize(ctx, refT, "tool-rebuild")
-		if !errors.Is(err, workspace.ErrOriginalIneffective) {
+		if !errors.Is(err, replica.ErrOriginalIneffective) {
 			t.Fatalf("rebuild of the missing replica = %v, want ErrOriginalIneffective instead of a claimed rebuild", err)
 		}
 		if unbuilt.Path != "" {
@@ -386,19 +386,19 @@ func TestReplicaMaterialization(t *testing.T) {
 		}
 
 		refused, err := reader.ReadSegment(ctx, refB, "tool-shell", ledger.SegmentRequest{})
-		if !errors.Is(err, workspace.ErrReplicaUnauthorized) {
+		if !errors.Is(err, replica.ErrReplicaUnauthorized) {
 			t.Fatalf("segment read of the foreign owner = %v, want ErrReplicaUnauthorized", err)
 		}
 		if len(refused.Body) != 0 {
 			t.Fatalf("the refused read served %d bytes, want none", len(refused.Body))
 		}
-		if _, err := mat.Materialize(ctx, refB, "tool-shell"); !errors.Is(err, workspace.ErrReplicaUnauthorized) {
+		if _, err := mat.Materialize(ctx, refB, "tool-shell"); !errors.Is(err, replica.ErrReplicaUnauthorized) {
 			t.Fatalf("materialisation outside the bound scope = %v, want ErrReplicaUnauthorized", err)
 		}
 
 		forged := ledger.OriginalRef{Key: refB.Key, Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
 		outside, err := reader.ReadSegment(ctx, forged, "tool-shell", ledger.SegmentRequest{})
-		if !errors.Is(err, workspace.ErrOriginalIneffective) {
+		if !errors.Is(err, replica.ErrOriginalIneffective) {
 			t.Fatalf("segment read of a key registered outside the scope = %v, want a refusal that leaks nothing", err)
 		}
 		if len(outside.Body) != 0 {

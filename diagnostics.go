@@ -20,11 +20,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // DiagnosticSubsystem names one diagnostic face of the host beside the unified

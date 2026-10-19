@@ -12,13 +12,14 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/cli"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestModelReplacementLifecycle drives the model replacement lease over the formal runtime entry and checks its lifecycle.
@@ -456,17 +457,17 @@ func replacementPublisher(ctx context.Context, run *tagent.Run, calls *int) func
 // listener and returns its base address.
 func serveReplacementFeedback(t *testing.T, ctx context.Context, run *tagent.Run, endpoint *rl.FeedbackEndpoint, session event.SessionID) string {
 	t.Helper()
-	cli := tagent.NewCLI(run, query.AuthorizationScope{
+	shell := cli.NewCLI(run, query.AuthorizationScope{
 		Agents:   []event.AgentID{"agent-a"},
 		Sessions: []event.Address{{AgentID: "agent-a", SessionID: session}},
-	}, tagent.WithRequestCredential(feedbackCredential), tagent.WithFeedbackEndpoint(endpoint))
+	}, cli.WithRequestCredential(feedbackCredential), cli.WithFeedbackEndpoint(endpoint))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	serveCtx, stopServe := context.WithCancel(ctx)
 	serving := make(chan error, 1)
-	go func() { serving <- cli.Serve(serveCtx, listener) }()
+	go func() { serving <- shell.Serve(serveCtx, listener) }()
 	t.Cleanup(func() {
 		stopServe()
 		if err := <-serving; err != nil {

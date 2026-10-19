@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/rl"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"

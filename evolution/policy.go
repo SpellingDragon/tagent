@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 const (

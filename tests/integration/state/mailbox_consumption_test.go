@@ -5,10 +5,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
-	orgstate "github.com/SpellingDragon/tagent/state"
+	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestMailboxConsumption checks how one mailbox keeps its three time points apart while a slow model decision holds the session slot.

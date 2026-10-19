@@ -17,9 +17,10 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/cli"
+	"github.com/SpellingDragon/tagent/memory/query"
 )
 
 // diagCredential is the request credential the test shells authenticate with.
@@ -86,18 +87,18 @@ func newDiagService(t *testing.T, ctx context.Context, credential string) (*tage
 		Agents:   []event.AgentID{"agent-a"},
 		Sessions: []event.Address{addr},
 	}
-	opts := []tagent.CLIOption{}
+	opts := []cli.CLIOption{}
 	if credential != "" {
-		opts = append(opts, tagent.WithRequestCredential(credential))
+		opts = append(opts, cli.WithRequestCredential(credential))
 	}
-	cli := tagent.NewCLI(run, scope, opts...)
+	shell := cli.NewCLI(run, scope, opts...)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	serveCtx, stopServe := context.WithCancel(ctx)
 	serving := make(chan error, 1)
-	go func() { serving <- cli.Serve(serveCtx, listener) }()
+	go func() { serving <- shell.Serve(serveCtx, listener) }()
 	stop := func() {
 		stopServe()
 		if err := <-serving; err != nil {

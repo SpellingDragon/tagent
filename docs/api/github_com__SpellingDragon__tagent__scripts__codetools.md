@@ -12,3 +12,4 @@ removed in canonical go/printer form, decls prints one JSON object per top-level
 declaration.
 
 - Both subcommands exit non-zero on unreadable or unparsable input so a silent
+

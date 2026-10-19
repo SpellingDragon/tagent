@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // scenarioDeliveries records the notifications one deliverer was offered.

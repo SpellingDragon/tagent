@@ -1,6 +1,6 @@
 package rl
 
-import "github.com/SpellingDragon/tagent/event"
+import "github.com/SpellingDragon/tagent/api/event"
 
 // FactKey returns the attempt's identity as a fact key: the attempt ID the record
 // is stored under. A retry hidden below the decision boundary is not a second

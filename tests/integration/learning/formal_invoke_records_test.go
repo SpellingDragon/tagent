@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/rl"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )

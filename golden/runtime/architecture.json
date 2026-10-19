@@ -28,34 +28,40 @@
       "pattern": ".",
       "role": "composition",
       "required": true,
-      "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。"
+      "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。根 allow 列表是登记表：列全每个已登记包供未登记包检出，不是依赖边；宿主壳 cli 位于组合根之上，其指向 . 的回边不算环（真环仍在其余包之间检出，判据见 scripts/check_runtime_architecture.py 的 find_cycle）。"
     },
     {
-      "pattern": "event",
+      "pattern": "cli",
+      "role": "host-shell",
+      "required": true,
+      "reason": "宿主壳：命令面（invoke/query/start）与宿主转换面（HostBridge/DeliveryReceipt/ApprovalDecision）从组合根拆出成独立包，位于组合根之上（cli→.），运行时不反向依赖它；宿主不嵌壳时整包丢弃（package-zero-debt 第五弹根包整合）。"
+    },
+    {
+      "pattern": "api/event",
       "role": "leaf-domain",
       "required": true,
       "reason": "事件身份与事实载体；纯叶子，原生模型载荷可来自外部框架类型。"
     },
     {
-      "pattern": "config",
+      "pattern": "api/config",
       "role": "declaration",
       "required": true,
       "reason": "纯组织声明解析与规范化指纹，不依赖运行时包。"
     },
     {
-      "pattern": "state",
+      "pattern": "runtime/state",
       "role": "state-owner",
       "required": true,
       "reason": "agent/session、mailbox、执行绑定、消费记录与发布代的持有者。"
     },
     {
-      "pattern": "agent",
+      "pattern": "runtime/agent",
       "role": "execution",
       "required": true,
       "reason": "事件调度与单次模型决策；借 state 的绑定执行。"
     },
     {
-      "pattern": "task",
+      "pattern": "runtime/task",
       "role": "task-lifecycle",
       "required": true,
       "reason": "任务、取消、通知义务与转交，经注入端口提交变化。"
@@ -67,34 +73,40 @@
       "reason": "持久原文与可重建投影的领域接口。"
     },
     {
-      "pattern": "workspace",
-      "role": "temp-replica",
-      "required": true,
-      "reason": "临时文件副本的建立与清理，不持有事实真源。"
-    },
-    {
-      "pattern": "plugin",
+      "pattern": "api/plugin",
       "role": "pipeline",
       "required": true,
       "reason": "阶段化插件职责；绑定由 state 持有、组合根构造。"
     },
     {
-      "pattern": "view",
+      "pattern": "api/view",
       "role": "presentation-vocabulary",
       "required": true,
       "reason": "提交后呈现的词汇层（view）：一份已提交事实的 After 趟读出（Presentation/ObservationGap/RenderedView）；无行为、不持有事实、只引 event 的事实身份（fact-loop-convergence 03.3 登记）。"
     },
     {
-      "pattern": "model",
-      "role": "model-protocol",
+      "pattern": "evolution/governance",
+      "role": "governance-implementation",
       "required": true,
-      "reason": "锁定 tRPC 模型/provider 的原生接入与单一终局归约。"
+      "reason": "三拓展点之一 Governor 的实现域：策略、预算、目标与拒绝台账（Policy/BudgetManager/GoalRegistry/DenialLedger/GovernanceEventLog）实现 plugin.Governor 的裁决窄口，只读 event 与审批通道，不拥有运行时状态（package-zero-debt 终审反转显式登记）。"
     },
     {
       "pattern": "telemetry",
-      "role": "observation",
+      "role": "observation-implementation",
       "required": true,
-      "reason": "OTel/审计观测，提交后只读消费，不拥有状态。"
+      "reason": "三拓展点之一 Observer/AuditSink 的实现域：SDKObserver/Recorder/CommitObserver 把已提交事实送往 OTel 与审计面，只读 event 与 plugin 词汇，不拥有运行时状态（package-zero-debt 终审反转显式登记）。"
+    },
+    {
+      "pattern": "runtime/task/approval",
+      "role": "task-approval",
+      "required": true,
+      "reason": "审批是任务生命周期的一环：ApprovalChannel 与 ApprovalManager 的台账/扫描/裁决归 task 域的子包，只引 plugin 的裁决词汇（package-zero-debt 终审反转显式登记）。"
+    },
+    {
+      "pattern": "api/model",
+      "role": "model-protocol",
+      "required": true,
+      "reason": "锁定 tRPC 模型/provider 的原生接入与单一终局归约。"
     },
     {
       "pattern": "rl",
@@ -109,7 +121,7 @@
       "reason": "反思与自演进的登记/评估/回滚，不强制反向 governance 依赖。"
     },
     {
-      "pattern": "query",
+      "pattern": "memory/query",
       "role": "read-projection",
       "required": false,
       "reason": "授权过滤的只读运行总图投影（inventory/snapshot/cursor/subscribe/explain）；有真实消费者（模型/SDK/CLI/诊断/看板/训练）；可选包，G1 未冻结不强制目录存在，也不塞回组合根做业务大 Store。只读消费事实，不拥有状态。"
@@ -163,6 +175,12 @@
       "reason": "重放读出单元：投影、预算、settle 与冷启动重建（package-restructure 02.2）。读 ledger 事实与 event 身份，不反向依赖根 memory。"
     },
     {
+      "pattern": "memory/replica",
+      "role": "temp-replica",
+      "required": true,
+      "reason": "副本物化＝记忆域的机制子包：临时文件副本的建立、清理与原文重建（package-zero-debt 终审，自 workspace 迁入）。读 memory 的原文端口与 memory/ledger 的引用声明，只发事件、不持有事实真源。"
+    },
+    {
       "pattern": "evolution/meditation",
       "role": "self-improve",
       "required": true,
@@ -198,24 +216,23 @@
     {
       "from": ".",
       "allow": [
-        "config",
-        "state",
-        "agent",
-        "task",
+        "api/config",
+        "runtime/state",
+        "runtime/agent",
+        "runtime/task",
         "memory",
-        "workspace",
-        "plugin",
-        "model",
-        "telemetry",
+        "memory/replica",
+        "api/plugin",
+        "api/model",
         "rl",
         "evolution",
-        "query",
+        "memory/query",
         "tool/exec",
         "tool/mcp",
         "tool/remote",
         "memory/localfile",
         "memory/rustviking",
-        "event",
+        "api/event",
         "memory/search",
         "memory/ledger",
         "memory/replay",
@@ -224,44 +241,64 @@
         "evolution/consolidation",
         "bench",
         "tool/subagent",
-        "view"
+        "api/view",
+        "evolution/governance",
+        "telemetry",
+        "runtime/task/approval",
+        "cli"
       ],
       "forbidden": [],
-      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；evolution/refine、evolution/consolidation 随 package-zero-debt Z1 显式登记）。"
+      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；evolution/refine、evolution/consolidation 随 package-zero-debt Z1 显式登记；memory/replica 随终审显式登记；governance/telemetry/task/approval 随 package-zero-debt 终审反转显式登记；cli 随终审第五弹显式登记）。"
     },
     {
-      "from": "event",
+      "from": "cli",
+      "allow": [
+        ".",
+        "api/event",
+        "api/model",
+        "memory/query",
+        "rl",
+        "runtime/agent",
+        "runtime/task"
+      ],
+      "forbidden": [
+        "runtime/state",
+        "api/config",
+        "api/plugin",
+        "evolution",
+        "memory"
+      ],
+      "reason": "宿主壳只驱动组合根的公共面并读词汇与只读投影：组合根（唯一装配入口与 Run 的公开方法）、event/model 词汇、memory/query 只读投影、rl 反馈面、agent/task 的公开请求类型；不持有状态、不装配、不反向改写运行时（package-zero-debt 第五弹）。"
+    },
+    {
+      "from": "api/event",
       "allow": [],
       "forbidden": [
-        "config",
-        "state",
-        "agent",
-        "task",
+        "api/config",
+        "runtime/state",
+        "runtime/agent",
+        "runtime/task",
         "memory",
-        "workspace",
-        "plugin",
-        "model",
-        "telemetry",
+        "api/plugin",
+        "api/model",
         "rl",
         "evolution"
       ],
       "reason": "事件是纯叶子：不得 import 任何其他一方包。"
     },
     {
-      "from": "view",
+      "from": "api/view",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "config",
-        "state",
-        "agent",
-        "task",
+        "api/config",
+        "runtime/state",
+        "runtime/agent",
+        "runtime/task",
         "memory",
-        "workspace",
-        "plugin",
-        "model",
-        "telemetry",
+        "api/plugin",
+        "api/model",
         "rl",
         "evolution",
         "."
@@ -269,76 +306,77 @@
       "reason": "呈现词汇是纯叶子：只引 event 的事实身份（EventID），不引用任何其他一方包；呈现不写、不读存储、不驱动执行（fact-loop-convergence D3）。"
     },
     {
-      "from": "config",
+      "from": "api/config",
       "allow": [],
       "forbidden": [
-        "state",
-        "agent",
-        "task",
+        "runtime/state",
+        "runtime/agent",
+        "runtime/task",
         "memory",
-        "plugin",
-        "model"
+        "api/plugin",
+        "api/model"
       ],
       "reason": "纯声明解析，不触运行时与绑定。"
     },
     {
-      "from": "model",
+      "from": "api/model",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task",
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
         "memory",
-        "plugin",
+        "api/plugin",
         "rl",
         "evolution"
       ],
       "reason": "模型协议只经 event 记录事实；natives 来自外部框架，不自建影子类型。"
     },
     {
-      "from": "state",
+      "from": "runtime/state",
       "allow": [
-        "event",
-        "config",
-        "model",
-        "plugin",
-        "task"
+        "api/event",
+        "api/config",
+        "api/model",
+        "api/plugin",
+        "runtime/task"
       ],
       "forbidden": [
-        "agent",
+        "runtime/agent",
         "rl",
         "evolution"
       ],
       "reason": "state 实现 task 通知出口（contracts §4 mailbox 幂等接纳 + R1 装配序 store→manager）；state→task 边经主编排者批准加入（apply 骨架层 C，2026-10-13）。"
     },
     {
-      "from": "agent",
+      "from": "runtime/agent",
       "allow": [
-        "event",
-        "state",
-        "model",
-        "plugin",
-        "task",
-        "view"
+        "api/event",
+        "runtime/state",
+        "api/model",
+        "api/plugin",
+        "runtime/task",
+        "api/view",
+        "evolution/governance"
       ],
       "forbidden": [
         "rl",
         "evolution"
       ],
-      "reason": "执行器借 state 绑定并处理任务义务；plan 明确允许在确有必要时直接 import task 以避免影子接口；提交后呈现的交付面 PresentationSink 以 view 词汇传读（fact-loop-convergence 03.2）。"
+      "reason": "执行器借 state 绑定并处理任务义务；plan 明确允许在确有必要时直接 import task 以避免影子接口；提交后呈现的交付面 PresentationSink 以 view 词汇传读（fact-loop-convergence 03.2）；裁决实现由 governance 域承担，执行器只调其窄口（package-zero-debt 终审反转）。"
     },
     {
-      "from": "task",
+      "from": "runtime/task",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state",
+        "runtime/agent",
+        "runtime/state",
         "memory",
-        "plugin",
+        "api/plugin",
         "rl",
         "evolution"
       ],
@@ -347,13 +385,13 @@
     {
       "from": "memory",
       "allow": [
-        "event",
+        "api/event",
         "memory/ledger"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
+        "api/plugin",
         "rl",
         "evolution"
       ],
@@ -363,12 +401,12 @@
       "from": "memory/localfile",
       "allow": [
         "memory",
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "plugin"
+        "runtime/agent",
+        "runtime/state",
+        "api/plugin"
       ],
       "reason": "存储档实现只依赖 memory 领域接口与事件。"
     },
@@ -376,25 +414,25 @@
       "from": "memory/rustviking",
       "allow": [
         "memory",
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "plugin"
+        "runtime/agent",
+        "runtime/state",
+        "api/plugin"
       ],
       "reason": "存储档实现只依赖 memory 领域接口与事件。"
     },
     {
       "from": "memory/ledger",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
+        "api/plugin",
         "rl",
         "evolution",
         "memory",
@@ -405,14 +443,14 @@
     {
       "from": "memory/replay",
       "allow": [
-        "event",
+        "api/event",
         "memory/ledger"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
+        "api/plugin",
         "rl",
         "evolution",
         "memory"
@@ -420,20 +458,36 @@
       "reason": "重放读出只读 ledger 事实与 event 身份；不依赖根 memory 的读出面，避免与根成环。"
     },
     {
+      "from": "memory/replica",
+      "allow": [
+        "memory",
+        "api/event",
+        "memory/ledger"
+      ],
+      "forbidden": [
+        "runtime/agent",
+        "runtime/state",
+        "api/plugin",
+        "rl",
+        "evolution"
+      ],
+      "reason": "副本是原文的临时物化，必须能读原文重建（副本依赖原文）：原文引用与存储端口直接引 memory/ledger 的声明，压缩请求事实引 event 词汇，请求日志引 memory；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理（由 workspace 迁入记忆域，依赖面与语义不变，package-zero-debt 终审）。"
+    },
+    {
       "from": "evolution/meditation",
       "allow": [
-        "event",
-        "model",
+        "api/event",
+        "api/model",
         "memory",
         "memory/ledger",
         "memory/replay",
         "evolution/consolidation"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
+        "api/plugin",
         "rl"
       ],
       "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读 consolidation 的巩固唤醒词汇；不依赖执行器/状态容器/训练。"
@@ -444,10 +498,10 @@
         "evolution"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
+        "api/plugin",
         "rl",
         "memory"
       ],
@@ -461,63 +515,94 @@
         "evolution/meditation",
         "evolution/refine",
         "memory",
-        "event"
+        "api/event"
       ],
       "reason": "巩固通道词汇是纯叶子：一个触发源戳常量，不 import 任何其他一方包。"
     },
     {
-      "from": "workspace",
+      "from": "api/plugin",
       "allow": [
-        "memory",
-        "event",
-        "memory/ledger"
+        "api/event",
+        "api/view"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
         "rl",
-        "evolution"
+        "evolution",
+        "evolution/governance",
+        "telemetry",
+        "runtime/task/approval"
       ],
-      "reason": "副本是原文的临时物化，必须能读原文重建（副本依赖原文）：原文引用与存储端口直接引 memory/ledger 的声明，压缩请求事实引 event 词汇，请求日志引 memory；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理。"
-    },
-    {
-      "from": "plugin",
-      "allow": [
-        "event",
-        "view"
-      ],
-      "forbidden": [
-        "agent",
-        "state",
-        "rl",
-        "evolution"
-      ],
-      "reason": "插件按阶段执行，由组合根构造、state 持有；只以事件表达观测；After 趟读出呈现词汇并以 view 类型返回（事实类型声明已自 plugin 迁出到 view，fact-loop-convergence 03.1/03.2）。"
+      "reason": "插件按阶段执行，由组合根构造、state 持有；只以事件表达观测；After 趟读出呈现词汇并以 view 类型返回（事实类型声明已自 plugin 迁出到 view，fact-loop-convergence 03.1/03.2）；根内只留三拓展点抽象（相位、Observer/AuditSink、Governor），obs/audit/governance/approval 实现分派到 telemetry/governance/task/approval 各领域（package-zero-debt 终审反转）。"
     },
     {
       "from": "telemetry",
       "allow": [
-        "event"
+        "api/event",
+        "api/plugin"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task"
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
+        "memory",
+        "api/model",
+        "rl",
+        "evolution",
+        "evolution/governance",
+        "."
       ],
-      "reason": "提交后观测：只读 event，不拥有状态（关闭 OTel 不影响 Query）。"
+      "reason": "观测实现域：SDKObserver/Recorder/CommitObserver 只读已提交事件与 plugin.Observer/AuditSink 词汇，不拥有状态、不依赖任何领域实现（package-zero-debt 终审反转）。"
+    },
+    {
+      "from": "evolution/governance",
+      "allow": [
+        "api/event",
+        "api/plugin",
+        "runtime/task/approval"
+      ],
+      "forbidden": [
+        "runtime/agent",
+        "runtime/state",
+        "memory",
+        "api/model",
+        "rl",
+        "evolution",
+        "telemetry",
+        "."
+      ],
+      "reason": "治理实现域：Policy/BudgetManager/GoalRegistry/DenialLedger 实现 plugin.Governor，审批交由 task/approval 的窄口，不拥有状态、不依赖执行器（package-zero-debt 终审反转）。"
+    },
+    {
+      "from": "runtime/task/approval",
+      "allow": [
+        "api/plugin"
+      ],
+      "forbidden": [
+        "runtime/agent",
+        "runtime/state",
+        "memory",
+        "api/model",
+        "rl",
+        "evolution",
+        "evolution/governance",
+        "telemetry",
+        "."
+      ],
+      "reason": "审批是任务生命周期的子包：只引 plugin 的 RiskLevel/Decision 裁决词汇，不反向依赖治理或执行器（package-zero-debt 终审反转）。"
     },
     {
       "from": "rl",
       "allow": [
-        "event",
-        "model",
+        "api/event",
+        "api/model",
         "memory"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "plugin",
+        "runtime/agent",
+        "runtime/state",
+        "api/plugin",
         "evolution",
         "."
       ],
@@ -526,28 +611,28 @@
     {
       "from": "evolution",
       "allow": [
-        "state",
-        "event",
-        "model",
+        "runtime/state",
+        "api/event",
+        "api/model",
         "memory"
       ],
       "forbidden": [
-        "agent",
+        "runtime/agent",
         "rl"
       ],
       "reason": "反思与自演进消费 state/model/memory 事实；不强制反向 governance，也不依赖执行器内部。"
     },
     {
-      "from": "query",
+      "from": "memory/query",
       "allow": [
-        "event",
-        "state",
-        "task",
+        "api/event",
+        "runtime/state",
+        "runtime/task",
         "memory",
-        "plugin"
+        "api/plugin"
       ],
       "forbidden": [
-        "agent",
+        "runtime/agent",
         "rl",
         "evolution"
       ],
@@ -556,11 +641,11 @@
     {
       "from": "tool/exec",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state",
+        "runtime/agent",
+        "runtime/state",
         "memory"
       ],
       "reason": "执行适配持有资源租约并记事件，不拥有会话状态。"
@@ -568,22 +653,22 @@
     {
       "from": "tool/mcp",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state"
+        "runtime/agent",
+        "runtime/state"
       ],
       "reason": "MCP 适配只做连接/发现/网关与事件，不重写协议。"
     },
     {
       "from": "tool/remote",
       "allow": [
-        "event"
+        "api/event"
       ],
       "forbidden": [
-        "agent",
-        "state"
+        "runtime/agent",
+        "runtime/state"
       ],
       "reason": "远端投递适配经显式目标与事件关联，不藏调度。"
     },
@@ -591,13 +676,13 @@
       "from": "memory/search",
       "allow": [
         "memory",
-        "event",
+        "api/event",
         "memory/ledger"
       ],
       "forbidden": [
-        "agent",
-        "state",
-        "task",
+        "runtime/agent",
+        "runtime/state",
+        "runtime/task",
         "rl"
       ],
       "reason": "memory 实现子包（检索端口/混合融合）：读原文引用（直接引 memory/ledger 声明）、根 memory 的查询与嵌入端口、event 身份；索引非真源。由主编排者随 04.P0.4 骨架登记（层E收口，2026-10-13；memory/ledger 边随 package-restructure D3 别名面删除显式登记）。"
@@ -610,13 +695,13 @@
     {
       "from": "tool/subagent",
       "allow": [
-        "agent",
-        "config",
-        "event",
+        "runtime/agent",
+        "api/config",
+        "api/event",
         "memory",
         "memory/search",
-        "state",
-        "task"
+        "runtime/state",
+        "runtime/task"
       ],
       "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖。"
     }

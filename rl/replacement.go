@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // identitySeparator is the single separator a rendered model identity carries

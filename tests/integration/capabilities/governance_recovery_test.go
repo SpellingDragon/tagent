@@ -12,10 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -32,10 +33,10 @@ import (
 func TestGovernanceRecovery(t *testing.T) {
 	t.Run("a declared goal activates the goal gate and a refusal permeates the goal context", func(t *testing.T) {
 		logFace := recOpenLog(t, "")
-		goals := plugin.NewGoalRegistry()
-		ledger := plugin.NewDenialLedger()
+		goals := governance.NewGoalRegistry()
+		ledger := governance.NewDenialLedger()
 		ledger.BindStore(logFace)
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementStrict, grade: plugin.RiskHigh, tool: "shell_exec", rules: []plugin.RiskRule{recDeployRule()}, goals: goals, ledger: ledger, goalRequired: []string{"model"}})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskHigh, tool: "shell_exec", rules: []governance.RiskRule{recDeployRule()}, goals: goals, ledger: ledger, goalRequired: []string{"model"}})
 
 		if _, err := rig.call("call-goal-missing", "shell_exec", `{"cmd":"deploy"}`); !errors.Is(err, task.ErrDenied) {
 			t.Fatalf("call error = %v, want the goal gate refusing the goal-less autonomous call", err)
@@ -47,7 +48,7 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("ledger records = %d, want the missing-goal ruling recorded", got)
 		}
 		missing := ledger.Query(0)[0]
-		if missing.Subtype != plugin.SubtypeDenial || missing.GoalID != "" {
+		if missing.Subtype != governance.SubtypeDenial || missing.GoalID != "" {
 			t.Fatalf("missing-goal record = %+v, want a denial record carrying no goal context", missing)
 		}
 		if !strings.Contains(missing.Reason, "declared goal") {
@@ -65,7 +66,7 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("ledger records = %d, want the rule refusal recorded beside the goal ruling", got)
 		}
 		refusal := ledger.Query(0)[0]
-		if refusal.Subtype != plugin.SubtypeDenial || refusal.GoalID != g1 {
+		if refusal.Subtype != governance.SubtypeDenial || refusal.GoalID != g1 {
 			t.Fatalf("refusal record = %+v, want the denial permeating goal %s", refusal, g1)
 		}
 		if !strings.Contains(refusal.Reason, recDeployRuleReason) {
@@ -88,8 +89,8 @@ func TestGovernanceRecovery(t *testing.T) {
 			if err := json.Unmarshal(raw, &evt); err != nil {
 				t.Fatalf("parse stored governance event: %v", err)
 			}
-			if evt.Meta[plugin.MetaKeySubtype] != plugin.SubtypeDenial {
-				t.Fatalf("event subtype = %q, want the denial word", evt.Meta[plugin.MetaKeySubtype])
+			if evt.Meta[governance.MetaKeySubtype] != governance.SubtypeDenial {
+				t.Fatalf("event subtype = %q, want the denial word", evt.Meta[governance.MetaKeySubtype])
 			}
 			if evt.Meta["goal_id"] == g1 {
 				permeated = true
@@ -99,9 +100,9 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("governance events = %+v, want one event permeating goal %s", stored, g1)
 		}
 
-		wGoals := plugin.NewGoalRegistry()
-		wLedger := plugin.NewDenialLedger()
-		warnRig := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskHigh, tool: "shell_exec", goals: wGoals, ledger: wLedger, goalRequired: []string{"model"}})
+		wGoals := governance.NewGoalRegistry()
+		wLedger := governance.NewDenialLedger()
+		warnRig := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskHigh, tool: "shell_exec", goals: wGoals, ledger: wLedger, goalRequired: []string{"model"}})
 		out, err := warnRig.call("call-warn-goal", "shell_exec", `{"cmd":"status"}`)
 		if err != nil {
 			t.Fatalf("the warn grade records a missing goal and never denies: %v", err)
@@ -116,38 +117,38 @@ func TestGovernanceRecovery(t *testing.T) {
 		if warnRig.decision().Refused() {
 			t.Fatalf("warn ruling = %+v, want the missing goal recorded without a refusal", warnRig.decision())
 		}
-		warnRec := recFind(wLedger, plugin.SubtypeDenial)
+		warnRec := recFind(wLedger, governance.SubtypeDenial)
 		if warnRec == nil || !strings.Contains(warnRec.Reason, "declared goal") {
 			t.Fatalf("warn records = %+v, want the missing goal recorded beside the running call", wLedger.Query(0))
 		}
 	})
 
 	t.Run("the goal state words are kept verbatim and expired is derived from validity", func(t *testing.T) {
-		if string(plugin.GoalActive) != "active" || string(plugin.GoalAchieved) != "achieved" ||
-			string(plugin.GoalAbandoned) != "abandoned" || string(plugin.GoalExpired) != "expired" {
+		if string(governance.GoalActive) != "active" || string(governance.GoalAchieved) != "achieved" ||
+			string(governance.GoalAbandoned) != "abandoned" || string(governance.GoalExpired) != "expired" {
 			t.Fatalf("goal state words = %q/%q/%q/%q, want active/achieved/abandoned/expired verbatim",
-				plugin.GoalActive, plugin.GoalAchieved, plugin.GoalAbandoned, plugin.GoalExpired)
+				governance.GoalActive, governance.GoalAchieved, governance.GoalAbandoned, governance.GoalExpired)
 		}
-		goals := plugin.NewGoalRegistry()
+		goals := governance.NewGoalRegistry()
 		g1 := goals.Declare("ship the release", "entry", 0)
-		if recGoal(t, goals, g1).Status != plugin.GoalActive {
+		if recGoal(t, goals, g1).Status != governance.GoalActive {
 			t.Fatalf("declared goal = %+v, want the goal in flight under its declared word", recGoal(t, goals, g1))
 		}
-		if !goals.Resolve(g1, plugin.GoalAchieved) || recGoal(t, goals, g1).Status != plugin.GoalAchieved {
+		if !goals.Resolve(g1, governance.GoalAchieved) || recGoal(t, goals, g1).Status != governance.GoalAchieved {
 			t.Fatalf("resolved goal = %+v, want the reached goal under its achieved word", recGoal(t, goals, g1))
 		}
 		g2 := goals.Declare("watch the rollout", "entry", 0)
-		if !goals.Resolve(g2, plugin.GoalAbandoned) || recGoal(t, goals, g2).Status != plugin.GoalAbandoned {
+		if !goals.Resolve(g2, governance.GoalAbandoned) || recGoal(t, goals, g2).Status != governance.GoalAbandoned {
 			t.Fatalf("resolved goal = %+v, want the given-up goal under its abandoned word", recGoal(t, goals, g2))
 		}
-		if !goals.Resolve(g2, plugin.GoalAchieved) {
+		if !goals.Resolve(g2, governance.GoalAchieved) {
 			t.Fatalf("a repeated resolution must be applied as it arrives — the registry guards no terminal state")
 		}
 		g3 := goals.Declare("collect the metrics", "entry", time.Now().UnixMilli()-1000)
 		if goals.HasActive() || goals.Current() != nil {
 			t.Fatalf("a goal past its validity must stop counting as active")
 		}
-		if got := recGoal(t, goals, g3).Status; got != plugin.GoalActive {
+		if got := recGoal(t, goals, g3).Status; got != governance.GoalActive {
 			t.Fatalf("expired goal status = %q, want the recorded word never flipped — expired is derived", got)
 		}
 		if len(goals.Active()) != 0 {
@@ -162,11 +163,11 @@ func TestGovernanceRecovery(t *testing.T) {
 	t.Run("an exhausted window refuses whatever the grade says and a restart never refreshes it", func(t *testing.T) {
 		clock := &govClock{now: time.Now()}
 		dir := t.TempDir()
-		cfg := plugin.BudgetConfig{MaxHighRisk: 2}
-		ledger := plugin.NewDenialLedger()
-		policy := plugin.Open(
-			plugin.WithBudget(plugin.NewBudgetManager(cfg, dir, plugin.WithBudgetClock(clock.current))),
-			plugin.WithLedger(ledger),
+		cfg := governance.BudgetConfig{MaxHighRisk: 2}
+		ledger := governance.NewDenialLedger()
+		policy := governance.Open(
+			governance.WithBudget(governance.NewBudgetManager(cfg, dir, governance.WithBudgetClock(clock.current))),
+			governance.WithLedger(ledger),
 		)
 		if d := recJudge(t, policy, "call-budget-1", `{"cmd":"ls"}`); d.Refused() {
 			t.Fatalf("first call = %+v, want the window admitting its first operations", d)
@@ -181,12 +182,12 @@ func TestGovernanceRecovery(t *testing.T) {
 		if !strings.Contains(spent.Reason, "budget") {
 			t.Fatalf("budget refusal reason = %q, want the spent window named", spent.Reason)
 		}
-		if rec := recFind(ledger, plugin.SubtypeDenial); rec == nil {
+		if rec := recFind(ledger, governance.SubtypeDenial); rec == nil {
 			t.Fatalf("ledger records = %+v, want the budget refusal recorded", ledger.Query(0))
 		}
 
-		resumed := plugin.NewBudgetManager(cfg, dir, plugin.WithBudgetClock(clock.current))
-		if !errors.Is(resumed.Admit(plugin.RiskHigh), plugin.ErrBudgetExhausted) {
+		resumed := governance.NewBudgetManager(cfg, dir, governance.WithBudgetClock(clock.current))
+		if !errors.Is(resumed.Admit(plugin.RiskHigh), governance.ErrBudgetExhausted) {
 			t.Fatalf("a restarted budget manager must resume the spent window, not refresh it")
 		}
 		if got := resumed.Usage(plugin.RiskHigh); got != 2 {
@@ -201,9 +202,9 @@ func TestGovernanceRecovery(t *testing.T) {
 	t.Run("a restart replays the governance events back and keeps the records it made", func(t *testing.T) {
 		root := t.TempDir()
 		firstLog := recOpenLog(t, root)
-		goals1 := plugin.NewGoalRegistry()
+		goals1 := governance.NewGoalRegistry()
 		goals1.BindStore(firstLog)
-		ledger1 := plugin.NewDenialLedger()
+		ledger1 := governance.NewDenialLedger()
 		ledger1.BindStore(firstLog)
 
 		g1 := goals1.Declare("ship the release", "entry", 0)
@@ -211,11 +212,11 @@ func TestGovernanceRecovery(t *testing.T) {
 		if g1 != "g-1" || g2 != "g-2" {
 			t.Fatalf("declared identities = (%q, %q), want the declaration-order identities", g1, g2)
 		}
-		if !goals1.Resolve(g1, plugin.GoalAchieved) {
+		if !goals1.Resolve(g1, governance.GoalAchieved) {
 			t.Fatalf("resolve goal %s: the registry must accept the resolution", g1)
 		}
-		ledger1.Record(plugin.DenialRecord{
-			Subtype:  plugin.SubtypeDenial,
+		ledger1.Record(governance.DenialRecord{
+			Subtype:  governance.SubtypeDenial,
 			ToolName: "delete_file",
 			Level:    plugin.RiskHigh,
 			RuleID:   "no-delete",
@@ -233,13 +234,13 @@ func TestGovernanceRecovery(t *testing.T) {
 			if err := json.Unmarshal(raw, &evt); err != nil {
 				t.Fatalf("parse stored goal event: %v", err)
 			}
-			switch evt.Meta[plugin.MetaKeySubtype] {
-			case plugin.SubtypeGoalDeclared:
+			switch evt.Meta[governance.MetaKeySubtype] {
+			case governance.SubtypeGoalDeclared:
 				declared++
-			case plugin.SubtypeGoalResolved:
+			case governance.SubtypeGoalResolved:
 				resolved++
 			default:
-				t.Fatalf("goal event subtype = %q, want goal_declared or goal_resolved", evt.Meta[plugin.MetaKeySubtype])
+				t.Fatalf("goal event subtype = %q, want goal_declared or goal_resolved", evt.Meta[governance.MetaKeySubtype])
 			}
 		}
 		if declared != 2 || resolved != 1 {
@@ -247,15 +248,15 @@ func TestGovernanceRecovery(t *testing.T) {
 		}
 
 		secondLog := recOpenLog(t, root)
-		goals2 := plugin.NewGoalRegistry()
+		goals2 := governance.NewGoalRegistry()
 		goals2.BindStore(secondLog)
-		ledger2 := plugin.NewDenialLedger()
+		ledger2 := governance.NewDenialLedger()
 		ledger2.BindStore(secondLog)
 
-		if got := recGoal(t, goals2, g1).Status; got != plugin.GoalAchieved {
+		if got := recGoal(t, goals2, g1).Status; got != governance.GoalAchieved {
 			t.Fatalf("replayed goal %s status = %q, want achieved replayed in operation order", g1, got)
 		}
-		if got := recGoal(t, goals2, g2).Status; got != plugin.GoalActive {
+		if got := recGoal(t, goals2, g2).Status; got != governance.GoalActive {
 			t.Fatalf("replayed goal %s status = %q, want the still-in-flight goal rebuilt as active", g2, got)
 		}
 		if !goals2.HasActive() {
@@ -268,18 +269,18 @@ func TestGovernanceRecovery(t *testing.T) {
 			t.Fatalf("replayed records = %d, want the refusal kept across the restart", ledger2.Count())
 		}
 		replayed := ledger2.Query(0)[0]
-		if replayed.GoalID != g1 || replayed.Subtype != plugin.SubtypeDenial || replayed.ToolName != "delete_file" {
+		if replayed.GoalID != g1 || replayed.Subtype != governance.SubtypeDenial || replayed.ToolName != "delete_file" {
 			t.Fatalf("replayed record = %+v, want the refusal still permeating goal %s", replayed, g1)
 		}
 	})
 
 	t.Run("concurrent declarations and records keep every counter exact", func(t *testing.T) {
 		logFace := recOpenLog(t, "")
-		goals := plugin.NewGoalRegistry()
+		goals := governance.NewGoalRegistry()
 		goals.BindStore(logFace)
-		ledger := plugin.NewDenialLedger()
+		ledger := governance.NewDenialLedger()
 		ledger.BindStore(logFace)
-		budget := plugin.NewBudgetManager(plugin.BudgetConfig{}, "")
+		budget := governance.NewBudgetManager(governance.BudgetConfig{}, "")
 
 		const workers, perWorker = 8, 10
 		var wg sync.WaitGroup
@@ -292,8 +293,8 @@ func TestGovernanceRecovery(t *testing.T) {
 					if id == "" {
 						t.Errorf("declaration %d/%d returned no identity", w, i)
 					}
-					ledger.Record(plugin.DenialRecord{
-						Subtype:  plugin.SubtypeDenial,
+					ledger.Record(governance.DenialRecord{
+						Subtype:  governance.SubtypeDenial,
 						ToolName: "shell_exec",
 						Level:    plugin.RiskMedium,
 						Reason:   "concurrent probe",
@@ -334,42 +335,42 @@ func TestGovernanceRecovery(t *testing.T) {
 
 	t.Run("a failing store and a bad snapshot degrade instead of failing the gate", func(t *testing.T) {
 		failing := recFailingLog{}
-		goals := plugin.NewGoalRegistry()
+		goals := governance.NewGoalRegistry()
 		goals.BindStore(failing)
-		ledger := plugin.NewDenialLedger()
+		ledger := governance.NewDenialLedger()
 		ledger.BindStore(failing)
 		if id := goals.Declare("keep going", "entry", 0); id == "" {
 			t.Fatalf("a failing store must not swallow the declaration")
 		}
-		ledger.Record(plugin.DenialRecord{Subtype: plugin.SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskMedium, Reason: "store down"})
+		ledger.Record(governance.DenialRecord{Subtype: governance.SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskMedium, Reason: "store down"})
 		if ledger.Count() != 1 || len(goals.List()) != 1 {
 			t.Fatalf("a failing store must never block the operation: goals=%d records=%d", len(goals.List()), ledger.Count())
 		}
-		memGoals := plugin.NewGoalRegistry()
+		memGoals := governance.NewGoalRegistry()
 		memGoals.BindStore(nil)
-		memLedger := plugin.NewDenialLedger()
+		memLedger := governance.NewDenialLedger()
 		memLedger.BindStore(nil)
 		if memGoals.Declare("memory only", "entry", 0) == "" {
 			t.Fatalf("a registry without a store must degrade to memory state")
 		}
-		memLedger.Record(plugin.DenialRecord{Subtype: plugin.SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskMedium, Reason: "memory only"})
+		memLedger.Record(governance.DenialRecord{Subtype: governance.SubtypeDenial, ToolName: "shell_exec", Level: plugin.RiskMedium, Reason: "memory only"})
 		if memLedger.Count() != 1 {
 			t.Fatalf("a ledger without a store must degrade to memory state, records = %d", memLedger.Count())
 		}
 
-		cfg := plugin.BudgetConfig{MaxHighRisk: 2}
+		cfg := governance.BudgetConfig{MaxHighRisk: 2}
 		corrupt := t.TempDir()
 		if err := os.WriteFile(filepath.Join(corrupt, "budget.json"), []byte("{not json"), 0o644); err != nil {
 			t.Fatalf("write the corrupted snapshot: %v", err)
 		}
-		if err := plugin.NewBudgetManager(cfg, corrupt).Admit(plugin.RiskHigh); err != nil {
+		if err := governance.NewBudgetManager(cfg, corrupt).Admit(plugin.RiskHigh); err != nil {
 			t.Fatalf("a corrupted snapshot must degrade to a fresh window instead of failing: %v", err)
 		}
 		forged := t.TempDir()
 		if err := os.WriteFile(filepath.Join(forged, "budget.json"), []byte(`{"epoch":0,"buckets":{"high":[9,9,9,9,9,9]}}`), 0o644); err != nil {
 			t.Fatalf("write the forged snapshot: %v", err)
 		}
-		if got := plugin.NewBudgetManager(cfg, forged).Usage(plugin.RiskHigh); got != 0 {
+		if got := governance.NewBudgetManager(cfg, forged).Usage(plugin.RiskHigh); got != 0 {
 			t.Fatalf("an epoch-less snapshot must be wholly untrusted: usage = %d, want the forged consumption never adopted", got)
 		}
 	})
@@ -378,7 +379,7 @@ func TestGovernanceRecovery(t *testing.T) {
 // recJudge rules over one plain high-grade call the way the dispatch admits it:
 // the trigger source the goal gate matches on and the grade the one Before pass
 // carries.
-func recJudge(t *testing.T, policy *plugin.Policy, callID, args string) plugin.Decision {
+func recJudge(t *testing.T, policy *governance.Policy, callID, args string) plugin.Decision {
 	t.Helper()
 	call := model.ToolCall{ID: callID, Type: "function", Function: model.FunctionDefinitionParam{Name: "shell_exec", Arguments: []byte(args)}}
 	pass := plugin.CallPass{Final: call, Risk: plugin.RiskHigh, TriggerSource: "model"}
@@ -392,7 +393,7 @@ func recJudge(t *testing.T, policy *plugin.Policy, callID, args string) plugin.D
 // recOpenLog opens the durable governance event face over the real memory
 // tier: the in-memory tier when root is empty, the localfile tier otherwise.
 // Reopening the same root is the restart these sub-cases recover across.
-func recOpenLog(t *testing.T, root string) plugin.GovernanceEventLog {
+func recOpenLog(t *testing.T, root string) governance.GovernanceEventLog {
 	t.Helper()
 	cfg := ledger.StorageConfig{Type: ledger.StorageMemory}
 	if root != "" {
@@ -407,7 +408,7 @@ func recOpenLog(t *testing.T, root string) plugin.GovernanceEventLog {
 
 // recFind reports the newest ledger record filed under the subtype, or nil
 // when the ledger holds none.
-func recFind(ledger *plugin.DenialLedger, subtype string) *plugin.DenialRecord {
+func recFind(ledger *governance.DenialLedger, subtype string) *governance.DenialRecord {
 	for _, rec := range ledger.Query(0) {
 		if rec.Subtype == subtype {
 			rec := rec
@@ -419,7 +420,7 @@ func recFind(ledger *plugin.DenialLedger, subtype string) *plugin.DenialRecord {
 
 // recGoal reports the goal the registry holds under the identity, failing the
 // sub-case when none is found.
-func recGoal(t *testing.T, goals *plugin.GoalRegistry, id string) *plugin.Goal {
+func recGoal(t *testing.T, goals *governance.GoalRegistry, id string) *governance.Goal {
 	t.Helper()
 	for _, goal := range goals.List() {
 		if goal.ID == id {
@@ -435,11 +436,11 @@ const recDeployRuleReason = "deploying unattended is restricted and must not run
 
 // recDeployRule returns the violation rule these sub-cases rule over: an
 // autonomous deploy at the medium grade or above is a violation of the gate.
-func recDeployRule() plugin.RiskRule {
-	return plugin.RiskRule{
+func recDeployRule() governance.RiskRule {
+	return governance.RiskRule{
 		ID:      "no-deploy",
 		MinRisk: plugin.RiskMedium,
-		Match: func(rc plugin.RiskContext) bool {
+		Match: func(rc governance.RiskContext) bool {
 			return rc.ToolName == "shell_exec" && strings.Contains(string(rc.ArgsJSON), "deploy")
 		},
 		Reason: recDeployRuleReason,

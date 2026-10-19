@@ -11,7 +11,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // DeliveryRecord is one delivery obligation as the replay surface carries it:

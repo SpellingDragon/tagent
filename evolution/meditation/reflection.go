@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator

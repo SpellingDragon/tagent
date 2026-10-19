@@ -7,10 +7,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root

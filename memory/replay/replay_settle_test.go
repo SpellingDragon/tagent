@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // settleNow is the pass time the settle invariants judge age against.

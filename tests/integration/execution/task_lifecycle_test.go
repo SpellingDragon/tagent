@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // TestTaskLifecycle checks the in-memory task registry and task manager over one lifecycle.

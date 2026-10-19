@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
 
@@ -34,7 +34,7 @@ type approvalSender interface {
 // every configured approver chat and resolves a reply against the manager, so a
 // ruling is bound to the arguments that were held.
 type approvalGateway struct {
-	manager   *plugin.ApprovalManager
+	manager   *approval.ApprovalManager
 	enabled   bool
 	approvers []string
 
@@ -51,7 +51,7 @@ func newApprovalGateway(gov governanceEntry, approvers []string) *approvalGatewa
 	}
 	ttl := time.Duration(gov.ApprovalTTLMinutes) * time.Minute
 	g := &approvalGateway{
-		manager: plugin.NewApprovalManager(dir, ttl),
+		manager: approval.NewApprovalManager(dir, ttl),
 		enabled: gov.Enabled,
 	}
 	for _, id := range approvers {
@@ -65,7 +65,7 @@ func newApprovalGateway(gov governanceEntry, approvers []string) *approvalGatewa
 
 // Manager reports the approval manager the execution policy reads its rulings
 // through.
-func (g *approvalGateway) Manager() *plugin.ApprovalManager { return g.manager }
+func (g *approvalGateway) Manager() *approval.ApprovalManager { return g.manager }
 
 // Enabled reports whether the host attaches the approval policy of this
 // governance section to the assembly.
@@ -96,7 +96,7 @@ func (g *approvalGateway) IsApprover(userID string) bool {
 // Deliver offers one approval request to every configured approver chat. No
 // approver and no sender are named failures: the manager records them as
 // visible delivery gaps and the gate keeps waiting.
-func (g *approvalGateway) Deliver(ctx context.Context, req plugin.ApprovalRequest) error {
+func (g *approvalGateway) Deliver(ctx context.Context, req approval.ApprovalRequest) error {
 	g.mu.RLock()
 	sender := g.sender
 	g.mu.RUnlock()
@@ -148,12 +148,12 @@ func (g *approvalGateway) Resolve(from, text string) (handled bool, reply string
 
 // match reports the one pending request whose digest starts with the prefix. An
 // unknown prefix and an ambiguous prefix are refused by name.
-func (g *approvalGateway) match(prefix string) (*plugin.ApprovalRequest, error) {
+func (g *approvalGateway) match(prefix string) (*approval.ApprovalRequest, error) {
 	prefix = strings.ToLower(strings.TrimSpace(prefix))
 	if len(prefix) < minApprovalPrefix {
-		return nil, fmt.Errorf("%w: 前缀至少 %d 位十六进制字符", plugin.ErrApprovalNotFound, minApprovalPrefix)
+		return nil, fmt.Errorf("%w: 前缀至少 %d 位十六进制字符", approval.ErrApprovalNotFound, minApprovalPrefix)
 	}
-	var found []*plugin.ApprovalRequest
+	var found []*approval.ApprovalRequest
 	for _, req := range g.manager.Pending() {
 		if strings.HasPrefix(strings.ToLower(req.ArgsDigest), prefix) {
 			found = append(found, req)
@@ -161,7 +161,7 @@ func (g *approvalGateway) match(prefix string) (*plugin.ApprovalRequest, error) 
 	}
 	switch len(found) {
 	case 0:
-		return nil, fmt.Errorf("%w: 前缀 %s", plugin.ErrApprovalNotFound, prefix)
+		return nil, fmt.Errorf("%w: 前缀 %s", approval.ErrApprovalNotFound, prefix)
 	case 1:
 		return found[0], nil
 	default:
@@ -171,7 +171,7 @@ func (g *approvalGateway) match(prefix string) (*plugin.ApprovalRequest, error) 
 
 // parseApprovalReply reads one ruling reply: the verb beside the digest prefix
 // an approver answers with. A message that carries neither is not a ruling.
-func parseApprovalReply(text string) (plugin.ApprovalStatus, string, bool) {
+func parseApprovalReply(text string) (approval.ApprovalStatus, string, bool) {
 	fields := strings.Fields(text)
 	if len(fields) < 2 {
 		return "", "", false
@@ -179,9 +179,9 @@ func parseApprovalReply(text string) (plugin.ApprovalStatus, string, bool) {
 	verb, prefix := strings.ToLower(fields[0]), strings.TrimSpace(fields[1])
 	switch verb {
 	case "approve", "批准":
-		return plugin.ApprovalApproved, prefix, true
+		return approval.ApprovalApproved, prefix, true
 	case "reject", "拒绝":
-		return plugin.ApprovalDenied, prefix, true
+		return approval.ApprovalDenied, prefix, true
 	default:
 		return "", "", false
 	}

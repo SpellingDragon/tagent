@@ -24,8 +24,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // SchemaVersion names the record schema a line was written with. A reader selects

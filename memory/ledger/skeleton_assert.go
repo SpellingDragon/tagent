@@ -10,7 +10,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // The declared shapes and their fields.

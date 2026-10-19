@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // ReplaySettleType is the frozen type of a replay settle fact.

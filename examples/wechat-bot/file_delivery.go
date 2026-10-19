@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )

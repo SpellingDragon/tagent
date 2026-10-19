@@ -3,7 +3,7 @@ package memoryreplayexample
 import (
 	"context"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
 

@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/query"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/runtime/task/approval"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -34,17 +36,17 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		writeSkillFolder(t, root, "greet", "body v1\n")
 		ruleProbe := &policyProbe{name: "critical_tool"}
 		plainProbe := &policyProbe{name: "critical_plain"}
-		ledger := plugin.NewDenialLedger()
-		recorder := &rulingRecorder{inner: plugin.Open(
-			plugin.WithStrict(),
-			plugin.WithRules(plugin.RiskRule{
+		ledger := governance.NewDenialLedger()
+		recorder := &rulingRecorder{inner: governance.Open(
+			governance.WithStrict(),
+			governance.WithRules(governance.RiskRule{
 				ID:      "needs-human",
 				MinRisk: plugin.RiskCritical,
-				Match:   func(in plugin.RiskContext) bool { return in.ToolName == "critical_tool" },
+				Match:   func(in governance.RiskContext) bool { return in.ToolName == "critical_tool" },
 				Reason:  "critical_tool always awaits a human ruling",
 			}),
-			plugin.WithApprovals(plugin.NewApprovalManager("", time.Hour)),
-			plugin.WithLedger(ledger),
+			governance.WithApprovals(approval.NewApprovalManager("", time.Hour)),
+			governance.WithLedger(ledger),
 		)}
 		argsA, argsB := `{"x":1}`, `{"x":2}`
 		var mu sync.Mutex
@@ -146,18 +148,18 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		if len(records) != 2 {
 			t.Fatalf("governance records = %+v, want one approval fact per parked call", records)
 		}
-		byDigest := map[string]plugin.DenialRecord{}
+		byDigest := map[string]governance.DenialRecord{}
 		for _, rec := range records {
-			if rec.Subtype != plugin.SubtypeApproval || rec.Level != plugin.RiskCritical {
+			if rec.Subtype != governance.SubtypeApproval || rec.Level != plugin.RiskCritical {
 				t.Fatalf("governance record = %+v, want the wait recorded as an approval fact at the critical grade", rec)
 			}
 			byDigest[rec.ArgsDigest] = rec
 		}
-		matchedRecord, ok := byDigest[plugin.ArgsDigest([]byte(argsA))]
+		matchedRecord, ok := byDigest[approval.ArgsDigest([]byte(argsA))]
 		if !ok || matchedRecord.ToolName != "critical_tool" || matchedRecord.RuleID != "needs-human" {
 			t.Fatalf("approval fact of the matched call = %+v, want the native tool and rule the call was parked under", matchedRecord)
 		}
-		plainRecord, ok := byDigest[plugin.ArgsDigest([]byte(argsB))]
+		plainRecord, ok := byDigest[approval.ArgsDigest([]byte(argsB))]
 		if !ok || plainRecord.ToolName != "critical_plain" || plainRecord.RuleID != "" {
 			t.Fatalf("approval fact of the unmatched call = %+v, want the native tool beside no rule", plainRecord)
 		}
@@ -170,17 +172,17 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		writePromptFile(t, root, "prompts/system.md", "system prompt\n")
 		writeSkillFolder(t, root, "greet", "body v1\n")
 		probe := &policyProbe{name: "danger_tool"}
-		ledger := plugin.NewDenialLedger()
-		recorder := &rulingRecorder{inner: plugin.Open(
-			plugin.WithStrict(),
-			plugin.WithRules(plugin.RiskRule{
+		ledger := governance.NewDenialLedger()
+		recorder := &rulingRecorder{inner: governance.Open(
+			governance.WithStrict(),
+			governance.WithRules(governance.RiskRule{
 				ID:      "no-danger",
 				MinRisk: plugin.RiskHigh,
-				Match:   func(in plugin.RiskContext) bool { return in.ToolName == "danger_tool" },
+				Match:   func(in governance.RiskContext) bool { return in.ToolName == "danger_tool" },
 				Reason:  "danger_tool is refused at the high grade",
 			}),
-			plugin.WithApprovals(plugin.NewApprovalManager("", time.Hour)),
-			plugin.WithLedger(ledger),
+			governance.WithApprovals(approval.NewApprovalManager("", time.Hour)),
+			governance.WithLedger(ledger),
 		)}
 		args := `{"x":1}`
 		var mu sync.Mutex
@@ -248,10 +250,10 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			t.Fatalf("governance records = %+v, want one denial fact of the refused call", records)
 		}
 		refusalRecord := records[0]
-		if refusalRecord.Subtype != plugin.SubtypeDenial || refusalRecord.ToolName != "danger_tool" || refusalRecord.RuleID != "no-danger" {
+		if refusalRecord.Subtype != governance.SubtypeDenial || refusalRecord.ToolName != "danger_tool" || refusalRecord.RuleID != "no-danger" {
 			t.Fatalf("refusal fact = %+v, want the denial recorded under the native tool and its rule", refusalRecord)
 		}
-		if want := plugin.ArgsDigest([]byte(args)); refusalRecord.ArgsDigest != want {
+		if want := approval.ArgsDigest([]byte(args)); refusalRecord.ArgsDigest != want {
 			t.Fatalf("refusal digest = %s, want the digest %s of the arguments the model issued", refusalRecord.ArgsDigest, want)
 		}
 		scope := query.AuthorizationScope{Agents: []event.AgentID{"agent-a"}, Sessions: []event.Address{addr}}
@@ -273,16 +275,16 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 		writePromptFile(t, root, "prompts/system.md", "system prompt\n")
 		writeSkillFolder(t, root, "greet", "body v1\n")
 		probe := &policyProbe{name: "critical_tool"}
-		approvals := plugin.NewApprovalManager("", time.Hour)
-		recorder := &rulingRecorder{inner: plugin.Open(
-			plugin.WithStrict(),
-			plugin.WithRules(plugin.RiskRule{
+		approvals := approval.NewApprovalManager("", time.Hour)
+		recorder := &rulingRecorder{inner: governance.Open(
+			governance.WithStrict(),
+			governance.WithRules(governance.RiskRule{
 				ID:      "needs-human",
 				MinRisk: plugin.RiskCritical,
-				Match:   func(in plugin.RiskContext) bool { return in.ToolName == "critical_tool" },
+				Match:   func(in governance.RiskContext) bool { return in.ToolName == "critical_tool" },
 				Reason:  "critical_tool always awaits a human ruling",
 			}),
-			plugin.WithApprovals(approvals),
+			governance.WithApprovals(approvals),
 		)}
 		args := `{"x":7}`
 		var mu sync.Mutex
@@ -299,7 +301,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 				if _, err := approvals.Request(ctx, approvalID, "critical_tool", []byte(args), plugin.RiskCritical, "needs-human", "critical_tool always awaits a human ruling"); err != nil {
 					t.Errorf("register the approval request: %v", err)
 				}
-				if _, err := approvals.Decide(approvalID, plugin.ApprovalApproved, "operator"); err != nil {
+				if _, err := approvals.Decide(approvalID, approval.ApprovalApproved, "operator"); err != nil {
 					t.Errorf("decide the approval request: %v", err)
 				}
 				return ntToolTurn(ntCall("call-crit-2", "critical_tool", args))

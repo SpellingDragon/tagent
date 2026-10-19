@@ -1,6 +1,6 @@
 package ledger
 
-import "github.com/SpellingDragon/tagent/event"
+import "github.com/SpellingDragon/tagent/api/event"
 
 // FactKey returns the reference's identity as a fact key: the canonical hex key
 // of the original blob it names. The deduplication scope (owner, format and

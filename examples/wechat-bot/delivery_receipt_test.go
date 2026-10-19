@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 

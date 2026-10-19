@@ -13,12 +13,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/query"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -81,7 +81,7 @@ func TestFormalWrapperAdmission(t *testing.T) {
 		}}
 		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithEnforcement(plugin.EnforcementStrict))
+		}, tagent.WithGovernance(passPolicy{}), tagent.WithEnforcement(governance.EnforcementStrict))
 		if err != nil {
 			t.Fatalf("assemble the strict runtime: %v", err)
 		}
@@ -172,7 +172,7 @@ func TestFormalWrapperAdmission(t *testing.T) {
 		}}
 		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{fnTool}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithEnforcement(plugin.EnforcementStrict), tagent.WithApprover(approve))
+		}, tagent.WithGovernance(passPolicy{}), tagent.WithEnforcement(governance.EnforcementStrict), tagent.WithApprover(approve))
 		if err != nil {
 			t.Fatalf("assemble the ruled runtime: %v", err)
 		}

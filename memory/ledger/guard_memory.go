@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // ErrHolderRequired reports a protection hold that names no holder, so its

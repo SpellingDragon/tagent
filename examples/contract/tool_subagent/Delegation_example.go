@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 

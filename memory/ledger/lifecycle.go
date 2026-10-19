@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // StoredKey is one key as the lifecycle enumerates it: its canonical identity,

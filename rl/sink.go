@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // SinkRecordsFile is the file name the sink writes its record lines under.

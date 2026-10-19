@@ -16,7 +16,7 @@ package evolution
 import (
 	"context"
 
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // StructuralGate is the ordered gate a candidate organization plan passes

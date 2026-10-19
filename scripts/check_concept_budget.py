@@ -79,12 +79,6 @@ NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
 # 生成口径：本检查器对当前树的实测值。S1 的 observed 是接口方法数，S2 是导出字段数，
 # S3 是该文件的裸 ctx.Value 调用数；S4 是布尔债务（observed=None）。
 BASELINE = (
-    ("struct-fields", "evolution/meditation/vocabulary.go:MeditationArtifact", 6),
-    ("struct-fields", "evolution/refine/refine.go:RefineRecord", 7),
-    ("struct-fields", "memory/ledger/segment_store.go:SegmentRecord", 6),
-    ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
-    ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
-    ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
     # S1 iface-methods — 12 项（observed=实测接口方法数）
     ("iface-methods", "agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "agent/loop.go:Recorder", 3),
@@ -97,11 +91,11 @@ BASELINE = (
     ("iface-methods", "task/registry.go:Registry", 4),
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
     ("iface-methods", "tool/mcp/adapter.go:Registry", 5),
-    ("iface-methods", "workspace/cleaner.go:Cleaner", 5),
+    ("iface-methods", "memory/replica/cleaner.go:Cleaner", 5),
     # S2 struct-fields — 53 项（observed=实测导出字段数）
     ("struct-fields", "agent/delegate.go:Delegation", 8),
     ("struct-fields", "agent/invocation.go:Invocation", 6),
-    ("struct-fields", "tool/subagent/subagent.go:Definition", 8),
+    ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
     ("struct-fields", "config/config.go:AgentSpec", 8),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
     # 七个冻结键各自成一格，前缀透传与未建模条目必须原样留存（PassThrough/Unknown）——
@@ -123,8 +117,8 @@ BASELINE = (
     ("struct-fields", "memory/replay.go:DeliveryRecord", 8),
     ("struct-fields", "memory/search/port.go:Query", 9),
     ("struct-fields", "memory/ledger/segment_store.go:SegmentRecord", 6),
-    ("struct-fields", "plugin/denial.go:DenialRecord", 9),
-    ("struct-fields", "plugin/goal.go:Goal", 6),
+    ("struct-fields", "governance/denial.go:DenialRecord", 9),
+    ("struct-fields", "governance/goal.go:Goal", 6),
     ("struct-fields", "query/explain.go:Blocker", 6),
     ("struct-fields", "query/explain.go:LeaseLedgerCounts", 6),
     ("struct-fields", "query/explain.go:LeaseRetention", 9),
@@ -180,7 +174,7 @@ BASELINE = (
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
-    ("ctx-bare", "plugin/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
+    ("ctx-bare", "governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。

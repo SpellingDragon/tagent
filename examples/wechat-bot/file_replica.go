@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/replica"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -52,10 +52,10 @@ func deliveryOwner(entry string) event.Address {
 // workspaceReplicas 是投递层对 workspace 副本生命周期的视图：大结果落为原文，
 // 副本材料化于副本根下；已立在副本区的副本只取活跃保护。
 type workspaceReplicas struct {
-	scope        workspace.ResultScope
-	cleaner      *workspace.ReplicaCleaner
-	materializer *workspace.Materializer
-	externalizer *workspace.ResultExternalizer
+	scope        replica.ResultScope
+	cleaner      *replica.ReplicaCleaner
+	materializer *replica.Materializer
+	externalizer *replica.ResultExternalizer
 }
 
 var _ resultReplicaSource = (*workspaceReplicas)(nil)
@@ -64,22 +64,22 @@ var _ resultReplicaSource = (*workspaceReplicas)(nil)
 // 材料化经宿主固定的读作用域读取原文，回收器回收没有投递持有的副本。
 // owner 是这些副本归属的会址，maxTokens 是外置阈值的模型窗口口径（0 取默认值）。
 func newWorkspaceReplicas(workspaceDir string, owner event.Address, store replicaStore, maxTokens int) (*workspaceReplicas, error) {
-	scope := workspace.ResultScope{
+	scope := replica.ResultScope{
 		Owner:           owner,
-		Format:          workspace.FormatOverflow,
+		Format:          replica.FormatOverflow,
 		RetentionPolicy: replicaRetention,
 	}
 	root := filepath.Join(workspaceDir, replicaArea)
-	cleaner, err := workspace.NewReplicaCleaner(root)
+	cleaner, err := replica.NewReplicaCleaner(root)
 	if err != nil {
 		return nil, err
 	}
 	readScope := ledger.ReadScope{Owner: scope.Owner, Format: scope.Format, RetentionPolicy: scope.RetentionPolicy}
-	materializer, err := workspace.NewMaterializer(root, store, readScope, workspace.WithCleaner(cleaner))
+	materializer, err := replica.NewMaterializer(root, store, readScope, replica.WithCleaner(cleaner))
 	if err != nil {
 		return nil, err
 	}
-	externalizer, err := workspace.NewResultExternalizer(store, workspace.WithMaxTokens(maxTokens))
+	externalizer, err := replica.NewResultExternalizer(store, replica.WithMaxTokens(maxTokens))
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (r *workspaceReplicas) OpenReplica(ctx context.Context, path, consumer stri
 	switch {
 	case err == nil:
 		return resultCopy{Path: path, Release: release}, true, nil
-	case errors.Is(err, workspace.ErrCleanupTargetOutOfRange):
+	case errors.Is(err, replica.ErrCleanupTargetOutOfRange):
 	default:
 		return resultCopy{}, false, err
 	}
@@ -115,7 +115,7 @@ func (r *workspaceReplicas) OpenReplica(ctx context.Context, path, consumer stri
 	if err != nil {
 		return resultCopy{}, false, err
 	}
-	ref := workspace.OriginalRefFor(r.scope, body)
+	ref := replica.OriginalRefFor(r.scope, body)
 	if _, err := r.externalizer.Externalize(ctx, ref, body); err != nil {
 		return resultCopy{}, false, err
 	}

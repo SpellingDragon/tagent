@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // TestModelTerminalProtocol checks the single terminal reduction of the model protocol over channel and iterator shapes.

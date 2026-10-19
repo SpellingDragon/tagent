@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/replica"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -42,17 +42,17 @@ func TestReplicaLifecycleProtectsActiveUse(t *testing.T) {
 		}
 		return store
 	}
-	cleanerFor := func(t *testing.T, root string) *workspace.ReplicaCleaner {
+	cleanerFor := func(t *testing.T, root string) *replica.ReplicaCleaner {
 		t.Helper()
-		cleaner, err := workspace.NewReplicaCleaner(root)
+		cleaner, err := replica.NewReplicaCleaner(root)
 		if err != nil {
 			t.Fatalf("NewReplicaCleaner: %v", err)
 		}
 		return cleaner
 	}
-	materializerFor := func(t *testing.T, root string, store ledger.ScopedOriginalStore, cleaner *workspace.ReplicaCleaner) *workspace.Materializer {
+	materializerFor := func(t *testing.T, root string, store ledger.ScopedOriginalStore, cleaner *replica.ReplicaCleaner) *replica.Materializer {
 		t.Helper()
-		materializer, err := workspace.NewMaterializer(root, store, scope, workspace.WithCleaner(cleaner))
+		materializer, err := replica.NewMaterializer(root, store, scope, replica.WithCleaner(cleaner))
 		if err != nil {
 			t.Fatalf("NewMaterializer: %v", err)
 		}
@@ -71,15 +71,15 @@ func TestReplicaLifecycleProtectsActiveUse(t *testing.T) {
 
 	t.Run("S0 保护注入: a working copy is served only where its protection exists, and a cleaner of another replica area is refused", func(t *testing.T) {
 		root := t.TempDir()
-		unwired, err := workspace.NewMaterializer(root, seeded(t, firstBody), scope)
+		unwired, err := replica.NewMaterializer(root, seeded(t, firstBody), scope)
 		if err != nil {
 			t.Fatalf("NewMaterializer without a cleaner: %v", err)
 		}
-		if _, err := unwired.Open(ctx, ref, "tool-shell"); !errors.Is(err, workspace.ErrReplicaProtectionUnavailable) {
+		if _, err := unwired.Open(ctx, ref, "tool-shell"); !errors.Is(err, replica.ErrReplicaProtectionUnavailable) {
 			t.Fatalf("Open with no protection wired = %v, want ErrReplicaProtectionUnavailable", err)
 		}
 		other := cleanerFor(t, t.TempDir())
-		if _, err := workspace.NewMaterializer(root, seeded(t, firstBody), scope, workspace.WithCleaner(other)); !errors.Is(err, workspace.ErrCleanerRootMismatch) {
+		if _, err := replica.NewMaterializer(root, seeded(t, firstBody), scope, replica.WithCleaner(other)); !errors.Is(err, replica.ErrCleanerRootMismatch) {
 			t.Fatalf("NewMaterializer with a cleaner of another replica area = %v, want ErrCleanerRootMismatch", err)
 		}
 	})
@@ -239,10 +239,10 @@ func TestReplicaLifecycleProtectsActiveUse(t *testing.T) {
 		}
 		cleaner := cleanerFor(t, root)
 		materializer := materializerFor(t, root, seeded(t, firstBody), cleaner)
-		if _, err := materializer.Materialize(ctx, ref, "tool-shell"); !errors.Is(err, workspace.ErrReplicaParentLinked) {
+		if _, err := materializer.Materialize(ctx, ref, "tool-shell"); !errors.Is(err, replica.ErrReplicaParentLinked) {
 			t.Fatalf("Materialize across a linked parent = %v, want ErrReplicaParentLinked", err)
 		}
-		if _, err := materializer.Open(ctx, ref, "tool-shell"); !errors.Is(err, workspace.ErrReplicaParentLinked) {
+		if _, err := materializer.Open(ctx, ref, "tool-shell"); !errors.Is(err, replica.ErrReplicaParentLinked) {
 			t.Fatalf("Open across a linked parent = %v, want ErrReplicaParentLinked", err)
 		}
 		requireOnlyUserFile := func() {
@@ -412,15 +412,15 @@ func TestReplicaLifecycleProtectsActiveUse(t *testing.T) {
 		}
 		cleaner := cleanerFor(t, root)
 		materializer := materializerFor(t, root, seeded(t, firstBody), cleaner)
-		replica, err := materializer.Materialize(ctx, ref, "tool-shell")
+		made, err := materializer.Materialize(ctx, ref, "tool-shell")
 		if err != nil {
 			t.Fatalf("Materialize: %v", err)
 		}
 		if err := cleaner.CleanupStartup(ctx); err != nil {
 			t.Fatalf("CleanupStartup: %v", err)
 		}
-		if _, err := os.Lstat(replica.Path); !os.IsNotExist(err) {
-			t.Fatalf("replica %s is still standing (Lstat err=%v), want it reclaimed", replica.Path, err)
+		if _, err := os.Lstat(made.Path); !os.IsNotExist(err) {
+			t.Fatalf("replica %s is still standing (Lstat err=%v), want it reclaimed", made.Path, err)
 		}
 		requireBytes(t, staging, stagingBody)
 		served, err := materializer.Materialize(ctx, ref, "tool-shell")

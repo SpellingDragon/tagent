@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestScenario01OrganizationPublication drives the sole publication entry over one two-agent declaration.

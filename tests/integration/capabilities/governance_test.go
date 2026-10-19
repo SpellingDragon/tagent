@@ -11,10 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/runtime/task/approval"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -34,7 +36,7 @@ import (
 // 契约: docs/wiki/agent/governance-enforcement.md#enforcement-modes
 func TestGovernanceBeforeExecution(t *testing.T) {
 	t.Run("warn records and exposes a rule violation without blocking the execution", func(t *testing.T) {
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskMedium, tool: "delete_file", rules: []plugin.RiskRule{govDeleteRule()}})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskMedium, tool: "delete_file", rules: []governance.RiskRule{govDeleteRule()}})
 		out, err := rig.call("call-warn", "delete_file", `{"path":"probe.txt"}`)
 		if err != nil {
 			t.Fatalf("the warn grade must not refuse the call: %v", err)
@@ -59,7 +61,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 	})
 
 	t.Run("a gate that is not enabled lets every call through", func(t *testing.T) {
-		rig := newGovRig(t, govConfig{disabled: true, grade: plugin.RiskCritical, tool: "delete_file", rules: []plugin.RiskRule{govDeleteRule()}})
+		rig := newGovRig(t, govConfig{disabled: true, grade: plugin.RiskCritical, tool: "delete_file", rules: []governance.RiskRule{govDeleteRule()}})
 		out, err := rig.call("call-off", "delete_file", `{"path":"probe.txt"}`)
 		if err != nil {
 			t.Fatalf("a gate that is not enabled must not refuse the call: %v", err)
@@ -78,7 +80,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 
 	t.Run("strict refuses a violating call before execution and pairs the refusal with a named native result", func(t *testing.T) {
 		args := `{"path":"probe.txt"}`
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementStrict, grade: plugin.RiskMedium, tool: "delete_file", rules: []plugin.RiskRule{govDeleteRule()}})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskMedium, tool: "delete_file", rules: []governance.RiskRule{govDeleteRule()}})
 		out, err := rig.call("call-strict", "delete_file", args)
 		if !errors.Is(err, task.ErrDenied) {
 			t.Fatalf("call error = %v, want the refusal reported beside %v", err, task.ErrDenied)
@@ -110,14 +112,14 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		if !strings.Contains(den.Result.Content, govDeleteRuleReason) || !strings.Contains(den.Result.Content, "no-delete") {
 			t.Fatalf("denial content = %q, want the reason and the rule for the model to read", den.Result.Content)
 		}
-		if plugin.ArgsDigest([]byte(args)) != task.DigestArgs([]byte(args)) {
+		if approval.ArgsDigest([]byte(args)) != task.DigestArgs([]byte(args)) {
 			t.Fatalf("the policy digest and the task digest disagree over the same native arguments")
 		}
 	})
 
 	t.Run("a critical call is held awaiting approval under both enforcement grades and the hold is never a denial", func(t *testing.T) {
 		args := `{"cmd":"deploy"}`
-		for _, mode := range []plugin.Enforcement{plugin.EnforcementWarn, plugin.EnforcementStrict} {
+		for _, mode := range []governance.Enforcement{governance.EnforcementWarn, governance.EnforcementStrict} {
 			rig := newGovRig(t, govConfig{mode: mode, grade: plugin.RiskCritical})
 			out, err := rig.call("call-hold", "shell_exec", args)
 			if err != nil {
@@ -147,7 +149,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 				t.Fatalf("%s: ruling = %+v, want a hold that is a wait and never a denial", mode, d)
 			}
 			req := rig.registerApproval(receipt.Hold, "shell_exec", args)
-			if req.Status != plugin.ApprovalPending {
+			if req.Status != approval.ApprovalPending {
 				t.Fatalf("%s: approval request = %+v, want the request waiting for a ruling", mode, req)
 			}
 			if waiting := rig.approvals.Pending(); len(waiting) != 1 || waiting[0].ID != req.ID {
@@ -158,7 +160,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 
 	t.Run("an approval response is bound to the held identity and digest and a repeated response is idempotent", func(t *testing.T) {
 		args := `{"cmd":"deploy"}`
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementStrict, grade: plugin.RiskCritical})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskCritical})
 		out, err := rig.call("call-bind", "shell_exec", args)
 		if err != nil {
 			t.Fatalf("park the call: %v", err)
@@ -170,20 +172,20 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the approval request file: %v", err)
 		}
-		var onDisk plugin.ApprovalRequest
+		var onDisk approval.ApprovalRequest
 		if err := json.Unmarshal(raw, &onDisk); err != nil {
 			t.Fatalf("parse the approval request file: %v", err)
 		}
-		if onDisk.ID != receipt.Hold.ApprovalID || onDisk.ArgsDigest != receipt.Hold.ExpectedDigest || onDisk.ArgsDigest != plugin.ArgsDigest([]byte(args)) {
+		if onDisk.ID != receipt.Hold.ApprovalID || onDisk.ArgsDigest != receipt.Hold.ExpectedDigest || onDisk.ArgsDigest != approval.ArgsDigest([]byte(args)) {
 			t.Fatalf("request on disk = %+v, want the hold's identity beside the digest binding over the held arguments", onDisk)
 		}
 
-		first, err := rig.approvals.Decide(req.ID, plugin.ApprovalApproved, "cli:alice")
-		if err != nil || first.Status != plugin.ApprovalApproved || first.DecidedBy != "cli:alice" {
+		first, err := rig.approvals.Decide(req.ID, approval.ApprovalApproved, "cli:alice")
+		if err != nil || first.Status != approval.ApprovalApproved || first.DecidedBy != "cli:alice" {
 			t.Fatalf("first ruling = (%+v, %v), want the approval recorded", first, err)
 		}
-		second, err := rig.approvals.Decide(req.ID, plugin.ApprovalDenied, "cli:bob")
-		if err != nil || second.Status != plugin.ApprovalApproved || second.DecidedBy != "cli:alice" {
+		second, err := rig.approvals.Decide(req.ID, approval.ApprovalDenied, "cli:bob")
+		if err != nil || second.Status != approval.ApprovalApproved || second.DecidedBy != "cli:alice" {
 			t.Fatalf("repeated ruling = (%+v, %v), want the repeat idempotent beside the first ruling that took effect", second, err)
 		}
 
@@ -203,23 +205,23 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 			t.Fatalf("foreign-identity resolution error = %v, want the identity mismatch refused by name", err)
 		}
 
-		rebuilt := plugin.NewApprovalManager(rig.dir, 30*time.Minute, plugin.WithApprovalClock(rig.clock.current), plugin.WithApprovalRescanInterval(0))
-		seen := rebuilt.Lookup("shell_exec", plugin.ArgsDigest([]byte(args)))
-		if seen == nil || seen.ID != req.ID || seen.Status != plugin.ApprovalApproved {
+		rebuilt := approval.NewApprovalManager(rig.dir, 30*time.Minute, approval.WithApprovalClock(rig.clock.current), approval.WithApprovalRescanInterval(0))
+		seen := rebuilt.Lookup("shell_exec", approval.ArgsDigest([]byte(args)))
+		if seen == nil || seen.ID != req.ID || seen.Status != approval.ApprovalApproved {
 			t.Fatalf("rebuilt lookup = %+v, want the approved request still visible after a rebuild", seen)
 		}
 	})
 
 	t.Run("an approved hold proceeds on retry while a changed-argument retry is held again", func(t *testing.T) {
 		args := `{"cmd":"deploy"}`
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementStrict, grade: plugin.RiskCritical})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskCritical})
 		out, err := rig.call("call-approved", "shell_exec", args)
 		if err != nil {
 			t.Fatalf("park the call: %v", err)
 		}
 		receipt := out.(task.HoldReceipt)
 		req := rig.registerApproval(receipt.Hold, "shell_exec", args)
-		if _, err := rig.approvals.Decide(req.ID, plugin.ApprovalApproved, "cli:alice"); err != nil {
+		if _, err := rig.approvals.Decide(req.ID, approval.ApprovalApproved, "cli:alice"); err != nil {
 			t.Fatalf("approve the hold: %v", err)
 		}
 
@@ -258,14 +260,14 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 
 	t.Run("a denied approval refuses the retried call with a named paired result and zero execution", func(t *testing.T) {
 		args := `{"cmd":"deploy"}`
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskCritical})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskCritical})
 		out, err := rig.call("call-denied", "shell_exec", args)
 		if err != nil {
 			t.Fatalf("park the call: %v", err)
 		}
 		receipt := out.(task.HoldReceipt)
 		req := rig.registerApproval(receipt.Hold, "shell_exec", args)
-		if _, err := rig.approvals.Decide(req.ID, plugin.ApprovalDenied, "cli:bob"); err != nil {
+		if _, err := rig.approvals.Decide(req.ID, approval.ApprovalDenied, "cli:bob"); err != nil {
 			t.Fatalf("deny the hold: %v", err)
 		}
 
@@ -293,7 +295,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 
 	t.Run("an expired approval is treated as not approved and never proceeds on the old request", func(t *testing.T) {
 		args := `{"cmd":"deploy"}`
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskCritical, ttl: 30 * time.Minute})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskCritical, ttl: 30 * time.Minute})
 		out, err := rig.call("call-expiring", "shell_exec", args)
 		if err != nil {
 			t.Fatalf("park the call: %v", err)
@@ -302,11 +304,11 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		req := rig.registerApproval(receipt.Hold, "shell_exec", args)
 
 		rig.clock.advance(31 * time.Minute)
-		if _, err := rig.approvals.Decide(req.ID, plugin.ApprovalApproved, "cli:late"); !errors.Is(err, plugin.ErrApprovalExpired) {
-			t.Fatalf("late ruling error = %v, want the expired request refused beside %v", err, plugin.ErrApprovalExpired)
+		if _, err := rig.approvals.Decide(req.ID, approval.ApprovalApproved, "cli:late"); !errors.Is(err, approval.ErrApprovalExpired) {
+			t.Fatalf("late ruling error = %v, want the expired request refused beside %v", err, approval.ErrApprovalExpired)
 		}
-		seen := rig.approvals.Lookup("shell_exec", plugin.ArgsDigest([]byte(args)))
-		if seen == nil || seen.Status != plugin.ApprovalExpired {
+		seen := rig.approvals.Lookup("shell_exec", approval.ArgsDigest([]byte(args)))
+		if seen == nil || seen.Status != approval.ApprovalExpired {
 			t.Fatalf("lookup after validity = %+v, want the expired state read as not approved", seen)
 		}
 
@@ -326,7 +328,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		args := `{"cmd":"deploy"}`
 		failing := &govChannel{err: errors.New("the wechat channel is unreachable")}
 		working := &govChannel{}
-		rig := newGovRig(t, govConfig{mode: plugin.EnforcementStrict, grade: plugin.RiskCritical, channels: []plugin.ApprovalChannel{failing, working}})
+		rig := newGovRig(t, govConfig{mode: governance.EnforcementStrict, grade: plugin.RiskCritical, channels: []approval.ApprovalChannel{failing, working}})
 		out, err := rig.call("call-channel", "shell_exec", args)
 		if err != nil {
 			t.Fatalf("the gate must keep waiting beside a failed delivery: %v", err)
@@ -336,7 +338,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		}
 		receipt := out.(task.HoldReceipt)
 		req := rig.registerApproval(receipt.Hold, "shell_exec", args)
-		if req == nil || req.Status != plugin.ApprovalPending {
+		if req == nil || req.Status != approval.ApprovalPending {
 			t.Fatalf("registration = %+v, want the request registered beside the failed delivery", req)
 		}
 		gaps := rig.approvals.DeliveryGaps()
@@ -352,11 +354,11 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the approval request file: %v", err)
 		}
-		var external plugin.ApprovalRequest
+		var external approval.ApprovalRequest
 		if err := json.Unmarshal(raw, &external); err != nil {
 			t.Fatalf("parse the approval request file: %v", err)
 		}
-		external.Status = plugin.ApprovalApproved
+		external.Status = approval.ApprovalApproved
 		external.DecidedBy = "file:external"
 		written, err := json.Marshal(&external)
 		if err != nil {
@@ -382,9 +384,9 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 	})
 
 	t.Run("the pre-execution ruling runs exactly once per call and consumes the risk grade without a second risk face", func(t *testing.T) {
-		rules := []plugin.RiskRule{govDeleteRule()}
+		rules := []governance.RiskRule{govDeleteRule()}
 
-		low := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskLow, tool: "delete_file", rules: rules})
+		low := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskLow, tool: "delete_file", rules: rules})
 		if _, err := low.call("call-low", "delete_file", `{"path":"probe.txt"}`); err != nil {
 			t.Fatalf("the low grade must not refuse the call: %v", err)
 		}
@@ -394,7 +396,7 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		if d := low.decision(); d.Rule != "" {
 			t.Fatalf("low-grade ruling = %+v, want no rule fired below its grade threshold", d)
 		}
-		mid := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskMedium, tool: "delete_file", rules: rules})
+		mid := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskMedium, tool: "delete_file", rules: rules})
 		if _, err := mid.call("call-mid", "delete_file", `{"path":"probe.txt"}`); err != nil {
 			t.Fatalf("the warn grade must not refuse the call: %v", err)
 		}
@@ -418,15 +420,15 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 			t.Fatalf("risk-face renders = %d, want the ruling to consume the rendered grade and never render a second one", mid.grader.renders())
 		}
 
-		sourceRule := plugin.RiskRule{
+		sourceRule := governance.RiskRule{
 			ID:      "no-autonomous-delete",
 			MinRisk: plugin.RiskLow,
-			Match: func(rc plugin.RiskContext) bool {
+			Match: func(rc governance.RiskContext) bool {
 				return rc.ToolName == "delete_file" && rc.TriggerSource == "autonomous"
 			},
 			Reason: "an autonomous delete must not run unattended",
 		}
-		sourced := newGovRig(t, govConfig{mode: plugin.EnforcementWarn, grade: plugin.RiskLow, rules: []plugin.RiskRule{sourceRule}})
+		sourced := newGovRig(t, govConfig{mode: governance.EnforcementWarn, grade: plugin.RiskLow, rules: []governance.RiskRule{sourceRule}})
 		pass := plugin.CallPass{Final: call, Risk: plugin.RiskLow, TriggerSource: "autonomous"}
 		underSource, err := sourced.policy.Judge(pass)
 		if err != nil {
@@ -457,15 +459,15 @@ type govConfig struct {
 	// disabled builds the rig over a gate that is not enabled.
 	disabled bool
 	// mode is the enforcement grade the gate runs under.
-	mode plugin.Enforcement
+	mode governance.Enforcement
 	// grade is the risk grade the risk face renders.
 	grade plugin.RiskLevel
 	// rules are the violation rules the gate rules over.
-	rules []plugin.RiskRule
+	rules []governance.RiskRule
 	// goals is the goal registry the goal gate rules over.
-	goals *plugin.GoalRegistry
+	goals *governance.GoalRegistry
 	// ledger is the governance ledger the rulings record onto.
-	ledger *plugin.DenialLedger
+	ledger *governance.DenialLedger
 	// goalRequired lists the trigger sources an operation must hang on an
 	// active goal for.
 	goalRequired []string
@@ -474,7 +476,7 @@ type govConfig struct {
 	// call was made over. Zero means shell_exec.
 	tool string
 	// channels are the delivery faces the approval manager offers to.
-	channels []plugin.ApprovalChannel
+	channels []approval.ApprovalChannel
 	// ttl is the validity an approval request is issued with; zero means the
 	// default half hour.
 	ttl time.Duration
@@ -488,8 +490,8 @@ type govConfig struct {
 type govRig struct {
 	t          *testing.T
 	dir        string
-	policy     *plugin.Policy
-	approvals  *plugin.ApprovalManager
+	policy     *governance.Policy
+	approvals  *approval.ApprovalManager
 	pipeline   plugin.Pipeline
 	grader     *govGrader
 	inner      *govTool
@@ -520,9 +522,9 @@ func newGovRig(t *testing.T, cfg govConfig) *govRig {
 		clock:   &govClock{now: time.Now()},
 		records: make(chan task.Result, 16),
 	}
-	r.approvals = plugin.NewApprovalManager(r.dir, ttl,
-		plugin.WithApprovalClock(r.clock.current),
-		plugin.WithApprovalRescanInterval(0),
+	r.approvals = approval.NewApprovalManager(r.dir, ttl,
+		approval.WithApprovalClock(r.clock.current),
+		approval.WithApprovalRescanInterval(0),
 	)
 	for _, ch := range cfg.channels {
 		r.approvals.AddChannel(ch)
@@ -548,21 +550,21 @@ func newGovRig(t *testing.T, cfg govConfig) *govRig {
 // policyOf builds the gate the rig rules under: an unopened gate lets every
 // call through, and every other rig opens the gate with the gates its
 // configuration names.
-func policyOf(cfg govConfig, approvals *plugin.ApprovalManager) *plugin.Policy {
+func policyOf(cfg govConfig, approvals *approval.ApprovalManager) *governance.Policy {
 	if cfg.disabled {
-		return &plugin.Policy{}
+		return &governance.Policy{}
 	}
-	opts := []plugin.PolicyOption{
-		plugin.WithRules(cfg.rules...),
-		plugin.WithApprovals(approvals),
-		plugin.WithGoals(cfg.goals),
-		plugin.WithLedger(cfg.ledger),
-		plugin.WithGoalRequired(cfg.goalRequired...),
+	opts := []governance.PolicyOption{
+		governance.WithRules(cfg.rules...),
+		governance.WithApprovals(approvals),
+		governance.WithGoals(cfg.goals),
+		governance.WithLedger(cfg.ledger),
+		governance.WithGoalRequired(cfg.goalRequired...),
 	}
-	if cfg.mode == plugin.EnforcementStrict {
-		opts = append(opts, plugin.WithStrict())
+	if cfg.mode == governance.EnforcementStrict {
+		opts = append(opts, governance.WithStrict())
 	}
-	return plugin.Open(opts...)
+	return governance.Open(opts...)
 }
 
 // call drives one native tool call the way the dispatch does: the one Before
@@ -586,7 +588,7 @@ func (r *govRig) call(callID, tool, args string) (any, error) {
 		r.t.Fatalf("run the one Before pass of call %s: %v", callID, err)
 	}
 	pass.TriggerSource = "model"
-	out, callErr := r.wrapper.Call(task.WithCallFrame(plugin.WithCallPass(ctx, pass), govFrame(callID)), pass.Final.Function.Arguments)
+	out, callErr := r.wrapper.Call(task.WithCallFrame(governance.WithCallPass(ctx, pass), govFrame(callID)), pass.Final.Function.Arguments)
 	if got := r.judgeCount() - before; got != 1 {
 		r.t.Errorf("pre-execution rulings for call %s = %d, want exactly one", callID, got)
 	}
@@ -599,7 +601,7 @@ func (r *govRig) call(callID, tool, args string) (any, error) {
 // first — a refused call is terminal and carries its denial — while a held call
 // is a wait and never a denial.
 func (r *govRig) ruling(ctx context.Context, tool string, jsonArgs []byte) (task.Ruling, error) {
-	pass, ok := plugin.CallPassFrom(ctx)
+	pass, ok := governance.CallPassFrom(ctx)
 	if !ok {
 		return task.Ruling{}, errors.New("governance rig: the call carries no Before pass to rule over")
 	}
@@ -634,7 +636,7 @@ func (r *govRig) record(ctx context.Context, res task.Result) (event.EventID, er
 // registerApproval plays the wiring beside the park: it registers the approval
 // request under the very approval identity the hold was issued with, so a host
 // response names one identity across the hold and the request.
-func (r *govRig) registerApproval(hold task.Hold, tool, args string) *plugin.ApprovalRequest {
+func (r *govRig) registerApproval(hold task.Hold, tool, args string) *approval.ApprovalRequest {
 	r.t.Helper()
 	d := r.decision()
 	req, err := r.approvals.Request(context.Background(), hold.ApprovalID, tool, []byte(args), d.Risk, d.Rule, d.Reason)
@@ -700,11 +702,11 @@ func govFrame(callID string) task.CallFrame {
 
 // govDeleteRule returns the violation rule these sub-cases rule over: a delete
 // at the medium grade or above is a violation of the gate.
-func govDeleteRule() plugin.RiskRule {
-	return plugin.RiskRule{
+func govDeleteRule() governance.RiskRule {
+	return governance.RiskRule{
 		ID:      "no-delete",
 		MinRisk: plugin.RiskMedium,
-		Match: func(rc plugin.RiskContext) bool {
+		Match: func(rc governance.RiskContext) bool {
 			return rc.ToolName == "delete_file"
 		},
 		Reason: govDeleteRuleReason,
@@ -789,11 +791,11 @@ func (g *govGrader) renders() int {
 type govChannel struct {
 	err       error
 	mu        sync.Mutex
-	delivered []plugin.ApprovalRequest
+	delivered []approval.ApprovalRequest
 }
 
 // Deliver offers one approval request to this channel.
-func (c *govChannel) Deliver(ctx context.Context, req plugin.ApprovalRequest) error {
+func (c *govChannel) Deliver(ctx context.Context, req approval.ApprovalRequest) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err != nil {

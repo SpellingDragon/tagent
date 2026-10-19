@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 
 	evo "github.com/SpellingDragon/tagent/evolution"
 
-	orgstate "github.com/SpellingDragon/tagent/state"
+	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // probeModel is the deterministic stand-in for one agent's native model: it

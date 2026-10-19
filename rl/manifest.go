@@ -1,6 +1,6 @@
 package rl
 
-import "github.com/SpellingDragon/tagent/event"
+import "github.com/SpellingDragon/tagent/api/event"
 
 // 契约: docs/wiki/rl/rl-architecture.md#training-export
 //

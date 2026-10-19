@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )

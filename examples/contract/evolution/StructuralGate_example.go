@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/SpellingDragon/tagent/evolution"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // evidenceGate is the canonical structural gate: one ordered pass over the same

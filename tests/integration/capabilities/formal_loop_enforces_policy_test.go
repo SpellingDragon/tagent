@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/query"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -32,12 +33,12 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 		writePromptFile(t, root, "prompts/system.md", "system prompt\n")
 		writeSkillFolder(t, root, "greet", "body v1\n")
 		probe := &policyProbe{name: "danger_tool"}
-		governor := &countingGovernor{inner: plugin.Open(
-			plugin.WithStrict(),
-			plugin.WithRules(plugin.RiskRule{
+		governor := &countingGovernor{inner: governance.Open(
+			governance.WithStrict(),
+			governance.WithRules(governance.RiskRule{
 				ID:      "no-danger",
 				MinRisk: plugin.RiskHigh,
-				Match:   func(in plugin.RiskContext) bool { return in.ToolName == "danger_tool" },
+				Match:   func(in governance.RiskContext) bool { return in.ToolName == "danger_tool" },
 				Reason:  "danger_tool is refused at the high grade",
 			}),
 		)}

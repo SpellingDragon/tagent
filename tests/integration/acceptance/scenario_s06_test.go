@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 

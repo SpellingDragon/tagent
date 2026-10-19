@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 func TestDigestRendersTheSamePassIdentically(t *testing.T) {

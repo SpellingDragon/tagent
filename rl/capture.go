@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture

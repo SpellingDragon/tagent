@@ -17,11 +17,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/cli"
+	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -181,11 +182,11 @@ func TestPublicRuntimeEntry(t *testing.T) {
 			Agents:   []event.AgentID{"agent-a"},
 			Sessions: []event.Address{addr},
 		}
-		cli := tagent.NewCLI(run, scope, tagent.WithRequestCredential(entryCredential))
+		shell := cli.NewCLI(run, scope, cli.WithRequestCredential(entryCredential))
 
 		// The query command reports the very reading the SDK serves.
 		var stdout, stderr bytes.Buffer
-		if code := cli.Main(ctx, []string{"query"}, &stdout, &stderr); code != 0 {
+		if code := shell.Main(ctx, []string{"query"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("cli query exit = %d, stderr = %s", code, stderr.String())
 		}
 		var served query.Snapshot
@@ -202,7 +203,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 
 		stdout.Reset()
 		stderr.Reset()
-		code := cli.Main(ctx, []string{
+		code := shell.Main(ctx, []string{
 			"invoke", "-agent", "agent-a", "-session", "session-cli",
 			"-invocation", "inv-cli", "-text", "hello again",
 		}, &stdout, &stderr)
@@ -254,7 +255,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		}
 		serveCtx, stopServe := context.WithCancel(ctx)
 		serving := make(chan error, 1)
-		go func() { serving <- cli.Serve(serveCtx, listener) }()
+		go func() { serving <- shell.Serve(serveCtx, listener) }()
 		base := "http://" + listener.Addr().String()
 		if body := httpGet(t, base+"/healthz", entryCredential); body != "ok" {
 			t.Fatalf("healthz = %q, want the liveness probe answered", body)

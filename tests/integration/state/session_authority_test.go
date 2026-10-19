@@ -7,10 +7,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
-	orgstate "github.com/SpellingDragon/tagent/state"
+	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // TestSessionAuthority checks how one session site keeps its explicit target, instance identity, read grants and mailbox time points apart.

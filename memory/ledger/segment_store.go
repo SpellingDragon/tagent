@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // SegmentRecord is one event on its way into a segment: the partition and window

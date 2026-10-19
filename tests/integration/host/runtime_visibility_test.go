@@ -22,15 +22,16 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/cli"
 	"github.com/SpellingDragon/tagent/evolution/meditation"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
-	"github.com/SpellingDragon/tagent/task"
-	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
@@ -62,7 +63,7 @@ type visibilityObserver struct {
 }
 
 // The observation face plugs into the assembly through the runtime's own port.
-var _ telemetry.Observer = (*visibilityObserver)(nil)
+var _ plugin.Observer = (*visibilityObserver)(nil)
 
 // Observe counts one committed fact handed over unchanged.
 func (o *visibilityObserver) Observe(context.Context, event.Event) error {
@@ -312,8 +313,8 @@ func TestRuntimeVisibility(t *testing.T) {
 		run, _ := visibilityRun(t, ctx, tagent.WithReflectionAnchors(filepath.Join(t.TempDir(), "anchors.json")), tagent.WithRecorder(visibilityRecorder{}))
 		visibilityInvoke(t, ctx, run, "inv-host", "session-host")
 		scope := visibilityScope("session-host")
-		cli := tagent.NewCLI(run, scope, tagent.WithRequestCredential(entryCredential))
-		base, stop := startVisibilityHost(t, ctx, cli)
+		shell := cli.NewCLI(run, scope, cli.WithRequestCredential(entryCredential))
+		base, stop := startVisibilityHost(t, ctx, shell)
 		served := diagGet(t, base+"/diagnostics", "Bearer "+entryCredential)
 		if served.status != http.StatusOK {
 			t.Fatalf("diagnostic request status = %d (%s), want the reading behind the request gate", served.status, served.body)
@@ -360,9 +361,9 @@ func TestRuntimeVisibility(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		run, _ := visibilityRun(t, ctx)
-		cli := tagent.NewCLI(run, visibilityScope("session-host"))
+		shell := cli.NewCLI(run, visibilityScope("session-host"))
 		var stdout, stderr bytes.Buffer
-		if code := cli.Main(ctx, []string{"start", "-addr", "127.0.0.1:0"}, &stdout, &stderr); code != 2 {
+		if code := shell.Main(ctx, []string{"start", "-addr", "127.0.0.1:0"}, &stdout, &stderr); code != 2 {
 			t.Fatalf("start exit code = %d, want the usage refusal", code)
 		}
 		if !strings.Contains(stderr.String(), "the diagnostic switch names no subsystem") {
@@ -436,7 +437,7 @@ func TestRuntimeVisibility(t *testing.T) {
 
 // startVisibilityHost runs the start command of one shell over its own listener
 // and reports the base URL it serves on beside the stop that waits for the close.
-func startVisibilityHost(t *testing.T, ctx context.Context, cli *tagent.CLI) (string, func()) {
+func startVisibilityHost(t *testing.T, ctx context.Context, shell *cli.CLI) (string, func()) {
 	t.Helper()
 	stdout, stdoutWriter := io.Pipe()
 	var stderr bytes.Buffer
@@ -450,7 +451,7 @@ func startVisibilityHost(t *testing.T, ctx context.Context, cli *tagent.CLI) (st
 		io.Copy(io.Discard, stdout)
 	}()
 	done := make(chan int, 1)
-	go func() { done <- cli.Main(ctx, []string{"start", "-addr", "127.0.0.1:0"}, stdoutWriter, &stderr) }()
+	go func() { done <- shell.Main(ctx, []string{"start", "-addr", "127.0.0.1:0"}, stdoutWriter, &stderr) }()
 	line, ok := <-served
 	if !ok {
 		t.Fatalf("the start command served no address: %s", stderr.String())

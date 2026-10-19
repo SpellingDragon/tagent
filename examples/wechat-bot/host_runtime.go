@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/evolution"
-	tagentmodel "github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/openai/openai-go/option"
 	"gopkg.in/yaml.v3"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -298,11 +298,11 @@ func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalG
 		tagent.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
 	}
 	if gateway != nil && gateway.Enabled() {
-		policyOpts := []plugin.PolicyOption{plugin.WithApprovals(gateway.Manager())}
+		policyOpts := []governance.PolicyOption{governance.WithApprovals(gateway.Manager())}
 		if strings.EqualFold(strings.TrimSpace(doc.Governance.Enforcement), "strict") {
-			policyOpts = append(policyOpts, plugin.WithStrict())
+			policyOpts = append(policyOpts, governance.WithStrict())
 		}
-		opts = append(opts, tagent.WithPolicy(plugin.Open(policyOpts...)))
+		opts = append(opts, tagent.WithPolicy(governance.Open(policyOpts...)))
 	}
 	run, err := tagent.Assemble(ctx, decl, natives, opts...)
 	if err != nil {

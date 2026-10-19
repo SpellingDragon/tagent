@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // newTestHostSender returns one outbound path over the stand-in channel, routed
@@ -125,7 +125,7 @@ func TestHostSenderRefusesUnboundAddressWithoutFallback(t *testing.T) {
 // TestGuard_TestsNeverConstructRealChannel turns the no-live-channel rule into an executable check.
 //   - No test file in this module may construct the live bot client or reach the network.
 //   - The forbidden patterns are assembled by concatenation so this file cannot match itself.
-//   - real_wechat_gate_test.go is the one named exception whose acceptance face is the authorized real send.
+//   - main_real_test.go is the one named exception whose acceptance face is the authorized real send.
 //   - It drives the live channel only beside the token file, the explicit target and the send authorization.
 func TestGuard_TestsNeverConstructRealChannel(t *testing.T) {
 	forbidden := []string{
@@ -142,7 +142,7 @@ func TestGuard_TestsNeverConstructRealChannel(t *testing.T) {
 		if !strings.HasSuffix(e.Name(), "_test.go") {
 			continue
 		}
-		if e.Name() == "real_wechat_gate_test.go" {
+		if e.Name() == "main_real_test.go" {
 			continue
 		}
 		src, err := os.ReadFile(filepath.Clean(e.Name()))

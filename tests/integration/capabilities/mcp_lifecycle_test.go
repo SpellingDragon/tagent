@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"

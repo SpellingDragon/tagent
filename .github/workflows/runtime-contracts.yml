@@ -68,7 +68,7 @@ jobs:
       # First-party product packages per golden/runtime/architecture.json (its
       # scope excludes scripts/tests/prototype/examples/docs/resources). The root
       # package is *.go: a bare `.` would recurse the whole root module.
-      PRODUCT_PACKAGES: "*.go event config state agent task memory workspace plugin model telemetry rl evolution query tool bench"
+      PRODUCT_PACKAGES: "*.go api runtime memory evolution telemetry rl tool bench cli"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4

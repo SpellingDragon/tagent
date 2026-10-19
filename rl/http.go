@@ -11,7 +11,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // 契约: docs/wiki/rl/rl-architecture.md#http-api

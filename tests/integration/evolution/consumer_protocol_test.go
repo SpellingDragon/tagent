@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 )

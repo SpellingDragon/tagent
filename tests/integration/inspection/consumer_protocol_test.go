@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/memory/query"
 )
 
 // TestSecondWaveConsumersShareTheProtocol pins the push consumer of the query read face to the shared consumer protocol.

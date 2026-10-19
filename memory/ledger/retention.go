@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // RetentionKind names why one registration holds its material: an unsettled

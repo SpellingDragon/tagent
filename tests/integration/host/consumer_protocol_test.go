@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/plugin"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/telemetry"
 )
 
@@ -23,7 +23,7 @@ type protocolFactStore struct {
 	facts   map[event.EventID]event.Event
 	reads   int
 	commits int
-	audits  []telemetry.AuditRecord
+	audits  []plugin.AuditRecord
 }
 
 // CommittedFact answers the fact behind one identity, counting the read.
@@ -37,7 +37,7 @@ func (s *protocolFactStore) CommittedFact(_ context.Context, id event.EventID) (
 }
 
 // Audit lands one layered audit record, counting nothing as a fact.
-func (s *protocolFactStore) Audit(_ context.Context, record telemetry.AuditRecord) error {
+func (s *protocolFactStore) Audit(_ context.Context, record plugin.AuditRecord) error {
 	s.audits = append(s.audits, record)
 	return nil
 }
@@ -62,7 +62,7 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assemble the observer = %v, want one observation face", err)
 	}
-	consumer := plugin.NewCommitObserver(store, observer)
+	consumer := telemetry.NewCommitObserver(store, observer)
 
 	if err := consumer.ObserveCommit(ctx, committed.Key); err != nil {
 		t.Fatalf("observe the committed fact = %v, want the observation landed", err)
@@ -70,9 +70,9 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 	if store.reads != 1 {
 		t.Fatalf("fact reads = %d, want the one read of the identity it observed", store.reads)
 	}
-	wantAttempts := []telemetry.Attempt{
-		{Layer: telemetry.LayerTrace, Skipped: true},
-		{Layer: telemetry.LayerMetric, Skipped: true},
+	wantAttempts := []plugin.Attempt{
+		{Layer: plugin.LayerTrace, Skipped: true},
+		{Layer: plugin.LayerMetric, Skipped: true},
 	}
 	if len(store.audits) != 1 || store.audits[0].Fact != committed.Key {
 		t.Fatalf("audit records = %+v, want one record naming %q", store.audits, committed.Key)

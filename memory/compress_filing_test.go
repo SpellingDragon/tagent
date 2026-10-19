@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // requestNow is the filing moment the request-log invariants stamp judgments

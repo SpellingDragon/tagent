@@ -6,15 +6,14 @@ the fold identity that fact is quoted by. A pre-fold runs ahead of the request
 boundary, so the assembly path reads the folded projection and never folds it
 inline.
 
-Skeleton compile-time assertions for the reflection loop and the pass it reads:
-the loop's assembly and tick surface, the observation face it reads, the digest
-it renders and the execution watermark it advances only on a consumed turn.
-A renamed field or a widened signature stops this file from compiling.
-
 Skeleton compile-time assertions for the meditation shapes: the consumer faces
 a tick reads, the engine's pass, judgment and tick signatures, the pre-fold seam
-and the refusals each unwired face answers by name. A renamed field or a widened
-signature stops this file from compiling.
+and the refusals each unwired face answers by name. The reflection loop and the
+pass it reads keep their own declared surface here as well: the loop's assembly
+and tick operations, the observation face it reads, the digest it renders and
+the execution watermark it advances only on a consumed turn. One file holds the
+one shape pin of the package: a renamed field or a widened signature stops it
+from compiling.
 
 The meditation strategy face: the deterministic value assessment of one card,
 the policy bound a pass is judged against and the condenser seat an LLM would

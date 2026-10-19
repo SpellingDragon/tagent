@@ -12,11 +12,11 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory/replica"
+	"github.com/SpellingDragon/tagent/runtime/state"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -79,20 +79,20 @@ var _ ledger.OriginalStore = (*refusingOriginalStore)(nil)
 func TestLargeResultRestart(t *testing.T) {
 	ctx := context.Background()
 	owner := event.Address{AgentID: event.AgentID("agent-large"), SessionID: event.SessionID("session-large")}
-	scope := workspace.ResultScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
-	readScope := ledger.ReadScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
+	scope := replica.ResultScope{Owner: owner, Format: replica.FormatToolResult, RetentionPolicy: "keep"}
+	readScope := ledger.ReadScope{Owner: owner, Format: replica.FormatToolResult, RetentionPolicy: "keep"}
 
-	externalizer := func(t *testing.T, originals ledger.OriginalStore, options ...workspace.ExternalizerOption) *workspace.ResultExternalizer {
+	externalizer := func(t *testing.T, originals ledger.OriginalStore, options ...replica.ExternalizerOption) *replica.ResultExternalizer {
 		t.Helper()
-		built, err := workspace.NewResultExternalizer(originals, options...)
+		built, err := replica.NewResultExternalizer(originals, options...)
 		if err != nil {
 			t.Fatalf("NewResultExternalizer: %v", err)
 		}
 		return built
 	}
-	boundedTool := func(t *testing.T, ext *workspace.ResultExternalizer, result any) *workspace.BoundedTool {
+	boundedTool := func(t *testing.T, ext *replica.ResultExternalizer, result any) *replica.BoundedTool {
 		t.Helper()
-		tool, err := workspace.NewBoundedTool(&largeResultTool{
+		tool, err := replica.NewBoundedTool(&largeResultTool{
 			declaration: &trpctool.Declaration{Name: "shell", Description: "run one shell command"},
 			result:      result,
 		}, ext, scope)
@@ -123,7 +123,7 @@ func TestLargeResultRestart(t *testing.T) {
 		}
 		return preview
 	}
-	walkSegments := func(t *testing.T, reader *workspace.ReplicaReader, ref ledger.OriginalRef, entry ledger.SegmentRequest) ([]byte, int) {
+	walkSegments := func(t *testing.T, reader *replica.ReplicaReader, ref ledger.OriginalRef, entry ledger.SegmentRequest) ([]byte, int) {
 		t.Helper()
 		var out []byte
 		segments := 0
@@ -144,7 +144,7 @@ func TestLargeResultRestart(t *testing.T) {
 
 	t.Run("G2.1 大结果先存原文再有界预览: the original is kept whole before the preview and its entry exist", func(t *testing.T) {
 		store := ledger.NewMemoryOriginalStore()
-		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
+		ext := externalizer(t, store, replica.WithMaxTokens(16000))
 		big := strings.Repeat("大结果-", 12000)
 		tool := boundedTool(t, ext, big)
 		got, err := tool.Call(ctx, []byte(`{"command":"cat","args":["huge.log"]}`))
@@ -155,7 +155,7 @@ func TestLargeResultRestart(t *testing.T) {
 		if len(body) <= ext.Threshold() {
 			t.Fatalf("serialized result = %d characters, want it over the threshold %d", len(body), ext.Threshold())
 		}
-		ref := workspace.OriginalRefFor(scope, body)
+		ref := replica.OriginalRefFor(scope, body)
 		preview := requirePreview(t, got, ref)
 		if len(preview) >= len(body) {
 			t.Fatalf("preview holds %d bytes of a %d byte result, want a bounded preview", len(preview), len(body))
@@ -174,18 +174,18 @@ func TestLargeResultRestart(t *testing.T) {
 	})
 
 	t.Run("G2.2 阈值与 MaxTokens 对齐: one formula decides for the wrapper and for every producer", func(t *testing.T) {
-		if got := workspace.ThresholdForMaxTokens(16000); got != 32000 {
+		if got := replica.ThresholdForMaxTokens(16000); got != 32000 {
 			t.Fatalf("ThresholdForMaxTokens(16000) = %d, want 16000/2*4 = 32000", got)
 		}
-		if got := workspace.ThresholdForMaxTokens(0); got != 16000 {
+		if got := replica.ThresholdForMaxTokens(0); got != 16000 {
 			t.Fatalf("ThresholdForMaxTokens(0) = %d, want the 8000 default window to give 16000", got)
 		}
-		if got := workspace.ThresholdForMaxTokens(-5); got != 16000 {
+		if got := replica.ThresholdForMaxTokens(-5); got != 16000 {
 			t.Fatalf("ThresholdForMaxTokens(-5) = %d, want the default window to give 16000", got)
 		}
 
 		store := ledger.NewMemoryOriginalStore()
-		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
+		ext := externalizer(t, store, replica.WithMaxTokens(16000))
 		if ext.Threshold() != 32000 {
 			t.Fatalf("externalizer threshold = %d, want 32000", ext.Threshold())
 		}
@@ -198,7 +198,7 @@ func TestLargeResultRestart(t *testing.T) {
 		if returned, ok := got.(string); !ok || returned != atThreshold {
 			t.Fatalf("Call at the threshold returned %T, want the original string untouched", got)
 		}
-		if recalled := store.Get(ctx, workspace.OriginalRefFor(scope, serialized(t, atThreshold)).Key); recalled.Outcome != ledger.RecallMissing {
+		if recalled := store.Get(ctx, replica.OriginalRefFor(scope, serialized(t, atThreshold)).Key); recalled.Outcome != ledger.RecallMissing {
 			t.Fatalf("a result at the threshold was externalized: outcome %v", recalled.Outcome)
 		}
 
@@ -208,7 +208,7 @@ func TestLargeResultRestart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Call over the threshold = %v, want the preview of the kept original", err)
 		}
-		requirePreview(t, got, workspace.OriginalRefFor(scope, serialized(t, overThreshold)))
+		requirePreview(t, got, replica.OriginalRefFor(scope, serialized(t, overThreshold)))
 
 		defaultExt := externalizer(t, ledger.NewMemoryOriginalStore())
 		if defaultExt.Threshold() != 16000 {
@@ -227,7 +227,7 @@ func TestLargeResultRestart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Call over the default threshold = %v, want the preview of the kept original", err)
 		}
-		requirePreview(t, got, workspace.OriginalRefFor(scope, serialized(t, overDefault)))
+		requirePreview(t, got, replica.OriginalRefFor(scope, serialized(t, overDefault)))
 	})
 
 	t.Run("G2.3 清副本后独立进程经原文恢复: an independent reopen reads the original and materialises the replica again", func(t *testing.T) {
@@ -243,13 +243,13 @@ func TestLargeResultRestart(t *testing.T) {
 		if !ok {
 			t.Fatalf("localfile originals do not implement the scoped read face")
 		}
-		firstMaterializer, err := workspace.NewMaterializer(scratch, firstScoped, readScope)
+		firstMaterializer, err := replica.NewMaterializer(scratch, firstScoped, readScope)
 		if err != nil {
 			t.Fatalf("NewMaterializer: %v", err)
 		}
 		firstExt := externalizer(t, firstTier.Originals,
-			workspace.WithMaxTokens(16000),
-			workspace.WithResultMaterializer(firstMaterializer),
+			replica.WithMaxTokens(16000),
+			replica.WithResultMaterializer(firstMaterializer),
 		)
 		big := strings.Repeat("line-中文-", 10000)
 		got, err := boundedTool(t, firstExt, big).Call(ctx, []byte(`{}`))
@@ -257,7 +257,7 @@ func TestLargeResultRestart(t *testing.T) {
 			t.Fatalf("Call with a materializer = %v, want the preview of the kept original", err)
 		}
 		body := serialized(t, big)
-		ref := workspace.OriginalRefFor(scope, body)
+		ref := replica.OriginalRefFor(scope, body)
 		requirePreview(t, got, ref)
 
 		firstReplica, err := firstMaterializer.Materialize(ctx, ref, "externalize")
@@ -288,13 +288,13 @@ func TestLargeResultRestart(t *testing.T) {
 		if !ok {
 			t.Fatalf("reopened localfile originals do not implement the scoped read face")
 		}
-		secondMaterializer, err := workspace.NewMaterializer(scratch, secondScoped, readScope)
+		secondMaterializer, err := replica.NewMaterializer(scratch, secondScoped, readScope)
 		if err != nil {
 			t.Fatalf("reopen NewMaterializer: %v", err)
 		}
 		secondExt := externalizer(t, secondTier.Originals,
-			workspace.WithMaxTokens(16000),
-			workspace.WithResultMaterializer(secondMaterializer),
+			replica.WithMaxTokens(16000),
+			replica.WithResultMaterializer(secondMaterializer),
 		)
 		if secondExt.Threshold() != firstExt.Threshold() {
 			t.Fatalf("reopened threshold = %d, want the same %d", secondExt.Threshold(), firstExt.Threshold())
@@ -330,7 +330,7 @@ func TestLargeResultRestart(t *testing.T) {
 
 	t.Run("G2.4 统一外置路径: tool, task, tmux and overflow results take one path and one threshold", func(t *testing.T) {
 		store := ledger.NewMemoryOriginalStore()
-		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
+		ext := externalizer(t, store, replica.WithMaxTokens(16000))
 		big := strings.Repeat("统一外置-", 8000)
 		body := serialized(t, big)
 		if !ext.Exceeds(len(body)) {
@@ -338,14 +338,14 @@ func TestLargeResultRestart(t *testing.T) {
 		}
 
 		var previews []string
-		kinds := []string{workspace.FormatToolResult, workspace.FormatTaskResult, workspace.FormatTmuxOutput, workspace.FormatOverflow}
+		kinds := []string{replica.FormatToolResult, replica.FormatTaskResult, replica.FormatTmuxOutput, replica.FormatOverflow}
 		for _, format := range kinds {
 			kindScope := scope
 			kindScope.Format = format
-			ref := workspace.OriginalRefFor(kindScope, body)
-			var externalized workspace.Externalized
+			ref := replica.OriginalRefFor(kindScope, body)
+			var externalized replica.Externalized
 			var err error
-			if format == workspace.FormatToolResult {
+			if format == replica.FormatToolResult {
 				got, callErr := boundedTool(t, ext, big).Call(ctx, []byte(`{}`))
 				if callErr != nil {
 					t.Fatalf("tool result Call = %v", callErr)
@@ -372,7 +372,7 @@ func TestLargeResultRestart(t *testing.T) {
 				t.Fatalf("producers rendered different previews for one body:\n%q\n%q", previews[0], preview)
 			}
 		}
-		sharedKey := workspace.OriginalRefFor(scope, body).Key
+		sharedKey := replica.OriginalRefFor(scope, body).Key
 		references := store.References(sharedKey)
 		if len(references) != len(kinds) {
 			t.Fatalf("four producers left %d references on one body, want %d: the formats must not overwrite one another", len(references), len(kinds))
@@ -405,7 +405,7 @@ func TestLargeResultRestart(t *testing.T) {
 
 	t.Run("G2.5 nil 结果不拦截: a nil result is handed back and commits nothing", func(t *testing.T) {
 		store := ledger.NewMemoryOriginalStore()
-		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
+		ext := externalizer(t, store, replica.WithMaxTokens(16000))
 		before := store.BlobCount()
 		got, err := boundedTool(t, ext, nil).Call(ctx, []byte(`{}`))
 		if err != nil || got != nil {
@@ -419,7 +419,7 @@ func TestLargeResultRestart(t *testing.T) {
 	t.Run("原文未提交不发预览: a refused commit yields an error and no ticket", func(t *testing.T) {
 		cause := errors.New("commit barrier failed")
 		store := &refusingOriginalStore{cause: cause}
-		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
+		ext := externalizer(t, store, replica.WithMaxTokens(16000))
 		tool := boundedTool(t, ext, strings.Repeat("c", 40000))
 		got, err := tool.Call(ctx, []byte(`{}`))
 		if !errors.Is(err, cause) {
@@ -440,17 +440,17 @@ func TestLargeResultRestart(t *testing.T) {
 		if err := os.WriteFile(blockedRoot, []byte("not a directory"), 0o600); err != nil {
 			t.Fatalf("write the blocking file: %v", err)
 		}
-		blockedMaterializer, err := workspace.NewMaterializer(blockedRoot, store, readScope)
+		blockedMaterializer, err := replica.NewMaterializer(blockedRoot, store, readScope)
 		if err != nil {
 			t.Fatalf("NewMaterializer(blocked root): %v", err)
 		}
-		blockedExt := externalizer(t, store, workspace.WithMaxTokens(16000), workspace.WithResultMaterializer(blockedMaterializer))
+		blockedExt := externalizer(t, store, replica.WithMaxTokens(16000), replica.WithResultMaterializer(blockedMaterializer))
 		got, err := boundedTool(t, blockedExt, big).Call(ctx, []byte(`{}`))
-		if !errors.Is(err, workspace.ErrReplicaWriteFailed) {
-			t.Fatalf("Call with a failing replica write = %v, want %v", err, workspace.ErrReplicaWriteFailed)
+		if !errors.Is(err, replica.ErrReplicaWriteFailed) {
+			t.Fatalf("Call with a failing replica write = %v, want %v", err, replica.ErrReplicaWriteFailed)
 		}
 		body := serialized(t, big)
-		ref := workspace.OriginalRefFor(scope, body)
+		ref := replica.OriginalRefFor(scope, body)
 		requirePreview(t, got, ref)
 		recalled := store.Get(ctx, ref.Key)
 		if recalled.Outcome != ledger.RecallFound {
@@ -461,13 +461,13 @@ func TestLargeResultRestart(t *testing.T) {
 
 	t.Run("G2.6 正式链消费者锚: the assembled run hands the model the preview of the kept original", func(t *testing.T) {
 		store := ledger.NewMemoryOriginalStore()
-		ext := externalizer(t, store, workspace.WithMaxTokens(16000))
+		ext := externalizer(t, store, replica.WithMaxTokens(16000))
 		big := strings.Repeat("大结果-", 12000)
 		inner := &largeResultTool{
 			declaration: &trpctool.Declaration{Name: "shell", Description: "run one shell command"},
 			result:      big,
 		}
-		wrapped, err := workspace.NewBoundedTool(inner, ext, scope)
+		wrapped, err := replica.NewBoundedTool(inner, ext, scope)
 		if err != nil {
 			t.Fatalf("NewBoundedTool: %v", err)
 		}
@@ -500,7 +500,7 @@ func TestLargeResultRestart(t *testing.T) {
 			t.Fatalf("model requests = %d, want one request per decision", len(requests))
 		}
 		body := serialized(t, big)
-		ref := workspace.OriginalRefFor(scope, body)
+		ref := replica.OriginalRefFor(scope, body)
 		var observation *model.Message
 		for i := range requests[1].Messages {
 			message := &requests[1].Messages[i]

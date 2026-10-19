@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // removedOwners is an owner binding whose current orchestration keeps none of

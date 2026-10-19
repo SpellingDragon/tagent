@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	orgconfig "github.com/SpellingDragon/tagent/config"
+	orgconfig "github.com/SpellingDragon/tagent/api/config"
 )
 
 // TestConfigurationContract checks the configuration declaration contract end to end:

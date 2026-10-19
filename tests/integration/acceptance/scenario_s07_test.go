@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/memory/replica"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -74,7 +74,7 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 		t.Fatalf("put the replica original: %v", err)
 	}
 	replicaRef := ledger.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-	materializer, err := workspace.NewMaterializer(root, store, scopeA)
+	materializer, err := replica.NewMaterializer(root, store, scopeA)
 	if err != nil {
 		t.Fatalf("open the materializer: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materialise the replica: %v", err)
 	}
-	cleaner, err := workspace.NewReplicaCleaner(root)
+	cleaner, err := replica.NewReplicaCleaner(root)
 	if err != nil {
 		t.Fatalf("open the replica cleaner: %v", err)
 	}

@@ -1,0 +1,74 @@
+package memoryreplicaexample
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/SpellingDragon/tagent/memory/replica"
+
+	"github.com/SpellingDragon/tagent/memory/ledger"
+)
+
+// errReplicaWrite is what the replica writer behind the canonical externalizer reports for a
+// write that did not land.
+var errReplicaWrite = errors.New("workspace: the replica could not be written")
+
+// keptOriginals is the canonical externalizer: it commits the durable original before the
+// replica or the preview exists, and a replica write that fails is reported beside the
+// still-effective reference instead of discarding the original.
+type keptOriginals struct {
+	originals map[string][]byte
+	replica   func(ledger.OriginalRef, []byte) error
+}
+
+// Externalize commits body as the durable original of ref and returns the bounded preview
+// with the segment entry for it.
+func (e *keptOriginals) Externalize(_ context.Context, ref ledger.OriginalRef, body []byte) (replica.Externalized, error) {
+	if ref.Key == "" {
+		return replica.Externalized{}, ledger.ErrKeyRequired
+	}
+	if e.originals == nil {
+		e.originals = map[string][]byte{}
+	}
+	e.originals[string(ref.Key)] = append([]byte(nil), body...)
+
+	preview := body
+	if len(preview) > 64 {
+		preview = preview[:64]
+	}
+	out := replica.Externalized{
+		Original: ref,
+		Preview:  string(preview),
+		Segment:  ledger.SegmentRequest{MaxBytes: ledger.DefaultSegmentMaxBytes},
+	}
+	if err := e.replica(ref, body); err != nil {
+		return out, fmt.Errorf("%w: %w", replica.ErrReplicaWriteFailed, err)
+	}
+	return out, nil
+}
+
+var _ replica.Externalizer = (*keptOriginals)(nil)
+
+// ExampleExternalizer commits one oversized result: the original is kept first, the returned
+// preview is bounded while the segment entry still reaches the whole result, and a replica
+// write that failed comes back as ErrReplicaWriteFailed with the reference still effective.
+//
+// 契约: docs/wiki/agent/compression-and-telemetry.md#output-overflow
+func ExampleExternalizer() {
+	ctx := context.Background()
+	externalizer := &keptOriginals{replica: func(ledger.OriginalRef, []byte) error { return errReplicaWrite }}
+	body := make([]byte, 128)
+	ref := ledger.OriginalRef{Key: "blob-1", Format: "text/plain"}
+
+	out, err := externalizer.Externalize(ctx, ref, body)
+	if !errors.Is(err, replica.ErrReplicaWriteFailed) {
+		return
+	}
+	if out.Original != ref || len(out.Preview) > 64 || out.Segment.MaxBytes == 0 {
+		return
+	}
+	if len(externalizer.originals["blob-1"]) != len(body) {
+		return
+	}
+}

@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // ErrFoldEmpty reports a fold of an empty projection: there is no run to

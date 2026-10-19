@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // MeditationValue is the deterministic value assessment of one card: the score

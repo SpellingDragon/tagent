@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/replica"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -576,7 +576,7 @@ func TestFileRoundTrip(t *testing.T) {
 		if !bytes.Equal(read, body) {
 			t.Fatalf("the channel read %d bytes at %s, want the %d bytes of the result", len(read), replicaPath, len(body))
 		}
-		ref := workspace.OriginalRefFor(rig.replicas.scope, body)
+		ref := replica.OriginalRefFor(rig.replicas.scope, body)
 		recalled := rig.store.Get(context.Background(), ref.Key)
 		if recalled.Outcome != ledger.RecallFound || !bytes.Equal(recalled.Body, body) {
 			t.Fatalf("the original of the large result reads back as %v, want the committed bytes", recalled.Outcome)

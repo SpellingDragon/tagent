@@ -7,13 +7,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/telemetry"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
@@ -81,7 +83,7 @@ func (r *Run) suppliers(agents map[event.AgentID]NativeAgent) map[event.AgentID]
 				elements := contributed.Plugins
 				if r.observer != nil {
 					elements = append(append([]plugin.Plugin(nil), contributed.Plugins...),
-						observePlugin{observer: plugin.NewCommitObserver(runFacts{run: r}, r.observer)})
+						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, r.observer)})
 				}
 				return elements, nil
 			},
@@ -261,7 +263,7 @@ func (r *Run) wrap(tool trpctool.CallableTool) trpctool.Tool {
 	approve := r.approver
 	if r.policy != nil {
 		approve = policyRuling(r.policy)
-	} else if approve == nil && r.enforcement == plugin.EnforcementStrict {
+	} else if approve == nil && r.enforcement == governance.EnforcementStrict {
 		approve = denyWithoutApprover
 	}
 	return &admissionGate{run: r, inner: task.Wrap(r.manager, &toolProducer{run: r, inner: tool},
@@ -364,7 +366,7 @@ func (p *toolProducer) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // execution.
 func policyRuling(governor plugin.Governor) task.Approver {
 	return func(ctx context.Context, _ string, _ []byte) (task.Ruling, error) {
-		pass, ok := plugin.CallPassFrom(ctx)
+		pass, ok := governance.CallPassFrom(ctx)
 		if !ok {
 			return task.Ruling{}, errors.New("tagent: the call carries no Before pass to rule over")
 		}

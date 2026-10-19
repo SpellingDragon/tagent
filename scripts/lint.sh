@@ -102,6 +102,19 @@ if ! go run ./scripts/codetools tracked-hygiene; then
   exit 1
 fi
 
+# 包布局：文件名只写小写下划线、每包恰一份正名骨架断言、测试文件镜像生产文件
+# （判据与理由见 docs/comment-gate-tooling.md#package-layout）
+if ! go run ./scripts/codetools package-layout "${POLICY_DIRS[@]}"; then
+  echo "lint: package layout violates the rules above — rename to lower_snake.go, merge into skeleton_assert.go, or mirror the production file"
+  exit 1
+fi
+
+# 包布局门自己的负例见证：只打印不拒绝、或某条规则变得不可达，都在这里红
+if ! bash scripts/test_check_package_layout.sh; then
+  echo "lint: the package-layout checker no longer rejects its own negative fixtures"
+  exit 1
+fi
+
 # 机器消费的点号模块引用必须可解析或显式登记（specs/architecture-guardrails：机器消费的点号模块引用必须可解析）
 if ! go run ./scripts/codetools dotted-refs; then
   echo "lint: a dotted module reference resolves nowhere and carries no allowlist entry"

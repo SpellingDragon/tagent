@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 
-	orgstate "github.com/SpellingDragon/tagent/state"
+	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // policyStand is the deterministic stand-in of the real governance policy the

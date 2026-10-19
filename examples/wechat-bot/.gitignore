@@ -138,4 +138,4 @@ openspec/
 !file_replica.go
 
 # 真实微信发送面的资源门测试: 白名单制必须点名入库, 否则门测试本身不在版本控制。
-!real_wechat_gate_test.go
+!main_real_test.go

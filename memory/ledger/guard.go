@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // 契约: docs/wiki/memory/memory-architecture.md#hard-contracts

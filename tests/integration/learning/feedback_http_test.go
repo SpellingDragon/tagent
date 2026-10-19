@@ -17,9 +17,10 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/cli"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
 )
 
@@ -160,17 +161,17 @@ func newFeedbackService(t *testing.T, ctx context.Context, token string, limits 
 		t.Fatalf("build the feedback endpoint: %v", err)
 	}
 	service.endpoint = endpoint
-	cli := tagent.NewCLI(run, query.AuthorizationScope{
+	shell := cli.NewCLI(run, query.AuthorizationScope{
 		Agents:   []event.AgentID{"agent-a"},
 		Sessions: []event.Address{{AgentID: "agent-a", SessionID: "session-feedback"}},
-	}, tagent.WithRequestCredential(token), tagent.WithFeedbackEndpoint(endpoint))
+	}, cli.WithRequestCredential(token), cli.WithFeedbackEndpoint(endpoint))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	serveCtx, stopServe := context.WithCancel(ctx)
 	serving := make(chan error, 1)
-	go func() { serving <- cli.Serve(serveCtx, listener) }()
+	go func() { serving <- shell.Serve(serveCtx, listener) }()
 	stopped := false
 	t.Cleanup(func() {
 		if stopped {

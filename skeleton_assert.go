@@ -2,19 +2,16 @@ package tagent
 
 import (
 	"context"
-	"io"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/query"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
-	"github.com/SpellingDragon/tagent/telemetry"
-	"github.com/SpellingDragon/tagent/view"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -22,39 +19,6 @@ import (
 // Compile-time assertions for the public face of the composition root: the sole
 // assembly entry, the faces the host drives the assembled run through, and the
 // exact shape of every declaration the root exports.
-// The pending-delivery read face and the receipt that reconciles against it
-// keep their documented shapes: the stable delivery identity, the target
-// instance and the native message beside the bounded-read limit.
-var (
-	_ = DeliveryID("")
-
-	_ = PendingDelivery{
-		DeliveryID:     "",
-		TargetInstance: "",
-		Message:        model.Message{},
-	}
-
-	_ = PendingDeliveryRequest{
-		Max:   0,
-		After: "",
-	}
-
-	_ = PendingDeliveryResult{
-		Deliveries: nil,
-		Next:       "",
-		EOF:        false,
-	}
-
-	_ = DeliveryReceipt{
-		DeliveryID: "",
-		Accepted:   false,
-		Reason:     "",
-	}
-
-	_ = DefaultPendingDeliveries
-	_ = ErrPendingDeliveryLimit
-)
-
 // The minimal public assembly entry keeps its declared shape: the contributed
 // native pieces of one agent, one invocation's request, and the constructor and
 // the two entries a caller drives the assembled run through.
@@ -67,9 +31,9 @@ var (
 
 	// The post-commit observation face is attached through its own option, so
 	// the composed observer reads committed facts and observes nothing else.
-	_ func(telemetry.Observer) Option = WithTelemetry
+	_ func(plugin.Observer) Option = WithTelemetry
 
-	_ plugin.ObservationSink = telemetry.Observer(nil)
+	_ plugin.ObservationSink = plugin.Observer(nil)
 
 	_ func(*Run, context.Context, InvokeRequest) (agent.Turn, error) = (*Run).Invoke
 
@@ -96,15 +60,6 @@ var (
 	_ func(*Run) []RequestSnapshotRecord = (*Run).RequestSnapshots
 
 	_ = RequestSnapshotRecord{Decision: "", Snapshot: rl.RequestSnapshot{}}
-
-	// The host HTTP face refuses a request with no credential behind it: the
-	// shell opens the diagnostic endpoints only beside a configured request
-	// credential and answers every unauthenticated request by name.
-	_ func(*Run, query.AuthorizationScope, ...CLIOption) *CLI = NewCLI
-
-	_ func(string) CLIOption = WithRequestCredential
-
-	_ func(*CLI, context.Context, []string, io.Writer, io.Writer) int = (*CLI).Main
 )
 
 // The read port the assembled run answers the inventory through, the commit

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/rl"
 )
 

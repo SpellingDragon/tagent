@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
-	"github.com/SpellingDragon/tagent/view"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/telemetry"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -175,7 +176,7 @@ func (f runFacts) CommittedFact(_ context.Context, id event.EventID) (event.Even
 // the read-only observation duty of the After pass to it. The element carries
 // no state of its own and observes only through the lookup and the sink it was
 // wired with.
-type observePlugin struct{ observer *plugin.CommitObserver }
+type observePlugin struct{ observer *telemetry.CommitObserver }
 
 // The element satisfies both registration and phase faces of the pipeline.
 var (

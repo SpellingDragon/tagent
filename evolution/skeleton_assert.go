@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
 // 契约: docs/wiki/evolution/evolution-architecture.md#evidence-window

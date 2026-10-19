@@ -3,7 +3,7 @@ package rl
 import (
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // 契约: docs/wiki/rl/rl-architecture.md#training-export

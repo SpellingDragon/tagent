@@ -73,7 +73,16 @@ def pattern_matches(pattern, pkg):
     return False
 
 
-def find_cycle(adjacency):
+def find_cycle(adjacency, root="."):
+    """Report a dependency cycle between registered packages.
+
+    The composition root's allow list is a registry, not a dependency edge: it must
+    name every registered package so an unregistered one is caught, and no package
+    may be left unlisted. A back edge pointing at the root is therefore not a cycle
+    — the host shell (cli) sits above the composition root, which is the real
+    topology, not a mutual dependency. Cycles between the other packages still fail,
+    and the root's own outbound entries are still traversed.
+    """
     color = {}
     path_stack = []
 
@@ -81,6 +90,8 @@ def find_cycle(adjacency):
         color[node] = 1
         path_stack.append(node)
         for nxt in adjacency.get(node, ()):
+            if nxt == root:
+                continue
             state = color.get(nxt, 0)
             if state == 1:
                 return path_stack[path_stack.index(nxt):] + [nxt]

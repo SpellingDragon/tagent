@@ -13,97 +13,49 @@ are recorded as skipped attempts, the audit record still lands, and every
 committed fact stays readable exactly as before, so closing OTel changes neither
 a committed fact nor any query read.
 
-Package telemetry is the runtime's observation bypass: it carries the outbound
-ports through which an already committed fact is observed for tracing and audit,
-and the bounded recorder that hands those observations to a writer.
+VARIABLES
 
-Nothing here owns runtime state. The ports consume committed facts, never block
-the caller that produced one, and never withhold a fact from a caller because an
-observer is slow or broken; with observation switched off, the committed facts
-stay available to every reader.
+var ErrCommitObserverUnwired = errors.New("telemetry: the commit observer is not wired")
+    ErrCommitObserverUnwired reports a post-commit observation attempt on an
+    observer whose lookup or sink was never wired: a gap by name, not a silent
+    no-op that would read as a delivered observation.
+
+FUNCTIONS
+
+func NewSDKObserver(audit plugin.AuditSink, opts ...Option) (*SDKObserver, error)
+    NewSDKObserver assembles one post-commit observer: the audit sink the
+    layered records land in, beside the options that redirect or close the OTel
+    layers. The default handles are the framework's own, so an unconfigured
+    runtime observes through the framework's noop SDK at zero cost and a
+    configured one exports through the framework's OTel pipeline without this
+    package re-hosting an SDK.
 
 TYPES
 
-type Attempt struct {
-	// Layer names the layer the attempt was made at.
-	Layer Layer
-
-	// Skipped reports the attempt was not made because the observation is
-	// switched off. A layer that ran records the attempt as made, whether or
-	// not the framework behind it holds a real exporter yet.
-	Skipped bool
+type CommitObserver struct {
+	// Has unexported fields.
 }
-    Attempt is one SDK observation attempt at one layer: the layer it was made
-    at and whether it was skipped because the observation is switched off.
-    A skipped attempt is a legitimate recorded state, not a silent omission: an
-    audit reader sees which layers the SDK attempted and which it deliberately
-    left alone.
 
-    An attempt here is an observation attempt at one SDK layer, never a model
-    attempt: the remembered form of a model attempt is a record of the training
-    surface, and the identity of a model attempt is the event package's
-    AttemptID. The three readings stay apart and none is decoded as another.
+    CommitObserver is the post-commit observation wiring of the After pass:
+    it resolves the committed fact behind one identity and hands it unchanged to
+    the observation sink, as a read-only duty over a fact whose canonical commit
+    already happened.
 
-type AuditRecord struct {
-	// Fact is the identity of the committed fact the attempts were made for.
-	Fact event.EventID
-
-	// Attempts holds one entry per SDK layer, in the fixed layer order
-	// trace then metric.
-	Attempts []Attempt
-}
-    AuditRecord is the layered audit record of one committed fact's observation:
-    one entry per SDK layer, in the fixed layer order, describing the attempt
-    that layer made for that fact. The record is evidence about the observation,
-    never about the fact: it carries the fact's identity and the layered
-    attempts and rewrites nothing the fact already holds.
-
-type AuditSink interface {
-	// Audit hands one layered audit record to the audit side. A returned
-	// error means the record did not land and is reported to the caller as a
-	// missing observation; it never touches the committed fact the record
-	// describes.
-	Audit(ctx context.Context, record AuditRecord) error
-}
-    AuditSink is the audit side of the observation bypass: it receives the
-    layered audit record of one observed fact and reports whether the record
-    landed. An implementation must be safe for concurrent use, because the
-    post-commit pass may observe facts from several writers at once.
-
-    The redline list (3 rules): MUST be safe for concurrent use. MUST report
-    a record that did not land as a missing observation. MUST NOT touch the
-    committed fact the record describes.
-
-type Layer string
-    Layer names one layer of the layered SDK observation attempted for one
-    committed fact. The layers are attempted in the fixed order the constants
-    declare, so one audit record always reads trace then metric regardless of
-    how many facts one run observes.
-
-const (
-	// LayerTrace is the trace layer: the span the SDK records for one
-	// committed fact.
-	LayerTrace Layer = "trace"
-
-	// LayerMetric is the metric layer: the counter the SDK adds for one
-	// committed fact.
-	LayerMetric Layer = "metric"
-)
-type Observer interface {
-	// Observe reports one committed fact to the observation side.
-	//
-	// The fact is passed unchanged and is never rewritten here. A returned
-	// error records a missing observation, not an undone fact.
-	Observe(ctx context.Context, evt event.Event) error
-}
-    Observer is the post-commit observation entry: the single callback a runtime
-    invokes for each fact that has committed successfully.
-
-    The redline list (4 rules): MUST run after the fact is durable. MUST record
-    a failure as a gap in the observation record and report it to the caller.
-    MUST NOT hold back or reorder a committed fact for a slow or failing
-    observer. MUST NOT roll back the committed fact or re-run the observed work
+    A failed read or a failed sink is returned so the After pass records it as
+    a named gap beside this plugin's name: the committed fact is never rolled
+    back, never withheld from any reader, and the observed work is never re-run
     to satisfy an observer.
+
+func NewCommitObserver(facts plugin.FactLookup, sink plugin.ObservationSink) *CommitObserver
+    NewCommitObserver wires one fact lookup and one observation sink behind the
+    post-commit face. Both are required: an unwired observer refuses by name
+    instead of reporting an observation it never made.
+
+func (o *CommitObserver) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit resolves one committed fact and hands it unchanged to the
+    observation sink. It runs only after the canonical commit of that fact;
+    an identity with no committed fact behind it is refused as a gap and never
+    observed as if it had committed.
 
 type Option func(*SDKObserver)
     Option configures one SDKObserver at assembly time.
@@ -167,14 +119,6 @@ type SDKObserver struct {
     exporter. Every failure here is a missing observation: it is returned to the
     caller, recorded as a gap beside the plugin that failed, and never rolls the
     committed fact back or re-runs the observed work.
-
-func NewSDKObserver(audit AuditSink, opts ...Option) (*SDKObserver, error)
-    NewSDKObserver assembles one post-commit observer: the audit sink the
-    layered records land in, beside the options that redirect or close the OTel
-    layers. The default handles are the framework's own, so an unconfigured
-    runtime observes through the framework's noop SDK at zero cost and a
-    configured one exports through the framework's OTel pipeline without this
-    package re-hosting an SDK.
 
 func (o *SDKObserver) Observe(ctx context.Context, evt event.Event) error
     Observe observes one committed fact through the layered SDK attempt and

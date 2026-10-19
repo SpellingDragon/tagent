@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // ErrExportCaptureUnsealed, ErrExportCaptureMismatch, ErrExportCaptureUnreadable

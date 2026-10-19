@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/state"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory/replica"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/tool/remote"
-	"github.com/SpellingDragon/tagent/workspace"
 	a2aprotocol "trpc.group/trpc-go/trpc-a2a-go/protocol"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
@@ -315,13 +315,13 @@ func TestAddressedDelivery(t *testing.T) {
 		}
 
 		owner := event.Address{AgentID: "agent-a", SessionID: "session-addressed"}
-		scope := workspace.ResultScope{Owner: owner, Format: workspace.FormatToolResult, RetentionPolicy: "keep"}
+		scope := replica.ResultScope{Owner: owner, Format: replica.FormatToolResult, RetentionPolicy: "keep"}
 		originals := ledger.NewMemoryOriginalStore()
-		externalizer, err := workspace.NewResultExternalizer(originals, workspace.WithMaxTokens(16000))
+		externalizer, err := replica.NewResultExternalizer(originals, replica.WithMaxTokens(16000))
 		if err != nil {
 			t.Fatalf("build the externalizer: %v", err)
 		}
-		bounded, err := workspace.NewBoundedTool(callTool, externalizer, scope)
+		bounded, err := replica.NewBoundedTool(callTool, externalizer, scope)
 		if err != nil {
 			t.Fatalf("bound the remote call tool: %v", err)
 		}
@@ -366,7 +366,7 @@ func TestAddressedDelivery(t *testing.T) {
 		if err != nil {
 			t.Fatalf("serialize the remote result: %v", err)
 		}
-		ref := workspace.OriginalRefFor(scope, body)
+		ref := replica.OriginalRefFor(scope, body)
 		var observation *model.Message
 		for i := range requests[1].Messages {
 			message := &requests[1].Messages[i]

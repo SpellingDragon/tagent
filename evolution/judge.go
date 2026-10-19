@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // 契约: docs/wiki/evolution/evolution-architecture.md#verdict-states

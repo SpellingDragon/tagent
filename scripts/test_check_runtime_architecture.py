@@ -104,15 +104,30 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("unknown edge", out)
 
     def test_cycle_is_rejected(self):
+        # Negative anchor: a real cycle between two non-root packages stays red.
+        # The composition root's allow list is a registry, so only the root is
+        # exempt from closing a loop; mutual dependencies elsewhere still fail.
         policy = copy.deepcopy(self.policy)
         for edge in policy["edges"]:
-            if edge["from"] == "config":
-                edge["allow"] = ["state"]
-            if edge["from"] == "state":
-                edge["allow"] = ["config"]
+            if edge["from"] == "api/config":
+                edge["allow"] = ["runtime/state"]
+            if edge["from"] == "runtime/state":
+                edge["allow"] = ["api/config"]
         code, out, _ = self.check_policy(policy)
         self.assertNotEqual(code, 0)
         self.assertIn("cycle", out)
+
+    def test_back_edge_to_composition_root_is_not_a_cycle(self):
+        # Positive anchor: the host shell sits above the composition root
+        # (cli -> "."), and the root lists every package as a registry. Traversing
+        # the root's outbound entries plus that back edge must not read as a cycle.
+        policy = copy.deepcopy(self.policy)
+        self.assertIn("cli", patterns(policy), "the host shell is registered")
+        shell = next(edge for edge in policy["edges"] if edge["from"] == "cli")
+        self.assertIn(".", shell["allow"], "the host shell drives the composition root")
+        code, out, err = self.check_policy(policy)
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn("cycle", out)
 
     def test_duplicate_pattern_is_rejected(self):
         policy = copy.deepcopy(self.policy)
@@ -140,7 +155,9 @@ class PolicyTest(unittest.TestCase):
 
     def test_self_allowed_is_rejected(self):
         policy = copy.deepcopy(self.policy)
-        policy["edges"][1]["allow"] = ["event"]
+        for edge in policy["edges"]:
+            if edge["from"] == "api/event":
+                edge["allow"] = ["api/event"]
         code, out, _ = self.check_policy(policy)
         self.assertNotEqual(code, 0)
         self.assertIn("allows itself", out)
@@ -166,13 +183,13 @@ class PolicyTest(unittest.TestCase):
         self.assertNotIn("mcp", pats)
         self.assertNotIn("remote", pats)
 
-    def test_real_golden_workspace_edge_allows_memory_event(self):
+    def test_real_golden_replica_edge_allows_memory_event(self):
         edges = {edge["from"]: edge for edge in self.policy["edges"]}
-        workspace = edges["workspace"]
-        self.assertEqual(sorted(workspace["allow"]), ["event", "memory"])
-        self.assertIn("state", workspace["forbidden"])
-        self.assertIn("agent", workspace["forbidden"])
-        self.assertNotIn("memory", workspace["forbidden"])
+        replica = edges["memory/replica"]
+        self.assertEqual(sorted(replica["allow"]), ["api/event", "memory", "memory/ledger"])
+        self.assertIn("runtime/state", replica["forbidden"])
+        self.assertIn("runtime/agent", replica["forbidden"])
+        self.assertNotIn("memory", replica["forbidden"])
 
     def test_real_golden_storage_tiers_are_optional(self):
         by_pattern = {entry["pattern"]: entry for entry in self.policy["packages"]}
@@ -182,11 +199,11 @@ class PolicyTest(unittest.TestCase):
 
     def test_real_golden_query_projection_is_optional_registered_edge(self):
         by_pattern = {entry["pattern"]: entry for entry in self.policy["packages"]}
-        self.assertIn("query", by_pattern)
-        self.assertFalse(by_pattern["query"]["required"])
+        self.assertIn("memory/query", by_pattern)
+        self.assertFalse(by_pattern["memory/query"]["required"])
         edges = {edge["from"]: edge for edge in self.policy["edges"]}
-        self.assertIn("query", edges)
-        self.assertNotIn("agent", edges["query"]["allow"])
+        self.assertIn("memory/query", edges)
+        self.assertNotIn("runtime/agent", edges["memory/query"]["allow"])
 
     def test_real_golden_root_lists_every_package_without_wildcard(self):
         by_pattern = {entry["pattern"] for entry in self.policy["packages"]}
@@ -229,7 +246,7 @@ class ImplementationTest(unittest.TestCase):
         code, out, err = self.run_impl(go_list_stream(self.policy))
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["in_scope_packages"], 22)
+        self.assertEqual(payload["counts"]["in_scope_packages"], 31)
         self.assertEqual(payload["counts"]["missing_required_packages"], 0)
         self.assertIsNone(payload["productVerified"])
         self.assertTrue(any("injected" in note for note in payload["notes"]))
@@ -254,17 +271,26 @@ class ImplementationTest(unittest.TestCase):
 
     def test_edge_violation_is_rejected(self):
         text = go_list_stream(self.policy, extra_imports={
-            import_path("state"): [import_path("agent")]})
+            import_path("runtime/state"): [import_path("runtime/agent")]})
         code, out, _ = self.run_impl(text)
         self.assertNotEqual(code, 0)
         self.assertIn("edge violation", out)
+
+    def test_host_shell_back_edge_to_root_is_allowed(self):
+        # Consumer anchor: the real cli package imports the composition root. That
+        # edge is registered on the cli entry, and pointing it at "." must not read
+        # as a violation while the root also lists cli in its registry.
+        text = go_list_stream(self.policy, extra_imports={
+            import_path("cli"): [import_path(".")]})
+        code, out, err = self.run_impl(text)
+        self.assertEqual(code, 0, out + err)
 
     def test_benign_external_substring_is_reported_not_blocked(self):
         # A third-party import whose path merely *contains* the old guess-words
         # (localtool / trpcmirror / shadowtype) is a legal dependency: naming a
         # package is never proof of an unauthorised go.mod write, so it passes.
         text = go_list_stream(self.policy, extra_imports={
-            import_path("model"): [
+            import_path("api/model"): [
                 "example.com/upstream/localtool/model",
                 "example.com/upstream/trpcmirror/adapter",
                 "example.com/vendor/shadowtype",
@@ -277,7 +303,7 @@ class ImplementationTest(unittest.TestCase):
 
     def test_external_import_is_reported_but_never_blocks(self):
         text = go_list_stream(self.policy, extra_imports={
-            import_path("model"): ["example.com/brand/new/dep"]})
+            import_path("api/model"): ["example.com/brand/new/dep"]})
         code, out, err = self.run_impl(text)
         self.assertEqual(code, 0, out + err)
         self.assertNotIn("ERROR", out)

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/workspace"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/memory/replica"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -30,17 +30,17 @@ func TestReplicaCleanup(t *testing.T) {
 	body := []byte("replica body: exactly these bytes reach the replica and every segment of it")
 	ref := ledger.OriginalRef{Key: "result-a", Owner: owner, Format: "tool-output", RetentionPolicy: "keep"}
 
-	materializer := func(t *testing.T, root string, store ledger.ScopedOriginalStore) *workspace.Materializer {
+	materializer := func(t *testing.T, root string, store ledger.ScopedOriginalStore) *replica.Materializer {
 		t.Helper()
-		mat, err := workspace.NewMaterializer(root, store, scope)
+		mat, err := replica.NewMaterializer(root, store, scope)
 		if err != nil {
 			t.Fatalf("NewMaterializer: %v", err)
 		}
 		return mat
 	}
-	cleanerFor := func(t *testing.T, root string, options ...workspace.CleanupOption) *workspace.ReplicaCleaner {
+	cleanerFor := func(t *testing.T, root string, options ...replica.CleanupOption) *replica.ReplicaCleaner {
 		t.Helper()
-		cleaner, err := workspace.NewReplicaCleaner(root, options...)
+		cleaner, err := replica.NewReplicaCleaner(root, options...)
 		if err != nil {
 			t.Fatalf("NewReplicaCleaner: %v", err)
 		}
@@ -107,7 +107,7 @@ func TestReplicaCleanup(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	stopCleaner := func(t *testing.T, cleaner *workspace.ReplicaCleaner) {
+	stopCleaner := func(t *testing.T, cleaner *replica.ReplicaCleaner) {
 		t.Helper()
 		cleaner.Stop()
 		waitCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -178,9 +178,9 @@ func TestReplicaCleanup(t *testing.T) {
 		ageRoot := t.TempDir()
 		ageMat := materializer(t, ageRoot, ageStore)
 		ageCleaner := cleanerFor(t, ageRoot,
-			workspace.WithCleanupInterval(5*time.Millisecond),
-			workspace.WithReplicaMaxAge(10*time.Minute),
-			workspace.WithReplicaMaxCount(100),
+			replica.WithCleanupInterval(5*time.Millisecond),
+			replica.WithReplicaMaxAge(10*time.Minute),
+			replica.WithReplicaMaxCount(100),
 		)
 		oldOne, err := ageMat.Materialize(ctx, ref, "tool-shell")
 		if err != nil {
@@ -217,22 +217,22 @@ func TestReplicaCleanup(t *testing.T) {
 		countRoot := t.TempDir()
 		countMat := materializer(t, countRoot, countStore)
 		countCleaner := cleanerFor(t, countRoot,
-			workspace.WithCleanupInterval(5*time.Millisecond),
-			workspace.WithReplicaMaxAge(10*time.Minute),
-			workspace.WithReplicaMaxCount(2),
+			replica.WithCleanupInterval(5*time.Millisecond),
+			replica.WithReplicaMaxAge(10*time.Minute),
+			replica.WithReplicaMaxCount(2),
 		)
-		var kept [3]workspace.Replica
+		var kept [3]replica.Replica
 		for i, consumer := range []string{"tool-shell", "tool-editor", "task-result"} {
-			replica, err := countMat.Materialize(ctx, ref, consumer)
+			made, err := countMat.Materialize(ctx, ref, consumer)
 			if err != nil {
 				t.Fatalf("Materialize %s: %v", consumer, err)
 			}
-			kept[i] = replica
+			kept[i] = made
 		}
-		for i, replica := range kept {
+		for i, made := range kept {
 			aged := time.Now().Add(-time.Duration(3-i) * time.Minute)
-			if err := os.Chtimes(replica.Path, aged, aged); err != nil {
-				t.Fatalf("age replica %s: %v", replica.Path, err)
+			if err := os.Chtimes(made.Path, aged, aged); err != nil {
+				t.Fatalf("age replica %s: %v", made.Path, err)
 			}
 		}
 		countDone := make(chan error, 1)
@@ -254,21 +254,21 @@ func TestReplicaCleanup(t *testing.T) {
 		requireGone(t, kept[1].Path)
 		requireStanding(t, kept[2].Path, direct.Path)
 
-		if err := countCleaner.CleanupByAge(ctx, -time.Second); !errors.Is(err, workspace.ErrCleanupAgeInvalid) {
+		if err := countCleaner.CleanupByAge(ctx, -time.Second); !errors.Is(err, replica.ErrCleanupAgeInvalid) {
 			t.Fatalf("CleanupByAge with a negative bound = %v, want ErrCleanupAgeInvalid", err)
 		}
-		if err := countCleaner.CleanupByCount(ctx, -1); !errors.Is(err, workspace.ErrCleanupCountInvalid) {
+		if err := countCleaner.CleanupByCount(ctx, -1); !errors.Is(err, replica.ErrCleanupCountInvalid) {
 			t.Fatalf("CleanupByCount with a negative bound = %v, want ErrCleanupCountInvalid", err)
 		}
 		requireStanding(t, kept[2].Path, direct.Path)
-		if _, err := workspace.NewReplicaCleaner(countRoot, workspace.WithCleanupInterval(0)); !errors.Is(err, workspace.ErrCleanupIntervalInvalid) {
+		if _, err := replica.NewReplicaCleaner(countRoot, replica.WithCleanupInterval(0)); !errors.Is(err, replica.ErrCleanupIntervalInvalid) {
 			t.Fatalf("NewReplicaCleaner with a zero period = %v, want ErrCleanupIntervalInvalid", err)
 		}
 
 		idle := cleanerFor(t, countRoot,
-			workspace.WithCleanupInterval(5*time.Millisecond),
-			workspace.WithReplicaMaxAge(0),
-			workspace.WithReplicaMaxCount(0),
+			replica.WithCleanupInterval(5*time.Millisecond),
+			replica.WithReplicaMaxAge(0),
+			replica.WithReplicaMaxCount(0),
 		)
 		if err := idle.Wait(ctx); err != nil {
 			t.Fatalf("Wait on a cleaner that never ran = %v, want the end reported immediately", err)
@@ -285,7 +285,7 @@ func TestReplicaCleanup(t *testing.T) {
 		if err := idle.Wait(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Wait while the loop runs = %v, want the short ctx to run out first", err)
 		}
-		if err := idle.Run(ctx); !errors.Is(err, workspace.ErrCleanerAlreadyRunning) {
+		if err := idle.Run(ctx); !errors.Is(err, replica.ErrCleanerAlreadyRunning) {
 			t.Fatalf("second Run on a running cleaner = %v, want ErrCleanerAlreadyRunning", err)
 		}
 		stopCleaner(t, idle)
@@ -302,9 +302,9 @@ func TestReplicaCleanup(t *testing.T) {
 		root := t.TempDir()
 		mat := materializer(t, root, store)
 		cleaner := cleanerFor(t, root,
-			workspace.WithCleanupInterval(5*time.Millisecond),
-			workspace.WithReplicaMaxAge(0),
-			workspace.WithReplicaMaxCount(0),
+			replica.WithCleanupInterval(5*time.Millisecond),
+			replica.WithReplicaMaxAge(0),
+			replica.WithReplicaMaxCount(0),
 		)
 
 		held, err := mat.Materialize(ctx, ref, "tool-shell")
@@ -320,10 +320,10 @@ func TestReplicaCleanup(t *testing.T) {
 			t.Fatalf("Materialize idleTwo: %v", err)
 		}
 
-		if _, err := cleaner.Acquire(filepath.Join(root, "notes.txt")); !errors.Is(err, workspace.ErrCleanupTargetOutOfRange) {
+		if _, err := cleaner.Acquire(filepath.Join(root, "notes.txt")); !errors.Is(err, replica.ErrCleanupTargetOutOfRange) {
 			t.Fatalf("Acquire outside the replica area = %v, want ErrCleanupTargetOutOfRange", err)
 		}
-		if _, err := cleaner.Acquire(filepath.Join(root, "replica", "deadbeef", "cafebabe")); !errors.Is(err, workspace.ErrCleanupTargetMissing) {
+		if _, err := cleaner.Acquire(filepath.Join(root, "replica", "deadbeef", "cafebabe")); !errors.Is(err, replica.ErrCleanupTargetMissing) {
 			t.Fatalf("Acquire on no standing replica = %v, want ErrCleanupTargetMissing", err)
 		}
 
@@ -373,9 +373,9 @@ func TestReplicaCleanup(t *testing.T) {
 		stressRoot := t.TempDir()
 		stressMat := materializer(t, stressRoot, stressStore)
 		stressCleaner := cleanerFor(t, stressRoot,
-			workspace.WithCleanupInterval(time.Hour),
-			workspace.WithReplicaMaxAge(0),
-			workspace.WithReplicaMaxCount(0),
+			replica.WithCleanupInterval(time.Hour),
+			replica.WithReplicaMaxAge(0),
+			replica.WithReplicaMaxCount(0),
 		)
 		if err := stressCleaner.CleanupStartup(ctx); err != nil {
 			t.Fatalf("CleanupStartup before the stress run: %v", err)
@@ -407,20 +407,20 @@ func TestReplicaCleanup(t *testing.T) {
 						return
 					default:
 					}
-					replica, err := stressMat.Materialize(ctx, ref, "tool-shell")
+					made, err := stressMat.Materialize(ctx, ref, "tool-shell")
 					if err != nil {
 						t.Errorf("concurrent Materialize: %v", err)
 						return
 					}
-					release, err := stressCleaner.Acquire(replica.Path)
-					if errors.Is(err, workspace.ErrCleanupTargetMissing) {
+					release, err := stressCleaner.Acquire(made.Path)
+					if errors.Is(err, replica.ErrCleanupTargetMissing) {
 						continue
 					}
 					if err != nil {
 						t.Errorf("concurrent Acquire: %v", err)
 						return
 					}
-					if _, err := os.ReadFile(replica.Path); err != nil {
+					if _, err := os.ReadFile(made.Path); err != nil {
 						t.Errorf("a replica under an active read/write handle vanished mid-read: %v", err)
 					}
 					release()
@@ -459,9 +459,9 @@ func TestReplicaCleanup(t *testing.T) {
 		}
 		root := t.TempDir()
 		cleaner := cleanerFor(t, root,
-			workspace.WithCleanupInterval(5*time.Millisecond),
-			workspace.WithReplicaMaxAge(0),
-			workspace.WithReplicaMaxCount(0),
+			replica.WithCleanupInterval(5*time.Millisecond),
+			replica.WithReplicaMaxAge(0),
+			replica.WithReplicaMaxCount(0),
 		)
 		mat := materializer(t, root, store)
 		held, err := mat.Materialize(ctx, ref, "tool-shell")
@@ -573,9 +573,9 @@ func TestReplicaCleanup(t *testing.T) {
 		root := t.TempDir()
 		mat := materializer(t, root, store)
 		cleaner := cleanerFor(t, root,
-			workspace.WithCleanupInterval(5*time.Millisecond),
-			workspace.WithReplicaMaxAge(0),
-			workspace.WithReplicaMaxCount(0),
+			replica.WithCleanupInterval(5*time.Millisecond),
+			replica.WithReplicaMaxAge(0),
+			replica.WithReplicaMaxCount(0),
 		)
 		real, err := mat.Materialize(ctx, ref, "tool-shell")
 		if err != nil {

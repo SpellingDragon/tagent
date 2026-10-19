@@ -15,13 +15,14 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/config"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
-	"github.com/SpellingDragon/tagent/query"
-	"github.com/SpellingDragon/tagent/state"
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/telemetry"
-	"github.com/SpellingDragon/tagent/view"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -32,7 +33,7 @@ import (
 // of the wire and never a second ledger.
 type obsObserver struct {
 	mu     sync.Mutex
-	inner  telemetry.Observer
+	inner  plugin.Observer
 	events []event.Event
 	err    error
 }
@@ -61,7 +62,7 @@ func (o *obsObserver) observed() []event.Event {
 	return append([]event.Event(nil), o.events...)
 }
 
-var _ telemetry.Observer = (*obsObserver)(nil)
+var _ plugin.Observer = (*obsObserver)(nil)
 
 // obsModel is the scripted native model stand-in of these tests: it answers
 // the opening input with one native tool call and everything else with a final
@@ -156,7 +157,7 @@ const obsToolOutput = "out-a"
 // newObservedRun assembles one runtime through the sole assembly entry beside
 // the telemetry observer under test, over a declaration naming the single
 // agent and the scripted model and echo tool.
-func newObservedRun(t *testing.T, ctx context.Context, observer telemetry.Observer) *tagent.Run {
+func newObservedRun(t *testing.T, ctx context.Context, observer plugin.Observer) *tagent.Run {
 	t.Helper()
 	decl := &config.Declaration{
 		Entry:  "agent-a",
@@ -229,7 +230,7 @@ func TestObservationReachDiagnostics(t *testing.T) {
 			t.Fatalf("审计记录数 = %d, want one layered record per observed fact %d", len(records), len(observed))
 		}
 		for _, record := range records {
-			if len(record.Attempts) != 2 || record.Attempts[0].Layer != telemetry.LayerTrace || record.Attempts[1].Layer != telemetry.LayerMetric {
+			if len(record.Attempts) != 2 || record.Attempts[0].Layer != plugin.LayerTrace || record.Attempts[1].Layer != plugin.LayerMetric {
 				t.Fatalf("审计记录未分层: %+v", record.Attempts)
 			}
 			if record.Attempts[0].Skipped || record.Attempts[1].Skipped {

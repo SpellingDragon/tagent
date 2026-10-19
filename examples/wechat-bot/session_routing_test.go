@@ -15,9 +15,10 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/plugin"
-	"github.com/SpellingDragon/tagent/task"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -531,10 +532,10 @@ func TestSessionRouting(t *testing.T) {
 		if handled, _, err := gateway.Resolve("boss", "你好"); handled || err != nil {
 			t.Fatalf("a plain chat message = (%v,%v), want it to continue as a chat turn", handled, err)
 		}
-		if handled, _, err := gateway.Resolve("boss", "approve zzzz"); !handled || !errors.Is(err, plugin.ErrApprovalNotFound) {
+		if handled, _, err := gateway.Resolve("boss", "approve zzzz"); !handled || !errors.Is(err, approval.ErrApprovalNotFound) {
 			t.Fatalf("an unknown digest = (%v,%v), want ErrApprovalNotFound", handled, err)
 		}
-		if handled, _, err := gateway.Resolve("boss", "approve "+plugin.ArgsDigest(twinArgs)[:6]); !handled || !errors.Is(err, ErrApprovalAmbiguous) {
+		if handled, _, err := gateway.Resolve("boss", "approve "+approval.ArgsDigest(twinArgs)[:6]); !handled || !errors.Is(err, ErrApprovalAmbiguous) {
 			t.Fatalf("a digest naming two requests = (%v,%v), want ErrApprovalAmbiguous", handled, err)
 		}
 		if got := len(manager.Pending()); got != 3 {
@@ -557,7 +558,7 @@ func TestSessionRouting(t *testing.T) {
 				t.Fatalf("the decided request is still pending: %+v", req)
 			}
 		}
-		if handled, _, err := gateway.Resolve("boss", "approve "+held.ArgsDigest[:8]); !handled || !errors.Is(err, plugin.ErrApprovalNotFound) {
+		if handled, _, err := gateway.Resolve("boss", "approve "+held.ArgsDigest[:8]); !handled || !errors.Is(err, approval.ErrApprovalNotFound) {
 			t.Fatalf("a repeated ruling = (%v,%v), want it refused as decided", handled, err)
 		}
 	})

@@ -1,0 +1,446 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/state"
+)
+
+// invariantLoopAddress is the session address the invariants' drives run in.
+var invariantLoopAddress = event.Address{AgentID: "agent-a", SessionID: "session-a"}
+
+// invariantLoopOtherAddress is the neighbouring session address the invariants' drives never mix with.
+var invariantLoopOtherAddress = event.Address{AgentID: "agent-a", SessionID: "session-b"}
+
+// TestLoopTurnInvariants pins the decision slot, the single reduction and the session-scoped request chain of one drive.
+// - one session runs one effective model decision at a time, and the slot is free again once both drives ended
+// - a model entry error reaches the same single reduction every stream does, and no second decision is minted
+// - a production registered for a drive confirms its stop only after that drive really ended
+// - one session's history and ready input never enter another session's request, and no drive writes into another session
+// 契约: docs/wiki/agent/execution-generations.md#turn-outcome
+func TestLoopTurnInvariants(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("one session runs one effective model decision at a time", func(t *testing.T) {
+		behaviour := &invariantLoopModel{gate: make(chan struct{}), answer: "answer-a"}
+		loop, _, slots := invariantLoop(t, behaviour)
+		results := make(chan invariantLoopResult, 2)
+		drive := func(invocation event.InvocationID) {
+			turn, err := loop.Drive(ctx, Invocation{
+				InvocationID: invocation,
+				Address:      invariantLoopAddress,
+				Instance:     "instance-a",
+				Ready: []event.Event{{
+					Key:     event.EventID(string(invocation) + "-event"),
+					Message: model.Message{Role: model.RoleUser, Content: string(invocation)},
+				}},
+			})
+			results <- invariantLoopResult{turn: turn, err: err}
+		}
+		go drive("invocation-1")
+		invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
+		held, decision, ok := slots.Slot(invariantLoopAddress, "instance-a")
+		if !ok || held != event.InvocationID("invocation-1") || decision == "" {
+			t.Fatalf("decision slot while one drive is in flight = (%q, %q, %v), want the first invocation's own decision", held, decision, ok)
+		}
+		go drive("invocation-2")
+		time.Sleep(20 * time.Millisecond)
+		if got := behaviour.peakCount(); got != 1 {
+			t.Fatalf("model decisions in flight at once = %d, want the session's single slot respected", got)
+		}
+		close(behaviour.gate)
+		for i := 0; i < 2; i++ {
+			select {
+			case out := <-results:
+				if out.err != nil {
+					t.Fatalf("drive %d ended with %v, want a completed turn", i, out.err)
+				}
+				if out.turn.Terminal != model.KindCompleted || len(out.turn.Decisions) != 1 {
+					t.Fatalf("turn %d = (%v, %d decisions), want one completed decision", i, out.turn.Terminal, len(out.turn.Decisions))
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("a drive did not end after the queued decision was let through")
+			}
+		}
+		if got := behaviour.peakCount(); got != 1 {
+			t.Fatalf("model decisions in flight at once = %d, want never two beside one slot", got)
+		}
+		if _, _, ok := slots.Slot(invariantLoopAddress, "instance-a"); ok {
+			t.Fatal("the decision slot is still held after both drives ended")
+		}
+	})
+
+	t.Run("a model entry error reaches the same single reduction every stream does", func(t *testing.T) {
+		behaviour := newInvariantLoopModel("", errors.New("agent: the model entry refused the request"))
+		loop, _, _ := invariantLoop(t, behaviour)
+		recorder := &invariantLoopRecorder{}
+		loop.SetRecorder(recorder)
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-1",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:       "event-1",
+				EpisodeID: "episode-1",
+				Message:   model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("drive beside a refused model entry = %v, want the refusal reduced", err)
+		}
+		if turn.Terminal != model.KindFailed {
+			t.Fatalf("terminal beside a refused model entry = %v, want %v", turn.Terminal, model.KindFailed)
+		}
+		if len(turn.Decisions) != 1 {
+			t.Fatalf("decisions beside a refused model entry = %d, want the one attempt", len(turn.Decisions))
+		}
+		if got := recorder.counts(); got != (invariantLoopCounts{episodes: 1, decisions: 1, attempts: 1}) {
+			t.Fatalf("records beside a refused model entry = %+v, want one of each production point", got)
+		}
+		if got := recorder.outcome(); got != model.KindFailed {
+			t.Fatalf("recorded attempt outcome = %v, want the reduced terminal itself", got)
+		}
+	})
+
+	t.Run("a production registered for a drive confirms its stop only after that drive ended", func(t *testing.T) {
+		behaviour := &invariantLoopModel{gate: make(chan struct{})}
+		loop, _, _ := invariantLoop(t, behaviour)
+		watch := &invariantLoopWatch{}
+		loop.SetWatch(watch.register)
+		done := make(chan invariantLoopResult, 1)
+		go func() {
+			turn, err := loop.Drive(ctx, Invocation{
+				InvocationID: "invocation-1",
+				Address:      invariantLoopAddress,
+				Instance:     "instance-a",
+				Ready: []event.Event{{
+					Key:     "event-1",
+					Message: model.Message{Role: model.RoleUser, Content: "hello"},
+				}},
+			})
+			done <- invariantLoopResult{turn: turn, err: err}
+		}()
+		invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
+		registered := watch.list()
+		if len(registered) == 0 {
+			t.Fatal("a drive in flight registered no production")
+		}
+		for _, stopped := range registered {
+			if stopped() {
+				t.Fatal("a production still in flight confirmed its stop")
+			}
+		}
+		close(behaviour.gate)
+		select {
+		case out := <-done:
+			if out.err != nil {
+				t.Fatalf("drive ended with %v, want a completed turn", out.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the drive did not end after the model stream was let through")
+		}
+		for _, stopped := range watch.list() {
+			if !stopped() {
+				t.Fatal("a production of an ended drive never confirmed its stop")
+			}
+		}
+	})
+
+	t.Run("one session's history and ready input never enter another session's request", func(t *testing.T) {
+		behaviour := newInvariantLoopModel("answer-b", nil)
+		loop, _, _ := invariantLoop(t, behaviour)
+		history := newInvariantLoopHistory()
+		history.CommitHistory(invariantLoopAddress, []model.Message{{Role: model.RoleUser, Content: "alpha"}})
+		loop.SetHistory(history)
+		chains := &invariantLoopChains{}
+		loop.SetRequestFace(chains.face)
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-b",
+			Address:      invariantLoopOtherAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-b",
+				Message: model.Message{Role: model.RoleUser, Content: "beta"},
+			}},
+		})
+		if err != nil || turn.Terminal != model.KindCompleted {
+			t.Fatalf("drive of the neighbouring session = (%v, %v), want a completed turn", turn.Terminal, err)
+		}
+		if got := chains.recorded(); len(got) != 1 || got[0] != "session-b" {
+			t.Fatalf("request chains of the drive = %v, want the one session it runs in", got)
+		}
+		sent := behaviour.requestMessages()
+		if len(sent) != 1 {
+			t.Fatalf("requests sent by the drive = %d, want one", len(sent))
+		}
+		if invariantCarries(sent[0], "alpha") {
+			t.Fatalf("request of the neighbouring session carries another session's history: %+v", sent[0])
+		}
+		if !invariantCarries(sent[0], "beta") {
+			t.Fatalf("request of the neighbouring session carries no ready input: %+v", sent[0])
+		}
+		if !invariantCarries(sent[0], "prefix-session-b") {
+			t.Fatalf("request of the neighbouring session carries no prefix of its own chain: %+v", sent[0])
+		}
+		if got := history.SessionHistory(invariantLoopAddress); len(got) != 1 || invariantCarries(got, "answer-b") {
+			t.Fatalf("history of the first session = %+v, want its own message alone", got)
+		}
+		if got := history.SessionHistory(invariantLoopOtherAddress); len(got) != 2 {
+			t.Fatalf("history of the driven session = %+v, want the ready input beside the answer it committed", got)
+		}
+	})
+}
+
+// invariantLoopResult is one finished drive as the goroutine hands it back.
+type invariantLoopResult struct {
+	turn Turn
+	err  error
+}
+
+// invariantLoopModel is the model of the invariants: it streams one answer and may hold every call at a gate.
+type invariantLoopModel struct {
+	mu       sync.Mutex
+	gate     chan struct{}
+	fail     error
+	answer   string
+	inFlight int
+	peak     int
+	requests [][]model.Message
+}
+
+// newInvariantLoopModel returns a model answering at once with the answer named, or refusing the entry.
+func newInvariantLoopModel(answer string, fail error) *invariantLoopModel {
+	gate := make(chan struct{})
+	close(gate)
+	return &invariantLoopModel{gate: gate, answer: answer, fail: fail}
+}
+
+// GenerateContent holds the call at the gate and then streams its one answer.
+func (m *invariantLoopModel) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	m.inFlight++
+	if m.inFlight > m.peak {
+		m.peak = m.inFlight
+	}
+	m.requests = append(m.requests, append([]model.Message(nil), req.Messages...))
+	m.mu.Unlock()
+	select {
+	case <-m.gate:
+	case <-ctx.Done():
+	}
+	m.mu.Lock()
+	m.inFlight--
+	m.mu.Unlock()
+	if m.fail != nil {
+		return nil, m.fail
+	}
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{
+		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: m.answer}}},
+		Done:    true,
+	}
+	close(ch)
+	return ch, nil
+}
+
+// Info reports the model descriptor.
+func (m *invariantLoopModel) Info() model.Info { return model.Info{Name: "loop-model"} }
+
+// inFlightCount reports how many calls are inside the model right now.
+func (m *invariantLoopModel) inFlightCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.inFlight
+}
+
+// peakCount reports the largest number of calls the model saw at once.
+func (m *invariantLoopModel) peakCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.peak
+}
+
+// requestMessages reports the message set of every request the model was handed.
+func (m *invariantLoopModel) requestMessages() [][]model.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]model.Message(nil), m.requests...)
+}
+
+// invariantLoopChains records the request chain each assembled request ran under.
+type invariantLoopChains struct {
+	mu     sync.Mutex
+	chains []event.SessionID
+}
+
+// face assembles one prefix naming the chain it was asked for.
+func (c *invariantLoopChains) face(_ context.Context, boundary RequestBoundary) (BoundaryView, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.chains = append(c.chains, boundary.Chain.SessionID)
+	return BoundaryView{Messages: []model.Message{{
+		Role:    model.RoleSystem,
+		Content: "prefix-" + string(boundary.Chain.SessionID),
+	}}}, nil
+}
+
+// recorded reports the chains the assembled requests ran under, in order.
+func (c *invariantLoopChains) recorded() []event.SessionID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]event.SessionID(nil), c.chains...)
+}
+
+// invariantLoopHistory keeps one transcript per session address.
+type invariantLoopHistory struct {
+	mu        sync.Mutex
+	bySession map[event.SessionID][]model.Message
+}
+
+// newInvariantLoopHistory returns an empty session transcript face.
+func newInvariantLoopHistory() *invariantLoopHistory {
+	return &invariantLoopHistory{bySession: map[event.SessionID][]model.Message{}}
+}
+
+// SessionHistory reports the transcript accumulated for one session.
+func (h *invariantLoopHistory) SessionHistory(addr event.Address) []model.Message {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]model.Message(nil), h.bySession[addr.SessionID]...)
+}
+
+// CommitHistory appends one ended drive's transcript to its own session.
+func (h *invariantLoopHistory) CommitHistory(addr event.Address, msgs []model.Message) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.bySession[addr.SessionID] = append(h.bySession[addr.SessionID], msgs...)
+}
+
+// invariantLoopWatch records the in-flight productions a drive registers.
+type invariantLoopWatch struct {
+	mu    sync.Mutex
+	stops []func() bool
+}
+
+// register records one production stop confirmation.
+func (w *invariantLoopWatch) register(_ event.TaskID, stopped func() bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stops = append(w.stops, stopped)
+	return nil
+}
+
+// list reports the stop confirmations registered so far.
+func (w *invariantLoopWatch) list() []func() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]func() bool(nil), w.stops...)
+}
+
+// invariantLoopCounts is the number of records one recorder was asked to write.
+type invariantLoopCounts struct {
+	episodes  int
+	decisions int
+	attempts  int
+}
+
+// invariantLoopRecorder counts the records written through it and keeps the last attempt outcome.
+type invariantLoopRecorder struct {
+	mu       sync.Mutex
+	counted  invariantLoopCounts
+	outcomes []model.Outcome
+}
+
+// RecordEpisode counts one episode record.
+func (r *invariantLoopRecorder) RecordEpisode(context.Context, event.EpisodeID, event.SessionID, time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counted.episodes++
+	return nil
+}
+
+// RecordDecision counts one decision record.
+func (r *invariantLoopRecorder) RecordDecision(context.Context, event.DecisionID, event.InvocationID, event.EpisodeID, []event.EventID, string, string, []string, time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counted.decisions++
+	return nil
+}
+
+// RecordAttempt counts one attempt record beside the outcome it was handed.
+func (r *invariantLoopRecorder) RecordAttempt(_ context.Context, _ event.AttemptID, _ event.DecisionID, _ event.EpisodeID, outcome model.Outcome) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.counted.attempts++
+	r.outcomes = append(r.outcomes, outcome)
+	return nil
+}
+
+// counts reports the records written so far.
+func (r *invariantLoopRecorder) counts() invariantLoopCounts {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.counted
+}
+
+// outcome reports the kind of the last attempt outcome handed to the recorder.
+func (r *invariantLoopRecorder) outcome() model.Kind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.outcomes) == 0 {
+		return model.KindUnknown
+	}
+	return r.outcomes[len(r.outcomes)-1].Kind
+}
+
+// invariantLoop returns one loop over one held generation and one empty occupancy ledger.
+func invariantLoop(t *testing.T, behaviour *invariantLoopModel) (*Loop, *state.Bindings, *state.Occupancy) {
+	t.Helper()
+	declaration := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a"}}}
+	plan, err := state.NewStatePlan(
+		state.OrgPlan{Declaration: declaration, Fingerprint: "fp-a"},
+		map[event.AgentID]state.AgentBinding{
+			"agent-a": {Model: behaviour, PromptSource: state.PromptSource{Version: "v1"}},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("build the binding plan of the loop: %v", err)
+	}
+	bindings := state.NewBindings()
+	if err := bindings.Hold(plan); err != nil {
+		t.Fatalf("hold the binding generation of the loop: %v", err)
+	}
+	slots := state.NewOccupancy()
+	return NewLoop(bindings, slots, "instance-a", nil), bindings, slots
+}
+
+// invariantAwait waits for one expected state to arrive before a bounded deadline.
+func invariantAwait(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the expected state did not arrive before the deadline")
+}
+
+// invariantCarries reports whether one message set carries the content named.
+func invariantCarries(msgs []model.Message, content string) bool {
+	for _, msg := range msgs {
+		if msg.Content == content {
+			return true
+		}
+	}
+	return false
+}

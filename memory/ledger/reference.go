@@ -11,7 +11,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/SpellingDragon/tagent/event"
+	"github.com/SpellingDragon/tagent/api/event"
 )
 
 // OriginalRef names one stored original blob together with the reference

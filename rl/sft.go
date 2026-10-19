@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/SpellingDragon/tagent/event"
-	"github.com/SpellingDragon/tagent/model"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 )
 
 // SFTLegacyConverterV2 names the strict v2 converter that stays a read-only
