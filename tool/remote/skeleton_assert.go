@@ -25,6 +25,17 @@ var (
 	_ func(Dispatcher, context.Context, Target, CallIdentity, a2aprotocol.SendMessageParams, ...a2aclient.RequestOption) (*a2aprotocol.MessageResult, error) = Dispatcher.Send
 )
 
+// The handoff carriage keeps its declared shape: the consumer-side seam naming
+// the acceptance and the part, and the send delivering it under the identity and
+// target of the call.
+var (
+	_ HandoffCarrier = (HandoffCarrier)(nil)
+
+	_ func(*A2ADispatcher, context.Context, Target, CallIdentity, HandoffCarrier, a2aprotocol.SendMessageParams, ...a2aclient.RequestOption) (*a2aprotocol.MessageResult, error) = (*A2ADispatcher).SendHandoff
+
+	_ error = ErrHandoffMissing
+)
+
 // Interface kinds, plus the native types the adapter hands back to its callers.
 var (
 	_ Connector     = (Connector)(nil)

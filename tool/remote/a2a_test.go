@@ -2,16 +2,22 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	a2aclient "trpc.group/trpc-go/trpc-a2a-go/client"
 	a2aprotocol "trpc.group/trpc-go/trpc-a2a-go/protocol"
@@ -351,6 +357,123 @@ func TestRemoteCallErrorsStayClassified(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid agent URL") {
 		t.Fatalf("connector over an unusable URL = %v, want the URL refusal", err)
 	}
+}
+
+// TestSendHandoffCarriesTheEnvelopeBesideTheRequest pins the envelope on the wire:
+// - a send carrying a handoff keeps the text part of its request and adds one data part after it
+// - the data part decodes back into the envelope the call carried, and that envelope validates
+// - the caller's params keep the message it built
+// - a send carrying no handoff puts no data part on the wire
+// - an envelope naming no intent or no acceptance constraint is refused before the target is dialled
+// 契约: docs/wiki/tool/tool-architecture.md#delegation-retry
+func TestSendHandoffCarriesTheEnvelopeBesideTheRequest(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		mu.Unlock()
+		fmt.Fprint(w, `{"jsonrpc":"2.0","id":"","result":{"kind":"message","messageId":"m-1","role":"agent","parts":[{"kind":"text","text":"accepted"}]}}`)
+	}))
+	defer server.Close()
+	wireBody := func(index int) string {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		if index >= len(bodies) {
+			t.Fatalf("server saw %d requests, want request %d", len(bodies), index)
+		}
+		return bodies[index]
+	}
+
+	dispatcher := testDispatcher(t, server.URL, NewRetryPolicy(1))
+	envelope := agent.HandoffEnvelope{
+		Intent:           "review the change",
+		Constraints:      []string{"every finding names a file"},
+		Grants:           []string{"tool:exec_run"},
+		PendingDecisions: []string{"whether the change ships"},
+		Refs:             []event.EventID{"ev-context-1"},
+	}
+	params := testCallParams()
+	identity := CallIdentity{InvocationID: "inv-handoff", DecisionID: "dec-handoff", CallID: "call-handoff"}
+	result, err := dispatcher.SendHandoff(ctx, testTarget(server.URL), identity, envelope, params)
+	if err != nil || result == nil {
+		t.Fatalf("send carrying a handoff = (%v, %v), want the remote answer", result, err)
+	}
+	if got := ResultText(result); got != "accepted" {
+		t.Fatalf("result text = %q, want the text the remote agent answered with", got)
+	}
+	if len(params.Message.Parts) != 1 {
+		t.Fatalf("caller params carry %d parts, want the message it built kept", len(params.Message.Parts))
+	}
+
+	parts := requestParts(t, wireBody(0))
+	if len(parts) != 2 {
+		t.Fatalf("wire parts = %d, want the request text beside one handoff data part", len(parts))
+	}
+	if text := messageText(&a2aprotocol.Message{Parts: parts[:1]}); parts[0].GetKind() != a2aprotocol.KindText || text != "hello" {
+		t.Fatalf("first wire part = %#v, want the request text the call sent", parts[0])
+	}
+	if parts[1].GetKind() != a2aprotocol.KindData {
+		t.Fatalf("second wire part kind = %q, want %q", parts[1].GetKind(), a2aprotocol.KindData)
+	}
+	carried, err := agent.FromDataPart(parts[1])
+	if err != nil {
+		t.Fatalf("read the handoff from the wire = %v", err)
+	}
+	if !reflect.DeepEqual(carried, envelope) {
+		t.Fatalf("wire envelope = %+v, want %+v", carried, envelope)
+	}
+	if err := carried.Validate(); err != nil {
+		t.Fatalf("validate the wire envelope = %v, want it accepted", err)
+	}
+
+	plain := CallIdentity{InvocationID: "inv-plain", DecisionID: "dec-plain", CallID: "call-plain"}
+	if _, err := dispatcher.Send(ctx, testTarget(server.URL), plain, testCallParams()); err != nil {
+		t.Fatalf("send carrying no handoff = %v", err)
+	}
+	if parts := requestParts(t, wireBody(1)); len(parts) != 1 || parts[0].GetKind() != a2aprotocol.KindText {
+		t.Fatalf("wire parts of a call carrying no handoff = %#v, want the request text only", parts)
+	}
+
+	connector := &countingConnector{err: errors.New("the call reached the network")}
+	refusing, err := NewA2ADispatcher(connector, WithEndpoints(mustEndpoints(t, testTarget("http://127.0.0.1:1/a2a"))))
+	if err != nil {
+		t.Fatalf("dispatcher = %v", err)
+	}
+	refused := CallIdentity{InvocationID: "inv-refused", DecisionID: "dec-refused", CallID: "call-refused"}
+	if _, err := refusing.SendHandoff(ctx, testTarget("http://127.0.0.1:1/a2a"), refused, agent.HandoffEnvelope{Constraints: []string{"an explicit verdict"}}, testCallParams()); !errors.Is(err, agent.ErrHandoffIntentMissing) {
+		t.Fatalf("handoff naming no intent = %v, want %v", err, agent.ErrHandoffIntentMissing)
+	}
+	if _, err := refusing.SendHandoff(ctx, testTarget("http://127.0.0.1:1/a2a"), refused, agent.HandoffEnvelope{Intent: "review the change"}, testCallParams()); !errors.Is(err, agent.ErrHandoffConstraintsMissing) {
+		t.Fatalf("handoff naming no constraint = %v, want %v", err, agent.ErrHandoffConstraintsMissing)
+	}
+	if _, err := refusing.SendHandoff(ctx, testTarget("http://127.0.0.1:1/a2a"), refused, nil, testCallParams()); !errors.Is(err, ErrHandoffMissing) {
+		t.Fatalf("send naming no handoff = %v, want %v", err, ErrHandoffMissing)
+	}
+	if got := connector.connectCount(); got != 0 {
+		t.Fatalf("a refused handoff dialled the connector %d times, want 0", got)
+	}
+	if _, ok := refusing.Call(refused); ok {
+		t.Fatalf("a refused handoff left an attribution record")
+	}
+}
+
+// requestParts reports the message parts of one JSON-RPC message/send body as the
+// receiving side decodes them.
+func requestParts(t *testing.T, body string) []a2aprotocol.Part {
+	t.Helper()
+	var request struct {
+		Params struct {
+			Message a2aprotocol.Message `json:"message"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(body), &request); err != nil {
+		t.Fatalf("read the wire request = %v: %s", err, body)
+	}
+	return request.Params.Message.Parts
 }
 
 func testCallParams() a2aprotocol.SendMessageParams {

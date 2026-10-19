@@ -21,7 +21,9 @@ func ExampleHandoffEnvelope()
     the envelope names the task, the acceptance constraints, the grants,
     the pending decisions and the refs, validates itself and renders
     the external-context block a delegated turn reads in front of its
-    natural-language request.
+    natural-language request. The remote channel carries the same record as one
+    data part, so a data part read back names the same fields and is held to the
+    same validation.
 
 func ExampleHistoryFace()
     ExampleHistoryFace commits the transcript of one ended drive and reads it

@@ -25,7 +25,24 @@ var (
 	// ErrCallTargetConflict reports one call identity naming two targets: a call
 	// keeps the target it started on.
 	ErrCallTargetConflict = errors.New("remote: the call identity is bound to another target")
+	// ErrHandoffMissing reports a send that names no handoff to carry.
+	ErrHandoffMissing = errors.New("remote: the call carries no handoff")
 )
+
+// HandoffCarrier is one handoff in the form a remote call carries it: the
+// acceptance it is held to and the data part its message travels with. The
+// record that states a handoff hands itself over through this seam, so this
+// adapter carries a handoff without depending on the package that states one.
+//
+// The redline list (2 rules):
+// MUST answer with the part the whole handoff travels as, not a fragment of it.
+// MUST NOT answer with a part that names another kind.
+type HandoffCarrier interface {
+	// Validate reports whether the handoff names what a delegated turn could serve.
+	Validate() error
+	// DataPart returns the part one message carries the handoff as.
+	DataPart() a2aprotocol.DataPart
+}
 
 // complete reports whether a target names both its destination and the agent it
 // belongs to.
@@ -204,6 +221,35 @@ func (d *A2ADispatcher) Send(ctx context.Context, target Target, identity CallId
 	d.mu.Unlock()
 	close(state.done)
 	return result, sendErr
+}
+
+// SendHandoff delivers params whose message carries the handoff as one data part
+// beside the parts it already names, and keeps every other property of the call:
+// the same target, the same identity, the same retry shape and one outcome for
+// the identity.
+//
+// The message keeps its own parts, so the handoff travels beside the request and
+// never in place of it. A handoff naming no intent or no acceptance constraint is
+// refused by name before the call is claimed, so an unacceptable handoff never
+// reaches a peer and leaves no attribution record.
+func (d *A2ADispatcher) SendHandoff(ctx context.Context, target Target, identity CallIdentity, handoff HandoffCarrier, params a2aprotocol.SendMessageParams, opts ...a2aclient.RequestOption) (*a2aprotocol.MessageResult, error) {
+	if handoff == nil {
+		return nil, ErrHandoffMissing
+	}
+	if err := handoff.Validate(); err != nil {
+		return nil, err
+	}
+	return d.Send(ctx, target, identity, withHandoffPart(params, handoff), opts...)
+}
+
+// withHandoffPart returns params whose message carries the handoff as one data
+// part after the parts the message already names. The parts slice is rebuilt, so
+// the caller's params keep the message it built.
+func withHandoffPart(params a2aprotocol.SendMessageParams, handoff HandoffCarrier) a2aprotocol.SendMessageParams {
+	parts := make([]a2aprotocol.Part, 0, len(params.Message.Parts)+1)
+	parts = append(parts, params.Message.Parts...)
+	params.Message.Parts = append(parts, handoff.DataPart())
+	return params
 }
 
 // Call reports the attribution record of one call identity.

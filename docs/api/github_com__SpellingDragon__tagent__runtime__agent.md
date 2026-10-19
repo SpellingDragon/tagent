@@ -69,6 +69,14 @@ var ErrHandoffIntentMissing = errors.New("agent: the handoff envelope names no i
     ErrHandoffIntentMissing reports an envelope that names no intent, so no
     delegated turn could tell which task it serves.
 
+var ErrHandoffPartNotData = errors.New("agent: the part is not a data part")
+    ErrHandoffPartNotData reports a part that is not an A2A data part, so no
+    envelope payload sits in it.
+
+var ErrHandoffPartPayload = errors.New("agent: the data part carries no handoff envelope")
+    ErrHandoffPartPayload reports a data part whose payload does not decode as a
+    handoff envelope.
+
 var ErrRequestChainSessionRequired = errors.New("agent: projected request assembly needs a named session chain")
     ErrRequestChainSessionRequired reports a request assembly under a chain that
     names no session: assembling one would join every user of the partition into
@@ -376,27 +384,46 @@ const (
 
 type HandoffEnvelope struct {
 	// Intent is the task the delegated turn exists to serve.
-	Intent string
+	Intent string `json:"intent"`
 	// Constraints lists the acceptance criteria the handed-back result must satisfy.
-	Constraints []string
+	Constraints []string `json:"constraints,omitempty"`
 	// Grants lists the capabilities the handoff grants the delegated turn, each
 	// named with the kind it belongs to (tool, skill or mcp).
-	Grants []string
+	Grants []string `json:"grants,omitempty"`
 	// PendingDecisions lists the decisions the delegated turn may not take on its own.
-	PendingDecisions []string
+	PendingDecisions []string `json:"pending_decisions,omitempty"`
 	// Refs names the stored facts the handed-off context starts from.
-	Refs []event.EventID
+	Refs []event.EventID `json:"refs,omitempty"`
 }
     HandoffEnvelope is one cross-agent handoff in structured form: the task the
     delegated turn serves, the acceptance constraints its result is held to, the
     capabilities the handoff grants it, the decisions it may not take on its own
     and the stored facts it starts from. It travels beside the natural-language
-    request of the call and never replaces it.
+    request of the call and never replaces it, and one schema serves every
+    carrier: the JSON field names below are the wire names it travels under,
+    an A2A data part carries that JSON as its payload, and the local channel
+    renders the same fields as the text block ExternalContext states.
 
     The four segments of the handoff contract map onto this record: - the
     task is Intent; - the context summary is Refs beside the natural-language
     request; - the deliverable stays the natural-language request's own outcome;
     - the acceptance criteria are Constraints.
+
+func FromDataPart(part a2aprotocol.Part) (HandoffEnvelope, error)
+    FromDataPart reports the handoff envelope one A2A data part carries.
+    A payload already decoded into a map, an envelope carried in process and
+    JSON kept as bytes are each read. A part of another kind, or a payload that
+    does not decode, is refused by name.
+
+    The envelope is decoded, not accepted: the caller holds it to Validate
+    against the acceptance the receiving side owes, so a decoded envelope naming
+    no intent is still refused there.
+
+func (h HandoffEnvelope) DataPart() a2aprotocol.DataPart
+    DataPart returns the A2A data part one handoff travels as on the remote
+    channel: the envelope itself as the structured payload, under the field
+    names the record declares, so the receiver decodes the same schema the local
+    channel renders as text.
 
 func (h HandoffEnvelope) ExternalContext() string
     ExternalContext renders the envelope as the structured block one delegated

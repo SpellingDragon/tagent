@@ -26,6 +26,8 @@ var (
 	// ErrCallTargetConflict reports one call identity naming two targets: a call
 	// keeps the target it started on.
 	ErrCallTargetConflict = errors.New("remote: the call identity is bound to another target")
+	// ErrHandoffMissing reports a send that names no handoff to carry.
+	ErrHandoffMissing = errors.New("remote: the call carries no handoff")
 )
 var (
 	// ErrToolTargetMissing reports a tool call that names no agent to address.
@@ -67,6 +69,17 @@ func (d *A2ADispatcher) Send(ctx context.Context, target Target, identity CallId
     refused when it names no complete target, when the target is outside the
     caller's declaration, or when the identity carries no attribution; a repeat
     of an identity already bound to another target is refused as well.
+
+func (d *A2ADispatcher) SendHandoff(ctx context.Context, target Target, identity CallIdentity, handoff HandoffCarrier, params a2aprotocol.SendMessageParams, opts ...a2aclient.RequestOption) (*a2aprotocol.MessageResult, error)
+    SendHandoff delivers params whose message carries the handoff as one data
+    part beside the parts it already names, and keeps every other property of
+    the call: the same target, the same identity, the same retry shape and one
+    outcome for the identity.
+
+    The message keeps its own parts, so the handoff travels beside the request
+    and never in place of it. A handoff naming no intent or no acceptance
+    constraint is refused by name before the call is claimed, so an unacceptable
+    handoff never reaches a peer and leaves no attribution record.
 
 type CallIdentity struct {
 	// InvocationID identifies the responsibility scope that owns the call.
@@ -154,6 +167,21 @@ func (e *Endpoints) Resolve(target Target) (Target, error)
     Resolve returns the declared target the call names. A name the declaration
     does not carry, or one whose destination differs from the declaration,
     is refused by name.
+
+type HandoffCarrier interface {
+	// Validate reports whether the handoff names what a delegated turn could serve.
+	Validate() error
+	// DataPart returns the part one message carries the handoff as.
+	DataPart() a2aprotocol.DataPart
+}
+    HandoffCarrier is one handoff in the form a remote call carries it:
+    the acceptance it is held to and the data part its message travels with. The
+    record that states a handoff hands itself over through this seam, so this
+    adapter carries a handoff without depending on the package that states one.
+
+    The redline list (2 rules): MUST answer with the part the whole handoff
+    travels as, not a fragment of it. MUST NOT answer with a part that names
+    another kind.
 
 type IdentityResolver func(ctx context.Context) (CallIdentity, bool)
     IdentityResolver reports the attribution identity of the call under way,

@@ -20,6 +20,12 @@ func ExampleDispatcher()
     refused before anything is sent, and the call leaves one outcome instead of
     one outcome per retry.
 
+func ExampleHandoffCarrier()
+    ExampleHandoffCarrier states one handoff in the form a remote call carries
+    it: the handoff holds itself to its own acceptance and answers with the one
+    data part its message travels with, so a send can put the handoff beside the
+    request it carries.
+
 func ExampleSessionBinder()
     ExampleSessionBinder resolves the session one remote call runs under:
     the scope names the local agent and session the call is attributed to,

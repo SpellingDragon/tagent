@@ -584,7 +584,7 @@ tools:
 
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
-| **子 Agent handoff 的结构化载体** | `agent.HandoffEnvelope` 承载 intent/constraints/grants/pending_decisions/refs 五个字段；`call_subagent` 的 `handoff` 参数声明 intent/constraints/pending_decisions/refs，grants 取装配声明的 tool/skill/mcp 引用；该 envelope 经 `subagent.Turn.Handoff` 由 `ExternalContext` 渲染为子 Agent 请求前的结构化块，与既有自然语言 request 并存 | `Validate` 对无 intent 或无验收约束的 handoff 具名拒绝且不建任务；结构化断言见 `TestSubagentHandoffEnvelope` 与 `TestHandoffEnvelopeContract` |
+| **子 Agent handoff 的结构化载体** | `agent.HandoffEnvelope` 承载 intent/constraints/grants/pending_decisions/refs 五个字段；`call_subagent` 的 `handoff` 参数声明 intent/constraints/pending_decisions/refs，grants 取装配声明的 tool/skill/mcp 引用；该 envelope 经 `subagent.Turn.Handoff` 由 `ExternalContext` 渲染为子 Agent 请求前的结构化块，与既有自然语言 request 并存；同一 schema 的**载体分通道**：A2A 通道把 envelope 序列化为 message 的 data part（`DataPart`/`FromDataPart`，结构化 JSON、机器校验、互操作），本地委派保留 `Turn.Handoff`/`ExternalContext` 文本前置（降级并存，两通道共用同一组字段名） | `Validate` 对无 intent 或无验收约束的 handoff 具名拒绝且不建任务；结构化断言见 `TestSubagentHandoffEnvelope` 与 `TestHandoffEnvelopeContract` |
 | **看门狗收尾轮（已闭合）** | `FinalRoundPolicy` 在回合预算/时间预算到期时触发收尾轮：注入收尾指令、短超时保护、该轮工具调用一律不受理（配对回执）、返回后走既有 drain 真实终结——上限生效与优雅收尾两全 | `Loop.SetFinalRound` 生产接线 opt-in（默认零值=今日行为）；断言见 `TestFinalRoundClosingSemantics` 与 `TestFinalRoundClosesBesideRealDrain` |
 | **runEventLoop 单 session** | 一个 TagentAgent 实例绑定一个 (user, session) 循环；多会话需多实例 | 会话路由层（多循环共享引擎与存储） |
 | **冥想无内容价值判据** | 门控判定已解决自触发永动机：触发需新颖性门打开 **且** 距上次**执行** ≥ MinGap（节奏门，`lastMeditation` 锚；曾以“任意 turn 结束算忙”为语义的空闲锚已退役）**且**无在途冥想批（pending 防重入）。新颖性门只回答"有没有新东西"，不回答"新东西值不值得反思"——它看的是"水位之后观察面里有没有非自管新事件"，一句无关闲聊或一条低价值任务事件同样解锁下一轮 | 未消化事件量/★ 卡片密度作为内容价值第三判据（单一取数面，不分形态） |
