@@ -8,7 +8,10 @@
 // declaration types never carry syntax knowledge.
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // decodeDeclaration maps the decoded source tree onto the declaration types,
 // rejecting every key the declaration surface does not name. An empty or null
@@ -101,7 +104,7 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if n == nil || n.kind != sourceMap {
 		return nil, &decodeError{source: source, line: nodeLine(n), field: path, reason: "expected a mapping"}
 	}
-	fields, err := mapFields(source, path, n, "id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params")
+	fields, err := mapFields(source, path, n, "id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params", "final_round")
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +133,74 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.Params, err = floatMapField(source, joinField(path, "params"), fields["params"]); err != nil {
 		return nil, err
 	}
+	if a.FinalRound, err = finalRoundField(source, joinField(path, "final_round"), fields["final_round"]); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// finalRoundField maps one watchdog budget mapping onto its declaration; an
+// absent or null field declares no bound at all.
+func finalRoundField(source, field string, e *sourceEntry) (FinalRoundSpec, error) {
+	spec := FinalRoundSpec{}
+	if isAbsent(e) {
+		return spec, nil
+	}
+	if e.value.kind != sourceMap {
+		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
+	}
+	fields, err := mapFields(source, field, e.value, "max_rounds", "budget_seconds", "timeout_seconds", "prompt")
+	if err != nil {
+		return spec, err
+	}
+	if spec.MaxRounds, err = roundField(source, joinField(field, "max_rounds"), fields["max_rounds"]); err != nil {
+		return spec, err
+	}
+	if spec.BudgetSeconds, err = secondsField(source, joinField(field, "budget_seconds"), fields["budget_seconds"]); err != nil {
+		return spec, err
+	}
+	if spec.TimeoutSeconds, err = secondsField(source, joinField(field, "timeout_seconds"), fields["timeout_seconds"]); err != nil {
+		return spec, err
+	}
+	if spec.Prompt, err = stringField(source, joinField(field, "prompt"), fields["prompt"]); err != nil {
+		return spec, err
+	}
+	return spec, nil
+}
+
+// roundField reads one optional round count; an absent field reads as zero, and
+// a negative or fractional count is refused by name.
+func roundField(source, field string, e *sourceEntry) (int, error) {
+	if isAbsent(e) {
+		return 0, nil
+	}
+	value, err := numberNode(source, field, e.value)
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a non-negative count of rounds"}
+	}
+	if value != math.Trunc(value) {
+		return 0, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a whole count of rounds"}
+	}
+	return int(value), nil
+}
+
+// secondsField reads one optional duration written as a count of seconds; an
+// absent field reads as zero, and a negative count is refused by name.
+func secondsField(source, field string, e *sourceEntry) (float64, error) {
+	if isAbsent(e) {
+		return 0, nil
+	}
+	value, err := numberNode(source, field, e.value)
+	if err != nil {
+		return 0, err
+	}
+	if value < 0 {
+		return 0, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a non-negative count of seconds"}
+	}
+	return value, nil
 }
 
 // toolRefsField maps one references sequence onto tool refs.

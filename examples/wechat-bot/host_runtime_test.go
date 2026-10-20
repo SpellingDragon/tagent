@@ -91,3 +91,38 @@ func TestHostDocumentReadsShippedDocuments(t *testing.T) {
 		}
 	}
 }
+
+// TestHostDocumentSkipsAbsentPromptFiles pins the accepted side of one absent file: the declaration carries the rest.
+// - the absent file leaves the declaration short of it instead of stopping the assembly
+// - the carried file keeps its prompt kind, so the turn still reads it
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
+func TestHostDocumentSkipsAbsentPromptFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("角色\n"), 0o600); err != nil {
+		t.Fatalf("write the carried prompt: %v", err)
+	}
+	path := filepath.Join(dir, "tagent.yaml")
+	body := "entry: tagent\nprompt_dir: " + dir + "\nagents:\n  tagent:\n    provider: p\n    model: m\n    system_prompt:\n      files: [AGENTS.md, USER.md]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	doc, err := loadHostDocument(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+
+	decl, err := doc.Declaration()
+	if err != nil {
+		t.Fatalf("derive the declaration beside an absent prompt file: %v", err)
+	}
+	if len(decl.Agents) != 1 {
+		t.Fatalf("declaration carries %d agents, want 1", len(decl.Agents))
+	}
+	files := decl.Agents[0].Files
+	if len(files) != 1 {
+		t.Fatalf("agent %q carries %d prompt files, want the one the checkout carries", decl.Agents[0].ID, len(files))
+	}
+	if files[0].Path != filepath.Join(dir, "AGENTS.md") || files[0].Kind != config.FileKindPrompt {
+		t.Fatalf("prompt file = %+v, want the carried file of prompt kind", files[0])
+	}
+}

@@ -19,6 +19,21 @@ var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was alread
     ErrDuplicateInbound reports an inbound message whose identity was already
     admitted: one channel delivery drives one invocation.
 
+var ErrFaceEmptyInjection = errors.New("wechat-bot: the injection carries no user message")
+    ErrFaceEmptyInjection reports an injection request whose messages carry no
+    user content: a turn reads user input only, so the request is refused by
+    name.
+
+var ErrFaceNoActiveChat = errors.New("wechat-bot: no chat delivered yet, so the injection has no session to drive")
+    ErrFaceNoActiveChat reports an injection request arriving beside no chat
+    delivery: an injection carries no chat identity of its own, so it is
+    admitted at the chat that last delivered.
+
+var ErrFaceUnauthenticated = errors.New("wechat-bot: the injection request is not authenticated")
+    ErrFaceUnauthenticated reports an injection request whose subject did not
+    authenticate: no credential is configured for the face and the peer is not
+    the loopback address, or a configured credential was missing or unmatched.
+
 var ErrNoChatAddress = errors.New("wechat-bot: the inbound message names no chat identity")
     ErrNoChatAddress reports an inbound message that names no chat identity.
     The refusal is the whole answer: a message without an address is never

@@ -1,0 +1,30 @@
+# User
+
+Template for the personal context this deployment's entry agent reads as `USER.md`.
+Copy it to `USER.md` beside this file and edit — the copy stays out of version
+control (`resources/prompts/USER.md` is ignored on purpose), so one checkout per
+person carries one person's context. A checkout without `USER.md` still starts:
+the host skips a declared prompt file it does not carry and logs one info line.
+
+## Who is talking
+
+- Name and how to address them.
+- Languages they write in and the one to answer in.
+- Time zone and the hours they are usually reachable.
+
+## How they work
+
+- What they are building right now, in one or two sentences.
+- Their stack and the conventions already settled (so an answer does not re-open them).
+- Where the source of truth for their work lives (repo, notes, knowledge base).
+
+## How they want to be answered
+
+- Length and format they prefer; what to skip.
+- How much pushback they want: flag a wrong premise plainly, do not flatter.
+- What counts as "done" for them: a claim they can re-run, or a decision they can act on.
+
+## What not to do
+
+- Topics and details they keep out of chat.
+- Anything already ruled out — record it here so it is not proposed again.

@@ -37,6 +37,14 @@ var (
 		TaskPolicy: "",
 		Files:      []FileRef{},
 		Params:     map[string]float64{},
+		FinalRound: FinalRoundSpec{},
+	}
+
+	_ = FinalRoundSpec{
+		MaxRounds:      0,
+		BudgetSeconds:  0,
+		TimeoutSeconds: 0,
+		Prompt:         "",
 	}
 
 	_ = ToolRef{

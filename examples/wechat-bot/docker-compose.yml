@@ -8,17 +8,19 @@ services:
     read_only: true                  # 只读根文件系统
     tmpfs:
       - /app/logs:size=64m,mode=1777       # 日志写入内存盘
-      - /app/workspace:size=256m,mode=1777 # exec/任务层暂存
+      - /app/workspace:size=256m,mode=1777 # 入站附件/长文本落盘（workspace_dir）
     volumes:
-      # 持久化可写数据（记忆/轨迹/plan 规格化产出）——read_only 根下必须挂载
-      - tagent-memory:/app/.wechat-config       # localfile 记忆存储
+      # 持久化可写数据（登录态/治理审批/记忆/轨迹）——read_only 根下必须挂载
+      - tagent-memory:/app/.wechat-config       # localfile 记忆与登录态 cursor
       - tagent-trajectories:/app/data/trajectories  # 轨迹 dump
       - tagent-openspec:/app/openspec/changes   # plan 规格化产出
     environment:
-      - ZAI_API_KEY=${ZAI_API_KEY}      # 从宿主 env / .env 注入，绝不走 ~/.zshrc
+      - ZAI_API_KEY=${ZAI_API_KEY:?entry agent 的 provider 密钥必需}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?knowledge 子 agent 的 provider 密钥必需}
       - TAGENT_CONFIG=/app/tagent.yaml  # 配置已烘入镜像
-      - TAGENT_HTTP_PORT=8089
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - TAGENT_HTTP_PORT=8089           # 宿主 HTTP 面端口（healthcheck 探它）
+      # 非空则 /task 要求 Bearer 凭据；留空则只信回环对端（仅容器内可达）
+      - TAGENT_RL_AUTH_TOKEN=${TAGENT_RL_AUTH_TOKEN:-}
     ports:
       - "127.0.0.1:8089:8089"       # 仅绑本地，经反代/网络策略暴露
     deploy:
@@ -38,29 +40,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    networks:
-      - tagent-net
-
-  # 可观测后端（可选）：默认**不启动**——需显式 `docker compose --profile observability up -d`。
-  # 启用后在 .env 或宿主 env 设 OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317（同网络服务名），
-  # tagent 的 turn span 与框架层 span 即导出至此，UI 见 http://127.0.0.1:16686。
-  # 未启用时 OTEL_EXPORTER_OTLP_ENDPOINT 为空 → noop provider，零开销、行为逐字节不变。
-  jaeger:
-    image: jaegertracing/all-in-one:latest   # 生产建议固定到具体版本号，避免 latest 漂移
-    container_name: tagent-jaeger
-    profiles: ["observability"]
-    restart: unless-stopped
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true          # 开启 OTLP 接收（gRPC 4317 / HTTP 4318）
-      - SPAN_STORAGE_TYPE=memory             # 内存存储：排障用，重启即清空（持久化改用 badger/es）
-      - MEMORY_MAX_TRACES=20000              # 内存态 trace 上限，防长期运行 OOM
-    ports:
-      - "127.0.0.1:16686:16686"              # Jaeger UI（仅绑本地，经 SSH 隧道或反代访问）
-      - "127.0.0.1:4317:4317"                # OTLP gRPC（宿主进程形态的 tagent 亦可直连）
-    deploy:
-      resources:
-        limits:
-          memory: 1g
     networks:
       - tagent-net
 

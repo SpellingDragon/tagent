@@ -6,7 +6,7 @@
 
 **设计原则（逐字保留）**：
 - **信息隔离**：Session 只保存轻量引用（`EventReference`），完整数据在 MemoryStore
-- **因果优先**：每个事件通过 `RelationStore.SetParent` 指向其前驱事件，支持因果回溯
+- **因果优先**：每个事件通过 `MemoryRelations.SetParent` 指向其前驱事件，支持因果回溯
 - **视图独立**：压缩只修改 LLM 消息视图，不修改 MemoryStore 中的数据
 - **引擎旁路**：向量索引是派生投影（事件不可变；遗忘物理删除时联动移除向量），不进存储同步点
 
@@ -30,7 +30,7 @@
 | **8. 压实 crash-safe** | 任何时刻崩溃不丢事件，最多短暂双层并存 | 先写目标层、后删源层；查询侧按 EventKey 去重并保留高层版本 |
 | **9. 同点投影** | “对 LLM 可见”与“已入投影”不得分家 | `persistBusEvent` 同步双写 store 与投影 |
 
-**事实链红线**：**关键**：压缩只修改发给 LLM 的消息视图，不修改 MemoryStore 和 RelationStore。因果关系在整个生命周期中保持不变。事件入库后，任何后台工人（封口、压实、TTL、容量）只能搬迁、遮蔽或删除**可见性**，不得改写正文与身份；fold/compaction 只追加新事实，从不修改旧事实。
+**事实链红线**：**关键**：压缩只修改发给 LLM 的消息视图，不修改 MemoryStore 和 MemoryRelations。因果关系在整个生命周期中保持不变。事件入库后，任何后台工人（封口、压实、TTL、容量）只能搬迁、遮蔽或删除**可见性**，不得改写正文与身份；fold/compaction 只追加新事实，从不修改旧事实。
 
 ### 1.2 压缩固化语义（素材律与折叠）
 
@@ -109,9 +109,9 @@
 
 `EventReference` 只含 key、PartitionID、type、EventSummary、Timestamp、Role；**关键区别**：Session 中的 `EventReference` 不包含 `Content`、`ToolCalls` 和 `Response`，LLM 看到的只是 `EventSummary`。
 
-### 2.2 因果链（RelationStore）
+### 2.2 因果链（MemoryRelations）
 
-`InMemoryStore` 与 `FileSegmentStore` 都直接嵌入 `RelationStore` 并实现 `RelationStoreProvider`；第三方实现经该接口暴露因果能力。内容与关系分离：`FullEvent` 不可变，`RelationStore` 维护可变父子边。`parent=0` 表示根事件。
+因果边由 `memory/replay` 的 `MemoryRelations` 单独持有，任何 store 实现都不内嵌父子边：`FullEvent` 不可变，父子边可变，父引用不进记录。父边为空表示该事件没有父边（段起点）。日志形态在 `memory/ledger`：`relations.journal` 单文件逐行追加。
 
 回溯侧（`memory_turn` 与统一 `recall` 的 `turn_key` 形态）沿 `GetParent` 回走时，走不到回合起点必须**具名说出它观察到了什么**，而不是把它当成"没有历史"。六个读数都是观察陈述，不推断原因——TTL、驱逐、权限都不是存储层报出来的，替它猜一个就是把不确定转成错误结论：
 
@@ -126,7 +126,7 @@
 
 三字段与判读规则：`complete=true` 时 `reason` 必为空；`capped` 显式区分"预算用完"这一种不完整。三个字段都是**加法**——读方在缺失时按"不完整"处理，绝不当作空历史。写侧两条规则决定这些读数必然出现而非偶发：`parentKey==0` 时新段就地起链（不猜父），以及因果游标超上界（`maxLastEventKeys`）时回收最久未更新的键（正在提交的键被引用计数保护，不会被抽掉锚）；被回收的域下一次提交就会以 `no_parent_edge` 开头。
 
-**因果链自身的持久化顺序**：`SetParent`／解除父子关系都**先追加 `relations.journal`、后改内存邻接表**，且两步落在同一把锁里。这样一条失败的日志追加之后，读侧看到的仍是改动前的关系——调用方拿到错误、可原样重试，而内存里绝不会挂上一条校日志无法重放的边。同一判据也约束删除侧：journal 未落盘就不撤内存边。
+**因果链自身的持久化形态是 fsync 追加 + 回放重建**：`MemoryRelations.SetParent`（含解除父子关系）在**同一把锁里先追加 `relations.journal`、后改内存邻接表**；`Append` 仅在写入并 `file.Sync()` 屏障完成后才返回成功，屏障失败即按写入前长度截断回滚，故读侧看到的仍是改动前的关系、调用方可原样重试，内存里绝不会挂上一条无法重放的边；journal 未落盘就不撤内存边。打开时 `OpenRelationsJournal` 先裁掉最后一个换行之后的尾行（那次追加从未返回成功），`OpenMemoryRelations` 再把每行回放成父边：同一 child 后出现的记录覆盖先前的，空 parent 删去该边；`VerifyReplay` 把回放结果与持有的链逐项比对，不等即报 `ErrRelationsReplayMismatch`。根下只有这一份日志，没有快照文件。
 
 <a id="event-key"></a>
 ### 2.3 EventKey 位布局与跨重启单调性
@@ -149,7 +149,7 @@
 <a id="file-segment-store"></a>
 ### 2.4 KV 键空间与段的生命周期
 
-五类键之间**没有数据库级的引用约束**，全靠键名格式约定互相指向。键形：`{pid}:evt:{窗}:{seq}`→FullEvent、`{pid}:idx:{eventKey}`→`窗:seq`、`{pid}:meta:{窗}`→SegmentMeta、`{pid}:tomb:{eventKey}`→墓碑、`tagent:vec:{eventKey}`→embedding；因果另存 `relations.journal`/`relations.snap`。
+五类键之间**没有数据库级的引用约束**，全靠键名格式约定互相指向。键形：`{pid}:evt:{窗}:{seq}`→FullEvent、`{pid}:idx:{eventKey}`→`窗:seq`、`{pid}:meta:{窗}`→SegmentMeta、`{pid}:tomb:{eventKey}`→墓碑、`tagent:vec:{eventKey}`→embedding；因果另存 `relations.journal`（逐行 JSON，无快照文件）。
 
 | 指向契约 | 由谁维护 | 由谁消费 | 在本模块的作用 |
 |---|---|---|---|
@@ -195,7 +195,7 @@
 | 状态 | 位置 | 恢复机制 |
 |---|---|---|
 | 事件事实 | `kv.json` + `kv.wal.jsonl` | 启动 `loadSnapshot` + `replayWAL` |
-| 因果链 | `relations.snap` + `relations.journal` | `NewInMemRelationStore` 构造时 `recover()`（快照 + 日志重放） |
+| 因果链 | `relations.journal` | `OpenMemoryRelations` 打开时逐行回放重建父边（同 child 后记录覆盖、空 parent 删边），打开前裁掉未完成尾行 |
 | 墓碑集 | `{pid}:tomb:*` | `TombstoneSet.RecoverFromKV` |
 | LRU 缓存 | 仅内存 | 不需恢复（冷启动自然回填） |
 | 窗口 / seq / 事件计数 | 仅内存 `PartitionState` | 靠首次写入重建——契约 2 的软肋，见缺口表 |
@@ -243,7 +243,7 @@
 
 ### 3.4 写入全景与装饰链
 
-两个生产者归一到**同一条 `StoreEvent` 写入路径**（EventBus 注入经 `persistBusEvent`；框架 LLM 事件经 `MemoryPlugin.OnEvent`），因而只有一组写入不变量需要守护；压缩折叠的 compaction 事件是第三类合法写入——它记录折叠本身，不产生事实事件。窗口与 seq 的分配住在内存态 `PartitionState`（`sync.Map`，按 pid 惰性创建），这是“槽位分配”的唯一权威，也是恢复链路的关键。因果链（RelationStore）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。投影重建是同一 fold 的全量入口：`RebuildProjectionFromWAL` 在启动期（先于 spill 重放）从事实链回放复原（compaction snapshot + 尾部），与运行期增量 `Add` 等价。
+两个生产者归一到**同一条 `StoreEvent` 写入路径**（EventBus 注入经 `persistBusEvent`；框架 LLM 事件经 `MemoryPlugin.OnEvent`），因而只有一组写入不变量需要守护；压缩折叠的 compaction 事件是第三类合法写入——它记录折叠本身，不产生事实事件。窗口与 seq 的分配住在内存态 `PartitionState`（`sync.Map`，按 pid 惰性创建），这是“槽位分配”的唯一权威，也是恢复链路的关键。因果链（MemoryRelations）与投影（SessionProjection）是写入的**旁路产物**，不参与事实链本身；事实链只在 KV 里。投影重建是同一 fold 的全量入口：`RebuildProjectionFromWAL` 在启动期（先于 spill 重放）从事实链回放复原（compaction snapshot + 尾部），与运行期增量 `Add` 等价。
 
 <a id="engine-overview"></a>
 **装饰链（冻结契约 C2）**：`resolveMemoryStore → wireMemoryEngine`（配置 `memory.engine` 时包 engineBridge；未配置原样返回=零行为变化）`→ ErrorTrackingStore`（DegradationManager 启用时最外层包裹，内含 MemSpill）。顺序固定：**错误追踪在最外层、引擎桥在中间、事件存储在最内层**；错误追踪必须在最外层，否则它看不见引擎与存储层抛出的失败。边界能力接口（引擎提供者、KV 提供者、向量移除器）定义在被缝合的两侧共同依赖的核心包中，而不是引擎包内。
@@ -521,7 +521,7 @@ spill 重放只走 canonical 路径：`ReplayWithNotify` 依赖 store 的 `Event
 | **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `recall(turn_key=…)` 因果链召回** | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
 | **压缩触发 token 估值偏乐观（大上下文溢出风险）** | `DefaultTokenCounter`（`CharsPerToken=2.0`，仅计 `msg.Content`）对**中英混排+代码**长上下文实测**低估 ~15%**（远端语料 ≥8k tok 段 est/real p50=0.846、83% 低估）→ 压缩**晚于** provider 真实上限触发 → **provider 400 溢出风险**；且不含 tools-schema 每请求开销。防线：溢出即显式报错 | 复现：`rl/trajectory_analyze.py [estimator-bias]`；预算线预留 ~15%、tools-schema 开销入模、内容分型/自适应系数 |
 | **rustviking 原生向量 CLI 未接线** | 引擎 MVP 走内存索引+KV 序列化持久化；`index insert/search/delete` 为预留后端 | 实测后迁移同库向量后端（引擎侧适配，协议不变） |
-| **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + RelationStore 反向索引 |
+| **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + MemoryRelations 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |
 | **历史脏数据** | 旧 11 位 mask 时代的负 key / 超界分区（如 1167）残留于实机存量 | TTL 自然清退；不做主动迁移（读路径已容错） |
 | **压实未按日/周分组** | L2/L3 段名仅是对齐命名，一个“日段”可装跨数天事件——真实边界使其不再影响正确性，但超宽段剪枝粒度粗 | 压实按日/周分组产段 |

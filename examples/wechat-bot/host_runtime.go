@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -65,14 +66,28 @@ type providerEntry struct {
 }
 
 // agentEntry is one declared agent as the host reads it: its model reference,
-// the prompt files it is assembled from and the tools it declares.
+// the prompt files it is assembled from, the tools it declares and the watchdog
+// budget its invocations run under.
 type agentEntry struct {
 	Provider     string `yaml:"provider"`
 	Model        string `yaml:"model"`
 	SystemPrompt struct {
 		Files []string `yaml:"files"`
 	} `yaml:"system_prompt"`
-	Tools []hostToolRef `yaml:"tools"`
+	Tools      []hostToolRef    `yaml:"tools"`
+	FinalRound *finalRoundEntry `yaml:"final_round"`
+}
+
+// finalRoundEntry is the watchdog budget one declared agent opts into: the tool
+// rounds one invocation may run, the time it may spend before its next decision
+// becomes the closing round, the timeout that round runs under and the
+// instruction it carries. Every entry is optional, so an agent declaring no
+// budget keeps every invocation unbounded.
+type finalRoundEntry struct {
+	MaxRounds      int     `yaml:"max_rounds"`
+	BudgetSeconds  float64 `yaml:"budget_seconds"`
+	TimeoutSeconds float64 `yaml:"timeout_seconds"`
+	Prompt         string  `yaml:"prompt"`
 }
 
 // hostToolRef is one tool reference of a declared agent.
@@ -125,18 +140,53 @@ func (d *hostDocument) Declaration() (*config.Declaration, error) {
 	decl := &config.Declaration{Entry: entry}
 	for _, id := range d.agentOrder() {
 		spec := config.AgentSpec{ID: id, Model: d.modelName(id)}
-		for _, name := range d.Agents[id].SystemPrompt.Files {
-			spec.Files = append(spec.Files, config.FileRef{
-				Path: filepath.Join(d.PromptDir, name),
-				Kind: config.FileKindPrompt,
-			})
+		files, err := d.promptFiles(id)
+		if err != nil {
+			return nil, err
 		}
+		spec.Files = files
 		if d.declaresSend(id) {
 			spec.Tools = append(spec.Tools, config.ToolRef{Name: sendToolID})
 		}
+		spec.FinalRound = d.Agents[id].finalRound()
 		decl.Agents = append(decl.Agents, spec)
 	}
 	return decl, nil
+}
+
+// finalRound reports the watchdog budget one declared agent opts into; an agent
+// declaring none reports the zero budget, which leaves its invocations
+// unbounded.
+func (a agentEntry) finalRound() config.FinalRoundSpec {
+	if a.FinalRound == nil {
+		return config.FinalRoundSpec{}
+	}
+	return config.FinalRoundSpec{
+		MaxRounds:      a.FinalRound.MaxRounds,
+		BudgetSeconds:  a.FinalRound.BudgetSeconds,
+		TimeoutSeconds: a.FinalRound.TimeoutSeconds,
+		Prompt:         a.FinalRound.Prompt,
+	}
+}
+
+// promptFiles reports the prompt files one declared agent is assembled from. A
+// declared file the checkout does not carry is skipped with one info line, so the
+// personal context a deployment keeps beside the checkout stays an input rather
+// than a startup precondition; any other read failure stops the assembly.
+func (d *hostDocument) promptFiles(id string) ([]config.FileRef, error) {
+	files := make([]config.FileRef, 0, len(d.Agents[id].SystemPrompt.Files))
+	for _, name := range d.Agents[id].SystemPrompt.Files {
+		path := filepath.Join(d.PromptDir, name)
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				log.Infof("[host] declared prompt file absent, skipped: %s", path)
+				continue
+			}
+			return nil, fmt.Errorf("wechat-bot: read the declared prompt file %s: %w", path, err)
+		}
+		files = append(files, config.FileRef{Path: path, Kind: config.FileKindPrompt})
+	}
+	return files, nil
 }
 
 // agentOrder returns the declared agent identities in declaration order: the
@@ -258,6 +308,9 @@ type hostRuntime struct {
 	sender *hostSender
 	seen   *SeenStore
 	gates  sync.Map
+
+	chatMu   sync.Mutex
+	lastChat string
 }
 
 // inboundMessage is one channel delivery the host admits: the dedup identity of
@@ -376,6 +429,7 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 	if err := h.router.Bind(addr, in.ChatID); err != nil {
 		return event.Address{}, err
 	}
+	h.rememberChat(in.ChatID)
 	unlock := h.lockAddress(addr)
 	defer unlock()
 
@@ -430,6 +484,26 @@ func (h *hostRuntime) deliverTurn(ctx context.Context, addr event.Address, userN
 			content:       "执行出错：本轮模型回合失败，未产出交付内容。",
 		})
 	}
+}
+
+// rememberChat records the chat this delivery came from as the chat an injection
+// arriving without a chat of its own is admitted at.
+func (h *hostRuntime) rememberChat(chatID string) {
+	trimmed := strings.TrimSpace(chatID)
+	if trimmed == "" {
+		return
+	}
+	h.chatMu.Lock()
+	h.lastChat = trimmed
+	h.chatMu.Unlock()
+}
+
+// mostRecentChat reports the chat that last delivered, and no chat beside none: an
+// injection is admitted there and never at a chat of another session.
+func (h *hostRuntime) mostRecentChat() string {
+	h.chatMu.Lock()
+	defer h.chatMu.Unlock()
+	return h.lastChat
 }
 
 // deliver is the one outbound entry both channels reach: the active send tool

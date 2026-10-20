@@ -394,6 +394,19 @@ func main() {
 		return nil
 	})
 
+	face := newTaskFace(ctx, host, os.Getenv(faceTokenEnv))
+	listener, err := face.Listen()
+	if err != nil {
+		log.Errorf("[host] HTTP 面未装配，探针与注入端点均不可用: %v", err)
+	} else {
+		fmt.Printf("  HTTP:        http://%s (/healthz, /task)\n", listener.Addr())
+		go func() {
+			if err := face.Serve(listener); err != nil && !errors.Is(err, context.Canceled) {
+				log.Warnf("[host] HTTP 面结束: %v", err)
+			}
+		}()
+	}
+
 	fmt.Println("Bot is running. Press Ctrl+C to stop.")
 	if err := bot.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "Bot stopped with error: %v\n", err)

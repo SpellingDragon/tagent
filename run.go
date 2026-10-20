@@ -285,11 +285,38 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 	}
 	outcome, err := r.publisher.Publish(ctx, cand)
 	if err == nil {
+		r.loop.SetFinalRound(finalRoundPolicy(decl))
 		r.mu.Lock()
 		r.current = cand.Plan
 		r.mu.Unlock()
 	}
 	return outcome, err
+}
+
+// finalRoundPolicy maps the watchdog budget a declaration names for its entry
+// agent onto the policy every drive of this run runs under. The closing round
+// stays opt-in: a declaration that names no budget yields the zero policy,
+// which keeps every drive unbounded.
+func finalRoundPolicy(decl *config.Declaration) agent.FinalRoundPolicy {
+	spec := finalRoundSpecOf(decl)
+	return agent.FinalRoundPolicy{
+		MaxRounds: spec.MaxRounds,
+		Budget:    time.Duration(spec.BudgetSeconds * float64(time.Second)),
+		Timeout:   time.Duration(spec.TimeoutSeconds * float64(time.Second)),
+		Prompt:    spec.Prompt,
+	}
+}
+
+// finalRoundSpecOf reports the watchdog budget a declaration names for its entry
+// agent; a declaration naming no entry agent or no budget reports the zero
+// budget.
+func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
+	for _, spec := range decl.Agents {
+		if spec.ID == decl.Entry {
+			return spec.FinalRound
+		}
+	}
+	return config.FinalRoundSpec{}
 }
 
 // restoreChains folds every durable fact chain the storage already holds back

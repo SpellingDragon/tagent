@@ -48,13 +48,23 @@ agents:
   # ---- 顶层主 Agent(微信助手)----
   tagent:
     # provider/model 省略 → 回退全局(zhipu / glm-5.3-flash)
+    # USER.md 是部署侧个人上下文,不随仓库分发(见 .gitignore 与 USER.md.example)。
+    # 检出库不带它时,宿主按 skip-missing 契约跳过一个 info 日志继续装配;
+    # 部署方把 USER.md 放进 prompt_dir 即被加载。
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
     # 主动送达面:声明即授权(不声明的 agent 看不见 send);发送通路与会话解析复用宿主唯一实现。
     tools:
       - { kind: tool, id: send }
+    # 看门狗收尾轮(声明即 opt-in;不声明=无界,与未接此键时完全一致):
+    # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
+    # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
+    final_round:
+      max_rounds: 24
+      budget_seconds: 3300
+      timeout_seconds: 120
     # 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
-    #   memory / compress / max_tool_iterations / max_tokens / temperature / thinking_enabled
+    #   memory / compress / max_tokens / temperature / thinking_enabled
     #   compress_threshold / keep_recent_tasks / task_terminal_ttl / task_default_ttl / meditation
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
@@ -69,14 +79,14 @@ agents:
   # ---- Recall:记忆检索子 Agent ----
   recall:
     system_prompt:
-      files: [recall_agent.md]
+      files: [recall_agent.md]      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace;工具面本身仍待接线)
     # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
     #         以及工具面(recall_query/recall_get/recall_recent/recall_trace)
 
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
     system_prompt:
-      files: [action_agent.md]
+      files: [action_agent.md]      # 本目录自带(工具名按本部署的声明书写:file 工具/exec/mcp_call;工具面本身仍待接线)
     # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / temperature /
     #         thinking_enabled / reasoning_effort,以及 file 工具、exec、mcp_call
 

@@ -51,6 +51,7 @@
 !resources/
 !resources/prompts/
 !resources/prompts/*.md
+!resources/prompts/USER.md.example
 resources/prompts/USER.md
 
 # Allow skills: whole dirs tracked (whitelist mode), runtime node_modules excluded.
@@ -137,6 +138,10 @@ openspec/
 
 # 出站文件投递的副本生命周期：同样必须点名。
 !file_replica.go
+
+# 宿主 HTTP 面（探活 + 注入端点）源码与测试：白名单制必须点名。
+!inject_face.go
+!inject_face_test.go
 
 # 真实微信发送面的资源门测试: 白名单制必须点名入库, 否则门测试本身不在版本控制。
 !main_real_test.go

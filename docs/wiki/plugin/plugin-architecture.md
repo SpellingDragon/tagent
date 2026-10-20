@@ -45,7 +45,7 @@
 | 2 | 分配 Snowflake EventKey，构造 `FullEvent`（assistant 正文经 `sanitizeAssistantContent` 剥模型伪造的 `[evt_...]` 前缀，其余角色逐字存） | — |
 | 3 | 盖归因章：先 `agent_name`，再叠加 `AttributionFrom(ctx)` 的 rollout_id/trace_id/span_id/bundle_id | 归因缺失不阻断提交 |
 | 4 | `StoreEvent` | 失败即 `stored=false`：ERROR 留痕；带凭据的回合 `MarkRejected` |
-| 5 | 仅 `stored`：`RelationStore.SetParent` | 关系失败**不回滚内容** |
+| 5 | 仅 `stored`：`MemoryRelations.SetParent` | 关系失败**不回滚内容** |
 | 6 | 仅 `stored`：向本调用的 `ProjectionSink` `Append` EventReference | 未接 sink 时跳过——**投影与存储同点，绝不先投影后存储** |
 | 7 | 提交闸：按 `stored` 发布或撤回持久票据 | 见 §四 |
 | 8 | 仅 `stored`：推进因果游标 | 失败键永不成为下一条的父 |
@@ -55,7 +55,7 @@
 <a id="causal-mech"></a>
 ## 三、因果链机制
 
-每个事件经 `RelationStore.SetParent(childKey, parentKey)` 维护前驱，构成有向链；父关系**不进事件字段**。
+每个事件经 `MemoryRelations.SetParent(childKey, parentKey)` 维护前驱，构成有向链；父关系**不进事件字段**。
 
 - **同因果键线性化**：父键读取、事件键分配、落库、关系写入、游标推进落在同一条顺序里。两条并发提交若各读各的父，会造出分叉链或指向虚事件的父引用。串行单元是 `causalGuard`（每个 `<partition>:<session>` 一条），**不同因果键互不阻塞**。
 - **锁序**：持 `p.mu` 只登记引用计数 → 放 `p.mu` → 取键锁；`p.mu` 是叶锁，绝不横跨存储 I/O。
@@ -142,7 +142,7 @@
 
 ### 9.3 Session 与 MemoryStore 的分工（原版结论，仍然成立）
 
-Session 是框架提供的通用会话管理（完整 `event.Event`、`StateDelta` 累积、单 Session 范围）；MemoryStore 是 tagent 的差异化能力（`RelationStore` 因果图、`GetEvent(key)` 直接定位、按类型/时间/跨 Session 检索、`FullEvent.ToolCalls` 不随 LLM 视图变化）。**两者互补而非替代**：`MemoryPlugin` 是桥（FullEvent 入 MemoryStore，EventKey/EventType 经 `StateDelta` 合并进 `Session.State`），SmartCompress 只改发给 LLM 的 messages 视图，两者都不被修改。
+Session 是框架提供的通用会话管理（完整 `event.Event`、`StateDelta` 累积、单 Session 范围）；MemoryStore 是 tagent 的差异化能力（`MemoryRelations` 因果图、`GetEvent(key)` 直接定位、按类型/时间/跨 Session 检索、`FullEvent.ToolCalls` 不随 LLM 视图变化）。**两者互补而非替代**：`MemoryPlugin` 是桥（FullEvent 入 MemoryStore，EventKey/EventType 经 `StateDelta` 合并进 `Session.State`），SmartCompress 只改发给 LLM 的 messages 视图，两者都不被修改。
 
 ## 十、历史机制对照
 

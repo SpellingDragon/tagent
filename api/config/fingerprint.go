@@ -42,14 +42,26 @@ type canonicalDeclaration struct {
 
 // canonicalAgent is one agent spec in canonical field order.
 type canonicalAgent struct {
-	ID         string             `json:"id"`
-	ParentID   string             `json:"parent_id"`
-	Model      string             `json:"model"`
-	Tools      []canonicalToolRef `json:"tools"`
-	Plugins    []string           `json:"plugins"`
-	TaskPolicy string             `json:"task_policy"`
-	Files      []canonicalFileRef `json:"files"`
-	Params     map[string]float64 `json:"params"`
+	ID         string               `json:"id"`
+	ParentID   string               `json:"parent_id"`
+	Model      string               `json:"model"`
+	Tools      []canonicalToolRef   `json:"tools"`
+	Plugins    []string             `json:"plugins"`
+	TaskPolicy string               `json:"task_policy"`
+	Files      []canonicalFileRef   `json:"files"`
+	Params     map[string]float64   `json:"params"`
+	FinalRound *canonicalFinalRound `json:"final_round,omitempty"`
+}
+
+// canonicalFinalRound is one agent's watchdog budget in canonical field order.
+// An agent that declares no bound carries none of it, so its canonical form
+// names no budget and its fingerprint stays the one the declaration surface had
+// before the budget existed.
+type canonicalFinalRound struct {
+	MaxRounds      int     `json:"max_rounds,omitempty"`
+	BudgetSeconds  float64 `json:"budget_seconds,omitempty"`
+	TimeoutSeconds float64 `json:"timeout_seconds,omitempty"`
+	Prompt         string  `json:"prompt,omitempty"`
 }
 
 // canonicalToolRef is one tool ref in canonical field order.
@@ -89,9 +101,24 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 			TaskPolicy: a.TaskPolicy,
 			Files:      canonicalFileRefs(a.Files),
 			Params:     canonicalFloatMap(a.Params),
+			FinalRound: canonicalFinalRoundOf(a.FinalRound),
 		})
 	}
 	return out
+}
+
+// canonicalFinalRoundOf maps one watchdog budget onto its canonical form, or
+// names no budget at all while the budget places no bound.
+func canonicalFinalRoundOf(s FinalRoundSpec) *canonicalFinalRound {
+	if s.isZero() {
+		return nil
+	}
+	return &canonicalFinalRound{
+		MaxRounds:      s.MaxRounds,
+		BudgetSeconds:  canonicalFloat(s.BudgetSeconds),
+		TimeoutSeconds: canonicalFloat(s.TimeoutSeconds),
+		Prompt:         s.Prompt,
+	}
 }
 
 // canonicalToolRefs maps tool refs onto canonical tool ref forms.

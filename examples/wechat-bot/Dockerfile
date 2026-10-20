@@ -18,18 +18,17 @@ RUN npm install -g @fission-ai/openspec --no-audit --no-fund \
  && npm cache clean --force
 
 # ---------- 运行阶段：debian-slim + 运行时依赖 ----------
-# 选型说明：本 bot 需要 tmux（action 异步任务层）、node（openspec/skills）、
-# 以及 shell（entrypoint）——distroless/static 三者皆无，故改用 debian-slim。
+# 选型说明：本 bot 需要 node（openspec/skills，工具面未接线，保留供重接）、
+# curl（容器内探活）以及 shell（entrypoint）——distroless/static 三者皆无，故改用 debian-slim。
 # 安全加固（非 root / cap_drop / no-new-privileges / 资源上限 / 仅绑本地端口）
 # 全部保留于 docker-compose.yml，不因基础镜像变化而削弱。
 FROM debian:bookworm-slim
 
 # 运行时依赖：
-#   tmux            — 保留：exec 工具的异步任务层（本宿主未接线该工具）
-#   curl            — 保留供容器内探测（本宿主不装配 HTTP 面，无 /healthz 端点）
+#   curl            — 容器内探 /healthz（compose healthcheck 用它）
 #   libstdc++6/zlib1g — 拷贝来的 node 二进制所需运行时库
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl tmux libstdc++6 zlib1g \
+      ca-certificates curl libstdc++6 zlib1g \
  && rm -rf /var/lib/apt/lists/*
 
 # node 运行时 + openspec CLI（自工具阶段拷贝，固定 node 22 版本）

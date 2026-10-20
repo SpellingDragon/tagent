@@ -2,8 +2,10 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -146,6 +148,44 @@ agents:
 	fingerprintOf(t, *d1)
 	if !reflect.DeepEqual(d1, before) {
 		t.Fatalf("fingerprinting changed the declaration:\nbefore: %+v\nafter:  %+v", before, d1)
+	}
+}
+
+// TestFingerprintNamesTheWatchdogBudgetOnlyWhenDeclared pins that the budget moves the fingerprint only where a declaration names one.
+// - a declaration naming no budget fingerprints exactly as the same declaration carrying the zero budget
+// - naming any one entry of the budget moves the fingerprint
+// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
+func TestFingerprintNamesTheWatchdogBudgetOnlyWhenDeclared(t *testing.T) {
+	decl := loadConfigDeclaration(t, "entry: main\nagents:\n  - id: main\n    model: m1\n")
+	bare := fingerprintOf(t, *decl)
+	zeroed := *decl.Clone()
+	zeroed.Agents[0].FinalRound = FinalRoundSpec{}
+	if got := fingerprintOf(t, zeroed); got != bare {
+		t.Fatalf("fingerprint with the zero budget spelled out = %q, want %q", got, bare)
+	}
+	shape, err := json.Marshal(canonicalAgent{ID: "main", FinalRound: canonicalFinalRoundOf(FinalRoundSpec{})})
+	if err != nil {
+		t.Fatalf("marshal the canonical agent = %v", err)
+	}
+	if strings.Contains(string(shape), "final_round") {
+		t.Fatalf("canonical agent of a declaration naming no budget = %s, want no budget key", shape)
+	}
+	for _, tc := range []struct {
+		name string
+		spec FinalRoundSpec
+	}{
+		{name: "rounds", spec: FinalRoundSpec{MaxRounds: 3}},
+		{name: "time budget", spec: FinalRoundSpec{BudgetSeconds: 60}},
+		{name: "closing timeout", spec: FinalRoundSpec{TimeoutSeconds: 5}},
+		{name: "closing prompt", spec: FinalRoundSpec{Prompt: "deliver"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bounded := *decl.Clone()
+			bounded.Agents[0].FinalRound = tc.spec
+			if got := fingerprintOf(t, bounded); got == bare {
+				t.Fatalf("fingerprint did not move when the declaration named %s: %q", tc.name, got)
+			}
+		})
 	}
 }
 

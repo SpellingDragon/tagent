@@ -59,6 +59,37 @@ type AgentSpec struct {
 	Files []FileRef
 	// Params holds the agent's declaration-time model parameters.
 	Params map[string]float64
+	// FinalRound is the watchdog budget the invocations of this agent run
+	// under. Every field of the zero budget is zero, which places no bound on
+	// any invocation.
+	FinalRound FinalRoundSpec
+}
+
+// FinalRoundSpec is the declaration of one agent's watchdog budget: how many
+// tool rounds one invocation may run and how long it may spend before its next
+// decision becomes the closing round, the instruction that round carries and
+// the timeout it runs under. The zero budget places no bound on any invocation,
+// so a declaration that names no budget leaves every drive exactly as it runs
+// beside no budget at all.
+type FinalRoundSpec struct {
+	// MaxRounds bounds the tool rounds one invocation may run; 0 removes the
+	// bound.
+	MaxRounds int
+	// BudgetSeconds bounds the time one invocation may spend, in seconds; 0
+	// removes the bound.
+	BudgetSeconds float64
+	// TimeoutSeconds bounds the closing round itself, in seconds; 0 takes the
+	// runtime default timeout.
+	TimeoutSeconds float64
+	// Prompt is the closing instruction handed to the model; "" takes the
+	// runtime default instruction.
+	Prompt string
+}
+
+// isZero reports whether the budget places no bound at all: every field is the
+// zero of its kind, so the declaration states no watchdog.
+func (s FinalRoundSpec) isZero() bool {
+	return s == FinalRoundSpec{}
 }
 
 // ToolRef is a declaration-time reference to a tool, to a sub-agent delegation

@@ -250,6 +250,11 @@ agents:
     params:
       temperature: 0.2
       max_tokens: 4096
+    final_round:
+      max_rounds: 8
+      budget_seconds: 120
+      timeout_seconds: 15
+      prompt: deliver what exists
     tools:
       - name: exec
         params:
@@ -281,6 +286,7 @@ refs: [{params: {top_k: "4"}, name: search}]
 agents:
 - {id: main, model: glm-4-flash, task_policy: default, plugins: [risk, view],
    params: {max_tokens: 4096, temperature: 0.2},
+   final_round: {max_rounds: 8, budget_seconds: 120, timeout_seconds: 15, prompt: "deliver what exists"},
    tools: [{name: exec, params: {workspace: "/tmp/ws"}},
      {endpoint: "https://remote.example/knowledge", name: knowledge}],
    files: [{kind: prompt, path: prompts/main.md}, {kind: skill, path: skills/search.md}]}
@@ -300,6 +306,7 @@ const jsonCanonical = `{
       "task_policy": "default",
       "plugins": ["risk", "view"],
       "params": {"temperature": 0.2, "max_tokens": 4096},
+      "final_round": {"max_rounds": 8, "budget_seconds": 120, "timeout_seconds": 15, "prompt": "deliver what exists"},
       "tools": [
         {"name": "exec", "params": {"workspace": "/tmp/ws"}},
         {"name": "knowledge", "endpoint": "https://remote.example/knowledge"}
@@ -334,6 +341,11 @@ agents:
     params:
       temperature: 0.2
       max_tokens: 4096
+    final_round:
+      max_rounds: 8
+      budget_seconds: 120
+      timeout_seconds: 15
+      prompt: deliver what exists
     tools:
       - name: exec
         params:

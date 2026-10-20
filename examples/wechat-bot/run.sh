@@ -42,9 +42,6 @@ LOG_ARCHIVE_DIR="${LOG_ARCHIVE_DIR:-${LOG_DIR}/archive}"
 LOG_ARCHIVE_KEEP="${LOG_ARCHIVE_KEEP:-50}"
 
 
-# 可观测默认值（用户可通过环境变量覆盖）
-export TAGENT_HTTP_PORT="${TAGENT_HTTP_PORT:-8089}"
-
 # ============================================================================
 # 显示帮助
 # ============================================================================
@@ -66,30 +63,25 @@ show_help() {
 
 选项:
     -n, --name NAME     实例名称 (默认: default)
-    -d, --debug         保留开关（本示例不读 LOG_LEVEL：设了不改变日志级别）
-    --otlp ENDPOINT     保留开关（本示例不装载 OTLP exporter：设了无导出）
     -h, --help          显示帮助信息
 
-环境变量:
-    ZAI_API_KEY              API 密钥 (默认配置 tagent.yaml 必需)
-    DEEPSEEK_API_KEY         子 agent knowledge 的 provider 密钥 (tagent.yaml 引用即必需)
-    AREAL_API_KEY            AReaL proxy 认证 key (RL 参数基线 tagent.rl.yaml 声明)
+环境变量（码面实际读取的）:
+    <provider>.api_key_env   配置里被 agent 引用的每个 provider 密钥；启动前逐个校验
+                             (默认配置: ZAI_API_KEY + DEEPSEEK_API_KEY)
     TAGENT_CONFIG            配置文件路径 (默认: tagent.yaml; 任何严格 schema 文档均可装载)
     TAGENT_API_ENDPOINT      LLM API 地址覆盖 (设置后 entry agent 的端点改指向该地址)
     TAGENT_SESSION_ID        会址前缀标签 (默认: wechat-session, 拼作 <label>:<entry>:)
     TAGENT_WECHAT_WORKSPACE_DIR  附件/长文本落盘根 (覆盖 app.wechat.workspace_dir)
+    TAGENT_HTTP_PORT         宿主 HTTP 面端口 (默认: 8089, 只绑 127.0.0.1)
+    TAGENT_RL_AUTH_TOKEN     宿主 HTTP 面凭据; 空则只信回环对端 (mail-poller 同名读取)
     LOG_ARCHIVE_DIR          日志归档目录 (默认: logs/archive/)
     LOG_ARCHIVE_KEEP         归档保留份数 (默认: 50)
 
-    以下变量当前**不被 wechat-bot 读取**（保留供未来接线，设了无效果）:
-    LOG_LEVEL  TAGENT_USER_ID  TAGENT_HTTP_PORT  OTEL_EXPORTER_OTLP_ENDPOINT
-    （本示例不装配 HTTP 服务面: 无 /healthz、无 /task；详见 README「装配面」）
-
 RL 训练:
 
-    ./run.sh rl 入口已退役:rl 包只保留 capture/export/reward,模型热换与 /task 的
-    宿主侧(HTTP 面)无实现,启动 RL 模式无从谈起。参数基线留在 tagent.rl.yaml
-    (严格 schema 文档,可直接 TAGENT_CONFIG=tagent.rl.yaml 装载),重接线时以它为起点。
+    ./run.sh rl 入口已退役:rl 包只保留 capture/export/reward,宿主 main.go 无 RL 分支,
+    启动 RL 模式无从谈起。参数基线留在 tagent.rl.yaml (严格 schema 文档,可直接
+    TAGENT_CONFIG=tagent.rl.yaml 装载),重接线时以它为起点。
 EOF
 }
 
@@ -146,30 +138,39 @@ is_running() {
 # ============================================================================
 # 检查 API Key
 # ============================================================================
-check_api_key() {
-    # 根据配置文件确定需要检查的 API key 环境变量
-    local config_file="${TAGENT_CONFIG:-tagent.yaml}"
-    local key_env="ZAI_API_KEY"  # 默认
+# api_key_env_of <provider> [config] — providers 注册表里该 provider 声明的密钥变量名
+api_key_env_of() {
+    local config_file="${2:-${TAGENT_CONFIG:-tagent.yaml}}"
+    sed -nE "s/^[[:space:]]+$1:[[:space:]]*\{.*api_key_env:[[:space:]]*\"?([A-Za-z_][A-Za-z0-9_]*)\"?.*/\1/p" "$SCRIPT_DIR/$config_file" 2>/dev/null | head -1
+}
 
-    # 尝试从配置文件提取 api_key_env 字段（跳过注释行）
-    local extracted
-    extracted=$(grep '^[[:space:]]*api_key_env:' "$SCRIPT_DIR/$config_file" 2>/dev/null | head -1 | sed -E 's/[[:space:]]*#.*$//' | sed -E 's/.*: *"?([^"]*)"?/\1/' | tr -d '[:space:]')
-    if [[ -n "$extracted" ]]; then
-        key_env="$extracted"
+# required_keys [config] — 配置里被 agent 实际引用的密钥变量：全局 provider 一个，
+# 加每个 agent 显式覆盖的 provider 各一个（省略 provider 的 agent 回退全局）。
+# 声明了但没被引用的 provider 不算必需（可选连接器的密钥可缺）。
+required_keys() {
+    local config_file="${1:-${TAGENT_CONFIG:-tagent.yaml}}"
+    local p
+    {
+        sed -nE 's/^provider:[[:space:]]*([A-Za-z_][A-Za-z0-9_]*).*/\1/p' "$SCRIPT_DIR/$config_file" 2>/dev/null
+        sed -nE 's/^[[:space:]]+provider:[[:space:]]*([A-Za-z_][A-Za-z0-9_]*).*/\1/p' "$SCRIPT_DIR/$config_file" 2>/dev/null
+    } | sort -u | while read -r p; do api_key_env_of "$p" "$config_file"; done | sort -u
+}
+
+check_api_key() {
+    local config_file="${TAGENT_CONFIG:-tagent.yaml}"
+    local keys k fallback missing=0
+    keys=$(required_keys "$config_file")
+
+    if [[ -z "$keys" ]]; then
+        echo "错误: 无法从 $config_file 解出任何 api_key_env（配置是否缺 provider 声明？）"
+        exit 1
     fi
 
     # 【仅本地开发】缺失的 key 从 ~/.zshrc 回退读取（开发者本机便利）。
     # 注意：这与容器生产的严格策略是有意区分的两级设计——
     #   本地开发(run.sh)：允许 ~/.zshrc 回退，但会提示
     #   容器生产(entrypoint.sh)：严格只认 env/secret 注入，拒绝任何文件回退
-    # 多 provider 配置下逐个检查 yaml 中出现的全部 api_key_env（主 agent
-    # 与子 agent/工具可能分属不同 provider，如 tencent_hy + zhipu）。
-    local all_keys k fallback
-    all_keys=$(grep '^[[:space:]]*api_key_env:' "$SCRIPT_DIR/$config_file" 2>/dev/null \
-        | sed -E 's/[[:space:]]*#.*$//' | sed -E 's/.*: *"?([^"]*)"?/\1/' | tr -d '[:space:]' | sort -u)
-    [[ -z "$all_keys" ]] && all_keys="$key_env"
-
-    for k in $all_keys ZAI_API_KEY; do
+    for k in $keys; do
         if [[ -z "$(printenv "$k" 2>/dev/null)" ]]; then
             fallback=$(zsh -c "source ~/.zshrc 2>/dev/null && echo \$$k" 2>/dev/null)
             if [[ -n "$fallback" ]]; then
@@ -179,34 +180,22 @@ check_api_key() {
         fi
     done
 
-    # 硬校验：首个 key（原有行为）+ 主 agent 实际 provider 的 key（否则
-    # 缺失会在启动后才暴露）。其余 key 属可选 provider（yaml 声明但未被
-    # agent 引用时不设也可启动），仅尽力回退导出不阻断。
-    local main_provider main_key
-    main_provider=$(awk '/^agents:/{a=1; next} a && /^  [^ ]/{n++} a && n==1 && /provider:/{print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
-    if [[ -n "$main_provider" ]]; then
-        main_key=$(awk -v p="$main_provider" '$1==p":"{f=1; next} f && /^[^ ]/{exit} f && /api_key_env:/{sub(/[[:space:]]*#.*$/,""); gsub(/["'"'"']/, "", $2); print $2; exit}' "$SCRIPT_DIR/$config_file" 2>/dev/null)
-    fi
-
-    local key_value
-    key_value=$(printenv "$key_env" 2>/dev/null)
-    local main_key_value="present"
-    [[ -n "$main_key" ]] && main_key_value=$(printenv "$main_key" 2>/dev/null)
-
-    if [[ -z "$key_value" || -z "$main_key_value" ]]; then
-        for k in "$key_env" ${main_key:+"$main_key"}; do
-            [[ -n "$(printenv "$k" 2>/dev/null)" ]] && continue
-            echo "错误: $k 环境变量未设置 (配置: $config_file)"
-            echo
-            echo "请设置环境变量:"
-            echo "  export $k=your_api_key_here"
-            echo
-            echo "或在 ~/.zshrc 中添加:"
-            echo "  export $k=your_api_key_here"
-            echo
-        done
-        exit 1
-    fi
+    # 硬校验：agent 会真发请求的每个 provider 密钥都必须有值——否则缺失会在
+    # 启动后第一回合才暴露（knowledge 走 deepseek，entry 走 zhipu）。
+    for k in $keys; do
+        [[ -n "$(printenv "$k" 2>/dev/null)" ]] && continue
+        missing=1
+        echo "错误: $k 环境变量未设置 (配置: $config_file)"
+        echo
+        echo "请设置环境变量:"
+        echo "  export $k=your_api_key_here"
+        echo
+        echo "或在 ~/.zshrc 中添加:"
+        echo "  export $k=your_api_key_here"
+        echo
+    done
+    [[ "$missing" = 1 ]] && exit 1
+    return 0
 }
 
 # ============================================================================
@@ -244,7 +233,8 @@ show_systemd_guide() {
     4) 启动 + 开机自启:  sudo systemctl daemon-reload && sudo systemctl enable --now tagent-wechat
     5) 观测:             systemctl status tagent-wechat
                          journalctl -u tagent-wechat -f
-                         # 本示例不装配 HTTP 服务面：无 /healthz 可探，存活看 journalctl / PID 文件
+                         # 存活探针: curl -fsS http://127.0.0.1:\${TAGENT_HTTP_PORT:-8089}/healthz
+                         # (设了 TAGENT_RL_AUTH_TOKEN 则加 -H "Authorization: Bearer \$TAGENT_RL_AUTH_TOKEN")
 
   说明:systemd 直接管理二进制(Type=simple + Restart=always + SIGTERM 优雅关闭 +
        journald 收日志),安全加固(NoNewPrivileges/ProtectSystem=strict/ReadWritePaths
@@ -445,21 +435,13 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         rl|rl-start|rl-stop)
-            echo "错误: ./run.sh $1 已退役——rl 包无 HTTP 面实现，宿主无 RL 分支；参数基线见 tagent.rl.yaml" >&2
+            echo "错误: ./run.sh $1 已退役——rl 包只保留 capture/export/reward，宿主无 RL 分支；参数基线见 tagent.rl.yaml" >&2
             exit 1
             ;;
         -n|--name)
             INSTANCE_NAME="$2"
             PID_FILE="${LOG_DIR}/.pid-${INSTANCE_NAME}"
             LOG_FILE="${LOG_DIR}/wechat-bot-${INSTANCE_NAME}.log"
-            shift 2
-            ;;
-        -d|--debug)
-            export LOG_LEVEL="debug"
-            shift
-            ;;
-        --otlp)
-            export OTEL_EXPORTER_OTLP_ENDPOINT="$2"
             shift 2
             ;;
         -h|--help)

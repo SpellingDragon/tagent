@@ -157,6 +157,62 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 			wantLine: 4,
 		},
 		{
+			name:     "unknown watchdog budget key",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round:\n      max_rounds: 3\n      rounds: 4\n",
+			field:    "agents[0].final_round.rounds",
+			reason:   "unknown field",
+			wantLine: 5,
+		},
+		{
+			name:     "watchdog budget is a scalar",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round: 3\n",
+			field:    "agents[0].final_round",
+			reason:   "expected a mapping",
+			wantLine: 3,
+		},
+		{
+			name:     "watchdog round budget is not a number",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round:\n      max_rounds: many\n",
+			field:    "agents[0].final_round.max_rounds",
+			reason:   "expected a number",
+			wantLine: 4,
+		},
+		{
+			name:     "watchdog round budget is negative",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round:\n      max_rounds: -1\n",
+			field:    "agents[0].final_round.max_rounds",
+			reason:   "expected a non-negative count of rounds",
+			wantLine: 4,
+		},
+		{
+			name:     "watchdog round budget is fractional",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round:\n      max_rounds: 2.5\n",
+			field:    "agents[0].final_round.max_rounds",
+			reason:   "expected a whole count of rounds",
+			wantLine: 4,
+		},
+		{
+			name:     "watchdog time budget is negative",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round:\n      budget_seconds: -5\n",
+			field:    "agents[0].final_round.budget_seconds",
+			reason:   "expected a non-negative count of seconds",
+			wantLine: 4,
+		},
+		{
+			name:     "watchdog prompt is not a string",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    final_round:\n      prompt: 3\n",
+			field:    "agents[0].final_round.prompt",
+			reason:   "expected a string",
+			wantLine: 4,
+		},
+		{
 			name:     "reference parameter value is not a string",
 			file:     "org.yaml",
 			body:     "refs:\n  - name: remote\n    params:\n      mode: 1\n",
@@ -219,6 +275,33 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 				t.Fatalf("refusal %q does not name the source %q", err, filepath.Base(path))
 			}
 		})
+	}
+}
+
+// TestStrictDecodeReadsTheWatchdogBudget pins the accepted side of the watchdog budget.
+// - every entry a declaration names reaches the spec of its own agent with its own value
+// - an agent naming no budget carries the zero budget, which places no bound on its invocations
+// - a budget naming one entry leaves every entry it does not name unbounded
+// 契约: docs/wiki/platform/platform-subsystems.md#config-surface
+func TestStrictDecodeReadsTheWatchdogBudget(t *testing.T) {
+	body := "entry: main\nagents:\n  - id: main\n    final_round:\n      max_rounds: 24\n" +
+		"      budget_seconds: 3300\n      timeout_seconds: 120\n      prompt: deliver\n" +
+		"  - id: helper\n" +
+		"  - id: bounded\n    final_round:\n      max_rounds: 3\n"
+	decl, err := Load(context.Background(), writeConfigSource(t, "org.yaml", body))
+	if err != nil {
+		t.Fatalf("Load over a declared watchdog budget = %v, want the budget read", err)
+	}
+	want := FinalRoundSpec{MaxRounds: 24, BudgetSeconds: 3300, TimeoutSeconds: 120, Prompt: "deliver"}
+	if got := decl.Agents[0].FinalRound; got != want {
+		t.Fatalf("entry budget = %+v, want %+v", got, want)
+	}
+	if got := decl.Agents[1].FinalRound; !got.isZero() {
+		t.Fatalf("undeclared budget = %+v, want the zero budget", got)
+	}
+	partial := decl.Agents[2].FinalRound
+	if partial.MaxRounds != 3 || partial.BudgetSeconds != 0 || partial.TimeoutSeconds != 0 || partial.Prompt != "" {
+		t.Fatalf("partial budget = %+v, want only the entry the declaration names", partial)
 	}
 }
 

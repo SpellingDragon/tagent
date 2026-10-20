@@ -111,7 +111,7 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 |---|---|---|
 | 授权先于读取 | `PartitionIDs` 必须非空：空表是**一次拒绝**，绝不退化成全库扫描；每个授权分区单独分页，一个分区不会把读取面放宽到邻居 | `ExportOptions`、`ErrExportAuthorization` |
 | 逐条二次核验 | 每次写出行之前按授权表复查事件体：在授权分页轮里冒出来、但自身分区与事件键不一致或属外来的 body，计入 `Forbidden` 且**一行都不写** | `ExportManifest.Forbidden` |
-| 行形态 | 每行是 `memory.FullEvent` 的**完整内嵌拷贝**加 `parent_key`；`FullEvent` 本身不带父指针，无据可查时为 `""` 并计入 `ParentKeyMissing`，**从不发明**。因果边存储是 `MemoryStore` 的**可选面**：接不到时仍只读事件自带的父指针，取不到就如实报「无父」而不是失败 | `ExportedFact`、`memory.RelationStoreProvider` |
+| 行形态 | 每行是 `memory.FullEvent` 的**完整内嵌拷贝**加 `parent_key`；`FullEvent` 本身不带父指针，无据可查时为 `""` 并计入 `ParentKeyMissing`，**从不发明**。因果边存储是 `MemoryStore` 的**可选面**：接不到时仍只读事件自带的父指针，取不到就如实报「无父」而不是失败 | `ExportedFact`、`memory.MemoryRelations` |
 | 反馈连接 | `feedback` 的 `parent_key` → 父事件 `Metadata["call_id"]`（键名单源自 `event.MetaKeyCallID`）；`missing`／`expired_or_missing`／`forbidden_parent`／`ambiguous` 是**分开的列**，不折进数值奖励、不猜父事件为何不在、不静默跳过 | `ExportManifest.Join*`、`joinOutcome` |
 | 结构上不可写 | 导出器只握 `factReader`（`QueryEvents` + `GetEvent`）这一个读缝，写侧方法不可达：不改 TTL、不打 tombstone、不申请保留租约、不重编码 | `factReader` |
 | 分页轴 | 用 `Offset` 而非事件键游标：库按语义 `Timestamp` 排序，`MinEventKey` 约束的是写序轴，按键轴切会**悄悄丢掉键小于游标的异步回写事件**。宁可自报不完整，也不静默丢事实 | `walkPartition` |
