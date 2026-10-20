@@ -36,17 +36,17 @@ strict样本 SHALL 核验capture/export manifest并按root session分组切分�
 - **THEN** 同组不跨train/test，legacy不伪装严格完整。
 
 ### Requirement: 真实本地消费验收
-交付 SHALL 包含真实模型工具往返到本地真实tokenizer和collator batch的证据；缺凭据、模板不支持或SKIP不能计完成，不声称权重训练收益。**本波新增**：消费 MUST 使用**真实 tokenizer、chat template 与 collator**；MUST NOT 以自造返回常量的消费者结项；真实制品/入口**待授权**，未授权时该任务 MUST 保持 `design-blocked`，MUST NOT 标为完成。场景中的“隔离会话”指**可观测条件**（两个各自独立 session 身份），MUST NOT 被读作对某历史类/符号（如旧 `Runner`/“隔离 session”类型名）的硬要求，亦 MUST NOT 以此复活旧代码。
+交付 SHALL 包含真实模型工具往返到本地真实tokenizer和collator batch的证据；缺凭据、模板不支持或SKIP不能计完成，不声称权重训练收益。消费 MUST 使用**真实 tokenizer、chat template 与 collator**；MUST NOT 以自造返回常量的消费者结项；真实制品/入口**待授权**，未授权时该任务 MUST 保持 `design-blocked`，MUST NOT 标为完成。场景中的“隔离会话”指**可观测条件**（两个各自独立 session 身份），MUST NOT 被读作对某历史类/符号（如旧 `Runner`/“隔离 session”类型名）的硬要求，亦 MUST NOT 以此复活旧代码。
 
 #### Scenario: 最小可用数据集
 - **WHEN** 两个相互隔离的会话（各自独立 session 身份）完成真实工具使用并导出
 - **THEN** 必需用例PASS、目标token非空、labels/mask一致、分割无泄漏、无生产私密数据。
 
-#### Scenario: 常量替身被判失败（失败，本波新增）
+#### Scenario: 常量替身被判失败（失败）
 - **WHEN** 消费者以自造常量代替真实 tokenizer/chat template/collator
 - **THEN** 验收 MUST 显式失败，MUST NOT 计为完成。
 
-#### Scenario: 真实资源未授权（失败，本波新增）
+#### Scenario: 真实资源未授权（失败）
 - **WHEN** 真实 tokenizer/chat template/制品/入口未获授权
 - **THEN** 任务状态 MUST 为 `design-blocked`，接口面在 design 中明确，MUST NOT 声称 Code 实际 PASS。
 

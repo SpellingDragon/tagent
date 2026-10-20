@@ -4,7 +4,7 @@
 
 ## 一、仓库形态
 
-- **两个 Go module**：根 module `github.com/SpellingDragon/tagent`，以及 `examples/wechat-bot`（独立 module，无 `go.work`）。根 `./...` 永远不覆盖第二个 module，两者都要构建与测试。
+- **三个 Go module**：根 module `github.com/SpellingDragon/tagent`，以及 `examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远不覆盖这两个示例 module，三者都要构建与测试。
 - **Go 下限** `go 1.24.1`（见 [`go.mod`](go.mod)）。
 - **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`），加 `cli` 宿主壳与 module 根组合根；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
 - **门禁工具**：bash、Go、git；spec 门另需 openspec CLI 1.2.0；校验器自测需 python3。
@@ -40,7 +40,7 @@
 
 ```bash
 go run ./scripts/codetools package-layout . examples/wechat-bot examples/cli-host
-# 期望：package-layout: 500 file(s); names, skeleton pins and test mirrors hold（exit 0）
+# 期望：package-layout: 505 file(s); names, skeleton pins and test mirrors hold（exit 0）
 ```
 
 门自身有负例见证 `scripts/test_check_package_layout.sh`（干净／变体名／撞名／大写／孤儿测试五个 fixture 跑真命令，看退出码）。它也在 `scripts/lint.sh` 里跑：只打印不拒绝的检查器过不了干净 fixture，恒红的检查器过不了负例。
@@ -52,17 +52,18 @@ go build ./...
 go vet ./...
 go test ./... -short -count=1
 (cd examples/wechat-bot && go build ./... && go vet ./... && go test ./... -short -count=1)
+(cd examples/cli-host && go build ./... && go vet ./... && go test ./... -short -count=1)
 go mod verify
 bash scripts/lint.sh
 ```
 
 - `-short` 是常规测试面：soak 与需要真实进程/凭据的用例在 `-short` 下跳过。
-- [`scripts/lint.sh`](scripts/lint.sh) 是唯一门禁入口：gofmt、两 module 的 build/vet、注释棘轮、`name-check`、`doc-refs`、`docs/api` 新鲜度、`proc-refs`、`tracked-hygiene`、`package-layout`、`dotted-refs`、`commit-scope`。
-- 只改文档时可用 `bash scripts/lint.sh --only fmt`：只跑 gofmt，八个文档/脚本门仍然照跑；改了源码注释后先 `bash scripts/gen_godoc.sh` 重新生成 [`docs/api/`](docs/api/index.md)，再 `bash scripts/gen_godoc.sh --check`。**不要手改生成面。**
+- [`scripts/lint.sh`](scripts/lint.sh) 是唯一门禁入口：gofmt、根与 wechat-bot 的 build/vet、注释棘轮、doc budget、`name-check`、`doc-refs`、`docs/api` 新鲜度、`proc-refs`、`tracked-hygiene`、`package-layout`（含负例自测）、`dotted-refs`、`commit-scope`。
+- 只改文档时可用 `bash scripts/lint.sh --only fmt`：只跑 gofmt，九个文档/脚本门仍然照跑；改了源码注释后先 `bash scripts/gen_godoc.sh` 重新生成 [`docs/api/`](docs/api/index.md)，再 `bash scripts/gen_godoc.sh --check`。**不要手改生成面。**
 - race 门（与 CI 同一条命令，较慢）：
 
 ```bash
-./scripts/race_check.sh . ./memory/... ./runtime/... ./evolution/ ./api/... ./tool/... ./rl/ ./cli/
+./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
 ```
 
 - spec 卫生门（需 openspec 1.2.0）：
@@ -71,29 +72,29 @@ bash scripts/lint.sh
 bash scripts/check-openspec.sh
 ```
 
-实测（2026-10-19，go1.27.1 darwin/arm64）：
+实测（2026-10-21，go1.27.1 darwin/arm64）：
 
 | 命令 | 结果 |
 |---|---|
 | `go build ./...` / `go vet ./...` | exit 0 |
-| `go test ./... -short -count=1` | exit 0，0 个 `FAIL`（实测时 35 个包 `ok`；包数随新增测试增长，以复跑为准） |
-| bot module 的 build / vet / test | 三步 exit 0，`ok wechat-bot` |
+| `go test ./... -short -count=1` | exit 0，0 个 `FAIL`（实测时 38 个包 `ok`；包数随新增测试增长，以复跑为准） |
+| 两个示例 module 的 build / vet / test | 六步 exit 0 |
 | `go mod verify` | `all modules verified` |
 | `bash scripts/lint.sh` | `lint: ok` |
 | `./scripts/race_check.sh …`（包集同上） | `race_check: OK (go test passed)` |
-| `bash scripts/check-openspec.sh` | `Totals: 121 passed, 0 failed` |
-| `bash scripts/gen_godoc.sh --check` | `gen_godoc: docs/api matches the source (66 packages)` |
+| `bash scripts/check-openspec.sh` | `Totals: 124 passed, 4 failed (128 items)`（4 个 failed 均为活跃 change，主规格全绿） |
+| `bash scripts/gen_godoc.sh --check` | `gen_godoc: docs/api matches the source (68 packages)` |
 
 ## 四、PR 规范
 
 - **分支**：`dev` 接受直推并由 CI 全量验证，`main` 是发布线；跨线合并前按 CHANGELOG 口径评审。CI 对 `main`/`dev` 的 push 与所有 PR 触发（[`ci.yml`](.github/workflows/ci.yml)）。
-- **合入前四条 job 全绿**：`test`（含 bot module 与调度下限）、`race`、`validators`、`openspec`。soak job 仅 `workflow_dispatch` 手动触发，不参与每 PR 判定。
-- **提交主题**用 `type(scope): 摘要`，历史使用 `feat` / `fix` / `docs` / `chore` / `refactor`。
+- **合入前四条 job 全绿**：`test`（含两个示例 module 与调度下限）、`race`、`validators`、`openspec`。soak job 仅 `workflow_dispatch` 手动触发，不参与每 PR 判定。
+- **提交主题**用 `type(scope): 摘要`（`feat` / `fix` / `docs` / `chore` / `refactor`）。
 - **`docs(` / `docs:` 开头的提交不得携带代码路径**：`.go` / `.sh` / `.yml` / `.yaml` / `.py`（`docs/`、`openspec/` 与 `*.md` 除外）会被 `commit-scope` 具名拒绝。因此文档与 CI/代码不要放进同一个 docs 提交，分两次提交。（契约见 [`docs/comment-gate-tooling.md`](docs/comment-gate-tooling.md) §八。）
 - **一个意图一个落点**：同一意图的改动聚在单一包/文件族；不顺手重构、不整文件重排。
 - **用户可见变更记入 [`CHANGELOG.md`](CHANGELOG.md) 的 `[Unreleased]`**（Keep a Changelog + SemVer）；Breaking Changes 写"用户会感知到什么"。
 - **不把运行期产物入库**：`*.test`、`*.out`、`*.log`、`*.prof`、`data/` 等由 `tracked-hygiene` 拒绝；新增顶层目录必须同时登记 `scripts/codetools/hygiene.go` 的白名单与 README 布局说明。
-- **公共 API 变更**须保持 [`examples/contract/`](examples/contract/) 的编译期契约样例可编译（75 个 `Example` 函数）。
+- **公共 API 变更**须保持 [`examples/contract/`](examples/contract/) 的编译期契约样例可编译（74 个 `Example` 函数）。
 
 ## 五、pre-release 姿态
 

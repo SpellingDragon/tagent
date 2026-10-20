@@ -179,9 +179,9 @@ class PolicyTest(unittest.TestCase):
     def test_real_golden_registers_tool_subtree_not_top_level(self):
         pats = patterns(self.policy)
         self.assertIn("tool/mcp", pats)
-        self.assertIn("tool/remote", pats)
+        self.assertIn("tool/spec", pats)
         self.assertNotIn("mcp", pats)
-        self.assertNotIn("remote", pats)
+        self.assertNotIn("spec", pats)
 
     def test_real_golden_replica_edge_allows_memory_event(self):
         edges = {edge["from"]: edge for edge in self.policy["edges"]}
@@ -246,7 +246,8 @@ class ImplementationTest(unittest.TestCase):
         code, out, err = self.run_impl(go_list_stream(self.policy))
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["in_scope_packages"], 31)
+        self.assertEqual(payload["counts"]["in_scope_packages"],
+                         len(patterns(self.policy)))
         self.assertEqual(payload["counts"]["missing_required_packages"], 0)
         self.assertIsNone(payload["productVerified"])
         self.assertTrue(any("injected" in note for note in payload["notes"]))

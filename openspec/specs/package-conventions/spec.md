@@ -1,6 +1,10 @@
-# package-conventions
+# package-conventions Specification
 
-## ADDED Requirements
+## Purpose
+
+定义机制子包的挂法（只含事件词汇、消费接线、扩展策略三类文件）与命名归位规则（同一概念一个正名，与语义不符的内部名改回语义），作为新包准入与评审的判据。
+
+## Requirements
 
 ### Requirement: 机制子包挂法
 

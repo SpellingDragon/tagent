@@ -23,7 +23,7 @@ SmartCompressor.Compress 在替换 oldSegments 后，SHALL 检查压缩后的消
 
 ### Requirement: ensureUserPrompt 使用 pending user 策略
 
-ContextIntervention 的 ensureUserPrompt 函数 SHALL 替换为 pending user 策略：先查找压缩后消息中是否存在 user role 消息，如果存在则不添加任何消息；如果不存在，添加引导消息。不再使用硬编码的"继续"。
+ContextIntervention 的 ensureUserPrompt 函数 SHALL 采用 pending user 策略：先查找压缩后消息中是否存在 user role 消息，如果存在则不添加任何消息；如果不存在，添加引导消息。引导消息由该策略生成，文案不是硬编码的"继续"。
 
 #### Scenario: 压缩后已有 user message 时不添加
 

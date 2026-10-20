@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -438,10 +439,10 @@ func (h *hostSender) sendToUser(ctx context.Context, req sendRequest) (string, e
 			if err := h.longText(ctx, target, content, token); err == nil {
 				textSent = true
 			} else {
-				content = content[:2000] + "\n\n[Message truncated]"
+				content = truncateBytes(content, 2000) + "\n\n[Message truncated]"
 			}
 		} else {
-			content = content[:2000] + "\n\n[Message truncated]"
+			content = truncateBytes(content, 2000) + "\n\n[Message truncated]"
 		}
 	}
 	var sendErr error
@@ -519,7 +520,18 @@ func truncateLogN(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return truncateBytes(s, n) + "..."
+}
+
+// truncateBytes cuts s to at most n bytes without splitting a UTF-8 rune.
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // SeenStore provides message-level idempotency across restarts.

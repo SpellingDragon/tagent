@@ -618,8 +618,10 @@ type assemblyConfig struct {
 	memory *MemoryPlan
 }
 
-// Option configures the formal assembly at construction.
-type Option func(*assemblyConfig)
+// Option configures the formal assembly at construction. It is the assembly
+// name of the host option: one config struct, so the manual and the host entry
+// accept the same constructors.
+type Option = HostOption
 
 // WithGovernance attaches the governance every publication of this assembly is
 // decided under. The formal assembly carries no stand-in governance: an
@@ -689,18 +691,6 @@ func WithRecorder(recorder rl.Recorder) Option {
 // source of truth beside that ledger.
 func WithTelemetry(observer plugin.Observer) Option {
 	return func(c *assemblyConfig) { c.observer = observer }
-}
-
-// WithRetrievalTuning bounds the two retrieval legs and names the rank
-// constant their fusion scores under. A zero bound keeps that leg unbounded
-// and a zero constant keeps search.RRFRankConstant, so the zero value is the
-// untuned retrieval exactly as it stood.
-func WithRetrievalTuning(vectorTopK, keywordTopK, rrfK int) Option {
-	return func(c *assemblyConfig) {
-		c.vectorTopK = vectorTopK
-		c.keywordTopK = keywordTopK
-		c.rrfK = rrfK
-	}
 }
 
 // WithMemoryPlan opens the merged memory declaration of one organization: the
@@ -1094,7 +1084,9 @@ func (p *MemoryPlan) Tuning() (int, int, int) {
 
 // resolveMemory folds the declared memory plan into the faces this assembly
 // opens. A face an option states directly keeps it, so a host that wires its
-// own embedder over a declared tier is never overridden.
+// own embedder over a declared tier is never overridden. The declaration is the
+// one source of the retrieval tuning: a zero bound keeps that leg unbounded and
+// a zero constant keeps search.RRFRankConstant.
 func (c *assemblyConfig) resolveMemory() error {
 	if c.memory == nil {
 		return nil
@@ -1109,9 +1101,7 @@ func (c *assemblyConfig) resolveMemory() error {
 		}
 		c.embedder = embedder
 	}
-	if c.vectorTopK == 0 && c.keywordTopK == 0 && c.rrfK == 0 {
-		c.vectorTopK, c.keywordTopK, c.rrfK = c.memory.Tuning()
-	}
+	c.vectorTopK, c.keywordTopK, c.rrfK = c.memory.Tuning()
 	return nil
 }
 

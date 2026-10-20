@@ -16,7 +16,7 @@
 
 ### Requirement: 回执-反馈因果绑定
 
-feedback 事件 MUST 经 RelationStore.SetParent 绑定到其评价的产出事件（parent），Content 为结构化 JSON（verdict/rating/note/source），零新索引。**本波新增**：reward MUST 为从 feedback **派生的版本化**记录，与 feedback 事件**分开建模**；MUST NOT 自动把任务终态映射为 reward。
+feedback 事件 MUST 经 RelationStore.SetParent 绑定到其评价的产出事件（parent），Content 为结构化 JSON（verdict/rating/note/source），零新索引。reward MUST 为从 feedback **派生的版本化**记录，与 feedback 事件**分开建模**；MUST NOT 自动把任务终态映射为 reward。
 
 #### Scenario: 任务结算自动反馈
 - **WHEN** TaskManager settle 为 completed 或 failed
@@ -26,7 +26,7 @@ feedback 事件 MUST 经 RelationStore.SetParent 绑定到其评价的产出事�
 - **WHEN** 客户端 `POST /feedback`（event_key + verdict + note）
 - **THEN** 写入 api 来源 feedback 事件并因果绑定该 event_key；event_key 不存在时返回显式错误
 
-#### Scenario: 结算不直接产生 reward（失败，本波新增）
+#### Scenario: 结算不直接产生 reward（失败）
 - **WHEN** 任务 settle 写入 feedback 事件
 - **THEN** MUST NOT 同时把终态直接落为 reward；reward MUST 经版本化派生路径生成。
 

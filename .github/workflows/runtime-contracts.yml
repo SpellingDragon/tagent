@@ -18,21 +18,19 @@
 # scripts/test_check_runtime_workflow.py 对 golden 钉住，防漂移。根包用 *.go 是因为
 # `gofmt -l .`/`comment_policy .` 会递归整个根 module（含 scripts/tests）。
 #
-# 双 module 现状（2026-10-18 实测，不再是缺口）：examples/wechat-bot 是独立 module（无
-# go.work，根 module 的 ./... 到不了它），rebuild 落地后已重新可编译并通过自身测试——以
-# `git archive HEAD` 的干净树实测：
-#   go -C examples/wechat-bot build ./...                  → RC=0
-#   go -C examples/wechat-bot vet ./...                    → RC=0
-#   go -C examples/wechat-bot test ./... -short -count=1   → ok（9 个测试文件）
-# 这三步由 ci.yml 的 Build/Vet/Test (bot module) 承担；本 workflow 只管根 module 产品门，
-# 不重复 bot 步骤（重复会造两处升级点）。“当前不可编译（main.go 引用已删除包
-# tagent/agent/governance、tagent/memory/engine）”是 rebuild 过渡期记录，已失效。
+# 多 module 现状：examples/wechat-bot 与 examples/cli-host 都是独立 module（无 go.work，
+# 根 module 的 ./... 到不了它们），各自可编译并通过自身测试——以 `git archive HEAD`
+# 的干净树实测：
+#   go -C examples/wechat-bot  build ./... / vet ./... / test ./... -short -count=1 → RC=0
+#   go -C examples/cli-host    build ./... / vet ./... / test ./... -short -count=1 → RC=0
+# 这些步骤由 ci.yml 的 Build/Vet/Test (bot module) 与 Build/Vet/Test (cli-host module)
+# 承担；本 workflow 只管根 module 产品门，不重复示例 module 步骤（重复会造两处升级点）。
 #
-# 本 workflow 不代表产品行为通过；openspec strict 步骤以 `--all` 校验全部主规格与
-# 全部活跃 change（`--all` 覆盖面含 change），任一未 strict-valid 即如实红。也不是旧产品门的替代（ci.yml/lint.sh/race_check.sh/gen_godoc.sh
-# 的迁移属 09.3）。不使用 continue-on-error，不内嵌第二套校验器；检查器本体纯标准库，
-# 只有 workflow 自测解析本文件需要 PyYAML（自测步骤安装这一件）。旧的
-# .github/workflows/ci.yml 不变。
+# 本 workflow 不代表产品行为通过；openspec strict 步骤以 `--specs` 只校验主规格
+# （openspec/specs/ 是唯一真源；in-flight change 属 WIP，由 scripts/check-openspec.sh
+# 报告而不判红），任一主规格未 strict-valid 即如实红。不替代 ci.yml/lint.sh/
+# race_check.sh/gen_godoc.sh。不使用 continue-on-error，不内嵌第二套校验器；检查器本体
+# 纯标准库，只有 workflow 自测解析本文件需要 PyYAML（自测步骤安装这一件）。
 name: runtime-contracts
 
 on:
@@ -155,9 +153,9 @@ jobs:
       - name: Tracked hygiene
         run: go run ./scripts/codetools tracked-hygiene
 
-      - name: OpenSpec strict (all specs)
-        # 该步以 `--all` 校验全部主规格与全部活跃 change；规格或 change 未 strict-valid 时如实红，不以 continue-on-error 掩盖。
-        run: openspec validate --all --strict --no-interactive
+      - name: OpenSpec strict (main specs)
+        # 该步以 `--specs` 校验全部主规格；任一主规格未 strict-valid 时如实红，不以 continue-on-error 掩盖。
+        run: openspec validate --specs --strict --no-interactive
 
   real-acceptance:
     name: explicit-real-acceptance

@@ -34,7 +34,13 @@ func main() {
 	dieIf(err, "Boot the host")
 	defer app.close(host)
 
-	dieIf(app.bindWechat(ctx, host), "Bind the wechat channel")
+	if err := app.bindWechat(ctx, host); err != nil {
+		app.close(host)
+		dieIf(err, "Bind the wechat channel")
+	}
 	app.banner(path)
-	dieIf(app.run(ctx), "Run the wechat channel")
+	if err := app.run(ctx); err != nil {
+		app.close(host)
+		dieIf(err, "Run the wechat channel")
+	}
 }

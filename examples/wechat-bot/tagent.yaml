@@ -4,8 +4,8 @@
 # 解码纪律:loadHostDocument 走 api/config 的 strict 面(DecodeStrict)。
 #   **未知键拒启动**:任何 schema 未声明的键都会以「文件名:行号:字段路径: unknown field」
 #   拒绝启动,而不会被静默忽略。因此本文件只出现宿主真正读取的键。
-#   schema 见 host_runtime.go 的 hostDocument;未接线的原声明就地归档为注释,
-#   完整清单(键路径 + 接线所需)见 README「待接线清单」。新增键须先接 schema。
+#   schema 见 host.go 的 hostDocument;写进本文件的键必须已被该结构读取,
+#   未支持的键以行首「待接线」注释登记,不写进 YAML。新增键须先接 schema。
 #   ⚠️ 两种工具引用:kind: tool 是宿主直接贡献的实例(send/recall_*/skill_*/spec/file 七件);
 #   `- { kind: agent, agent: <id> }` 是委派——声明即授权:被引用 agent 必须在本文件
 #   声明,模型只看得见名为该 id 的委派工具(工具面按被引用 agent 自己的 tools[] 建),
@@ -16,7 +16,7 @@
 # 敏感信息(API Key)一律经环境变量注入,不写此文件。
 #
 # 编排约定(消除冗余,语义等价):
-#   · 全局 provider/model 为默认值 —— agent 省略即回退全局(见 host_runtime.go modelName),
+#   · 全局 provider/model 为默认值 —— agent 省略即回退全局(见 host.go modelName),
 #     仅 plan 覆盖 model、knowledge 覆盖 provider+model。改全局默认即改全体,无需逐 agent 重复。
 # ============================================================================
 
@@ -115,7 +115,7 @@ agents:
         vector_top_k: 20
         keyword_top_k: 20
         rrf_k: 60
-    # 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
+    # 待接线(本宿主不读,启用前须先在 host.go 接 schema 与装配):
     #   compress / max_tokens / temperature / thinking_enabled
     #   compress_threshold / keep_recent_tasks / task_terminal_ttl / task_default_ttl
 

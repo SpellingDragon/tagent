@@ -25,13 +25,13 @@ call_id SHALL 独立于trace生成并在调用scope内按invocation/response/too
 - **THEN** 数据可显式丢弃/截为不完整记录，内存有界、模型继续，统计可靠。
 
 ### Requirement: 封账完整性可证明
-FlushAndWait SHALL 返回writer确认后的manifest；存在inflight/drop/error、未同步或无manifest MUST NOT 声称完整。统计读取不得依赖可能已满的数据队列。**本波新增**：writer **未封账**（crash/未 flush）时 MUST 记 `partial` 并保留原因，MUST NOT 宣称完整；发送准入与关闭排空 MUST 走同一 protocol（采集与 model 共享终局）；封账统计 SHALL 支持按文件摘要复核。
+FlushAndWait SHALL 返回writer确认后的manifest；存在inflight/drop/error、未同步或无manifest MUST NOT 声称完整。统计读取不得依赖可能已满的数据队列。writer **未封账**（crash/未 flush）时 MUST 记 `partial` 并保留原因，MUST NOT 宣称完整；发送准入与关闭排空 MUST 走同一 protocol（采集与 model 共享终局）；封账统计 SHALL 支持按文件摘要复核。
 
 #### Scenario: 关闭与flush失败
 - **WHEN** capture结束或flush失败
 - **THEN** 成功封账可按文件摘要复核，失败保留unknown/partial及原因，不能伪全量。
 
-#### Scenario: 崩溃且未封账记 partial（失败，本波新增）
+#### Scenario: 崩溃且未封账记 partial（失败）
 - **WHEN** 进程在 writer 未封账时退出，重启后读取该 capture
 - **THEN** 记录状态 MUST 为 `partial` 并附未封账原因，MUST NOT 被判为完整。
 

@@ -110,8 +110,10 @@ type MessageSender interface {
 // to that agent.
 type DeliverFunc func(ctx context.Context, source string, targets []event.Address, content string)
 
-// HostOption configures one Boot call; it aliases the assembly Option.
-type HostOption = Option
+// HostOption configures one Boot call. It is the host-facing name of the
+// assembly option, so the host protocol's option type is declared here rather
+// than borrowed by alias.
+type HostOption func(*assemblyConfig)
 
 // WithSender attaches the outbound message face every turn output of the host
 // is delivered through.
@@ -301,8 +303,13 @@ func openHostRelations(plan *MemoryPlan) (*replay.MemoryRelations, error) {
 }
 
 // abortBoot drains the run of a Boot call that failed after the assembly and
-// reports the failure it carries.
+// reports the failure it carries. The reflection driver is stopped first: it
+// starts before the endpoints, so a failure in that window must not leave a
+// tick landing on a run that is already draining.
 func (h *Host) abortBoot(cause error) error {
+	if h.meditation != nil {
+		h.meditation.Stop()
+	}
 	closeCtx, cancel := context.WithTimeout(context.Background(), hostShutdownGrace)
 	defer cancel()
 	if h.run != nil {
@@ -785,18 +792,19 @@ func (d *hostDocument) nativeAgents(ctx context.Context, sender MessageSender, r
 
 // toolsFor constructs the tool instances the host contributes for one agent;
 // the core owns the execution, MCP and delegation families of the declaration.
+// The recall set is built before the run is assembled, so its observation table
+// and original store are wired to the port itself (it forwards to the faces Bind
+// attaches) and the relation ledger comes from the port's read face, so
+// recall_trace walks the host's parent chain.
 func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSender, recallPort *RecallPort) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
 	if d.declaresTool(id, hostSendToolID) {
 		available[hostSendToolID] = &hostSendTool{sender: sender}
 	}
 	if d.declaresRecall(id) {
-		reads := recall.Reads{
-			Searcher:  recallPort,
-			Embedder:  recallPort.Reads().Embedder,
-			Table:     recallPort,
-			Originals: recallPort,
-		}
+		reads := recallPort.Reads()
+		reads.Table = recallPort
+		reads.Originals = recallPort
 		for _, candidate := range recall.New(reads, memory.PartitionsOf(id, d.Agents[id].Memory.ReadNamespaces)) {
 			available[candidate.Declaration().Name] = candidate
 		}
@@ -1283,7 +1291,7 @@ type hostReflection struct {
 func (h *Host) newReflection(plan *hostMeditationPlan, deliver DeliverFunc) (*hostReflection, error) {
 	gate := h.run.ReflectionGate()
 	if gate == nil {
-		return nil, errors.New("tagent: the assembly carries no reflection anchor store")
+		return nil, fmt.Errorf("tagent: agent %q enables meditation beside no reflection anchor store", plan.agent)
 	}
 	reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
 		Loop:    meditation.ReflectionLoop{Agent: plan.agent, Session: plan.session},

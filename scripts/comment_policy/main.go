@@ -45,9 +45,9 @@ var auditMarker = regexp.MustCompile(`(?i)(§[0-9]|\b轮[0-9]+\b|\b20[0-9]{2}-[0
 
 // legacySymbolName matches a Go symbol whose name embeds the residue word: a symbol cannot
 // be renamed without changing the API, and its name is the concept rather than a comment
-// about one (LegacyRecord, SchemaLegacyV1, classifyLegacyRow, legacyMarkerFields,
-// ErrLegacySchemaLine). The unqualified word is left alone — the declared-name mask covers
-// the one case where it is the documented symbol.
+// about one (SchemaLegacyV2, SchemaLegacyV1, legacyMarkerFields, ErrLegacySchemaLine).
+// The unqualified word is left alone — the declared-name mask covers the one case where it
+// is the documented symbol.
 var legacySymbolName = regexp.MustCompile(`\b(?:[A-Za-z0-9_]+[Ll]egacy|[Ll]egacy[A-Za-z0-9_]+)[A-Za-z0-9_]*\b`)
 
 // legacyFormatPhrase matches the noun phrases that name the format itself: a row, line,
@@ -55,10 +55,10 @@ var legacySymbolName = regexp.MustCompile(`\b(?:[A-Za-z0-9_]+[Ll]egacy|[Ll]egacy
 // field set. A doc group joins wrapped lines with a space, so a phrase may straddle a break.
 var legacyFormatPhrase = regexp.MustCompile(`(?i)\blegacy\s+(?:rows?|lines?|imports?|schemas?|captures?|shapes?|formats?|structures?|trajector(?:y|ies)|dumps?|fields?|v1|v2|one|jsonl)\b`)
 
-// maskDomainVocabulary replaces the read-only import capability's own vocabulary with a
+// maskDomainVocabulary replaces the record vocabulary that names the legacy formats with a
 // placeholder before the residue rules read the prose: the v1 dump and v2 capture schemas
-// are formats this repository reads, so a doc comment stating which format a value belongs
-// to states a contract rather than narrating a change. The mask is a closed list on
+// are declared format names, so a doc comment stating which format a value belongs to
+// states a contract rather than narrating a change. The mask is a closed list on
 // purpose — an unqualified residue word still matches, so narration outside these shapes is
 // still reported, a masked shape cannot carry a change story, and a domain phrase never
 // shields the narration beside it in the same group.

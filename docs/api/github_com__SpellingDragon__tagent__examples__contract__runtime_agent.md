@@ -1,5 +1,7 @@
 package agentexample // import "github.com/SpellingDragon/tagent/examples/contract/runtime_agent"
 
+Package agentexample shows the notice feed the loop reads.
+
 Package agentexample holds the canonical example of every execution face
 the agent loop dispatches through: one file per interface, each a minimal
 implementation beside the Example function that drives it through its real
@@ -28,6 +30,9 @@ func ExampleHandoffEnvelope()
 func ExampleHistoryFace()
     ExampleHistoryFace commits the transcript of one ended drive and reads it
     back beside the input the next drive aggregates.
+
+func ExampleNoticeFeed()
+    ExampleNoticeFeed demonstrates the incremental notice read from the chain.
 
 func ExampleReconciler()
     ExampleReconciler books one admitted call, lands its terminal and reports

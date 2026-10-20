@@ -34,7 +34,7 @@ delta specs 同步与父级路线图状态回写义务。
 - **THEN** 在子变更 tasks.md 标记 BLOCKED 与阻塞原因,跳过非依赖任务,向用户汇报,不强行推进
 
 ### Requirement: 真实 LLM 测试失败的定性义务
-门禁②中 real-LLM/网络测试失败时,执行者 MUST 先经 Debug 流程定性(pre-existing flaky vs 本变更回归),定性证据至少包含:变更文件与测试依赖面的代码交集分析、跨运行失败点漂移对比、相关文件的 git 历史。判定为 pre-existing flaky 的失败不阻塞准出,但 MUST 记录在案。
+门禁②中 real-LLM/网络测试失败时,执行者 MUST 先经 Debug 流程定性(pre-existing flaky vs 本次改动回归),定性证据至少包含:变更文件与测试依赖面的代码交集分析、跨运行失败点漂移对比、相关文件的 git 历史。判定为 pre-existing flaky 的失败不阻塞准出,但 MUST 记录在案。
 
 #### Scenario: flaky 定性后放行
 - **WHEN** 门禁②某 real-LLM 测试失败且 Debug 定性为 pre-existing flaky(三重证据齐备)

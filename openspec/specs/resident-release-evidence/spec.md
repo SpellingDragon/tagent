@@ -49,7 +49,7 @@ CI SHALL 分别覆盖根模块与 wechat-bot 独立模块 build/vet/short，并�
 
 ### Requirement: 编排热更以生产委派变化验收
 
-本变更的编排热更 SHALL 以宿主生产入口验收：修改现有 YAML 后，新开始请求的实际工具声明与子调用目标随之变化；进行中请求及其重试、嵌套子调用、ACK 后后台执行保持原绑定；常驻 store/session/projection/TaskManager 身份不漂移；旧绑定与资源在实际执行停止后安全退役。候选失败、回滚、agent 增删、同名重入与并发发布交叉场景须有真实行为断言，不以指针、hash 或代际日志编号代替。
+编排热更 SHALL 以宿主生产入口验收：修改现有 YAML 后，新开始请求的实际工具声明与子调用目标随之变化；进行中请求及其重试、嵌套子调用、ACK 后后台执行保持原绑定；常驻 store/session/projection/TaskManager 身份不漂移；旧绑定与资源在实际执行停止后安全退役。候选失败、回滚、agent 增删、同名重入与并发发布交叉场景须有真实行为断言，不以指针、hash 或代际日志编号代替。
 
 性能 SHALL 分报候选构造/发布成本、请求获取版本开销与退役回收成本。真实 LLM、掉电、72h、真实渠道和生产存储单列授权；历史完成勾选不得继承为本目标完成证据。
 
@@ -67,7 +67,7 @@ CI SHALL 分别覆盖根模块与 wechat-bot 独立模块 build/vet/short，并�
 
 短锁 SHALL 用阻塞构建／阻塞清理的屏障验证，owner 有界性 SHALL 覆盖不断更换名字后的收敛，实际停止 SHALL 覆盖取消后仍存活的生产者。平均耗时、有限次数 race 未命中、固定几个名字发布多代均 MUST NOT 替代相应安全断言。
 
-本变更 race 验收 SHALL 保留全部失败，包括全上游访问栈；family 和 broad framework 分类只能用于诊断，不得吞掉子进程错误。命令记录原始退出码。完整补丁的必要未跟踪文件 SHALL 进入交付清单，HEAD-only 基线结果不能冒充新补丁验证。
+race 验收 SHALL 保留全部失败，包括全上游访问栈；family 和 broad framework 分类只能用于诊断，不得吞掉子进程错误。命令记录原始退出码。完整补丁的必要未跟踪文件 SHALL 进入交付清单，HEAD-only 基线结果不能冒充新补丁验证。
 
 #### Scenario: 纯上游 race 也阻断验收
 

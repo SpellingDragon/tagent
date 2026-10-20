@@ -103,7 +103,9 @@ func (c *CLI) Serve(ctx context.Context, listener net.Listener) error
     cancelled or the process is asked to terminate, then closes the run through
     the SDK close entry and reports its outcome. The server is held here (not by
     the SDK), so a host embeds the same handler under its own server instead of
-    getting a second one from the runtime.
+    getting a second one from the runtime. The connection shutdown and the run's
+    close read one budget each, so a drain that spent its shutdown span never
+    hands the close an expired context.
 
 type CLIOption func(*CLI)
 

@@ -53,9 +53,9 @@ jobs:
       - name: Test (short)
         run: go test ./... -short -count=1
 
-      # Second module (resident-remaining-hardening 3.5): examples/wechat-bot is
-      # an independent module with no go.work, so the root `./...` never reaches
-      # it. Build/vet/test it explicitly or its regressions ship silently.
+      # Separate modules: examples/wechat-bot and examples/cli-host are
+      # independent modules with no go.work, so the root `./...` never reaches
+      # them. Build/vet/test each explicitly or its regressions ship silently.
       - name: Build (bot module)
         working-directory: examples/wechat-bot
         run: go build ./...
@@ -68,16 +68,25 @@ jobs:
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
 
-      # Scheduling floor, repointed rather than dropped. The old step ran the ROOT
-      # package, which has had no test files since the rebuild removed the old
-      # production tree (`go test .` reports [no test files] and exits 0), so it
-      # asserted nothing; its stated witnesses (in-flight / pinned-hop attribution)
-      # lived in the removed tree and no longer exist anywhere in the repo. The
-      # attribution witnesses now live in tests/integration/execution (delegation
-      # completion, handoff future notifications, receipt/background separation),
-      # and "which round happened to arrive first may not satisfy the witness" is
-      # exactly what one P exercises. Admitted after four consecutive green runs
-      # under GOMAXPROCS=1 (~2.5s each).
+      # Third module: examples/cli-host is likewise independent (no go.work), so
+      # the root `./...` never reaches it either.
+      - name: Build (cli-host module)
+        working-directory: examples/cli-host
+        run: go build ./...
+
+      - name: Vet (cli-host module)
+        working-directory: examples/cli-host
+        run: go vet ./...
+
+      - name: Test (cli-host module, short)
+        working-directory: examples/cli-host
+        run: go test ./... -short -count=1
+
+      # Scheduling floor: the attribution witnesses (delegation completion,
+      # handoff future notifications, receipt/background separation) live in
+      # tests/integration/execution; "which round happened to arrive first may
+      # not satisfy the witness" is exactly what one P exercises. GOMAXPROCS=1
+      # fixes the round order (~2.5s).
       - name: Test (execution witnesses at the scheduling floor)
         run: GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1
 
@@ -110,8 +119,7 @@ jobs:
       # offending frame matches a registered upstream signature AND there is
       # no plain (non-race) failure. A green-looking race log from a failed
       # command (compile error / bad package / timeout) can never be reported
-      # as success. Package set widened to the memory SUBpackages, plugin, and
-      # rl (was: top-level memory only, no plugin/rl).
+      # as success. Package set covers the memory SUBpackages, api/plugin, and rl.
       - name: Race (root + memory subpkgs + runtime/agent + evolution + api/event + tool + api/plugin + rl)
         run: ./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
 

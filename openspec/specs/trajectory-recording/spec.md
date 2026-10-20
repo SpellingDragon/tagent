@@ -31,7 +31,7 @@ The system SHALL provide a `TrajectoryRecorder` type that implements the `model.
 
 ### Requirement: JSONL trajectory format
 
-The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/{session_id}.jsonl`. Each line SHALL be a JSON object containing the following fields: `timestamp`, `session_id`, `user_id`, `batch_index`, `llm_call.request.messages`, `llm_call.request.model`, `llm_call.request.generation_config`, `llm_call.response.choices`, `llm_call.response.usage`, `llm_call.response.finish_reason`, `llm_call.response.error`, `metadata.duration_ms`, `metadata.model_endpoint`. **本波新增**：每条记录 SHALL 携带**显式 schema 版本号**；episode/decision/attempt 及其字段解释 SHALL 在**实际生产点**确定（02.5 装配 / 02.4 模型终局），MUST NOT 由采集侧临时推断；未知谱系 MUST 显式标注，MUST NOT 静默归类。**兼容范围界定**：上述 `{trajectory_dir}/{session_id}.jsonl` 路径与字段清单**只界定旧格式兼容范围**，MUST NOT 被当作新格式的硬约束；**新记录 schema 由 00.3 审定**，其**最小真实生产字段**（请求/响应/usage/工具调用/时间等）MUST NOT 因「不硬套旧结构」而丢失。
+The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/{session_id}.jsonl`. Each line SHALL be a JSON object containing the following fields: `timestamp`, `session_id`, `user_id`, `batch_index`, `llm_call.request.messages`, `llm_call.request.model`, `llm_call.request.generation_config`, `llm_call.response.choices`, `llm_call.response.usage`, `llm_call.response.finish_reason`, `llm_call.response.error`, `metadata.duration_ms`, `metadata.model_endpoint`. 每条记录 SHALL 携带**显式 schema 版本号**；episode/decision/attempt 及其字段解释 SHALL 在**实际生产点**确定（02.5 装配 / 02.4 模型终局），MUST NOT 由采集侧临时推断；未知谱系 MUST 显式标注，MUST NOT 静默归类。**兼容范围界定**：上述 `{trajectory_dir}/{session_id}.jsonl` 路径与字段清单**只界定旧格式兼容范围**，MUST NOT 被当作新格式的硬约束；**新记录 schema 由 00.3 审定**，其**最小真实生产字段**（请求/响应/usage/工具调用/时间等）MUST NOT 因「不硬套旧结构」而丢失。
 
 #### Scenario: Single LLM call produces one JSONL line
 
@@ -44,11 +44,11 @@ The system SHALL persist trajectory records as JSONL files at `{trajectory_dir}/
 - **WHEN** the LLM response contains tool calls
 - **THEN** the `llm_call.response.choices` field SHALL include the complete tool call definitions (name, arguments, id)
 
-#### Scenario: 每行携带显式版本（正常，本波新增）
+#### Scenario: 每行携带显式版本（正常）
 - **WHEN** 任一记录被写入 JSONL
 - **THEN** 该行 MUST 含显式 schema 版本字段，读取方 MUST 依据版本选择解析路径。
 
-#### Scenario: 未知谱系显式（失败，本波新增）
+#### Scenario: 未知谱系显式（失败）
 - **WHEN** 读到版本/谱系无法识别的记录
 - **THEN** MUST 显式标为未知谱系并进入拒绝/状态清单，MUST NOT 静默当作已知 v2。
 
@@ -99,11 +99,11 @@ TrajectoryRecorder SHALL be composable with SwappableModel in either order: `Tra
 
 ### Requirement: Conversion to AReaL SFT dataset
 
-系统 SHALL 提供一条将 tagent JSONL 轨迹转换为**可被某个 SFT 消费者读取**的数据集（含 `input_ids` 与 `loss_mask`，prompt 置 `loss_mask=0`、completion 置 `loss_mask=1`）的路径。**具体 tokenizer / chat template / 制品 MUST NOT 由本 spec 指定**：MUST NOT 默认 AReaL 或固定模型（如 `Qwen/Qwen2.5-1.5B-Instruct`），MUST NOT 作本次默认新依赖；真实 SFT consumer 与制品 SHALL 在 **06.6 前具名核准授权**（维持 `design-blocked` 待核），MUST NOT 自动选择/安装模型。
+系统 SHALL 提供一条将 tagent JSONL 轨迹转换为**可被某个 SFT 消费者读取**的数据集（含 `input_ids` 与 `loss_mask`，prompt 置 `loss_mask=0`、completion 置 `loss_mask=1`）的路径。**具体 tokenizer / chat template / 制品 MUST NOT 由本 spec 指定**：MUST NOT 默认 AReaL 或固定模型（如 `Qwen/Qwen2.5-1.5B-Instruct`），MUST NOT 作默认新依赖；真实 SFT consumer 与制品 SHALL 经具名核准授权后启用（未核准时维持 `design-blocked`），MUST NOT 自动选择/安装模型。
 
-> 标题沿用旧名（delta 寻址）：语义已改为**中性 SFT 消费合同**。
+> 标题里的 "AReaL" 是该能力的寻址名；本合同只约束**中性 SFT 消费**，不指定具体 consumer。
 
-**本波范围修正**：本次只做**数据闭环＋SFT 消费**，源 `--mode rl`（AReaL `PPOTrainer` prompt dataset 路径）**不在本次范围**——重构 MUST NOT 新增真实 on-policy 消费者，MUST NOT 把 PPO/GRPO/RL prompt dataset 兼容当作本次交付或验收项。既有转换器 `v2` 结构**只读导入**（见「旧格式只读导入」）——旧 AReaL 兼容**仅是 v2 只读导入说明**，不改其 v2 含义。
+**范围**：本能力只做**数据闭环＋SFT 消费**，源 `--mode rl`（AReaL `PPOTrainer` prompt dataset 路径）**不在范围**——MUST NOT 新增真实 on-policy 消费者，MUST NOT 把 PPO/GRPO/RL prompt dataset 兼容当作交付或验收项。既有转换器 `v2` 结构**只读导入**（见「旧格式只读导入」）——AReaL 兼容**仅是 v2 只读导入说明**，不改其 v2 含义。
 
 #### Scenario: Convert JSONL to SFT dataset
 
@@ -111,12 +111,12 @@ TrajectoryRecorder SHALL be composable with SwappableModel in either order: `Tra
 - **THEN** a dataset SHALL be created at the output path
 - **AND** each sample SHALL have `input_ids` (tokenized prompt + completion) and `loss_mask` (0 for prompt, 1 for completion)
 
-#### Scenario: 不指定固定制品且不默认新依赖（失败，本波新增）
+#### Scenario: 不指定固定制品且不默认新依赖（失败）
 
 - **WHEN** 审查本能力是否把某 tokenizer/模型（如 Qwen）或 AReaL 设为本次默认依赖/指定制品
 - **THEN** MUST NOT 指定：真实 consumer/制品由 06.6 具名核准，未核准时维持 `design-blocked`，MUST NOT 自动安装/选型
 
-#### Scenario: on-policy/PPO 路径不在本次范围（失败，本波新增）
+#### Scenario: on-policy/PPO 路径不在本次范围（失败）
 
 - **WHEN** 试图以 `--mode rl` 产出 AReaL `PPOTrainer` prompt dataset 作为本次交付/验收项
 - **THEN** MUST NOT 计为本次完成项；本次只验收 SFT 数据消费，MUST NOT 引入真实 on-policy 消费或 PPO/GRPO 训练引擎

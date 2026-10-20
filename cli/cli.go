@@ -41,6 +41,11 @@ const (
 	defaultHTTPPort = "8089"
 )
 
+// serveShutdownGrace is the span the start command gives the connection
+// shutdown and, separately, the run's own close: one budget each, so an
+// exhausted connection drain never cuts the close off before it settles.
+const serveShutdownGrace = 5 * time.Second
+
 // ErrDiagnosticNotOpen reports a diagnostic request on a host shell beside no
 // request authentication: the diagnostic face stays closed until a request
 // credential is configured for it.
@@ -185,7 +190,9 @@ func (c *CLI) start(ctx context.Context, args []string, stdout, stderr io.Writer
 // cancelled or the process is asked to terminate, then closes the run through
 // the SDK close entry and reports its outcome. The server is held here (not by
 // the SDK), so a host embeds the same handler under its own server instead of
-// getting a second one from the runtime.
+// getting a second one from the runtime. The connection shutdown and the run's
+// close read one budget each, so a drain that spent its shutdown span never
+// hands the close an expired context.
 func (c *CLI) Serve(ctx context.Context, listener net.Listener) error {
 	server := &http.Server{Handler: c.handler()}
 	served := make(chan error, 1)
@@ -198,14 +205,16 @@ func (c *CLI) Serve(ctx context.Context, listener net.Listener) error {
 		return nil
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), serveShutdownGrace)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return err
 	}
 	<-served
-	deadline := time.Now().Add(5 * time.Second)
-	report, err := c.run.Close(shutdownCtx, agent.CloseRequest{Deadline: deadline})
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), serveShutdownGrace)
+	defer closeCancel()
+	deadline := time.Now().Add(serveShutdownGrace)
+	report, err := c.run.Close(closeCtx, agent.CloseRequest{Deadline: deadline})
 	if err != nil {
 		return err
 	}

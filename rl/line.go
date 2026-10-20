@@ -148,9 +148,9 @@ func ParseLine(data []byte) (Line, error) {
 	raw, hasSchema := head["schema"]
 	if marker := legacyMarker(head); marker != "" {
 		if hasSchema {
-			return Line{}, fmt.Errorf("%w: it declares a schema while carrying legacy capture field %q; route it through ImportLines instead", ErrSchemaMisuse, marker)
+			return Line{}, fmt.Errorf("%w: it declares a schema while carrying legacy capture field %q; legacy capture lines are not read under the current schema", ErrSchemaMisuse, marker)
 		}
-		return Line{}, fmt.Errorf("%w: it carries legacy capture field %q; read it through ImportLines instead", ErrLegacySchemaLine, marker)
+		return Line{}, fmt.Errorf("%w: it carries legacy capture field %q; legacy capture lines are not read under the current schema", ErrLegacySchemaLine, marker)
 	}
 	if !hasSchema {
 		return Line{}, ErrSchemaMissing

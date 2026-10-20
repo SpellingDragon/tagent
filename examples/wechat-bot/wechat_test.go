@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -419,6 +420,18 @@ func TestIntakeMediaAndLongText(t *testing.T) {
 		t.Fatalf("an oversize item was downloaded %d times, want none", declared.callCount())
 	}
 
+	failing := &fakeDownloader{given: errors.New("cdn down")}
+	broken := &wechat.Message{ItemList: []wechat.MessageItem{{
+		Type: wechat.ItemTypeImage, ImageItem: &wechat.ImageItem{MidSize: 10},
+	}}}
+	failed := IntakeMedia(context.Background(), failing, "https://cdn", ws, "chat-broken", broken, now)
+	if len(failed.Saved) != 0 || len(failed.Rejects) != 1 || !strings.Contains(failed.Rejects[0], "下载失败") {
+		t.Fatalf("failed intake = %+v, want the named download refusal", failed)
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(ws, uploadsSubdir, "chat-broken", "*")); len(leftovers) != 0 {
+		t.Fatalf("a failed download left %v on disk", leftovers)
+	}
+
 	long := strings.Repeat("a", longTextThreshold+10)
 	saved, inject, err := SaveLongText(ws, "chat-a", long, "input", now)
 	if err != nil {
@@ -667,6 +680,16 @@ func TestHostSenderIsTheOnlyOutboundPath(t *testing.T) {
 	last := texts[len(texts)-1]
 	if !strings.HasSuffix(last.Body, "[Message truncated]") || !strings.HasPrefix(last.Body, strings.Repeat("y", 2000)) {
 		t.Fatalf("truncated body = %q, want 2000 bytes plus the marker", last.Body)
+	}
+
+	fresh = strings.Repeat("中", 800)
+	if _, err := sender.sendToUser(ctx, sendRequest{addr: addr, triggerSource: sendToolLineage, content: fresh}); err != nil {
+		t.Fatalf("multibyte truncated send: %v", err)
+	}
+	texts = out.texts()
+	last = texts[len(texts)-1]
+	if !utf8.ValidString(last.Body) || !strings.HasSuffix(last.Body, "[Message truncated]") {
+		t.Fatalf("multibyte truncated body is not valid UTF-8: %q", last.Body)
 	}
 
 	out.failText = errors.New("network down")

@@ -163,7 +163,7 @@ org 热更在提交点把某 agent 的热参记为 `applied` 时，该 agent 的
 
 ### Requirement: 结构变更与文件直接生效分路及错误原因链
 
-结构变更（模型/工具/插件/任务策略/资源引用/memory）与文件懒读（prompt/skill）是**两条独立消费路径**：结构变更 SHALL 走 `config.Load → Compile → Prepare → 前置检查 → commit`；文件变更 SHALL 直接生效。结构性变化 MUST NOT 借文件通道绕开前置检查，文件变化也 MUST NOT 被宣称经过前置质量门。
+结构变更（模型/工具/插件/任务策略/资源引用/memory）与文件懒读（prompt/skill）是**两条独立消费路径**：结构变更 SHALL 走 `config.DecodeStrict → config.Fingerprint → Run.Publish → state.Publisher.Publish`（候选装配、基线复检、治理裁决、台账提交后一次切换）；文件变更 SHALL 直接生效。结构性变化 MUST NOT 借文件通道绕开前置检查，文件变化也 MUST NOT 被宣称经过前置质量门。
 
 结构路径失败时系统 SHALL 保留**错误原因链**（源文件 → 归一行 → 具名原因），使失败可定位；MUST NOT 以笼统「reload 失败」吞掉原因。
 

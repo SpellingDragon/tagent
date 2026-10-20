@@ -33,24 +33,26 @@ body:
       label: 模块归属
       description: 按包名选择；跨包或不确定时选 unknown。
       options:
-        - root (assembly / run*.go / CLI)
-        - agent
-        - config
-        - event
-        - evolution
+        - root (assembly / run*.go / host.go)
+        - cli (host shell)
+        - api/config
+        - api/document
+        - api/event
+        - api/model
+        - api/plugin
+        - api/view
+        - runtime/agent
+        - runtime/state
+        - runtime/task
         - memory
-        - model
-        - plugin
-        - query
+        - memory/query
+        - evolution
         - rl
-        - state
-        - task
         - telemetry
         - tool/exec
         - tool/mcp
-        - tool/remote
-        - workspace
         - examples/wechat-bot
+        - examples/cli-host
         - docs / scripts / CI
         - unknown
     validations:

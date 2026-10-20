@@ -719,13 +719,15 @@
         "runtime/agent",
         "api/config",
         "api/event",
+        "api/model",
         "memory",
         "memory/search",
+        "memory/replay",
         "runtime/state",
         "runtime/task",
         "memory/embedder"
       ],
-      "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖。"
+      "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖；handoff refs 与请求侧共用 memory/replay 的 AssembleBudgetPrefix 预算装配，事实文本按 api/model 的消息面读出（material-flow P3/P6）。"
     },
     {
       "from": "tool/recall",

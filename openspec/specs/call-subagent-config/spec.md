@@ -1,6 +1,10 @@
-# call-subagent-config
+# call-subagent-config Specification
 
-## ADDED Requirements
+## Purpose
+
+定义 `call_subagent` 工具的两条互斥装配源（agents 文件与显式参数）、装配后经 `agent.Delegate` 的 task 化委派、预置工具引用，以及宿主循环承载自定义事件类型的扩展点。
+
+## Requirements
 
 ### Requirement: 双装配源声明
 
@@ -40,7 +44,7 @@
 
 ### Requirement: event-loop 扩展点
 
-事件消费扩展 SHALL 经宿主循环（AdmitInbound/mailbox 接纳）承载：自定义事件类型到达后，消费逻辑可调用 LLM 与工具，消费结果经投递面回送。历史冥想/knowledge 专属消费不迁移，作为该扩展点的示例文档化。
+事件消费扩展 SHALL 经宿主循环（AdmitInbound/mailbox 接纳）承载：自定义事件类型到达后，消费逻辑可调用 LLM 与工具，消费结果经投递面回送。冥想与 knowledge 的专属消费是该扩展点的示例，其语义写在各自能力的 spec 里。
 
 #### Scenario: 自定义事件被消费并投递结果
 - **WHEN** 宿主循环接纳一条自定义类型事件且消费逻辑调用 LLM/tool

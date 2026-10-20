@@ -1,20 +1,22 @@
-# fact-vocabulary
+# fact-vocabulary Specification
 
-## ADDED Requirements
+## Purpose
+
+定义事实类别契约（`event.Fact` 的身份与类型两问）、每个事实族在所属包内的自证与登记义务、消费器协议（读事实→消费→产新事实），以及呈现视图的归属边界。
+
+## Requirements
 
 ### Requirement: 事实类别契约
 
-框架 SHALL 在 event 包声明事实类别接口（`Fact`：身份与类型两问），每个事实族（核心事件、通知、训练记录、声明、引用票据）MUST 在其所属包内实现该接口；事实族的归属包 MUST 在词汇表文档中逐族登记（族/身份/类型/归属/锁定机制）。
+框架 SHALL 在 event 包声明事实类别接口（`Fact`：身份与类型两问），每个事实族（核心事件、通知、训练记录、声明、引用票据、回放结算、压缩请求）MUST 在其所属包内实现该接口；事实族的归属包 MUST 在词汇表文档中逐族登记（族/身份/类型/归属/锁定机制）。
 
-#### Scenario: 五族自证为事实
-- **WHEN** 将 Event/Notice/AttemptRecord/Declaration/Ticket 赋给 Fact
+#### Scenario: 七族自证为事实
+- **WHEN** 将 Event/Notice/AttemptRecord/Declaration/OriginalRef/ReplaySettle/CompressRequest 赋给 Fact
 - **THEN** 编译通过，且各族的身份与类型两问返回稳定值（同一事实同一身份）
 
 #### Scenario: 词汇表可核
 - **WHEN** 读者按词汇表核查某族
 - **THEN** 文档的归属包与身份/锁定机制 MUST 与该包实现一致
-
-## ADDED Requirements
 
 ### Requirement: 消费器协议
 
@@ -23,8 +25,6 @@
 #### Scenario: 两实例协议一致
 - **WHEN** 回合驱动与时间驱动各消费一条事实
 - **THEN** 两者都产出新事实且源事实身份与内容不变
-
-## ADDED Requirements
 
 ### Requirement: 呈现视图归属
 

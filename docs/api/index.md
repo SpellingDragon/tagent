@@ -28,6 +28,7 @@
 | `github.com/SpellingDragon/tagent/examples/contract/memory_replica` | [github_com__SpellingDragon__tagent__examples__contract__memory_replica.md](github_com__SpellingDragon__tagent__examples__contract__memory_replica.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/memory_search` | [github_com__SpellingDragon__tagent__examples__contract__memory_search.md](github_com__SpellingDragon__tagent__examples__contract__memory_search.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/rl` | [github_com__SpellingDragon__tagent__examples__contract__rl.md](github_com__SpellingDragon__tagent__examples__contract__rl.md) |
+| `github.com/SpellingDragon/tagent/examples/contract/root` | [github_com__SpellingDragon__tagent__examples__contract__root.md](github_com__SpellingDragon__tagent__examples__contract__root.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/runtime_agent` | [github_com__SpellingDragon__tagent__examples__contract__runtime_agent.md](github_com__SpellingDragon__tagent__examples__contract__runtime_agent.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/runtime_state` | [github_com__SpellingDragon__tagent__examples__contract__runtime_state.md](github_com__SpellingDragon__tagent__examples__contract__runtime_state.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/runtime_task` | [github_com__SpellingDragon__tagent__examples__contract__runtime_task.md](github_com__SpellingDragon__tagent__examples__contract__runtime_task.md) |
@@ -73,4 +74,4 @@
 | `github.com/SpellingDragon/tagent/tool/subagent` | [github_com__SpellingDragon__tagent__tool__subagent.md](github_com__SpellingDragon__tagent__tool__subagent.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：68。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：69。文档覆盖由 scripts/comment_policy 单点判定。

@@ -366,8 +366,10 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 func (h *Host) Run() *Run
     Run reports the assembled run the host drives.
 
-type HostOption = Option
-    HostOption configures one Boot call; it aliases the assembly Option.
+type HostOption func(*assemblyConfig)
+    HostOption configures one Boot call. It is the host-facing name of the
+    assembly option, so the host protocol's option type is declared here rather
+    than borrowed by alias.
 
 func WithDeliverer(deliver DeliverFunc) HostOption
     WithDeliverer attaches the reflection delivery face of a document that
@@ -473,8 +475,10 @@ type NativeAgent struct {
     tools and plugin elements the host declares. MUST NOT let a native tool run
     beside the admission the task face keeps.
 
-type Option func(*assemblyConfig)
-    Option configures the formal assembly at construction.
+type Option = HostOption
+    Option configures the formal assembly at construction. It is the assembly
+    name of the host option: one config struct, so the manual and the host entry
+    accept the same constructors.
 
 func WithApprover(approve task.Approver) Option
     WithApprover attaches the approval ruling every call admitted through the
@@ -542,12 +546,6 @@ func WithReflectionAnchors(path string) Option
     answers the watermark the diagnostic reading reports. An assembly beside
     no path carries no reflection anchor store, and its reflection face reports
     that absence instead of a watermark of its own.
-
-func WithRetrievalTuning(vectorTopK, keywordTopK, rrfK int) Option
-    WithRetrievalTuning bounds the two retrieval legs and names the rank
-    constant their fusion scores under. A zero bound keeps that leg unbounded
-    and a zero constant keeps search.RRFRankConstant, so the zero value is the
-    untuned retrieval exactly as it stood.
 
 func WithStorage(cfg ledger.StorageConfig) Option
     WithStorage opens the named storage tier for this assembly and stores the

@@ -58,7 +58,7 @@ long-poll SHALL 响应请求取消及 server shutdown。POST /task SHALL 使用�
 
 ### Requirement: 动态端点是显式授权管理能力
 
-默认宿主 SHALL 使用可返回 error 的 endpoint 更新接口；未开启能力而请求 llm_base_url SHALL 拒绝。启用时 URL MUST 为 http/https、无 userinfo/fragment 且 host 属显式 allowlist，端口可动态；重定向 SHALL 同受限制。更新错误 SHALL 不注入消息、不报告更新成功。更新与本批接收 SHALL 串行化；日志 SHALL 脱敏，不写凭据或完整敏感 URL。此能力 SHALL 明确为全局管理面，不宣称多租户 task 级隔离。**本波新增**：重定向 MUST **逐跳**按同一 allowlist 重新校验（MUST NOT 仅校验首跳）；HTTP 响应体 SHALL 有大小限制，超限 SHALL 拒绝并保留原因。
+默认宿主 SHALL 使用可返回 error 的 endpoint 更新接口；未开启能力而请求 llm_base_url SHALL 拒绝。启用时 URL MUST 为 http/https、无 userinfo/fragment 且 host 属显式 allowlist，端口可动态；重定向 SHALL 同受限制。更新错误 SHALL 不注入消息、不报告更新成功。更新与本批接收 SHALL 串行化；日志 SHALL 脱敏，不写凭据或完整敏感 URL。此能力 SHALL 明确为全局管理面，不宣称多租户 task 级隔离。重定向 MUST **逐跳**按同一 allowlist 重新校验（MUST NOT 仅校验首跳）；HTTP 响应体 SHALL 有大小限制，超限 SHALL 拒绝并保留原因。
 
 #### Scenario: 非许可目的地
 - **WHEN** 合法 token 请求将模型切到 allowlist 之外的 host
@@ -68,11 +68,11 @@ long-poll SHALL 响应请求取消及 server shutdown。POST /task SHALL 使用�
 - **WHEN** endpoint callback 返回 error
 - **THEN** 保持原模型且请求失败，不返回 accepted
 
-#### Scenario: 逐跳重定向越权（失败，本波新增）
+#### Scenario: 逐跳重定向越权（失败）
 - **WHEN** 首跳 host 合法但重定向到 allowlist 之外的 host
 - **THEN** 该跳 MUST 被拒绝，无 prompt 发往越权目的地，MUST NOT 仅凭首跳放行。
 
-#### Scenario: 响应体超限（失败，本波新增）
+#### Scenario: 响应体超限（失败）
 - **WHEN** HTTP 响应体超过配置大小上限
 - **THEN** MUST 拒绝并保留原因，MUST NOT 无量读取。
 

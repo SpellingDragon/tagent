@@ -190,27 +190,29 @@ agents:
 ---
 
 <a id="reduction-map"></a>
-## 七、化归判据对照表：16 面三问归位
+## 七、化归判据对照表：18 面三问归位
 
-新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：module 根加 15 个一级产品族（`tool` 的 exec/file/knowledge/mcp/recall/spec/subagent 适配器算一族，`memory` 的存储档与检索子包算子包）。
+新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：module 根加 17 个一级产品面（`tool` 的 exec/file/knowledge/mcp/recall/spec/subagent 适配器算一族，`memory` 的存储档与检索子包算子包，`api` 的词汇包按面单列）。
 
 | # | 面（包） | ① 是不是事实 | ② 谁消费它 | ③ 什么时态 | 归位轴 |
 |---|---|---|---|---|---|
 | 1 | `tagent`（module 根） | 否：只装配与发布 | 宿主导入入口；`Assemble` 读声明 | 无（组合） | 边界 |
-| 2 | `agent` | 否：消费 ready 与回填，产物经 `rl.Recorder` 提交 | 回合驱动自己消费；宿主读回执与终态 | 在途（决策） | 执行器 |
-| 3 | `config` | 是：声明族（规范指纹身份） | 组合根与热重载候选；`state` 读绑定 | 存续 | 事实 |
-| 4 | `event` | 是：核心事件族（`Key` 身份） | 全部消费面的输入词汇 | 事实本体 | 事实 |
+| 2 | `runtime/agent` | 否：消费 ready 与回填，产物经 `rl.Recorder` 提交 | 回合驱动自己消费；宿主读回执与终态 | 在途（决策） | 执行器 |
+| 3 | `api/config` | 是：声明族（规范指纹身份） | 组合根与热重载候选；`runtime/state` 读绑定 | 存续 | 事实 |
+| 4 | `api/event` | 是：核心事件族（`Key` 身份） | 全部消费面的输入词汇 | 事实本体 | 事实 |
 | 5 | `evolution` | 否：产物是 `TypeExternalInput` 事件，归 `event` 族 | `Tick` 读事实链；`Loop` 再消费它产出的输入 | 回放（watermark 之后） | 消费 |
-| 6 | `governance` | 否：`Decision` 是裁决读数，不产事实 | 执行器读裁决；审批通道读 hold；审计面读事件日志 | 观测 | 消费 |
+| 6 | `evolution/governance` | 否：`Decision` 是裁决读数，不产事实 | 执行器读裁决；审批通道读 hold；审计面读事件日志 | 观测 | 消费 |
 | 7 | `memory` | 是：引用票据族（原文 `Key` 身份） | 组装与检索面读；策展消费读压缩请求 | 存续 | 时态 |
-| 8 | `model` | 否：锁定 tRPC 原生模型协议 | `agent` 的单次决策调用 | 无（边界） | 边界 |
-| 9 | `plugin` | 否：三拓展点的窄口抽象（端口、Observer/AuditSink、Governor），实现分派到各领域 | pipeline 按端口派发；组合根注入各领域实现 | 观测 | 消费 |
-| 10 | `query` | 否：只读投影（快照/游标/订阅） | 模型/SDK/CLI/诊断/看板/训练 | 回放 | 时态 |
+| 8 | `api/model` | 否：锁定 tRPC 原生模型协议 | `runtime/agent` 的单次决策调用 | 无（边界） | 边界 |
+| 9 | `api/plugin` | 否：三拓展点的窄口抽象（端口、Observer/AuditSink、Governor），实现分派到各领域 | pipeline 按端口派发；组合根注入各领域实现 | 观测 | 消费 |
+| 10 | `memory/query` | 否：只读投影（快照/游标/订阅） | 模型/SDK/CLI/诊断/看板/训练 | 回放 | 时态 |
 | 11 | `rl` | 是：训练记录三族（Episode/Decision/Attempt） | 录制器在产生点写记录；宿主读反馈归因计数 | 在途（记录） | 事实 |
-| 12 | `state` | 否：绑定、邮箱、发布台账的唯一持有者 | `agent`/`task`/`query` 读绑定与发布代 | 存续 | 时态 |
-| 13 | `task` | 是：通知族（四元组身份） | `Deliverer`、`Loop` 回填、关停收尾 | 在途（义务） | 事实 |
+| 12 | `runtime/state` | 否：绑定、邮箱、发布台账的唯一持有者 | `runtime/agent`/`runtime/task`/`memory/query` 读绑定与发布代 | 存续 | 时态 |
+| 13 | `runtime/task` | 是：通知族（四元组身份） | `Deliverer`、`Loop` 回填、关停收尾 | 在途（义务） | 事实 |
 | 14 | `telemetry` | 否：观测旁路，只读消费 | audit sink 与 OTel 后端读记录 | 观测 | 消费 |
-| 15 | `tool`（exec/file/knowledge/mcp/recall/spec/subagent） | 否：执行适配；调用记录落 `event` | `agent` 经工具面执行调用 | 无（执行边界） | 执行器 |
-| 16 | `view` | 否：呈现词汇（`Presentation`/`RenderedView`） | 宿主通道读呈现 | 产物 | 时态 |
+| 15 | `tool`（exec/file/knowledge/mcp/recall/spec/subagent） | 否：执行适配；调用记录落 `api/event` | `runtime/agent` 经工具面执行调用 | 无（执行边界） | 执行器 |
+| 16 | `api/view` | 否：呈现词汇（`Presentation`/`RenderedView`） | 宿主通道读呈现 | 产物 | 时态 |
+| 17 | `api/document` | 是：声明族的宿主文档面（`Document` 派生出 `config.Declaration`） | 各宿主把自有文档映射到 `Document`，组合根据此装配 | 存续 | 事实 |
+| 18 | `cli` | 否：宿主壳（命令面与宿主面） | 宿主进程驱动已装配的 run；runtime 不反向 import | 无（组合） | 边界 |
 
-对照结论：本变更只重排压缩三件（01，落在 `memory`/`tool` 两个面内），其余面按上表归位、不改行为；五个消费面的声明见第四节，产物的事实族归属见 `docs/FACT-VOCABULARY.md` 的附表。三问答不出来就不是新能力，而是既有能力的字段——这是本表要拦的那类偏差。
+对照结论：每个一级包在表里只占一个面；新增能力先按三问归位，再决定落在哪个面，不新开平行词汇。五个消费面的声明见第四节，产物的事实族归属见 `docs/FACT-VOCABULARY.md` 的附表。三问答不出来就不是新能力，而是既有能力的字段——这是本表要拦的那类偏差。

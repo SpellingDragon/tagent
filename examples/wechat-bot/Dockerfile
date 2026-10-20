@@ -9,8 +9,8 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/wechat-bot .
 
 # ---------- 工具阶段：node 运行时 + openspec CLI ----------
-# plan 子 agent 的 spec 工具后端是 openspec（npm 包）；skills（url-fetcher 等）
-# 也需要 node。两者当前均**未被本宿主接线**（工具面只接 send），保留供重接。
+# plan 子 agent 的 spec 工具后端是 openspec（npm 包）；knowledge 的 skill_* 工具
+# 也需要 node。两者均由 Boot 按 tagent.yaml 声明接线，运行时镜像必须保留。
 # 此处用官方 node 镜像安装 openspec，运行阶段只拷贝必要产物，
 # 避免在最终镜像里保留 npm 缓存与构建工具。
 FROM node:22-bookworm-slim AS tooling
@@ -18,7 +18,7 @@ RUN npm install -g @fission-ai/openspec --no-audit --no-fund \
  && npm cache clean --force
 
 # ---------- 运行阶段：debian-slim + 运行时依赖 ----------
-# 选型说明：本 bot 需要 node（openspec/skills，工具面未接线，保留供重接）、
+# 选型说明：本 bot 需要 node（openspec/skills 工具面）、
 # curl（容器内探活）以及 shell（entrypoint）——distroless/static 三者皆无，故改用 debian-slim。
 # 安全加固（非 root / cap_drop / no-new-privileges / 资源上限 / 仅绑本地端口）
 # 全部保留于 docker-compose.yml，不因基础镜像变化而削弱。

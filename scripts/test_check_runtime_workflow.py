@@ -51,8 +51,8 @@ GATE_STEPS = [
      ["comment_policy -no-baseline $PRODUCT_PACKAGES", '"$count" != "0"']),
     ("Tracked hygiene",
      ["codetools tracked-hygiene"]),
-    ("OpenSpec strict (all specs)",
-     ["openspec validate --all --strict", "--no-interactive"]),
+    ("OpenSpec strict (main specs)",
+     ["openspec validate --specs --strict", "--no-interactive"]),
 ]
 
 
