@@ -1,6 +1,6 @@
 # Tools
 
-当前宿主实际授予 **`send`** 与两个委派工具 **`knowledge`**、**`recall`**；下面每一节都标了接线状态，标「未接线」的是**声明面**——工具表里没有它，调用会被具名拒绝，不要调用，改用文本向用户说明限制。
+当前宿主实际授予 **`send`** 与三个委派工具 **`knowledge`**、**`recall`**、**`plan`**（plan 的调用说明随 `plan_tool_desc.md` 热载）；下面每一节都标了接线状态，标「未接线」的是**声明面**——工具表里没有它，调用会被具名拒绝，不要调用，改用文本向用户说明限制。
 
 ## knowledge（已接线：委派到 knowledge agent）
 Acquire knowledge from web search, skills, and historical memory. Use this when you need to:

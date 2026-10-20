@@ -6,7 +6,7 @@
 #   拒绝启动,而不会被静默忽略。因此本文件只出现宿主真正读取的键。
 #   schema 见 host_runtime.go 的 hostDocument;未接线的原声明就地归档为注释,
 #   完整清单(键路径 + 接线所需)见 README「待接线清单」。新增键须先接 schema。
-#   ⚠️ 两种工具引用:kind: tool 是宿主直接贡献的实例(send/recall_*/skill_*);
+#   ⚠️ 两种工具引用:kind: tool 是宿主直接贡献的实例(send/recall_*/skill_*/spec/file 七件);
 #   `- { kind: agent, agent: <id> }` 是委派——声明即授权:被引用 agent 必须在本文件
 #   声明,模型只看得见名为该 id 的委派工具(工具面按被引用 agent 自己的 tools[] 建),
 #   引用未声明 agent 一律拒启动。`description_file` 热载工具描述,`event_params` 列出
@@ -86,12 +86,13 @@ agents:
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
     # 主动送达面:声明即授权(不声明的 agent 看不见 send);发送通路与会话解析复用宿主唯一实现。
-    # 委派面:knowledge/recall 声明为 agent 引用——模型看到名为 knowledge/recall 的工具,
+    # 委派面:knowledge/recall/plan 声明为 agent 引用——模型看到名为 knowledge/recall/plan 的工具,
     # 工具面是被委派 agent 自己的 tools[],描述从 description_file 热载。
     tools:
       - { kind: tool, id: send }
       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
       - { kind: agent, agent: recall, event_params: [event_keys] }
+      - { kind: agent, agent: plan, description_file: plan_tool_desc.md }
     # 看门狗收尾轮(声明即 opt-in;不声明=无界,与未接此键时完全一致):
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
@@ -193,8 +194,22 @@ agents:
     model: glm-5.3                       # 覆盖全局 flash(plan 需更强推理)
     system_prompt:
       files: [plan_agent.md]
-    # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature,
-    #         以及 spec 工具与读/写 file 工具(base_dir 沙箱锁 openspec/)
+    # 文件面:全部相对路径的沙箱根是 openspec/——spec 工具与 file 工具同根,
+    # 写类工具只能落在计划工作区内,../ 与绝对路径由文件工具直接拒绝。
+    file:
+      base_dir: openspec
+    tools:
+      # spec 工具:闭集操作(init/new/status/validate/archive/instructions/list),
+      # 后端为 openspec CLI(argv 直调,无 shell);计划文件本身经 file 面读写。
+      - { kind: tool, id: spec }
+      - { kind: tool, id: save_file }
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: read_multiple_files }
+      - { kind: tool, id: list_file }
+      - { kind: tool, id: search_file }
+      - { kind: tool, id: search_content }
+      - { kind: tool, id: replace_content }
+    # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature
 
   # ---- Meditator:旁路冥想线(独立反思主体,常驻第二条循环)----
   meditator:

@@ -29,6 +29,7 @@ import (
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/recall"
+	"github.com/SpellingDragon/tagent/tool/spec"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 	"github.com/openai/openai-go/option"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -60,10 +61,12 @@ var ErrMeditationDeclaration = meditation.ErrDeclaration
 
 // hostToolNames lists the tool ids this host accepts from a declaration, in the
 // order one declaration receives them: the outbound tool, the recall tools, the
-// knowledge tools, the file tools, the execution face and the two MCP
-// gateways. An id the core assembles from the declaration — the file family,
-// exec and the MCP gateways — is accepted here and contributed by no host
-// instance, so the declaration reads it while the core builds it once.
+// knowledge tools, the plan tool, the file tools, the execution face and the two
+// MCP gateways. The file family is accepted here beside the core's own
+// construction: a delegated turn runs on the target's native tools, so the host
+// contributes the file surface its declaration grants, and the core drops its
+// copy of a name the host already answers. Exec and the MCP gateways are
+// assembled by the core alone.
 var hostToolNames = append(append([]string{
 	sendToolID,
 	recall.QueryToolName,
@@ -72,6 +75,7 @@ var hostToolNames = append(append([]string{
 	recall.TraceToolName,
 	knowledge.SkillSearchToolName,
 	knowledge.SkillLoadToolName,
+	spec.ToolName,
 }, tagentfile.Names()...),
 	tagentexec.PresetName,
 	mcpgw.ToolNameMCPCall,
@@ -106,6 +110,10 @@ type hostDocument struct {
 	once        sync.Once
 	mapped      document.Document
 	mappedError error
+
+	// specBackend is the plan backend a test installs; nil runs the openspec CLI
+	// in the process working directory, the one that holds the openspec workspace.
+	specBackend spec.Backend
 }
 
 // storageEntry is the storage tier the host opens for the runtime: the recall
@@ -396,9 +404,10 @@ func (d *hostDocument) nativeAgents(ctx context.Context, send *hostSendSeam, rec
 
 // hostTools constructs the tool instances one declared agent's declaration
 // grants, in declaration order: the outbound tool, every recall tool the
-// declaration names and every knowledge tool whose faces this host wires. A
-// tool the declaration does not name is never constructed, so a declaration
-// outside the set sees none of them.
+// declaration names, every knowledge tool whose faces this host wires, the
+// plan tool over the openspec CLI and the file tools over the face the
+// declaration fixes. A tool the declaration does not name is never constructed,
+// so a declaration outside the set sees none of them.
 func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendSeam, recallPort *tagent.RecallPort) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolNames))
 	if d.declaresTool(id, sendToolID) {
@@ -419,6 +428,18 @@ func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendS
 			available[candidate.Declaration().Name] = candidate
 		}
 	}
+	if d.declaresTool(id, spec.ToolName) {
+		available[spec.ToolName] = spec.NewTool(d.planBackend())
+	}
+	if d.declaresFileTools(id) {
+		surface, err := d.fileTools(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range surface {
+			available[candidate.Declaration().Name] = candidate
+		}
+	}
 	tools := make([]trpctool.CallableTool, 0, len(available))
 	for _, ref := range d.Agents[id].Tools {
 		if ref.Kind != "tool" {
@@ -427,6 +448,66 @@ func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendS
 		if tool, ok := available[ref.ID]; ok {
 			tools = append(tools, tool)
 		}
+	}
+	return tools, nil
+}
+
+// planBackend returns the backend the plan tool dispatches through: the
+// installed backend, or the openspec CLI in the process working directory.
+func (d *hostDocument) planBackend() spec.Backend {
+	if d.specBackend != nil {
+		return d.specBackend
+	}
+	return spec.NewOpenSpecBackend()
+}
+
+// declaresFileTools reports whether one declared agent names any file tool.
+func (d *hostDocument) declaresFileTools(id string) bool {
+	for _, name := range tagentfile.Names() {
+		if d.declaresTool(id, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// fileTools constructs the file surface one declared agent's declaration grants
+// over the face its declaration fixes: the base directory every relative path
+// resolves under and the read roots an absolute read may name. The host
+// contributes the instance because a delegated agent's surface is its native
+// tools; the core constructs the same surface for the agent's own binding.
+func (d *hostDocument) fileTools(ctx context.Context, id string) ([]trpctool.CallableTool, error) {
+	face := d.Agents[id].File
+	granted := make([]string, 0, len(tagentfile.Names()))
+	for _, ref := range d.Agents[id].Tools {
+		if ref.Kind != "tool" {
+			continue
+		}
+		for _, name := range tagentfile.Names() {
+			if ref.ID == name {
+				granted = append(granted, name)
+			}
+		}
+	}
+	surface, err := tagentfile.New(tagentfile.Options{
+		BaseDir:   face.BaseDir,
+		ReadRoots: face.ReadRoots,
+		Tools:     granted,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wechat-bot: construct the file surface of agent %q: %w", id, err)
+	}
+	tools := make([]trpctool.CallableTool, 0, len(granted))
+	for _, candidate := range surface.Tools(ctx) {
+		callable, ok := candidate.(trpctool.CallableTool)
+		if !ok {
+			name := ""
+			if declaration := candidate.Declaration(); declaration != nil {
+				name = declaration.Name
+			}
+			return nil, fmt.Errorf("wechat-bot: the file tool %q of agent %q carries no native call surface", name, id)
+		}
+		tools = append(tools, callable)
 	}
 	return tools, nil
 }

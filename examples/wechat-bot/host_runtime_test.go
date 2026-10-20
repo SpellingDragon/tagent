@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -28,6 +29,8 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	coreembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	tagentfile "github.com/SpellingDragon/tagent/tool/file"
+	"github.com/SpellingDragon/tagent/tool/spec"
 
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
@@ -666,4 +669,228 @@ func TestMemoryDeclarationZeroValueKeepsTheHostSilent(t *testing.T) {
 	if v, k, r := plan.Tuning(); v != 0 || k != 0 || r != 0 {
 		t.Fatalf("retrieval tuning = %d/%d/%d, want the zero tuning", v, k, r)
 	}
+}
+
+// specOperationTurn builds the scripted response calling one operation under a
+// distinct call id, so a sequence of operation calls stays distinguishable.
+func specOperationTurn(id, name, args string) *trpcmodel.Response {
+	return &trpcmodel.Response{
+		Choices: []trpcmodel.Choice{{Message: trpcmodel.Message{Role: trpcmodel.RoleAssistant, ToolCalls: []trpcmodel.ToolCall{{
+			ID:   id,
+			Type: "function",
+			Function: trpcmodel.FunctionDefinitionParam{
+				Name:      name,
+				Arguments: []byte(args),
+			},
+		}}}}},
+		Done: true,
+	}
+}
+
+// TestHostPlanAgentDeclaresThePlanSurface pins the plan declaration: the spec operation set beside the file tools over one sandbox.
+// - the spec tool is accepted from the declaration and constructed for the agent that names it
+// - its declaration advertises the closed operation set
+// - the file tools and the sandbox root land on the same declaration
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
+func TestHostPlanAgentDeclaresThePlanSurface(t *testing.T) {
+	workspace := t.TempDir()
+	sandbox := filepath.Join(workspace, "openspec")
+	if err := os.MkdirAll(sandbox, 0o755); err != nil {
+		t.Fatalf("create the plan sandbox: %v", err)
+	}
+	doc := &hostDocument{
+		Entry: "plan",
+		Agents: map[string]agentEntry{
+			"plan": {
+				Model: "model-plan",
+				File:  config.FileSpec{BaseDir: sandbox},
+				Tools: []hostToolRef{
+					{Kind: "tool", ID: spec.ToolName},
+					{Kind: "tool", ID: tagentfile.SaveFileToolName},
+					{Kind: "tool", ID: tagentfile.ReadFileToolName},
+				},
+			},
+		},
+	}
+	decl, err := doc.Declaration()
+	if err != nil {
+		t.Fatalf("derive the declaration: %v", err)
+	}
+	var plan config.AgentSpec
+	for _, declared := range decl.Agents {
+		if declared.ID == "plan" {
+			plan = declared
+		}
+	}
+	if plan.ID != "plan" {
+		t.Fatalf("declared agents = %v, want the plan agent", decl.Agents)
+	}
+	if plan.File.BaseDir != sandbox {
+		t.Fatalf("plan base dir = %q, want %q", plan.File.BaseDir, sandbox)
+	}
+	granted := make(map[string]bool, len(plan.Tools))
+	for _, ref := range plan.Tools {
+		granted[ref.Name] = true
+	}
+	for _, want := range []string{spec.ToolName, tagentfile.SaveFileToolName, tagentfile.ReadFileToolName} {
+		if !granted[want] {
+			t.Fatalf("plan tools = %v, want %q", plan.Tools, want)
+		}
+	}
+	tools, err := doc.hostTools(context.Background(), "plan", &hostSendSeam{}, nil)
+	if err != nil {
+		t.Fatalf("construct the plan surface: %v", err)
+	}
+	carried := mapTools(tools)
+	for _, want := range []string{spec.ToolName, tagentfile.SaveFileToolName, tagentfile.ReadFileToolName} {
+		if carried[want] == nil {
+			t.Fatalf("plan surface = %v, want %q", toolNamesOf(carried), want)
+		}
+	}
+	if len(carried) != 3 {
+		t.Fatalf("plan surface = %v, want exactly the spec tool and the two declared file tools", toolNamesOf(carried))
+	}
+	op := carried[spec.ToolName].Declaration().InputSchema.Properties["op"]
+	if op == nil || len(op.Enum) != 7 {
+		t.Fatalf("spec op enum = %v, want the seven declared operations", op)
+	}
+}
+
+// TestHostPlanDelegationRunsTheSpecTool drives the plan reference through the assembly the process runs.
+// - the entry model sees one tool named after the plan agent and no generic delegation tool
+// - the delegated turn carries the plan agent's own surface: the spec tool beside the sandboxed file tools
+// - the spec operations run the real openspec CLI and its output returns to the plan model
+// - a write outside the declared sandbox is refused and no file lands there
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
+func TestHostPlanDelegationRunsTheSpecTool(t *testing.T) {
+	if _, err := exec.LookPath("openspec"); err != nil {
+		t.Skipf("the real openspec CLI is not on PATH: %v", err)
+	}
+	ctx := context.Background()
+	workspace := t.TempDir()
+	sandbox := filepath.Join(workspace, "openspec")
+	if err := os.MkdirAll(sandbox, 0o755); err != nil {
+		t.Fatalf("create the plan sandbox: %v", err)
+	}
+	doc := &hostDocument{
+		Entry: "tagent",
+		Agents: map[string]agentEntry{
+			"tagent": {Model: "model-main", Tools: []hostToolRef{{Agent: "plan"}}},
+			"plan": {
+				Model: "model-plan",
+				File:  config.FileSpec{BaseDir: sandbox},
+				Tools: []hostToolRef{
+					{Kind: "tool", ID: spec.ToolName},
+					{Kind: "tool", ID: tagentfile.SaveFileToolName},
+					{Kind: "tool", ID: tagentfile.ReadFileToolName},
+				},
+			},
+		},
+		specBackend: spec.NewOpenSpecBackend(spec.WithWorkDir(workspace)),
+	}
+	entry, planner := &scriptModel{}, &scriptModel{}
+	planTools, err := doc.hostTools(ctx, "plan", &hostSendSeam{}, nil)
+	if err != nil {
+		t.Fatalf("construct the plan surface: %v", err)
+	}
+	natives := map[event.AgentID]tagent.NativeAgent{
+		"tagent": {Model: namedModel{scriptModel: entry, name: "model-main"}},
+		"plan":   {Model: namedModel{scriptModel: planner, name: "model-plan"}, Tools: planTools},
+	}
+
+	host, err := assembleHostFrom(ctx, doc, nil, NewSeenStore(t.TempDir(), slog.Default()), &hostSendSeam{}, natives, nil)
+	if err != nil {
+		t.Fatalf("assemble the host around the plan reference: %v", err)
+	}
+	out := &mockOutbound{}
+	host.sender = &hostSender{
+		bot: out,
+		longText: func(_ context.Context, chatID, content, _ string) error {
+			out.record("long", chatID, content)
+			return nil
+		},
+		typingActive: &sync.Map{},
+		router:       host.router,
+		inj:          host.inbox,
+		workspaceDir: t.TempDir(),
+	}
+	t.Cleanup(func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := host.Close(closeCtx); err != nil {
+			t.Logf("close the host: %v", err)
+		}
+	})
+
+	entry.then(delegateTurn("plan", `{"input":"create the plan"}`), finalTurn("planned"))
+	planner.then(
+		specOperationTurn("call-spec-1", spec.ToolName, `{"op":"init"}`),
+		specOperationTurn("call-spec-2", spec.ToolName, `{"op":"new","name":"plan-delegation"}`),
+		specOperationTurn("call-spec-3", tagentfile.SaveFileToolName, `{"file_name":"../escape.md","contents":"x"}`),
+		finalTurn("plan created"),
+	)
+
+	if _, err := host.HandleInbound(ctx, inboundMessage{Key: "plan-delegate", ChatID: "chat-a", Text: "create the plan"}); err != nil {
+		t.Fatalf("drive the planning turn: %v", err)
+	}
+
+	requests := entry.recorded()
+	if len(requests) == 0 {
+		t.Fatal("the entry model was never driven")
+	}
+	if requests[0].Tools["plan"] == nil {
+		t.Fatalf("entry tool names = %v, want the declared plan target", toolNamesOf(requests[0].Tools))
+	}
+	if requests[0].Tools["call_subagent"] != nil {
+		t.Fatalf("entry tool names = %v, want no generic delegation tool", toolNamesOf(requests[0].Tools))
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for planner.callCount() < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	delegated := planner.recorded()
+	if len(delegated) < 4 {
+		t.Fatalf("planning model steps = %d, want the four scripted decisions", len(delegated))
+	}
+	for _, name := range []string{spec.ToolName, tagentfile.SaveFileToolName, tagentfile.ReadFileToolName} {
+		if delegated[0].Tools[name] == nil {
+			t.Fatalf("planning tool names = %v, want %q", toolNamesOf(delegated[0].Tools), name)
+		}
+	}
+	sawCLIOutput := false
+	sawSandboxRefusal := false
+	for _, req := range delegated {
+		if requestCarries(req, "OpenSpec") {
+			sawCLIOutput = true
+		}
+		if requestCarries(req, "are not allowed") {
+			sawSandboxRefusal = true
+		}
+	}
+	if !sawCLIOutput {
+		t.Fatal("no planning request carries the real CLI output of the spec operation")
+	}
+	if !sawSandboxRefusal {
+		t.Fatal("no planning request carries the sandbox refusal of the escaping write")
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "escape.md")); !os.IsNotExist(err) {
+		t.Fatalf("a write outside the sandbox landed at %s (err=%v)", filepath.Join(workspace, "escape.md"), err)
+	}
+	changeFile := filepath.Join(sandbox, "changes", "plan-delegation", ".openspec.yaml")
+	if _, err := os.Stat(changeFile); err != nil {
+		t.Fatalf("the real CLI created no change under the sandbox: %v", err)
+	}
+	if !out.has("text", "chat-a", "planned") {
+		t.Fatalf("deliveries = %v, want the entry answer", out.recorded())
+	}
+}
+
+// mapTools renders a tool slice as the name-keyed map toolNamesOf reads.
+func mapTools(tools []trpctool.CallableTool) map[string]trpctool.Tool {
+	out := make(map[string]trpctool.Tool, len(tools))
+	for _, tool := range tools {
+		out[tool.Declaration().Name] = tool
+	}
+	return out
 }

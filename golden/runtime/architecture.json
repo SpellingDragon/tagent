@@ -240,6 +240,12 @@
       "role": "adapter",
       "required": true,
       "reason": "知识工具面：三工具（skill_search/skill_load/read_file）只把 tRPC 的技能仓库与文件面适配到模型读的声明上，自己不持有仓库与文件系统，也不重造检索。"
+    },
+    {
+      "pattern": "tool/spec",
+      "role": "adapter",
+      "required": true,
+      "reason": "计划工具面：七操作闭集（init/new/status/validate/archive/instructions/list）只把 typed Request 映射成 openspec CLI 的固定 argv，模型控制参数值而控制不了命令结构；后端可替换，工具面与提示词不随之改变。"
     }
   ],
   "edges": [
@@ -276,6 +282,7 @@
         "tool/subagent",
         "tool/recall",
         "tool/knowledge",
+        "tool/spec",
         "api/view",
         "evolution/governance",
         "telemetry",
@@ -796,6 +803,11 @@
       "from": "tool/knowledge",
       "allow": [],
       "reason": "知识工具面只做 tRPC 技能仓库与文件面的端口适配，不依赖任何一方包，也不向核心包反向依赖。"
+    },
+    {
+      "from": "tool/spec",
+      "allow": [],
+      "reason": "计划工具面只做 typed 操作到 openspec CLI 固定参数的映射，不依赖任何一方包，也不向核心包反向依赖。"
     }
   ],
   "external": {
