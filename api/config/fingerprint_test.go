@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestFingerprintIsStableUnderDefaultsAndRepeatedLoads pins that the fingerprint names the declaration surface, not the spelling of a document.
@@ -183,6 +184,39 @@ func TestFingerprintNamesTheWatchdogBudgetOnlyWhenDeclared(t *testing.T) {
 			bounded := *decl.Clone()
 			bounded.Agents[0].FinalRound = tc.spec
 			if got := fingerprintOf(t, bounded); got == bare {
+				t.Fatalf("fingerprint did not move when the declaration named %s: %q", tc.name, got)
+			}
+		})
+	}
+}
+
+// TestFingerprintNamesTheMemoryAndMeditationBindingsOnlyWhenDeclared pins the canonical binding entries.
+// - zero bindings spelled out leave the fingerprint unchanged
+// - a memory tier, engine connection, meditation switch, cadence and target each move it
+// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
+func TestFingerprintNamesTheMemoryAndMeditationBindingsOnlyWhenDeclared(t *testing.T) {
+	decl := loadConfigDeclaration(t, "entry: main\nagents:\n  - id: main\n    model: m1\n")
+	bare := fingerprintOf(t, *decl)
+	zeroed := *decl.Clone()
+	zeroed.Agents[0].Memory = MemorySpec{}
+	zeroed.Agents[0].Meditation = MeditationSpec{}
+	if got := fingerprintOf(t, zeroed); got != bare {
+		t.Fatalf("fingerprint with zero bindings spelled out = %q, want %q", got, bare)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*AgentSpec)
+	}{
+		{name: "memory tier", mutate: func(a *AgentSpec) { a.Memory.Type = "localfile" }},
+		{name: "embedding connection", mutate: func(a *AgentSpec) { a.Memory.Engine.Embedding.Model = "embedding-3" }},
+		{name: "meditation switch", mutate: func(a *AgentSpec) { a.Meditation.Enabled = true }},
+		{name: "meditation cadence", mutate: func(a *AgentSpec) { a.Meditation.Interval = time.Minute }},
+		{name: "delivery target", mutate: func(a *AgentSpec) { a.Meditation.DeliverTo = []string{"main"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bound := *decl.Clone()
+			tc.mutate(&bound.Agents[0])
+			if got := fingerprintOf(t, bound); got == bare {
 				t.Fatalf("fingerprint did not move when the declaration named %s: %q", tc.name, got)
 			}
 		})

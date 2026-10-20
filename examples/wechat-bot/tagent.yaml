@@ -37,11 +37,17 @@ providers:
   # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
   # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
 
-# ===== 存储层(recall 读面之基;不声明则 recall 无 Table/Originals/Embedder)=====
-# 声明后宿主开 localfile 原始层与分段层,并自持 relation 账本(<root>/relations)。
-storage:
-  type: localfile
-  root: data/store
+# ===== 记忆面(共享持久存储 + 语义引擎)=====
+# 存储不再有顶层 storage 段:它由各 agent 的 memory 段声明,宿主把全体声明归并成
+# 一个 tier + 一个 engine(hostDocument.memorySettings)——同一份存储被两种引擎读会答出
+# 两种结果,所以只有一处声明引擎、其余处只声明存储与读授权;声明不一致一律拒启动。
+#   · type/path:localfile 的原始层与分段层根;.wechat-config/data 是旧世界的
+#     KV/事件目录,指向它即接回跨重启的历史知识(legacy body 由 DecodeEventBody 兼容)。
+#   · read_namespaces:跨分区读授权(recall.New 的授权面);自身命名空间恒在授权内,
+#     这里列出的名字追加到它之后。不声明则不跨区。
+#   · engine:语义引擎,embedding 经 trpc knowledge/embedder/openai 真调用;
+#     vector_top_k/keyword_top_k 是混合检索两腿的上限,rrf_k 是融合秩常数(零值=历史行为)。
+#     api_key_env 指向的变量缺失时具名拒启动(embedding key is not set)。
 
 # ===== 治理闸(装配期恒挂 WithGovernance;此处开启审批面)=====
 # 行为详情见 docs/wiki/platform/agent-behavior-matrix.md 与 platform-subsystems.md(historical-verbatim,
@@ -79,9 +85,24 @@ agents:
       max_rounds: 24
       budget_seconds: 3300
       timeout_seconds: 120
+    # 记忆面:本 agent 是共享 tier 的声明处(见文件头的记忆面说明),也是语义引擎的唯一声明处。
+    memory:
+      type: localfile
+      path: .wechat-config/data
+      read_namespaces: [tagent]
+      engine:
+        backend: memory
+        embedding:
+          provider: zhipu
+          model: embedding-3
+          api_key_env: ZAI_API_KEY
+          dimensions: 512
+        vector_top_k: 20
+        keyword_top_k: 20
+        rrf_k: 60
     # 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
-    #   memory / compress / max_tokens / temperature / thinking_enabled
-    #   compress_threshold / keep_recent_tasks / task_terminal_ttl / task_default_ttl / meditation
+    #   compress / max_tokens / temperature / thinking_enabled
+    #   compress_threshold / keep_recent_tasks / task_terminal_ttl / task_default_ttl
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:
@@ -114,7 +135,13 @@ agents:
       - { kind: tool, id: recall_get }
       - { kind: tool, id: recall_recent }
       - { kind: tool, id: recall_trace }
-    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
+    # 记忆面:与 tagent 同一 tier(归并校验);read_namespaces 把 tagent 分区追加进读授权,
+    # 于是 recall_query 能在自身分区之外检索业务分区的历史。
+    memory:
+      type: localfile
+      path: .wechat-config/data
+      read_namespaces: [tagent]
+    # 待接线:max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
 
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
@@ -139,8 +166,25 @@ agents:
     # 主动送达面:反思结论里用户该知道的部分,经 send 显式投递(不配则模型不可见)。
     tools:
       - { kind: tool, id: send }
-    # 待接线:memory(localfile 共享存储) / meditation(观察面与回流白名单) /
-    #         max_tool_iterations / max_tokens / temperature / compress_threshold,
+    # 观察面:与 tagent 同一 tier;read_namespaces 授权它读业务分区,
+    # meditation.observed_namespaces 再从中圈定真正反思的分区(越界拒启动)。
+    memory:
+      type: localfile
+      path: .wechat-config/data
+      read_namespaces: [tagent]
+    # 定时策展:enabled 即启动宿主 ticker(默认 30m),min_gap 是两次已消费反思的最小间隔;
+    # prompt_file 是每次注入随摘要携带的静态提示(相对 prompt_dir);
+    # observed_namespaces 必须落在各自 read 授权内;deliver_to 是回流白名单——
+    # 本轮反思回合的 assistant 正文经宿主唯一发送通路投给这些 agent 已绑定的会话。
+    # 一个进程只驱动一条反思循环:第二个 enabled 的 agent 拒启动。
+    meditation:
+      enabled: true
+      interval: 30m
+      min_gap: 2h
+      prompt_file: meditation.md
+      observed_namespaces: [tagent]
+      deliver_to: [tagent]
+    # 待接线:max_tool_iterations / max_tokens / temperature / compress_threshold,
     #         以及 recall + file 工具 + exec
 
 # ===== 应用专属配置(各应用自行反序列化)=====

@@ -98,7 +98,10 @@ BASELINE = (
     # S2 struct-fields — 53 项（observed=实测导出字段数）
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 8),
     ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
-    ("struct-fields", "api/config/config.go:AgentSpec", 8),
+    # AgentSpec 13f（声明面本体）：单个 agent 的完整声明格，memory/meditation 随核心默认实现下沉后各成一格，拆开会让声明面出现影子结构。
+    ("struct-fields", "api/config/config.go:AgentSpec", 13),
+    # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
+    ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
     # 七个冻结键各自成一格，前缀透传与未建模条目必须原样留存（PassThrough/Unknown）——
     # 字段即被解析元数据的原样形状，瘦身会丢掉“不丢条目”的保真承诺，故不瘦身。

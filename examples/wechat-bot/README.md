@@ -24,10 +24,10 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.
 |---|---|
 | 读配置 | `loadHostDocument(TAGENT_CONFIG)` → `api/config.DecodeStrict`：schema 之外的键**拒绝启动**，错误点名 `文件:行:字段路径`（`config.ErrUnknownConfigKey`）；schema 即 `host_runtime.go` 的 `hostDocument` 结构标签 |
 | 装配 | `tagent.Assemble(ctx, decl, natives, opts...)` → `*tagent.Run`（恒挂 `WithGovernance`，配了审批网关再加 `WithPolicy`）；`decl` 由 `hostDocument.Declaration` 派生（entry agent、各 agent 的 `system_prompt.files`、声明了的 `send` 工具），模型按 `providers` 的 `api_endpoint` + `api_key_env` 现场构造 |
-| 驱动 | `host.Drive` → 按会址加锁 → `run.Invoke(ctx, tagent.InvokeRequest{InvocationID, Address, Input})`；收尾走 `run.Close(ctx, agent.CloseRequest{})` |
+| 驱动 | `host.Drive` → 按会址加锁 → `run.Invoke(ctx, tagent.InvokeRequest{InvocationID, Address, TriggerSource: "user", Input})`；收尾走 `run.Close(ctx, agent.CloseRequest{})` |
 | HTTP 面 | `newTaskFace(ctx, host, TAGENT_RL_AUTH_TOKEN)` → `Listen()` 绑 `127.0.0.1:<TAGENT_HTTP_PORT>`，`GET /healthz` 答存活、`POST /task` 收一条注入（202 先行、回合在后台跑），驱动面是 `faceDrive{Drive, mostRecentChat}` |
 
-- **已接线的键**：`entry`/`provider`/`model`/`prompt_dir`/`providers`/`agents{provider,model,system_prompt.files,tools,final_round{max_rounds,budget_seconds,timeout_seconds,prompt}}`/`request_timeout_seconds`/`governance{enabled,enforcement,dir,approval_ttl_minutes}`/`app.wechat{config_dir,token_file,context_token_dir,workspace_dir,approvers}`；工具面只接 `hostToolNames` 这五项（`send` + 四个 `recall_*`）：`declaredTools` 按固定清单过滤，写别的 `id` 不进声明，`agent:` 键在 schema 里但零消费（写了不报错也不生效）；看门狗预算只读 entry agent 的 `final_round`（`run.go` 按声明为整条 run 接一次 `SetFinalRound`），不声明即无界。
+- **已接线的键**：`entry`/`provider`/`model`/`prompt_dir`/`providers`/`agents{provider,model,system_prompt.files,tools,final_round{max_rounds,budget_seconds,timeout_seconds,prompt},memory{...},meditation{...}}`/`request_timeout_seconds`/`governance{enabled,enforcement,dir,approval_ttl_minutes}`/`app.wechat{config_dir,token_file,context_token_dir,workspace_dir,approvers}`；工具面只接 `hostToolNames` 这五项（`send` + 四个 `recall_*`）：`declaredTools` 按固定清单过滤，写别的 `id` 不进声明，`agent:` 键在 schema 里但零消费（写了不报错也不生效）；看门狗预算只读 entry agent 的 `final_round`（`run.go` 按声明为整条 run 接一次 `SetFinalRound`），不声明即无界。
 - **环境变量**（码面实际读取）：`TAGENT_CONFIG`、`TAGENT_API_ENDPOINT`（覆盖 entry endpoint）、`TAGENT_SESSION_ID`（会址前缀标签，默认 `wechat-session`）、`TAGENT_WECHAT_WORKSPACE_DIR`、`TAGENT_HTTP_PORT`（HTTP 面端口，默认 8089）、`TAGENT_RL_AUTH_TOKEN`（HTTP 面凭据；空则只信回环对端）、`providers.*.api_key_env` 点名的每个变量（被 agent 引用的必需，未被引用的可选）。
 - **HTTP 面**：宿主自己装配的最小面（**不经** `cli.NewCLI`，故无 `/query`、`/diagnostics`、`/feedback`）：`GET /healthz` 无凭据答 `200 ok`；`POST /task` 收 `{"messages":[{"role":"user","content":"..."}],"trigger_source":"user"}`，有 token 则要求 `Authorization: Bearer <token>`，否则仅回环对端；注入没有会话身份，投到**最近一次有投递的会话**上（无会话答 503）。mail-poller 走的就是这条通道。
 
@@ -39,8 +39,37 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.
 |---|---|
 | `log_level` / `trajectory_*` / `working_dir` / `mcp_servers` | 无读取点；环境变量侧同样没读点，故 `wizard.sh`/`run.sh`/`.env.example` 已不再采集（配置即业务：不读就不采）；MCP 工具面也未接 |
 | `evolution` / `reliability` / `governance.budget_*`、`max_*_risk`、`goal_required_for` | 平台面只装配治理闸：预算与 goal 未接，只消费 `enabled`/`enforcement`/`dir`/`approval_ttl_minutes` |
-| `agents.*.memory` / `compress` / `meditation` / `max_tokens` / `temperature` / `thinking_enabled` / `reasoning_effort` / `compress_threshold` / `task_*_ttl` | 装配面不读，schema 未声明 |
-| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），但宿主只注入检索面 `Searcher`，四个工具各缺 `Embedder`/`Table`/`Originals`/`Trace` ⇒ **调用即具名拒绝**（`recall_query: recall: the deployment wires no read face for this tool`）；`{kind: agent, ...}`（旧 subagent 形态）、`description_file`、`event_params`、file、`exec`、`spec`、`mcp_*`、`skill_*`、子 agent 委派（core 的 `tool/subagent` 预设）均无宿主实现 |
+| `agents.*.compress` / `max_tokens` / `temperature` / `thinking_enabled` / `reasoning_effort` / `compress_threshold` / `task_*_ttl` | 装配面不读，schema 未声明（`memory` 与 `meditation` 已接线，见下节） |
+| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），读面由宿主装配后注入（Searcher=`Run.Recall`、Table=观测表、Originals=scoped 原始层、Embedder=`memory.engine` 的真 embedding、Trace=宿主关系账本），有 `memory` 声明即可用，无声明则调用即具名拒绝；`{kind: agent, ...}` 委派已接、`description_file`/`event_params` 已消费；file、`exec`、`spec`、`mcp_*`、`skill_*` 仍无宿主实现 |
+
+## 记忆与定时策展（已接线）
+
+```yaml
+agents:
+  tagent:
+    memory:
+      type: localfile
+      path: .wechat-config/data          # 旧世界 KV/事件目录:接回跨重启历史知识
+      read_namespaces: [tagent]          # 跨分区读授权(recall.New);自身命名空间恒在内
+      engine:
+        backend: memory
+        embedding: { provider: zhipu, model: embedding-3, api_key_env: ZAI_API_KEY, dimensions: 512 }
+        vector_top_k: 20                 # 混合检索双腿上限;零值=历史行为(不截断)
+        keyword_top_k: 20
+        rrf_k: 60                        # RRF 秩常数;零值=默认 60
+  meditator:
+    meditation:
+      enabled: true
+      interval: 30m                      # 宿主 tick 周期(零值=30m)
+      min_gap: 2h                        # 两次已消费反思的最小间隔
+      prompt_file: meditation.md         # 相对 prompt_dir;每次注入随摘要携带
+      observed_namespaces: [tagent]      # 必须落在读授权内,否则具名拒启动
+      deliver_to: [tagent]               # 回流白名单本轮 assistant 正文发给目标已绑定的会话
+```
+
+- **归并纪律**：全体 `memory` 声明归一成**一个** `ledger.StorageConfig`（`WithStorage`）＋**一个**引擎（`WithEmbedder`，trpc `knowledge/embedder/openai`；替换旧 `HashEmbedder` 占位），不一致/缺 key/引擎无存储均拒启动（`ErrMemoryDeclaration`/`ErrMemoryEngine`/`ErrEmbeddingKey`）；`read_namespaces` 追加到 `recall.New` 的分区授权。
+- **策展纪律**：一个进程至多一个 `enabled`；水位锚在 `<storage root>/meditation/<agent>/anchors.json`（`WithReflectionAnchors`）；tick 调 `evolution/meditation.Reflection.Tick`（观察面=摘要→ novelty → `min_gap` → 注入本 agent 自己的会话），只有 **consumed** 的回合推进水位；结果经 `sendToUser` 投递，血统 `meditation`。`enabled: false`/未声明 = 零行为。
+- **为什么只有一个引擎**：同一份向量只能属于一个向量空间；两套 embedding 混写会让相似度失去意义，所以第二个不同的引擎声明直接拒启。
 
 ## Agent 声明（六个，`tagent.yaml`）
 
@@ -48,10 +77,10 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.
 |---|---|---|
 | `tagent` | **entry**：接收消息、编排全局、直接回复 | `send` |
 | `knowledge` | 知识获取与翻译 | — |
-| `recall` | 记忆召回执行体 | `recall_query` / `recall_get` / `recall_recent` / `recall_trace`（已声明；读面未注入，调用即具名拒绝） |
+| `recall` | 记忆召回执行体 | `recall_query` / `recall_get` / `recall_recent` / `recall_trace`（读面由宿主注入；`read_namespaces` 决定跨分区范围） |
 | `action` | 命令与文件执行 | — |
 | `plan` | 工作计划管理（拆解 / 记账 / 归档审计，**不代工**） | — |
-| `meditator` | 旁路冥想线（后台反思，自触发） | `send` |
+| `meditator` | 旁路冥想线（宿主定时驱动的反思主体） | `send` |
 
 ## 治理审批（critical 操作人工把关）
 

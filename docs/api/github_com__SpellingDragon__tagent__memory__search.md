@@ -53,6 +53,11 @@ var ErrQueryTextMissing = errors.New("search: the query carries no retrieval tex
     admit. Listing is not a degraded retrieval form; a caller that wants a
     listing names it on a path made for listing.
 
+var ErrRetrievalTuning = errors.New("search: retrieval tuning carries a negative bound")
+    ErrRetrievalTuning reports retrieval tuning a deployment named outside the
+    range this searcher can honour: a negative leg bound or a negative rank
+    constant is refused by name instead of being coerced into a default.
+
 var ErrStrategyUnknown = errors.New("search: the query names an unknown strategy")
     ErrStrategyUnknown reports a query naming a strategy outside the declared
     vocabulary, so no rule could decide how its legs combine.
@@ -95,7 +100,8 @@ type Fusion interface {
     the text, which stays behind the original path.
 
 func NewRRFFusion() Fusion
-    NewRRFFusion returns the hybrid fusion port.
+    NewRRFFusion returns the hybrid fusion port under the canonical rank
+    constant.
 
 type Query struct {
 	// Text is the retrieval content of the query: the question whose answers
@@ -168,7 +174,12 @@ func (q Query) Validate() error
     is empty: retrieval runs for content, and an empty Text is refused by name
     rather than degraded into a filter-only listing.
 
-type RRFFusion struct{}
+type RRFFusion struct {
+	// K is the rank constant this fusion scores under. A non-positive K runs
+	// under the canonical RRFRankConstant, so the zero value keeps the
+	// documented rule instead of a division by zero.
+	K int
+}
     RRFFusion is the Fusion implementation of this package. It carries the two
     strategies that have consumers — hybrid and keyword-only — and refuses the
     rest by name.
@@ -182,7 +193,7 @@ type RRFFusion struct{}
     - A fused hit stays a reference, so a fused set is never a second copy of
     the text behind it.
 
-func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error)
+func (f RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error)
     Fuse merges the two legs under strategy and returns the ordered reference
     set they fuse into, on the terms of the Fusion port.
 
@@ -261,6 +272,13 @@ func NewStoreSearcher(source ReferenceSource, vectors VectorSource, embedder mem
 func (s *StoreSearcher) Search(ctx context.Context, q Query) (Result, error)
     Search returns the reference set of q, ranked by the retrieval rule the
     query runs under and cut to the page the query asks for.
+
+func (s *StoreSearcher) SetRetrievalTuning(vectorTopK, keywordTopK, rrfK int) error
+    SetRetrievalTuning applies the leg bounds and the rank constant one
+    deployment declares. A zero bound keeps that leg unbounded, and a zero
+    rank constant keeps the canonical RRFRankConstant, so the zero value of the
+    tuning is exactly the searcher's historical behaviour. The call configures
+    the searcher before it serves queries and is not a per-query setting.
 
 type Strategy string
     Strategy parameterizes how the retrieval legs of a query are combined.

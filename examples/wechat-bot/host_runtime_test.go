@@ -54,8 +54,8 @@ func TestHostDocumentRefusesUnknownKey(t *testing.T) {
 		},
 		{
 			name:  "section under a declared agent",
-			body:  "entry: tagent\nagents:\n  tagent:\n    memory:\n      type: local\n",
-			field: "agents.tagent.memory",
+			body:  "entry: tagent\nagents:\n  tagent:\n    compress:\n      type: local\n",
+			field: "agents.tagent.compress",
 			line:  4,
 		},
 		{

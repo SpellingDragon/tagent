@@ -55,6 +55,9 @@ func cloneAgentSpec(in AgentSpec) AgentSpec {
 	out.Plugins = cloneStrings(in.Plugins)
 	out.Files = cloneFileRefs(in.Files)
 	out.Params = cloneFloatMap(in.Params)
+	out.Memory.ReadNamespaces = cloneStrings(in.Memory.ReadNamespaces)
+	out.Meditation.ObservedNamespaces = cloneStrings(in.Meditation.ObservedNamespaces)
+	out.Meditation.DeliverTo = cloneStrings(in.Meditation.DeliverTo)
 	return out
 }
 

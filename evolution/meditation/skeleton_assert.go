@@ -120,6 +120,28 @@ var (
 	_ error = ErrObservationScopeOutOfBounds
 )
 
+// The scheduled driver keeps its plan, port and operations, and its refusals
+// answer by name.
+var (
+	_ Deliver = func(context.Context, event.Address, []event.AgentID) {}
+
+	_ = DriverPlan{ReflectionConfig: ReflectionConfig{}, Targets: []event.AgentID{}}
+
+	_ func(DriverPlan, WatermarkGate, ObservedFacts, ReflectionInput, Deliver) (*Driver, error) = NewDriver
+
+	_ func(*Driver, context.Context) TickOutcome = (*Driver).Tick
+	_ func(*Driver, context.Context)             = (*Driver).Start
+	_ func(*Driver)                              = (*Driver).Stop
+	_ func(*Driver) ReflectionScope              = (*Driver).Scope
+
+	_ error = ErrDriverCadence
+	_ error = ErrDriverUntargeted
+	_ error = ErrDriverUnwired
+)
+
+// The driver's unset cadence falls back to one declared constant.
+const _ = DefaultInterval
+
 // The loop's config, receipt and tick records keep every documented field.
 var (
 	_ = ReflectionConfig{

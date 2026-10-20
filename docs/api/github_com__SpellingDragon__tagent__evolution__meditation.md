@@ -1,5 +1,9 @@
 package meditation // import "github.com/SpellingDragon/tagent/evolution/meditation"
 
+The scheduled reflection driver of one meditation loop: the plan it runs,
+the delivery port a fired reflection flows back through, one Tick per declared
+interval, and the named refusals a plan that cannot drive answers at assembly.
+
 The pre-fold face of the meditation consumer: the fold a consumer runs when it
 consumes a compress request, the compaction fact it files into the state, and
 the fold identity that fact is quoted by. A pre-fold runs ahead of the request
@@ -54,6 +58,9 @@ const (
     MeditationLinkWeight, MeditationSkeletonWeight and MeditationRecencyWeight
     are the value assessment weights: a standing causal link is worth more than
     the boundary skeleton weight, which is worth more than the recency bonus.
+
+const DefaultInterval = 30 * time.Minute
+    DefaultInterval is the tick cadence of a driver whose plan names none.
 
 const LineageReflection = "meditation"
 
@@ -137,6 +144,18 @@ var ErrDigestScanMismatch = errors.New("evolution: the observed pass opened at a
     summarizes is the one its caller already read, so the rendering never
     triggers a second pass over the fact chain.
 
+var ErrDriverCadence = errors.New("evolution: the meditation driver requires a non-negative cadence")
+    ErrDriverCadence reports a plan whose interval or rhythm floor is negative:
+    no ticker can run at such a cadence.
+
+var ErrDriverUntargeted = errors.New("evolution: the meditation driver requires a declared delivery target")
+    ErrDriverUntargeted reports a plan that names no delivery target: a fired
+    reflection whose result nobody receives is refused at assembly.
+
+var ErrDriverUnwired = errors.New("evolution: the meditation driver requires a delivery port")
+    ErrDriverUnwired reports a driver assembled without the delivery port a
+    fired reflection hands its result to.
+
 var ErrObservationScopeOutOfBounds = errors.New("evolution: the observed namespaces reach outside the authorized read scope")
     ErrObservationScopeOutOfBounds reports an observation face that names a
     namespace outside the authorized read scope. The face is refused by name at
@@ -195,6 +214,13 @@ func NewAnchorStore(path string) (*AnchorStore, error)
     NewAnchorStore returns the anchor store of the record at path, creating
     its directory when the directory is absent. A store built without a path is
     refused with ErrAnchorStoreUnusable.
+
+func NewDriver(plan DriverPlan, gate WatermarkGate, facts ObservedFacts, input ReflectionInput, deliver Deliver) (*Driver, error)
+    NewDriver assembles the scheduled reflection of one plan over its watermark
+    gate, its observed fact-chain face, its loop-session injection face and
+    its delivery port. A negative cadence, a plan naming no target and a
+    missing port are refused by name; a plan leaving the interval unset runs at
+    DefaultInterval.
 
 func NewMeditation(policy MeditationPolicy, retention *ledger.Retention, lifecycle *ledger.Lifecycle, condense Condenser, options ...MeditationOption) (*Meditation, error)
     NewMeditation returns the meditation engine over the retention ledger and
@@ -320,6 +346,11 @@ type Condenser func(ctx context.Context, run MeditationRun, now time.Time) (stri
     fallback — the overflow run sinks into an "(earlier n items)" count line —
     and never collapses the pass or rewrites a fact.
 
+type Deliver func(ctx context.Context, source event.Address, targets []event.AgentID)
+    Deliver hands the output of one fired reflection to the declared targets:
+    the source is the observing agent's own loop address, and the targets are
+    the declared recipients in declaration order.
+
 type Digest interface {
 	// Render returns the bounded self-state summary of the observed face since
 	// the given watermark. When the face holds more than the bound renders, the
@@ -349,6 +380,40 @@ type DigestSummary struct {
 }
     DigestSummary is the rendered self-state summary together with the count of
     facts the render bound left out.
+
+type Driver struct {
+	// Has unexported fields.
+}
+    Driver drives one declared reflection loop: each tick reads the observed
+    face through the reflection chain, injects the reflection input into the
+    observing agent's own loop session, and hands a fired reflection's output
+    to the delivery port. The zero value is not usable; build a driver with
+    NewDriver.
+
+func (d *Driver) Scope() ReflectionScope
+    Scope reports the resolved observation face of this driver's reflection.
+
+func (d *Driver) Start(ctx context.Context)
+    Start begins the tick loop: the first tick runs one interval after the
+    start, so a restart never fires a reflection the previous process just
+    consumed.
+
+func (d *Driver) Stop()
+    Stop ends the tick loop and waits for the tick in flight to return. A driver
+    never started returns immediately.
+
+func (d *Driver) Tick(ctx context.Context) TickOutcome
+    Tick runs one scheduled reflection and, when it fired, hands what the
+    reflection turn produced to the delivery port. A tick that decided not to
+    fire delivers nothing.
+
+type DriverPlan struct {
+	ReflectionConfig
+	// Targets is the declared delivery white list of one fired reflection.
+	Targets []event.AgentID
+}
+    DriverPlan is the one scheduled reflection a host declares: the reflection
+    loop, face, cadence and prompt, beside the declared delivery targets.
 
 type FactAttribution struct {
 	// Lineage is the trigger-source stamp the fact carries; empty means the fact

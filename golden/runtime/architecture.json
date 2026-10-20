@@ -73,6 +73,12 @@
       "reason": "持久原文与可重建投影的领域接口。"
     },
     {
+      "pattern": "memory/embedder",
+      "role": "impl-subpackage",
+      "required": true,
+      "reason": "memory 实现子包（语义嵌入装配）：从 api/config 的 EmbeddingSpec 构造 provider-backed memory.Embedder 默认实现，宿主只声明连接；缺 key 与半声明在装配期具名拒绝。"
+    },
+    {
       "pattern": "api/plugin",
       "role": "pipeline",
       "required": true,
@@ -234,6 +240,7 @@
         "runtime/task",
         "memory",
         "memory/replica",
+        "memory/embedder",
         "api/plugin",
         "api/model",
         "rl",
@@ -410,6 +417,21 @@
         "evolution"
       ],
       "reason": "持久事实只发事件；不得反向依赖上层的智能与治理。根 memory 只声明自己的读出面（事件体、查询、迁移、压缩请求日志），其声明中出现的原文引用与引用面直接引 memory/ledger 的词汇，根不再复制子包声明的兼容别名面（package-restructure D3）。"
+    },
+    {
+      "from": "memory/embedder",
+      "allow": [
+        "api/config"
+      ],
+      "forbidden": [
+        "runtime/agent",
+        "runtime/state",
+        "api/plugin",
+        "rl",
+        "evolution",
+        "memory"
+      ],
+      "reason": "嵌入装配只读声明词汇并调用外部 provider SDK：不读写事实、不持有运行时状态，也不反向依赖根 memory 的投影面。"
     },
     {
       "from": "memory/localfile",

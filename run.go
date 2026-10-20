@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -85,6 +86,10 @@ type InvokeRequest struct {
 	// to. It is read from this input alone and never guessed from a session or
 	// a trace: a range that names no episode records no episode.
 	Episode event.EpisodeID
+	// TriggerSource is the trigger-source stamp every input fact of the range
+	// carries. An empty stamp records none, so an assembly that names no
+	// lineage behaves exactly as it did before the stamp existed.
+	TriggerSource string
 	// Input is the native input of the range, in the order the caller admits it.
 	Input []model.Message
 }
@@ -129,6 +134,7 @@ type Run struct {
 	explainer   *query.Explainer
 	retrieval   *retrievalSupply
 	tier        *ledger.Tier
+	observed    *memory.MemoryEventQuery
 	embedder    memory.Embedder
 	loop        *agent.Loop
 	sites       map[event.Address]bool
@@ -262,9 +268,17 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
+		if err := supply.searcher.SetRetrievalTuning(cfg.vectorTopK, cfg.keywordTopK, cfg.rrfK); err != nil {
+			return nil, err
+		}
+		observed, err := seedObservedEvents(ctx, tier)
+		if err != nil {
+			return nil, err
+		}
 		r.mu.Lock()
 		r.retrieval = supply
 		r.tier = tier
+		r.observed = observed
 		r.mu.Unlock()
 	}
 	r.mu.Lock()
@@ -509,6 +523,13 @@ type assemblyConfig struct {
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
 	embedder    memory.Embedder
+	// vectorTopK and keywordTopK bound the two retrieval legs; rrfK is the
+	// rank constant their fusion scores under. The zero value keeps the legs
+	// unbounded and the canonical constant, so an untuned assembly behaves
+	// exactly as it did before the tuning existed.
+	vectorTopK  int
+	keywordTopK int
+	rrfK        int
 	recorder    rl.Recorder
 	observer    plugin.Observer
 	execManager *tagentexec.Manager
@@ -590,6 +611,18 @@ func WithTelemetry(observer plugin.Observer) Option {
 	return func(c *assemblyConfig) { c.observer = observer }
 }
 
+// WithRetrievalTuning bounds the two retrieval legs and names the rank
+// constant their fusion scores under. A zero bound keeps that leg unbounded
+// and a zero constant keeps search.RRFRankConstant, so the zero value is the
+// untuned retrieval exactly as it stood.
+func WithRetrievalTuning(vectorTopK, keywordTopK, rrfK int) Option {
+	return func(c *assemblyConfig) {
+		c.vectorTopK = vectorTopK
+		c.keywordTopK = keywordTopK
+		c.rrfK = rrfK
+	}
+}
+
 // WithReflectionAnchors points the reflection face of this assembly at the
 // anchor record its watermark is read from: the store owns that record and
 // answers the watermark the diagnostic reading reports. An assembly beside no
@@ -607,6 +640,209 @@ func WithReflectionAnchors(path string) Option {
 // blockers, and refuses to explain a registered lease by name.
 func WithExecManager(manager *tagentexec.Manager) Option {
 	return func(c *assemblyConfig) { c.execManager = manager }
+}
+
+// ErrObservationUnwired reports an observation read attempted on a run
+// assembled beside no storage tier: the face is refused by name rather than
+// answered as an empty chain.
+var ErrObservationUnwired = errors.New("tagent: the run is assembled beside no observable storage tier")
+
+// ErrCommittedFactMissing reports a fact identity this run holds neither in
+// its live ledger nor in the storage tier it was assembled over.
+var ErrCommittedFactMissing = errors.New("tagent: the committed fact is not held by this run")
+
+// establish makes the explicit address a site of this instance and grants the
+// diagnostic read face of the run a read of it, so an address is established
+// exactly once whatever door admitted it.
+func (r *Run) establish(ctx context.Context, addr event.Address) error {
+	if !addr.IsComplete() {
+		return fmt.Errorf("tagent: the invocation address is incomplete: %v", addr)
+	}
+	r.mu.Lock()
+	closing, established := r.closing, r.sites[addr]
+	r.mu.Unlock()
+	if closing {
+		return agent.ErrShutdownRefused
+	}
+	if established {
+		return nil
+	}
+	if _, err := r.store.Establish(ctx, addr, r.instance); err != nil {
+		return err
+	}
+	if err := r.authority.GrantRead(ctx, r.inspector, addr); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.sites[addr] = true
+	r.mu.Unlock()
+	return nil
+}
+
+// InjectEvent commits one explicit input event of the named responsibility
+// range and drives the loop session of its address with it, exactly as the
+// Invoke entry drives a range the host admitted. The caller owns the event's
+// address and lineage; this entry stamps only the identities that scope it to
+// this run and range, and reports the identity the fact committed under.
+func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error) {
+	if !evt.Owner.IsComplete() {
+		return agent.Turn{}, "", fmt.Errorf("tagent: the injected event address is incomplete: %v", evt.Owner)
+	}
+	if invocationID == "" {
+		return agent.Turn{}, "", errors.New("tagent: the injected event carries no invocation identity")
+	}
+	if err := r.establish(ctx, evt.Owner); err != nil {
+		return agent.Turn{}, "", err
+	}
+	if evt.Source.IsZero() {
+		evt.Source = evt.Owner
+	}
+	if evt.Target.IsZero() {
+		evt.Target = evt.Owner
+	}
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now()
+	}
+	evt.InvocationID = invocationID
+	evt.InstanceID = r.instance
+	key := r.commitFact(evt)
+	evt.Key = key
+	turn, err := r.loop.Drive(ctx, agent.Invocation{
+		InvocationID: invocationID,
+		Address:      evt.Owner,
+		Instance:     r.instance,
+		Ready:        []event.Event{evt},
+	})
+	return turn, key, err
+}
+
+// ReflectionGate reports the watermark gate the reflection face of this run
+// reads, or nil when the assembly was configured beside none. The gate is the
+// one anchor store the assembly built, so a reflection never opens a second
+// store over the same record.
+func (r *Run) ReflectionGate() meditation.WatermarkGate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.watermark
+}
+
+// ObservedEvents answers one query over the fact chain this run can observe:
+// the events its storage tier already committed, merged with every fact this
+// process committed, landed idempotently under the identity each fact carries.
+// A run assembled beside no storage tier refuses the read by name.
+func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	r.mu.Lock()
+	observed := r.observed
+	facts := make([]event.Event, 0, len(r.facts))
+	for _, evt := range r.facts {
+		facts = append(facts, evt)
+	}
+	r.mu.Unlock()
+	if observed == nil {
+		return nil, ErrObservationUnwired
+	}
+	for _, evt := range facts {
+		record, held := eventRecordOf(evt)
+		if !held {
+			continue
+		}
+		if err := observed.Store(ctx, record); err != nil {
+			return nil, err
+		}
+	}
+	return observed.QueryEvents(ctx, opts)
+}
+
+// CommittedEvent reports the fact an identity names: the live fact of this
+// process when it holds one, and otherwise the event the storage tier already
+// committed. A committed body carries the light fields and no trigger source,
+// so a fact restored from the tier carries the lineage its bytes carry and
+// never an invented one.
+func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error) {
+	if id == "" {
+		return event.Event{}, fmt.Errorf("%w: the identity is empty", ErrCommittedFactMissing)
+	}
+	r.mu.Lock()
+	evt, held := r.facts[id]
+	tier := r.tier
+	r.mu.Unlock()
+	if held {
+		return evt, nil
+	}
+	if tier == nil {
+		return event.Event{}, fmt.Errorf("%w: %s", ErrCommittedFactMissing, id)
+	}
+	stored, found, err := tier.Segments.GetEvent(ctx, id)
+	if err != nil {
+		return event.Event{}, err
+	}
+	if !found {
+		return event.Event{}, fmt.Errorf("%w: %s", ErrCommittedFactMissing, id)
+	}
+	body, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return event.Event{}, err
+	}
+	meta := map[string]string{}
+	if body.Summary != "" {
+		meta[event.MetaKeyEventSummary] = body.Summary
+	}
+	return event.Event{
+		Key:       id,
+		Type:      body.Type,
+		Timestamp: time.UnixMilli(body.Timestamp),
+		Meta:      meta,
+		Message:   model.Message{Content: body.Content},
+		Owner:     body.Owner,
+	}, nil
+}
+
+// seedObservedEvents lands every event the storage tier already committed into
+// the observation table this run merges its live facts into: the body decodes
+// under the schema, including the earlier generation an older writer left, and
+// the record keeps the partition and window the segment index committed it
+// under.
+func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryEventQuery, error) {
+	observed := memory.NewMemoryEventQuery()
+	events, err := tier.Segments.Events(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, stored := range events {
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return nil, fmt.Errorf("tagent: observe the committed event %s: %w", stored.Key, err)
+		}
+		if err := observed.Store(ctx, body.Record(stored.PartitionID, stored.WindowTS)); err != nil {
+			return nil, err
+		}
+	}
+	return observed, nil
+}
+
+// eventRecordOf projects one committed fact onto the query record the
+// observation table reads it under: the partition its owning agent resolves to,
+// its frozen type, its summary and content, and its event time on the
+// millisecond axis. A fact naming no owning agent belongs to no partition and
+// is not observed rather than filed under an invented one.
+func eventRecordOf(evt event.Event) (memory.EventRecord, bool) {
+	if evt.Key == "" {
+		return memory.EventRecord{}, false
+	}
+	agent := agentOf(evt)
+	if agent == "" {
+		return memory.EventRecord{}, false
+	}
+	timestamp := evt.Timestamp.UnixMilli()
+	return memory.EventRecord{
+		Key:         evt.Key,
+		PartitionID: memory.PartitionIDFromName(string(agent)),
+		Type:        evt.Type,
+		Summary:     evt.Meta[event.MetaKeyEventSummary],
+		Content:     evt.Message.Content,
+		Timestamp:   timestamp,
+		WindowTS:    timestamp,
+	}, true
 }
 
 // inspectorSubject, projectionWindow and agentShutdownPollInterval are the

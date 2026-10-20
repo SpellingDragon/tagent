@@ -3,7 +3,6 @@ package tagent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sort"
 	"time"
 
@@ -36,25 +35,8 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 	if req.InvocationID == "" {
 		return agent.Turn{}, errors.New("tagent: the invocation carries no identity")
 	}
-	if !req.Address.IsComplete() {
-		return agent.Turn{}, fmt.Errorf("tagent: the invocation address is incomplete: %v", req.Address)
-	}
-	r.mu.Lock()
-	closing, established := r.closing, r.sites[req.Address]
-	r.mu.Unlock()
-	if closing {
-		return agent.Turn{}, agent.ErrShutdownRefused
-	}
-	if !established {
-		if _, err := r.store.Establish(ctx, req.Address, r.instance); err != nil {
-			return agent.Turn{}, err
-		}
-		if err := r.authority.GrantRead(ctx, r.inspector, req.Address); err != nil {
-			return agent.Turn{}, err
-		}
-		r.mu.Lock()
-		r.sites[req.Address] = true
-		r.mu.Unlock()
+	if err := r.establish(ctx, req.Address); err != nil {
+		return agent.Turn{}, err
 	}
 	ready := make([]event.Event, 0, len(req.Input))
 	now := time.Now()
@@ -69,6 +51,9 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 			InvocationID: req.InvocationID,
 			InstanceID:   r.instance,
 			EpisodeID:    req.Episode,
+		}
+		if req.TriggerSource != "" {
+			evt.Meta = map[string]string{event.MetaKeyTriggerSource: req.TriggerSource}
 		}
 		evt.Key = r.commitFact(evt)
 		ready = append(ready, evt)

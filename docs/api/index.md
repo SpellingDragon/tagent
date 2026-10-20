@@ -43,6 +43,7 @@
 | `github.com/SpellingDragon/tagent/internal/bench` | [github_com__SpellingDragon__tagent__internal__bench.md](github_com__SpellingDragon__tagent__internal__bench.md) |
 | `github.com/SpellingDragon/tagent/internal/prototype` | [github_com__SpellingDragon__tagent__internal__prototype.md](github_com__SpellingDragon__tagent__internal__prototype.md) |
 | `github.com/SpellingDragon/tagent/memory` | [github_com__SpellingDragon__tagent__memory.md](github_com__SpellingDragon__tagent__memory.md) |
+| `github.com/SpellingDragon/tagent/memory/embedder` | [github_com__SpellingDragon__tagent__memory__embedder.md](github_com__SpellingDragon__tagent__memory__embedder.md) |
 | `github.com/SpellingDragon/tagent/memory/ledger` | [github_com__SpellingDragon__tagent__memory__ledger.md](github_com__SpellingDragon__tagent__memory__ledger.md) |
 | `github.com/SpellingDragon/tagent/memory/query` | [github_com__SpellingDragon__tagent__memory__query.md](github_com__SpellingDragon__tagent__memory__query.md) |
 | `github.com/SpellingDragon/tagent/memory/replay` | [github_com__SpellingDragon__tagent__memory__replay.md](github_com__SpellingDragon__tagent__memory__replay.md) |
@@ -74,4 +75,4 @@
 | `github.com/SpellingDragon/tagent/tool/subagent` | [github_com__SpellingDragon__tagent__tool__subagent.md](github_com__SpellingDragon__tagent__tool__subagent.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：69。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：70。文档覆盖由 scripts/comment_policy 单点判定。

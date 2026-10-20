@@ -289,6 +289,13 @@ func DecodeEventBody(body []byte) (EventBody, error)
     DecodeEventBody decodes one committed body under the body schema, or names
     the refusal for bytes that carry no body of this schema.
 
+    Bodies the earlier writer committed spell their identity as event_key beside
+    event_type and event_summary. Those bodies decode under the same schema: the
+    decimal identity is carried over verbatim, because it is the key the segment
+    index stored the event under, and the two renamed fields fill the light
+    fields they name. A body carrying no identity at all is refused by name,
+    so an event key can never be invented from the bytes beside it.
+
 func (b EventBody) Encode() ([]byte, error)
     Encode returns the committed bytes of the body under the body schema.
 

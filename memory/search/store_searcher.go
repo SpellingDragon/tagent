@@ -79,10 +79,12 @@ type cursorToken struct {
 // without an embedder answers through the keyword leg alone, which is the
 // byte-identical fallback the hybrid contract states.
 type StoreSearcher struct {
-	source   ReferenceSource
-	vectors  VectorSource
-	embedder memory.Embedder
-	fusion   Fusion
+	source      ReferenceSource
+	vectors     VectorSource
+	embedder    memory.Embedder
+	fusion      Fusion
+	vectorTopK  int
+	keywordTopK int
 }
 
 // NewStoreSearcher returns a searcher over source. vectors and embedder may
@@ -93,6 +95,28 @@ func NewStoreSearcher(source ReferenceSource, vectors VectorSource, embedder mem
 }
 
 var _ Searcher = (*StoreSearcher)(nil)
+
+// ErrRetrievalTuning reports retrieval tuning a deployment named outside the
+// range this searcher can honour: a negative leg bound or a negative rank
+// constant is refused by name instead of being coerced into a default.
+var ErrRetrievalTuning = errors.New("search: retrieval tuning carries a negative bound")
+
+// SetRetrievalTuning applies the leg bounds and the rank constant one
+// deployment declares. A zero bound keeps that leg unbounded, and a zero rank
+// constant keeps the canonical RRFRankConstant, so the zero value of the
+// tuning is exactly the searcher's historical behaviour. The call configures
+// the searcher before it serves queries and is not a per-query setting.
+func (s *StoreSearcher) SetRetrievalTuning(vectorTopK, keywordTopK, rrfK int) error {
+	if vectorTopK < 0 || keywordTopK < 0 || rrfK < 0 {
+		return ErrRetrievalTuning
+	}
+	s.vectorTopK = vectorTopK
+	s.keywordTopK = keywordTopK
+	if rrfK > 0 {
+		s.fusion = RRFFusion{K: rrfK}
+	}
+	return nil
+}
 
 // Search returns the reference set of q, ranked by the retrieval rule the
 // query runs under and cut to the page the query asks for.
@@ -133,12 +157,13 @@ func (s *StoreSearcher) Search(ctx context.Context, q Query) (Result, error) {
 
 // keywordLeg returns the keyword leg of q: the references whose event matches
 // the query text on the query semantics of the read face, inside the partition
-// set this search is authorized for. The page bound is left to the port, so the
-// leg carries the whole matching set and the page is cut after the fusion.
+// set this search is authorized for. The leg carries at most the declared
+// keyword bound; an undeclared bound leaves the whole matching set on the leg
+// and the page is cut after the fusion, which is the historical behaviour.
 func (s *StoreSearcher) keywordLeg(ctx context.Context, q Query, partitions []int) ([]ledger.OriginalRef, error) {
 	opts := q.QueryOptions()
 	opts.PartitionIDs = partitions
-	opts.Limit = 0
+	opts.Limit = s.keywordTopK
 	refs, err := s.source.QueryEvents(ctx, opts)
 	if err != nil {
 		return nil, err
@@ -161,7 +186,7 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 	}
 	opts := q.QueryOptions()
 	opts.PartitionIDs = partitions
-	opts.Limit = 0
+	opts.Limit = s.vectorTopK
 	opts.Keyword = ""
 	refs, err := s.source.QueryEvents(ctx, opts)
 	if err != nil {

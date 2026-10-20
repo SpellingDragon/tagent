@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -75,12 +76,72 @@ func (b EventBody) Encode() ([]byte, error) {
 
 // DecodeEventBody decodes one committed body under the body schema, or names
 // the refusal for bytes that carry no body of this schema.
+//
+// Bodies the earlier writer committed spell their identity as event_key beside
+// event_type and event_summary. Those bodies decode under the same schema: the
+// decimal identity is carried over verbatim, because it is the key the segment
+// index stored the event under, and the two renamed fields fill the light
+// fields they name. A body carrying no identity at all is refused by name, so
+// an event key can never be invented from the bytes beside it.
 func DecodeEventBody(body []byte) (EventBody, error) {
 	var decoded EventBody
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return EventBody{}, fmt.Errorf("%w: %w", ErrEventBody, err)
 	}
+	if decoded.Key == "" {
+		var legacy struct {
+			Key     json.RawMessage `json:"event_key"`
+			Type    string          `json:"event_type"`
+			Summary string          `json:"event_summary"`
+		}
+		if err := json.Unmarshal(body, &legacy); err != nil {
+			return EventBody{}, fmt.Errorf("%w: %w", ErrEventBody, err)
+		}
+		key, err := legacyBodyKey(legacy.Key)
+		if err != nil {
+			return EventBody{}, err
+		}
+		decoded.Key = key
+		if decoded.Type == "" {
+			decoded.Type = legacy.Type
+		}
+		if decoded.Summary == "" {
+			decoded.Summary = legacy.Summary
+		}
+	}
+	if decoded.Key == "" {
+		return EventBody{}, fmt.Errorf("%w: the body carries no event key", ErrEventBody)
+	}
 	return decoded, nil
+}
+
+// legacyBodyKey reads the canonical identity out of the earlier event_key
+// field: the decimal literal that writer recorded, as a JSON number or as a
+// string. A number is kept verbatim, so the identity matches the segment
+// index key character by character; a literal that is not an unsigned integer
+// has no canonical spelling and is refused by name.
+func legacyBodyKey(raw json.RawMessage) (event.EventID, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", nil
+	}
+	if raw[0] == '"' {
+		var key string
+		if err := json.Unmarshal(raw, &key); err != nil {
+			return "", fmt.Errorf("%w: legacy event key: %w", ErrEventBody, err)
+		}
+		if key == "" {
+			return "", nil
+		}
+		return event.EventID(key), nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return "", fmt.Errorf("%w: legacy event key: %w", ErrEventBody, err)
+	}
+	if _, err := strconv.ParseUint(number.String(), 10, 64); err != nil {
+		return "", fmt.Errorf("%w: legacy event key %q is not an unsigned integer", ErrEventBody, number.String())
+	}
+	return event.EventID(number.String()), nil
 }
 
 // Record returns the query record of the body under the partition and segment

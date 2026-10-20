@@ -114,6 +114,15 @@ type AgentSpec struct {
 	// carries beside the open asynchronous task state. False keeps a request
 	// exactly as it stands without the block.
 	EnvironmentBlock bool
+	// Memory declares the storage tier this agent reads, the namespaces it may
+	// read across partitions and the semantic engine behind its recall
+	// vocabulary. The zero declaration names no memory binding at all.
+	Memory MemorySpec
+	// Meditation declares the scheduled reflection this agent runs: its
+	// cadence, the prompt its input carries, the namespaces it observes and
+	// the declared agents its result flows back to. The zero declaration
+	// enables no reflection loop.
+	Meditation MeditationSpec
 }
     AgentSpec is the declaration of a single agent inside an organization.
 
@@ -177,6 +186,41 @@ func (d *Declaration) ToolRefs() []ToolRef
     ToolRefs returns the organization level references as a deep copy,
     so callers may mutate the result without touching the declaration.
 
+type EmbeddingSpec struct {
+	// Provider names the embedding protocol provider.
+	Provider string `yaml:"provider"`
+	// Model names the embedding model of that provider.
+	Model string `yaml:"model"`
+	// APIKeyEnv names the environment variable holding the key.
+	APIKeyEnv string `yaml:"api_key_env"`
+	// Dimensions is the vector width the connection declares.
+	Dimensions int `yaml:"dimensions"`
+	// APIEndpoint overrides the provider default endpoint when it is set.
+	APIEndpoint string `yaml:"api_endpoint"`
+}
+    EmbeddingSpec is one embedding connection: the protocol provider, the model,
+    the environment variable holding the key, the vector width, and the optional
+    endpoint that overrides the provider default.
+
+type EngineSpec struct {
+	// Backend names the retrieval backend.
+	Backend string `yaml:"backend"`
+	// Embedding is the connection the vector leg embeds through.
+	Embedding EmbeddingSpec `yaml:"embedding"`
+	// VectorTopK bounds the vector leg of one retrieval; 0 takes the runtime
+	// default.
+	VectorTopK int `yaml:"vector_top_k"`
+	// KeywordTopK bounds the keyword leg of one retrieval; 0 takes the runtime
+	// default.
+	KeywordTopK int `yaml:"keyword_top_k"`
+	// RRFK is the rank constant the reciprocal-rank fusion runs under; 0 takes
+	// the runtime default.
+	RRFK int `yaml:"rrf_k"`
+}
+    EngineSpec is the semantic engine behind one memory declaration: the
+    retrieval backend, the embedding connection and the two leg bounds and rank
+    constant the hybrid retrieval runs under.
+
 type FileKind string
     FileKind identifies the role a referenced file plays in request assembly.
 
@@ -216,6 +260,46 @@ type FinalRoundSpec struct {
     and the timeout it runs under. The zero budget places no bound on any
     invocation, so a declaration that names no budget leaves every drive exactly
     as it runs beside no budget at all.
+
+type MeditationSpec struct {
+	// Enabled states whether this agent runs the reflection loop.
+	Enabled bool `yaml:"enabled"`
+	// Interval is the tick cadence; 0 takes the engine default cadence.
+	Interval time.Duration `yaml:"interval"`
+	// MinGap is the floor between two consumed reflections; 0 places no floor.
+	MinGap time.Duration `yaml:"min_gap"`
+	// PromptFile is the file the static reflection prompt is read from.
+	PromptFile string `yaml:"prompt_file"`
+	// ObservedNamespaces declares the observed face; empty means the agent's
+	// own partition.
+	ObservedNamespaces []string `yaml:"observed_namespaces"`
+	// DeliverTo lists the declared agents the reflection result flows back to.
+	DeliverTo []string `yaml:"deliver_to"`
+}
+    MeditationSpec is the scheduled reflection one agent declares: whether it
+    runs, the tick cadence and the floor between two consumed reflections,
+    the prompt its input carries, the namespaces it observes and the declared
+    agents its result flows back to.
+
+type MemorySpec struct {
+	// Type names the storage tier kind, or is empty for no tier.
+	Type string `yaml:"type"`
+	// Path is the root the storage tier opens, or is empty for no tier.
+	Path string `yaml:"path"`
+	// ReadNamespaces lists the namespaces this agent may read across
+	// partitions, beside its own namespace.
+	ReadNamespaces []string `yaml:"read_namespaces"`
+	// Engine is the semantic engine the recall retrieval runs under; its zero
+	// value names no engine, which is the keyword-only retrieval.
+	Engine EngineSpec `yaml:"engine"`
+}
+    MemorySpec is the memory declaration of one agent: the storage tier its
+    facts persist through, the namespaces it is authorized to read across
+    partitions, and the semantic engine its recall vocabulary generates its
+    embeddings with.
+
+    The tier is a type and a root, both required together; an engine beside no
+    tier names no place for its vectors to persist.
 
 type ToolRef struct {
 	// Name is the referenced name as written in the declaration.

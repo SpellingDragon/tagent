@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,6 +105,24 @@ func (r *SessionRouter) Target(addr event.Address) (string, bool) {
 	defer r.mu.Unlock()
 	chatID, ok := r.targets[addr]
 	return chatID, ok
+}
+
+// BoundAddresses reports the addresses of the named agent that a drive bound to
+// a chat identity, in session order. The reflection delivery resolves its declared
+// target through this face: an agent no drive reached holds no address, so its
+// result is withheld rather than sent to a session of another agent.
+func (r *SessionRouter) BoundAddresses(agentID event.AgentID) []event.Address {
+	if agentID == "" || agentID != r.agentID {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	addresses := make([]event.Address, 0, len(r.targets))
+	for addr := range r.targets {
+		addresses = append(addresses, addr)
+	}
+	sort.Slice(addresses, func(i, j int) bool { return addresses[i].SessionID < addresses[j].SessionID })
+	return addresses
 }
 
 // NextInvocation mints the responsibility range identity of one drive of the

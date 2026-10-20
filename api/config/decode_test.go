@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestStrictDecodeRefusesEveryUndeclaredShape pins the startup gate: every shape the declaration surface does not name is refused before defaults run.
@@ -44,6 +45,14 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 			field:    "agents[0].unexpected",
 			reason:   "unknown field",
 			wantLine: 3,
+		},
+		{
+			name:     "unknown embedding key",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    memory:\n      engine:\n        embedding:\n          api_base: x\n",
+			field:    "agents[0].memory.engine.embedding.api_base",
+			reason:   "unknown field",
+			wantLine: 6,
 		},
 		{
 			name:     "unknown tool reference key",
@@ -302,6 +311,52 @@ func TestStrictDecodeReadsTheWatchdogBudget(t *testing.T) {
 	partial := decl.Agents[2].FinalRound
 	if partial.MaxRounds != 3 || partial.BudgetSeconds != 0 || partial.TimeoutSeconds != 0 || partial.Prompt != "" {
 		t.Fatalf("partial budget = %+v, want only the entry the declaration names", partial)
+	}
+}
+
+// TestStrictDecodeReadsTheMemoryAndMeditationBindings pins the two runtime declarations sunk into the core schema.
+// - a declared memory tier, read face and engine land in the agent spec, the duration cadence included
+// - a declared meditation switch, cadence, prompt, observation face and delivery list land in the agent spec
+// - an agent naming neither carries the zero binding
+// 契约: docs/wiki/platform/platform-subsystems.md#strict-decode
+func TestStrictDecodeReadsTheMemoryAndMeditationBindings(t *testing.T) {
+	body := "entry: main\nagents:\n  - id: main\n    memory:\n      type: localfile\n      path: data\n" +
+		"      read_namespaces: [audit, ops]\n      engine:\n        backend: memory\n" +
+		"        vector_top_k: 20\n        keyword_top_k: 10\n        rrf_k: 60\n" +
+		"        embedding:\n          provider: zhipu\n          model: embedding-3\n" +
+		"          api_key_env: ZAI_API_KEY\n          dimensions: 512\n" +
+		"    meditation:\n      enabled: true\n      interval: 30m\n      min_gap: 5m\n" +
+		"      prompt_file: prompts/meditation.md\n      observed_namespaces: [main]\n      deliver_to: [main]\n" +
+		"  - id: plain\n"
+	decl, err := Load(context.Background(), writeConfigSource(t, "org.yaml", body))
+	if err != nil {
+		t.Fatalf("Load over the declared bindings = %v, want both read", err)
+	}
+	memory := decl.Agents[0].Memory
+	if memory.Type != "localfile" || memory.Path != "data" || len(memory.ReadNamespaces) != 2 {
+		t.Fatalf("memory = %+v, want the declared tier and read face", memory)
+	}
+	engine := memory.Engine
+	if engine.Backend != "memory" || engine.VectorTopK != 20 || engine.KeywordTopK != 10 || engine.RRFK != 60 {
+		t.Fatalf("engine = %+v, want the declared backend and retrieval tuning", engine)
+	}
+	embedding := engine.Embedding
+	if embedding.Provider != "zhipu" || embedding.Model != "embedding-3" ||
+		embedding.APIKeyEnv != "ZAI_API_KEY" || embedding.Dimensions != 512 {
+		t.Fatalf("embedding = %+v, want the declared provider connection", embedding)
+	}
+	meditation := decl.Agents[0].Meditation
+	if !meditation.Enabled || meditation.Interval != 30*time.Minute || meditation.MinGap != 5*time.Minute {
+		t.Fatalf("meditation cadence = %+v, want the declared switch and durations", meditation)
+	}
+	if meditation.PromptFile != "prompts/meditation.md" || len(meditation.ObservedNamespaces) != 1 || len(meditation.DeliverTo) != 1 {
+		t.Fatalf("meditation face = %+v, want the declared prompt, observation face and target", meditation)
+	}
+	if got := decl.Agents[1].Memory; !got.isZero() {
+		t.Fatalf("undeclared memory = %+v, want the zero binding", got)
+	}
+	if got := decl.Agents[1].Meditation; !got.isZero() {
+		t.Fatalf("undeclared meditation = %+v, want the zero binding", got)
 	}
 }
 

@@ -65,18 +65,32 @@ var ErrStrategyUnknown = errors.New("search: the query names an unknown strategy
 // - The hybrid fallback is byte-identical by contract: an empty vector leg (unconfigured embedder, dropped generation or no hit) runs the very same code path keyword-only runs, so a caller cannot tell the two apart and a vector pipeline coming up later never changes what a keyword-only answer looked like.
 // - The fusion grants nothing: both legs arrive already read under the caller's authorized scope and the fused result stays inside it.
 // - A fused hit stays a reference, so a fused set is never a second copy of the text behind it.
-type RRFFusion struct{}
+type RRFFusion struct {
+	// K is the rank constant this fusion scores under. A non-positive K runs
+	// under the canonical RRFRankConstant, so the zero value keeps the
+	// documented rule instead of a division by zero.
+	K int
+}
 
-// NewRRFFusion returns the hybrid fusion port.
+// NewRRFFusion returns the hybrid fusion port under the canonical rank
+// constant.
 func NewRRFFusion() Fusion {
-	return RRFFusion{}
+	return RRFFusion{K: RRFRankConstant}
+}
+
+// rankConstant reports the rank constant this fusion scores under.
+func (f RRFFusion) rankConstant() int {
+	if f.K > 0 {
+		return f.K
+	}
+	return RRFRankConstant
 }
 
 var _ Fusion = RRFFusion{}
 
 // Fuse merges the two legs under strategy and returns the ordered reference
 // set they fuse into, on the terms of the Fusion port.
-func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error) {
+func (f RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []ledger.OriginalRef) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
@@ -87,7 +101,7 @@ func (RRFFusion) Fuse(ctx context.Context, strategy Strategy, vector, keyword []
 		if len(vector) == 0 {
 			return keywordOnly(keyword), nil
 		}
-		return reciprocalRank(vector, keyword), nil
+		return reciprocalRank(vector, keyword, f.rankConstant()), nil
 	case StrategyVectorOnly:
 		return Result{}, ErrStrategyUnwired
 	default:
@@ -111,7 +125,7 @@ func keywordOnly(keyword []ledger.OriginalRef) Result {
 // descending score with ties broken toward the larger event key. A reference
 // appearing in both legs carries both contributions; the same reference twice
 // inside one leg is counted at its first rank only.
-func reciprocalRank(vector, keyword []ledger.OriginalRef) Result {
+func reciprocalRank(vector, keyword []ledger.OriginalRef, rankConstant int) Result {
 	scores := map[ledger.OriginalRef]float64{}
 	accumulate := func(leg []ledger.OriginalRef) {
 		seen := make(map[ledger.OriginalRef]bool, len(leg))
@@ -120,7 +134,7 @@ func reciprocalRank(vector, keyword []ledger.OriginalRef) Result {
 				continue
 			}
 			seen[ref] = true
-			scores[ref] += 1 / float64(RRFRankConstant+rank)
+			scores[ref] += 1 / float64(rankConstant+rank)
 		}
 	}
 	accumulate(vector)

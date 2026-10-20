@@ -49,6 +49,10 @@ const DiagnosticSwitchEnv = "TAGENT_DIAGNOSTICS"
 
 VARIABLES
 
+var ErrCommittedFactMissing = errors.New("tagent: the committed fact is not held by this run")
+    ErrCommittedFactMissing reports a fact identity this run holds neither in
+    its live ledger nor in the storage tier it was assembled over.
+
 var ErrDiagnosticSwitchUnknown = errors.New("tagent: the diagnostic switch names no subsystem of this host")
     ErrDiagnosticSwitchUnknown reports a diagnostic switch naming no subsystem
     of this host: the switch is refused by name instead of being dropped in
@@ -58,6 +62,11 @@ var ErrGovernanceMissing = errors.New("tagent: the formal assembly carries no go
     ErrGovernanceMissing reports a formal assembly that carries no governance:
     the sole publication entry is driven under a real governance and never under
     a stand-in that passes every required check by construction.
+
+var ErrObservationUnwired = errors.New("tagent: the run is assembled beside no observable storage tier")
+    ErrObservationUnwired reports an observation read attempted on a run
+    assembled beside no storage tier: the face is refused by name rather than
+    answered as an empty chain.
 
 var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face (assembled beside no storage)")
     ErrRetrievalUnwired reports a recall against a run assembled beside no
@@ -269,6 +278,10 @@ type InvokeRequest struct {
 	// to. It is read from this input alone and never guessed from a session or
 	// a trace: a range that names no episode records no episode.
 	Episode event.EpisodeID
+	// TriggerSource is the trigger-source stamp every input fact of the range
+	// carries. An empty stamp records none, so an assembly that names no
+	// lineage behaves exactly as it did before the stamp existed.
+	TriggerSource string
 	// Input is the native input of the range, in the order the caller admits it.
 	Input []model.Message
 }
@@ -361,6 +374,12 @@ func WithReflectionAnchors(path string) Option
     answers the watermark the diagnostic reading reports. An assembly beside
     no path carries no reflection anchor store, and its reflection face reports
     that absence instead of a watermark of its own.
+
+func WithRetrievalTuning(vectorTopK, keywordTopK, rrfK int) Option
+    WithRetrievalTuning bounds the two retrieval legs and names the rank
+    constant their fusion scores under. A zero bound keeps that leg unbounded
+    and a zero constant keeps search.RRFRankConstant, so the zero value is the
+    untuned retrieval exactly as it stood.
 
 func WithStorage(cfg ledger.StorageConfig) Option
     WithStorage opens the named storage tier for this assembly and stores the
@@ -462,6 +481,13 @@ func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
     as it committed, and the range reads back from it instead of from a second
     transcript of the same facts.
 
+func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error)
+    CommittedEvent reports the fact an identity names: the live fact of this
+    process when it holds one, and otherwise the event the storage tier already
+    committed. A committed body carries the light fields and no trigger source,
+    so a fact restored from the tier carries the lineage its bytes carry and
+    never an invented one.
+
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
     Diagnostics reads every diagnostic face of this run under the caller's
     authorization scope: the unified runtime map beside the reflection,
@@ -482,6 +508,13 @@ func (r *Run) Explain(ctx context.Context, filter query.ListFilter) (query.Block
     caller presents. The read grants no authorization of its own and reads every
     fact from the owners at read time.
 
+func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error)
+    InjectEvent commits one explicit input event of the named responsibility
+    range and drives the loop session of its address with it, exactly as the
+    Invoke entry drives a range the host admitted. The caller owns the event's
+    address and lineage; this entry stamps only the identities that scope it to
+    this run and range, and reports the identity the fact committed under.
+
 func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 
     Invoke drives one invocation through the persistent event loop: the input
@@ -500,6 +533,12 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     input into the range's own transcript and never batch two invocations of one
     session. MUST borrow the binding generation effective at each decision's own
     start. MUST NOT let an admission receipt stand for the result of the call.
+
+func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
+    ObservedEvents answers one query over the fact chain this run can observe:
+    the events its storage tier already committed, merged with every fact this
+    process committed, landed idempotently under the identity each fact carries.
+    A run assembled beside no storage tier refuses the read by name.
 
 func (r *Run) Presentations() []view.Presentation
     Presentations reports the After pass presentations this run handed to
@@ -562,6 +601,12 @@ func (r *Run) Recovery() task.RestoreReport
     Recovery reports how the assembly folded the durable chains its storage
     already held at startup: one outcome per task the chains covered. The report
     is empty for an assembly beside no storage.
+
+func (r *Run) ReflectionGate() meditation.WatermarkGate
+    ReflectionGate reports the watermark gate the reflection face of this run
+    reads, or nil when the assembly was configured beside none. The gate is the
+    one anchor store the assembly built, so a reflection never opens a second
+    store over the same record.
 
 func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     RequestSnapshots reports the safe request snapshots this assembly fixed

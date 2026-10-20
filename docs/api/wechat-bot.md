@@ -1,4 +1,19 @@
 
+The scheduled reflection of the host: the meditation section names one observing
+agent, the cadence its ticks run at, the namespaces it reflects on and the
+declared agents its result flows back to. The core driver owns the tick loop;
+this file resolves the declaration into its plan, supplies the observation and
+injection faces over the assembled run, and gives the delivery port the one
+outbound path. A document declaring no enabled meditation starts no driver and
+changes nothing.
+
+The memory assembly of the host: the memory declaration names one shared storage
+tier, the semantic engine behind the recall vocabulary and the namespaces one
+agent may read across partitions, and this file merges those declarations into
+the faces the run and the recall tools are wired over. The embedding connection
+itself is the core default implementation; the host only names the declaration
+it assembles.
+
 本文件承载换装后的转世通报：检测、组装、注入与记消费。
 
 send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进调用方的会话，
@@ -19,6 +34,10 @@ var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was alread
     ErrDuplicateInbound reports an inbound message whose identity was already
     admitted: one channel delivery drives one invocation.
 
+var ErrEmbeddingKey = embedder.ErrEmbeddingKey
+    ErrEmbeddingKey reports an embedding connection whose key variable names no
+    value in the environment.
+
 var ErrFaceEmptyInjection = errors.New("wechat-bot: the injection carries no user message")
     ErrFaceEmptyInjection reports an injection request whose messages carry no
     user content: a turn reads user input only, so the request is refused by
@@ -33,6 +52,25 @@ var ErrFaceUnauthenticated = errors.New("wechat-bot: the injection request is no
     ErrFaceUnauthenticated reports an injection request whose subject did not
     authenticate: no credential is configured for the face and the peer is not
     the loopback address, or a configured credential was missing or unmatched.
+
+var ErrMeditationDeclaration = errors.New("wechat-bot: the meditation declaration is inconsistent")
+    ErrMeditationDeclaration reports a meditation section this host cannot
+    drive: two agents enabling one reflection loop, a cadence or prompt that
+    cannot be read, an observation face outside the agent's authorized read
+    scope, a delivery target the document does not declare, or an enabled
+    section beside no shared storage tier for its anchor record.
+
+var ErrMemoryDeclaration = errors.New("wechat-bot: the memory declaration is inconsistent")
+    ErrMemoryDeclaration reports a memory section this host cannot merge into
+    one storage tier and one semantic engine: a declaration that names half a
+    storage tier, two agents that name different tiers or engines, or an engine
+    beside no tier at all.
+
+var ErrMemoryEngine = errors.New("wechat-bot: the memory engine declaration is invalid")
+    ErrMemoryEngine reports a semantic engine declaration this host cannot
+    assemble: an unknown backend or provider, a connection missing its model,
+    key variable or vector width, a negative retrieval bound, or an endpoint
+    that is not an absolute http(s) URL.
 
 var ErrNoChatAddress = errors.New("wechat-bot: the inbound message names no chat identity")
     ErrNoChatAddress reports an inbound message that names no chat identity.
@@ -217,6 +255,13 @@ func (r *SessionRouter) Bind(addr event.Address, chatID string) error
     identity of its address: a later explicit send from that address reaches the
     chat its own drive came from. A rebound address keeps its first identity and
     reports the conflict instead of silently retargeting the session.
+
+func (r *SessionRouter) BoundAddresses(agentID event.AgentID) []event.Address
+    BoundAddresses reports the addresses of the named agent that a drive bound
+    to a chat identity, in session order. The reflection delivery resolves
+    its declared target through this face: an agent no drive reached holds no
+    address, so its result is withheld rather than sent to a session of another
+    agent.
 
 func (r *SessionRouter) NextInvocation(addr event.Address) event.InvocationID
     NextInvocation mints the responsibility range identity of one drive of the

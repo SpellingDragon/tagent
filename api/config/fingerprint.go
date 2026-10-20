@@ -57,6 +57,50 @@ type canonicalAgent struct {
 	// declaration surface had before the switches existed.
 	ReplayBudget     int  `json:"replay_budget,omitempty"`
 	EnvironmentBlock bool `json:"environment_block,omitempty"`
+	// Memory and Meditation are the bindings of the agent: an agent that
+	// declares neither carries no entry of its own, so its canonical form
+	// names no binding and its fingerprint stays the one the declaration
+	// surface had before the bindings existed.
+	Memory     *canonicalMemory     `json:"memory,omitempty"`
+	Meditation *canonicalMeditation `json:"meditation,omitempty"`
+}
+
+// canonicalMemory is one memory binding in canonical field order.
+type canonicalMemory struct {
+	Type           string           `json:"type"`
+	Path           string           `json:"path"`
+	ReadNamespaces []string         `json:"read_namespaces"`
+	Engine         *canonicalEngine `json:"engine,omitempty"`
+}
+
+// canonicalEngine is one semantic engine in canonical field order.
+type canonicalEngine struct {
+	Backend     string              `json:"backend"`
+	Embedding   *canonicalEmbedding `json:"embedding,omitempty"`
+	VectorTopK  int                 `json:"vector_top_k,omitempty"`
+	KeywordTopK int                 `json:"keyword_top_k,omitempty"`
+	RRFK        int                 `json:"rrf_k,omitempty"`
+}
+
+// canonicalEmbedding is one embedding connection in canonical field order.
+type canonicalEmbedding struct {
+	Provider    string `json:"provider"`
+	Model       string `json:"model"`
+	APIKeyEnv   string `json:"api_key_env"`
+	Dimensions  int    `json:"dimensions,omitempty"`
+	APIEndpoint string `json:"api_endpoint,omitempty"`
+}
+
+// canonicalMeditation is one meditation binding in canonical field order. The
+// cadence is named in nanoseconds, so two spellings of one duration normalize
+// onto the same fingerprint.
+type canonicalMeditation struct {
+	Enabled            bool     `json:"enabled,omitempty"`
+	IntervalNS         int64    `json:"interval_ns,omitempty"`
+	MinGapNS           int64    `json:"min_gap_ns,omitempty"`
+	PromptFile         string   `json:"prompt_file,omitempty"`
+	ObservedNamespaces []string `json:"observed_namespaces"`
+	DeliverTo          []string `json:"deliver_to"`
 }
 
 // canonicalFinalRound is one agent's watchdog budget in canonical field order.
@@ -68,6 +112,27 @@ type canonicalFinalRound struct {
 	BudgetSeconds  float64 `json:"budget_seconds,omitempty"`
 	TimeoutSeconds float64 `json:"timeout_seconds,omitempty"`
 	Prompt         string  `json:"prompt,omitempty"`
+}
+
+// isZero reports whether the memory declaration names no binding at all.
+func (s MemorySpec) isZero() bool {
+	return s.Type == "" && s.Path == "" && len(s.ReadNamespaces) == 0 && s.Engine.isZero()
+}
+
+// isZero reports whether the engine declaration names no engine at all.
+func (s EngineSpec) isZero() bool {
+	return s == EngineSpec{}
+}
+
+// isZero reports whether the embedding declaration names no connection at all.
+func (s EmbeddingSpec) isZero() bool {
+	return s == EmbeddingSpec{}
+}
+
+// isZero reports whether the meditation declaration enables no reflection.
+func (s MeditationSpec) isZero() bool {
+	return !s.Enabled && s.Interval == 0 && s.MinGap == 0 && s.PromptFile == "" &&
+		len(s.ObservedNamespaces) == 0 && len(s.DeliverTo) == 0
 }
 
 // canonicalToolRef is one tool ref in canonical field order.
@@ -110,9 +175,71 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 			FinalRound:       canonicalFinalRoundOf(a.FinalRound),
 			ReplayBudget:     a.ReplayBudget,
 			EnvironmentBlock: a.EnvironmentBlock,
+			Memory:           canonicalMemoryOf(a.Memory),
+			Meditation:       canonicalMeditationOf(a.Meditation),
 		})
 	}
 	return out
+}
+
+// canonicalMemoryOf maps one memory binding onto its canonical form, or names
+// no binding at all while the declaration names none.
+func canonicalMemoryOf(s MemorySpec) *canonicalMemory {
+	if s.isZero() {
+		return nil
+	}
+	return &canonicalMemory{
+		Type:           s.Type,
+		Path:           s.Path,
+		ReadNamespaces: canonicalStrings(s.ReadNamespaces),
+		Engine:         canonicalEngineOf(s.Engine),
+	}
+}
+
+// canonicalEngineOf maps one semantic engine onto its canonical form, or names
+// no engine at all while the declaration names none.
+func canonicalEngineOf(s EngineSpec) *canonicalEngine {
+	if s.isZero() {
+		return nil
+	}
+	return &canonicalEngine{
+		Backend:     s.Backend,
+		Embedding:   canonicalEmbeddingOf(s.Embedding),
+		VectorTopK:  s.VectorTopK,
+		KeywordTopK: s.KeywordTopK,
+		RRFK:        s.RRFK,
+	}
+}
+
+// canonicalEmbeddingOf maps one embedding connection onto its canonical form,
+// or names no connection at all while the declaration names none.
+func canonicalEmbeddingOf(s EmbeddingSpec) *canonicalEmbedding {
+	if s.isZero() {
+		return nil
+	}
+	return &canonicalEmbedding{
+		Provider:    s.Provider,
+		Model:       s.Model,
+		APIKeyEnv:   s.APIKeyEnv,
+		Dimensions:  s.Dimensions,
+		APIEndpoint: s.APIEndpoint,
+	}
+}
+
+// canonicalMeditationOf maps one meditation binding onto its canonical form,
+// or names no binding at all while the declaration enables none.
+func canonicalMeditationOf(s MeditationSpec) *canonicalMeditation {
+	if s.isZero() {
+		return nil
+	}
+	return &canonicalMeditation{
+		Enabled:            s.Enabled,
+		IntervalNS:         int64(s.Interval),
+		MinGapNS:           int64(s.MinGap),
+		PromptFile:         s.PromptFile,
+		ObservedNamespaces: canonicalStrings(s.ObservedNamespaces),
+		DeliverTo:          canonicalStrings(s.DeliverTo),
+	}
 }
 
 // canonicalFinalRoundOf maps one watchdog budget onto its canonical form, or

@@ -332,6 +332,11 @@ func main() {
 		host.sender.replicas = replicas
 	}
 
+	if err := host.startMeditation(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "Start the meditation driver failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	bot.OnMessage(func(ctx context.Context, msg *wechat.Message) error {
 		if handled, reply, _ := gateway.Resolve(msg.FromUserID, msg.Text()); handled {
 			if reply != "" {

@@ -40,6 +40,40 @@ var (
 		FinalRound:       FinalRoundSpec{},
 		ReplayBudget:     0,
 		EnvironmentBlock: false,
+		Memory:           MemorySpec{},
+		Meditation:       MeditationSpec{},
+	}
+
+	_ = MemorySpec{
+		Type:           "",
+		Path:           "",
+		ReadNamespaces: []string{},
+		Engine:         EngineSpec{},
+	}
+
+	_ = EngineSpec{
+		Backend:     "",
+		Embedding:   EmbeddingSpec{},
+		VectorTopK:  0,
+		KeywordTopK: 0,
+		RRFK:        0,
+	}
+
+	_ = EmbeddingSpec{
+		Provider:    "",
+		Model:       "",
+		APIKeyEnv:   "",
+		Dimensions:  0,
+		APIEndpoint: "",
+	}
+
+	_ = MeditationSpec{
+		Enabled:            false,
+		Interval:           0,
+		MinGap:             0,
+		PromptFile:         "",
+		ObservedNamespaces: []string{},
+		DeliverTo:          []string{},
 	}
 
 	_ = FinalRoundSpec{

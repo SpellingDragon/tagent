@@ -20,6 +20,7 @@ import (
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
@@ -112,6 +113,12 @@ type agentEntry struct {
 	SkillDirs  []string         `yaml:"skill_dirs"`
 	ReadRoot   string           `yaml:"read_root"`
 	FinalRound *finalRoundEntry `yaml:"final_round"`
+	// Memory declares the shared storage tier and semantic engine this agent
+	// reads, and the namespaces it is authorized to read across partitions.
+	Memory config.MemorySpec `yaml:"memory"`
+	// Meditation declares the scheduled reflection this agent runs: the
+	// cadence, the observed namespaces and the agents its result flows back to.
+	Meditation config.MeditationSpec `yaml:"meditation"`
 }
 
 // finalRoundEntry is the watchdog budget one declared agent opts into: the tool
@@ -192,6 +199,8 @@ func (d *hostDocument) Declaration() (*config.Declaration, error) {
 		}
 		spec.Tools = refs
 		spec.FinalRound = d.Agents[id].finalRound()
+		spec.Memory = d.Agents[id].Memory
+		spec.Meditation = d.Agents[id].Meditation
 		decl.Agents = append(decl.Agents, spec)
 	}
 	return decl, nil
@@ -370,7 +379,7 @@ func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendS
 		available[sendToolID] = sendToolFactory(send)
 	}
 	if d.declaresRecall(id) {
-		for _, candidate := range recall.New(recallSeam.readsFace(), []string{id}) {
+		for _, candidate := range recall.New(recallSeam.readsFace(), d.readNamespaces(id)) {
 			available[candidate.Declaration().Name] = candidate
 		}
 	}
@@ -578,54 +587,6 @@ func (s *hostRecallSeam) readsFace() recall.Reads {
 	return reads
 }
 
-// declaresStorage reports whether the document declares a storage tier: the
-// recall read faces are wired only over the events a tier commits.
-func (d *hostDocument) declaresStorage() bool {
-	return strings.TrimSpace(d.Storage.Type) != ""
-}
-
-// storageConfig reports the storage tier the document names, or nil when it
-// names none.
-func (d *hostDocument) storageConfig() *ledger.StorageConfig {
-	if !d.declaresStorage() {
-		return nil
-	}
-	return &ledger.StorageConfig{
-		Type: ledger.StorageType(strings.TrimSpace(d.Storage.Type)),
-		Root: strings.TrimSpace(d.Storage.Root),
-	}
-}
-
-// embedder reports the embedding binding the recall retrieval of this host
-// generates its vectors under: the deterministic offline binding, and none at
-// all when the document declares no storage tier.
-func (d *hostDocument) embedder() memory.Embedder {
-	if !d.declaresStorage() {
-		return nil
-	}
-	return memory.NewHashEmbedder(0)
-}
-
-// relations reports the causal relation ledger the recall trace of this host
-// walks: the journal under the storage root when the document declares one, and
-// an in-process ledger otherwise. The runtime wires no relation ledger, so this
-// face belongs to the host.
-func (d *hostDocument) relations() (*replay.MemoryRelations, error) {
-	cfg := d.storageConfig()
-	if cfg == nil {
-		return replay.NewMemoryRelations(), nil
-	}
-	root := filepath.Join(cfg.Root, "relations")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		return nil, fmt.Errorf("wechat-bot: create the relation journal %s: %w", root, err)
-	}
-	relations, err := replay.OpenMemoryRelations(root)
-	if err != nil {
-		return nil, fmt.Errorf("wechat-bot: open the relation journal %s: %w", root, err)
-	}
-	return relations, nil
-}
-
 // requestTimeout reports the model call timeout the document declares.
 func (d *hostDocument) requestTimeout() time.Duration {
 	if d.TimeoutSeconds > 0 {
@@ -697,6 +658,9 @@ type hostRuntime struct {
 	seen   *SeenStore
 	gates  sync.Map
 
+	meditationPlan *meditationPlan
+	meditation     *meditation.Driver
+
 	chatMu   sync.Mutex
 	lastChat string
 }
@@ -719,7 +683,10 @@ func assembleHost(ctx context.Context, doc *hostDocument, gateway *approvalGatew
 	if err != nil {
 		return nil, err
 	}
-	embedder := doc.embedder()
+	embedder, err := doc.embedder()
+	if err != nil {
+		return nil, err
+	}
 	recallSeam := &hostRecallSeam{trace: relations, embedder: embedder}
 	natives, err := doc.nativeAgents(ctx, send, recallSeam)
 	if err != nil {
@@ -751,11 +718,27 @@ func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalG
 		tagent.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
 		tagent.WithTelemetry(telemetry.NewLogObserver(log.Default)),
 	}
-	if cfg := doc.storageConfig(); cfg != nil {
+	if cfg, err := doc.storageConfig(); err != nil {
+		return nil, err
+	} else if cfg != nil {
 		opts = append(opts, tagent.WithStorage(*cfg))
 		if embedder != nil {
 			opts = append(opts, tagent.WithEmbedder(embedder))
 		}
+	}
+	vectorTopK, keywordTopK, rrfK, err := doc.retrievalTuning()
+	if err != nil {
+		return nil, err
+	}
+	if vectorTopK > 0 || keywordTopK > 0 || rrfK > 0 {
+		opts = append(opts, tagent.WithRetrievalTuning(vectorTopK, keywordTopK, rrfK))
+	}
+	plan, err := doc.meditationPlan()
+	if err != nil {
+		return nil, err
+	}
+	if plan != nil {
+		opts = append(opts, tagent.WithReflectionAnchors(plan.anchorsPath))
 	}
 	if gateway != nil && gateway.Enabled() {
 		policyOpts := []governance.PolicyOption{governance.WithApprovals(gateway.Manager())}
@@ -769,10 +752,11 @@ func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalG
 		return nil, err
 	}
 	host := &hostRuntime{
-		run:    run,
-		router: router,
-		inbox:  newInternalInbox(),
-		seen:   seen,
+		run:            run,
+		router:         router,
+		inbox:          newInternalInbox(),
+		seen:           seen,
+		meditationPlan: plan,
 	}
 	seam.bind(func(ctx context.Context, addr event.Address, content string) (string, error) {
 		return host.deliver(ctx, addr, sendToolLineage, content)
@@ -790,8 +774,12 @@ func sessionPrefix(doc *hostDocument) string {
 	return label + ":" + strings.TrimSpace(doc.Entry) + ":"
 }
 
-// Close drains the runtime and reports what stayed open.
+// Close drains the runtime and reports what stayed open. The scheduled
+// reflection stops first, so no tick runs beside the closing runtime.
 func (h *hostRuntime) Close(ctx context.Context) error {
+	if h.meditation != nil {
+		h.meditation.Stop()
+	}
 	report, err := h.run.Close(ctx, agent.CloseRequest{})
 	if err != nil {
 		return err
@@ -847,9 +835,10 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 		return addr, nil
 	}
 	turn, err := h.run.Invoke(ctx, tagent.InvokeRequest{
-		InvocationID: h.router.NextInvocation(addr),
-		Address:      addr,
-		Input:        input,
+		InvocationID:  h.router.NextInvocation(addr),
+		Address:       addr,
+		TriggerSource: "user",
+		Input:         input,
 	})
 	if err != nil {
 		return addr, err
