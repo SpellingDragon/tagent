@@ -590,12 +590,14 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 // contributed per agent through the NativeAgent map; these entries are the
 // shared dependencies of the whole run.
 type assemblyConfig struct {
-	governance  state.Governance
-	approver    task.Approver
-	policy      plugin.Governor
-	enforcement governance.Enforcement
-	storage     *ledger.StorageConfig
-	embedder    memory.Embedder
+	hostSender    MessageSender
+	hostDeliverer DeliverFunc
+	governance    state.Governance
+	approver      task.Approver
+	policy        plugin.Governor
+	enforcement   governance.Enforcement
+	storage       *ledger.StorageConfig
+	embedder      memory.Embedder
 	// vectorTopK and keywordTopK bound the two retrieval legs; rrfK is the
 	// rank constant their fusion scores under. The zero value keeps the legs
 	// unbounded and the canonical constant, so an untuned assembly behaves

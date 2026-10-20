@@ -1,5 +1,12 @@
 package tagent // import "github.com/SpellingDragon/tagent"
 
+Boot is the turnkey entry of the composition root: it reads one host document,
+resolves the declaration it carries, and returns the Host the application
+drives. The Host owns the assembled run, the scheduled reflection and the
+two loopback endpoints; the application fills the outbound message face,
+the approval face and the reflection delivery face through the options,
+and reads nothing else out of the document.
+
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
 host was started with. Every section reads the owner that already holds the fact
@@ -63,6 +70,43 @@ var ErrGovernanceMissing = errors.New("tagent: the formal assembly carries no go
     the sole publication entry is driven under a real governance and never under
     a stand-in that passes every required check by construction.
 
+var ErrHostAddressMissing = errors.New("tagent: the invocation names no complete session address")
+    ErrHostAddressMissing reports an invocation that names no complete session
+    address: the runtime is driven at an explicit address and never at a
+    most-recent one.
+
+var ErrHostClosed = errors.New("tagent: the host is closed")
+    ErrHostClosed reports an invocation or endpoint drive that reached a host
+    whose close already began.
+
+var ErrHostConfigMissing = errors.New("tagent: the host names no configuration path")
+    ErrHostConfigMissing reports a Boot call that names no configuration path:
+    the host has no document to read, so no runtime is assembled.
+
+var ErrHostDelivererMissing = errors.New("tagent: the host enables meditation beside no reflection deliverer")
+    ErrHostDelivererMissing reports a document that enables meditation beside
+    no reflection deliverer: a fired reflection would have nowhere to go,
+    so the host is refused by name instead of running a silent loop.
+
+var ErrHostEmptyTask = errors.New("tagent: the task request carries no user message")
+    ErrHostEmptyTask reports a task request whose messages carry no user
+    content: a turn reads user input only, so the request is refused by name.
+
+var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitted yet")
+    ErrHostNoActiveSession reports a task request arriving before any user turn:
+    the endpoint carries no session identity of its own, so it drives the one
+    session the host admitted last.
+
+var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound message sender")
+    ErrHostSenderMissing reports a host that grants the send tool or admits an
+    invocation at the user address beside no outbound message sender: the turn
+    would produce output nothing can deliver, so the run is refused by name.
+
+var ErrHostUnauthenticated = errors.New("tagent: the task request is not authenticated")
+    ErrHostUnauthenticated reports a task request whose subject did not
+    authenticate: a configured credential must arrive as a bearer token,
+    and a face beside no credential admits the loopback peer only.
+
 var ErrMemoryDeclaration = errors.New("tagent: the memory declaration is inconsistent")
     ErrMemoryDeclaration reports a memory declaration that cannot be merged into
     one storage tier and one semantic engine: a declaration that names half a
@@ -86,6 +130,13 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
     such store, so the recall is refused by name instead of answered as an empty
     reference set that would read as "nothing was found".
 
+var ErrUnknownAgentReference = errors.New("tagent: the agent reference names no declared agent")
+    ErrUnknownAgentReference reports an agent reference that names no declared
+    agent.
+
+var ErrUnknownHostTool = errors.New("tagent: the declared tool is not contributed by this host")
+    ErrUnknownHostTool reports a declared tool this host does not contribute.
+
 FUNCTIONS
 
 func EnvironmentBlockGenerations() int64
@@ -93,6 +144,13 @@ func EnvironmentBlockGenerations() int64
     boundary has rendered in this process so far.
 
 TYPES
+
+type DeliverFunc func(ctx context.Context, source string, targets []event.Address, content string)
+    DeliverFunc is the reflection delivery face the host hands a fired
+    reflection to: the source agent the reflection belongs to, the declared
+    target agents it flows back to and one body per call. A target is named by
+    its agent identity alone; the application resolves the sessions it has bound
+    to that agent.
 
 type DiagnosticFace struct {
 	// Subsystem names the face this reading belongs to.
@@ -274,6 +332,51 @@ type DiagnosticWatermark struct {
     consumed reflection turn advanced it to, read from the anchor store that
     persists it.
 
+type Host struct {
+	// Has unexported fields.
+}
+    Host is the assembled runtime of one host document: the run the entry
+    drives, the scheduled reflection beside it and the two loopback endpoints
+    a supervisor and an inbound channel reach. The host holds no application
+    concept of its own: every channel identity, approval ruling and delivery
+    target arrives through the options and the invocation address.
+
+func Boot(configPath string, opts ...HostOption) (*Host, error)
+    Boot reads one host document and returns the assembled host: the declaration
+    is resolved from the document, the models, tool instances, storage tier,
+    embedder and reflection plan are built for it, the run is assembled through
+    Assemble, and the reflection driver and the loopback endpoints start beside
+    it. Every failure before the assembly returns the named refusal and leaves
+    nothing running.
+
+func (h *Host) Close(ctx context.Context) error
+    Close stops the endpoints and the reflection driver, drains the run and
+    closes the MCP servers. A repeated close reports the first result and runs
+    no second drain.
+
+func (h *Host) FaceAddr() string
+    FaceAddr reports the address the loopback endpoints listen on, and an empty
+    address beside a host that serves none.
+
+func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
+    Invoke drives one invocation through the assembled run. An invocation at the
+    user address of the entry agent delivers the fresh assistant output through
+    the message sender; every other address is driven headless.
+
+func (h *Host) Run() *Run
+    Run reports the assembled run the host drives.
+
+type HostOption = Option
+    HostOption configures one Boot call; it aliases the assembly Option.
+
+func WithDeliverer(deliver DeliverFunc) HostOption
+    WithDeliverer attaches the reflection delivery face of a document that
+    enables meditation.
+
+func WithSender(sender MessageSender) HostOption
+    WithSender attaches the outbound message face every turn output of the host
+    is delivered through.
+
 type InvokeRequest struct {
 	// InvocationID identifies the responsibility range.
 	InvocationID event.InvocationID
@@ -335,6 +438,18 @@ func (p *MemoryPlan) Tuning() (int, int, int)
     Tuning reports the two leg bounds and the rank constant the merged engine
     declares. A plan beside no engine reports the zero tuning, which keeps the
     retrieval exactly as it stood.
+
+type MessageSender interface {
+	// Send delivers one body to the target address.
+	Send(ctx context.Context, target event.Address, content string) error
+}
+    MessageSender is the outbound message face the host delivers turn output
+    through: one body, one explicit address, and the delivery outcome reported
+    to the caller.
+
+    The redline list (3 rules): MUST deliver the body to the explicit address
+    the host names. MUST NOT resolve a target from a most-recent session or from
+    the body. MUST NOT report a refused delivery as a delivered one.
 
 type NativeAgent struct {
 	// Model is the native model of the agent; a nil model refuses the assembly.

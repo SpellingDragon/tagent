@@ -1,7 +1,9 @@
-// wechat_test 钉住 examples/wechat-bot 的协议适配语义：入站分类与落盘、去重与会话路由、
-// 出站唯一通路与文件规则、send 工具契约、审批裁决、启动通知、HTTP 面、定时策展投递，
-// 以及 registerHandlers 的真实挂点链路（审批→去重→分类→typing→Drive→清理）。
-// 装配走与进程相同的入口，模型与通道换成确定性替身。
+// wechat_test.go 钉住应用侧仍然自有的微信语义：入站分类与落盘、文件投递规则、去重与
+// 会话路由、唯一出站通路、审批裁决与审批席位、两条启动通知，以及 registerHandlers 的
+// 真实挂点链路（审批→去重→分类→typing→Drive→清理）。
+//
+// 装配（声明→agents→models→工具面→storage→meditation→注入面）已由 tagent.Boot 承担，
+// 其核心测试在根包；这里只驱动应用侧运行时，模型回答以脚本替身给出。
 //
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#module-layout
 package main
@@ -12,8 +14,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,16 +22,15 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
+	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory"
-	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
-	"trpc.group/trpc-go/trpc-agent-go/model"
-	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // testSessionPrefix 是用例会址的会话前缀：与装配期的会话标签一致。
@@ -39,198 +38,6 @@ const testSessionPrefix = "routing-test:tagent:"
 
 func testAddress(chat string) event.Address {
 	return event.Address{AgentID: "tagent", SessionID: event.SessionID(testSessionPrefix + chat)}
-}
-
-// frameCtx 携带一次调用派发会写下的显式会址，工具据此确定送达目标。
-func frameCtx(ctx context.Context, addr event.Address) context.Context {
-	return task.WithCallFrame(ctx, task.CallFrame{Address: addr})
-}
-
-// testDocument 造一份宿主文档：入口 agent 声明 send 工具，其余 agent 不声明任何工具。
-func testDocument(entry string, peers ...string) *hostDocument {
-	doc := &hostDocument{Entry: entry, Model: "test-model"}
-	doc.Agents = map[string]agentEntry{
-		entry: {Model: "test-model", Tools: []hostToolRef{{Kind: "tool", ID: sendToolID}}},
-	}
-	for _, peer := range peers {
-		doc.Agents[peer] = agentEntry{Model: "test-model"}
-	}
-	return doc
-}
-
-// meditationDocument 造一份启用定时策展的宿主文档：meditator 观察 tagent 的
-// 分区，把反射回流给 tagent；两者共用临时存储根，锚点因此落在被观察事实旁。
-func meditationDocument(t *testing.T) *hostDocument {
-	t.Helper()
-	root := t.TempDir()
-	prompt := filepath.Join(t.TempDir(), "meditation.md")
-	if err := os.WriteFile(prompt, []byte("本轮只看业务分区有没有值得回流的新结论。"), 0o644); err != nil {
-		t.Fatalf("write the meditation prompt: %v", err)
-	}
-	storage := config.MemorySpec{Type: string(ledger.StorageLocalFile), Path: root}
-	doc := &hostDocument{Entry: "tagent", Model: "test-model", PromptDir: t.TempDir()}
-	doc.Agents = map[string]agentEntry{
-		"tagent": {Model: "test-model", Memory: storage},
-		"meditator": {
-			Model:  "test-model",
-			Memory: config.MemorySpec{Type: storage.Type, Path: storage.Path, ReadNamespaces: []string{"tagent"}},
-			Meditation: config.MeditationSpec{
-				Enabled:            true,
-				Interval:           time.Minute,
-				PromptFile:         prompt,
-				ObservedNamespaces: []string{"tagent"},
-				DeliverTo:          []string{"tagent"},
-			},
-		},
-	}
-	return doc
-}
-
-// TestMeditationDriverDeliversTheDeclaredReflection 钉住宿主侧定时策展的端到端语义。
-//
-//   - 计划按声明解析：节奏、观察面、白名单与锚点。
-//   - 一次 tick 走同一条反射链，把策展正文送到声明目标的已绑定会话。
-//   - 第二次 tick 因无新观察，不产生模型调用与投递。
-func TestMeditationDriverDeliversTheDeclaredReflection(t *testing.T) {
-	ctx := context.Background()
-	doc := meditationDocument(t)
-	rig := newRoutingRig(t, doc)
-
-	plan := rig.host.meditationPlan
-	if plan == nil {
-		t.Fatal("the document enables meditation but the assembly resolved no plan")
-	}
-	if plan.agent != "meditator" || plan.interval != time.Minute || plan.minGap != 0 {
-		t.Fatalf("plan = %s/%s/%s, want meditator at the declared one-minute cadence", plan.agent, plan.interval, plan.minGap)
-	}
-	wantAnchors := filepath.Join(doc.Agents["tagent"].Memory.Path, "meditation", "meditator", "anchors.json")
-	if plan.anchors != wantAnchors {
-		t.Fatalf("anchors path = %q, want %q", plan.anchors, wantAnchors)
-	}
-	if len(plan.observed) != 1 || plan.observed[0] != "tagent" {
-		t.Fatalf("observed namespaces = %v, want the declared tagent face", plan.observed)
-	}
-	if len(plan.targets) != 1 || plan.targets[0] != "tagent" {
-		t.Fatalf("delivery white list = %v, want the declared tagent target", plan.targets)
-	}
-
-	rig.model.then(finalTurn("先把旧选题放一放。"))
-	if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-a", Text: "这条回答还是老选题"}); err != nil {
-		t.Fatalf("drive the observed business turn: %v", err)
-	}
-
-	rig.model.then(finalTurn("建议把选题换成用户真正问过的问题。"))
-	if err := rig.host.startMeditation(ctx); err != nil {
-		t.Fatalf("start the scheduled reflection: %v", err)
-	}
-	if rig.host.meditation == nil {
-		t.Fatal("startMeditation built no driver beside an enabled declaration")
-	}
-	rig.host.meditation.tick(ctx)
-
-	requests := rig.model.recorded()
-	if len(requests) < 2 {
-		t.Fatalf("model calls = %d, want the business turn beside the reflection turn", len(requests))
-	}
-	if !requestCarries(requests[1], "本轮只看业务分区有没有值得回流的新结论。") {
-		t.Fatalf("the reflection request does not carry the declared prompt: %+v", requests[1].Messages)
-	}
-	if !requestCarries(requests[1], "[reflection]") {
-		t.Fatalf("the reflection request does not carry the reflection digest: %+v", requests[1].Messages)
-	}
-
-	delivered := false
-	for _, text := range rig.out.texts() {
-		if text.Target == "chat-a" && text.Body == "建议把选题换成用户真正问过的问题。" {
-			delivered = true
-		}
-	}
-	if !delivered {
-		t.Fatalf("text deliveries = %+v, want the reflection delivered to chat-a", rig.out.texts())
-	}
-	if _, err := os.Stat(wantAnchors); err != nil {
-		t.Fatalf("the anchor record was not persisted at %s: %v", wantAnchors, err)
-	}
-
-	beforeCalls := rig.model.callCount()
-	beforeTexts := len(rig.out.texts())
-	rig.host.meditation.tick(ctx)
-	if got := rig.model.callCount(); got != beforeCalls {
-		t.Fatalf("the second tick made %d more model call(s), want none without new observation", got-beforeCalls)
-	}
-	if got := len(rig.out.texts()); got != beforeTexts {
-		t.Fatalf("the second tick produced %d more delivery(ies), want none", got-beforeTexts)
-	}
-}
-
-// scriptModel 按决策顺序回答脚本：未编排的决策仍给出收尾答复，让调用计数偏离
-// 的用例在断言处失败而不是挂在驱动里。
-type scriptModel struct {
-	mu       sync.Mutex
-	queue    []func(*model.Request) *model.Response
-	calls    int
-	requests []model.Request
-}
-
-func (m *scriptModel) GenerateContent(_ context.Context, req *model.Request) (<-chan *model.Response, error) {
-	m.mu.Lock()
-	m.requests = append(m.requests, *req)
-	step := func(*model.Request) *model.Response { return finalTurn("(unscripted)") }
-	if len(m.queue) > 0 {
-		step = m.queue[0]
-		m.queue = m.queue[1:]
-	}
-	m.calls++
-	m.mu.Unlock()
-
-	ch := make(chan *model.Response, 1)
-	ch <- step(req)
-	close(ch)
-	return ch, nil
-}
-
-func (m *scriptModel) Info() model.Info { return model.Info{Name: "wechat-test-model"} }
-
-func (m *scriptModel) then(responses ...*model.Response) {
-	m.mu.Lock()
-	for _, resp := range responses {
-		answer := resp
-		m.queue = append(m.queue, func(*model.Request) *model.Response { return answer })
-	}
-	m.mu.Unlock()
-}
-
-func (m *scriptModel) callCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.calls
-}
-
-func (m *scriptModel) recorded() []model.Request {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]model.Request(nil), m.requests...)
-}
-
-func finalTurn(content string) *model.Response {
-	return &model.Response{
-		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, Content: content}}},
-		Done:    true,
-	}
-}
-
-func sendTurn(content string) *model.Response {
-	return &model.Response{
-		Choices: []model.Choice{{Message: model.Message{Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{
-			ID:   "call-send-1",
-			Type: "function",
-			Function: model.FunctionDefinitionParam{
-				Name:      sendToolID,
-				Arguments: []byte(fmt.Sprintf(`{"content":%q}`, content)),
-			},
-		}}}}},
-		Done: true,
-	}
 }
 
 // outboundEvent 是替身通道记录的一笔侧效：类别、目标与正文。
@@ -319,11 +126,11 @@ func (m *mockOutbound) has(kind, target, body string) bool {
 	return false
 }
 
-// fakeDownloader 是入站媒体下载面的替身：记录被下载的次数并按需写出载荷。
+// fakeDownloader 是入站下载替身：把固定载荷写进 Writer，并记录被调次数。
 type fakeDownloader struct {
-	mu      sync.Mutex
 	payload []byte
-	err     error
+	given   error
+	mu      sync.Mutex
 	calls   int
 }
 
@@ -331,8 +138,8 @@ func (d *fakeDownloader) download(w io.Writer) (int64, error) {
 	d.mu.Lock()
 	d.calls++
 	d.mu.Unlock()
-	if d.err != nil {
-		return 0, d.err
+	if d.given != nil {
+		return 0, d.given
 	}
 	n, err := w.Write(d.payload)
 	return int64(n), err
@@ -409,57 +216,77 @@ func (f *fakeChannel) typingCount() int {
 	return f.typing
 }
 
-// routingRig 是一台挂在替身通道上的宿主：装配入口与进程相同，模型与通道为确定性替身。
+// routingRig 是一台挂在替身通道上的应用侧运行时：Drive 的模型回答由脚本给出，
+// 回答经同一个 sender 端口投递，与核心的路由一致。
 type routingRig struct {
-	host  *hostRuntime
-	model *scriptModel
-	seam  *hostSendSeam
-	out   *mockOutbound
+	host *hostRuntime
+	out  *mockOutbound
+
+	mu       sync.Mutex
+	answers  []string
+	requests []tagent.InvokeRequest
 }
 
-func newRoutingRig(t *testing.T, doc *hostDocument) *routingRig {
+func newRoutingRig(t *testing.T) *routingRig {
 	t.Helper()
 	t.Setenv("TAGENT_SESSION_ID", "routing-test")
 
-	decl, err := doc.Declaration()
+	router, err := NewSessionRouter("tagent", testSessionPrefix)
 	if err != nil {
-		t.Fatalf("declare the test document: %v", err)
+		t.Fatalf("new router: %v", err)
 	}
-	script := &scriptModel{}
-	seam := &hostSendSeam{}
-	natives := make(map[event.AgentID]tagent.NativeAgent, len(decl.Agents))
-	for _, spec := range decl.Agents {
-		native := tagent.NativeAgent{Model: script}
-		if doc.declaresSend(spec.ID) {
-			native.Tools = []trpctool.CallableTool{newSendTool(seam)}
-		}
-		natives[event.AgentID(spec.ID)] = native
-	}
-
 	out := &mockOutbound{}
-	host, err := assembleHostFrom(context.Background(), doc, nil, NewSeenStore(t.TempDir(), discardLogger()), seam, natives, nil)
-	if err != nil {
-		t.Fatalf("assemble the host: %v", err)
-	}
-	host.sender = &hostSender{
-		bot: out,
+	inbox := newInternalInbox()
+	sender := &hostSender{
+		bot:          out,
+		router:       router,
+		typingActive: &sync.Map{},
+		inj:          inbox,
+		workspaceDir: t.TempDir(),
 		longText: func(_ context.Context, chatID, content, _ string) error {
 			out.record("long", chatID, fmt.Sprintf("%d bytes", len(content)))
 			return nil
 		},
-		typingActive: &sync.Map{},
-		router:       host.router,
-		inj:          host.inbox,
-		workspaceDir: t.TempDir(),
 	}
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := host.Close(ctx); err != nil {
-			t.Logf("close the host: %v", err)
+	rig := &routingRig{out: out}
+	rig.host = &hostRuntime{
+		router: router,
+		inbox:  inbox,
+		sender: sender,
+		seen:   NewSeenStore(t.TempDir(), discardLogger()),
+	}
+	rig.host.invoke = func(ctx context.Context, req tagent.InvokeRequest) (bool, error) {
+		rig.mu.Lock()
+		rig.requests = append(rig.requests, req)
+		answer := ""
+		if len(rig.answers) > 0 {
+			answer, rig.answers = rig.answers[0], rig.answers[1:]
 		}
-	})
-	return &routingRig{host: host, model: script, seam: seam, out: out}
+		rig.mu.Unlock()
+		if answer == "" {
+			return false, nil
+		}
+		return false, sender.Send(ctx, req.Address, answer)
+	}
+	return rig
+}
+
+func (r *routingRig) then(answers ...string) {
+	r.mu.Lock()
+	r.answers = append(r.answers, answers...)
+	r.mu.Unlock()
+}
+
+func (r *routingRig) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.requests)
+}
+
+func (r *routingRig) recorded() []tagent.InvokeRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]tagent.InvokeRequest(nil), r.requests...)
 }
 
 func discardLogger() *slog.Logger {
@@ -485,17 +312,13 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func historyCarries(history []model.Message, body string) bool {
-	for _, msg := range history {
+func requestCarries(req tagent.InvokeRequest, body string) bool {
+	for _, msg := range req.Input {
 		if strings.Contains(msg.Content, body) {
 			return true
 		}
 	}
 	return false
-}
-
-func requestCarries(req model.Request, body string) bool {
-	return historyCarries(req.Messages, body)
 }
 
 func TestClassifyInbound(t *testing.T) {
@@ -707,18 +530,6 @@ func TestSessionRouter(t *testing.T) {
 	if first, second := router.NextInvocation(a), router.NextInvocation(a); first == second {
 		t.Fatalf("two drives minted one invocation: %v", first)
 	}
-
-	history := []model.Message{{Content: "one"}, {Content: "two"}}
-	if fresh := router.TakeUndelivered(a, history); len(fresh) != 2 {
-		t.Fatalf("first take = %d messages, want 2", len(fresh))
-	}
-	if fresh := router.TakeUndelivered(a, history); len(fresh) != 0 {
-		t.Fatalf("second take = %d messages, want none", len(fresh))
-	}
-	history = append(history, model.Message{Content: "three"})
-	if fresh := router.TakeUndelivered(a, history); len(fresh) != 1 || fresh[0].Content != "three" {
-		t.Fatalf("incremental take = %+v, want only the new message", fresh)
-	}
 }
 
 func TestFileDeliveryRules(t *testing.T) {
@@ -880,97 +691,6 @@ func TestHostSenderIsTheOnlyOutboundPath(t *testing.T) {
 	}
 }
 
-// seamRecorder 是发送缝替身：记录每次调用携带的会址与正文，标签与失败由用例给定。
-type seamRecorder struct {
-	mu     sync.Mutex
-	addrs  []event.Address
-	bodies []string
-	label  string
-	given  error
-}
-
-func (s *seamRecorder) send(_ context.Context, addr event.Address, content string) (string, error) {
-	s.mu.Lock()
-	s.addrs = append(s.addrs, addr)
-	s.bodies = append(s.bodies, content)
-	s.mu.Unlock()
-	return s.label, s.given
-}
-
-func (s *seamRecorder) calls() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.bodies)
-}
-
-func mustCall(t *testing.T, tool *SendTool, ctx context.Context, args string) string {
-	t.Helper()
-	res, err := tool.Call(ctx, []byte(args))
-	if err != nil {
-		t.Fatalf("Call(%s) returned a turn error: %v", args, err)
-	}
-	text, ok := res.(string)
-	if !ok {
-		t.Fatalf("Call(%s) result = %T, want string", args, res)
-	}
-	return text
-}
-
-func TestSendToolContract(t *testing.T) {
-	decl := NewSendTool(nil).Declaration()
-	if decl.Name != sendToolID || len(decl.InputSchema.Properties) != 1 || decl.InputSchema.Properties["content"] == nil {
-		t.Fatalf("declaration = %+v, want only content", decl)
-	}
-	if len(decl.InputSchema.Required) != 1 || decl.InputSchema.Required[0] != "content" {
-		t.Fatalf("required = %v, want [content]", decl.InputSchema.Required)
-	}
-	for _, forbidden := range []string{"chat_id", "target", "to", "user_id", "channel", "token"} {
-		if _, ok := decl.InputSchema.Properties[forbidden]; ok {
-			t.Errorf("declaration exposes %q; target and channel must stay host-fixed", forbidden)
-		}
-	}
-
-	rec := &seamRecorder{label: "chat-a"}
-	tool := NewSendTool(rec.send)
-	ctx := frameCtx(context.Background(), testAddress("chat-a"))
-
-	if res := mustCall(t, tool, context.Background(), `{"content":"x"}`); !strings.Contains(res, "不携带显式会话地址") {
-		t.Fatalf("addressless call = %q, want a named refusal", res)
-	}
-	if res := mustCall(t, tool, ctx, `{"content":"x","to":"chat-b"}`); !strings.Contains(res, "参数含声明之外的字段") || !strings.Contains(res, "'to'") {
-		t.Fatalf("forged target = %q, want a named refusal", res)
-	}
-	for _, args := range []string{`{}`, `{"content":""}`} {
-		if res := mustCall(t, tool, ctx, args); !strings.Contains(res, "content 不能为空") {
-			t.Fatalf("empty content (%s) = %q", args, res)
-		}
-	}
-	oversize := fmt.Sprintf(`{"content":"%s"}`, strings.Repeat("x", contentMaxBytes+1))
-	if res := mustCall(t, tool, ctx, oversize); !strings.Contains(res, "content exceeds 8KiB 上界（实际 8193 字节）") {
-		t.Fatalf("oversize = %q", res)
-	}
-	if rec.calls() != 0 {
-		t.Fatalf("refused calls reached the seam %d times", rec.calls())
-	}
-	if res := mustCall(t, tool, ctx, fmt.Sprintf(`{"content":"%s"}`, strings.Repeat("x", contentMaxBytes))); !strings.Contains(res, "[send_ok]") {
-		t.Fatalf("boundary content = %q, want send_ok", res)
-	}
-	if rec.calls() != 1 || rec.addrs[0] != testAddress("chat-a") || len(rec.bodies[0]) != contentMaxBytes {
-		t.Fatalf("seam call = %+v, want one call at the frame address with the full body", rec)
-	}
-
-	rec.given = errNoSendTarget
-	if res := mustCall(t, tool, ctx, `{"content":"poke"}`); !strings.Contains(res, "[send_denied]") || !strings.Contains(res, errNoSendTarget.Error()) {
-		t.Fatalf("seam refusal = %q", res)
-	}
-	if _, err := tool.Call(ctx, []byte(`not-json`)); err == nil {
-		t.Fatal("malformed arguments did not return a protocol error")
-	}
-	if res := mustCall(t, NewSendTool(nil), ctx, `{"content":"x"}`); !strings.Contains(res, "宿主未接线发送缝") {
-		t.Fatalf("unbound tool = %q", res)
-	}
-}
-
 // TestApprovalGateway 钉住审批请求的下行广播、白名单裁决与无审批人的可见 gap。
 //
 //   - The announcement fans out to every configured approver.
@@ -1067,6 +787,56 @@ func TestApprovalGateway(t *testing.T) {
 	}
 }
 
+// TestApprovalRuling pins the approval gateway rulings.
+func TestApprovalRuling(t *testing.T) {
+	ctx := context.Background()
+	gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: t.TempDir()}, []string{"boss"})
+	gateway.SetSender(&mockOutbound{})
+	ruling := approvalRuling(gateway)
+	args := []byte(`{"cmd":"ls"}`)
+	pass := plugin.CallPass{
+		Final:         trpcmodel.ToolCall{Function: trpcmodel.FunctionDefinitionParam{Name: "exec", Arguments: args}},
+		Risk:          plugin.RiskCritical,
+		TriggerSource: "user",
+	}
+	callCtx := governance.WithCallPass(ctx, pass)
+
+	held, err := ruling(callCtx, "exec", args)
+	if err != nil || held.Kind != task.RulingHold {
+		t.Fatalf("critical ruling = (%+v,%v), want a hold", held, err)
+	}
+	if _, err := gateway.Manager().Request(ctx, "approval-1", "exec", args, plugin.RiskCritical, "critical", "held"); err != nil {
+		t.Fatalf("register the held call: %v", err)
+	}
+	if _, _, err := gateway.Resolve("boss", "approve "+shortDigest(approval.ArgsDigest(args))); err != nil {
+		t.Fatalf("approve the held call: %v", err)
+	}
+	approved, err := ruling(callCtx, "exec", args)
+	if err != nil || approved.Kind != task.RulingRun {
+		t.Fatalf("approved ruling = (%+v,%v), want run", approved, err)
+	}
+
+	deniedArgs := []byte(`{"cmd":"rm -rf /"}`)
+	deniedPass := plugin.CallPass{
+		Final: trpcmodel.ToolCall{Function: trpcmodel.FunctionDefinitionParam{Name: "exec", Arguments: deniedArgs}},
+		Risk:  plugin.RiskCritical,
+	}
+	if _, err := gateway.Manager().Request(ctx, "approval-2", "exec", deniedArgs, plugin.RiskCritical, "critical", "held"); err != nil {
+		t.Fatalf("register the second call: %v", err)
+	}
+	if _, _, err := gateway.Resolve("boss", "reject "+shortDigest(approval.ArgsDigest(deniedArgs))); err != nil {
+		t.Fatalf("reject the second call: %v", err)
+	}
+	denied, err := ruling(governance.WithCallPass(ctx, deniedPass), "exec", deniedArgs)
+	if err != nil || denied.Kind != task.RulingDeny {
+		t.Fatalf("denied ruling = (%+v,%v), want deny", denied, err)
+	}
+
+	if _, err := ruling(ctx, "exec", args); err == nil {
+		t.Fatal("a call beside no Before pass was ruled instead of refused closed")
+	}
+}
+
 func TestReincarnationNotice(t *testing.T) {
 	dir := t.TempDir()
 	notice := filepath.Join(dir, "REINCARNATION_NOTICE")
@@ -1140,124 +910,19 @@ func TestSystemAlertConsumption(t *testing.T) {
 	}
 }
 
-type fakeFace struct {
-	chat   string
-	driven chan inboundMessage
-}
-
-func newFakeFace(chat string) *fakeFace {
-	return &fakeFace{chat: chat, driven: make(chan inboundMessage, 1)}
-}
-
-func (f *fakeFace) Drive(_ context.Context, in inboundMessage) (event.Address, error) {
-	f.driven <- in
-	return event.Address{AgentID: "tagent", SessionID: "injected"}, nil
-}
-
-func (f *fakeFace) mostRecentChat() string { return f.chat }
-
-func TestTaskFace(t *testing.T) {
-	body := `{"messages":[{"role":"user","content":"hello"}]}`
-	drive := newFakeFace("chat-a")
-	handler := newTaskFace(context.Background(), drive, "secret").Handler()
-
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
-		t.Fatalf("healthz = %d %q", rec.Code, rec.Body.String())
-	}
-
-	for _, tc := range []struct {
-		name   string
-		auth   string
-		body   string
-		remote string
-		want   int
-	}{
-		{"no credential", "", body, "192.0.2.1:1000", http.StatusUnauthorized},
-		{"wrong credential", "Bearer nope", body, "192.0.2.1:1000", http.StatusUnauthorized},
-		{"malformed body", "Bearer secret", `{`, "192.0.2.1:1000", http.StatusBadRequest},
-		{"empty user content", "Bearer secret", `{"messages":[{"role":"user","content":"   "}]}`, "192.0.2.1:1000", http.StatusBadRequest},
-	} {
-		req := httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(tc.body))
-		req.RemoteAddr = tc.remote
-		if tc.auth != "" {
-			req.Header.Set("Authorization", tc.auth)
-		}
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		if rec.Code != tc.want {
-			t.Fatalf("%s: status = %d, want %d (%s)", tc.name, rec.Code, tc.want, rec.Body.String())
-		}
-	}
-
-	empty := newFakeFace("")
-	req := httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer secret")
-	rec = httptest.NewRecorder()
-	newTaskFace(context.Background(), empty, "secret").Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("injection beside no chat = %d, want 503", rec.Code)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer secret")
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("accepted injection = %d, want 202", rec.Code)
-	}
-	select {
-	case in := <-drive.driven:
-		if in.ChatID != "chat-a" || in.Text != "hello" {
-			t.Fatalf("injected turn = %+v, want chat-a/hello", in)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the accepted injection never reached the drive face")
-	}
-
-	loopback := newFakeFace("chat-a")
-	req = httptest.NewRequest(http.MethodPost, "/task", strings.NewReader(body))
-	req.RemoteAddr = "127.0.0.1:5555"
-	rec = httptest.NewRecorder()
-	newTaskFace(context.Background(), loopback, "").Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("loopback injection beside no credential = %d, want 202", rec.Code)
-	}
-}
-
-func TestHostToolGrantsSendOnlyByDeclaration(t *testing.T) {
-	doc := testDocument("tagent", "quiet")
-	seam := &hostSendSeam{}
-	tools, err := doc.hostTools(context.Background(), "tagent", seam, nil)
-	if err != nil {
-		t.Fatalf("host tools of the entry agent: %v", err)
-	}
-	if len(tools) != 1 || tools[0].Declaration().Name != sendToolID {
-		t.Fatalf("entry tools = %+v, want only send", tools)
-	}
-	quiet, err := doc.hostTools(context.Background(), "quiet", seam, nil)
-	if err != nil {
-		t.Fatalf("host tools of an undeclared agent: %v", err)
-	}
-	if len(quiet) != 0 {
-		t.Fatalf("an agent beside no declaration received %+v", quiet)
-	}
-}
-
 // TestRegisteredHandlersDriveTheChannel 钉住真实挂点链路：去重、长文落盘与审批裁决。
 //
 //   - A long text is tokenized into a file before the turn reads it.
 //   - A ruling from the whitelisted approver is answered and never becomes a turn.
 func TestRegisteredHandlersDriveTheChannel(t *testing.T) {
-	rig := newRoutingRig(t, testDocument("tagent"))
+	rig := newRoutingRig(t)
 	channel := newFakeChannel()
 	gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: t.TempDir()}, []string{"boss"})
 	cfg := WechatAppConfig{WorkspaceDir: t.TempDir()}
 	typing := bindChannel(rig.host, channel, cfg)
 	registerHandlers(rig.host, channel, gateway, cfg, typing)
 
-	rig.model.then(finalTurn("answer-a"))
+	rig.then("answer-a")
 	msg := textMessage("chat-a", "hello")
 	if err := channel.emit(context.Background(), msg); err != nil {
 		t.Fatalf("inbound delivery: %v", err)
@@ -1271,17 +936,17 @@ func TestRegisteredHandlersDriveTheChannel(t *testing.T) {
 	if err := channel.emit(context.Background(), msg); err != nil {
 		t.Fatalf("duplicate delivery: %v", err)
 	}
-	if got := rig.model.callCount(); got != 1 {
+	if got := rig.callCount(); got != 1 {
 		t.Fatalf("duplicate delivery drove %d turns, want one", got)
 	}
 
-	rig.model.then(finalTurn("long-answer"))
+	rig.then("long-answer")
 	long := strings.Repeat("长", longTextThreshold+1)
 	if err := channel.emit(context.Background(), textMessage("chat-a", long)); err != nil {
 		t.Fatalf("long-text delivery: %v", err)
 	}
 	waitFor(t, "the long-text answer", func() bool { return channel.has("text", "chat-a", "long-answer") })
-	requests := rig.model.recorded()
+	requests := rig.recorded()
 	if len(requests) != 2 || !requestCarries(requests[1], "已存为文件") {
 		t.Fatalf("long-text request = %+v, want the saved-file inject", requests)
 	}
@@ -1301,17 +966,17 @@ func TestRegisteredHandlersDriveTheChannel(t *testing.T) {
 	if !channel.has("text", "boss", "审批已记录") {
 		t.Fatalf("approval reply = %+v, want the recorded ruling", channel.texts())
 	}
-	if got := rig.model.callCount(); got != 2 {
+	if got := rig.callCount(); got != 2 {
 		t.Fatalf("an approval ruling drove %d model turns, want none", got-2)
 	}
 }
 
-// TestHostDrivesSessionsAndTheActiveChannel 钉住会话隔离与主动通道的唯一发送面。
+// TestHostDrivesSessionsAndTheActiveChannel 钉住会话隔离与唯一发送面。
 //
 //   - Internal notices wait for the session they name.
-//   - The active channel leaves through the same sender and only its own chat.
+//   - The one sender reaches only its own chat; a reflection fans out to the bound chats.
 func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
-	rig := newRoutingRig(t, testDocument("tagent"))
+	rig := newRoutingRig(t)
 	ctx := context.Background()
 	a, err := rig.host.router.AddressFor("chat-a")
 	if err != nil {
@@ -1322,7 +987,7 @@ func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rig.model.then(finalTurn("answer-a"))
+	rig.then("answer-a")
 	if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-a", Text: "q-a"}); err != nil {
 		t.Fatalf("drive chat-a: %v", err)
 	}
@@ -1330,37 +995,36 @@ func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
 		t.Fatalf("chat-a answer = %+v", rig.out.recorded())
 	}
 
-	rig.model.then(finalTurn("answer-b"))
+	rig.then("answer-b")
 	if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-b", Text: "q-b"}); err != nil {
 		t.Fatalf("drive chat-b: %v", err)
-	}
-	if historyCarries(rig.host.run.SessionHistory(a), "answer-b") {
-		t.Fatal("the chat-b turn leaked into the chat-a transcript")
 	}
 	if !rig.out.has("text", "chat-b", "answer-b") || rig.out.has("text", "chat-b", "answer-a") {
 		t.Fatalf("chat-b deliveries = %+v, want its own answer only", rig.out.recorded())
 	}
+	requests := rig.recorded()
+	if requests[0].Address == requests[1].Address {
+		t.Fatalf("two chats collapsed onto one session address: %v", requests[0].Address)
+	}
 
-	rig.host.inbox.InjectInternal(a, receiptLineage, model.Message{Content: "notice-for-a"})
-	rig.model.then(finalTurn("answer-b2"))
+	rig.host.inbox.InjectInternal(a, receiptLineage, tagentmodel.Message{Content: "notice-for-a"})
+	rig.then("answer-b2")
 	if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-b", Text: "q-b2"}); err != nil {
 		t.Fatalf("drive chat-b again: %v", err)
 	}
-	if requestCarries(rig.model.recorded()[2], "notice-for-a") {
+	if requestCarries(rig.recorded()[2], "notice-for-a") {
 		t.Fatal("a notice addressed to chat-a entered the chat-b request")
 	}
-	rig.model.then(finalTurn("answer-a2"))
+	rig.then("answer-a2")
 	if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-a", Text: "q-a2"}); err != nil {
 		t.Fatalf("drive chat-a again: %v", err)
 	}
-	if !requestCarries(rig.model.recorded()[3], "notice-for-a") {
+	if !requestCarries(rig.recorded()[3], "notice-for-a") {
 		t.Fatal("the notice did not reach its own session")
 	}
 
-	rig.model.then(sendTurn("poke-a"))
-	rig.model.then(finalTurn("closing-a"))
-	if _, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-a", Text: "poke"}); err != nil {
-		t.Fatalf("drive the active channel: %v", err)
+	if err := rig.host.sender.Send(ctx, a, "poke-a"); err != nil {
+		t.Fatalf("the explicit send: %v", err)
 	}
 	if !rig.out.has("text", "chat-a", "poke-a") {
 		t.Fatalf("the explicit send did not reach chat-a: %+v", rig.out.recorded())
@@ -1368,21 +1032,17 @@ func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
 	if rig.out.has("text", "chat-b", "poke-a") {
 		t.Fatalf("the chat-a send leaked into chat-b: %+v", rig.out.recorded())
 	}
-	requests := rig.model.recorded()
-	if len(requests) != 6 || !requestCarries(requests[5], "[send_ok]") || !requestCarries(requests[5], "目标 chat-a") {
-		t.Fatalf("the send receipt did not return to the model: %d requests", len(requests))
-	}
 
-	stray := event.Address{AgentID: "tagent", SessionID: "never-bound"}
-	res, err := newSendTool(rig.seam).Call(frameCtx(ctx, stray), []byte(`{"content":"leak"}`))
-	if err != nil {
-		t.Fatalf("the refusal must stay a result text: %v", err)
+	rig.host.sender.DeliverReflection(ctx, "meditation", []event.Address{{AgentID: "tagent"}}, "reflection")
+	for _, chat := range []string{"chat-a", "chat-b"} {
+		if !rig.out.has("text", chat, "reflection") {
+			t.Fatalf("reflection delivery = %+v, missing %s", rig.out.texts(), chat)
+		}
 	}
-	if text, ok := res.(string); !ok || !strings.HasPrefix(text, "[send_denied] 无可解析的送达目标") {
-		t.Fatalf("unbound address result = %v, want a named refusal", res)
-	}
-	if receipts := rig.host.inbox.Drain(stray); len(receipts) != 1 || !strings.Contains(receipts[0].Content, "no-target") {
-		t.Fatalf("stray receipts = %+v, want one no-target receipt", receipts)
+	before := len(rig.out.texts())
+	rig.host.sender.DeliverReflection(ctx, "meditation", []event.Address{{AgentID: "quiet"}}, "nowhere")
+	if got := len(rig.out.texts()); got != before {
+		t.Fatalf("a reflection beside no bound chat delivered %d texts, want none", got-before)
 	}
 	if b == a {
 		t.Fatal("two chats collapsed onto one address")

@@ -12,6 +12,9 @@
 !main.go
 !wechat.go
 !wechat_test.go
+!wechat_approval.go
+!wechat_files.go
+!wechat_notice.go
 !scripts/
 !scripts/verify_large_file.go
 !scripts/loggrep.py

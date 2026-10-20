@@ -1,18 +1,21 @@
-main.go 只做 wiring：读配置 → 装配 → 登录 → 注册挂点 → 启动 → 注入面。
-微信协议语义（收发/文件/路由/去重/send/审批/通知）全部在 wechat.go； 声明、模型与工具面的构造走
-api/document、api/config 与 tagent.Assemble 现有入口。
+main.go 只做 wiring：读应用配置 → Boot 装配 → 绑定微信通道 → 运行。 微信协议语义（收发/文件/路由/去重/审批/通知）在
+wechat*.go； 声明、模型、工具面、storage、meditation 与注入面全部由 tagent.Boot 装配。
 
-wechat.go 是微信宿主唯一的适配文件：SDK 调用、收发、文件、路由、去重、send、审批与通知 都是微信协议语义的一部分。main.go 只做
-wiring；核心的声明、装配、模型与工具面一律走 api/document、api/config 与 tagent.Assemble 现有入口。
+wechat.go 是微信宿主的适配文件：SDK 生命周期、收发、路由、去重、send 端口、审批与启动通知
+都是微信协议语义的一部分。装配（声明→agents→models→工具面→storage→meditation→注入面） 一律走
+tagent.Boot；应用侧只填 Boot 留出的两个端口：出站消息面与审批面。
+
+wechat_approval.go 是微信审批面：审批请求经微信下发、审批裁决按白名单解析，
+以及把治理策略适配到宿主每一次调用的准入席位。审批的传输是微信语义，裁决语义 仍由核心的治理策略决定，应用侧只做接线。
+
+wechat_files.go 是微信文件面：入站媒体的分类、落盘与注入文本，出站回复命名的
+本地文件投递，以及两条路径共用的命名与大小规则。全部是微信协议语义的一部分， 与宿主装配无关。
+
+wechat_notice.go 是两条一次性启动通知：保险链换装的转世通报与上一世重启失败的系统告警。
+两者都把一条内部消息塞进宿主的收件箱，让第一回合读到；传输是微信宿主的启动语义， 与装配无关。
 
 VARIABLES
 
-var (
-	// ErrUnknownAgentReference reports an agent reference that names no declared agent.
-	ErrUnknownAgentReference = errors.New("wechat-bot: the agent reference names no declared agent")
-	// ErrUnknownHostTool reports a declared tool this host does not contribute.
-	ErrUnknownHostTool = errors.New("wechat-bot: the declared tool is not contributed by this host")
-)
 var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one pending approval")
     ErrApprovalAmbiguous reports a ruling whose digest prefix names more than
     one pending request: an ambiguous ruling is refused instead of applied to a
@@ -21,21 +24,6 @@ var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one
 var ErrApprovalNotApprover = errors.New("wechat-bot: the sender is not in the approval whitelist")
     ErrApprovalNotApprover reports a message-channel ruling from a user outside
     the approver whitelist: an empty whitelist refuses every message ruling.
-
-var ErrFaceEmptyInjection = errors.New("wechat-bot: the injection carries no user message")
-    ErrFaceEmptyInjection reports an injection request whose messages carry no
-    user content: a turn reads user input only, so the request is refused by
-    name.
-
-var ErrFaceNoActiveChat = errors.New("wechat-bot: no chat delivered yet, so the injection has no session to drive")
-    ErrFaceNoActiveChat reports an injection request arriving beside no chat
-    delivery: an injection carries no chat identity of its own, so it is
-    admitted at the chat that last delivered.
-
-var ErrFaceUnauthenticated = errors.New("wechat-bot: the injection request is not authenticated")
-    ErrFaceUnauthenticated reports an injection request whose subject did not
-    authenticate: no credential is configured for the face and the peer is not
-    the loopback address, or a configured credential was missing or unmatched.
 
 var ErrNoChatAddress = errors.New("wechat-bot: the inbound message names no chat identity")
     ErrNoChatAddress reports an inbound message that names no chat identity.
@@ -137,30 +125,6 @@ func (s *SeenStore) CheckAndMark(key string) bool
     false if it was already seen (duplicate — drop). Marking is persisted
     immediately (atomic write) so a crash right after cannot replay the message.
 
-type SendFunc func(ctx context.Context, addr event.Address, content string) (targetLabel string, err error)
-    SendFunc 是组合根注入的发送缝：把一条正文按显式会址送进宿主唯一的发送通路， 返回实际送达目标的标签；error
-    携带具名拒绝原因，由工具层转写为结果文本。
-
-type SendTool struct {
-	// Has unexported fields.
-}
-    SendTool 是模型可见的主动送达面：send 是装配完成后绑定的发送缝； 未绑定时的调用得到具名拒绝。
-
-func NewSendTool(send SendFunc) *SendTool
-    NewSendTool 构造送达面：send 传 nil 表示延后绑定，装配尾段经 SetSend 补上。
-
-func (t *SendTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
-    Call implements tool.CallableTool.
-
-      - 一切拒绝与发送失败都作为结果文本返回给模型（回合继续），目标规则随文案点名；
-      - err 只留给解不出参数形态的协议错，此时回合交由框架处置。
-
-func (t *SendTool) Declaration() *trpctool.Declaration
-    Declaration implements tool.CallableTool.
-
-func (t *SendTool) SetSend(send SendFunc)
-    SetSend 绑定发送缝：通道与目标定位由装配闭包固定，不经参数出入。
-
 type SessionRouter struct {
 	// Has unexported fields.
 }
@@ -198,12 +162,6 @@ func (r *SessionRouter) NextInvocation(addr event.Address) event.InvocationID
     NextInvocation mints the responsibility range identity of one drive of the
     address. The identity is unique per drive and derived from the address,
     so a range never collides with the range of another session.
-
-func (r *SessionRouter) TakeUndelivered(addr event.Address, history []tagentmodel.Message) []tagentmodel.Message
-    TakeUndelivered returns the transcript messages the address accumulated
-    since the previous take and records them as consumed. Delivery reads one
-    session's own transcript only, so a reply never carries another session's
-    turn.
 
 func (r *SessionRouter) Target(addr event.Address) (string, bool)
     Target reports the chat identity bound to exactly this address. An address
