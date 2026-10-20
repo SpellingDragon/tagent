@@ -791,7 +791,13 @@ func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSe
 		available[hostSendToolID] = &hostSendTool{sender: sender}
 	}
 	if d.declaresRecall(id) {
-		for _, candidate := range recall.New(recallPort.Reads(), memory.PartitionsOf(id, d.Agents[id].Memory.ReadNamespaces)) {
+		reads := recall.Reads{
+			Searcher:  recallPort,
+			Embedder:  recallPort.Reads().Embedder,
+			Table:     recallPort,
+			Originals: recallPort,
+		}
+		for _, candidate := range recall.New(reads, memory.PartitionsOf(id, d.Agents[id].Memory.ReadNamespaces)) {
 			available[candidate.Declaration().Name] = candidate
 		}
 	}
