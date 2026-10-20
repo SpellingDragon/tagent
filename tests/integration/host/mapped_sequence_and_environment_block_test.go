@@ -239,21 +239,23 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("settled")
 	}}
+	spec := config.AgentSpec{
+		ID:               "agent-a",
+		Model:            "model-a",
+		EnvironmentBlock: true,
+		Files: []config.FileRef{
+			{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
+			{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
+		},
+		Tools: []config.ToolRef{
+			{Name: "evaluation"},
+			{Name: "docs", Endpoint: "http://mcp.local"},
+		},
+	}
+	spec.File = config.FileSpec{BaseDir: root}
 	decl := &config.Declaration{
-		Entry: "agent-a",
-		Agents: []config.AgentSpec{{
-			ID:               "agent-a",
-			Model:            "model-a",
-			EnvironmentBlock: true,
-			Files: []config.FileRef{
-				{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
-				{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
-			},
-			Tools: []config.ToolRef{
-				{Name: "evaluation"},
-				{Name: "docs", Endpoint: "http://mcp.local"},
-			},
-		}},
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{spec},
 	}
 	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{echo}},

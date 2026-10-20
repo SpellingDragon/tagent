@@ -47,12 +47,12 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 			wantLine: 3,
 		},
 		{
-			name:     "unknown embedding key",
+			name:     "unknown agent section",
 			file:     "org.yaml",
-			body:     "agents:\n  - id: main\n    memory:\n      engine:\n        embedding:\n          api_base: x\n",
-			field:    "agents[0].memory.engine.embedding.api_base",
+			body:     "agents:\n  - id: main\n    memori:\n      type: localfile\n",
+			field:    "agents[0].memori",
 			reason:   "unknown field",
-			wantLine: 6,
+			wantLine: 3,
 		},
 		{
 			name:     "unknown tool reference key",
@@ -314,29 +314,56 @@ func TestStrictDecodeReadsTheWatchdogBudget(t *testing.T) {
 	}
 }
 
-// TestStrictDecodeReadsTheMemoryAndMeditationBindings pins the two runtime declarations sunk into the core schema.
-// - a declared memory tier, read face and engine land in the agent spec, the duration cadence included
-// - a declared meditation switch, cadence, prompt, observation face and delivery list land in the agent spec
-// - an agent naming neither carries the zero binding
-// 契约: docs/wiki/platform/platform-subsystems.md#strict-decode
-func TestStrictDecodeReadsTheMemoryAndMeditationBindings(t *testing.T) {
-	body := "entry: main\nagents:\n  - id: main\n    memory:\n      type: localfile\n      path: data\n" +
-		"      read_namespaces: [audit, ops]\n      engine:\n        backend: memory\n" +
-		"        vector_top_k: 20\n        keyword_top_k: 10\n        rrf_k: 60\n" +
-		"        embedding:\n          provider: zhipu\n          model: embedding-3\n" +
-		"          api_key_env: ZAI_API_KEY\n          dimensions: 512\n" +
-		"    meditation:\n      enabled: true\n      interval: 30m\n      min_gap: 5m\n" +
-		"      prompt_file: prompts/meditation.md\n      observed_namespaces: [main]\n      deliver_to: [main]\n" +
-		"  - id: plain\n"
+// TestStrictDecodeReadsTheSectionDeclarations pins the accepted side of the four domain sections.
+// - every declared section lands in the plain field of its agent with its own value
+// - an agent naming no section carries the zero section of each kind
+// - a section naming one entry leaves the entries it does not name at their zero
+// 契约: docs/wiki/platform/platform-subsystems.md#config-surface
+func TestStrictDecodeReadsTheSectionDeclarations(t *testing.T) {
+	const body = `entry: main
+agents:
+  - id: main
+    memory:
+      type: localfile
+      path: /var/lib/tagent/memory
+      read_namespaces: [audit, ops]
+      engine:
+        backend: memory
+        vector_top_k: 20
+        keyword_top_k: 10
+        rrf_k: 60
+        embedding:
+          provider: zhipu
+          model: embedding-3
+          api_key_env: ZAI_API_KEY
+          dimensions: 512
+    meditation:
+      enabled: true
+      interval: 30m
+      min_gap: 5m
+      prompt_file: prompts/meditation.md
+      observed_namespaces: [team]
+      deliver_to: [main]
+    file:
+      base_dir: /srv/workspace
+      read_roots: [/srv/workspace]
+    exec:
+      monitor:
+        interval: 2s
+        stable_duration: 3s
+        interactive_stable_duration: 4s
+        fake_dead_duration: 5s
+  - id: plain
+`
 	decl, err := Load(context.Background(), writeConfigSource(t, "org.yaml", body))
 	if err != nil {
-		t.Fatalf("Load over the declared bindings = %v, want both read", err)
+		t.Fatalf("Load over the four declared sections = %v, want the sections read", err)
 	}
-	memory := decl.Agents[0].Memory
-	if memory.Type != "localfile" || memory.Path != "data" || len(memory.ReadNamespaces) != 2 {
-		t.Fatalf("memory = %+v, want the declared tier and read face", memory)
+	agent := decl.Agents[0]
+	if agent.Memory.Type != "localfile" || agent.Memory.Path != "/var/lib/tagent/memory" || len(agent.Memory.ReadNamespaces) != 2 {
+		t.Fatalf("memory = %+v, want the declared tier and read face", agent.Memory)
 	}
-	engine := memory.Engine
+	engine := agent.Memory.Engine
 	if engine.Backend != "memory" || engine.VectorTopK != 20 || engine.KeywordTopK != 10 || engine.RRFK != 60 {
 		t.Fatalf("engine = %+v, want the declared backend and retrieval tuning", engine)
 	}
@@ -345,18 +372,115 @@ func TestStrictDecodeReadsTheMemoryAndMeditationBindings(t *testing.T) {
 		embedding.APIKeyEnv != "ZAI_API_KEY" || embedding.Dimensions != 512 {
 		t.Fatalf("embedding = %+v, want the declared provider connection", embedding)
 	}
-	meditation := decl.Agents[0].Meditation
+	meditation := agent.Meditation
 	if !meditation.Enabled || meditation.Interval != 30*time.Minute || meditation.MinGap != 5*time.Minute {
 		t.Fatalf("meditation cadence = %+v, want the declared switch and durations", meditation)
 	}
 	if meditation.PromptFile != "prompts/meditation.md" || len(meditation.ObservedNamespaces) != 1 || len(meditation.DeliverTo) != 1 {
 		t.Fatalf("meditation face = %+v, want the declared prompt, observation face and target", meditation)
 	}
-	if got := decl.Agents[1].Memory; !got.isZero() {
-		t.Fatalf("undeclared memory = %+v, want the zero binding", got)
+	if agent.File.BaseDir != "/srv/workspace" || len(agent.File.ReadRoots) != 1 {
+		t.Fatalf("file face = %+v, want the declared base directory and read roots", agent.File)
 	}
-	if got := decl.Agents[1].Meditation; !got.isZero() {
-		t.Fatalf("undeclared meditation = %+v, want the zero binding", got)
+	wantMonitor := MonitorSpec{
+		Interval:                  2 * time.Second,
+		StableDuration:            3 * time.Second,
+		InteractiveStableDuration: 4 * time.Second,
+		FakeDeadDuration:          5 * time.Second,
+	}
+	if agent.Exec.Monitor != wantMonitor {
+		t.Fatalf("exec monitor = %+v, want %+v", agent.Exec.Monitor, wantMonitor)
+	}
+	plain := decl.Agents[1]
+	if !plain.Memory.isZero() || !plain.Meditation.isZero() || !plain.File.isZero() || !plain.Exec.isZero() {
+		t.Fatalf("undeclared sections = %+v/%+v/%+v/%+v, want the zero section of each kind",
+			plain.Memory, plain.Meditation, plain.File, plain.Exec)
+	}
+	partial, err := Load(context.Background(), writeConfigSource(t, "partial.yaml", "entry: main\nagents:\n  - id: main\n    memory:\n      type: localfile\n"))
+	if err != nil {
+		t.Fatalf("Load over a partial memory section = %v, want the section read", err)
+	}
+	if got := partial.Agents[0].Memory; got.Type != "localfile" || got.Path != "" || len(got.ReadNamespaces) != 0 {
+		t.Fatalf("partial memory = %+v, want only the entry the declaration names", got)
+	}
+}
+
+// TestStrictDecodeRefusesUndeclaredSectionKeys pins the strict boundary inside every section.
+// - a key a section does not name is refused by full field path and source line
+// - a section value that is not a mapping is refused by type
+// 契约: docs/wiki/platform/platform-subsystems.md#strict-decode
+func TestStrictDecodeRefusesUndeclaredSectionKeys(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		field    string
+		reason   string
+		wantLine int
+	}{
+		{
+			name:     "memory key",
+			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      region: x\n",
+			field:    "agents[0].memory.region",
+			reason:   "unknown field",
+			wantLine: 5,
+		},
+		{
+			name:     "memory engine key",
+			body:     "entry: main\nagents:\n  - id: main\n    memory:\n      engine:\n        embedding:\n          api_base: x\n",
+			field:    "agents[0].memory.engine.embedding.api_base",
+			reason:   "unknown field",
+			wantLine: 7,
+		},
+		{
+			name:     "meditation key",
+			body:     "entry: main\nagents:\n  - id: main\n    meditation:\n      cadence: 30m\n",
+			field:    "agents[0].meditation.cadence",
+			reason:   "unknown field",
+			wantLine: 5,
+		},
+		{
+			name:     "file key",
+			body:     "entry: main\nagents:\n  - id: main\n    file:\n      root: /tmp/base\n",
+			field:    "agents[0].file.root",
+			reason:   "unknown field",
+			wantLine: 5,
+		},
+		{
+			name:     "exec monitor key",
+			body:     "entry: main\nagents:\n  - id: main\n    exec:\n      monitor:\n        poll: 1s\n",
+			field:    "agents[0].exec.monitor.poll",
+			reason:   "unknown field",
+			wantLine: 6,
+		},
+		{
+			name:     "section is not a mapping",
+			body:     "entry: main\nagents:\n  - id: main\n    memory: 3\n",
+			field:    "agents[0].memory",
+			reason:   "expected a mapping",
+			wantLine: 4,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfigSource(t, "org.yaml", tc.body)
+			_, err := Load(context.Background(), path)
+			if err == nil {
+				t.Fatalf("Load(%q) = nil error, want a refusal", tc.body)
+			}
+			var refused *decodeError
+			if !errors.As(err, &refused) {
+				t.Fatalf("Load(%q) error = %T (%v), want *decodeError", tc.body, err, err)
+			}
+			if refused.field != tc.field {
+				t.Fatalf("Load(%q) field = %q, want %q (error: %v)", tc.body, refused.field, tc.field, err)
+			}
+			if !strings.Contains(refused.reason, tc.reason) {
+				t.Fatalf("Load(%q) reason = %q, want it to name %q", tc.body, refused.reason, tc.reason)
+			}
+			if refused.line != tc.wantLine {
+				t.Fatalf("Load(%q) line = %d, want %d (error: %v)", tc.body, refused.line, tc.wantLine, err)
+			}
+		})
 	}
 }
 

@@ -335,19 +335,21 @@ func (m *ntModel) recorded() []model.Request {
 }
 
 // declarationOf declares one agent assembled from the prompt and skill files
-// under the given root.
+// under the given root, with its file face rooted at that same root.
 func declarationOf(root string) *config.Declaration {
+	spec := config.AgentSpec{
+		ID:    "agent-a",
+		Model: "model-a",
+		Files: []config.FileRef{
+			{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
+			skillFileRef(root, "greet"),
+		},
+		Params: map[string]float64{},
+	}
+	spec.File = config.FileSpec{BaseDir: root}
 	return &config.Declaration{
-		Entry: "agent-a",
-		Agents: []config.AgentSpec{{
-			ID:    "agent-a",
-			Model: "model-a",
-			Files: []config.FileRef{
-				{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
-				skillFileRef(root, "greet"),
-			},
-			Params: map[string]float64{},
-		}},
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{spec},
 	}
 }
 

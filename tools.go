@@ -12,11 +12,17 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/telemetry"
+	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/recall"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
@@ -142,14 +148,29 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 func (r *Run) presetTools(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, id event.AgentID, spec config.AgentSpec, native []trpctool.Tool, chain []event.AgentID) ([]trpctool.Tool, error) {
 	refs := make([]config.ToolRef, 0, len(spec.Tools))
 	targets := make([]config.ToolRef, 0, len(spec.Tools))
+	faces := make([]trpctool.Tool, 0, 3)
 	delegate := false
 	for _, ref := range spec.Tools {
 		if agentRef(ref) != "" {
 			targets = append(targets, ref)
 			continue
 		}
-		if ref.Name == subagent.CallSubagentRef {
+		switch ref.Name {
+		case subagent.CallSubagentRef:
 			delegate = true
+			continue
+		case tagentexec.PresetName:
+			faces = append(faces, tagentexec.NewPreset(r.execManager, monitorConfigOf(spec))...)
+			continue
+		case mcpgw.ToolNameMCPCall, mcpgw.ToolNameMCPDiscover:
+			if r.mcpGateways == nil {
+				return nil, mcpgw.ErrRegistryMissing
+			}
+			if ref.Name == mcpgw.ToolNameMCPCall {
+				faces = append(faces, r.mcpGateways.CallTool())
+			} else {
+				faces = append(faces, r.mcpGateways.DiscoverTool())
+			}
 			continue
 		}
 		refs = append(refs, ref)
@@ -165,6 +186,7 @@ func (r *Run) presetTools(ctx context.Context, decl *config.Declaration, agents 
 		}
 		presets = append(presets, target)
 	}
+	presets = append(presets, faces...)
 	assembled := append(append([]trpctool.Tool(nil), native...), presets...)
 	if delegate {
 		delegation, err := r.presetSubagent(ctx, agents, id, spec, assembled)
@@ -194,6 +216,20 @@ func (r *Run) presetTools(ctx context.Context, decl *config.Declaration, agents 
 		out = append(out, tool)
 	}
 	return out, nil
+}
+
+// monitorConfigOf maps the monitor rhythm one declaration fixes onto the
+// execution face: a duration the declaration leaves at zero keeps the framework
+// default of that field, so a declaration naming no rhythm runs exactly as an
+// undeclared one did.
+func monitorConfigOf(spec config.AgentSpec) tagentexec.MonitorConfig {
+	monitor := spec.Exec.Monitor
+	return tagentexec.MonitorConfigFromBase(
+		monitor.Interval,
+		monitor.StableDuration,
+		monitor.InteractiveStableDuration,
+		monitor.FakeDeadDuration,
+	)
 }
 
 // agentRef reports the declared agent one reference authorizes, or the empty
@@ -591,4 +627,199 @@ func policyRuling(governor plugin.Governor) task.Approver {
 // admitted for execution by the default of the wrapper.
 func denyWithoutApprover(context.Context, string, []byte) (task.Ruling, error) {
 	return task.Ruling{Kind: task.RulingDeny, Reason: "strict enforcement admits no call without an approver"}, nil
+}
+
+// RecallPort is the late-bound recall read face a host assembles its recall
+// tools over: the tools are constructed before the run exists, so every face is
+// bound to the assembled run once the assembly returns. A call before that
+// binding answers the named refusal of the recall surface instead of an empty
+// page that would read as "nothing was found".
+//
+// The port carries the read faces the tools consume and forwards each to the
+// face the run wires: the retrieval port, the observation table over the
+// committed store and the scoped original store of the storage tier. The
+// relation ledger is the host's own, because a run assembled beside no relation
+// face wires none, so it is held here from the first call and never rebound.
+type RecallPort struct {
+	mu       sync.RWMutex
+	searcher func(ctx context.Context, query search.Query) (search.Result, error)
+	reads    recall.Reads
+	trace    *replay.MemoryRelations
+}
+
+var _ search.Searcher = (*RecallPort)(nil)
+
+var _ recall.Table = (*RecallPort)(nil)
+
+var _ ledger.ScopedOriginalStore = (*RecallPort)(nil)
+
+// NewRecallPort opens the port over the embedding binding the recall tools are
+// built with and the relation ledger the host holds. The binding is fixed at
+// construction because the tools read it once when they are built; every other
+// face is attached by Bind.
+func NewRecallPort(embedder memory.Embedder, trace *replay.MemoryRelations) *RecallPort {
+	return &RecallPort{reads: recall.Reads{Embedder: embedder}, trace: trace}
+}
+
+// Bind attaches the read faces of the assembled run.
+func (p *RecallPort) Bind(r *Run) {
+	p.mu.Lock()
+	p.searcher = r.Recall
+	p.reads = r.RecallReads()
+	p.mu.Unlock()
+}
+
+// Search answers one retrieval through the bound face.
+func (p *RecallPort) Search(ctx context.Context, query search.Query) (search.Result, error) {
+	p.mu.RLock()
+	face := p.searcher
+	p.mu.RUnlock()
+	if face == nil {
+		return search.Result{}, recall.ErrRecallUnwired
+	}
+	return face(ctx, query)
+}
+
+// QueryEvents answers the event references one query matches through the bound
+// observation table.
+func (p *RecallPort) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	p.mu.RLock()
+	table := p.reads.Table
+	p.mu.RUnlock()
+	if table == nil {
+		return nil, fmt.Errorf("recall_query: %w", recall.ErrRecallUnwired)
+	}
+	return table.QueryEvents(ctx, opts)
+}
+
+// Event answers the reference of one landed event through the bound table.
+func (p *RecallPort) Event(key event.EventID) (memory.EventReference, bool) {
+	p.mu.RLock()
+	table := p.reads.Table
+	p.mu.RUnlock()
+	if table == nil {
+		return memory.EventReference{}, false
+	}
+	return table.Event(key)
+}
+
+// Reference answers the original reference one landed event carries through the
+// bound table.
+func (p *RecallPort) Reference(key event.EventID) (ledger.OriginalRef, bool) {
+	p.mu.RLock()
+	table := p.reads.Table
+	p.mu.RUnlock()
+	if table == nil {
+		return ledger.OriginalRef{}, false
+	}
+	return table.Reference(key)
+}
+
+// GetScoped answers one original read through the bound scoped original store.
+func (p *RecallPort) GetScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope) ledger.RecallResult {
+	p.mu.RLock()
+	originals := p.reads.Originals
+	p.mu.RUnlock()
+	if originals == nil {
+		return ledger.RecallResult{Key: key, Outcome: ledger.RecallFailed, Err: recall.ErrRecallUnwired}
+	}
+	return originals.GetScoped(ctx, key, scope)
+}
+
+// ReadSegmentScoped answers one segment read through the bound scoped original
+// store.
+func (p *RecallPort) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope, req ledger.SegmentRequest) (ledger.SegmentResult, error) {
+	p.mu.RLock()
+	originals := p.reads.Originals
+	p.mu.RUnlock()
+	if originals == nil {
+		return ledger.SegmentResult{}, fmt.Errorf("recall_get: %w", recall.ErrRecallUnwired)
+	}
+	return originals.ReadSegmentScoped(ctx, key, scope, req)
+}
+
+// Reads reports the read face this port wires for the recall tools: the
+// retrieval port, the embedding binding and the table and original store of the
+// bound run, beside the relation ledger the host holds. A face the deployment
+// wires nothing for stays absent, so the tool that needs it refuses by name
+// instead of answering an empty result.
+func (p *RecallPort) Reads() recall.Reads {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	reads := p.reads
+	reads.Searcher = p
+	reads.Trace = p.trace
+	if reads.Table != nil {
+		reads.Table = p
+	}
+	if reads.Originals != nil {
+		reads.Originals = p
+	}
+	return reads
+}
+
+// ObservationFacts returns the read-only fact-chain face the scheduled
+// reflection of this run judges on: the committed fact chain the run reads,
+// carrying the lineage each fact was committed under.
+func (r *Run) ObservationFacts() meditation.ObservedFacts {
+	return runObservation{run: r}
+}
+
+// runObservation is the observation face of one reflection over the run.
+type runObservation struct {
+	run *Run
+}
+
+// QueryEvents answers one page over the fact chain the run observes.
+func (o runObservation) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	return o.run.ObservedEvents(ctx, opts)
+}
+
+// CommittedFact reports the fact one reference names.
+func (o runObservation) CommittedFact(ctx context.Context, id event.EventID) (event.Event, error) {
+	return o.run.CommittedEvent(ctx, id)
+}
+
+// ReflectionInput returns the injection face the scheduled reflection of this
+// run drives its own loop session through: it commits the reflection input as a
+// fact of the observing agent's own partition, drives that agent's loop session
+// with it and reports what became of the turn.
+func (r *Run) ReflectionInput() meditation.ReflectionInput {
+	return &runReflectionInput{run: r}
+}
+
+// runReflectionInput is the injection face of one reflection over the run. The
+// receipt is the only evidence the reflection turn ran, so an injection that
+// errors reports no receipt and the watermark never moves.
+type runReflectionInput struct {
+	run *Run
+
+	mu  sync.Mutex
+	seq uint64
+}
+
+var _ meditation.ReflectionInput = (*runReflectionInput)(nil)
+
+// InjectReflection commits one reflection input, drives its loop session and
+// reports the outcome the turn reached: a completed terminal is a consumed
+// reflection, and every other terminal is a deferral that leaves the watermark
+// where it stands.
+func (i *runReflectionInput) InjectReflection(ctx context.Context, evt event.Event) (meditation.ReflectionReceipt, error) {
+	i.mu.Lock()
+	i.seq++
+	seq := i.seq
+	i.mu.Unlock()
+	invocation := event.InvocationID(fmt.Sprintf("%s#meditation-%d", evt.Owner.SessionID, seq))
+	turn, key, err := i.run.InjectEvent(ctx, evt, invocation)
+	if err != nil {
+		return meditation.ReflectionReceipt{}, err
+	}
+	receipt := meditation.ReflectionReceipt{Key: key, At: evt.Timestamp}
+	if turn.Terminal != model.KindCompleted {
+		receipt.Outcome = meditation.ReflectionDeferred
+		receipt.Reason = fmt.Sprintf("the reflection turn reached terminal %q instead of a completed one", turn.Terminal)
+		return receipt, nil
+	}
+	receipt.Outcome = meditation.ReflectionConsumed
+	return receipt, nil
 }

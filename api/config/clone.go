@@ -13,6 +13,7 @@ func (d *Declaration) Clone() *Declaration {
 		Agents:   cloneAgents(d.Agents),
 		Refs:     cloneToolRefs(d.Refs),
 		Baseline: d.Baseline,
+		Servers:  cloneServerSpecs(d.Servers),
 		Raw:      cloneRawMap(d.Raw),
 	}
 	return out
@@ -58,6 +59,19 @@ func cloneAgentSpec(in AgentSpec) AgentSpec {
 	out.Memory.ReadNamespaces = cloneStrings(in.Memory.ReadNamespaces)
 	out.Meditation.ObservedNamespaces = cloneStrings(in.Meditation.ObservedNamespaces)
 	out.Meditation.DeliverTo = cloneStrings(in.Meditation.DeliverTo)
+	out.File.ReadRoots = cloneStrings(in.File.ReadRoots)
+	return out
+}
+
+// cloneServerSpecs deep copies the declared MCP servers.
+func cloneServerSpecs(in map[string]MCPServerSpec) map[string]MCPServerSpec {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]MCPServerSpec, len(in))
+	for name, spec := range in {
+		out[name] = spec
+	}
 	return out
 }
 

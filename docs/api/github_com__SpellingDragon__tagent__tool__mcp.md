@@ -9,6 +9,11 @@ session initialization and tool listing stay with the native
 trpc.group/trpc-go/trpc-agent-go/tool/mcp types this package registers and hands
 out.
 
+The declaration face of the MCP axis: one generation of named servers as the
+deployment declares them, bound onto the live registry the gateways read.
+The binding moves connections only — no agent's declared tool set changes when a
+server appears or disappears, because the gateway declarations are constants.
+
 CONSTANTS
 
 const (
@@ -80,7 +85,45 @@ var (
     name the state they report, so a caller can tell a duplicate registration
     from a missing one and a shut-down table from an empty one.
 
+var ErrRegistryMissing = errors.New("mcp: the declaration names servers beside no live registry")
+    ErrRegistryMissing reports a binding beside no live registry: the servers
+    would be declared and unreachable, so the assembly is refused by name.
+
+var ErrServerDeclaredTwice = errors.New("mcp: the declaration names the same server twice")
+    ErrServerDeclaredTwice reports one generation naming the same server twice.
+
+var ErrServerKeyMissing = errors.New("mcp: the key variable of the declared server is not set")
+    ErrServerKeyMissing reports a declared server whose key variable is unset:
+    the declaration promises a connection this process cannot authenticate,
+    so the assembly is refused by name instead of opening an anonymous one.
+
+var ErrServerURLMissing = errors.New("mcp: the declared server names no url")
+    ErrServerURLMissing reports a declared server that names no endpoint.
+
+FUNCTIONS
+
+func ValidateDeclared(declared []DeclaredServer) error
+    ValidateDeclared reports whether one generation can be bound at all: every
+    server names an endpoint, no name repeats and every key variable is set.
+
 TYPES
+
+type Binder struct {
+	// Has unexported fields.
+}
+    Binder binds one generation of declared servers onto one live registry and
+    remembers the generation it applied, so a reload only moves the servers
+    whose declaration changed.
+
+func NewBinder(registry Registry) *Binder
+    NewBinder returns the binder of one live registry.
+
+func (b *Binder) Bind(ctx context.Context, declared []DeclaredServer) error
+    Bind brings the live registry onto one generation of declared servers:
+    a server the generation dropped or redeclared is released, a server it added
+    or redeclared is registered, and a server whose declaration did not change
+    is left untouched. Registration stays lazy — the native tool set connects at
+    its first use, so one unreachable server never blocks its siblings.
 
 type CallTool struct {
 	// Has unexported fields.
@@ -135,6 +178,21 @@ type DeclarationReloader interface {
     The redline list (2 rules): MUST return the declarations in the order they
     are handed to a request. MUST NOT answer a declaration of a tool the gateway
     does not serve.
+
+type DeclaredServer struct {
+	// Name is the registry identity the gateways address the server by.
+	Name string
+	// Transport is the declared transport spelling; an empty spelling means
+	// the streamable HTTP transport.
+	Transport string
+	// URL is the endpoint of the streamable or SSE transport.
+	URL string
+	// APIKeyEnv names the environment variable holding the key; an empty name
+	// declares a server that needs no key.
+	APIKeyEnv string
+}
+    DeclaredServer is one MCP server the organization declaration names:
+    the transport, the endpoint and the environment variable holding its key.
 
 type DiscoverTool struct {
 	// Has unexported fields.

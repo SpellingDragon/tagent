@@ -426,8 +426,13 @@ func main() {
 // report bounds the values: a tool reference the assembly contributes nothing for
 // is announced instead of silently resolved to nothing.
 func reportUnwired(doc *hostDocument) {
+	decl, err := doc.Declaration()
+	if err != nil {
+		return
+	}
 	var items []string
-	for _, id := range doc.agentOrder() {
+	for _, spec := range decl.Agents {
+		id := spec.ID
 		for _, ref := range doc.Agents[id].Tools {
 			switch {
 			case ref.Kind == "tool" && ref.ID == sendToolID:

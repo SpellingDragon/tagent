@@ -37,6 +37,20 @@ providers:
   # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
   # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
 
+# ===== MCP 服务端注册表 =====
+# 声明即绑定:核心把这里声明的 server 绑到 mcp_call / mcp_discover 读取的活注册表。
+# transport 支持 streamable-http(归一化为框架的 streamable)与 sse;api_key_env
+# 指向的环境变量缺失时拒启动。
+mcp_servers:
+  web-search-prime:
+    transport: streamable-http
+    url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
+    api_key_env: ZAI_API_KEY
+  zread:
+    transport: streamable-http
+    url: https://open.bigmodel.cn/api/mcp/zread/mcp
+    api_key_env: ZAI_API_KEY
+
 # ===== 记忆面(共享持久存储 + 语义引擎)=====
 # 存储不再有顶层 storage 段:它由各 agent 的 memory 段声明,宿主把全体声明归并成
 # 一个 tier + 一个 engine(hostDocument.memorySettings)——同一份存储被两种引擎读会答出
@@ -146,9 +160,32 @@ agents:
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
     system_prompt:
-      files: [action_agent.md]      # 本目录自带(工具名按本部署的声明书写:file 工具/exec/mcp_call;工具面本身仍待接线)
-    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / temperature /
-    #         thinking_enabled / reasoning_effort,以及 file 工具、exec、mcp_call
+      files: [action_agent.md]      # 本目录自带(工具名按本部署的声明书写:file 工具/exec_run·exec_release/mcp_call)
+    # 文件面:base_dir 是全部相对路径的沙箱根,read_roots 追加只读根;
+    # tools[] 列出的 file 工具即授权,未列出的不进入模型请求。
+    file:
+      base_dir: .
+    # 执行面:monitor 是 tmux 监控节奏(间隔/静默判定/疑似假死),未声明的字段取框架默认。
+    exec:
+      monitor:
+        interval: 3s
+        stable_duration: 30s
+        fake_dead_duration: 180s
+    # 工具面:七件 file 工具与 exec/mcp 网关均由核心按声明装配;exec 声明一项即授予
+    # exec_run 与 exec_release 两件,MCP 网关读顶层 mcp_servers 的活注册表。
+    tools:
+      - { kind: tool, id: read_file }
+      - { kind: tool, id: list_file }
+      - { kind: tool, id: search_file }
+      - { kind: tool, id: search_content }
+      - { kind: tool, id: read_multiple_files }
+      - { kind: tool, id: save_file }
+      - { kind: tool, id: replace_content }
+      - { kind: tool, id: exec }
+      - { kind: tool, id: mcp_call }
+      - { kind: tool, id: mcp_discover }
+    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold /
+    #         temperature / thinking_enabled / reasoning_effort
 
   # ---- Plan:工作计划管理子 Agent(openspec CLI,无通用 shell 逃逸面)----
   plan:

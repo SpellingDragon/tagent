@@ -6,9 +6,24 @@ variable holding the key, the vector width and the optional endpoint. The
 connection is validated at assembly time, so a host that runs is a host whose
 vectors belong to the vector space its store was built for.
 
+The deterministic embedding stand-in of the memory side: it maps text to a
+fixed-dimension unit vector with no endpoint behind it, so the vector leg of
+a retrieval runs to completion offline and a runtime without an embedding
+configuration still exercises the whole retrieval mechanism end to end.
+The vectors it carries are content fingerprints and not semantic measurements:
+identical text always yields identical vectors and text sharing more character
+n-grams scores a higher cosine. That is the mechanism guarantee a retrieval test
+stands on, and no claim of semantic recall quality.
+
 Skeleton compile-time assertions for the provider-backed embedder: the assembly
 entry, the declaration check, the memory seam method and the named refusals keep
 exactly these shapes.
+
+CONSTANTS
+
+const DefaultHashDimensions = 128
+    DefaultHashDimensions is the vector width a HashEmbedder runs at when it
+    names none.
 
 VARIABLES
 
@@ -59,3 +74,19 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error)
     Embed returns the vector of text under the declared connection, honouring
     cancellation and answering a named failure when the provider fails, returns
     no vector, or returns a vector of another width.
+
+type HashEmbedder struct {
+	// Has unexported fields.
+}
+    HashEmbedder is the Embedder that hashes character n-grams into
+    a fixed-dimension unit vector. The mapping is deterministic and
+    honours cancellation, and the zero value is usable and runs at
+    DefaultHashDimensions.
+
+func NewHashEmbedder(dimensions int) *HashEmbedder
+    NewHashEmbedder returns a hash embedder of the given vector width, or one at
+    DefaultHashDimensions when the width names none.
+
+func (e *HashEmbedder) Embed(ctx context.Context, text string) ([]float32, error)
+    Embed returns the deterministic embedding vector of text: a unit vector over
+    the character n-gram fingerprint of the text, identical for identical text.

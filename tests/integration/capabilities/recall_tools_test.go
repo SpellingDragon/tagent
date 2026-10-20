@@ -10,6 +10,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
+	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/tool/recall"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -30,7 +31,7 @@ type recallSurface struct {
 // capability is refused by the tool and not by a chain that cannot vectorize.
 func newRecallSurface(t *testing.T, wired memory.Embedder) *recallSurface {
 	t.Helper()
-	chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+	chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 	chain.landStore(t)
 	relations := replay.NewMemoryRelations()
 	if err := relations.SetParent("0a02", "0a01"); err != nil {
@@ -129,7 +130,7 @@ func TestRecallToolSurface(t *testing.T) {
 
 	t.Run("normal", func(t *testing.T) {
 		t.Run("the retrieval tool answers the landed hits inside its partition", func(t *testing.T) {
-			surface := newRecallSurface(t, memory.NewHashEmbedder(0))
+			surface := newRecallSurface(t, memoryembedder.NewHashEmbedder(0))
 			answer, err := callRecallTool(t, surface.tools[recall.QueryToolName], fmt.Sprintf(`{"text":%q,"limit":5}`, realRecallText))
 			if err != nil {
 				t.Fatalf("recall_query(%q): %v", realRecallText, err)
@@ -156,7 +157,7 @@ func TestRecallToolSurface(t *testing.T) {
 		})
 
 		t.Run("the exact read serves the original back in bounded segments", func(t *testing.T) {
-			surface := newRecallSurface(t, memory.NewHashEmbedder(0))
+			surface := newRecallSurface(t, memoryembedder.NewHashEmbedder(0))
 			tool := surface.tools[recall.GetToolName]
 			var walked []byte
 			position := 0
@@ -183,7 +184,7 @@ func TestRecallToolSurface(t *testing.T) {
 		})
 
 		t.Run("the exact read names a miss and an event outside the partition", func(t *testing.T) {
-			surface := newRecallSurface(t, memory.NewHashEmbedder(0))
+			surface := newRecallSurface(t, memoryembedder.NewHashEmbedder(0))
 			tool := surface.tools[recall.GetToolName]
 			miss, err := callRecallTool(t, tool, `{"key":"9f9f"}`)
 			if err != nil {
@@ -216,7 +217,7 @@ func TestRecallToolSurface(t *testing.T) {
 		})
 
 		t.Run("the recent page answers newest first and reports the page it could not carry", func(t *testing.T) {
-			surface := newRecallSurface(t, memory.NewHashEmbedder(0))
+			surface := newRecallSurface(t, memoryembedder.NewHashEmbedder(0))
 			tool := surface.tools[recall.RecentToolName]
 			page, err := callRecallTool(t, tool, `{"limit":2}`)
 			if err != nil {
@@ -242,7 +243,7 @@ func TestRecallToolSurface(t *testing.T) {
 		})
 
 		t.Run("the causal walk follows the parent links to a root", func(t *testing.T) {
-			surface := newRecallSurface(t, memory.NewHashEmbedder(0))
+			surface := newRecallSurface(t, memoryembedder.NewHashEmbedder(0))
 			tool := surface.tools[recall.TraceToolName]
 			chain, err := callRecallTool(t, tool, `{"key":"0a03"}`)
 			if err != nil {

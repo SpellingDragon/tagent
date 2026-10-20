@@ -25,6 +25,7 @@ var (
 		Agents:   []AgentSpec{},
 		Refs:     []ToolRef{},
 		Baseline: "",
+		Servers:  map[string]MCPServerSpec{},
 		Raw:      map[string]any{},
 	}
 
@@ -42,6 +43,8 @@ var (
 		EnvironmentBlock: false,
 		Memory:           MemorySpec{},
 		Meditation:       MeditationSpec{},
+		File:             FileSpec{},
+		Exec:             ExecSpec{},
 	}
 
 	_ = MemorySpec{
@@ -74,6 +77,28 @@ var (
 		PromptFile:         "",
 		ObservedNamespaces: []string{},
 		DeliverTo:          []string{},
+	}
+
+	_ = FileSpec{
+		BaseDir:   "",
+		ReadRoots: []string{},
+	}
+
+	_ = ExecSpec{
+		Monitor: MonitorSpec{},
+	}
+
+	_ = MonitorSpec{
+		Interval:                  0,
+		StableDuration:            0,
+		InteractiveStableDuration: 0,
+		FakeDeadDuration:          0,
+	}
+
+	_ = MCPServerSpec{
+		Transport: "",
+		URL:       "",
+		APIKeyEnv: "",
 	}
 
 	_ = FinalRoundSpec{

@@ -12,8 +12,3 @@ func ExampleLogObserver()
     line carrying the tool and the task, and neither line renders the payload
     content.
 
-func ExampleRecorder()
-    ExampleRecorder admits committed facts into a bounded queue: an admission
-    past the byte budget is refused and counted instead of blocking the caller,
-    and the run is reported sealed only when the writer confirmed the seal.
-

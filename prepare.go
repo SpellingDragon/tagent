@@ -16,10 +16,10 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	tagentfile "github.com/SpellingDragon/tagent/tool/file"
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-	"trpc.group/trpc-go/trpc-agent-go/tool/file"
 	toolskill "trpc.group/trpc-go/trpc-agent-go/tool/skill"
 )
 
@@ -123,13 +123,15 @@ func buildBinding(ctx context.Context, spec config.AgentSpec, s supplier, leases
 
 // registerNativeTools registers the native tool families of one declared agent
 // on the binding's tool resources: the contributed native tools — the
-// function-tool shape among them — beside the native file tool set the
-// declared files give a root for and the native skill load tool the declared
-// skill files give a repository for. Every native callable tool of every
-// family is admitted through the same registration wrapper before it is
-// registered, so a call of any family produces one real admission receipt and
-// settles through the task face. The tools it returns are the registered ones
-// in registration order, the exact list a request carries.
+// function-tool shape among them — beside the native file surface the agent's
+// file face grants and the native skill load tool the declared skill files give
+// a repository for. An agent that declares no file face carries no native file
+// surface: a declaration is the authorization, and no declaration grants no
+// file tool. Every native callable tool of every family is admitted through the
+// same registration wrapper before it is registered, so a call of any family
+// produces one real admission receipt and settles through the task face. The
+// tools it returns are the registered ones in registration order, the exact
+// list a request carries.
 //
 // A construction that fails is refused by name beside the family it was
 // registering, so a binding is never published holding half a tool family.
@@ -142,18 +144,16 @@ func registerNativeTools(ctx context.Context, spec config.AgentSpec, contributed
 	}
 	resources.Register(state.ToolKindFunction, "contributed", admitted...)
 	registered = append(registered, admitted...)
-	if base := commonDir(spec.Files); base != "" {
-		files, err := file.NewToolSet(file.WithBaseDir(base))
+	if surface, err := nativeFileSurface(spec); err != nil {
+		return nil, nil, err
+	} else if surface != nil {
+		admitted, err := admitTools(withoutContributed(surface.Tools(ctx), contributed), wrap)
 		if err != nil {
-			return nil, nil, fmt.Errorf("construct the native file tool set under %q: %w", base, err)
+			surface.Close()
+			return nil, nil, fmt.Errorf("admit the native file tools under %q: %w", surface.BaseDir(), err)
 		}
-		native := files.Tools(ctx)
-		admitted, err := admitTools(native, wrap)
-		if err != nil {
-			return nil, nil, fmt.Errorf("admit the native file tools under %q: %w", base, err)
-		}
-		resources.Attach(files)
-		resources.Register(state.ToolKindFile, base, admitted...)
+		resources.Attach(surface)
+		resources.Register(state.ToolKindFile, surface.BaseDir(), admitted...)
 		registered = append(registered, admitted...)
 	}
 	if roots := skillRoots(spec.Files); len(roots) > 0 {
@@ -170,6 +170,66 @@ func registerNativeTools(ctx context.Context, spec config.AgentSpec, contributed
 		registered = append(registered, admitted...)
 	}
 	return resources, registered, nil
+}
+
+// nativeFileSurface builds the file surface one agent declares: the file face
+// fixes the base directory and the read roots, and the file ids the agent's
+// references name fix the granted set. A declaration is the authorization: an
+// agent that declares neither a face nor a file id carries no file surface and
+// therefore no file tool, while a declared face that names no tool grants the
+// whole frozen set over that face. An agent that declares a face or a file id
+// but names no existing base directory is refused by name when the surface is
+// built.
+func nativeFileSurface(spec config.AgentSpec) (*tagentfile.Surface, error) {
+	face := spec.File
+	granted := declaredFileTools(spec)
+	if face.BaseDir == "" && len(granted) == 0 && len(face.ReadRoots) == 0 {
+		return nil, nil
+	}
+	surface, err := tagentfile.New(tagentfile.Options{
+		BaseDir:   face.BaseDir,
+		ReadRoots: face.ReadRoots,
+		Tools:     granted,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("construct the native file tool set: %w", err)
+	}
+	return surface, nil
+}
+
+// declaredFileTools reports the file tool ids one agent's references name, in
+// declaration order.
+func declaredFileTools(spec config.AgentSpec) []string {
+	names := tagentfile.Names()
+	granted := make([]string, 0, len(names))
+	for _, ref := range spec.Tools {
+		for _, name := range names {
+			if ref.Name == name {
+				granted = append(granted, name)
+			}
+		}
+	}
+	return granted
+}
+
+// withoutContributed drops the native file tools a contributed tool already
+// answers under the same name: the host contribution is the instance the model
+// sees, so one name never reaches a request twice.
+func withoutContributed(tools []trpctool.Tool, contributed []trpctool.Tool) []trpctool.Tool {
+	declared := make(map[string]bool, len(contributed))
+	for _, tool := range contributed {
+		if declaration := tool.Declaration(); declaration != nil {
+			declared[declaration.Name] = true
+		}
+	}
+	out := make([]trpctool.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if declaration := tool.Declaration(); declaration != nil && declared[declaration.Name] {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
 }
 
 // admitTools registers each native callable tool under the admission wrapper,
@@ -201,9 +261,8 @@ func toolName(tool trpctool.Tool) string {
 }
 
 // commonDir reports the deepest directory every declared file lives under, so
-// the native file tool set is rooted where the declared files are. A
-// declaration that names no file carries no root and registers no file tool
-// set.
+// the request-boundary file source reads the declared files under one root. A
+// declaration that names no file carries no root.
 func commonDir(files []config.FileRef) string {
 	if len(files) == 0 {
 		return ""

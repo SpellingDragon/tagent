@@ -3,11 +3,17 @@ package exec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
+
+// ErrUnwired reports a call beside no execution resource manager: the
+// declaration granted the execution face while the assembly wires no ledger to
+// hold it, so the call is refused by name instead of starting anything.
+var ErrUnwired = errors.New("exec: the deployment wires no execution resource manager")
 
 // 契约: docs/wiki/tool/tool-architecture.md#action-tool
 //
@@ -20,6 +26,7 @@ import (
 // is never swept for having taken long while it is still working.
 type RunTool struct {
 	manager *Manager
+	monitor MonitorConfig
 }
 
 // ReleaseTool is the callable tool face of one explicit release: it stops the
@@ -30,12 +37,43 @@ type ReleaseTool struct {
 	manager *Manager
 }
 
-// NewRunTool returns the run tool over the given execution resource manager.
-func NewRunTool(manager *Manager) *RunTool { return &RunTool{manager: manager} }
+// RunToolOption fixes one piece of the run tool beside the manager it acquires
+// through.
+type RunToolOption func(*RunTool)
+
+// WithRunMonitor binds the monitor rhythm the declaration fixes to every
+// acquisition the tool opens: a call that names no monitor key of its own runs
+// under this rhythm instead of the framework default.
+func WithRunMonitor(rhythm MonitorConfig) RunToolOption {
+	return func(t *RunTool) { t.monitor = rhythm }
+}
+
+// NewRunTool returns the run tool over the given execution resource manager and
+// the rhythm its declaration fixes.
+func NewRunTool(manager *Manager, opts ...RunToolOption) *RunTool {
+	t := &RunTool{manager: manager, monitor: DefaultMonitorConfig}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
 
 // NewReleaseTool returns the release tool over the given execution resource
 // manager.
 func NewReleaseTool(manager *Manager) *ReleaseTool { return &ReleaseTool{manager: manager} }
+
+// PresetName is the declaration id that grants the execution face: the
+// declaration names it once, and the surface answers with the run and the
+// release tool under their own frozen names.
+const PresetName = "exec"
+
+// NewPreset returns the tools one declared execution face grants, in the order
+// the request carries them: the run tool under the monitor rhythm the
+// declaration fixes beside the explicit release tool. A preset built beside no
+// manager still builds; each call answers ErrUnwired.
+func NewPreset(manager *Manager, rhythm MonitorConfig) []trpctool.Tool {
+	return []trpctool.Tool{NewRunTool(manager, WithRunMonitor(rhythm)), NewReleaseTool(manager)}
+}
 
 // runArgs is the argument set of one execution run. A key outside this set —
 // the retired tool-level compress section among them — is accepted and left
@@ -100,6 +138,9 @@ func (t *ReleaseTool) Declaration() *trpctool.Declaration {
 // at the cadence of the call's own monitor rhythm until the execution behind it
 // returns, and the renewing ends beside the call.
 func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	if t.manager == nil {
+		return nil, ErrUnwired
+	}
 	var args runArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return nil, fmt.Errorf("exec: the run arguments do not parse: %w", err)
@@ -113,7 +154,7 @@ func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		Dir:      args.Dir,
 		Resource: ResourceKey{Kind: args.Kind, Key: args.Resource},
 	}
-	rhythm, err := MonitorConfigFrom(args.Monitor)
+	rhythm, err := MonitorConfigWith(t.monitor, args.Monitor)
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +225,9 @@ func (t *RunTool) renewForCall(key ResourceKey, lease time.Duration, rhythm Moni
 // resource beside its exit code; an unconfirmed stop answers with the retained
 // resource beside the reason it stayed held.
 func (t *ReleaseTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	if t.manager == nil {
+		return nil, ErrUnwired
+	}
 	var args releaseArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return nil, fmt.Errorf("exec: the release arguments do not parse: %w", err)

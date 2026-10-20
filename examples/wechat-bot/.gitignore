@@ -133,8 +133,8 @@ openspec/
 !host_runtime_test.go
 !host_memory.go
 !host_memory_test.go
-!host_meditation.go
-!host_meditation_test.go
+!meditation_delivery.go
+!meditation_delivery_test.go
 !session_routing.go
 !approval_channel.go
 !main_test.go

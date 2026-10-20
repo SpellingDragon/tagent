@@ -1,12 +1,11 @@
-// host_meditation_test 钉住 定时策展的接线红线：声明面读到的观察分区、节奏与回流白名单
-// 就是宿主交给核心定时驱动的反射循环——Tick 走同一条水位/观察/注入链，权威回合产出的正文经
-// 唯一出网通路送到声明的目标；未启用的声明不建驱动器、不动模型、不写锚点，等于没有这一段。
+// meditation_delivery_test 钉住 定时策展的投递红线：权威回合产出的正文经唯一出网通路送到
+// 声明的目标——Tick 走同一条水位/观察/注入链；未启用的声明不建驱动器、不动模型、不写锚点，
+// 等于没有这一段。声明解析归核心（meditation.PlanOf），本文件只盯宿主自己的投递面。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
 package main
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,17 +60,17 @@ func TestMeditationTickDeliversTheReflectionToTheDeclaredTarget(t *testing.T) {
 		t.Fatal("the document enables meditation but the assembly resolved no plan")
 	}
 	plan := rig.host.meditationPlan
-	if plan.agent != "meditator" || plan.interval != time.Minute || plan.minGap != 0 {
-		t.Fatalf("plan = %s/%s/%s, want meditator at the declared one-minute cadence", plan.agent, plan.interval, plan.minGap)
+	if plan.Agent() != "meditator" || plan.Interval() != time.Minute || plan.MinGap() != 0 {
+		t.Fatalf("plan = %s/%s/%s, want meditator at the declared one-minute cadence", plan.Agent(), plan.Interval(), plan.MinGap())
 	}
 	wantAnchors := filepath.Join(doc.Agents["tagent"].Memory.Path, "meditation", "meditator", "anchors.json")
-	if plan.anchorsPath != wantAnchors {
-		t.Fatalf("anchors path = %q, want %q", plan.anchorsPath, wantAnchors)
+	if plan.AnchorsPath() != wantAnchors {
+		t.Fatalf("anchors path = %q, want %q", plan.AnchorsPath(), wantAnchors)
 	}
-	if got := plan.observedNamespaces; len(got) != 1 || got[0] != "tagent" {
+	if got := plan.ObservedNamespaces(); len(got) != 1 || got[0] != "tagent" {
 		t.Fatalf("observed namespaces = %v, want the declared tagent face", got)
 	}
-	if got := plan.deliverTo; len(got) != 1 || got[0] != "tagent" {
+	if got := plan.DeliverTo(); len(got) != 1 || got[0] != "tagent" {
 		t.Fatalf("delivery white list = %v, want the declared tagent target", got)
 	}
 
@@ -146,11 +145,10 @@ func TestMeditationDisabledKeepsTheHostStill(t *testing.T) {
 	entry.Meditation.Enabled = false
 	doc.Agents["meditator"] = entry
 
-	plan, err := doc.meditationPlan()
-	if err != nil || plan != nil {
-		t.Fatalf("plan = %+v, %v, want none beside a disabled declaration", plan, err)
-	}
 	rig := newRoutingRig(t, doc)
+	if rig.host.meditationPlan != nil {
+		t.Fatalf("plan = %+v, want none beside a disabled declaration", rig.host.meditationPlan)
+	}
 	if rig.host.run.ReflectionGate() != nil {
 		t.Fatal("a disabled meditation still wired a reflection anchor store")
 	}
@@ -174,82 +172,5 @@ func TestMeditationDisabledKeepsTheHostStill(t *testing.T) {
 	anchors := filepath.Join(doc.Agents["tagent"].Memory.Path, "meditation", "meditator", "anchors.json")
 	if _, err := os.Stat(anchors); !os.IsNotExist(err) {
 		t.Fatalf("a disabled meditation wrote an anchor record at %s: %v", anchors, err)
-	}
-}
-
-// TestMeditationDeclarationRefusesInconsistentShapes refuses each inconsistent meditation declaration by name.
-//   - two enabled loops
-//   - an observation face outside the authorized read scope
-//   - an undeclared delivery target
-//   - a missing prompt
-//   - an enabled section beside no storage tier
-func TestMeditationDeclarationRefusesInconsistentShapes(t *testing.T) {
-	cases := []struct {
-		name   string
-		mutate func(*hostDocument)
-		want   error
-	}{
-		{
-			name: "two enabled loops",
-			mutate: func(doc *hostDocument) {
-				second := doc.Agents["tagent"]
-				second.Meditation = doc.Agents["meditator"].Meditation
-				doc.Agents["tagent"] = second
-			},
-			want: ErrMeditationDeclaration,
-		},
-		{
-			name: "observation outside the read scope",
-			mutate: func(doc *hostDocument) {
-				entry := doc.Agents["meditator"]
-				entry.Meditation.ObservedNamespaces = []string{"ops"}
-				doc.Agents["meditator"] = entry
-			},
-			want: meditation.ErrObservationScopeOutOfBounds,
-		},
-		{
-			name: "undeclared delivery target",
-			mutate: func(doc *hostDocument) {
-				entry := doc.Agents["meditator"]
-				entry.Meditation.DeliverTo = []string{"ghost"}
-				doc.Agents["meditator"] = entry
-			},
-			want: ErrMeditationDeclaration,
-		},
-		{
-			name: "missing prompt",
-			mutate: func(doc *hostDocument) {
-				entry := doc.Agents["meditator"]
-				entry.Meditation.PromptFile = filepath.Join(t.TempDir(), "absent.md")
-				doc.Agents["meditator"] = entry
-			},
-			want: ErrMeditationDeclaration,
-		},
-		{
-			name: "no storage tier",
-			mutate: func(doc *hostDocument) {
-				business := doc.Agents["tagent"]
-				business.Memory = config.MemorySpec{}
-				doc.Agents["tagent"] = business
-				entry := doc.Agents["meditator"]
-				entry.Memory = config.MemorySpec{}
-				entry.Meditation.ObservedNamespaces = nil
-				doc.Agents["meditator"] = entry
-			},
-			want: ErrMeditationDeclaration,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			doc := meditationDocument(t)
-			tc.mutate(doc)
-			_, err := doc.meditationPlan()
-			if !errors.Is(err, ErrMeditationDeclaration) {
-				t.Fatalf("resolve the plan: error %v, want ErrMeditationDeclaration", err)
-			}
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("resolve the plan: error %v, want %v", err, tc.want)
-			}
-		})
 	}
 }

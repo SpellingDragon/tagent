@@ -1,18 +1,10 @@
 
-The scheduled reflection of the host: the meditation section names one observing
-agent, the cadence its ticks run at, the namespaces it reflects on and the
-declared agents its result flows back to. The core driver owns the tick loop;
-this file resolves the declaration into its plan, supplies the observation and
-injection faces over the assembled run, and gives the delivery port the one
-outbound path. A document declaring no enabled meditation starts no driver and
-changes nothing.
-
-The memory assembly of the host: the memory declaration names one shared storage
-tier, the semantic engine behind the recall vocabulary and the namespaces one
-agent may read across partitions, and this file merges those declarations into
-the faces the run and the recall tools are wired over. The embedding connection
-itself is the core default implementation; the host only names the declaration
-it assembles.
+The delivery face of the scheduled reflection: the declaration resolves in the
+core (meditation.PlanOf), and what this host adds is its own loop session — the
+observing agent's reserved meditation session, which never occupies the business
+conversation — beside the one outbound path a fired reflection's result leaves
+through. A target no chat ever reached receives nothing and the delivery is
+named in the log instead of being retargeted to another session.
 
 本文件承载换装后的转世通报：检测、组装、注入与记消费。
 
@@ -34,10 +26,6 @@ var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was alread
     ErrDuplicateInbound reports an inbound message whose identity was already
     admitted: one channel delivery drives one invocation.
 
-var ErrEmbeddingKey = embedder.ErrEmbeddingKey
-    ErrEmbeddingKey reports an embedding connection whose key variable names no
-    value in the environment.
-
 var ErrFaceEmptyInjection = errors.New("wechat-bot: the injection carries no user message")
     ErrFaceEmptyInjection reports an injection request whose messages carry no
     user content: a turn reads user input only, so the request is refused by
@@ -53,33 +41,22 @@ var ErrFaceUnauthenticated = errors.New("wechat-bot: the injection request is no
     authenticate: no credential is configured for the face and the peer is not
     the loopback address, or a configured credential was missing or unmatched.
 
-var ErrMeditationDeclaration = errors.New("wechat-bot: the meditation declaration is inconsistent")
+var ErrMeditationDeclaration = meditation.ErrDeclaration
     ErrMeditationDeclaration reports a meditation section this host cannot
-    drive: two agents enabling one reflection loop, a cadence or prompt that
-    cannot be read, an observation face outside the agent's authorized read
-    scope, a delivery target the document does not declare, or an enabled
-    section beside no shared storage tier for its anchor record.
-
-var ErrMemoryDeclaration = errors.New("wechat-bot: the memory declaration is inconsistent")
-    ErrMemoryDeclaration reports a memory section this host cannot merge into
-    one storage tier and one semantic engine: a declaration that names half a
-    storage tier, two agents that name different tiers or engines, or an engine
-    beside no tier at all.
-
-var ErrMemoryEngine = errors.New("wechat-bot: the memory engine declaration is invalid")
-    ErrMemoryEngine reports a semantic engine declaration this host cannot
-    assemble: an unknown backend or provider, a connection missing its model,
-    key variable or vector width, a negative retrieval bound, or an endpoint
-    that is not an absolute http(s) URL.
+    resolve into one scheduled reflection. The resolution rules — one loop
+    per host, cadence bounds, the observation face inside the read scope,
+    the declared delivery targets and the anchor record path — are the core
+    declaration ones; this host names the refusal in its own vocabulary.
 
 var ErrNoChatAddress = errors.New("wechat-bot: the inbound message names no chat identity")
     ErrNoChatAddress reports an inbound message that names no chat identity.
     The refusal is the whole answer: a message without an address is never
     routed to a session that belongs to somebody else.
 
-var ErrNoEntryAgent = errors.New("wechat-bot: the host document names no declared entry agent")
+var ErrNoEntryAgent = document.ErrDeclarationEntry
     ErrNoEntryAgent reports a host document that names no entry agent or names
-    an agent it does not declare.
+    an agent it does not declare. The derivation rules are the core declaration
+    ones; this host names the refusal in its own vocabulary.
 
 var ErrSessionPrefixMissing = errors.New("wechat-bot: the session router carries no session prefix")
     ErrSessionPrefixMissing reports a router constructed without the explicit

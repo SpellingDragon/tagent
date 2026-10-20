@@ -6,6 +6,7 @@
 |---|---|
 | `github.com/SpellingDragon/tagent` | [github_com__SpellingDragon__tagent.md](github_com__SpellingDragon__tagent.md) |
 | `github.com/SpellingDragon/tagent/api/config` | [github_com__SpellingDragon__tagent__api__config.md](github_com__SpellingDragon__tagent__api__config.md) |
+| `github.com/SpellingDragon/tagent/api/document` | [github_com__SpellingDragon__tagent__api__document.md](github_com__SpellingDragon__tagent__api__document.md) |
 | `github.com/SpellingDragon/tagent/api/event` | [github_com__SpellingDragon__tagent__api__event.md](github_com__SpellingDragon__tagent__api__event.md) |
 | `github.com/SpellingDragon/tagent/api/model` | [github_com__SpellingDragon__tagent__api__model.md](github_com__SpellingDragon__tagent__api__model.md) |
 | `github.com/SpellingDragon/tagent/api/plugin` | [github_com__SpellingDragon__tagent__api__plugin.md](github_com__SpellingDragon__tagent__api__plugin.md) |
@@ -68,6 +69,7 @@
 | `github.com/SpellingDragon/tagent/tests/integration/learning` | [github_com__SpellingDragon__tagent__tests__integration__learning.md](github_com__SpellingDragon__tagent__tests__integration__learning.md) |
 | `github.com/SpellingDragon/tagent/tests/integration/state` | [github_com__SpellingDragon__tagent__tests__integration__state.md](github_com__SpellingDragon__tagent__tests__integration__state.md) |
 | `github.com/SpellingDragon/tagent/tool/exec` | [github_com__SpellingDragon__tagent__tool__exec.md](github_com__SpellingDragon__tagent__tool__exec.md) |
+| `github.com/SpellingDragon/tagent/tool/file` | [github_com__SpellingDragon__tagent__tool__file.md](github_com__SpellingDragon__tagent__tool__file.md) |
 | `github.com/SpellingDragon/tagent/tool/knowledge` | [github_com__SpellingDragon__tagent__tool__knowledge.md](github_com__SpellingDragon__tagent__tool__knowledge.md) |
 | `github.com/SpellingDragon/tagent/tool/mcp` | [github_com__SpellingDragon__tagent__tool__mcp.md](github_com__SpellingDragon__tagent__tool__mcp.md) |
 | `github.com/SpellingDragon/tagent/tool/recall` | [github_com__SpellingDragon__tagent__tool__recall.md](github_com__SpellingDragon__tagent__tool__recall.md) |
@@ -75,4 +77,4 @@
 | `github.com/SpellingDragon/tagent/tool/subagent` | [github_com__SpellingDragon__tagent__tool__subagent.md](github_com__SpellingDragon__tagent__tool__subagent.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：70。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：72。文档覆盖由 scripts/comment_policy 单点判定。

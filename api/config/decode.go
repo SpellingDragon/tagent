@@ -26,7 +26,7 @@ func decodeDeclaration(source string, root *sourceNode) (*Declaration, error) {
 		return nil, &decodeError{source: source, line: root.line, reason: "expected a mapping"}
 	}
 	d.Raw = rawDocument(root)
-	fields, err := mapFields(source, "", root, "entry", "agents", "refs", "baseline")
+	fields, err := mapFields(source, "", root, "entry", "agents", "refs", "baseline", "mcp_servers")
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +42,59 @@ func decodeDeclaration(source string, root *sourceNode) (*Declaration, error) {
 	if d.Baseline, err = stringField(source, "baseline", fields["baseline"]); err != nil {
 		return nil, err
 	}
+	if d.Servers, err = mcpServersField(source, "mcp_servers", fields["mcp_servers"]); err != nil {
+		return nil, err
+	}
 	return d, nil
+}
+
+// mcpServersField maps one free-form mapping of server names onto the server
+// declarations it binds; an absent or null field binds no server.
+func mcpServersField(source, field string, e *sourceEntry) (map[string]MCPServerSpec, error) {
+	if isAbsent(e) {
+		return nil, nil
+	}
+	if e.value.kind != sourceMap {
+		return nil, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
+	}
+	entries, err := mapEntryFields(source, field, e.value)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]MCPServerSpec, len(entries))
+	for name, ent := range entries {
+		server, err := mcpServerField(source, joinField(field, name), ent)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = server
+	}
+	return out, nil
+}
+
+// mcpServerField maps one MCP server declaration onto its spec.
+func mcpServerField(source, field string, e *sourceEntry) (MCPServerSpec, error) {
+	spec := MCPServerSpec{}
+	if isAbsent(e) {
+		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
+	}
+	if e.value.kind != sourceMap {
+		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
+	}
+	fields, err := mapFields(source, field, e.value, "transport", "url", "api_key_env")
+	if err != nil {
+		return spec, err
+	}
+	if spec.Transport, err = stringField(source, joinField(field, "transport"), fields["transport"]); err != nil {
+		return spec, err
+	}
+	if spec.URL, err = requiredStringField(source, field, e.value, "url", fields["url"]); err != nil {
+		return spec, err
+	}
+	if spec.APIKeyEnv, err = stringField(source, joinField(field, "api_key_env"), fields["api_key_env"]); err != nil {
+		return spec, err
+	}
+	return spec, nil
 }
 
 // mapFields indexes the entries of one fixed-shape mapping by key, rejecting
@@ -100,12 +152,22 @@ func agentsField(source string, e *sourceEntry) ([]AgentSpec, error) {
 	return agents, nil
 }
 
-// decodeAgent maps one agent mapping onto an agent spec.
+// agentKeys are the agent keys the declaration surface names: the core fields
+// this package reads itself and the four domain sections, which are plain
+// fields of AgentSpec.
+var agentKeys = []string{
+	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
+	"final_round", "replay_budget", "environment_block",
+	"memory", "meditation", "file", "exec",
+}
+
+// decodeAgent maps one agent mapping onto an agent spec: the core keys first,
+// then the four domain sections in canonical slot order.
 func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if n == nil || n.kind != sourceMap {
 		return nil, &decodeError{source: source, line: nodeLine(n), field: path, reason: "expected a mapping"}
 	}
-	fields, err := mapFields(source, path, n, "id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params", "final_round", "replay_budget", "environment_block", "memory", "meditation")
+	fields, err := mapFields(source, path, n, agentKeys...)
 	if err != nil {
 		return nil, err
 	}
@@ -149,133 +211,183 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.Meditation, err = meditationField(source, joinField(path, "meditation"), fields["meditation"]); err != nil {
 		return nil, err
 	}
+	if a.File, err = fileField(source, joinField(path, "file"), fields["file"]); err != nil {
+		return nil, err
+	}
+	if a.Exec, err = execField(source, joinField(path, "exec"), fields["exec"]); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 
-// memoryField maps one memory declaration onto its spec; an absent or null
-// field declares no memory binding at all.
-func memoryField(source, field string, e *sourceEntry) (MemorySpec, error) {
-	spec := MemorySpec{}
+// sectionFields reads one optional section mapping: an absent or null section
+// declares nothing, and a value that is not a mapping is refused by field path
+// so every decoder below only ever reads a mapping. The keys the section names
+// are declared here, so a key outside them is refused before the decoder runs.
+func sectionFields(source, field string, e *sourceEntry, keys ...string) (map[string]*sourceEntry, bool, error) {
 	if isAbsent(e) {
-		return spec, nil
+		return nil, false, nil
 	}
 	if e.value.kind != sourceMap {
-		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
+		return nil, false, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
 	}
-	fields, err := mapFields(source, field, e.value, "type", "path", "read_namespaces", "engine")
+	fields, err := mapFields(source, field, e.value, keys...)
 	if err != nil {
+		return nil, false, err
+	}
+	return fields, true, nil
+}
+
+// memoryField maps one memory section mapping onto its declaration.
+func memoryField(source, field string, e *sourceEntry) (MemorySpec, error) {
+	spec := MemorySpec{}
+	fields, declared, err := sectionFields(source, field, e, "type", "path", "read_namespaces", "engine")
+	if err != nil || !declared {
 		return spec, err
 	}
 	if spec.Type, err = stringField(source, joinField(field, "type"), fields["type"]); err != nil {
-		return spec, err
+		return MemorySpec{}, err
 	}
 	if spec.Path, err = stringField(source, joinField(field, "path"), fields["path"]); err != nil {
-		return spec, err
+		return MemorySpec{}, err
 	}
 	if spec.ReadNamespaces, err = stringSeqField(source, joinField(field, "read_namespaces"), fields["read_namespaces"]); err != nil {
-		return spec, err
+		return MemorySpec{}, err
 	}
 	if spec.Engine, err = engineField(source, joinField(field, "engine"), fields["engine"]); err != nil {
-		return spec, err
+		return MemorySpec{}, err
 	}
 	return spec, nil
 }
 
-// engineField maps one semantic engine declaration onto its spec; an absent or
-// null field declares no engine, which is the keyword-only retrieval.
+// engineField maps one semantic engine section onto its declaration; an absent
+// or null engine declares no engine, which is the keyword-only retrieval.
 func engineField(source, field string, e *sourceEntry) (EngineSpec, error) {
 	spec := EngineSpec{}
-	if isAbsent(e) {
-		return spec, nil
-	}
-	if e.value.kind != sourceMap {
-		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
-	}
-	fields, err := mapFields(source, field, e.value, "backend", "embedding", "vector_top_k", "keyword_top_k", "rrf_k")
-	if err != nil {
+	fields, declared, err := sectionFields(source, field, e, "backend", "embedding", "vector_top_k", "keyword_top_k", "rrf_k")
+	if err != nil || !declared {
 		return spec, err
 	}
 	if spec.Backend, err = stringField(source, joinField(field, "backend"), fields["backend"]); err != nil {
-		return spec, err
+		return EngineSpec{}, err
 	}
 	if spec.Embedding, err = embeddingField(source, joinField(field, "embedding"), fields["embedding"]); err != nil {
-		return spec, err
+		return EngineSpec{}, err
 	}
 	if spec.VectorTopK, err = countField(source, joinField(field, "vector_top_k"), fields["vector_top_k"]); err != nil {
-		return spec, err
+		return EngineSpec{}, err
 	}
 	if spec.KeywordTopK, err = countField(source, joinField(field, "keyword_top_k"), fields["keyword_top_k"]); err != nil {
-		return spec, err
+		return EngineSpec{}, err
 	}
 	if spec.RRFK, err = countField(source, joinField(field, "rrf_k"), fields["rrf_k"]); err != nil {
-		return spec, err
+		return EngineSpec{}, err
 	}
 	return spec, nil
 }
 
-// embeddingField maps one embedding connection onto its spec; an absent or null
-// field names no connection.
+// embeddingField maps one embedding connection onto its declaration; an absent
+// or null connection names no embedding.
 func embeddingField(source, field string, e *sourceEntry) (EmbeddingSpec, error) {
 	spec := EmbeddingSpec{}
-	if isAbsent(e) {
-		return spec, nil
-	}
-	if e.value.kind != sourceMap {
-		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
-	}
-	fields, err := mapFields(source, field, e.value, "provider", "model", "api_key_env", "dimensions", "api_endpoint")
-	if err != nil {
+	fields, declared, err := sectionFields(source, field, e, "provider", "model", "api_key_env", "dimensions", "api_endpoint")
+	if err != nil || !declared {
 		return spec, err
 	}
 	if spec.Provider, err = stringField(source, joinField(field, "provider"), fields["provider"]); err != nil {
-		return spec, err
+		return EmbeddingSpec{}, err
 	}
 	if spec.Model, err = stringField(source, joinField(field, "model"), fields["model"]); err != nil {
-		return spec, err
+		return EmbeddingSpec{}, err
 	}
 	if spec.APIKeyEnv, err = stringField(source, joinField(field, "api_key_env"), fields["api_key_env"]); err != nil {
-		return spec, err
+		return EmbeddingSpec{}, err
 	}
 	if spec.Dimensions, err = countField(source, joinField(field, "dimensions"), fields["dimensions"]); err != nil {
-		return spec, err
+		return EmbeddingSpec{}, err
 	}
 	if spec.APIEndpoint, err = stringField(source, joinField(field, "api_endpoint"), fields["api_endpoint"]); err != nil {
-		return spec, err
+		return EmbeddingSpec{}, err
 	}
 	return spec, nil
 }
 
-// meditationField maps one meditation declaration onto its spec; an absent or
-// null field enables no reflection loop.
+// meditationField maps one meditation section mapping onto its declaration.
 func meditationField(source, field string, e *sourceEntry) (MeditationSpec, error) {
 	spec := MeditationSpec{}
-	if isAbsent(e) {
-		return spec, nil
-	}
-	if e.value.kind != sourceMap {
-		return spec, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a mapping"}
-	}
-	fields, err := mapFields(source, field, e.value, "enabled", "interval", "min_gap", "prompt_file", "observed_namespaces", "deliver_to")
-	if err != nil {
+	fields, declared, err := sectionFields(source, field, e, "enabled", "interval", "min_gap", "prompt_file", "observed_namespaces", "deliver_to")
+	if err != nil || !declared {
 		return spec, err
 	}
 	if spec.Enabled, err = boolField(source, joinField(field, "enabled"), fields["enabled"]); err != nil {
+		return MeditationSpec{}, err
+	}
+	if spec.Interval, err = durationField(source, joinField(field, "interval"), fields["interval"]); err != nil {
+		return MeditationSpec{}, err
+	}
+	if spec.MinGap, err = durationField(source, joinField(field, "min_gap"), fields["min_gap"]); err != nil {
+		return MeditationSpec{}, err
+	}
+	if spec.PromptFile, err = stringField(source, joinField(field, "prompt_file"), fields["prompt_file"]); err != nil {
+		return MeditationSpec{}, err
+	}
+	if spec.ObservedNamespaces, err = stringSeqField(source, joinField(field, "observed_namespaces"), fields["observed_namespaces"]); err != nil {
+		return MeditationSpec{}, err
+	}
+	if spec.DeliverTo, err = stringSeqField(source, joinField(field, "deliver_to"), fields["deliver_to"]); err != nil {
+		return MeditationSpec{}, err
+	}
+	return spec, nil
+}
+
+// fileField maps one file section mapping onto its declaration.
+func fileField(source, field string, e *sourceEntry) (FileSpec, error) {
+	spec := FileSpec{}
+	fields, declared, err := sectionFields(source, field, e, "base_dir", "read_roots")
+	if err != nil || !declared {
+		return spec, err
+	}
+	if spec.BaseDir, err = stringField(source, joinField(field, "base_dir"), fields["base_dir"]); err != nil {
+		return FileSpec{}, err
+	}
+	if spec.ReadRoots, err = stringSeqField(source, joinField(field, "read_roots"), fields["read_roots"]); err != nil {
+		return FileSpec{}, err
+	}
+	return spec, nil
+}
+
+// execField maps one exec section mapping onto its declaration.
+func execField(source, field string, e *sourceEntry) (ExecSpec, error) {
+	spec := ExecSpec{}
+	fields, declared, err := sectionFields(source, field, e, "monitor")
+	if err != nil || !declared {
+		return spec, err
+	}
+	if spec.Monitor, err = monitorField(source, joinField(field, "monitor"), fields["monitor"]); err != nil {
+		return ExecSpec{}, err
+	}
+	return spec, nil
+}
+
+// monitorField maps one monitor rhythm onto its declaration; an absent or null
+// rhythm takes the runtime defaults.
+func monitorField(source, field string, e *sourceEntry) (MonitorSpec, error) {
+	spec := MonitorSpec{}
+	fields, declared, err := sectionFields(source, field, e, "interval", "stable_duration", "interactive_stable_duration", "fake_dead_duration")
+	if err != nil || !declared {
 		return spec, err
 	}
 	if spec.Interval, err = durationField(source, joinField(field, "interval"), fields["interval"]); err != nil {
-		return spec, err
+		return MonitorSpec{}, err
 	}
-	if spec.MinGap, err = durationField(source, joinField(field, "min_gap"), fields["min_gap"]); err != nil {
-		return spec, err
+	if spec.StableDuration, err = durationField(source, joinField(field, "stable_duration"), fields["stable_duration"]); err != nil {
+		return MonitorSpec{}, err
 	}
-	if spec.PromptFile, err = stringField(source, joinField(field, "prompt_file"), fields["prompt_file"]); err != nil {
-		return spec, err
+	if spec.InteractiveStableDuration, err = durationField(source, joinField(field, "interactive_stable_duration"), fields["interactive_stable_duration"]); err != nil {
+		return MonitorSpec{}, err
 	}
-	if spec.ObservedNamespaces, err = stringSeqField(source, joinField(field, "observed_namespaces"), fields["observed_namespaces"]); err != nil {
-		return spec, err
-	}
-	if spec.DeliverTo, err = stringSeqField(source, joinField(field, "deliver_to"), fields["deliver_to"]); err != nil {
-		return spec, err
+	if spec.FakeDeadDuration, err = durationField(source, joinField(field, "fake_dead_duration"), fields["fake_dead_duration"]); err != nil {
+		return MonitorSpec{}, err
 	}
 	return spec, nil
 }

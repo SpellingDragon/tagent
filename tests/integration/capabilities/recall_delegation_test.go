@@ -12,7 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/memory"
+	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/tool/recall"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
@@ -29,7 +29,7 @@ import (
 func TestRecallDelegationConsumesBothStages(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	surface := newRecallSurface(t, memory.NewHashEmbedder(0))
+	surface := newRecallSurface(t, memoryembedder.NewHashEmbedder(0))
 	tools := make([]trpctool.CallableTool, 0, len(surface.tools))
 	for _, name := range []string{recall.QueryToolName, recall.GetToolName, recall.RecentToolName, recall.TraceToolName} {
 		tools = append(tools, surface.tools[name])

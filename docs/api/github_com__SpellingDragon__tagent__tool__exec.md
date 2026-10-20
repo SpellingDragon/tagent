@@ -20,6 +20,11 @@ const KindTmux = "tmux"
     family whose availability rests on the real tmux binary being reachable on
     PATH.
 
+const PresetName = "exec"
+    PresetName is the declaration id that grants the execution face:
+    the declaration names it once, and the surface answers with the run and the
+    release tool under their own frozen names.
+
 VARIABLES
 
 var DefaultMonitorConfig = MonitorConfig{
@@ -61,12 +66,23 @@ var ErrTmuxUnavailable = errors.New("exec: the tmux capability is not available 
     ErrTmuxUnavailable reports an acquisition refused because the declared kind
     needs the tmux capability and the system does not provide it.
 
+var ErrUnwired = errors.New("exec: the deployment wires no execution resource manager")
+    ErrUnwired reports a call beside no execution resource manager: the
+    declaration granted the execution face while the assembly wires no ledger to
+    hold it, so the call is refused by name instead of starting anything.
+
 FUNCTIONS
 
 func IsTmuxAvailable() bool
     IsTmuxAvailable reports whether a tmux binary is reachable on PATH. The
     verdict comes from a real PATH lookup at every call, so a deployment without
     tmux reads as unavailable and no construction can stand in for the probe.
+
+func NewPreset(manager *Manager, rhythm MonitorConfig) []trpctool.Tool
+    NewPreset returns the tools one declared execution face grants, in the
+    order the request carries them: the run tool under the monitor rhythm the
+    declaration fixes beside the explicit release tool. A preset built beside no
+    manager still builds; each call answers ErrUnwired.
 
 TYPES
 
@@ -307,12 +323,22 @@ type MonitorConfig struct {
     output against.
 
 func MonitorConfigFrom(values map[string]any) (MonitorConfig, error)
-    MonitorConfigFrom reads the monitor rhythm out of a configuration map:
-    the four supported keys take duration strings, and a key outside them —
-    the retired tool-level compress section among them — is ignored rather than
-    consumed or refused. A supported key that carries no duration is reported by
-    name beside the default rhythm, so a malformed setting is visible instead of
-    silently replaced.
+    MonitorConfigFrom reads the monitor rhythm out of a configuration map
+    over the default rhythm: the four supported keys take duration strings,
+    and a key outside them — the retired tool-level compress section among them
+    — is ignored rather than consumed or refused. A supported key that carries
+    no duration is reported by name beside the default rhythm, so a malformed
+    setting is visible instead of silently replaced.
+
+func MonitorConfigFromBase(interval, stable, interactive, fakeDead time.Duration) MonitorConfig
+    MonitorConfigFromBase returns the rhythm the four declared durations name:
+    a duration the declaration leaves at zero keeps the default of that field,
+    so a declaration naming only an interval still carries the whole rhythm.
+
+func MonitorConfigWith(base MonitorConfig, values map[string]any) (MonitorConfig, error)
+    MonitorConfigWith reads the monitor rhythm out of a configuration map over
+    the base rhythm its caller declares: a key the map does not name keeps the
+    base of that generation, and a key it names replaces exactly that one field.
 
 type ProbeResult struct {
 	// State is the state this probe observed.
@@ -419,8 +445,9 @@ type RunTool struct {
     so a long execution is never swept for having taken long while it is still
     working.
 
-func NewRunTool(manager *Manager) *RunTool
-    NewRunTool returns the run tool over the given execution resource manager.
+func NewRunTool(manager *Manager, opts ...RunToolOption) *RunTool
+    NewRunTool returns the run tool over the given execution resource manager
+    and the rhythm its declaration fixes.
 
 func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
     Call acquires the declared execution resource and reports what its execution
@@ -432,6 +459,15 @@ func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
 
 func (t *RunTool) Declaration() *trpctool.Declaration
     Declaration returns the fixed declaration of the run tool.
+
+type RunToolOption func(*RunTool)
+    RunToolOption fixes one piece of the run tool beside the manager it acquires
+    through.
+
+func WithRunMonitor(rhythm MonitorConfig) RunToolOption
+    WithRunMonitor binds the monitor rhythm the declaration fixes to every
+    acquisition the tool opens: a call that names no monitor key of its own runs
+    under this rhythm instead of the framework default.
 
 type StopEvidence struct {
 	// Resource is the resource identity this evidence was observed for.

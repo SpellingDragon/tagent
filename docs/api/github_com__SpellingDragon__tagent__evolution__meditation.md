@@ -4,6 +4,14 @@ The scheduled reflection driver of one meditation loop: the plan it runs,
 the delivery port a fired reflection flows back through, one Tick per declared
 interval, and the named refusals a plan that cannot drive answers at assembly.
 
+The declaration face of one scheduled reflection: a document states which
+agent observes, at which cadence, over which namespaces, with which prompt
+and to which declared targets, and PlanOf resolves that section once into the
+plan a driver runs. The host maps its own document onto document.Document;
+the resolution rules — one loop per host, cadence bounds, the observation face
+inside the authorized read scope, the declared delivery targets and the anchor
+record path — live here, not in the host.
+
 The pre-fold face of the meditation consumer: the fold a consumer runs when it
 consumes a compress request, the compaction fact it files into the state, and
 the fold identity that fact is quoted by. A pre-fold runs ahead of the request
@@ -133,6 +141,13 @@ var ErrAnchorUnreadable = errors.New("evolution: the anchor record cannot be rea
     or parsed. The gate reads it as an unestablished watermark and stays closed;
     no default and no fallback criterion is substituted for it.
 
+var ErrDeclaration = errors.New("tagent: the meditation declaration is inconsistent")
+    ErrDeclaration reports a meditation section that cannot be resolved into
+    one scheduled reflection: more than one agent enabling the loop, a negative
+    cadence, an unreadable or empty prompt, an observation face outside the
+    authorized read scope, an undeclared delivery target, or an enabled section
+    beside no shared storage tier for its anchor record.
+
 var ErrDigestFaceUnavailable = errors.New("evolution: the digest has no observed pass to render")
     ErrDigestFaceUnavailable reports a digest asked to render without the pass
     it summarizes. An absent pass is named as unavailable, never presented as a
@@ -238,6 +253,13 @@ func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts
     gate, its observed fact-chain face and the loop-session injection face. A
     declared observation face outside the authorized scope refuses the assembly
     by name.
+
+func PlanOf(doc *document.Document, promptDir, storageRoot string) (*Plan, error)
+    PlanOf resolves the one meditation section doc enables: the entry agent is
+    resolved first and the remaining agents in declared order, so one document
+    resolves to one plan across restarts. A document enabling none reports a nil
+    plan. Every inconsistent section is refused by name at assembly rather than
+    driven into a reflection the declaration did not state.
 
 func Prefold(ctx context.Context, projection *replay.ReplayProjection) (replay.CompactionFact, error)
     Prefold folds the projection a consumer owns ahead of assembly and answers
@@ -786,6 +808,45 @@ type PartitionActivity struct {
     PartitionActivity is one observed partition's tally in a pass: how much
     of the reference page belongs to it and how the hydrated sample splits by
     lineage.
+
+type Plan struct {
+	// Has unexported fields.
+}
+    Plan is the one scheduled reflection a document declares, resolved at
+    assembly: the observing agent, the cadence, the prompt the input carries,
+    the resolved observation face, the declared delivery targets and the anchor
+    record its watermark persists in. A document enabling no meditation resolves
+    to a nil plan, which starts no driver.
+
+func (p *Plan) Agent() string
+    Agent reports the observing agent's identity.
+
+func (p *Plan) AnchorsPath() string
+    AnchorsPath reports the anchor record the reflection watermark persists in:
+    the store beside the shared storage tier the document names.
+
+func (p *Plan) DeliverTo() []string
+    DeliverTo reports the declared delivery white list the fired reflection
+    flows back through.
+
+func (p *Plan) Interval() time.Duration
+    Interval reports the tick cadence the reflection loop runs at.
+
+func (p *Plan) MinGap() time.Duration
+    MinGap reports the rhythm floor between two fired reflections; zero keeps
+    the cadence as the only bound.
+
+func (p *Plan) ObservedNamespaces() []string
+    ObservedNamespaces reports the resolved observation face: the declared
+    namespaces inside the authorized read scope, or the agent's own namespace
+    beside no declaration.
+
+func (p *Plan) Prompt() string
+    Prompt reports the static prompt every reflection input carries.
+
+func (p *Plan) ReadNamespaces() []string
+    ReadNamespaces reports the namespaces the observing agent may read across,
+    its own first and every granted cross-namespace read after it.
 
 type Reflection struct {
 	// Has unexported fields.

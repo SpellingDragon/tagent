@@ -53,10 +53,11 @@ var (
 	}
 )
 
-// The probe states must stay compile-time constants of their declared type: a
-// variable or a bare int stops this block from compiling.
+// The probe states and the preset id must stay compile-time constants of their
+// declared type: a variable or a bare int stops this block from compiling.
 const (
 	_ ProbeState = ProbeUnknown
 	_ ProbeState = ProbeAlive
 	_ ProbeState = ProbeDead
+	_ string     = PresetName
 )

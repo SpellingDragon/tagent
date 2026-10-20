@@ -16,6 +16,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
+	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -390,7 +391,7 @@ func TestRecallEvaluation(t *testing.T) {
 	t.Run("检索路径生产接线: 正式入口消费 StoreQuerySource/StoreSearcher", func(t *testing.T) {
 		storeRoot := t.TempDir()
 		tier := seedEvalCorpus(t, storeRoot)
-		run := evalAssemble(t, storeRoot, memory.NewHashEmbedder(0))
+		run := evalAssemble(t, storeRoot, memoryembedder.NewHashEmbedder(0))
 		alpha := []string{realAlphaPartition}
 
 		gain := search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: alpha, Limit: 20}
@@ -485,7 +486,7 @@ func TestRecallEvaluation(t *testing.T) {
 			t.Fatalf("keyword recall beside no embedding = %v, want %v: the keyword leg is unchanged", originalKeysOf(keyword.Refs), want)
 		}
 
-		counter := &evalCountingEmbedder{inner: memory.NewHashEmbedder(0)}
+		counter := &evalCountingEmbedder{inner: memoryembedder.NewHashEmbedder(0)}
 		counted := evalAssemble(t, storeRoot, counter)
 		generated := awaitEvalVectorCount(t, counter, len(realCorpusOf()))
 		if _, err := counted.Recall(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: []string{realAlphaPartition}}); err != nil {
@@ -505,7 +506,7 @@ func TestRecallEvaluation(t *testing.T) {
 	t.Run("评测语义保留零增益与失败: 不美化", func(t *testing.T) {
 		storeRoot := t.TempDir()
 		seedEvalCorpus(t, storeRoot)
-		run := evalAssemble(t, storeRoot, memory.NewHashEmbedder(0))
+		run := evalAssemble(t, storeRoot, memoryembedder.NewHashEmbedder(0))
 		alpha := []string{realAlphaPartition}
 		gain := search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: alpha, Limit: 20}
 		awaitEvalRecall(t, run, gain, []event.EventID{"0a01"})

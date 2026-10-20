@@ -5,29 +5,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
+	"github.com/SpellingDragon/tagent/api/document"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
-	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/telemetry"
+	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
+	tagentfile "github.com/SpellingDragon/tagent/tool/file"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/recall"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 	"github.com/openai/openai-go/option"
@@ -39,8 +39,9 @@ import (
 )
 
 // ErrNoEntryAgent reports a host document that names no entry agent or names an
-// agent it does not declare.
-var ErrNoEntryAgent = errors.New("wechat-bot: the host document names no declared entry agent")
+// agent it does not declare. The derivation rules are the core declaration
+// ones; this host names the refusal in its own vocabulary.
+var ErrNoEntryAgent = document.ErrDeclarationEntry
 
 // ErrDuplicateInbound reports an inbound message whose identity was already
 // admitted: one channel delivery drives one invocation.
@@ -50,10 +51,20 @@ var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was alread
 // provider entry of the document.
 var ErrUnknownProvider = errors.New("wechat-bot: the host document declares no such provider")
 
-// hostToolNames lists the tools this host contributes for the declared tool
-// ids of every agent, in the order one declaration receives them: the outbound
-// tool, the recall tools, then the knowledge tools.
-var hostToolNames = []string{
+// ErrMeditationDeclaration reports a meditation section this host cannot
+// resolve into one scheduled reflection. The resolution rules — one loop per
+// host, cadence bounds, the observation face inside the read scope, the declared
+// delivery targets and the anchor record path — are the core declaration ones;
+// this host names the refusal in its own vocabulary.
+var ErrMeditationDeclaration = meditation.ErrDeclaration
+
+// hostToolNames lists the tool ids this host accepts from a declaration, in the
+// order one declaration receives them: the outbound tool, the recall tools, the
+// knowledge tools, the file tools, the execution face and the two MCP
+// gateways. An id the core assembles from the declaration — the file family,
+// exec and the MCP gateways — is accepted here and contributed by no host
+// instance, so the declaration reads it while the core builds it once.
+var hostToolNames = append(append([]string{
 	sendToolID,
 	recall.QueryToolName,
 	recall.GetToolName,
@@ -61,8 +72,11 @@ var hostToolNames = []string{
 	recall.TraceToolName,
 	knowledge.SkillSearchToolName,
 	knowledge.SkillLoadToolName,
-	knowledge.ReadFileToolName,
-}
+}, tagentfile.Names()...),
+	tagentexec.PresetName,
+	mcpgw.ToolNameMCPCall,
+	mcpgw.ToolNameMCPDiscover,
+)
 
 // hostDocument is the host-side view of one configuration source: the entry
 // agent, the provider registry, the declared agents, the storage tier the recall
@@ -78,9 +92,20 @@ type hostDocument struct {
 	Storage        storageEntry             `yaml:"storage"`
 	TimeoutSeconds int                      `yaml:"request_timeout_seconds"`
 	Governance     governanceEntry          `yaml:"governance"`
-	App            struct {
+	// MCPServers declares the MCP servers the core binds onto the live
+	// registry the gateways read, keyed by the name a gateway call addresses.
+	MCPServers map[string]config.MCPServerSpec `yaml:"mcp_servers"`
+	App        struct {
 		Wechat WechatAppConfig `yaml:"wechat"`
 	} `yaml:"app"`
+
+	// once guards the one mapping of this document onto the declaration-shaped
+	// section: the prompt files are read once per document, so every reader
+	// during assembly shares the same derivation and the same one log line per
+	// absent file.
+	once        sync.Once
+	mapped      document.Document
+	mappedError error
 }
 
 // storageEntry is the storage tier the host opens for the runtime: the recall
@@ -119,6 +144,11 @@ type agentEntry struct {
 	// Meditation declares the scheduled reflection this agent runs: the
 	// cadence, the observed namespaces and the agents its result flows back to.
 	Meditation config.MeditationSpec `yaml:"meditation"`
+	// File fixes the base directory and the read roots of this agent's file
+	// surface, and Exec the monitor rhythm of its execution face: both are
+	// consumed by the core assembly, the host declares neither.
+	File config.FileSpec `yaml:"file"`
+	Exec config.ExecSpec `yaml:"exec"`
 }
 
 // finalRoundEntry is the watchdog budget one declared agent opts into: the tool
@@ -174,36 +204,51 @@ func loadHostDocument(path string) (*hostDocument, error) {
 	return doc, nil
 }
 
-// Declaration returns the organization declaration the host assembles: the entry
-// agent, the agents the document declares with the prompt files they are
-// assembled from, and the tool references this host contributes.
+// document maps the host's own sections onto the declaration-shaped section:
+// the entry agent, the agent sections with the prompt files they are assembled
+// from, and the tool references this host contributes. This method only maps;
+// the derivation rules — the entry validation and the assembly order — are the
+// core ones.
+func (d *hostDocument) document() (document.Document, error) {
+	d.once.Do(func() { d.mapped, d.mappedError = d.mapDocument() })
+	return d.mapped, d.mappedError
+}
+
+// Declaration returns the organization declaration the host assembles.
 func (d *hostDocument) Declaration() (*config.Declaration, error) {
-	entry := strings.TrimSpace(d.Entry)
-	if entry == "" {
-		return nil, ErrNoEntryAgent
+	document, err := d.document()
+	if err != nil {
+		return nil, err
 	}
-	if _, ok := d.Agents[entry]; !ok {
-		return nil, fmt.Errorf("%w: %q", ErrNoEntryAgent, entry)
-	}
-	decl := &config.Declaration{Entry: entry}
-	for _, id := range d.agentOrder() {
-		spec := config.AgentSpec{ID: id, Model: d.modelName(id)}
+	return document.Declaration()
+}
+
+// mapDocument maps one host document onto the declaration-shaped section.
+func (d *hostDocument) mapDocument() (document.Document, error) {
+	agents := make(map[string]config.AgentSpec, len(d.Agents))
+	for id, entry := range d.Agents {
+		spec := config.AgentSpec{
+			ID:         id,
+			Model:      d.modelName(id),
+			FinalRound: entry.finalRound(),
+		}
+		spec.Memory = entry.Memory
+		spec.Meditation = entry.Meditation
+		spec.File = entry.File
+		spec.Exec = entry.Exec
 		files, err := d.promptFiles(id)
 		if err != nil {
-			return nil, err
+			return document.Document{}, err
 		}
 		spec.Files = files
 		refs, err := d.toolRefs(id)
 		if err != nil {
-			return nil, err
+			return document.Document{}, err
 		}
 		spec.Tools = refs
-		spec.FinalRound = d.Agents[id].finalRound()
-		spec.Memory = d.Agents[id].Memory
-		spec.Meditation = d.Agents[id].Meditation
-		decl.Agents = append(decl.Agents, spec)
+		agents[id] = spec
 	}
-	return decl, nil
+	return document.Document{Entry: d.Entry, Agents: agents, Servers: d.MCPServers}, nil
 }
 
 // ErrUnknownAgentReference reports an agent reference whose target this document
@@ -291,33 +336,14 @@ func (a agentEntry) finalRound() config.FinalRoundSpec {
 // personal context a deployment keeps beside the checkout stays an input rather
 // than a startup precondition; any other read failure stops the assembly.
 func (d *hostDocument) promptFiles(id string) ([]config.FileRef, error) {
-	files := make([]config.FileRef, 0, len(d.Agents[id].SystemPrompt.Files))
-	for _, name := range d.Agents[id].SystemPrompt.Files {
-		path := filepath.Join(d.PromptDir, name)
-		if _, err := os.Stat(path); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				log.Infof("[host] declared prompt file absent, skipped: %s", path)
-				continue
-			}
-			return nil, fmt.Errorf("wechat-bot: read the declared prompt file %s: %w", path, err)
-		}
-		files = append(files, config.FileRef{Path: path, Kind: config.FileKindPrompt})
+	files, absent, err := document.PromptFiles(d.PromptDir, d.Agents[id].SystemPrompt.Files)
+	if err != nil {
+		return nil, fmt.Errorf("wechat-bot: %w", err)
+	}
+	for _, path := range absent {
+		log.Infof("[host] declared prompt file absent, skipped: %s", path)
 	}
 	return files, nil
-}
-
-// agentOrder returns the declared agent identities in declaration order: the
-// entry first, then the remaining identities sorted, so one document assembles
-// in one order across restarts.
-func (d *hostDocument) agentOrder() []string {
-	ids := make([]string, 0, len(d.Agents))
-	for id := range d.Agents {
-		if id != strings.TrimSpace(d.Entry) {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	return append([]string{strings.TrimSpace(d.Entry)}, ids...)
 }
 
 // modelName reports the model reference of one declared agent: its own
@@ -347,7 +373,7 @@ func (d *hostDocument) declaresTool(id, name string) bool {
 
 // nativeAgents constructs the live pieces every declared agent is assembled
 // with: its own model and the contributed tools its declaration grants.
-func (d *hostDocument) nativeAgents(ctx context.Context, send *hostSendSeam, recallSeam *hostRecallSeam) (map[event.AgentID]tagent.NativeAgent, error) {
+func (d *hostDocument) nativeAgents(ctx context.Context, send *hostSendSeam, recallPort *tagent.RecallPort) (map[event.AgentID]tagent.NativeAgent, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
@@ -359,7 +385,7 @@ func (d *hostDocument) nativeAgents(ctx context.Context, send *hostSendSeam, rec
 		if err != nil {
 			return nil, err
 		}
-		tools, err := d.hostTools(ctx, spec.ID, send, recallSeam)
+		tools, err := d.hostTools(ctx, spec.ID, send, recallPort)
 		if err != nil {
 			return nil, err
 		}
@@ -373,13 +399,14 @@ func (d *hostDocument) nativeAgents(ctx context.Context, send *hostSendSeam, rec
 // declaration names and every knowledge tool whose faces this host wires. A
 // tool the declaration does not name is never constructed, so a declaration
 // outside the set sees none of them.
-func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendSeam, recallSeam *hostRecallSeam) ([]trpctool.CallableTool, error) {
+func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendSeam, recallPort *tagent.RecallPort) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolNames))
 	if d.declaresTool(id, sendToolID) {
 		available[sendToolID] = sendToolFactory(send)
 	}
 	if d.declaresRecall(id) {
-		for _, candidate := range recall.New(recallSeam.readsFace(), d.readNamespaces(id)) {
+		partitions := memory.PartitionsOf(id, d.Agents[id].Memory.ReadNamespaces)
+		for _, candidate := range recall.New(recallPort.Reads(), partitions) {
 			available[candidate.Declaration().Name] = candidate
 		}
 	}
@@ -414,9 +441,12 @@ func (d *hostDocument) declaresRecall(id string) bool {
 	return false
 }
 
-// declaresKnowledge reports whether one declared agent names any knowledge tool.
+// declaresKnowledge reports whether one declared agent names a knowledge tool
+// the host builds: the two skill tools. The read face belongs to the file
+// surface of the declaration, so a declaration naming read_file alone never
+// builds a second knowledge surface beside it.
 func (d *hostDocument) declaresKnowledge(id string) bool {
-	for _, name := range []string{knowledge.SkillSearchToolName, knowledge.SkillLoadToolName, knowledge.ReadFileToolName} {
+	for _, name := range []string{knowledge.SkillSearchToolName, knowledge.SkillLoadToolName} {
 		if d.declaresTool(id, name) {
 			return true
 		}
@@ -461,130 +491,6 @@ func (d *hostDocument) readRoot(id string) string {
 		return root
 	}
 	return "."
-}
-
-// hostRecallSeam is the recall read seam of this host: the tools are
-// constructed before the runtime exists, so every face is bound to the assembled
-// run once the assembly returns. A call before that binding answers the named
-// refusal of the recall surface.
-//
-// The seam carries the read faces the tools consume and forwards each to the
-// face the run wired: the retrieval port, the observation table over the
-// committed store and the scoped original store of the storage tier. The
-// relation ledger is this host's own, because the run wires none, so it is held
-// here from the first call and never rebound.
-type hostRecallSeam struct {
-	mu       sync.RWMutex
-	face     func(ctx context.Context, query search.Query) (search.Result, error)
-	reads    recall.Reads
-	embedder memory.Embedder
-	trace    *replay.MemoryRelations
-}
-
-var _ search.Searcher = (*hostRecallSeam)(nil)
-
-var _ recall.Table = (*hostRecallSeam)(nil)
-
-var _ ledger.ScopedOriginalStore = (*hostRecallSeam)(nil)
-
-// bind attaches the read faces of the assembled run.
-func (s *hostRecallSeam) bind(face func(ctx context.Context, query search.Query) (search.Result, error), reads recall.Reads) {
-	s.mu.Lock()
-	s.face = face
-	s.reads = reads
-	s.mu.Unlock()
-}
-
-// Search answers one retrieval through the bound face.
-func (s *hostRecallSeam) Search(ctx context.Context, query search.Query) (search.Result, error) {
-	s.mu.RLock()
-	face := s.face
-	s.mu.RUnlock()
-	if face == nil {
-		return search.Result{}, recall.ErrRecallUnwired
-	}
-	return face(ctx, query)
-}
-
-// QueryEvents answers the event references one query matches through the bound
-// observation table.
-func (s *hostRecallSeam) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
-	s.mu.RLock()
-	table := s.reads.Table
-	s.mu.RUnlock()
-	if table == nil {
-		return nil, fmt.Errorf("recall_query: %w", recall.ErrRecallUnwired)
-	}
-	return table.QueryEvents(ctx, opts)
-}
-
-// Event answers the reference of one landed event through the bound table.
-func (s *hostRecallSeam) Event(key event.EventID) (memory.EventReference, bool) {
-	s.mu.RLock()
-	table := s.reads.Table
-	s.mu.RUnlock()
-	if table == nil {
-		return memory.EventReference{}, false
-	}
-	return table.Event(key)
-}
-
-// Reference answers the original reference one landed event carries through the
-// bound table.
-func (s *hostRecallSeam) Reference(key event.EventID) (ledger.OriginalRef, bool) {
-	s.mu.RLock()
-	table := s.reads.Table
-	s.mu.RUnlock()
-	if table == nil {
-		return ledger.OriginalRef{}, false
-	}
-	return table.Reference(key)
-}
-
-// GetScoped answers one original read through the bound scoped original store.
-func (s *hostRecallSeam) GetScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope) ledger.RecallResult {
-	s.mu.RLock()
-	originals := s.reads.Originals
-	s.mu.RUnlock()
-	if originals == nil {
-		return ledger.RecallResult{Key: key, Outcome: ledger.RecallFailed, Err: recall.ErrRecallUnwired}
-	}
-	return originals.GetScoped(ctx, key, scope)
-}
-
-// ReadSegmentScoped answers one segment read through the bound scoped original
-// store.
-func (s *hostRecallSeam) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope, req ledger.SegmentRequest) (ledger.SegmentResult, error) {
-	s.mu.RLock()
-	originals := s.reads.Originals
-	s.mu.RUnlock()
-	if originals == nil {
-		return ledger.SegmentResult{}, fmt.Errorf("recall_get: %w", recall.ErrRecallUnwired)
-	}
-	return originals.ReadSegmentScoped(ctx, key, scope, req)
-}
-
-// readsFace reports the read face this host wires for the recall tools: the retrieval
-// port, the embedding binding and the table and original store of the bound
-// run, beside the relation ledger this host holds. A face the deployment wires
-// nothing for stays absent, so the tool that needs it refuses by name instead
-// of answering an empty result.
-func (s *hostRecallSeam) readsFace() recall.Reads {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	reads := s.reads
-	reads.Searcher = s
-	reads.Trace = s.trace
-	if s.embedder != nil {
-		reads.Embedder = s.embedder
-	}
-	if reads.Table != nil {
-		reads.Table = s
-	}
-	if reads.Originals != nil {
-		reads.Originals = s
-	}
-	return reads
 }
 
 // requestTimeout reports the model call timeout the document declares.
@@ -658,7 +564,8 @@ type hostRuntime struct {
 	seen   *SeenStore
 	gates  sync.Map
 
-	meditationPlan *meditationPlan
+	meditationPlan *meditation.Plan
+	meditationLoop meditation.ReflectionLoop
 	meditation     *meditation.Driver
 
 	chatMu   sync.Mutex
@@ -674,29 +581,57 @@ type inboundMessage struct {
 	Text     string
 }
 
+// relations reports the causal relation ledger the recall trace of this host
+// walks: the journal under the storage root when the plan opens one, and an
+// in-process ledger otherwise. The core assembles no relation face, so the
+// ledger belongs to the host and is handed to the recall port.
+func (d *hostDocument) relations(plan *tagent.MemoryPlan) (*replay.MemoryRelations, error) {
+	cfg := plan.Storage()
+	if cfg == nil {
+		return replay.NewMemoryRelations(), nil
+	}
+	root := filepath.Join(cfg.Root, "relations")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, fmt.Errorf("wechat-bot: create the relation journal %s: %w", root, err)
+	}
+	relations, err := replay.OpenMemoryRelations(root)
+	if err != nil {
+		return nil, fmt.Errorf("wechat-bot: open the relation journal %s: %w", root, err)
+	}
+	return relations, nil
+}
+
 // assembleHost builds the runtime of one document and returns the host that
 // drives it: the live pieces of every declared agent are constructed here and
 // the assembly they form is the one this process runs.
 func assembleHost(ctx context.Context, doc *hostDocument, gateway *approvalGateway, seen *SeenStore) (*hostRuntime, error) {
 	send := &hostSendSeam{}
-	relations, err := doc.relations()
+	decl, err := doc.Declaration()
 	if err != nil {
 		return nil, err
 	}
-	embedder, err := doc.embedder()
+	plan, err := tagent.MemoryPlanOf(decl, doc.Storage.Type, doc.Storage.Root)
 	if err != nil {
 		return nil, err
 	}
-	recallSeam := &hostRecallSeam{trace: relations, embedder: embedder}
-	natives, err := doc.nativeAgents(ctx, send, recallSeam)
+	relations, err := doc.relations(plan)
 	if err != nil {
 		return nil, err
 	}
-	host, err := assembleHostFrom(ctx, doc, gateway, seen, send, natives, embedder)
+	embedder, err := plan.Embedder()
 	if err != nil {
 		return nil, err
 	}
-	recallSeam.bind(host.run.Recall, host.run.RecallReads())
+	recallPort := tagent.NewRecallPort(embedder, relations)
+	natives, err := doc.nativeAgents(ctx, send, recallPort)
+	if err != nil {
+		return nil, err
+	}
+	host, err := assembleHostFrom(ctx, doc, gateway, seen, send, natives, plan)
+	if err != nil {
+		return nil, err
+	}
+	recallPort.Bind(host.run)
 	return host, nil
 }
 
@@ -704,8 +639,10 @@ func assembleHost(ctx context.Context, doc *hostDocument, gateway *approvalGatew
 // is assembled with. The pieces are handed in rather than constructed here, so
 // a caller that builds its own models and tools drives the very same assembly
 // and the very same outbound path this process runs. Governance is mandatory at
-// publication; the approval policy is attached when a gateway is supplied.
-func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalGateway, seen *SeenStore, seam *hostSendSeam, natives map[event.AgentID]tagent.NativeAgent, embedder memory.Embedder) (*hostRuntime, error) {
+// publication; the approval policy is attached when a gateway is supplied. A
+// caller that states no memory plan of its own assembles over the declaration of
+// the document, so the facts it commits land on the tier the document names.
+func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalGateway, seen *SeenStore, seam *hostSendSeam, natives map[event.AgentID]tagent.NativeAgent, memoryPlan *tagent.MemoryPlan) (*hostRuntime, error) {
 	decl, err := doc.Declaration()
 	if err != nil {
 		return nil, err
@@ -714,31 +651,33 @@ func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalG
 	if err != nil {
 		return nil, err
 	}
+	if memoryPlan == nil {
+		memoryPlan, err = tagent.MemoryPlanOf(decl, doc.Storage.Type, doc.Storage.Root)
+		if err != nil {
+			return nil, err
+		}
+	}
 	opts := []tagent.Option{
 		tagent.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
 		tagent.WithTelemetry(telemetry.NewLogObserver(log.Default)),
 	}
-	if cfg, err := doc.storageConfig(); err != nil {
-		return nil, err
-	} else if cfg != nil {
-		opts = append(opts, tagent.WithStorage(*cfg))
-		if embedder != nil {
-			opts = append(opts, tagent.WithEmbedder(embedder))
-		}
+	if memoryPlan != nil {
+		opts = append(opts, tagent.WithMemoryPlan(memoryPlan))
 	}
-	vectorTopK, keywordTopK, rrfK, err := doc.retrievalTuning()
+	var storageRoot string
+	if memoryPlan != nil && memoryPlan.Storage() != nil {
+		storageRoot = memoryPlan.Storage().Root
+	}
+	mapped, err := doc.document()
 	if err != nil {
 		return nil, err
 	}
-	if vectorTopK > 0 || keywordTopK > 0 || rrfK > 0 {
-		opts = append(opts, tagent.WithRetrievalTuning(vectorTopK, keywordTopK, rrfK))
-	}
-	plan, err := doc.meditationPlan()
+	meditationPlan, err := meditation.PlanOf(&mapped, doc.PromptDir, storageRoot)
 	if err != nil {
 		return nil, err
 	}
-	if plan != nil {
-		opts = append(opts, tagent.WithReflectionAnchors(plan.anchorsPath))
+	if meditationPlan != nil {
+		opts = append(opts, tagent.WithReflectionAnchors(meditationPlan.AnchorsPath()))
 	}
 	if gateway != nil && gateway.Enabled() {
 		policyOpts := []governance.PolicyOption{governance.WithApprovals(gateway.Manager())}
@@ -756,7 +695,10 @@ func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalG
 		router:         router,
 		inbox:          newInternalInbox(),
 		seen:           seen,
-		meditationPlan: plan,
+		meditationPlan: meditationPlan,
+	}
+	if meditationPlan != nil {
+		host.meditationLoop = meditationLoop(doc, meditationPlan)
 	}
 	seam.bind(func(ctx context.Context, addr event.Address, content string) (string, error) {
 		return host.deliver(ctx, addr, sendToolLineage, content)
@@ -774,6 +716,55 @@ func sessionPrefix(doc *hostDocument) string {
 	return label + ":" + strings.TrimSpace(doc.Entry) + ":"
 }
 
+// newMeditationDriver builds the core driver of the resolved plan over the
+// assembled run: the gate is the anchor store the assembly built, the
+// observation face is the run's own fact chain, the injection face drives the
+// observing agent's own loop session, and the delivery port is the host's
+// outbound path.
+func (h *hostRuntime) newMeditationDriver() (*meditation.Driver, error) {
+	gate := h.run.ReflectionGate()
+	if gate == nil {
+		return nil, fmt.Errorf("%w: the assembly carries no reflection anchor store", ErrMeditationDeclaration)
+	}
+	plan := h.meditationPlan
+	driver, err := meditation.NewDriver(meditation.DriverPlan{
+		ReflectionConfig: meditation.ReflectionConfig{
+			Loop: h.meditationLoop,
+			Face: meditation.ReflectionFace{
+				ObservedNamespaces: plan.ObservedNamespaces(),
+				ReadNamespaces:     plan.ReadNamespaces(),
+			},
+			Cadence: meditation.ReflectionCadence{Interval: plan.Interval(), MinGap: plan.MinGap()},
+			Prompt:  plan.Prompt(),
+		},
+		Targets: meditationTargets(plan.DeliverTo()),
+	}, gate, h.run.ObservationFacts(), h.run.ReflectionInput(), h.deliverReflection)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrMeditationDeclaration, err)
+	}
+	return driver, nil
+}
+
+// startMeditation starts the scheduled reflection beside the host: one tick per
+// declared interval until the context or Close stops it. A document enabling no
+// meditation starts nothing and is exactly the host it was before the section
+// existed.
+func (h *hostRuntime) startMeditation(ctx context.Context) error {
+	if h == nil || h.meditationPlan == nil {
+		return nil
+	}
+	if h.meditation != nil {
+		return nil
+	}
+	driver, err := h.newMeditationDriver()
+	if err != nil {
+		return err
+	}
+	driver.Start(ctx)
+	h.meditation = driver
+	return nil
+}
+
 // Close drains the runtime and reports what stayed open. The scheduled
 // reflection stops first, so no tick runs beside the closing runtime.
 func (h *hostRuntime) Close(ctx context.Context) error {
@@ -787,7 +778,7 @@ func (h *hostRuntime) Close(ctx context.Context) error {
 	if !report.Drained {
 		log.Warnf("[host] close reported %d unsettled obligation(s)", len(report.Unsettled))
 	}
-	return nil
+	return h.run.CloseMCPServers()
 }
 
 // Admit claims the dedup identity of one channel delivery: a duplicate delivery

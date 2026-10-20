@@ -164,7 +164,7 @@ func TestFingerprintNamesTheWatchdogBudgetOnlyWhenDeclared(t *testing.T) {
 	if got := fingerprintOf(t, zeroed); got != bare {
 		t.Fatalf("fingerprint with the zero budget spelled out = %q, want %q", got, bare)
 	}
-	shape, err := json.Marshal(canonicalAgent{ID: "main", FinalRound: canonicalFinalRoundOf(FinalRoundSpec{})})
+	shape, err := json.Marshal(canonicalAgent{canonicalAgentCore: canonicalAgentCore{ID: "main", FinalRound: canonicalFinalRoundOf(FinalRoundSpec{})}})
 	if err != nil {
 		t.Fatalf("marshal the canonical agent = %v", err)
 	}
@@ -190,28 +190,34 @@ func TestFingerprintNamesTheWatchdogBudgetOnlyWhenDeclared(t *testing.T) {
 	}
 }
 
-// TestFingerprintNamesTheMemoryAndMeditationBindingsOnlyWhenDeclared pins the canonical binding entries.
-// - zero bindings spelled out leave the fingerprint unchanged
-// - a memory tier, engine connection, meditation switch, cadence and target each move it
+// TestFingerprintNamesSectionsOnlyWhenDeclared pins that each domain section moves the fingerprint only where a declaration names one.
+// - a declaration carrying the zero section of each kind fingerprints exactly as the same declaration naming none
+// - naming any entry of a section moves the fingerprint
+// - two spellings of one duration normalize onto the same fingerprint
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
-func TestFingerprintNamesTheMemoryAndMeditationBindingsOnlyWhenDeclared(t *testing.T) {
+func TestFingerprintNamesSectionsOnlyWhenDeclared(t *testing.T) {
 	decl := loadConfigDeclaration(t, "entry: main\nagents:\n  - id: main\n    model: m1\n")
 	bare := fingerprintOf(t, *decl)
 	zeroed := *decl.Clone()
 	zeroed.Agents[0].Memory = MemorySpec{}
 	zeroed.Agents[0].Meditation = MeditationSpec{}
+	zeroed.Agents[0].File = FileSpec{}
+	zeroed.Agents[0].Exec = ExecSpec{}
 	if got := fingerprintOf(t, zeroed); got != bare {
-		t.Fatalf("fingerprint with zero bindings spelled out = %q, want %q", got, bare)
+		t.Fatalf("fingerprint with the zero sections spelled out = %q, want %q", got, bare)
 	}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*AgentSpec)
 	}{
-		{name: "memory tier", mutate: func(a *AgentSpec) { a.Memory.Type = "localfile" }},
-		{name: "embedding connection", mutate: func(a *AgentSpec) { a.Memory.Engine.Embedding.Model = "embedding-3" }},
-		{name: "meditation switch", mutate: func(a *AgentSpec) { a.Meditation.Enabled = true }},
-		{name: "meditation cadence", mutate: func(a *AgentSpec) { a.Meditation.Interval = time.Minute }},
-		{name: "delivery target", mutate: func(a *AgentSpec) { a.Meditation.DeliverTo = []string{"main"} }},
+		{name: "memory tier", mutate: func(s *AgentSpec) { s.Memory.Type = "localfile" }},
+		{name: "embedding connection", mutate: func(s *AgentSpec) { s.Memory.Engine.Embedding.Model = "embedding-3" }},
+		{name: "meditation switch", mutate: func(s *AgentSpec) { s.Meditation.Enabled = true }},
+		{name: "meditation cadence", mutate: func(s *AgentSpec) { s.Meditation.Interval = time.Minute }},
+		{name: "delivery target", mutate: func(s *AgentSpec) { s.Meditation.DeliverTo = []string{"main"} }},
+		{name: "base directory", mutate: func(s *AgentSpec) { s.File.BaseDir = "/tmp/base" }},
+		{name: "read root", mutate: func(s *AgentSpec) { s.File.ReadRoots = []string{"/tmp/a"} }},
+		{name: "monitor interval", mutate: func(s *AgentSpec) { s.Exec.Monitor.Interval = time.Second }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bound := *decl.Clone()
@@ -220,6 +226,41 @@ func TestFingerprintNamesTheMemoryAndMeditationBindingsOnlyWhenDeclared(t *testi
 				t.Fatalf("fingerprint did not move when the declaration named %s: %q", tc.name, got)
 			}
 		})
+	}
+	spelled := loadConfigDeclaration(t, "entry: main\nagents:\n  - id: main\n    model: m1\n    exec:\n      monitor:\n        interval: 60s\n")
+	compact := loadConfigDeclaration(t, "entry: main\nagents:\n  - id: main\n    model: m1\n    exec:\n      monitor:\n        interval: 1m\n")
+	if got, want := fingerprintOf(t, *spelled), fingerprintOf(t, *compact); got != want {
+		t.Fatalf("fingerprint of 60s = %q, want the %q of 1m", got, want)
+	}
+}
+
+// TestCloneOwnsTheSectionSlices pins that a copied declaration shares no section slice with its source.
+// - mutating the read namespaces, the delivery target or the read roots of a copy reaches none of the original
+// 契约: docs/wiki/platform/org-hot-reload.md#config-clone
+func TestCloneOwnsTheSectionSlices(t *testing.T) {
+	decl := loadConfigDeclaration(t, `entry: main
+agents:
+  - id: main
+    memory:
+      read_namespaces: [audit]
+    meditation:
+      deliver_to: [main]
+    file:
+      read_roots: [/tmp/a]
+`)
+	clone := decl.Clone()
+	clone.Agents[0].Memory.ReadNamespaces[0] = "changed"
+	clone.Agents[0].Meditation.DeliverTo[0] = "changed"
+	clone.Agents[0].File.ReadRoots[0] = "changed"
+	agent := decl.Agents[0]
+	if got := agent.Memory.ReadNamespaces[0]; got != "audit" {
+		t.Fatalf("mutating a clone reached the source read face: %q", got)
+	}
+	if got := agent.Meditation.DeliverTo[0]; got != "main" {
+		t.Fatalf("mutating a clone reached the source delivery list: %q", got)
+	}
+	if got := agent.File.ReadRoots[0]; got != "/tmp/a" {
+		t.Fatalf("mutating a clone reached the source read roots: %q", got)
 	}
 }
 

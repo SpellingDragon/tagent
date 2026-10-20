@@ -63,6 +63,17 @@ var ErrGovernanceMissing = errors.New("tagent: the formal assembly carries no go
     the sole publication entry is driven under a real governance and never under
     a stand-in that passes every required check by construction.
 
+var ErrMemoryDeclaration = errors.New("tagent: the memory declaration is inconsistent")
+    ErrMemoryDeclaration reports a memory declaration that cannot be merged into
+    one storage tier and one semantic engine: a declaration that names half a
+    storage tier, two agents that name different tiers or engines, or an engine
+    beside no tier at all.
+
+var ErrMemoryEngine = errors.New("tagent: the memory engine declaration is invalid")
+    ErrMemoryEngine reports a semantic engine declaration the core cannot
+    assemble: an unknown backend, a negative retrieval bound, or an embedding
+    connection that does not name what its provider needs.
+
 var ErrObservationUnwired = errors.New("tagent: the run is assembled beside no observable storage tier")
     ErrObservationUnwired reports an observation read attempted on a run
     assembled beside no storage tier: the face is refused by name rather than
@@ -295,6 +306,41 @@ type InvokeRequest struct {
     default the address to a most-recent session. MUST NOT derive an address or
     an episode from a session or a trace.
 
+type MemoryPlan struct {
+	// Has unexported fields.
+}
+    MemoryPlan is the merged memory declaration of one organization: the one
+    storage tier every declaring agent shares and the one semantic engine its
+    recall vocabulary generates embeddings under. The plan is resolved once
+    at assembly and caches the binding it built, so the storage face and the
+    retrieval face of one run run over the one embedder.
+
+func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error)
+    MemoryPlanOf merges every agent's memory declaration into the one plan the
+    assembly opens, beside the storage section the document states at its top
+    level. Every declaring agent must name the same tier and the same engine:
+    a shared store read under two different engines would answer one query two
+    ways. An engine beside no tier is refused by name, because an embedding with
+    nowhere to persist its vectors is no engine at all. A document that declares
+    neither reports a nil plan, which wires no storage face and no embedder.
+
+func (p *MemoryPlan) Embedder() (memory.Embedder, error)
+    Embedder reports the embedding binding the plan generates its vectors under:
+    the core default implementation over the declared engine, built on the first
+    call and cached so one run runs over one binding. A plan beside no engine
+    reports no embedder, which is the keyword-only retrieval.
+
+func (p *MemoryPlan) Engine() *config.EngineSpec
+    Engine reports the merged semantic engine, or nil beside no engine.
+
+func (p *MemoryPlan) Storage() *ledger.StorageConfig
+    Storage reports the storage tier the plan opens, or nil beside no tier.
+
+func (p *MemoryPlan) Tuning() (int, int, int)
+    Tuning reports the two leg bounds and the rank constant the merged engine
+    declares. A plan beside no engine reports the zero tuning, which keeps the
+    retrieval exactly as it stood.
+
 type NativeAgent struct {
 	// Model is the native model of the agent; a nil model refuses the assembly.
 	Model model.Model
@@ -341,16 +387,28 @@ func WithEnforcement(grade governance.Enforcement) Option
 
 func WithExecManager(manager *tagentexec.Manager) Option
     WithExecManager attaches the execution resource ledger this assembly
-    explains its registered leases through: the blocker explanation read of the
-    run reports each registration beside the retention facts the ledger records
-    under its key, and beside the accounting the ledger keeps over its leases.
-    An assembly beside no ledger still explains its task and notification
-    blockers, and refuses to explain a registered lease by name.
+    acquires through and explains its registered leases by: a declaration that
+    grants the exec face acquires through this ledger under the monitor rhythm
+    its own declaration fixes, and the blocker explanation read of the run
+    reports each registration beside the retention facts the ledger records
+    under its key. An assembly beside no ledger still explains its task and
+    notification blockers, refuses to explain a registered lease by name,
+    and refuses a call of the granted exec face by name instead of starting
+    anything.
 
 func WithGovernance(governance state.Governance) Option
     WithGovernance attaches the governance every publication of this assembly
     is decided under. The formal assembly carries no stand-in governance: an
     assembly beside no governance is refused by name before anything is built.
+
+func WithMemoryPlan(plan *MemoryPlan) Option
+    WithMemoryPlan opens the merged memory declaration of one organization: the
+    storage tier every declaring agent shares, the embedding binding its recall
+    vocabulary generates its vectors under and the retrieval tuning its engine
+    names. The plan is resolved once, so the storage face and the retrieval face
+    of this assembly run over the one binding it built. An assembly beside no
+    plan keeps the faces its other options state, exactly as it did before the
+    plan existed.
 
 func WithPolicy(policy plugin.Governor) Option
     WithPolicy attaches the governance policy every call admitted through the
@@ -394,6 +452,59 @@ func WithTelemetry(observer plugin.Observer) Option
     committed ledger unchanged and handed to the observer, so the observation
     is a read-only attachment to facts that already committed and never a second
     source of truth beside that ledger.
+
+type RecallPort struct {
+	// Has unexported fields.
+}
+    RecallPort is the late-bound recall read face a host assembles its recall
+    tools over: the tools are constructed before the run exists, so every face
+    is bound to the assembled run once the assembly returns. A call before that
+    binding answers the named refusal of the recall surface instead of an empty
+    page that would read as "nothing was found".
+
+    The port carries the read faces the tools consume and forwards each to
+    the face the run wires: the retrieval port, the observation table over
+    the committed store and the scoped original store of the storage tier.
+    The relation ledger is the host's own, because a run assembled beside no
+    relation face wires none, so it is held here from the first call and never
+    rebound.
+
+func NewRecallPort(embedder memory.Embedder, trace *replay.MemoryRelations) *RecallPort
+    NewRecallPort opens the port over the embedding binding the recall tools are
+    built with and the relation ledger the host holds. The binding is fixed at
+    construction because the tools read it once when they are built; every other
+    face is attached by Bind.
+
+func (p *RecallPort) Bind(r *Run)
+    Bind attaches the read faces of the assembled run.
+
+func (p *RecallPort) Event(key event.EventID) (memory.EventReference, bool)
+    Event answers the reference of one landed event through the bound table.
+
+func (p *RecallPort) GetScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope) ledger.RecallResult
+    GetScoped answers one original read through the bound scoped original store.
+
+func (p *RecallPort) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
+    QueryEvents answers the event references one query matches through the bound
+    observation table.
+
+func (p *RecallPort) ReadSegmentScoped(ctx context.Context, key event.EventID, scope ledger.ReadScope, req ledger.SegmentRequest) (ledger.SegmentResult, error)
+    ReadSegmentScoped answers one segment read through the bound scoped original
+    store.
+
+func (p *RecallPort) Reads() recall.Reads
+    Reads reports the read face this port wires for the recall tools:
+    the retrieval port, the embedding binding and the table and original store
+    of the bound run, beside the relation ledger the host holds. A face the
+    deployment wires nothing for stays absent, so the tool that needs it refuses
+    by name instead of answering an empty result.
+
+func (p *RecallPort) Reference(key event.EventID) (ledger.OriginalRef, bool)
+    Reference answers the original reference one landed event carries through
+    the bound table.
+
+func (p *RecallPort) Search(ctx context.Context, query search.Query) (search.Result, error)
+    Search answers one retrieval through the bound face.
 
 type RequestSnapshotRecord struct {
 	// Decision is the decision whose request the snapshot was fixed for.
@@ -472,6 +583,12 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
     real settlement and the real stop confirmations behind it. MUST NOT read a
     cancelled request, an emptied queue or an elapsed timeout as settlement.
 
+func (r *Run) CloseMCPServers() error
+    CloseMCPServers releases every MCP server the live registry holds: the close
+    closes each server's connection exactly once, waits for the calls still in
+    flight and answers the release errors it accumulated. An embedding process
+    calls it beside the close of the run; a repeated call releases nothing anew.
+
 func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
     CommitHistory appends the transcript one ended drive accumulated to the
     history of its session, so the next invocation of the session reads the
@@ -533,6 +650,11 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     input into the range's own transcript and never batch two invocations of one
     session. MUST borrow the binding generation effective at each decision's own
     start. MUST NOT let an admission receipt stand for the result of the call.
+
+func (r *Run) ObservationFacts() meditation.ObservedFacts
+    ObservationFacts returns the read-only fact-chain face the scheduled
+    reflection of this run judges on: the committed fact chain the run reads,
+    carrying the lineage each fact was committed under.
 
 func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
     ObservedEvents answers one query over the fact chain this run can observe:
@@ -607,6 +729,12 @@ func (r *Run) ReflectionGate() meditation.WatermarkGate
     reads, or nil when the assembly was configured beside none. The gate is the
     one anchor store the assembly built, so a reflection never opens a second
     store over the same record.
+
+func (r *Run) ReflectionInput() meditation.ReflectionInput
+    ReflectionInput returns the injection face the scheduled reflection of this
+    run drives its own loop session through: it commits the reflection input
+    as a fact of the observing agent's own partition, drives that agent's loop
+    session with it and reports what became of the turn.
 
 func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     RequestSnapshots reports the safe request snapshots this assembly fixed

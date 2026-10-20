@@ -20,15 +20,6 @@ side. The storage unit itself lives in memory/ledger and the replay unit in
 memory/replay; this package keeps the read face (queries, segment reads),
 the projection and the assembly seam over them.
 
-The deterministic embedding stand-in of the memory side: it maps text to a
-fixed-dimension unit vector with no endpoint behind it, so the vector leg of
-a retrieval runs to completion offline and a runtime without an embedding
-configuration still exercises the whole retrieval mechanism end to end.
-The vectors it carries are content fingerprints and not semantic measurements:
-identical text always yields identical vectors and text sharing more character
-n-grams scores a higher cosine. That is the mechanism guarantee a retrieval test
-stands on, and no claim of semantic recall quality.
-
 The body schema one committed event carries through the segment store: the
 canonical identity and the light fields a query filters and matches on, and the
 owner, format and retention policy the reference beside it is registered under.
@@ -97,10 +88,6 @@ const (
     and any other value is refused by name with ErrQueryOrder instead of being
     silently coerced into one of the two.
 
-const DefaultHashDimensions = 128
-    DefaultHashDimensions is the vector width a HashEmbedder runs at when it
-    names none.
-
 const DefaultVectorQueue = 64
     DefaultVectorQueue is the queue bound a vector seam runs under when its
     caller names none: every seam is bounded, so a slow embedder can never grow
@@ -148,6 +135,12 @@ func PartitionIDFromName(name string) int
     PartitionIDFromName derives the stable partition ID of one name: the FNV-1a
     hash of the name folded into the ten-bit partition range. The same name
     always derives the same ID and the derivation is cached per name.
+
+func PartitionsOf(id string, extra []string) []string
+    PartitionsOf reports the partitions one agent may read across: its own
+    namespace first, then every cross-namespace read its memory declaration
+    grants, deduplicated in declaration order. The granted set is what the
+    recall tools of that agent are built over, so no call can widen it.
 
 TYPES
 
@@ -362,22 +355,6 @@ type EventReference struct {
     no content and no tool payload — the text behind a hit stays behind the
     original read path, so a page of references is never a second copy of the
     events it names.
-
-type HashEmbedder struct {
-	// Has unexported fields.
-}
-    HashEmbedder is the Embedder that hashes character n-grams into
-    a fixed-dimension unit vector. The mapping is deterministic and
-    honours cancellation, and the zero value is usable and runs at
-    DefaultHashDimensions.
-
-func NewHashEmbedder(dimensions int) *HashEmbedder
-    NewHashEmbedder returns a hash embedder of the given vector width, or one at
-    DefaultHashDimensions when the width names none.
-
-func (e *HashEmbedder) Embed(ctx context.Context, text string) ([]float32, error)
-    Embed returns the deterministic embedding vector of text: a unit vector over
-    the character n-gram fingerprint of the text, identical for identical text.
 
 type MemoryEventQuery struct {
 	// Has unexported fields.

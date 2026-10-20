@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory"
+	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/search"
 )
@@ -267,7 +268,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("a committed event is consumed only after the observation table lands it", func(t *testing.T) {
-		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		if got := chain.store.EventCount(); got != len(chain.events) {
 			t.Fatalf("real store holds %d committed events, want %d", got, len(chain.events))
 		}
@@ -332,7 +333,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	})
 
 	t.Run("the retrieval recalls the context and reads its original back byte for byte", func(t *testing.T) {
-		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		chain.landStore(t)
 		for _, ev := range chain.events {
 			if strings.Contains(strings.ToLower(ev.summary), strings.ToLower(realRecallText)) || strings.Contains(strings.ToLower(ev.content), strings.ToLower(realRecallText)) {
@@ -362,7 +363,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	})
 
 	t.Run("hybrid fusion leads with the hit both legs carry", func(t *testing.T) {
-		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		chain.landStore(t)
 		keywordLeg, err := chain.source.QueryEvents(ctx, memory.QueryOptions{
 			PartitionIDs: []int{memory.PartitionIDFromName(realAlphaPartition)},
@@ -399,7 +400,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	})
 
 	t.Run("an event outside the authorized partition never appears", func(t *testing.T) {
-		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		chain.landStore(t)
 		scoped := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 10, "")
 		for _, ref := range scoped.Refs {
@@ -424,7 +425,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	})
 
 	t.Run("a reader outside the reference scope is refused by name", func(t *testing.T) {
-		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		chain.landStore(t)
 		inside := ledger.ReadScope{Owner: realOwnerOf(), Format: realEventFormat, RetentionPolicy: realEventRetention}
 		exact, _ := scopedReadBack(t, chain.scoped, inside, "0a01")
@@ -453,7 +454,7 @@ func TestSearchRecallsFromRealStore(t *testing.T) {
 	})
 
 	t.Run("continuation pages union to the full result", func(t *testing.T) {
-		chain := newRealStoreChain(t, memory.NewHashEmbedder(0))
+		chain := newRealStoreChain(t, memoryembedder.NewHashEmbedder(0))
 		chain.landStore(t)
 		full := chain.recall(t, realRecallText, realAlphaPartition, string(search.StrategyHybrid), 20, "")
 		want := []event.EventID{"0a01", "0a02", "0a03"}

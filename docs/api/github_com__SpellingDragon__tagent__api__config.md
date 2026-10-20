@@ -10,7 +10,7 @@ imports another tagent package. It describes data and holds no live objects
 Turning a Declaration into live bindings belongs to the composition root and to
 the state owner, not here.
 
-  - config.go states the declaration vocabulary;
+  - config.go states the declaration vocabulary every host shares;
   - decode.go maps a decoded source tree onto it, rejecting every key the
     surface does not name;
   - load.go is the assembly entry that reads a source and applies defaults;
@@ -114,17 +114,31 @@ type AgentSpec struct {
 	// carries beside the open asynchronous task state. False keeps a request
 	// exactly as it stands without the block.
 	EnvironmentBlock bool
-	// Memory declares the storage tier this agent reads, the namespaces it may
-	// read across partitions and the semantic engine behind its recall
-	// vocabulary. The zero declaration names no memory binding at all.
+
+	// Memory is the memory section this agent declares: the storage tier its
+	// facts persist through, the namespaces it may read across partitions and
+	// the semantic engine its recall vocabulary embeds with. The zero value
+	// declares no memory binding.
 	Memory MemorySpec
-	// Meditation declares the scheduled reflection this agent runs: its
-	// cadence, the prompt its input carries, the namespaces it observes and
-	// the declared agents its result flows back to. The zero declaration
-	// enables no reflection loop.
+	// Meditation is the scheduled reflection this agent declares: whether it
+	// runs, the cadence it ticks at, the prompt its input carries, the
+	// namespaces it observes and the declared agents its result flows back to.
+	// The zero value enables no reflection.
 	Meditation MeditationSpec
+	// File is the file surface this agent declares: the root every relative
+	// path of its file tools resolves under and the extra roots an absolute
+	// read path may name. The zero value declares no file surface.
+	File FileSpec
+	// Exec is the execution face this agent declares: the monitor rhythm every
+	// run of its execution tools starts from. The zero value declares no
+	// rhythm, which is the runtime default.
+	Exec ExecSpec
 }
-    AgentSpec is the declaration of a single agent inside an organization.
+    AgentSpec is the declaration of a single agent inside an organization: the
+    core every host shares and the four domain sections it may declare (memory,
+    meditation, file and exec). Every section is a plain field, so one file
+    names every key of an agent declaration and a reader reaches a section by
+    reading the field instead of going through a registration mechanism.
 
 type Declaration struct {
 	// Entry is the name of the entry agent that receives application input.
@@ -137,6 +151,11 @@ type Declaration struct {
 	Refs []ToolRef
 	// Baseline records the version baseline the declaration was loaded against.
 	Baseline string
+	// Servers declares the MCP servers the organization binds by name: each
+	// entry fixes the transport, the endpoint and the environment variable
+	// holding the key. An empty map binds no server, so the MCP gateways
+	// answer the named empty state instead of reaching anything.
+	Servers map[string]MCPServerSpec
 	// Raw is the decoded source document before defaults and normalization are
 	// applied.
 	Raw map[string]any
@@ -221,6 +240,14 @@ type EngineSpec struct {
     retrieval backend, the embedding connection and the two leg bounds and rank
     constant the hybrid retrieval runs under.
 
+type ExecSpec struct {
+	// Monitor is the rhythm a run starts from; its zero fields take the
+	// runtime defaults.
+	Monitor MonitorSpec `yaml:"monitor"`
+}
+    ExecSpec is the execution face one agent declares: the monitor rhythm every
+    run of its execution tools starts from.
+
 type FileKind string
     FileKind identifies the role a referenced file plays in request assembly.
 
@@ -239,6 +266,18 @@ type FileRef struct {
 }
     FileRef references a prompt or skill file whose content is read at request
     boundaries.
+
+type FileSpec struct {
+	// BaseDir is the directory every relative path resolves under; empty takes
+	// the working directory when the face is declared some other way.
+	BaseDir string `yaml:"base_dir"`
+	// ReadRoots lists the extra roots an absolute read path may name beside the
+	// base directory itself.
+	ReadRoots []string `yaml:"read_roots"`
+}
+    FileSpec is the file face one agent declares: the root every relative path
+    of its file tools resolves under and the extra roots an absolute read path
+    may name.
 
 type FinalRoundSpec struct {
 	// MaxRounds bounds the tool rounds one invocation may run; 0 removes the
@@ -260,6 +299,17 @@ type FinalRoundSpec struct {
     and the timeout it runs under. The zero budget places no bound on any
     invocation, so a declaration that names no budget leaves every drive exactly
     as it runs beside no budget at all.
+
+type MCPServerSpec struct {
+	// Transport names the connection transport; empty takes the remote default.
+	Transport string `yaml:"transport"`
+	// URL is the endpoint the connection is opened against.
+	URL string `yaml:"url"`
+	// APIKeyEnv names the environment variable holding the call key.
+	APIKeyEnv string `yaml:"api_key_env"`
+}
+    MCPServerSpec is one MCP server the declaration binds: the transport,
+    the endpoint and the environment variable holding the call key.
 
 type MeditationSpec struct {
 	// Enabled states whether this agent runs the reflection loop.
@@ -300,6 +350,22 @@ type MemorySpec struct {
 
     The tier is a type and a root, both required together; an engine beside no
     tier names no place for its vectors to persist.
+
+type MonitorSpec struct {
+	// Interval is the observation cadence.
+	Interval time.Duration `yaml:"interval"`
+	// StableDuration is the span a run must stay unchanged to count as stable.
+	StableDuration time.Duration `yaml:"stable_duration"`
+	// InteractiveStableDuration is the span an interactive run must stay
+	// unchanged to count as stable.
+	InteractiveStableDuration time.Duration `yaml:"interactive_stable_duration"`
+	// FakeDeadDuration is the span after which a silent run is suspected dead.
+	FakeDeadDuration time.Duration `yaml:"fake_dead_duration"`
+}
+    MonitorSpec is one monitor rhythm: the cadence the run is observed at,
+    the span it must stay unchanged to count as stable, the span an interactive
+    run must stay unchanged to count as stable and the span after which a silent
+    run is suspected dead. Every zero field takes the runtime default.
 
 type ToolRef struct {
 	// Name is the referenced name as written in the declaration.

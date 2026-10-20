@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -436,4 +437,30 @@ func holdsKey(keys []ledger.StoredKey, key event.EventID) bool {
 		}
 	}
 	return false
+}
+
+// TestPartitionsOfLeadsWithTheAgentPartition pins the partition set one agent may read across.
+// - the agent's own namespace leads the set
+// - declared reads follow in declaration order
+// - repeated reads, the own namespace repeated and blank reads are dropped
+// 契约: docs/wiki/platform/platform-subsystems.md#config-surface
+func TestPartitionsOfLeadsWithTheAgentPartition(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		id    string
+		extra []string
+		want  []string
+	}{
+		{name: "own partition only", id: "main", want: []string{"main"}},
+		{name: "declared reads follow in order", id: "main", extra: []string{"audit", "ops"}, want: []string{"main", "audit", "ops"}},
+		{name: "the own partition is not repeated", id: "main", extra: []string{"main", "audit"}, want: []string{"main", "audit"}},
+		{name: "repeated reads collapse", id: "main", extra: []string{"audit", "audit"}, want: []string{"main", "audit"}},
+		{name: "blank reads are dropped", id: "main", extra: []string{" ", "audit"}, want: []string{"main", "audit"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PartitionsOf(tc.id, tc.extra); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("PartitionsOf(%q, %v) = %v, want %v", tc.id, tc.extra, got, tc.want)
+			}
+		})
+	}
 }

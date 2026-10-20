@@ -22,6 +22,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
+	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/search"
 
 	"trpc.group/trpc-go/trpc-agent-go/knowledge"
@@ -155,7 +156,7 @@ func newKnowledgeTool(ctx context.Context, ref config.ToolRef) (trpctool.Tool, e
 	}
 	base := knowledge.New(
 		knowledge.WithVectorStore(inmemory.New()),
-		knowledge.WithEmbedder(knowledgeEmbedding{inner: memory.NewHashEmbedder(0)}),
+		knowledge.WithEmbedder(knowledgeEmbedding{inner: memoryembedder.NewHashEmbedder(0)}),
 		knowledge.WithSources(sources),
 	)
 	if err := base.Load(ctx); err != nil {
@@ -318,7 +319,7 @@ func (e knowledgeEmbedding) GetEmbeddingWithUsage(ctx context.Context, text stri
 }
 
 // GetDimensions reports the width of the vector the binding produces.
-func (e knowledgeEmbedding) GetDimensions() int { return memory.DefaultHashDimensions }
+func (e knowledgeEmbedding) GetDimensions() int { return memoryembedder.DefaultHashDimensions }
 
 // get returns the vector of text widened onto the trpc embedder width.
 func (e knowledgeEmbedding) get(ctx context.Context, text string) ([]float64, error) {

@@ -49,21 +49,32 @@ var DefaultMonitorConfig = MonitorConfig{
 	FakeDeadDuration:          120 * time.Second,
 }
 
-// MonitorConfigFrom reads the monitor rhythm out of a configuration map: the
-// four supported keys take duration strings, and a key outside them — the
-// retired tool-level compress section among them — is ignored rather than
-// consumed or refused. A supported key that carries no duration is reported by
-// name beside the default rhythm, so a malformed setting is visible instead of
-// silently replaced.
+// MonitorConfigFrom reads the monitor rhythm out of a configuration map over
+// the default rhythm: the four supported keys take duration strings, and a key
+// outside them — the retired tool-level compress section among them — is
+// ignored rather than consumed or refused. A supported key that carries no
+// duration is reported by name beside the default rhythm, so a malformed
+// setting is visible instead of silently replaced.
 func MonitorConfigFrom(values map[string]any) (MonitorConfig, error) {
-	rhythm := DefaultMonitorConfig
-	for key, set := range map[string]*time.Duration{
-		"interval":                    &rhythm.Interval,
-		"stable_duration":             &rhythm.StableDuration,
-		"interactive_stable_duration": &rhythm.InteractiveStableDuration,
-		"fake_dead_duration":          &rhythm.FakeDeadDuration,
-	} {
-		value, ok := values[key]
+	return MonitorConfigWith(DefaultMonitorConfig, values)
+}
+
+// MonitorConfigWith reads the monitor rhythm out of a configuration map over
+// the base rhythm its caller declares: a key the map does not name keeps the
+// base of that generation, and a key it names replaces exactly that one field.
+func MonitorConfigWith(base MonitorConfig, values map[string]any) (MonitorConfig, error) {
+	rhythm := base
+	keys := []struct {
+		name string
+		set  *time.Duration
+	}{
+		{"interval", &rhythm.Interval},
+		{"stable_duration", &rhythm.StableDuration},
+		{"interactive_stable_duration", &rhythm.InteractiveStableDuration},
+		{"fake_dead_duration", &rhythm.FakeDeadDuration},
+	}
+	for _, key := range keys {
+		value, ok := values[key.name]
 		if !ok || value == nil {
 			continue
 		}
@@ -71,16 +82,38 @@ func MonitorConfigFrom(values map[string]any) (MonitorConfig, error) {
 		case string:
 			parsed, err := time.ParseDuration(typed)
 			if err != nil {
-				return DefaultMonitorConfig, fmt.Errorf("exec: monitor %q is not a duration: %q", key, typed)
+				return DefaultMonitorConfig, fmt.Errorf("exec: monitor %q is not a duration: %q", key.name, typed)
 			}
-			*set = parsed
+			*key.set = parsed
 		case time.Duration:
-			*set = typed
+			*key.set = typed
 		default:
-			return DefaultMonitorConfig, fmt.Errorf("exec: monitor %q is not a duration: %v", key, typed)
+			return DefaultMonitorConfig, fmt.Errorf("exec: monitor %q is not a duration: %v", key.name, typed)
 		}
 	}
 	return rhythm, nil
+}
+
+// MonitorConfigFromBase returns the rhythm the four declared durations name:
+// a duration the declaration leaves at zero keeps the default of that field,
+// so a declaration naming only an interval still carries the whole rhythm.
+func MonitorConfigFromBase(interval, stable, interactive, fakeDead time.Duration) MonitorConfig {
+	rhythm := DefaultMonitorConfig
+	fields := []struct {
+		set   *time.Duration
+		value time.Duration
+	}{
+		{&rhythm.Interval, interval},
+		{&rhythm.StableDuration, stable},
+		{&rhythm.InteractiveStableDuration, interactive},
+		{&rhythm.FakeDeadDuration, fakeDead},
+	}
+	for _, field := range fields {
+		if field.value > 0 {
+			*field.set = field.value
+		}
+	}
+	return rhythm
 }
 
 // DegradeError is the named refusal of an acquisition whose declared kind needs

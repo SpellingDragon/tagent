@@ -49,6 +49,12 @@
       "reason": "纯组织声明解析与规范化指纹，不依赖运行时包。"
     },
     {
+      "pattern": "api/document",
+      "role": "declaration-dialect",
+      "required": true,
+      "reason": "宿主文档方言的共用适配面：把各宿主自己的文档映射成声明形 Document，并从中派生出组织声明；只引 api/config 的声明词汇，不装配运行时。"
+    },
+    {
       "pattern": "runtime/state",
       "role": "state-owner",
       "required": true,
@@ -76,7 +82,7 @@
       "pattern": "memory/embedder",
       "role": "impl-subpackage",
       "required": true,
-      "reason": "memory 实现子包（语义嵌入装配）：从 api/config 的 EmbeddingSpec 构造 provider-backed memory.Embedder 默认实现，宿主只声明连接；缺 key 与半声明在装配期具名拒绝。"
+      "reason": "memory 实现子包（语义嵌入 装配）：从 api/config 声明的 EmbeddingSpec 构造 provider-backed memory.Embedder 默认实现，宿主只声明连接；缺 key 与半声明在装配期具名拒绝。"
     },
     {
       "pattern": "api/plugin",
@@ -137,6 +143,12 @@
       "role": "adapter",
       "required": true,
       "reason": "exec/tmux 执行适配、资源租约与停止凭证。"
+    },
+    {
+      "pattern": "tool/file",
+      "role": "adapter",
+      "required": true,
+      "reason": "file 工具面适配：把锁定的七件原生文件工具封装成按声明授权的工具面（根目录/只读根/授权清单），不重写文件语义，也不依赖任何一方包。"
     },
     {
       "pattern": "tool/mcp",
@@ -235,6 +247,7 @@
       "from": ".",
       "allow": [
         "api/config",
+        "api/document",
         "runtime/state",
         "runtime/agent",
         "runtime/task",
@@ -247,6 +260,7 @@
         "evolution",
         "memory/query",
         "tool/exec",
+        "tool/file",
         "tool/mcp",
         "tool/remote",
         "memory/localfile",
@@ -340,6 +354,21 @@
       "reason": "纯声明解析，不触运行时与绑定。"
     },
     {
+      "from": "api/document",
+      "allow": [
+        "api/config"
+      ],
+      "forbidden": [
+        "runtime/state",
+        "runtime/agent",
+        "runtime/task",
+        "memory",
+        "api/plugin",
+        "api/model"
+      ],
+      "reason": "宿主方言适配只读声明词汇：把宿主文档映射成 Document 并由 api/config 派生声明，不触运行时、绑定与存储。"
+    },
+    {
       "from": "api/model",
       "allow": [
         "api/event"
@@ -431,7 +460,7 @@
         "evolution",
         "memory"
       ],
-      "reason": "嵌入装配只读声明词汇并调用外部 provider SDK：不读写事实、不持有运行时状态，也不反向依赖根 memory 的投影面。"
+      "reason": "嵌入装配只读 api/config 声明的嵌入连接并调用外部 provider SDK：不读写事实、不持运行时状态，也不反向依赖根 memory 的投影面。"
     },
     {
       "from": "memory/localfile",
@@ -512,12 +541,14 @@
     {
       "from": "evolution/meditation",
       "allow": [
+        "api/config",
         "api/event",
         "api/model",
         "memory",
         "memory/ledger",
         "memory/replay",
-        "evolution/consolidation"
+        "evolution/consolidation",
+        "api/document"
       ],
       "forbidden": [
         "runtime/agent",
@@ -677,6 +708,7 @@
     {
       "from": "tool/exec",
       "allow": [
+        "api/config",
         "api/event"
       ],
       "forbidden": [
@@ -685,6 +717,13 @@
         "memory"
       ],
       "reason": "执行适配持有资源租约并记事件，不拥有会话状态。"
+    },
+    {
+      "from": "tool/file",
+      "allow": [
+        "api/config"
+      ],
+      "reason": "文件工具面只做锁定 tRPC 文件工具集的声明化封装，经 api/config 注册自己的声明段，不反向依赖核心包。"
     },
     {
       "from": "tool/mcp",
@@ -737,7 +776,8 @@
         "memory",
         "memory/search",
         "runtime/state",
-        "runtime/task"
+        "runtime/task",
+        "memory/embedder"
       ],
       "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖。"
     },

@@ -20,6 +20,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +33,7 @@ import (
 	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -42,6 +45,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 )
 
 // NativeAgent is what the embedding process contributes for one declared
@@ -145,6 +149,16 @@ type Run struct {
 	approver    task.Approver
 	policy      plugin.Governor
 	enforcement governance.Enforcement
+	// execManager is the execution resource ledger the exec face acquires
+	// through and the lease explanation reads; a declaration that grants the
+	// exec face beside no ledger is refused by name at call time.
+	execManager *tagentexec.Manager
+	// mcpServers is the live registry the MCP gateways read, mcpGateways the
+	// fixed gateway tools over it and mcpBinder the binding of the declared
+	// server generation onto it.
+	mcpServers  *mcpgw.ServerRegistry
+	mcpGateways *mcpgw.Gateways
+	mcpBinder   *mcpgw.Binder
 	recorder    rl.Recorder
 	observer    plugin.Observer
 	presented   []view.Presentation
@@ -183,6 +197,9 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if cfg.governance == nil {
 		return nil, ErrGovernanceMissing
 	}
+	if err := cfg.resolveMemory(); err != nil {
+		return nil, err
+	}
 	r := &Run{
 		instance:    newInstanceID(),
 		bindings:    state.NewBindings(),
@@ -199,6 +216,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		enforcement: cfg.enforcement,
 		recorder:    cfg.recorder,
 		observer:    cfg.observer,
+		execManager: cfg.execManager,
 	}
 	if cfg.reflectionAnchors != "" {
 		anchors, err := meditation.NewAnchorStore(cfg.reflectionAnchors)
@@ -251,6 +269,9 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	inventory := query.NewInventory(runReading{run: r})
 	r.projection = query.NewProjection(inventory, projectionWindow)
 	r.explainer = query.NewExplainer(inventory, ExecLeaseExplainer(cfg.execManager))
+	r.mcpServers = mcpgw.NewServerRegistry()
+	r.mcpGateways = mcpgw.NewGateways(r.mcpServers, mcpgw.NewRegistryDiscovery())
+	r.mcpBinder = mcpgw.NewBinder(r.mcpServers)
 	if _, err := r.Publish(ctx, decl, agents); err != nil {
 		return nil, err
 	}
@@ -305,6 +326,10 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
+	servers := declaredServersOf(decl)
+	if err := mcpgw.ValidateDeclared(servers); err != nil {
+		return state.PublishOutcome{}, err
+	}
 	plan := state.OrgPlan{
 		Declaration: decl,
 		Baseline:    r.publisher.Baseline(),
@@ -320,8 +345,58 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 		r.mu.Lock()
 		r.current = cand.Plan
 		r.mu.Unlock()
+		if err := r.bindMCPServers(ctx, servers); err != nil {
+			return outcome, err
+		}
 	}
 	return outcome, err
+}
+
+// declaredServersOf maps the server section of one declaration onto the named
+// servers the live registry binds, in name order so one generation binds in one
+// order across restarts.
+func declaredServersOf(decl *config.Declaration) []mcpgw.DeclaredServer {
+	names := make([]string, 0, len(decl.Servers))
+	for name := range decl.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	servers := make([]mcpgw.DeclaredServer, 0, len(names))
+	for _, name := range names {
+		spec := decl.Servers[name]
+		servers = append(servers, mcpgw.DeclaredServer{
+			Name:      name,
+			Transport: spec.Transport,
+			URL:       spec.URL,
+			APIKeyEnv: spec.APIKeyEnv,
+		})
+	}
+	return servers
+}
+
+// bindMCPServers moves the live MCP registry onto the generation the published
+// declaration names: a server the generation dropped stops answering, a server
+// it added answers immediately, and a server whose declaration did not change
+// keeps the connection it holds.
+func (r *Run) bindMCPServers(ctx context.Context, servers []mcpgw.DeclaredServer) error {
+	if r.mcpBinder == nil {
+		return mcpgw.ErrRegistryMissing
+	}
+	if err := r.mcpBinder.Bind(ctx, servers); err != nil {
+		return fmt.Errorf("tagent: bind the declared MCP servers: %w", err)
+	}
+	return nil
+}
+
+// CloseMCPServers releases every MCP server the live registry holds: the close
+// closes each server's connection exactly once, waits for the calls still in
+// flight and answers the release errors it accumulated. An embedding process
+// calls it beside the close of the run; a repeated call releases nothing anew.
+func (r *Run) CloseMCPServers() error {
+	if r.mcpServers == nil {
+		return nil
+	}
+	return r.mcpServers.Close()
 }
 
 // finalRoundPolicy maps the watchdog budget a declaration names for its entry
@@ -536,6 +611,11 @@ type assemblyConfig struct {
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
+	// memory is the merged memory declaration the assembly opens: the storage
+	// tier, the embedding binding and the retrieval tuning the declaration
+	// names. An option that states one of those faces directly keeps it, so a
+	// host that wires its own embedder is never overridden.
+	memory *MemoryPlan
 }
 
 // Option configures the formal assembly at construction.
@@ -623,6 +703,17 @@ func WithRetrievalTuning(vectorTopK, keywordTopK, rrfK int) Option {
 	}
 }
 
+// WithMemoryPlan opens the merged memory declaration of one organization: the
+// storage tier every declaring agent shares, the embedding binding its recall
+// vocabulary generates its vectors under and the retrieval tuning its engine
+// names. The plan is resolved once, so the storage face and the retrieval face
+// of this assembly run over the one binding it built. An assembly beside no
+// plan keeps the faces its other options state, exactly as it did before the
+// plan existed.
+func WithMemoryPlan(plan *MemoryPlan) Option {
+	return func(c *assemblyConfig) { c.memory = plan }
+}
+
 // WithReflectionAnchors points the reflection face of this assembly at the
 // anchor record its watermark is read from: the store owns that record and
 // answers the watermark the diagnostic reading reports. An assembly beside no
@@ -632,12 +723,14 @@ func WithReflectionAnchors(path string) Option {
 	return func(c *assemblyConfig) { c.reflectionAnchors = path }
 }
 
-// WithExecManager attaches the execution resource ledger this assembly explains
-// its registered leases through: the blocker explanation read of the run
-// reports each registration beside the retention facts the ledger records
-// under its key, and beside the accounting the ledger keeps over its leases.
-// An assembly beside no ledger still explains its task and notification
-// blockers, and refuses to explain a registered lease by name.
+// WithExecManager attaches the execution resource ledger this assembly acquires
+// through and explains its registered leases by: a declaration that grants the
+// exec face acquires through this ledger under the monitor rhythm its own
+// declaration fixes, and the blocker explanation read of the run reports each
+// registration beside the retention facts the ledger records under its key. An
+// assembly beside no ledger still explains its task and notification blockers,
+// refuses to explain a registered lease by name, and refuses a call of the
+// granted exec face by name instead of starting anything.
 func WithExecManager(manager *tagentexec.Manager) Option {
 	return func(c *assemblyConfig) { c.execManager = manager }
 }
@@ -854,3 +947,202 @@ const (
 	projectionWindow          = 8
 	agentShutdownPollInterval = 2 * time.Millisecond
 )
+
+// ErrMemoryDeclaration reports a memory declaration that cannot be merged into
+// one storage tier and one semantic engine: a declaration that names half a
+// storage tier, two agents that name different tiers or engines, or an engine
+// beside no tier at all.
+var ErrMemoryDeclaration = errors.New("tagent: the memory declaration is inconsistent")
+
+// ErrMemoryEngine reports a semantic engine declaration the core cannot
+// assemble: an unknown backend, a negative retrieval bound, or an embedding
+// connection that does not name what its provider needs.
+var ErrMemoryEngine = errors.New("tagent: the memory engine declaration is invalid")
+
+// memoryEngineBackend is the only engine backend the core wires: the semantic
+// retrieval of the memory side. A declaration naming another backend is refused
+// by name instead of being read as this one.
+const memoryEngineBackend = "memory"
+
+// MemoryPlan is the merged memory declaration of one organization: the one
+// storage tier every declaring agent shares and the one semantic engine its
+// recall vocabulary generates embeddings under. The plan is resolved once at
+// assembly and caches the binding it built, so the storage face and the
+// retrieval face of one run run over the one embedder.
+type MemoryPlan struct {
+	storage  ledger.StorageConfig
+	hasStore bool
+	engine   *config.EngineSpec
+	embedder memory.Embedder
+	built    bool
+}
+
+// MemoryPlanOf merges every agent's memory declaration into the one plan the
+// assembly opens, beside the storage section the document states at its top
+// level. Every declaring agent must name the same tier and the same engine: a
+// shared store read under two different engines would answer one query two
+// ways. An engine beside no tier is refused by name, because an embedding with
+// nowhere to persist its vectors is no engine at all. A document that declares
+// neither reports a nil plan, which wires no storage face and no embedder.
+func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error) {
+	if decl == nil {
+		return nil, fmt.Errorf("%w: the assembly carries no declaration", ErrMemoryDeclaration)
+	}
+	plan := &MemoryPlan{}
+	declaredBy := ""
+	engineBy := ""
+	for _, spec := range decl.Agents {
+		id := spec.ID
+		entry := spec.Memory
+		storageType := strings.TrimSpace(entry.Type)
+		storagePath := strings.TrimSpace(entry.Path)
+		storageDeclared := storageType != "" || storagePath != ""
+		if storageDeclared && (storageType == "" || storagePath == "") {
+			return nil, fmt.Errorf("%w: agent %q names half a storage tier (type and path are both required)", ErrMemoryDeclaration, id)
+		}
+		if storageDeclared {
+			candidate := ledger.StorageConfig{Type: ledger.StorageType(storageType), Root: storagePath}
+			if !plan.hasStore {
+				plan.storage = candidate
+				plan.hasStore = true
+				declaredBy = id
+			} else if plan.storage != candidate {
+				return nil, fmt.Errorf("%w: agents %q and %q name different storage tiers", ErrMemoryDeclaration, declaredBy, id)
+			}
+		}
+		if declaresEngine(entry.Engine) {
+			engine := entry.Engine
+			if plan.engine == nil {
+				plan.engine = &engine
+				engineBy = id
+			} else if *plan.engine != engine {
+				return nil, fmt.Errorf("%w: agents %q and %q name different semantic engines", ErrMemoryDeclaration, engineBy, id)
+			}
+		}
+	}
+	topType := strings.TrimSpace(storageType)
+	topRoot := strings.TrimSpace(storageRoot)
+	if topType != "" {
+		top := ledger.StorageConfig{Type: ledger.StorageType(topType), Root: topRoot}
+		if plan.hasStore && plan.storage != top {
+			return nil, fmt.Errorf("%w: the top-level storage disagrees with the memory tier agent %q declares", ErrMemoryDeclaration, declaredBy)
+		}
+		if !plan.hasStore {
+			plan.storage = top
+			plan.hasStore = true
+		}
+	}
+	if !plan.hasStore && plan.engine == nil {
+		return nil, nil
+	}
+	if !plan.hasStore {
+		return nil, fmt.Errorf("%w: the semantic engine requires a storage tier", ErrMemoryDeclaration)
+	}
+	if plan.engine != nil {
+		if err := validateEngine(*plan.engine); err != nil {
+			return nil, err
+		}
+	}
+	return plan, nil
+}
+
+// Storage reports the storage tier the plan opens, or nil beside no tier.
+func (p *MemoryPlan) Storage() *ledger.StorageConfig {
+	if p == nil || !p.hasStore {
+		return nil
+	}
+	cfg := p.storage
+	return &cfg
+}
+
+// Engine reports the merged semantic engine, or nil beside no engine.
+func (p *MemoryPlan) Engine() *config.EngineSpec {
+	if p == nil {
+		return nil
+	}
+	return p.engine
+}
+
+// Embedder reports the embedding binding the plan generates its vectors under:
+// the core default implementation over the declared engine, built on the first
+// call and cached so one run runs over one binding. A plan beside no engine
+// reports no embedder, which is the keyword-only retrieval.
+func (p *MemoryPlan) Embedder() (memory.Embedder, error) {
+	if p == nil || p.engine == nil {
+		return nil, nil
+	}
+	if p.built {
+		return p.embedder, nil
+	}
+	built, err := embedder.New(p.engine.Embedding)
+	if err != nil {
+		return nil, err
+	}
+	p.embedder, p.built = built, true
+	return built, nil
+}
+
+// Tuning reports the two leg bounds and the rank constant the merged engine
+// declares. A plan beside no engine reports the zero tuning, which keeps the
+// retrieval exactly as it stood.
+func (p *MemoryPlan) Tuning() (int, int, int) {
+	if p == nil || p.engine == nil {
+		return 0, 0, 0
+	}
+	return p.engine.VectorTopK, p.engine.KeywordTopK, p.engine.RRFK
+}
+
+// resolveMemory folds the declared memory plan into the faces this assembly
+// opens. A face an option states directly keeps it, so a host that wires its
+// own embedder over a declared tier is never overridden.
+func (c *assemblyConfig) resolveMemory() error {
+	if c.memory == nil {
+		return nil
+	}
+	if c.storage == nil {
+		c.storage = c.memory.Storage()
+	}
+	if c.embedder == nil {
+		embedder, err := c.memory.Embedder()
+		if err != nil {
+			return err
+		}
+		c.embedder = embedder
+	}
+	if c.vectorTopK == 0 && c.keywordTopK == 0 && c.rrfK == 0 {
+		c.vectorTopK, c.keywordTopK, c.rrfK = c.memory.Tuning()
+	}
+	return nil
+}
+
+// declaresEngine reports whether a memory engine section names anything.
+func declaresEngine(engine config.EngineSpec) bool {
+	return strings.TrimSpace(engine.Backend) != "" ||
+		strings.TrimSpace(engine.Embedding.Provider) != "" ||
+		strings.TrimSpace(engine.Embedding.Model) != "" ||
+		strings.TrimSpace(engine.Embedding.APIKeyEnv) != "" ||
+		engine.Embedding.Dimensions != 0 ||
+		strings.TrimSpace(engine.Embedding.APIEndpoint) != "" ||
+		engine.VectorTopK != 0 || engine.KeywordTopK != 0 || engine.RRFK != 0
+}
+
+// validateEngine validates one merged semantic engine: the backend must be the
+// one the core wires, the retrieval bounds must not be negative, and the
+// embedding connection must name everything its provider needs.
+func validateEngine(engine config.EngineSpec) error {
+	backend := strings.TrimSpace(engine.Backend)
+	if backend == "" {
+		return fmt.Errorf("%w: the engine names no backend", ErrMemoryEngine)
+	}
+	if backend != memoryEngineBackend {
+		return fmt.Errorf("%w: backend %q is not a known engine backend", ErrMemoryEngine, backend)
+	}
+	if engine.VectorTopK < 0 || engine.KeywordTopK < 0 || engine.RRFK < 0 {
+		return fmt.Errorf("%w: the engine carries a negative retrieval bound (vector_top_k=%d keyword_top_k=%d rrf_k=%d)",
+			ErrMemoryEngine, engine.VectorTopK, engine.KeywordTopK, engine.RRFK)
+	}
+	if err := embedder.Validate(engine.Embedding); err != nil {
+		return fmt.Errorf("%w: %w", ErrMemoryEngine, err)
+	}
+	return nil
+}

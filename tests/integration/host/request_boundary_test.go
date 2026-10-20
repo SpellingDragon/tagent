@@ -14,6 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	tagentfile "github.com/SpellingDragon/tagent/tool/file"
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -23,6 +24,7 @@ import (
 // TestFileChangesReachNextRequest checks the 01.6 boundary on the formal entry.
 //   - a prompt file rewritten between two invocations enters the next request's messages at once
 //   - the rewrite takes effect with no reload and no structural generation in between
+//   - a declaration that names no file face carries no file tool: the authorization is the declaration
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#generations
 func TestFileChangesReachNextRequest(t *testing.T) {
@@ -83,6 +85,13 @@ func TestFileChangesReachNextRequest(t *testing.T) {
 	for i, msg := range requests[1].Messages {
 		if strings.Contains(msg.Content, "prompt body v1") {
 			t.Fatalf("second request message %d = %+v, want no stale body from the earlier read", i, msg)
+		}
+	}
+	for _, req := range requests {
+		for _, name := range tagentfile.Names() {
+			if req.Tools[name] != nil {
+				t.Fatalf("request tools carry %q, want no file tool for an agent that declares no file face", name)
+			}
 		}
 	}
 }
@@ -247,17 +256,19 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 		}
 		return entryFinalTurn("settled")
 	}}
+	spec := config.AgentSpec{
+		ID:    "agent-a",
+		Model: "model-a",
+		Files: []config.FileRef{
+			{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
+			{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
+		},
+		Tools: []config.ToolRef{{Name: "evaluation"}},
+	}
+	spec.File = config.FileSpec{BaseDir: root}
 	decl := &config.Declaration{
-		Entry: "agent-a",
-		Agents: []config.AgentSpec{{
-			ID:    "agent-a",
-			Model: "model-a",
-			Files: []config.FileRef{
-				{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
-				{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
-			},
-			Tools: []config.ToolRef{{Name: "evaluation"}},
-		}},
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{spec},
 	}
 	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{fnTool}},
@@ -336,16 +347,18 @@ func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
 	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("settled")
 	}}
+	spec := config.AgentSpec{
+		ID:    "agent-a",
+		Model: "model-a",
+		Files: []config.FileRef{
+			{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
+			{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
+		},
+	}
+	spec.File = config.FileSpec{BaseDir: root}
 	decl := &config.Declaration{
-		Entry: "agent-a",
-		Agents: []config.AgentSpec{{
-			ID:    "agent-a",
-			Model: "model-a",
-			Files: []config.FileRef{
-				{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
-				{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
-			},
-		}},
+		Entry:  "agent-a",
+		Agents: []config.AgentSpec{spec},
 	}
 	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
 		"agent-a": {Model: provider},

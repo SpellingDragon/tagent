@@ -8,7 +8,7 @@
 // identical text always yields identical vectors and text sharing more
 // character n-grams scores a higher cosine. That is the mechanism guarantee a
 // retrieval test stands on, and no claim of semantic recall quality.
-package memory
+package embedder
 
 import (
 	"context"
@@ -35,8 +35,6 @@ func NewHashEmbedder(dimensions int) *HashEmbedder {
 	}
 	return &HashEmbedder{dimensions: dimensions}
 }
-
-var _ Embedder = (*HashEmbedder)(nil)
 
 // Embed returns the deterministic embedding vector of text: a unit vector over
 // the character n-gram fingerprint of the text, identical for identical text.
