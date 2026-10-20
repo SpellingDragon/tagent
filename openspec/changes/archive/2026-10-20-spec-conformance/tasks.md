@@ -38,4 +38,4 @@ graph LR
 
 ## F 收尾
 - [x] F1 契约零改动断言（golden 键变更已逐键申报）＋ F2 全量门禁（lint ok/36 包/deterministic 14 match/complete 15 match）＋ F3 DoD 逐项核验
-- [ ] F4 archive（需明示）
+- [x] F4 archive（openspec archive + 导览——域到证据映射见 ORCHESTRATION 台账）
