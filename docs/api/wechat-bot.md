@@ -52,6 +52,17 @@ var ErrTargetRebind = errors.New("wechat-bot: the address is already bound to an
     already delivered to another chat. The bound target is the delivery identity
     of that session and is never rewritten by a later claim.
 
+var ErrUnknownAgentReference = errors.New("wechat-bot: the agent reference names no declared agent")
+    ErrUnknownAgentReference reports an agent reference whose target this
+    document does not declare: the declaration is the authorization, so a
+    reference to an undeclared agent stops the startup instead of reaching the
+    assembly.
+
+var ErrUnknownHostTool = errors.New("wechat-bot: the declared tool is not contributed by this host")
+    ErrUnknownHostTool reports a declared host tool this host contributes no
+    instance for: the schema names the ids it reads, and a document that drifts
+    from them stops the startup instead of exposing a name nothing answers.
+
 var ErrUnknownProvider = errors.New("wechat-bot: the host document declares no such provider")
     ErrUnknownProvider reports an agent whose provider name resolves to no
     provider entry of the document.

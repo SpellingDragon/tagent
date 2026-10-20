@@ -1,5 +1,21 @@
 package replay // import "github.com/SpellingDragon/tagent/memory/replay"
 
+The segment-age axis of the mapped sequence: a projection is partitioned
+into task-turn segments that close at an agent output, exactly the way the
+deterministic compress level reads them, and each segment is placed in one
+of three age bands by its age — the newest band the segments still inside the
+recent window, the middle band the segments one and two windows back, the oldest
+band everything before that. A fold acts on the band next to the material it
+consumes: the process detail of the newest band folds into one middle-band
+product, and the middle band folds into the one history summary the oldest band
+reads as.
+
+The fold is segment-grained while AssembleBudget is entry-grained: the assembly
+decides how one entry is presented under its budget and never removes an entry,
+and a fold decides which material a segment still carries and replaces the
+consumed entries with the product it minted. Both read the same projection and
+neither writes the fact chain.
+
 The fold of one projection: the collapse of its foldable run into one compaction
 entry, stated as a fact of the chain rather than kept beside it. The retained
 refs keep the payload order, the payload records the boundary the tail is
@@ -34,12 +50,37 @@ none.
 
 Skeleton compile-time assertions for the replay shapes: the presentation
 decision, the chain-isolated replay source and relation store, the compaction
-payload and its refs, and the cold-start rebuild that replays a fact chain into
-an empty projection. A renamed field or a widened signature stops this file from
+payload and its refs, the cold-start rebuild that replays a fact chain into
+an empty projection, and the segment-age axis the bands and their folds are
+declared under. A renamed field or a widened signature stops this file from
 compiling.
 
 CONSTANTS
 
+const (
+	// DefaultAgeKeepRecent is the number of recent segments the age rules keep
+	// whole when a plan names no window, the same default the deterministic
+	// compress level reads under.
+	DefaultAgeKeepRecent = 2
+	// DefaultAgeVolumeThreshold is the rendered volume a projection may carry
+	// before an age fold is due, in bytes.
+	DefaultAgeVolumeThreshold = 4096
+
+	// ProjectionTypeSegmentFold names the product entry the process detail of
+	// one new-band segment folds into.
+	ProjectionTypeSegmentFold = "segment_fold"
+	// ProjectionTypeHistorySummary names the product entry the middle and
+	// oldest bands fold into.
+	ProjectionTypeHistorySummary = "history_summary"
+
+	// AgeProducerSegmentAge names the mechanism that judges a projection due for
+	// an age fold.
+	AgeProducerSegmentAge = "memory.replay.segment-age"
+	// AgeReasonSegmentFold states why the new band is folded.
+	AgeReasonSegmentFold = "the process detail of the new band is over its volume threshold"
+	// AgeReasonHistorySummary states why the middle band is folded away.
+	AgeReasonHistorySummary = "the middle band is over its volume threshold"
+)
 const (
 	// RebuildPageSize is the page size the rebuild pages the fact chain with:
 	// minimum-event-key paging in EventKey write order.
@@ -109,6 +150,12 @@ var ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry"
 
 FUNCTIONS
 
+func LevelOfAge(age, keepRecent int) int
+    LevelOfAge reports the compress level the age of one closed segment reads
+    under the deterministic rule the age axis is shared with: the recent window
+    whole, the next window dropping tool commands, the window after that keeping
+    the skeleton only, and everything older archived.
+
 func RenderProjection(entries []ProjectionEntry) []byte
     RenderProjection renders the projection in its canonical form: one JSON
     line per entry, in order, carrying the entry's identity, type, summary,
@@ -127,6 +174,66 @@ func SyntheticKey(key event.EventID) bool
     text the payload carries, rather than a fact the chain hydrates.
 
 TYPES
+
+type AgeFoldPlan struct {
+	// KeepRecent is the number of recent segments kept whole; zero reads
+	// DefaultAgeKeepRecent.
+	KeepRecent int
+	// VolumeThreshold is the rendered volume a projection may carry, in bytes;
+	// zero reads DefaultAgeVolumeThreshold.
+	VolumeThreshold int
+}
+    AgeFoldPlan shapes one age-band fold: the window the age rule keeps whole
+    and the rendered volume a projection may carry before a fold is due.
+    A plan naming no window or no threshold reads the defaults.
+
+type AgeFoldReport struct {
+	// Volume is the rendered volume the projection carried, in bytes.
+	Volume int
+	// Threshold is the volume the fold was judged under, in bytes.
+	Threshold int
+	// Triggered reports whether the volume passed the threshold and a fold ran.
+	Triggered bool
+	// NewFolded is how many entries the new-band fold consumed.
+	NewFolded int
+	// MidFolded is how many entries the middle and oldest bands contributed to
+	// the history summary.
+	MidFolded int
+	// Products lists the product entries the fold minted, in projection order:
+	// one segment fold per folded new-band segment, then the history summary.
+	Products []ProjectionEntry
+	// Requests lists the compress requests the fold filed, one per product, in
+	// the order the products were minted.
+	Requests []event.CompressRequest
+}
+    AgeFoldReport is the structured result of one age-band fold: the volume
+    the projection carried beside the threshold it was judged under, how many
+    entries each fold consumed, and the products and compress requests it
+    minted.
+
+type Band int
+    Band names one band of the segment-age axis a segment belongs to.
+
+const (
+	// BandNew is the newest band, level L0: the projection of these segments
+	// corresponds to the context text as it stands.
+	BandNew Band = iota
+	// BandMid is the middle band, levels L1 and L2: the process detail between
+	// the user input and the agent output of these segments is what folds.
+	BandMid
+	// BandOld is the oldest band, level L3: these segments read as one history
+	// summary.
+	BandOld
+)
+func BandOfAge(age, keepRecent int) Band
+    BandOfAge reports the band a closed segment of the given age belongs to.
+
+func BandOfLevel(level int) Band
+    BandOfLevel reports the band one compress level belongs to: L0 the new band,
+    L1 and L2 the middle band, L3 the old band.
+
+func (b Band) String() string
+    String reports the band as the age axis names it.
 
 type ChainFact struct {
 	// Key is the canonical identity of the fact.
@@ -426,6 +533,13 @@ func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]Pr
     on the projection's own settle account, so the fact chain it replayed is
     exactly as it stood.
 
+func (p *ReplayProjection) AssembleBudgetPrefix(ctx context.Context, budget, prefix int) ([]ProjectionEntry, error)
+    AssembleBudgetPrefix assembles the leading prefix of the projection under
+    the same budget rules, so a consumer presents the material that has ended
+    while the material still in flight stays with the transcript that carries
+    it: a negative prefix assembles the whole projection, and a prefix past its
+    length assembles what it holds.
+
 func (p *ReplayProjection) Compaction() *CompactionFact
     Compaction returns the compaction payload the last fold left, nil before
     any.
@@ -450,6 +564,18 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error)
     the remaining entries are represented by the summary alone. The compaction
     payload records the fullBoundary value the tail is replayed after, and the
     summary entry is returned first on every restore.
+
+func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error)
+    FoldByAge folds the projection along its segment-age bands once its rendered
+    volume passes the plan's threshold: the process detail of every closed
+    new-band segment is replaced by one segment-fold product, and the middle and
+    oldest bands are replaced by one history summary placed first. A projection
+    whose volume stays inside the threshold is left exactly as it stands.
+
+    The fold is deterministic over the sequence it reads and files the judgment
+    as a compress request rather than rewriting any fact: the products enter
+    the projection under content-addressed synthetic keys, so folding the same
+    sequence twice mints the same keys and appends no second product.
 
 func (p *ReplayProjection) FullBoundary() event.EventID
     FullBoundary returns the event-key boundary the compaction payload carried.
@@ -507,3 +633,28 @@ func (s ReplaySettle) FactKey() string
 
 func (s ReplaySettle) FactType() string
     FactType returns the frozen type a settle fact is read as.
+
+type Segment struct {
+	// Index is the position of the segment in the projection, oldest first.
+	Index int
+	// Age is the distance of the segment from the newest one, zero for it.
+	Age int
+	// Level is the compress level the age reads, zero for a segment in progress.
+	Level int
+	// Band is the age band the level belongs to.
+	Band Band
+	// Complete reports whether an agent output closed the segment.
+	Complete bool
+	// Entries are the projection entries the segment spans, in projection order.
+	Entries []ProjectionEntry
+}
+    Segment is one task-turn segment of a projection: the entries it spans, the
+    age and level it reads, whether an agent output closed it, and the band it
+    therefore belongs to. A segment no agent output closed is still in progress,
+    reads L0 and is never folded.
+
+func SegmentsOf(entries []ProjectionEntry, keepRecent int) []Segment
+    SegmentsOf partitions the entries of one projection into its task-turn
+    segments, oldest first: a segment spans an external input beside the process
+    entries that follow it up to the agent output that closes it, and a tail no
+    agent output closed stays its own segment in progress.

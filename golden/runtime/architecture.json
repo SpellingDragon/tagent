@@ -216,6 +216,12 @@
       "role": "adapter",
       "required": true,
       "reason": "召回工具面：四工具（recall_query/get/recent/trace）只做端口转换，检索与读取走 memory/search 与 memory/query 的既有读面，不重造检索。"
+    },
+    {
+      "pattern": "tool/knowledge",
+      "role": "adapter",
+      "required": true,
+      "reason": "知识工具面：三工具（skill_search/skill_load/read_file）只把 tRPC 的技能仓库与文件面适配到模型读的声明上，自己不持有仓库与文件系统，也不重造检索。"
     }
   ],
   "edges": [
@@ -248,6 +254,7 @@
         "internal/bench",
         "tool/subagent",
         "tool/recall",
+        "tool/knowledge",
         "api/view",
         "evolution/governance",
         "telemetry",
@@ -722,6 +729,11 @@
         "memory/search"
       ],
       "reason": "工具面只读记忆域的既有读面（观测表/原文读路径/父链/检索端口）与事件身份，自己既不持存储也不做检索。"
+    },
+    {
+      "from": "tool/knowledge",
+      "allow": [],
+      "reason": "知识工具面只做 tRPC 技能仓库与文件面的端口适配，不依赖任何一方包，也不向核心包反向依赖。"
     }
   ],
   "external": {

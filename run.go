@@ -36,6 +36,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -127,6 +128,8 @@ type Run struct {
 	projection  *query.Projection
 	explainer   *query.Explainer
 	retrieval   *retrievalSupply
+	tier        *ledger.Tier
+	embedder    memory.Embedder
 	loop        *agent.Loop
 	sites       map[event.Address]bool
 	facts       map[event.EventID]event.Event
@@ -208,6 +211,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			return nil, err
 		}
 		tier = opened
+		assemblyInfo("tagent: storage tier opened tier=%s durable=%t root=%s",
+			tier.Capabilities.Tier, tier.Capabilities.Durable, cfg.storage.Root)
+		if !tier.Capabilities.Durable {
+			assemblyWarn("tagent: storage tier keeps no record across process exit tier=%s restored=none",
+				tier.Capabilities.Tier)
+		}
 		durable, err = state.NewDurableCommit(ledger.TierFactLog(tier), nil)
 		if err != nil {
 			return nil, err
@@ -253,8 +262,14 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
+		r.mu.Lock()
 		r.retrieval = supply
+		r.tier = tier
+		r.mu.Unlock()
 	}
+	r.mu.Lock()
+	r.embedder = cfg.embedder
+	r.mu.Unlock()
 	return r, nil
 }
 
@@ -281,7 +296,7 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 		Baseline:    r.publisher.Baseline(),
 		Fingerprint: fingerprint,
 	}
-	cand, err := prepare(ctx, plan, r.suppliers(agents))
+	cand, err := prepare(ctx, plan, r.suppliers(decl, agents))
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
@@ -309,6 +324,28 @@ func finalRoundPolicy(decl *config.Declaration) agent.FinalRoundPolicy {
 	}
 }
 
+// specOfLocked reports the spec one declaration names for an agent under the
+// run lock: a declaration that names no such agent reports the zero spec, so a
+// switch an agent does not declare keeps the assembly as it stood.
+func specOfLocked(decl *config.Declaration, id event.AgentID) config.AgentSpec {
+	if decl == nil {
+		return config.AgentSpec{}
+	}
+	for _, spec := range decl.Agents {
+		if event.AgentID(spec.ID) == id {
+			return spec
+		}
+	}
+	return config.AgentSpec{}
+}
+
+// agentSpecOf reports the spec the declaration in effect names for one agent.
+func (r *Run) agentSpecOf(id event.AgentID) config.AgentSpec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return specOfLocked(r.current.Plan.Declaration, id)
+}
+
 // finalRoundSpecOf reports the watchdog budget a declaration names for its entry
 // agent; a declaration naming no entry agent or no budget reports the zero
 // budget.
@@ -325,17 +362,27 @@ func finalRoundSpecOf(decl *config.Declaration) config.FinalRoundSpec {
 // into the registry of this assembly under the current orchestration binding,
 // one outcome per task the chains cover. A chain carrying no admission
 // material is refused by name in the report and rebuilds nothing.
+//
+// The whole fold is observed as one line at INFO — the chains read, the tasks
+// rebuilt and the chains dropped (a chain the restore refused, or a link the
+// registry already held) beside the elapsed time — so a restart states what it
+// recovered instead of leaving the reader to count report entries. A failed fold
+// is observed at ERROR beside the chain it stopped on.
 func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (task.RestoreReport, error) {
+	started := time.Now()
 	owners := runOwners{bindings: r.bindings}
 	merged := task.RestoreReport{}
-	for _, taskID := range durable.TaskIDs() {
+	chains := durable.TaskIDs()
+	for _, taskID := range chains {
 		chain, err := durable.Records(ctx, taskID)
 		if err != nil {
+			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
 		report, err := r.registry.Restore(ctx, chain, owners)
 		merged.Tasks = append(merged.Tasks, report.Tasks...)
 		if err != nil {
+			assemblyError("tagent: restore stopped task=%s err=%v", taskID, err)
 			return merged, err
 		}
 		for _, outcome := range report.Tasks {
@@ -344,7 +391,25 @@ func (r *Run) restoreChains(ctx context.Context, durable *state.DurableCommit) (
 			}
 		}
 	}
+	recovered, dropped := restoredCounts(merged)
+	assemblyInfo("tagent: restore folded chains=%d recovered=%d dropped=%d elapsed=%s",
+		len(chains), recovered, dropped, time.Since(started).Round(time.Microsecond))
 	return merged, nil
+}
+
+// restoredCounts reports how many tasks the fold rebuilt and how many outcomes
+// ended without a rebuild: a chain the restore refused and a link the registry
+// already held are both counted as dropped, so the two halves always add up to
+// the number of outcomes.
+func restoredCounts(report task.RestoreReport) (recovered, dropped int) {
+	for _, outcome := range report.Tasks {
+		if outcome.Recovered {
+			recovered++
+			continue
+		}
+		dropped++
+	}
+	return recovered, dropped
 }
 
 // Recovery reports how the assembly folded the durable chains its storage
@@ -363,6 +428,56 @@ func newInstanceID() event.InstanceID {
 		panic("tagent: mint the runtime instance identity: " + err.Error())
 	}
 	return event.InstanceID(hex.EncodeToString(buf[:]))
+}
+
+// assemblyInfo renders one line of the assembly face at INFO: the storage tier
+// the assembly opened and what the fold of the durable chains recovered from it.
+// One assembly writes one line per event, so the INFO stream is bounded by the
+// assemblies a process builds.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
+// MUST write one line per opened tier and one per completed fold.
+// MUST NOT render the stored records, the prompts or the model output.
+func assemblyInfo(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Infof(format, args...)
+}
+
+// assemblyWarn renders one line of the assembly face at WARN: the tier the
+// assembly opened holds nothing across process exit, so the run starts beside no
+// chain and restores nothing. The claim a durable tier would let the process
+// make is weaker, and a quieter level would leave that change unsaid.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
+// MUST write one line per tier that guarantees no durability.
+// MUST NOT render the stored records, the prompts or the model output.
+func assemblyWarn(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Warnf(format, args...)
+}
+
+// assemblyError renders one line of the assembly face at ERROR: a fold of the
+// durable chains that stopped before it covered every chain. The assembly is
+// refused beside it, so nothing runs on a partially folded scene.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a changed refusal.
+// MUST write one line per fold that stopped.
+// MUST NOT render the stored records, the prompts or the model output.
+func assemblyError(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Errorf(format, args...)
 }
 
 // publishContract is the precondition contract the assembly enforces on every

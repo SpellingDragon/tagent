@@ -28,6 +28,12 @@ Package subagent turns one sub-agent declaration - an agents file or explicit
 parameters - into the resolved assembly the trpc agent builder consumes.
 The package holds no live object: a refused declaration yields no assembly.
 
+The target tool of one declared agent reference: the declaration names the
+target agent, so the model sees a tool of that agent's own name instead of a
+generic call it could point anywhere. The tool surface behind it is the target's
+own declaration — the tools that agent declares, not the caller's assembled set
+— so the reference grants exactly the declared target and nothing wider.
+
 call_subagent is the model-visible face of one sub-agent call: the declaration
 names the two assembly sources, and a call resolves one of them into an
 assembly, admits the assembled call as a task through the delegation face and
@@ -67,6 +73,19 @@ const (
 )
     ParamMinScore, ParamMaxResults, ParamSource and ParamTool are the
     configuration parameter names a preset reference reads.
+
+const (
+	// ParamAgent names the declared agent one reference authorizes.
+	ParamAgent = "agent"
+	// ParamDescriptionFile names the file the target's description is read from.
+	ParamDescriptionFile = "description_file"
+	// ParamEventParams names the call arguments that carry event references.
+	ParamEventParams = "event_params"
+)
+    ParamAgent, ParamDescriptionFile and ParamEventParams are the reference
+    parameters one agent reference carries: the declared target it authorizes,
+    the file its description is read from at every request boundary, and the
+    call arguments whose values travel as the handoff's refs.
 
 const RecallToolName = "recall"
     RecallToolName is the tool name the recall reference is assembled under.
@@ -145,6 +164,13 @@ var ErrSourceConflict = errors.New("both an agents file and explicit parameters 
 
 var ErrSourceMissing = errors.New("no assembly source was given")
     ErrSourceMissing reports a call naming no assembly source.
+
+var ErrTargetArguments = errors.New("subagent: the call names no declared argument")
+    ErrTargetArguments reports a call carrying a key the target's declaration
+    does not name.
+
+var ErrTargetNameMissing = errors.New("subagent: the target tool names no declared agent")
+    ErrTargetNameMissing reports a target tool constructed with no name.
 
 var ErrTurnFailed = errors.New("subagent: the delegated turn failed")
     ErrTurnFailed reports a turn whose stream reached a terminal error.
@@ -315,6 +341,53 @@ type Source struct {
 }
     Source names exactly one assembly source: an agents file or explicit
     parameters.
+
+type Target struct {
+	// Has unexported fields.
+}
+    Target is the model-visible face of one declared agent reference: a tool of
+    the target's own name whose call admits one turn of that target as a task.
+
+func NewTarget(opts TargetOptions) (*Target, error)
+    NewTarget returns the target tool over the declared faces.
+
+func (t *Target) Call(ctx context.Context, jsonArgs []byte) (any, error)
+    Call implements the native callable tool port: it reads one call's declared
+    arguments, builds the handoff the declared event params feed, admits one
+    turn of the target as a task and answers with the receipt of that admission.
+
+func (t *Target) Declaration() *trpctool.Declaration
+    Declaration implements the native callable tool port. The description is
+    read from the declared file at every read, so a rewritten file reaches the
+    next request's tool declaration without a reload; a file that cannot be read
+    answers with the declared description instead.
+
+type TargetOptions struct {
+	// Name is the tool name the model sees: the declared target agent identity.
+	Name string
+	// Description is the declared purpose read when no description file is
+	// named, and the fallback of a file that cannot be read.
+	Description string
+	// DescriptionFile is the file the description is read from at every
+	// declaration read, so a rewritten file takes effect with no reload.
+	DescriptionFile string
+	// Assembly is the resolved declaration of the target agent: its identity,
+	// model, tool names and instruction.
+	Assembly *Assembly
+	// Builder runs the assembly into the live agent and one turn of it.
+	Builder Builder
+	// Delegation is the task face the call is admitted through.
+	Delegation Delegation
+	// Bindings is the state owner's borrowing face.
+	Bindings state.Borrow
+	// EventParams lists the call arguments whose values are handed over as the
+	// envelope's refs, in declaration order.
+	EventParams []string
+}
+    TargetOptions fixes what the composition root hands one target tool:
+    the declared target's identity and purpose, the assembly its delegated turn
+    runs on, the builder that runs it, the delegation and borrowing faces of the
+    run and the call arguments that travel as the handoff's refs.
 
 type Tool struct {
 	// Has unexported fields.

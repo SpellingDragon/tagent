@@ -74,8 +74,16 @@ type ToolOptions struct {
 // Tool is the call_subagent tool: one declaration naming both assembly sources, and a
 // call that assembles one sub-agent, admits it as a task and answers with its receipt.
 type Tool struct {
-	parent     *Assembly
-	builder    Builder
+	parent  *Assembly
+	builder Builder
+	faces   delegationFaces
+}
+
+// delegationFaces is the pair every delegating tool of this package admits a turn
+// through: the task face the call is admitted as and the borrowing face the
+// initiating generation is taken from. A target tool and the generic call share
+// exactly these two, so one admission path serves both.
+type delegationFaces struct {
 	delegation Delegation
 	bindings   state.Borrow
 }
@@ -92,10 +100,9 @@ func NewTool(opts ToolOptions) (*Tool, error) {
 		return nil, ErrBindingsMissing
 	}
 	return &Tool{
-		parent:     opts.Parent,
-		builder:    opts.Builder,
-		delegation: opts.Delegation,
-		bindings:   opts.Bindings,
+		parent:  opts.Parent,
+		builder: opts.Builder,
+		faces:   delegationFaces{delegation: opts.Delegation, bindings: opts.Bindings},
 	}, nil
 }
 
@@ -194,7 +201,7 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if err != nil {
 		return t.denied(err), nil
 	}
-	receipt, err := t.admit(ctx, frame, assembly, args.Input, envelope)
+	receipt, err := t.faces.admit(ctx, t.builder, frame, assembly, args.Input, envelope)
 	if err != nil {
 		return t.denied(err), nil
 	}
@@ -205,15 +212,15 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // identity of the decision that issued it, the initiating generation is borrowed for the
 // reference the delegated turn inherits, and a fresh admission starts the delegated turn
 // beside the receipt it already returned, carrying the envelope the call declared.
-func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assembly, input string, envelope *agent.HandoffEnvelope) (task.AdmissionReceipt, error) {
+func (d delegationFaces) admit(ctx context.Context, builder Builder, frame task.CallFrame, assembly *Assembly, input string, envelope *agent.HandoffEnvelope) (task.AdmissionReceipt, error) {
 	if !frame.Address.IsComplete() {
 		return task.AdmissionReceipt{}, ErrAddressIncomplete
 	}
-	handle, err := t.bindings.Borrow(ctx, frame.Address.AgentID)
+	handle, err := d.bindings.Borrow(ctx, frame.Address.AgentID)
 	if err != nil {
 		return task.AdmissionReceipt{}, err
 	}
-	receipt, err := t.delegation.Delegate(ctx, agent.Delegation{
+	receipt, err := d.delegation.Delegate(ctx, agent.Delegation{
 		InvocationID: frame.Identity.InvocationID,
 		DecisionID:   frame.Identity.DecisionID,
 		CallID:       frame.Identity.CallID,
@@ -228,7 +235,7 @@ func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assemb
 		return receipt, releaseErr
 	}
 	if receipt.Kind == task.AdmissionFresh {
-		go t.serve(context.WithoutCancel(ctx), receipt.TaskID, assembly, frame.Address, input, envelope)
+		go d.serve(context.WithoutCancel(ctx), builder, receipt.TaskID, assembly, frame.Address, input, envelope)
 	}
 	return receipt, nil
 }
@@ -236,9 +243,9 @@ func (t *Tool) admit(ctx context.Context, frame task.CallFrame, assembly *Assemb
 // serve runs the delegated turn of one fresh admission and reports its terminal: a turn
 // that ends settles its task and one that fails reports the failure. A settle the ledger
 // refuses leaves the task where it is rather than inventing an outcome.
-func (t *Tool) serve(ctx context.Context, taskID event.TaskID, assembly *Assembly, addr event.Address, input string, envelope *agent.HandoffEnvelope) {
+func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID event.TaskID, assembly *Assembly, addr event.Address, input string, envelope *agent.HandoffEnvelope) {
 	status := task.StatusSettled
-	_, err := t.builder.Serve(ctx, assembly, Turn{
+	_, err := builder.Serve(ctx, assembly, Turn{
 		UserID:    string(addr.AgentID),
 		SessionID: string(addr.SessionID),
 		Input:     input,
@@ -247,7 +254,7 @@ func (t *Tool) serve(ctx context.Context, taskID event.TaskID, assembly *Assembl
 	if err != nil {
 		status = task.StatusFailed
 	}
-	_, _ = t.delegation.Complete(ctx, taskID, status, "")
+	_, _ = d.delegation.Complete(ctx, taskID, status, "")
 }
 
 // denied renders one refusal as result text: the named case beside the source, field and

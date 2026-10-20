@@ -63,11 +63,15 @@ var (
 	_ MeditationProjection = func(context.Context) (*replay.ReplayProjection, error) { return nil, nil }
 	_ MeditationFolds      = func(context.Context, replay.CompactionFact) error { return nil }
 	_ MeditationOption     = func(*Meditation) {}
+	_ CompressPhase        = (CompressPhase)(nil)
 
 	_ func(*memory.CompressRequests) MeditationOption              = WithCompressRequests
 	_ func(MeditationCards) MeditationOption                       = WithMeditationCards
 	_ func(MeditationSink) MeditationOption                        = WithMeditationProducts
+	_ func(CompressPhase) MeditationOption                         = WithCompressPhase
 	_ func(MeditationProjection, MeditationFolds) MeditationOption = WithMeditationPreFold
+
+	_ func(CompressPhase, context.Context, event.CompressRequest) error = CompressPhase.TriggerCompress
 
 	_ func(MeditationPolicy, *ledger.Retention, *ledger.Lifecycle, Condenser, ...MeditationOption) (*Meditation, error) = NewMeditation
 

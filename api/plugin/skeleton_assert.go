@@ -33,6 +33,10 @@ var (
 
 	_ func(FinalPresenter, context.Context, event.EventID) (string, bool) = FinalPresenter.Present
 
+	_ func(EnvironmentInject, context.Context, EnvironmentRequest) (string, error) = EnvironmentInject.InjectEnvironment
+
+	_ func(CompressTrigger, context.Context, event.CompressRequest) error = CompressTrigger.TriggerCompress
+
 	_ func(Governor, CallPass) (Decision, error) = Governor.Judge
 
 	_ func(ObservationSource) []string = ObservationSource.ObservedNamespaces
@@ -59,6 +63,8 @@ var (
 	_ RiskAssessor       = (RiskAssessor)(nil)
 	_ PostCommitObserver = (PostCommitObserver)(nil)
 	_ FinalPresenter     = (FinalPresenter)(nil)
+	_ EnvironmentInject  = (EnvironmentInject)(nil)
+	_ CompressTrigger    = (CompressTrigger)(nil)
 	_ Governor           = (Governor)(nil)
 	_ ObservationSource  = (ObservationSource)(nil)
 	_ ObservationSink    = (ObservationSink)(nil)
@@ -94,6 +100,8 @@ const (
 	_ Phase = PhaseRiskPolicy
 	_ Phase = PhasePostCommitObserve
 	_ Phase = PhaseFinalPresentation
+	_ Phase = PhaseCompressTrigger
+	_ Phase = PhaseEnvironmentInject
 
 	_ Disposition = DispositionAllow
 	_ Disposition = DispositionRecord
@@ -117,6 +125,10 @@ var (
 
 	_ func(Pipeline, context.Context, event.EventID) view.Presentation = Pipeline.After
 
+	_ func(Pipeline, context.Context, event.CompressRequest) error = Pipeline.TriggerCompress
+
+	_ func(Pipeline, context.Context, EnvironmentRequest) (string, error) = Pipeline.InjectEnvironment
+
 	_ error = ErrCallIdentityChanged
 )
 
@@ -132,6 +144,8 @@ var (
 		Fact:     "",
 		Attempts: []Attempt{{Layer: LayerTrace, Skipped: false}},
 	}
+
+	_ = EnvironmentRequest{Agent: ""}
 
 	_ = view.Presentation{
 		Fact:  "",

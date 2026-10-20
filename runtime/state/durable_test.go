@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -449,6 +451,8 @@ type invariantFactLog struct {
 	staged   map[string][]byte
 	barrier  map[string][]byte
 	failSync bool
+	failPut  error
+	failScan error
 }
 
 // newInvariantFactLog returns an empty log beside a barrier that completes.
@@ -460,6 +464,9 @@ func newInvariantFactLog() *invariantFactLog {
 func (l *invariantFactLog) Put(_ context.Context, key string, value []byte) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.failPut != nil {
+		return l.failPut
+	}
 	l.staged[key] = append([]byte(nil), value...)
 	return nil
 }
@@ -476,6 +483,9 @@ func (l *invariantFactLog) Get(_ context.Context, key string) ([]byte, bool, err
 func (l *invariantFactLog) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.failScan != nil {
+		return nil, l.failScan
+	}
 	out := map[string][]byte{}
 	for key, value := range l.barrier {
 		if strings.HasPrefix(key, prefix) {
@@ -504,4 +514,217 @@ func (l *invariantFactLog) refuseSync(refuse bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.failSync = refuse
+}
+
+// refusePut makes every stage answer the failure handed over, or stage again
+// when it is nil.
+func (l *invariantFactLog) refusePut(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failPut = err
+}
+
+// refuseScan makes every scan answer the failure handed over, or read again
+// when it is nil.
+func (l *invariantFactLog) refuseScan(err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.failScan = err
+}
+
+// TestDurableCommitFailureObservation pins the lines the persistence face writes for every write it could not store.
+// - a refused write reports the uncommitted outcome at ERROR and stores no fact
+// - a refused barrier reports the uncertain outcome at ERROR and reports no durable success
+// - a refused declaration reports the undeclared outcome at ERROR
+// - an unreadable log reports the failed load at ERROR and answers no carrier
+// - a failing logger changes no outcome: the bypass drops the line and keeps the refusal
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestDurableCommitFailureObservation(t *testing.T) {
+	ctx := context.Background()
+	taskID := event.TaskID("task-1")
+	writeErr := errors.New("state: the log refused the write")
+
+	t.Run("a refused write reports the uncommitted outcome", func(t *testing.T) {
+		observer := &durableObserver{}
+		defer watchDurableLog(t, observer)()
+		log := newInvariantFactLog()
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		log.refusePut(writeErr)
+		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
+		if !errors.Is(err, writeErr) || result != task.CommitNotCommitted {
+			t.Fatalf("commit beside a refused write = (%v, %v), want the uncommitted outcome beside its failure", result, err)
+		}
+		if !observer.mentions("error", "durable commit write failed", "task=task-1", "result=uncommitted") {
+			t.Fatalf("error lines = %v, want the refused write beside its task and outcome", observer.all())
+		}
+	})
+
+	t.Run("a refused barrier reports the uncertain outcome", func(t *testing.T) {
+		observer := &durableObserver{}
+		defer watchDurableLog(t, observer)()
+		log := newInvariantFactLog()
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		log.refuseSync(true)
+		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
+		if err == nil || result != task.CommitUncertain {
+			t.Fatalf("commit beside a refused barrier = (%v, %v), want the uncertain outcome", result, err)
+		}
+		if !observer.mentions("error", "durable commit barrier failed", "task=task-1", "result=uncertain") {
+			t.Fatalf("error lines = %v, want the refused barrier beside its task and outcome", observer.all())
+		}
+	})
+
+	t.Run("a refused declaration reports the undeclared outcome", func(t *testing.T) {
+		observer := &durableObserver{}
+		defer watchDurableLog(t, observer)()
+		log := newInvariantFactLog()
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		log.refusePut(writeErr)
+		if err := carrier.Declare(ctx, taskID, invariantSpec()); !errors.Is(err, writeErr) {
+			t.Fatalf("declaration beside a refused write = %v, want the failure of the log", err)
+		}
+		if !observer.mentions("error", "durable declare write failed", "task=task-1", "result=undeclared") {
+			t.Fatalf("error lines = %v, want the refused declaration beside its task and outcome", observer.all())
+		}
+	})
+
+	t.Run("an unreadable log reports the failed load", func(t *testing.T) {
+		observer := &durableObserver{}
+		defer watchDurableLog(t, observer)()
+		log := newInvariantFactLog()
+		log.refuseScan(writeErr)
+		carrier, err := NewDurableCommit(log, nil)
+		if !errors.Is(err, writeErr) || carrier != nil {
+			t.Fatalf("open beside an unreadable log = (%v, %v), want no carrier beside the failure", carrier, err)
+		}
+		if !observer.mentions("error", "durable commit load failed") {
+			t.Fatalf("error lines = %v, want the failed load", observer.all())
+		}
+	})
+
+	t.Run("a failing logger changes no outcome", func(t *testing.T) {
+		observer := &durableObserver{panicsLeft: 1}
+		defer watchDurableLog(t, observer)()
+		log := newInvariantFactLog()
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier beside a failing logger: %v", err)
+		}
+		log.refusePut(writeErr)
+		result, err := carrier.Commit(ctx, invariantRecord(taskID, 0, task.StatusAccepted))
+		if !errors.Is(err, writeErr) || result != task.CommitNotCommitted {
+			t.Fatalf("commit beside a failing logger = (%v, %v), want the uncommitted outcome kept", result, err)
+		}
+	})
+}
+
+// durableObserver is the framework logger the observation checks of this package
+// read the persistence face through: it records every line beside its level and
+// refuses the writes its counter still holds by panicking.
+type durableObserver struct {
+	mu         sync.Mutex
+	lines      []string
+	panicsLeft int
+}
+
+// record takes one line at the named level, or refuses it by panicking.
+func (o *durableObserver) record(level, text string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.panicsLeft > 0 {
+		o.panicsLeft--
+		panic("the logger refused the write")
+	}
+	o.lines = append(o.lines, level+": "+text)
+}
+
+// Debug records one debug line.
+func (o *durableObserver) Debug(args ...any) { o.record("debug", fmt.Sprint(args...)) }
+
+// Debugf records one formatted debug line.
+func (o *durableObserver) Debugf(format string, args ...any) {
+	o.record("debug", fmt.Sprintf(format, args...))
+}
+
+// Info records one info line.
+func (o *durableObserver) Info(args ...any) { o.record("info", fmt.Sprint(args...)) }
+
+// Infof records one formatted info line.
+func (o *durableObserver) Infof(format string, args ...any) {
+	o.record("info", fmt.Sprintf(format, args...))
+}
+
+// Warn records one warning line.
+func (o *durableObserver) Warn(args ...any) { o.record("warn", fmt.Sprint(args...)) }
+
+// Warnf records one formatted warning line.
+func (o *durableObserver) Warnf(format string, args ...any) {
+	o.record("warn", fmt.Sprintf(format, args...))
+}
+
+// Error records one error line.
+func (o *durableObserver) Error(args ...any) { o.record("error", fmt.Sprint(args...)) }
+
+// Errorf records one formatted error line.
+func (o *durableObserver) Errorf(format string, args ...any) {
+	o.record("error", fmt.Sprintf(format, args...))
+}
+
+// Fatal records one fatal line without ending the test binary.
+func (o *durableObserver) Fatal(args ...any) { o.record("fatal", fmt.Sprint(args...)) }
+
+// Fatalf records one formatted fatal line without ending the test binary.
+func (o *durableObserver) Fatalf(format string, args ...any) {
+	o.record("fatal", fmt.Sprintf(format, args...))
+}
+
+// all reports every line taken, whatever the level.
+func (o *durableObserver) all() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.lines...)
+}
+
+// mentions reports whether one line taken at the level carries every fragment.
+func (o *durableObserver) mentions(level string, fragments ...string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, line := range o.lines {
+		if !strings.HasPrefix(line, level+": ") {
+			continue
+		}
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// watchDurableLog points the framework logger at the observer for the duration of
+// one check and answers the restore that ends it, so a check reads the lines of
+// its own face and leaves the package logger as it found it.
+func watchDurableLog(t *testing.T, observer trpclog.Logger) func() {
+	t.Helper()
+	original := trpclog.Default
+	trpclog.Default = observer
+	restore := func() { trpclog.Default = original }
+	t.Cleanup(restore)
+	return restore
 }

@@ -1,8 +1,6 @@
 # 配置迁移指南
 
-> **权威来源**：当前配置格式以 [`config.go`](../config.go) 的结构体定义与
-> [README「配置参考」章](../README.md#-配置参考) 为准；本篇只解决**从早期格式迁移**时的字段对照与
-> 常见错写。行为契约见 [openspec/specs/](../openspec/specs/)。
+> **本篇是历史篇**：它描述的是 legacy 生产树（已随 `prototype rewrite` 移除）的 `config.go` 三代格式。仓库现在没有根 `config.go`，也没有「配置参考」章；当期声明面是 `api/config` 的 `Declaration`/`AgentSpec`/`ToolRef`，而唯一在用的严格解码 schema 是 `examples/wechat-bot/host_runtime.go` 的 `hostDocument`（未知键拒启动）。字段对照仍可参考，但**不要拿本篇当当前格式的权威**。
 
 ## 概述
 
@@ -16,7 +14,7 @@ tagent 的配置格式经历过三代。仓内部分早期文档/示例仍残留
 |------|------|------|
 | 第一代（扁平） | 顶层直接写 `tagent.name` / `system_prompt_file` / `knowledge_agent.enabled` 等平铺字段 | **已废弃**，字段在当前 `Config` 中不存在 |
 | 第二代（`tagent:` 包裹 + `name`/`type`） | `tagent.agents.<x>` 外层再包一个 `tagent:` 根键；工具用 `name` + `type` + `config` | **已废弃**，当前顶层无 `tagent:` 根键，ToolRef 用 `kind`/`agent`/`id`/`properties` |
-| 第三代（当前，声明式） | 顶层直接是 `entry` / `model` / `provider` / `providers` / `agents` / `mcp_servers` / `governance` / `evolution` / `reliability` / `working_dir` 等 | **当前格式** |
+| 第三代（声明式，已被 `api/config` 取代） | 顶层直接是 `entry` / `model` / `provider` / `providers` / `agents` / `mcp_servers` / `governance` / `evolution` / `reliability` / `working_dir` 等 | **仅历史**：`mcp_servers`/`evolution`/`reliability`/`working_dir` 及 `agents.*.memory` 在当期宿主 schema 里**无读取点，写入即拒启动** |
 
 ## 当前格式：最小可用示例
 

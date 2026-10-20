@@ -93,10 +93,10 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		if first[1].Role != model.RoleSystem || !strings.Contains(first[1].Content, "greet body v1") {
 			t.Fatalf("snapshot message 1 = %+v, want the fixed skill body", first[1])
 		}
-		if first[2].Role != agent.RoleOf(event.TypeExternalInput) || first[2].Content != "投影原文一" {
+		if first[2].Role != snapshotRoleOf(t, event.TypeExternalInput) || first[2].Content != "投影原文一" {
 			t.Fatalf("snapshot message 2 = %+v, want the first projected entry under the frozen role table", first[2])
 		}
-		if first[3].Role != agent.RoleOf(event.TypeAgentOutput) || first[3].Content != "投影原文二" {
+		if first[3].Role != snapshotRoleOf(t, event.TypeAgentOutput) || first[3].Content != "投影原文二" {
 			t.Fatalf("snapshot message 3 = %+v, want the second projected entry under the frozen role table", first[3])
 		}
 		if first[4].Role != model.RoleUser || first[4].Content != "first" {
@@ -263,6 +263,16 @@ func invokeSnapshotWith(t *testing.T, ctx context.Context, run *tagent.Run, invo
 		t.Fatalf("invoke the formal runtime: %v", err)
 	}
 	return turn
+}
+
+// snapshotRoleOf maps one projected event type onto the frozen message role of the request boundary.
+func snapshotRoleOf(t *testing.T, eventType string) model.Role {
+	t.Helper()
+	role, err := agent.RoleOf(eventType)
+	if err != nil {
+		t.Fatalf("map %s onto a role: %v", eventType, err)
+	}
+	return role
 }
 
 // learnRequests reports a copy of the native requests the scripted provider was driven with.

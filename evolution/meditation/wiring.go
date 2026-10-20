@@ -14,6 +14,8 @@ import (
 	"sort"
 	"time"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -52,6 +54,23 @@ type MeditationCards func(ctx context.Context) ([]MeditationCard, error)
 // that fails is reported by name, so a product is never counted as held before
 // the state carries it.
 type MeditationSink func(ctx context.Context, artifact MeditationArtifact) error
+
+// CompressPhase is the plugin face a meditation tick hands the compress requests it
+// reads to: the face answers one filed judgment with the compression it owes, and the
+// request it is dispatched for is the one the log filed, value for value. The tick
+// curates the material only after the face answered it, so a compression face that
+// refused keeps its request pending instead of being counted compressed.
+//
+// The redline list (3 rules):
+// MUST take the request as the log filed it: the face answers the compression, never the judgment.
+// MUST NOT retire the request: the tick retires it once the products of its compression are committed.
+// MUST NOT curate material no filed request names.
+type CompressPhase interface {
+	// TriggerCompress dispatches one filed compress request. A nil error carries the
+	// request forward into the pass that compresses it; a non-nil error refuses it
+	// by name, so no material is curated and the request stays pending.
+	TriggerCompress(ctx context.Context, request event.CompressRequest) error
+}
 
 // MeditationTick is what one meditation tick did: the request facts it took in, the
 // passes they drove, the product facts it committed into the state, the fold
@@ -97,6 +116,7 @@ type Meditation struct {
 	requests   *memory.CompressRequests
 	cards      MeditationCards
 	products   MeditationSink
+	phase      CompressPhase
 	projection MeditationProjection
 	folds      MeditationFolds
 }
@@ -146,14 +166,23 @@ func WithMeditationProducts(products MeditationSink) MeditationOption {
 	return func(meditation *Meditation) { meditation.products = products }
 }
 
+// WithCompressPhase wires the plugin face the consumer tick dispatches every compress
+// request it reads to. A tick wired without one curates the material its requests name
+// and retires them as it stands: no compression face stands between the judgment and
+// the pass.
+func WithCompressPhase(phase CompressPhase) MeditationOption {
+	return func(meditation *Meditation) { meditation.phase = phase }
+}
+
 // NewMeditation returns the meditation engine over the retention ledger and the
 // lifecycle it drives: the ledger holds what the artifact references and the
 // lifecycle owns the tombstone channel every eviction travels. A nil
 // condenser runs the deterministic engineering condensation. The retention
 // ledger must be the one the lifecycle was built over, so a reference the pass
 // holds is the protection the eviction consults. The options wire the consumer
-// face: the request log a tick consumes, the card sequence it curates and the
-// state its product facts are committed into.
+// face: the request log a tick consumes, the card sequence it curates, the state
+// its product facts are committed into and the plugin face its requests are
+// dispatched to.
 func NewMeditation(policy MeditationPolicy, retention *ledger.Retention, lifecycle *ledger.Lifecycle, condense Condenser, options ...MeditationOption) (*Meditation, error) {
 	if retention == nil || lifecycle == nil {
 		return nil, ErrMeditationUnwired
@@ -187,6 +216,8 @@ func NewMeditation(policy MeditationPolicy, retention *ledger.Retention, lifecyc
 // an original fact.
 func (c *Meditation) Curate(ctx context.Context, now time.Time, cards []MeditationCard) (MeditationReport, error) {
 	report := MeditationReport{Fates: map[event.EventID]MeditationFate{}}
+	started := time.Now()
+	defer func() { observePass(report, len(cards), time.Since(started)) }()
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
@@ -349,15 +380,18 @@ func (c *Meditation) Judge(ctx context.Context, now time.Time, cards []Meditatio
 
 // Tick runs one meditation tick at now: it reads the card sequence it curates and
 // the compress requests pending in the request log, and for each pending request
-// naming that sequence it runs one pass, commits the condensed artifact the pass
-// minted into the state, pre-folds the compressed projection once through the
-// wired pre-fold, commits the compaction fact and retires the request. A request
-// naming other material stays pending, and a pass, commit, pre-fold or retirement
-// that failed keeps its request pending and lands in the tick account, so a
-// request is never counted consumed before the products of its compression are
-// held.
+// naming that sequence it dispatches the compress phase, runs one pass, commits the
+// condensed artifact the pass minted into the state, pre-folds the compressed
+// projection once through the wired pre-fold, commits the compaction fact and retires
+// the request. A request naming other material stays pending, and a phase, pass,
+// commit, pre-fold or retirement that failed keeps its request pending and lands in
+// the tick account, so a request is never counted consumed before the products of its
+// compression are held.
 func (c *Meditation) Tick(ctx context.Context, now time.Time) (MeditationTick, error) {
 	var tick MeditationTick
+	started := time.Now()
+	observeTick("tagent: meditation tick start")
+	defer func() { observeTickEnd(tick, time.Since(started)) }()
 	if err := ctx.Err(); err != nil {
 		return tick, err
 	}
@@ -382,6 +416,10 @@ func (c *Meditation) Tick(ctx context.Context, now time.Time) (MeditationTick, e
 			continue
 		}
 		tick.Read = append(tick.Read, request)
+		if err := c.dispatchCompress(ctx, request); err != nil {
+			tick.Failures = append(tick.Failures, err)
+			continue
+		}
 		report, err := c.Curate(ctx, now, cards)
 		if err != nil {
 			tick.Failures = append(tick.Failures, err)
@@ -415,6 +453,21 @@ func (c *Meditation) Tick(ctx context.Context, now time.Time) (MeditationTick, e
 	return tick, nil
 }
 
+// dispatchCompress hands one filed compress request to the plugin face the tick was
+// wired with, so the compression a producer judged due is answered through the plugin
+// surface instead of inside the tick. A tick wired without a compression face
+// dispatches nothing and curates the material as it stands; a face that refuses is
+// reported by name beside its request, so the request is never counted compressed.
+func (c *Meditation) dispatchCompress(ctx context.Context, request event.CompressRequest) error {
+	if c.phase == nil {
+		return nil
+	}
+	if err := c.phase.TriggerCompress(ctx, request); err != nil {
+		return fmt.Errorf("memory: the compress phase refused request %s: %w", request.ID, err)
+	}
+	return nil
+}
+
 // prefold folds the projection the tick's consumer owns and commits the
 // compaction fact it left into the state: the fold runs at consumption time and
 // the request boundary reads its result.
@@ -437,4 +490,42 @@ func (c *Meditation) prefold(ctx context.Context) (replay.CompactionFact, error)
 		return replay.CompactionFact{}, err
 	}
 	return payload, nil
+}
+
+// observeTick renders one line of the meditation observation at DEBUG: the start and
+// end lines of one tick, and the line of each pass that tick drove. A line carries the
+// identities, the counts and the elapsed time the step accounted, never a card
+// summary, an artifact body or reference metadata.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a refused tick.
+// MUST keep the stream bounded: one line per tick boundary and one per pass, never one per card.
+// MUST NOT render card summaries, artifact bodies or reference metadata.
+func observeTick(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
+}
+
+// observeTickEnd renders the end line of one tick: what it read, what it committed, what
+// it pre-folded and what it degraded under, beside the time the tick took.
+func observeTickEnd(tick MeditationTick, elapsed time.Duration) {
+	observeTick("tagent: meditation tick end read=%d reports=%d products=%d folds=%d failures=%d elapsed=%s",
+		len(tick.Read), len(tick.Reports), len(tick.Products), len(tick.Folds), len(tick.Failures),
+		elapsed.Round(time.Microsecond))
+}
+
+// observePass renders the line of one pass: the cards it assessed, whether the bound
+// triggered it, the identity of the artifact it left and the fates it filed, beside the
+// time the pass took.
+func observePass(report MeditationReport, cards int, elapsed time.Duration) {
+	artifact := "none"
+	if report.Artifact != nil {
+		artifact = string(report.Artifact.Key)
+	}
+	observeTick("tagent: meditation pass cards=%d triggered=%t artifact=%s evicted=%d failures=%d elapsed=%s",
+		cards, report.Triggered, artifact, len(report.Evicted), len(report.Failures),
+		elapsed.Round(time.Microsecond))
 }

@@ -6,13 +6,18 @@
 #   拒绝启动,而不会被静默忽略。因此本文件只出现宿主真正读取的键。
 #   schema 见 host_runtime.go 的 hostDocument;未接线的原声明就地归档为注释,
 #   完整清单(键路径 + 接线所需)见 README「待接线清单」。新增键须先接 schema。
+#   ⚠️ 两种工具引用:kind: tool 是宿主直接贡献的实例(send/recall_*/skill_*);
+#   `- { kind: agent, agent: <id> }` 是委派——声明即授权:被引用 agent 必须在本文件
+#   声明,模型只看得见名为该 id 的委派工具(工具面按被引用 agent 自己的 tools[] 建),
+#   引用未声明 agent 一律拒启动。`description_file` 热载工具描述,`event_params` 列出
+#   的调用参数其值随 handoff refs 交给子 agent。
 #
 # 分层:tagent YAML(agent 定义) · providers(连接注册表)。
 # 敏感信息(API Key)一律经环境变量注入,不写此文件。
 #
 # 编排约定(消除冗余,语义等价):
 #   · 全局 provider/model 为默认值 —— agent 省略即回退全局(见 host_runtime.go modelName),
-#     仅 plan 覆盖 model。改全局默认即改全体,无需逐 agent 重复。
+#     仅 plan 覆盖 model、knowledge 覆盖 provider+model。改全局默认即改全体,无需逐 agent 重复。
 # ============================================================================
 
 # ===== 全局默认(agent 省略 provider/model 时回退此)=====
@@ -32,8 +37,15 @@ providers:
   # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
   # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
 
+# ===== 存储层(recall 读面之基;不声明则 recall 无 Table/Originals/Embedder)=====
+# 声明后宿主开 localfile 原始层与分段层,并自持 relation 账本(<root>/relations)。
+storage:
+  type: localfile
+  root: data/store
+
 # ===== 治理闸(装配期恒挂 WithGovernance;此处开启审批面)=====
-# 行为详情见 docs/wiki/platform/agent-behavior-matrix.md 与 platform-subsystems.md。
+# 行为详情见 docs/wiki/platform/agent-behavior-matrix.md 与 platform-subsystems.md(historical-verbatim,
+# 描述的是已移除的子系统;本宿主实际只消费下面四个键)。
 governance:
   enabled: true
   enforcement: warn            # warn(放行) 是本宿主支持的另一档;strict 时追加 WithStrict——critical 恒需人工批准(不受此放松)
@@ -54,8 +66,12 @@ agents:
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
     # 主动送达面:声明即授权(不声明的 agent 看不见 send);发送通路与会话解析复用宿主唯一实现。
+    # 委派面:knowledge/recall 声明为 agent 引用——模型看到名为 knowledge/recall 的工具,
+    # 工具面是被委派 agent 自己的 tools[],描述从 description_file 热载。
     tools:
       - { kind: tool, id: send }
+      - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
+      - { kind: agent, agent: recall, event_params: [event_keys] }
     # 看门狗收尾轮(声明即 opt-in;不声明=无界,与未接此键时完全一致):
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
@@ -73,15 +89,26 @@ agents:
     model: deepseek-flash
     system_prompt:
       files: [knowledge_agent.md, knowledge_backend.md]
+    # 知识面:skill_dirs 是技能仓根,read_root 限定 read_file 的沙箱根。
+    # 三工具复用 trpc skill/file 面(skill_search/skill_load/read_file),不自行造轮。
+    skill_dirs: [skills]
+    read_root: .
+    tools:
+      - { kind: tool, id: skill_search }
+      - { kind: tool, id: skill_load }
+      - { kind: tool, id: read_file }
     # 待接线:memory / reasoning_effort / max_tool_iterations / max_tokens / compress_threshold
-    #         以及工具面(skill_*/mcp_*/duckduckgo_search/memory_query/read_file)
+    #         以及 mcp_*/duckduckgo_search/memory_query
 
   # ---- Recall:记忆检索子 Agent ----
   recall:
     system_prompt:
       files: [recall_agent.md]      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
     # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
-    # 检索与原文读取走 memory 的既有读面,分区授权取本 agent 的 ID。
+    # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 走已提交
+    # 存储的观察表,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
+    # 走宿主自持的 relation 账本(运行时本身不维护 relations)。不声明 storage 时读面为空,
+    # 调用即具名拒绝(recall: the deployment wires no read face)。
     tools:
       - { kind: tool, id: recall_query }
       - { kind: tool, id: recall_get }

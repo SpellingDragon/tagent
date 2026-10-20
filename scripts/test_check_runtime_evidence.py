@@ -128,8 +128,8 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["counts"]["scenarios_covered"], 12)
-        self.assertEqual(payload["counts"]["scenarios_required"], 12)
+        self.assertEqual(payload["counts"]["scenarios_covered"], 15)
+        self.assertEqual(payload["counts"]["scenarios_required"], 15)
         self.assertEqual(payload["extra"]["scope"], "complete")
         self.assertEqual(payload["extra"]["remaining_required"], [])
         self.assertIsNone(payload["productVerified"])
@@ -189,7 +189,7 @@ class EvidenceTest(unittest.TestCase):
         code, out, err = run_checker("--contract", str(REAL_CONTRACT), "--check-contract", "--json")
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["scenario_count"], 12)
+        self.assertEqual(payload["counts"]["scenario_count"], 15)
 
     def test_contract_only_mode_with_plan_graph(self):
         graph = REPO / "openspec" / "changes" / "archive" / "2026-10-18-runtime-rebuild" / "task-graph.json"
@@ -380,7 +380,7 @@ class EvidenceTest(unittest.TestCase):
         path = self.write("contract9.json", contract)
         code, out, _ = run_checker("--contract", str(path), "--check-contract", "--json")
         self.assertNotEqual(code, 0)
-        self.assertIn("expected 12 golden scenarios", out)
+        self.assertIn("expected 15 golden scenarios", out)
 
     def test_placeholder_observation_is_rejected(self):
         contract = load_contract()
@@ -521,8 +521,8 @@ class EvidenceTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["extra"]["scope"], "deterministic")
         self.assertEqual(payload["extra"]["remaining_required"], ["S10"])
-        self.assertEqual(payload["counts"]["scenarios_required"], 11)
-        self.assertEqual(payload["counts"]["scenarios_verified"], 11)
+        self.assertEqual(payload["counts"]["scenarios_required"], 14)
+        self.assertEqual(payload["counts"]["scenarios_verified"], 14)
         self.assertEqual(payload["counts"]["scope_is_complete"], 0)
         self.assertIsNone(payload["productVerified"])
 

@@ -189,7 +189,12 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
 	l.observeReady(ctx, inv)
 	history := l.sessionHistory(inv.Address)
-	transcript := append(append([]model.Message(nil), history...), aggregateReady(inv.Ready)...)
+	ready, err := aggregateReady(inv.Ready)
+	if err != nil {
+		return turn, err
+	}
+	transcript := append(append([]model.Message(nil), history...), ready...)
+	transcript = append(transcript, l.progressNotes(inv.InvocationID)...)
 	l.recordEpisode(ctx, inv)
 	inputs := readyEventIDs(inv.Ready)
 	policy := l.finalRound()
@@ -239,16 +244,22 @@ func consumerDebug(format string, args ...any) {
 	trpclog.Default.Debugf(format, args...)
 }
 
-// Backflow admits one settled notification of a call into the intake of the
-// invocation that issued that call, so it drives that invocation's next
-// decision and no other. A non-terminal notification carries no result to pair
-// and is ignored here. The settled delivery commits as the delivery fact of the
+// Backflow admits one notification of a call into the intake of the invocation
+// that issued that call, so it drives that invocation's next decision and no
+// other. A progress notification is admitted into that invocation's notification
+// lane as input material: it reports in-flight work, so it answers no call, parks
+// no result and is read by the next decision of the range as the material it is.
+// A non-terminal notification that is not progress carries no result to pair and
+// is ignored here. The settled delivery commits as the delivery fact of the
 // range before it is handed on, so the delivery boundary of a call is observed
 // as the fact it is; the After pass of that fact runs beside the notification
 // rather than under the cancellation of the caller that delivered it, because
 // observation is a bypass.
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
+	case task.NoticeProgress:
+		l.intakeFor(invocationID).notify(notice)
+		return
 	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
 	default:
 		return
@@ -834,14 +845,15 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 }
 
 // intake is one invocation's backflow intake: the address its range runs at,
-// the settled tool messages that arrived before their wait began, and the waits
-// of the calls still running. A notification of one invocation never reaches the
-// intake of another.
+// the settled tool messages that arrived before their wait began, the waits of
+// the calls still running, and the progress notifications the range has not read
+// yet. A notification of one invocation never reaches the intake of another.
 type intake struct {
-	mu      sync.Mutex
-	address event.Address
-	waiters map[event.TaskID][]chan delivered
-	arrived map[event.TaskID][]delivered
+	mu       sync.Mutex
+	address  event.Address
+	waiters  map[event.TaskID][]chan delivered
+	arrived  map[event.TaskID][]delivered
+	notified []task.Notice
 }
 
 // setAddress records the address the range of this intake runs at, so the
@@ -889,6 +901,54 @@ func (in *intake) deliver(taskID event.TaskID, item delivered) {
 	in.arrived[taskID] = append(in.arrived[taskID], item)
 }
 
+// notify parks one progress notification in the notification lane of the intake,
+// where the next decision of the range reads it as input material: the progress
+// of a call answers no call, so it neither fills a wait nor parks a result.
+func (in *intake) notify(notice task.Notice) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.notified = append(in.notified, notice)
+}
+
+// takeNotified hands on the progress notifications the range has not read yet and
+// leaves the notification lane empty, so the progress of a call reaches exactly
+// one decision of its range.
+func (in *intake) takeNotified() []task.Notice {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if len(in.notified) == 0 {
+		return nil
+	}
+	taken := in.notified
+	in.notified = nil
+	return taken
+}
+
+// progressNotes reads the progress notifications of one invocation as the input
+// material the next decision of its range carries: one user message per report,
+// none of them answering a call. The lane is emptied as it is read.
+func (l *Loop) progressNotes(invocationID event.InvocationID) []model.Message {
+	notified := l.intakeFor(invocationID).takeNotified()
+	if len(notified) == 0 {
+		return nil
+	}
+	notes := make([]model.Message, 0, len(notified))
+	for _, notice := range notified {
+		notes = append(notes, progressNoteOf(notice))
+	}
+	return notes
+}
+
+// progressNoteOf renders one progress notification as the input material its
+// range reads: a user message naming the task and the round it reports in, with
+// no tool identity, because the report of in-flight work answers no call.
+func progressNoteOf(notice task.Notice) model.Message {
+	return model.Message{
+		Role:    model.RoleUser,
+		Content: fmt.Sprintf("tagent: task %s reports progress in round %d", notice.TaskID, notice.Round),
+	}
+}
+
 // await waits for the settled tool result of one task and reports whether one
 // arrived before the context ended.
 func (in *intake) await(ctx context.Context, taskID event.TaskID) (delivered, bool) {
@@ -914,17 +974,23 @@ func (in *intake) await(ctx context.Context, taskID event.TaskID) (delivered, bo
 // messages of its next request, in the order the session admitted it: the
 // native message of each event is kept as it stands, so a multi-tool assistant
 // message and its per-call paired tool messages survive untouched. Only a
-// message carrying no role of its own is filled from the frozen event type.
-func aggregateReady(ready []event.Event) []model.Message {
+// message carrying no role of its own is filled from the frozen event type, and
+// an event type the frozen table does not declare refuses the aggregation by
+// name instead of rendering under a fallback role.
+func aggregateReady(ready []event.Event) ([]model.Message, error) {
 	msgs := make([]model.Message, 0, len(ready))
 	for _, ev := range ready {
 		msg := ev.Message
 		if msg.Role == "" {
-			msg.Role = RoleOf(ev.Type)
+			role, err := RoleOf(ev.Type)
+			if err != nil {
+				return nil, err
+			}
+			msg.Role = role
 		}
 		msgs = append(msgs, msg)
 	}
-	return msgs
+	return msgs, nil
 }
 
 // assistantOf projects the assistant message one reduced body carries, keeping

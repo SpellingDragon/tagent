@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "change": "runtime-rebuild",
-  "description": "runtime-rebuild 的 12 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID/时间/CallID。**关联/工件键（dict/list 值）同样由 runner 从正式 API 输出派生，不得照抄本档 expected 填报；`event_refs` 为 runner 自报，不构成真伪/来源认证。** S03 的 `model_message_roles` 为框架级 Role 序列，按产品真实 6 消息形态固定（assistant 携双 call＋2 条受理回执 `tool`＋2 条后台观察 `user`，即受理与观察分立；场景 call 数冻结为 2；供应商 role 映射待 G1，不在此冻结）；S07 只要求引用互不覆盖与内容相等，**不强制去重优化**；S08 的 `blocker_detail_rows[0]` 取自「通知欠给已关闭实例、未投递被保留」这一真实构造（**不是**存储降级）：`advancer` 取产品闭集词表 `executor`/`diagnosis`/`explicit-stop`/`notice-transport`（是「下一推进方类别」，不是任务 id），`blocker` 是 owner 原样记录的自由文本（**已知观测面欠账**：该自由文本仍落在身份轴，闭环需在产品侧给稳定 code 或把该字段降维，未在本轮改动）；S10 保留 `resource` scope 与真实 SFT 制品门，非空/形状对齐不预设具体批次或制品。**S03 的 `requested_calls`/`receipts`/`backgrounds` 与受理/后台有界内容标记取自隔离工具 fixture 的固定返回值（call→task 为 1:1，decision→call 为 **1:N**：一次决策的 assistant 消息可携带多个 call，故两条 receipt 同记 issuing decision `decision-a`；非观察器填充、不以生产串 ID 重命名为正确结果）；S10 的 capture/seal/export/sample/episode 为规范化工件关系记录并接真实 consumer 输入，labels/mask 以形状非空与值合法性断言（非仅字段存在）。这些格式只作观测规范化合同，不冻结产品 API/schema。**",
+  "description": "runtime-rebuild 的 15 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID/时间/CallID。**关联/工件键（dict/list 值）同样由 runner 从正式 API 输出派生，不得照抄本档 expected 填报；`event_refs` 为 runner 自报，不构成真伪/来源认证。** S03 的 `model_message_roles` 为框架级 Role 序列，按产品真实 6 消息形态固定（assistant 携双 call＋2 条受理回执 `tool`＋2 条后台观察 `user`，即受理与观察分立；场景 call 数冻结为 2；供应商 role 映射待 G1，不在此冻结）；S07 只要求引用互不覆盖与内容相等，**不强制去重优化**；S08 的 `blocker_detail_rows[0]` 取自「通知欠给已关闭实例、未投递被保留」这一真实构造（**不是**存储降级）：`advancer` 取产品闭集词表 `executor`/`diagnosis`/`explicit-stop`/`notice-transport`（是「下一推进方类别」，不是任务 id），`blocker` 是 owner 原样记录的自由文本（**已知观测面欠账**：该自由文本仍落在身份轴，闭环需在产品侧给稳定 code 或把该字段降维，未在本轮改动）；S10 保留 `resource` scope 与真实 SFT 制品门，非空/形状对齐不预设具体批次或制品。**S03 的 `requested_calls`/`receipts`/`backgrounds` 与受理/后台有界内容标记取自隔离工具 fixture 的固定返回值（call→task 为 1:1，decision→call 为 **1:N**：一次决策的 assistant 消息可携带多个 call，故两条 receipt 同记 issuing decision `decision-a`；非观察器填充、不以生产串 ID 重命名为正确结果）；S10 的 capture/seal/export/sample/episode 为规范化工件关系记录并接真实 consumer 输入，labels/mask 以形状非空与值合法性断言（非仅字段存在）。这些格式只作观测规范化合同，不冻结产品 API/schema。**",
   "evidence_contract": {
     "note": "上游 scenario runner 的正式入口产物应满足下列字段；检查器只做明示校验，不把它当作防伪或加密证明——runner/source_fingerprint/execution 均由 runner 自报，不声称来源已认证。本块字段集与 check_runtime_evidence.py 的强制集自洽（声明少于强制即失败）。",
     "required_fields": [
@@ -35,7 +35,7 @@
     "sequence_semantics": "逐条 record 的 test_package/test_name 必须与合同逐字一致；test-log 允许合法并行（run→pause→cont→pass），但每个 (包,用例) 必须有终止事件、子测试不得 skip/fail、包级唯一 start/pass、无包级 fail。"
   },
   "scopes": {
-    "note": "验收集登记（唯一、全 12 场景各归一标签）。check_runtime_evidence.py 默认 --scope complete（严格，全 12 必验）；--scope deterministic 只验确定性标签场景并输出 scope 与 remaining_required（把资源场景列为显式欠账，不报全通过，也不得用合成资源用例凑数）。合同始终含全 12 场景。",
+    "note": "验收集登记（唯一、全 15 场景各归一标签）。check_runtime_evidence.py 默认 --scope complete（严格，全 15 必验）；--scope deterministic 只验确定性标签场景并输出 scope 与 remaining_required（把资源场景列为显式欠账，不报全通过，也不得用合成资源用例凑数）。合同始终含全 15 场景。",
     "labels": [
       "deterministic",
       "resource"
@@ -445,6 +445,80 @@
         "explicit_source_assembled": true,
         "both_sources_refused_by_name": true,
         "both_sources_admitted_tasks": 0
+      }
+    },
+    {
+      "id": "S13",
+      "title": "上下文闭集：静态头（prompt/skill 结构序）→折叠摘要→投影→环境块→transcript（W1.3 布局），每个消息恰属一部件且五部件齐全",
+      "task_ids": [
+        "03.4",
+        "02.5"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario13ContextClosedSet",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/host:TestEnvironmentBlockNamesTheAvailableFaces",
+        "tests/integration/history:TestAgeBandsReachTheRequest"
+      ],
+      "observations": {
+        "static_head_order": [
+          "prompt",
+          "skill"
+        ],
+        "folded_summary_leads_projection": true,
+        "environment_block_before_transcript": true,
+        "part_count_closed": 5
+      }
+    },
+    {
+      "id": "S14",
+      "title": "三龄段：段龄折叠产出（新→中一段进程折、中+老→老一份历史摘要）且摘要领投影；阈值不达整投影原样未动",
+      "task_ids": [
+        "03.4"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario14AgeBandProducts",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "memory/replay:TestAgeFoldFoldsTheNewBandIntoOneProduct",
+        "memory/replay:TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary",
+        "memory/replay:TestAgeFoldWaitsForTheVolumeThreshold"
+      ],
+      "observations": {
+        "age_fold_products": {
+          "segment_fold": 1,
+          "history_summary": 1
+        },
+        "history_summary_leads": true,
+        "under_threshold_untouched": true
+      }
+    },
+    {
+      "id": "S15",
+      "title": "task 逻辑状态：静默逐级识别 watch→stable→suspect（每级报一次）＋progress 回调抵达下一次决策且不答调用",
+      "task_ids": [
+        "02.2",
+        "02.5"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario15TaskLogicalStatus",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "runtime/task:TestLogicalStatusRecognition",
+        "runtime/agent:TestBackflowNotificationLanes",
+        "tests/integration/execution:TestProgressNotificationReachesTheAgent"
+      ],
+      "observations": {
+        "logical_status_ladder": [
+          "watch",
+          "stable",
+          "suspect"
+        ],
+        "progress_reaches_decision": true
       }
     }
   ]

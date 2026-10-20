@@ -118,23 +118,42 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 // on the projection's own settle account, so the fact chain it replayed is
 // exactly as it stood.
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error) {
+	return p.AssembleBudgetPrefix(ctx, budget, -1)
+}
+
+// AssembleBudgetPrefix assembles the leading prefix of the projection under the
+// same budget rules, so a consumer presents the material that has ended while
+// the material still in flight stays with the transcript that carries it: a
+// negative prefix assembles the whole projection, and a prefix past its length
+// assembles what it holds.
+func (p *ReplayProjection) AssembleBudgetPrefix(ctx context.Context, budget, prefix int) ([]ProjectionEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if budget < 1 {
 		return nil, ErrBudgetInvalid
 	}
+	return p.assembleBudgetLocked(budget, prefix), nil
+}
+
+// assembleBudgetLocked runs the assembly over the leading prefix of the entries
+// under the recorded decisions and the remaining budget.
+func (p *ReplayProjection) assembleBudgetLocked(budget, prefix int) []ProjectionEntry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	entries := p.entries
+	if prefix >= 0 && prefix < len(entries) {
+		entries = entries[:prefix]
+	}
 	limit := budget * budgetCharsPerToken
 	used := 0
-	out := make([]ProjectionEntry, 0, len(p.entries)+1)
+	out := make([]ProjectionEntry, 0, len(entries)+1)
 	if p.recovery != nil {
 		hint := *p.recovery
 		out = append(out, hint)
 		used += len(hint.Content)
 	}
-	for _, entry := range p.entries {
+	for _, entry := range entries {
 		if entry.Key != "" {
 			if decision, recorded := p.decisions[entry.Key]; recorded {
 				view := p.viewOf(decision, entry)
@@ -179,7 +198,7 @@ func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]Pr
 			continue
 		}
 	}
-	return out, nil
+	return out
 }
 
 // RecordDecision records the presentation decision of one entry and reshapes

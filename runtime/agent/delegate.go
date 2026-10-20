@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -165,12 +167,13 @@ func identityOf(notice task.Notice) noticeIdentity {
 // whole delegated turn, the notification identities already recorded, and the
 // terminal waiting for the task's obligations to clear before it is reported.
 type delegationEntry struct {
-	record  Delegation
-	pin     *state.BindingHandle
-	round   int64
-	seen    map[noticeIdentity]bool
-	pending task.Status
-	booked  bool
+	record   Delegation
+	pin      *state.BindingHandle
+	round    int64
+	seen     map[noticeIdentity]bool
+	pending  task.Status
+	booked   bool
+	admitted time.Time
 }
 
 // Delegator is one agent's sub-agent delegation ledger. It owns the call
@@ -215,9 +218,11 @@ func NewDelegator(tasks DelegationTasks, holder state.Borrow, instance event.Ins
 // - A dedup added no obligation: only this admission's pre-registration is withdrawn, and the obligations of the first admission stay untouched.
 func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.AdmissionReceipt, error) {
 	if req.InvocationID == "" || req.DecisionID == "" || req.CallID == "" {
+		delegateDebug("tagent: delegation refused result=unnamed call=%q agent=%q", req.CallID, req.Target.AgentID)
 		return task.AdmissionReceipt{}, ErrDelegationIdentityMissing
 	}
 	if !req.Target.IsComplete() {
+		delegateDebug("tagent: delegation refused result=address call=%s agent=%s", req.CallID, req.Target.AgentID)
 		return task.AdmissionReceipt{}, ErrDelegationAddressIncomplete
 	}
 	pin, err := d.holder.BorrowDerived(ctx, state.BindingRef{
@@ -226,6 +231,7 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 		Generation: req.Ref.Generation,
 	})
 	if err != nil {
+		delegateDebug("tagent: delegation refused result=pin call=%s agent=%s err=%v", req.CallID, req.Target.AgentID, err)
 		return task.AdmissionReceipt{}, err
 	}
 	d.mu.Lock()
@@ -251,13 +257,16 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 		d.withdrawBooking()
 		_ = pin.Release(ctx)
 		if err != nil {
+			delegateDebug("tagent: delegation refused result=admission call=%s agent=%s err=%v", req.CallID, req.Target.AgentID, err)
 			return receipt, err
 		}
+		delegateDebug("tagent: delegation refused result=admission call=%s agent=%s", req.CallID, req.Target.AgentID)
 		return receipt, ErrDelegationAdmissionRefused
 	}
 	if receipt.Kind != task.AdmissionFresh {
 		d.withdrawBooking()
 		_ = pin.Release(ctx)
+		delegateDebug("tagent: delegation admitted result=dedup task=%s agent=%s call=%s", receipt.TaskID, req.Target.AgentID, req.CallID)
 		return receipt, nil
 	}
 	record := req
@@ -266,13 +275,16 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 	record.Progress = nil
 	d.mu.Lock()
 	d.entries[receipt.TaskID] = &delegationEntry{
-		record: record,
-		pin:    pin,
-		round:  1,
-		seen:   map[noticeIdentity]bool{},
-		booked: true,
+		record:   record,
+		pin:      pin,
+		round:    1,
+		seen:     map[noticeIdentity]bool{},
+		booked:   true,
+		admitted: time.Now(),
 	}
 	d.mu.Unlock()
+	delegateDebug("tagent: delegation admitted result=fresh task=%s agent=%s call=%s invocation=%s",
+		receipt.TaskID, req.Target.AgentID, req.CallID, req.InvocationID)
 	return receipt, nil
 }
 
@@ -330,16 +342,20 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
 	case task.StatusCancelled:
 		kind = task.NoticeCancelled
 	default:
+		delegateDebug("tagent: delegation refused result=status task=%s status=%s", taskID, delegationStatusName(status))
 		return task.Notice{}, fmt.Errorf("%w: %v", ErrDelegationNotTerminal, status)
 	}
 	d.mu.Lock()
 	entry, ok := d.entries[taskID]
 	if !ok {
 		d.mu.Unlock()
+		delegateDebug("tagent: delegation refused result=unknown task=%s", taskID)
 		return task.Notice{}, fmt.Errorf("%w: %s", ErrDelegationUnknown, taskID)
 	}
 	if entry.pending != task.StatusUnknown || isTerminalStatus(entry.record.Status) {
+		standing := entry.record.Status
 		d.mu.Unlock()
+		delegateDebug("tagent: delegation refused result=terminal task=%s status=%s", taskID, delegationStatusName(standing))
 		return task.Notice{}, fmt.Errorf("%w: %s", ErrDelegationTerminal, taskID)
 	}
 	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact}
@@ -354,9 +370,11 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
 
 	result, err := d.tasks.Advance(ctx, taskID, status, mutation, []task.Envelope{envelope})
 	if err != nil {
+		delegateDebug("tagent: delegation refused result=advance task=%s err=%v", taskID, err)
 		return task.Notice{}, err
 	}
 	if result != task.CommitCommitted {
+		delegateDebug("tagent: delegation refused result=commit task=%s outcome=%v", taskID, result)
 		return task.Notice{}, fmt.Errorf("%w: %v", ErrDelegationCommitRefused, result)
 	}
 	d.mu.Lock()
@@ -368,9 +386,26 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
 	d.mu.Unlock()
 
 	if err := d.tasks.Flush(ctx, taskID); err != nil {
+		delegateDebug("tagent: delegation settle withheld task=%s err=%v", taskID, err)
 		return notice, err
 	}
-	return notice, d.land(ctx, taskID)
+	if err := d.land(ctx, taskID); err != nil {
+		return notice, err
+	}
+	if !d.terminalReported(taskID) {
+		delegateDebug("tagent: delegation settle withheld task=%s status=%s", taskID, delegationStatusName(status))
+	}
+	return notice, nil
+}
+
+// terminalReported reports whether the record of one delegation already stands
+// at a terminal status, so a settle that landed is told apart from one the open
+// obligations still withhold.
+func (d *Delegator) terminalReported(taskID event.TaskID) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.entries[taskID]
+	return ok && isTerminalStatus(entry.record.Status)
 }
 
 // Reconcile attempts the landing of one delegation again and reports the status
@@ -393,7 +428,9 @@ func (d *Delegator) Reconcile(ctx context.Context, taskID event.TaskID) (task.St
 // cleared. While any obligation is still open the terminal stays withheld and
 // the record stands where it was; when none is left, the terminal is recorded,
 // the delivery reconciliation barrier is closed and the initiating generation
-// is released.
+// is released. The terminal that lands here is the one line the delegation face
+// writes at INFO, from the settle of the caller and from a later reconcile
+// alike: it carries the task, the agent and the elapsed life of the call.
 func (d *Delegator) land(ctx context.Context, taskID event.TaskID) error {
 	d.mu.Lock()
 	entry, ok := d.entries[taskID]
@@ -415,8 +452,10 @@ func (d *Delegator) land(ctx context.Context, taskID event.TaskID) error {
 	}
 	d.mu.Lock()
 	var pin *state.BindingHandle
+	landed := task.StatusUnknown
 	if entry.pending != task.StatusUnknown {
 		entry.record.Status = entry.pending
+		landed = entry.pending
 		entry.pending = task.StatusUnknown
 		if entry.booked {
 			entry.booked = false
@@ -425,7 +464,13 @@ func (d *Delegator) land(ctx context.Context, taskID event.TaskID) error {
 		pin = entry.pin
 		entry.pin = nil
 	}
+	agentID := entry.record.Target.AgentID
+	elapsed := time.Since(entry.admitted)
 	d.mu.Unlock()
+	if landed != task.StatusUnknown {
+		delegateInfo("tagent: delegation settled task=%s agent=%s status=%s elapsed=%s",
+			taskID, agentID, delegationStatusName(landed), elapsed.Round(time.Microsecond))
+	}
 	if pin != nil {
 		return pin.Release(ctx)
 	}
@@ -521,6 +566,64 @@ func (d *Delegator) withdrawBookingLocked() {
 // isTerminalStatus reports whether one status is a terminal outcome.
 func isTerminalStatus(status task.Status) bool {
 	return status == task.StatusSettled || status == task.StatusFailed || status == task.StatusCancelled
+}
+
+// delegationStatusName renders one task status as the name an observation line
+// carries, so a line names the phase it reports instead of an ordinal.
+func delegationStatusName(status task.Status) string {
+	switch status {
+	case task.StatusAccepted:
+		return "accepted"
+	case task.StatusRunning:
+		return "running"
+	case task.StatusProgress:
+		return "progress"
+	case task.StatusSettled:
+		return "settled"
+	case task.StatusFailed:
+		return "failed"
+	case task.StatusCancelled:
+		return "cancelled"
+	case task.StatusAwaitingApproval:
+		return "awaiting_approval"
+	default:
+		return "unknown"
+	}
+}
+
+// delegateDebug renders one line of the delegation face at DEBUG: the admission
+// the ledger admitted, deduplicated or refused, and the settle it withheld
+// while an obligation is still open. A line carries the task, the agent, the
+// native call identity and the outcome word — labels and identities only.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed delegation.
+// MUST keep one line per admission, per refusal and per withheld settle.
+// MUST NOT render the delegated prompt, the target input or the model output.
+func delegateDebug(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
+}
+
+// delegateInfo renders the one line a delegation writes at INFO when its
+// terminal really lands: the task, the agent whose turn ran, the terminal
+// status and the elapsed life of the call from admission to the report. A
+// delegation is a turn of another agent, so its completion belongs beside the
+// turn boundaries rather than in the per-fact detail.
+//
+// The redline list (3 rules):
+// MUST be written once per landed terminal, whatever entry landed it.
+// MUST stay a bypass: a failing logger is a missing line, never a withheld terminal.
+// MUST NOT render the delegated prompt, the target input or the model output.
+func delegateInfo(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Infof(format, args...)
 }
 
 // turnBorrow is the borrowing face of one delegated turn: every borrow names

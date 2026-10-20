@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -89,6 +90,10 @@ type memoryTask struct {
 	stops           []StopEvidence
 	handoff         *HandoffTarget
 	handoffRecord   HandoffRecord
+	admittedAt      time.Time
+	changedAt       time.Time
+	runSince        time.Time
+	reported        LogicalStatus
 }
 
 // MemoryRegistry is the in-memory task registry: it admits a task declaration, moves a
@@ -103,6 +108,7 @@ type MemoryRegistry struct {
 	limit     int
 	last      int64
 	tasks     map[event.TaskID]*memoryTask
+	policy    Policy
 }
 
 // The registry satisfies the task registry port.
@@ -117,6 +123,7 @@ func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...Regis
 		admission: admission,
 		seq:       NewNoticeSequencer(),
 		tasks:     map[event.TaskID]*memoryTask{},
+		policy:    DefaultPolicy,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -149,12 +156,15 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 		return AdmissionReceipt{CallID: spec.CallID, Accepted: false, Kind: AdmissionRejected}, ErrConcurrencyLimit
 	}
 	r.last++
+	admitted := time.Now()
 	taskID := event.TaskID(fmt.Sprintf("task-%d", r.last))
 	entry := &memoryTask{
-		spec:      spec,
-		status:    StatusAccepted,
-		round:     1,
-		mutations: map[MutationID]CommitRecord{},
+		spec:       spec,
+		status:     StatusAccepted,
+		round:      1,
+		mutations:  map[MutationID]CommitRecord{},
+		admittedAt: admitted,
+		changedAt:  admitted,
 	}
 	mutation := MutationID("admit:" + string(taskID))
 	record := CommitRecord{
@@ -293,6 +303,7 @@ func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTas
 	if result != CommitCommitted {
 		return result, false, err
 	}
+	entry.markMovement(record.Status, time.Now())
 	entry.status = record.Status
 	entry.revision = record.ExpectedRevision + 1
 	entry.mutations[record.MutationID] = record

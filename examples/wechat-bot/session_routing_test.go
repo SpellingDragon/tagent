@@ -253,7 +253,7 @@ func newRoutingRig(t *testing.T, doc *hostDocument) *routingRig {
 	}
 
 	out := &mockOutbound{}
-	host, err := assembleHostFrom(context.Background(), doc, nil, NewSeenStore(t.TempDir(), slog.Default()), seam, natives)
+	host, err := assembleHostFrom(context.Background(), doc, nil, NewSeenStore(t.TempDir(), slog.Default()), seam, natives, nil)
 	if err != nil {
 		t.Fatalf("assemble the host: %v", err)
 	}

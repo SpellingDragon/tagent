@@ -51,6 +51,12 @@ type canonicalAgent struct {
 	Files      []canonicalFileRef   `json:"files"`
 	Params     map[string]float64   `json:"params"`
 	FinalRound *canonicalFinalRound `json:"final_round,omitempty"`
+	// ReplayBudget and EnvironmentBlock are the request-context switches of the
+	// agent: an agent that declares neither carries no entry of its own, so its
+	// canonical form names no switch and its fingerprint stays the one the
+	// declaration surface had before the switches existed.
+	ReplayBudget     int  `json:"replay_budget,omitempty"`
+	EnvironmentBlock bool `json:"environment_block,omitempty"`
 }
 
 // canonicalFinalRound is one agent's watchdog budget in canonical field order.
@@ -93,15 +99,17 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 	out := make([]canonicalAgent, 0, len(in))
 	for _, a := range in {
 		out = append(out, canonicalAgent{
-			ID:         a.ID,
-			ParentID:   a.ParentID,
-			Model:      a.Model,
-			Tools:      canonicalToolRefs(a.Tools),
-			Plugins:    canonicalStrings(a.Plugins),
-			TaskPolicy: a.TaskPolicy,
-			Files:      canonicalFileRefs(a.Files),
-			Params:     canonicalFloatMap(a.Params),
-			FinalRound: canonicalFinalRoundOf(a.FinalRound),
+			ID:               a.ID,
+			ParentID:         a.ParentID,
+			Model:            a.Model,
+			Tools:            canonicalToolRefs(a.Tools),
+			Plugins:          canonicalStrings(a.Plugins),
+			TaskPolicy:       a.TaskPolicy,
+			Files:            canonicalFileRefs(a.Files),
+			Params:           canonicalFloatMap(a.Params),
+			FinalRound:       canonicalFinalRoundOf(a.FinalRound),
+			ReplayBudget:     a.ReplayBudget,
+			EnvironmentBlock: a.EnvironmentBlock,
 		})
 	}
 	return out

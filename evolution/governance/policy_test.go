@@ -1,9 +1,14 @@
 package governance
 
 import (
+	"context"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -153,4 +158,267 @@ func TestGovernanceRulingInvariants(t *testing.T) {
 			t.Fatalf("denial result = %+v, want the paired result bound to the same call", refused.Denial.Result)
 		}
 	})
+}
+
+// TestApprovalRulingObservation pins the lines the approval channel writes for every ruling the record answers.
+// - an approved, a denied and an expired request each write one INFO line carrying the digest, the ruling and the approver
+// - a call beside no approval channel writes its unapprovable ruling at INFO
+// - a pending wait writes one DEBUG line and keeps the INFO stream free of it
+// - a logger that fails changes no ruling: the bypass drops the line and keeps the decision
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestApprovalRulingObservation(t *testing.T) {
+	ctx := context.Background()
+	call := invariantRulingCall("call-1", "shell")
+	digest := approval.ArgsDigest(call.Function.Arguments)
+
+	t.Run("an approved ruling writes its line beside the approver", func(t *testing.T) {
+		observer := &approvalObserver{}
+		defer watchApprovalLog(t, observer)()
+		manager := approval.NewApprovalManager("", time.Hour)
+		if _, err := manager.Request(ctx, "approval-1", call.Function.Name, call.Function.Arguments, plugin.RiskCritical, "no-shell", "shell needs a review"); err != nil {
+			t.Fatalf("register the approval request: %v", err)
+		}
+		if _, err := manager.Decide("approval-1", approval.ApprovalApproved, "alice"); err != nil {
+			t.Fatalf("approve the request: %v", err)
+		}
+		ruling, err := Open(WithApprovals(manager), WithRules(invariantMatchingRule("shell needs a review"))).
+			Judge(plugin.CallPass{Final: call, Risk: plugin.RiskCritical})
+		if err != nil {
+			t.Fatalf("judge the approved call: %v", err)
+		}
+		if ruling.Refused() || ruling.Disposition != plugin.DispositionRecord {
+			t.Fatalf("ruling = %+v, want the approved call recorded", ruling)
+		}
+		if !observer.mentions("info", "approval ruled", "tool=shell", "digest="+digest, "ruling=approved", "by=alice") {
+			t.Fatalf("info lines = %v, want the approved ruling beside its digest and approver", observer.all())
+		}
+	})
+
+	t.Run("a denied ruling writes its line beside the approver", func(t *testing.T) {
+		observer := &approvalObserver{}
+		defer watchApprovalLog(t, observer)()
+		manager := approval.NewApprovalManager("", time.Hour)
+		if _, err := manager.Request(ctx, "approval-1", call.Function.Name, call.Function.Arguments, plugin.RiskCritical, "", ""); err != nil {
+			t.Fatalf("register the approval request: %v", err)
+		}
+		if _, err := manager.Decide("approval-1", approval.ApprovalDenied, "bob"); err != nil {
+			t.Fatalf("deny the request: %v", err)
+		}
+		ruling, err := Open(WithApprovals(manager)).Judge(plugin.CallPass{Final: call, Risk: plugin.RiskCritical})
+		if err != nil {
+			t.Fatalf("judge the denied call: %v", err)
+		}
+		if !ruling.Refused() {
+			t.Fatalf("ruling = %+v, want the denied call refused", ruling)
+		}
+		if !observer.mentions("info", "approval ruled", "digest="+digest, "ruling=denied", "by=bob") {
+			t.Fatalf("info lines = %v, want the denied ruling beside its digest and approver", observer.all())
+		}
+	})
+
+	t.Run("an expired request writes its line instead of a standing approval", func(t *testing.T) {
+		observer := &approvalObserver{}
+		defer watchApprovalLog(t, observer)()
+		clock := newObservationClock()
+		manager := approval.NewApprovalManager("", time.Minute, approval.WithApprovalClock(clock.Now))
+		request, err := manager.Request(ctx, "approval-1", call.Function.Name, call.Function.Arguments, plugin.RiskCritical, "", "")
+		if err != nil {
+			t.Fatalf("register the approval request: %v", err)
+		}
+		clock.advance(2 * time.Minute)
+		ruling, err := Open(WithApprovals(manager)).Judge(plugin.CallPass{Final: call, Risk: plugin.RiskCritical})
+		if err != nil {
+			t.Fatalf("judge the expired call: %v", err)
+		}
+		if ruling.Disposition != plugin.DispositionHold || ruling.Refused() {
+			t.Fatalf("ruling = %+v, want the expired call to wait instead of proceeding", ruling)
+		}
+		if !observer.mentions("info", "approval ruled", "digest="+digest, "ruling=expired", fmt.Sprintf("expires_ms=%d", request.ExpiresMs)) {
+			t.Fatalf("info lines = %v, want the expired ruling beside its validity", observer.all())
+		}
+	})
+
+	t.Run("a pending wait writes a debug line and no info line", func(t *testing.T) {
+		observer := &approvalObserver{}
+		defer watchApprovalLog(t, observer)()
+		manager := approval.NewApprovalManager("", time.Hour)
+		if _, err := manager.Request(ctx, "approval-1", call.Function.Name, call.Function.Arguments, plugin.RiskCritical, "", ""); err != nil {
+			t.Fatalf("register the approval request: %v", err)
+		}
+		ruling, err := Open(WithApprovals(manager)).Judge(plugin.CallPass{Final: call, Risk: plugin.RiskCritical})
+		if err != nil {
+			t.Fatalf("judge the pending call: %v", err)
+		}
+		if ruling.Disposition != plugin.DispositionHold {
+			t.Fatalf("disposition = %q, want the pending call held", ruling.Disposition)
+		}
+		if !observer.mentions("debug", "approval awaited", "digest="+digest) {
+			t.Fatalf("debug lines = %v, want the pending wait beside its digest", observer.all())
+		}
+		if observer.mentions("info", "approval ruled") {
+			t.Fatalf("info lines = %v, want the repeated wait kept out of the INFO stream", observer.all())
+		}
+	})
+
+	t.Run("a call beside no approval channel writes its unapprovable ruling", func(t *testing.T) {
+		observer := &approvalObserver{}
+		defer watchApprovalLog(t, observer)()
+		ruling, err := Open().Judge(plugin.CallPass{Final: call, Risk: plugin.RiskCritical})
+		if err != nil {
+			t.Fatalf("judge the unapprovable call: %v", err)
+		}
+		if !ruling.Refused() {
+			t.Fatalf("ruling = %+v, want the unapprovable call refused", ruling)
+		}
+		if !observer.mentions("info", "approval ruled", "tool=shell", "ruling=unavailable") {
+			t.Fatalf("info lines = %v, want the unapprovable ruling named", observer.all())
+		}
+	})
+
+	t.Run("a failing logger changes no ruling", func(t *testing.T) {
+		observer := &approvalObserver{panicsLeft: 1}
+		defer watchApprovalLog(t, observer)()
+		manager := approval.NewApprovalManager("", time.Hour)
+		if _, err := manager.Request(ctx, "approval-1", call.Function.Name, call.Function.Arguments, plugin.RiskCritical, "", ""); err != nil {
+			t.Fatalf("register the approval request: %v", err)
+		}
+		if _, err := manager.Decide("approval-1", approval.ApprovalApproved, "alice"); err != nil {
+			t.Fatalf("approve the request: %v", err)
+		}
+		ruling, err := Open(WithApprovals(manager)).Judge(plugin.CallPass{Final: call, Risk: plugin.RiskCritical})
+		if err != nil {
+			t.Fatalf("judge the approved call beside a failing logger: %v", err)
+		}
+		if ruling.Refused() || ruling.Disposition != plugin.DispositionRecord {
+			t.Fatalf("ruling = %+v, want the approved call recorded beside a failing logger", ruling)
+		}
+	})
+}
+
+// observationClock is the approval clock of the observation checks: it serves the
+// instant it was moved to, so one request can be read past its validity.
+type observationClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+// newObservationClock returns a clock standing at the current instant.
+func newObservationClock() *observationClock {
+	return &observationClock{now: time.Now()}
+}
+
+// Now reports the instant the clock stands at.
+func (c *observationClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// advance moves the clock forward by one span.
+func (c *observationClock) advance(span time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(span)
+}
+
+// approvalObserver is the framework logger the observation checks of this
+// package read the approval face through: it records every line beside its level
+// and refuses the writes its counter still holds by panicking.
+type approvalObserver struct {
+	mu         sync.Mutex
+	lines      []string
+	panicsLeft int
+}
+
+// record takes one line at the named level, or refuses it by panicking.
+func (o *approvalObserver) record(level, text string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.panicsLeft > 0 {
+		o.panicsLeft--
+		panic("the logger refused the write")
+	}
+	o.lines = append(o.lines, level+": "+text)
+}
+
+// Debug records one debug line.
+func (o *approvalObserver) Debug(args ...any) { o.record("debug", fmt.Sprint(args...)) }
+
+// Debugf records one formatted debug line.
+func (o *approvalObserver) Debugf(format string, args ...any) {
+	o.record("debug", fmt.Sprintf(format, args...))
+}
+
+// Info records one info line.
+func (o *approvalObserver) Info(args ...any) { o.record("info", fmt.Sprint(args...)) }
+
+// Infof records one formatted info line.
+func (o *approvalObserver) Infof(format string, args ...any) {
+	o.record("info", fmt.Sprintf(format, args...))
+}
+
+// Warn records one warning line.
+func (o *approvalObserver) Warn(args ...any) { o.record("warn", fmt.Sprint(args...)) }
+
+// Warnf records one formatted warning line.
+func (o *approvalObserver) Warnf(format string, args ...any) {
+	o.record("warn", fmt.Sprintf(format, args...))
+}
+
+// Error records one error line.
+func (o *approvalObserver) Error(args ...any) { o.record("error", fmt.Sprint(args...)) }
+
+// Errorf records one formatted error line.
+func (o *approvalObserver) Errorf(format string, args ...any) {
+	o.record("error", fmt.Sprintf(format, args...))
+}
+
+// Fatal records one fatal line without ending the test binary.
+func (o *approvalObserver) Fatal(args ...any) { o.record("fatal", fmt.Sprint(args...)) }
+
+// Fatalf records one formatted fatal line without ending the test binary.
+func (o *approvalObserver) Fatalf(format string, args ...any) {
+	o.record("fatal", fmt.Sprintf(format, args...))
+}
+
+// all reports every line taken, whatever the level.
+func (o *approvalObserver) all() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.lines...)
+}
+
+// mentions reports whether one line taken at the level carries every fragment.
+func (o *approvalObserver) mentions(level string, fragments ...string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, line := range o.lines {
+		if !strings.HasPrefix(line, level+": ") {
+			continue
+		}
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// watchApprovalLog points the framework logger at the observer for the duration
+// of one check and answers the restore that ends it, so a check reads the lines of
+// its own face and leaves the package logger as it found it.
+func watchApprovalLog(t *testing.T, observer trpclog.Logger) func() {
+	t.Helper()
+	original := trpclog.Default
+	trpclog.Default = observer
+	restore := func() { trpclog.Default = original }
+	t.Cleanup(restore)
+	return restore
 }

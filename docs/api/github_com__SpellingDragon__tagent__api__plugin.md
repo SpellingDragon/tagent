@@ -1,19 +1,22 @@
 package plugin // import "github.com/SpellingDragon/tagent/api/plugin"
 
 Package plugin declares the ordered per-phase pipeline through which tagent
-injects its differentiated capabilities into the framework event flow: the
-pre-execution call transform and risk ruling, and the post-commit observation
-and final presentation.
+injects its differentiated capabilities into the framework event flow:
+the pre-execution call transform and risk ruling, the post-commit observation
+and final presentation, the request-assembly environment injection and the
+compress-request consumption.
 
 A plugin is a registration unit: it reports the phase it serves and implements
 that phase's one narrow interface. The pre-execution faces form one Before
 pass a request runs exactly once; the post-commit faces form the After pass,
-which reads only facts whose canonical commit already happened and answers with
-a Presentation.
+which reads only facts whose canonical commit already happened and answers
+with a Presentation. The two further phases answer their own pass: one request
+assembly asks for its environment block, and one compress request is handed to
+the faces that answer it.
 
-  - the extension-face vocabulary: the phases, the four narrow interfaces,
-    the pipeline that dispatches them, the post-commit observation wiring and
-    the presentation pass;
+  - the extension-face vocabulary: the phases, the narrow interfaces each phase
+    owns, the pipeline that dispatches them, the post-commit observation wiring
+    and the presentation pass;
   - the extension policies at the governance gate: the pre-execution ruling,
     the risk rules, the approval channel, the denial ledger, the goal registry
     and the budget window, each stated in its own file and reaching the pipeline
@@ -106,6 +109,22 @@ type CallPass struct {
     second risk face; the trigger source is stated by the dispatching layer that
     knows what started the call, so a ruling has no hidden input of its own.
 
+type CompressTrigger interface {
+	// TriggerCompress dispatches one filed compress request. A nil error carries the
+	// request forward into the compression that answers it; a non-nil error refuses
+	// it by name, so the material is not compressed and the request stays pending.
+	TriggerCompress(ctx context.Context, request event.CompressRequest) error
+}
+    CompressTrigger is the compress-consumption face: TriggerCompress answers
+    one filed compress request with the compression it owes. The request is the
+    judgment that material is over its bound; the face is the mechanism that
+    answers it.
+
+    The redline list (3 rules): MUST answer the request it was handed:
+    its identity and subject stay as filed. MUST NOT retire the request:
+    the consumer retires it once the products of its compression are committed.
+    MUST NOT compress material no filed request names.
+
 type Decision struct {
 	// Disposition is the ruling for this call.
 	Disposition Disposition
@@ -179,6 +198,31 @@ const (
 	// hold is a wait and is never reported as a denial.
 	DispositionHold Disposition = "hold"
 )
+type EnvironmentInject interface {
+	// InjectEnvironment renders the environment block of one request assembly. A nil
+	// error carries the rendered text; a non-nil error refuses the assembly by name,
+	// so no request is built over a block that failed to render.
+	InjectEnvironment(ctx context.Context, request EnvironmentRequest) (string, error)
+}
+    EnvironmentInject is the request-assembly face: InjectEnvironment renders
+    the dynamic environment material one request carries, and the assembly
+    places that text where its own layout puts it.
+
+    The redline list (3 rules): MUST render the material the request assembly
+    holds at this boundary, and never a snapshot taken earlier. MUST NOT write
+    the runtime it reads or change the request it serves. MUST NOT refuse a
+    request to hide an empty face: an empty face is stated as empty, not as no
+    block.
+
+type EnvironmentRequest struct {
+	// Agent is the agent the request assembly runs as.
+	Agent event.AgentID
+}
+    EnvironmentRequest names the request assembly one environment block is
+    rendered for: the agent the request runs as. The material itself is read
+    by the face from the runtime it holds, so an assembly never has to hand a
+    bundle of its own state across the phase.
+
 type FactLookup interface {
 	// CommittedFact returns the committed fact the identity names. An identity
 	// with no committed fact behind it is an error, never an empty fact.
@@ -200,9 +244,10 @@ type FinalPresenter interface {
     presentation of one fact for its channel and reports the presentation text
     with whether it was dropped.
 
-    The redline list (3 rules): MUST answer the presentation text beside whether
+    The redline list (4 rules): MUST answer the presentation text beside whether
     the channel dropped it. MUST NOT drop a presentation without reporting the
-    drop. MUST NOT retract the committed fact it was rendered from.
+    drop. MUST NOT retract the committed fact it was rendered from. MUST NOT be
+    registered beside a second presenter: one fact carries one presentation.
 
 type Governor interface {
 	// Judge returns the ruling for one tool call before its side effect runs,
@@ -311,6 +356,8 @@ type Phase int
       - PhaseRiskPolicy → RiskAssessor and Governor
       - PhasePostCommitObserve → PostCommitObserver
       - PhaseFinalPresentation → FinalPresenter
+      - PhaseCompressTrigger → CompressTrigger
+      - PhaseEnvironmentInject → EnvironmentInject
 
     The risk phase carries two faces of one ruling: a RiskAssessor renders the
     grade and a Governor renders the one pre-execution ruling over that grade.
@@ -337,6 +384,16 @@ const (
 	// PhaseFinalPresentation renders the final presentation of a fact for its
 	// channel.
 	PhaseFinalPresentation
+
+	// PhaseCompressTrigger is the consumption phase of a compress request: the
+	// filed judgment that material is over its bound is handed to the faces that
+	// answer it with the compression it owes, before the request is retired.
+	PhaseCompressTrigger
+
+	// PhaseEnvironmentInject is the request-assembly phase: the faces render the
+	// dynamic environment material one request carries at the bottom of its
+	// assembly, so what changes with the run never moves the stable prefix.
+	PhaseEnvironmentInject
 )
 type Pipeline struct {
 	// Has unexported fields.
@@ -347,27 +404,31 @@ type Pipeline struct {
 
     The pre-execution faces run as the one Before pass of a tool call; the
     post-commit faces run as the After pass of a committed fact. The pipeline
-    is assembled once per dispatch from the borrowed generation's plugins and is
-    never reassembled mid-request.
+    is assembled once per dispatch from the borrowed generation's plugins and
+    is never reassembled mid-request. The presentation phase holds at most one
+    face, because the fact-to-presentation mapping is one-to-one.
 
 func NewPipeline(plugins []Plugin) (Pipeline, error)
     NewPipeline groups the registered plugins into their phase's narrow
     interface set, in the declared order. A plugin whose phase is not one of the
-    four declared phases, a nil plugin, and a plugin that implements no narrow
-    interface of its own phase each refuse the pipeline by name instead of being
-    trimmed in silence.
+    declared phases, a nil plugin, a plugin that implements no narrow interface
+    of its own phase, and a second final presenter each refuse the pipeline by
+    name instead of being trimmed in silence.
 
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation
     After runs the After pass over one fact whose canonical commit already
-    happened: every observer reads the fact first, then every presenter renders
+    happened: every observer reads the fact first, then the presenter renders
     it. The pass runs after the commit and never before it, so a refused call
-    and a call whose commit failed present nothing at all.
+    and a call whose commit failed present nothing at all. An observation that
+    fails is recorded as a named gap in the returned presentation and never
+    rolls the committed fact back; a presenter that drops its text drops the
+    presentation only. The pass carries no error return: a failure here is a gap
+    or a dropped view, never a reason to touch the committed fact.
 
-    An observation that fails is recorded as a named gap in the returned
-    presentation and never rolls the committed fact back; a presenter that drops
-    its text drops the presentation only. The pass carries no error return:
-    a failure here is a gap or a dropped view, never a reason to touch the
-    committed fact.
+    The fact enters the presentation pass exactly once, because the pipeline
+    holds at most one presenter: one fact carries one presentation, so the
+    returned views hold the one view that presenter rendered or none when the
+    pipeline carries no presenter at all.
 
 func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass, error)
     Before runs the one Before pass of one tool call: every transform face
@@ -385,6 +446,29 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
     identity and permission at the wrapper's admission path — and the same final
     call is the one both executed and recorded.
 
+func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequest) (string, error)
+    InjectEnvironment runs the injection pass of one request assembly: every
+    environment face renders its block in pipeline order, and the pass answers
+    the blocks that carried text, in that order. A face answering no text
+    contributes no block, and a pipeline carrying no environment face answers no
+    block at all.
+
+    A face that answers an error refuses the pass at that face by name: no later
+    face runs and the assembly answers with the refusal instead of carrying a
+    block it could not render.
+
+func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressRequest) error
+    TriggerCompress runs the trigger pass of one filed compress request: every
+    compress face answers the request in pipeline order, so the compression
+    a producer judged due is the one the wired faces deliver. The request is
+    dispatched as the log filed it, and the consumer retires it afterwards —
+    never here — so a request whose compression failed stays pending.
+
+    A face that answers an error refuses the pass at that face by name: no later
+    face runs, and the caller answers with the refusal instead of counting the
+    request as compressed. A pipeline carrying no compress face answers nil,
+    so a consumer wired without one refuses nothing of the request it read.
+
 type Plugin interface {
 	// Name returns the stable name of this plugin.
 	Name() string
@@ -398,8 +482,8 @@ type Plugin interface {
     single phase that element serves, and the element implements that phase's
     narrow interface. The composition root reads the phase of every registered
     Plugin and dispatches the element into that phase's narrow interface set —
-    TransformCall, RiskAssessor, Governor, PostCommitObserver, FinalPresenter —
-    in the declared order.
+    TransformCall, RiskAssessor, Governor, PostCommitObserver, FinalPresenter,
+    CompressTrigger, EnvironmentInject — in the declared order.
 
     The redline list (3 rules): MUST report the one phase the element serves
     and implement that phase's narrow interface. MUST NOT report a phase

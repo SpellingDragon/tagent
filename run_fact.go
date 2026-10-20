@@ -5,17 +5,25 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/telemetry"
 )
+
+// mappedSummaryRunes bounds the one-line read a mapped entry carries when the
+// fact stored no summary of its own: the read is a prefix of the original, not
+// a rewrite of it, so the bound only decides how much of the first line the
+// mapped sequence speaks.
+const mappedSummaryRunes = 120
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
@@ -26,14 +34,157 @@ import (
 // instead of reconstructing one.
 // - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive and the settled delivery all land here.
 // - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
+// - A committed fact enters the mapped sequence of its own session chain right after it lands, so every consumption of that chain assembles the sequence the commits recorded.
 func (r *Run) commitFact(evt event.Event) event.EventID {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
 	}
+	entry, mapped := mappedEntryOf(evt)
 	r.mu.Lock()
 	r.facts[evt.Key] = evt
 	r.mu.Unlock()
+	if !mapped {
+		return evt.Key
+	}
+	r.attachDeclaredReplay(evt)
+	r.recordMapped(evt, entry)
 	return evt.Key
+}
+
+// recordMapped appends one mapped entry to the sequence of its session and
+// moves the boundary between the material that ended and the material still in
+// flight: a new range is admitted by an external input under an invocation of
+// its own, and that first fact is where everything the earlier ranges committed
+// becomes ended material the next request presents while the transcript stops
+// carrying it. Facts of the range in flight — the reasoning, the calls and the
+// output of a round — stay behind that boundary, because the transcript of the
+// drive carries them.
+func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	held, carried := r.replays[sessionOf(evt)]
+	if !carried {
+		return
+	}
+	position := held.projection.Len()
+	held.projection.Append(context.Background(), entry)
+	if evt.Type == event.TypeExternalInput && held.rangeInvocation != "" && held.rangeInvocation != evt.InvocationID {
+		held.ended = position
+	}
+	held.rangeInvocation = evt.InvocationID
+	r.replays[sessionOf(evt)] = held
+}
+
+// sessionOf reports the session chain one committed fact belongs to: the session
+// of the address that owns it, and of the address it is routed to or comes from
+// beside a fact that names no owner.
+func sessionOf(evt event.Event) event.SessionID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.SessionID != "" {
+			return addr.SessionID
+		}
+	}
+	return ""
+}
+
+// attachDeclaredReplay opens the mapped sequence of a session whose agent
+// declares a replay budget: the first committed fact of that session registers
+// a fresh projection through AttachReplay, so every later consumption of the
+// chain assembles the sequence the commits record. A held registration is left
+// as it stands, and a session naming no budget maps onto no projection: its
+// commits record nothing beside the fact itself and a declaration that declares
+// no budget keeps the assembly as it stood.
+func (r *Run) attachDeclaredReplay(evt event.Event) {
+	session := sessionOf(evt)
+	if session == "" {
+		return
+	}
+	r.mu.Lock()
+	_, held := r.replays[session]
+	budget := 0
+	if !held {
+		budget = specOfLocked(r.current.Plan.Declaration, agentOf(evt)).ReplayBudget
+	}
+	r.mu.Unlock()
+	if held || budget <= 0 {
+		return
+	}
+	err := r.AttachReplay(agent.RequestChain{SessionID: session}, budget, replay.NewReplayProjection())
+	if err != nil {
+		return
+	}
+}
+
+// agentOf reports the agent one committed fact belongs to, by the precedence
+// sessionOf reads the session under: the owner of the fact, then the address it
+// is routed to, then the address it came from.
+func agentOf(evt event.Event) event.AgentID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.AgentID != "" {
+			return addr.AgentID
+		}
+	}
+	return ""
+}
+
+// mappedEntryOf projects one committed fact onto the projection entry its
+// consumption carries: the canonical identity of the fact, its frozen type, the
+// one-line read stored beside it and the text the model view speaks for it. A
+// fact that carries no model payload maps onto no entry, so the mapped sequence
+// never carries an empty message the model would read.
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func mappedEntryOf(evt event.Event) (replay.ProjectionEntry, bool) {
+	content := mappedContentOf(evt.Message)
+	if content == "" {
+		return replay.ProjectionEntry{}, false
+	}
+	return replay.ProjectionEntry{
+		Key:     evt.Key,
+		Type:    evt.Type,
+		Summary: oneLineOf(evt.Meta[event.MetaKeyEventSummary], content),
+		Content: content,
+		Time:    evt.Timestamp,
+	}, true
+}
+
+// mappedContentOf reports the text one committed message speaks for on the
+// replay path: the content as it stands, and otherwise the call or the tool face
+// the message carries, so a call the model issued is never lost from the mapped
+// sequence.
+func mappedContentOf(msg model.Message) string {
+	if msg.Content != "" {
+		return msg.Content
+	}
+	calls := make([]string, 0, len(msg.ToolCalls))
+	for _, call := range msg.ToolCalls {
+		calls = append(calls, "[call "+call.Function.Name+"]")
+	}
+	if len(calls) > 0 {
+		return strings.Join(calls, " ")
+	}
+	if msg.ToolName != "" {
+		return "[tool " + msg.ToolName + " returned no text]"
+	}
+	return ""
+}
+
+// oneLineOf reports the one-line read a projection entry carries: the summary
+// the event stored beside its original, and otherwise the first line of the
+// original itself, bounded. It reads the original and never rewrites it.
+func oneLineOf(summary, content string) string {
+	if summary != "" {
+		return summary
+	}
+	line := content
+	if at := strings.IndexByte(line, '\n'); at >= 0 {
+		line = line[:at]
+	}
+	runes := []rune(line)
+	if len(runes) <= mappedSummaryRunes {
+		return line
+	}
+	return string(runes[:mappedSummaryRunes]) + "…"
 }
 
 // record stores one wrapped call result as a fact of this run and reports the
@@ -162,10 +313,16 @@ func (r *Run) SessionHistory(addr event.Address) []model.Message {
 // CommitHistory appends the transcript one ended drive accumulated to the
 // history of its session, so the next invocation of the session reads the
 // range's history as it actually ended while no two invocations ever batch
-// their ready input together.
+// their ready input together. A session whose chain carries a mapped sequence
+// commits no transcript here: that sequence carried every fact of the range as
+// it committed, and the range reads back from it instead of from a second
+// transcript of the same facts.
 func (r *Run) CommitHistory(addr event.Address, msgs []model.Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, mapped := r.replays[addr.SessionID]; mapped {
+		return
+	}
 	r.history[addr] = append(r.history[addr], msgs...)
 }
 

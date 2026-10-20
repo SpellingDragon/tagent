@@ -392,7 +392,7 @@ func newFileRig(t *testing.T, workspaceDir string, maxTokens int) *fileRig {
 		}
 		natives[event.AgentID(spec.ID)] = native
 	}
-	host, err := assembleHostFrom(context.Background(), doc, nil, NewSeenStore(t.TempDir(), slog.Default()), seam, natives)
+	host, err := assembleHostFrom(context.Background(), doc, nil, NewSeenStore(t.TempDir(), slog.Default()), seam, natives, nil)
 	if err != nil {
 		t.Fatalf("assemble the host: %v", err)
 	}

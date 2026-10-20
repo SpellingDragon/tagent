@@ -11,6 +11,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -219,16 +220,24 @@ func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (stat
 	return f.source.Fixate(ctx, normalized)
 }
 
-// replayEntry is one session chain's projection registered for replay: the
-// projection itself beside the budget the request boundary assembles it under.
+// replayEntry is one session chain's mapped sequence registered for replay: the
+// projection itself beside the budget the request boundary assembles it under,
+// how many of its leading entries have ended — the material a request presents,
+// while the entries still in flight stay with the transcript that carries them —
+// and the invocation whose range those in-flight entries belong to.
 type replayEntry struct {
-	projection *replay.ReplayProjection
-	budget     int
+	projection      *replay.ReplayProjection
+	budget          int
+	ended           int
+	rangeInvocation event.InvocationID
 }
 
 // AttachReplay registers the replayed projection of one session chain on this
 // assembly: every request of that session carries the chain's budget assembly
 // in front of its transcript, mapped under the frozen event-type→role table.
+// The entries a registration carries were replayed from the chain, so they are
+// ended material and are presented at once; the facts the run commits from here
+// on present themselves once their range ends.
 // A chain that names no session is refused by name: assembling one would join
 // every user of the partition into one transcript.
 func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *replay.ReplayProjection) error {
@@ -240,7 +249,7 @@ func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *rep
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replays[chain.SessionID] = replayEntry{projection: projection, budget: budget}
+	r.replays[chain.SessionID] = replayEntry{projection: projection, budget: budget, ended: projection.Len()}
 	return nil
 }
 
@@ -249,9 +258,18 @@ func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *rep
 // first — the prompt and skill bodies the binding names, in structural order
 // — then the skill bodies already loaded on the binding's tool resources
 // beside them (skill-name order, once each, and never a body the fixed files
-// already carry), then the replayed projection of the session chain. The
-// content version the boundary fixed is reported back as the version the
-// request runs on.
+// already carry), then the replayed projection of the session chain, and
+// finally the dynamic environment material of the request when the agent
+// declares it: that block is the answer of the request-assembly plugin phase,
+// rendered by the element this assembly registers for it. The content version
+// the boundary fixed is reported back as the version the request runs on.
+//
+// The order is the cache ordering the environment block exists for: what stays
+// the same between two requests of one session — the fixed prompt and skill
+// bodies, the transcript ahead of it — sits at the top as the stable prefix,
+// while what changes with the run sits at the bottom of the assembly, so a
+// change of the available tool face or of the open task state never moves the
+// prefix before it.
 func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundary) (agent.BoundaryView, error) {
 	if boundary.Chain.SessionID == "" {
 		return agent.BoundaryView{}, agent.ErrRequestChainSessionRequired
@@ -259,7 +277,7 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 	view := agent.BoundaryView{}
 	r.mu.Lock()
 	fixer := r.fixers[boundary.Agent]
-	replay, registered := r.replays[boundary.Chain.SessionID]
+	sequence, registered := r.replays[boundary.Chain.SessionID]
 	r.mu.Unlock()
 	fixedSkills := map[string]bool{}
 	if fixer != nil {
@@ -286,13 +304,180 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 		}
 	}
 	if registered {
-		projected, err := replay.projection.AssembleBudget(ctx, replay.budget)
+		projected, err := sequence.projection.AssembleBudgetPrefix(ctx, sequence.budget, sequence.ended)
 		if err != nil {
 			return agent.BoundaryView{}, err
 		}
 		for _, entry := range projected {
-			view.Messages = append(view.Messages, model.Message{Role: agent.RoleOf(entry.Type), Content: entry.Content})
+			role, err := agent.RoleOf(entry.Type)
+			if err != nil {
+				return agent.BoundaryView{}, err
+			}
+			view.Messages = append(view.Messages, model.Message{Role: role, Content: entry.Content})
 		}
 	}
+	if r.agentSpecOf(boundary.Agent).EnvironmentBlock {
+		pipeline, err := plugin.NewPipeline([]plugin.Plugin{environmentBlockPlugin{run: r, boundary: boundary}})
+		if err != nil {
+			return agent.BoundaryView{}, err
+		}
+		block, err := pipeline.InjectEnvironment(ctx, plugin.EnvironmentRequest{Agent: boundary.Agent})
+		if err != nil {
+			return agent.BoundaryView{}, err
+		}
+		view.Messages = append(view.Messages, model.Message{Role: model.RoleSystem, Content: block})
+	}
 	return view, nil
+}
+
+// environmentBlockPlugin is the request-assembly element of this run: the
+// environment-injection phase face over one request boundary of one agent. The
+// block it renders is the dynamic material the boundary closes its assembly with,
+// read from the runtime at this boundary.
+type environmentBlockPlugin struct {
+	run      *Run
+	boundary agent.RequestBoundary
+}
+
+// The element satisfies both the registration face and the phase face it serves.
+var (
+	_ plugin.Plugin            = environmentBlockPlugin{}
+	_ plugin.EnvironmentInject = environmentBlockPlugin{}
+)
+
+// Name returns the stable plugin name the phase line records.
+func (p environmentBlockPlugin) Name() string { return "environment-block" }
+
+// Phase reports the request-assembly phase this plugin serves.
+func (p environmentBlockPlugin) Phase() plugin.Phase { return plugin.PhaseEnvironmentInject }
+
+// InjectEnvironment renders the environment block of this assembly: the one
+// block a request carries at the bottom of its boundary material.
+func (p environmentBlockPlugin) InjectEnvironment(ctx context.Context, _ plugin.EnvironmentRequest) (string, error) {
+	return p.run.environmentBlock(ctx, p.boundary), nil
+}
+
+// environmentTaskLines bounds how many open obligations one environment block
+// names: a run holding more reports the count it left out rather than growing
+// the request without bound.
+const environmentTaskLines = 16
+
+// environmentBlock renders the dynamic environment material one request carries
+// at the bottom of the boundary assembly, for an agent that declares it: the
+// agent the request runs as, the tool, skill and MCP faces available to it, and
+// the asynchronous work it holds open at this boundary. The block is one system
+// message and it closes the assembly, because everything in it changes with the
+// run while the material above it — the fixed prompt, the skill bodies and the
+// transcript ahead of the assembly — does not, so the changing part never moves
+// the stable prefix it follows.
+func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary) string {
+	spec := r.agentSpecOf(boundary.Agent)
+	open, omitted := r.openTaskLines(ctx)
+	var b strings.Builder
+	b.WriteString("## Environment\n")
+	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)
+	if modelName := modelNameOf(boundary.Binding); modelName != "" {
+		fmt.Fprintf(&b, "- model: %s\n", modelName)
+	}
+	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding)))
+	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(visibleSkillsOf(boundary.Binding)))
+	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(endpointsOf(spec.Tools)))
+	fmt.Fprintf(&b, "- tasks: %d open\n", len(open)+omitted)
+	if len(open) == 0 {
+		b.WriteString("  - (none)\n")
+	}
+	for _, line := range open {
+		fmt.Fprintf(&b, "  - %s\n", line)
+	}
+	if omitted > 0 {
+		fmt.Fprintf(&b, "  - (+%d more)\n", omitted)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// openTaskLines reports the obligations this run owes as the environment block
+// names them — the class each waits in beside the task it belongs to — in stable
+// order, bounded. The obligations left out are counted, and a task this run has
+// released contributes no line.
+func (r *Run) openTaskLines(ctx context.Context) ([]string, int) {
+	if r.commit == nil || r.manager == nil {
+		return nil, 0
+	}
+	var lines []string
+	for _, id := range r.commit.TaskIDs() {
+		open, err := r.manager.Obligations(ctx, id)
+		if err != nil {
+			continue
+		}
+		for _, obligation := range open.Open {
+			lines = append(lines, fmt.Sprintf("%s task=%s", obligation.Kind, obligation.TaskID))
+		}
+	}
+	sort.Strings(lines)
+	if len(lines) <= environmentTaskLines {
+		return lines, 0
+	}
+	return lines[:environmentTaskLines], len(lines) - environmentTaskLines
+}
+
+// toolNamesOf reports the tool names one binding exposes to the model, in name
+// order and each named once: the tools the binding carries beside the tools its
+// tool resources registered, so the file and skill families the request face
+// carries are named with the contributed ones.
+func toolNamesOf(binding state.AgentBinding) []string {
+	seen := map[string]bool{}
+	var names []string
+	collect := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	for _, tool := range binding.Tools {
+		if tool == nil || tool.Declaration() == nil {
+			continue
+		}
+		collect(tool.Declaration().Name)
+	}
+	if resources, ok := binding.Set.(*state.ToolResources); ok {
+		for _, record := range resources.Resources() {
+			collect(record.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// endpointsOf reports the MCP faces one declaration makes available, as the
+// name of the reference beside the endpoint it names, in name order.
+func endpointsOf(refs []config.ToolRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.Endpoint == "" {
+			continue
+		}
+		out = append(out, ref.Name+"@"+ref.Endpoint)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// modelNameOf reports the model name one binding runs against, empty when the
+// binding carries no model.
+func modelNameOf(binding state.AgentBinding) string {
+	if binding.Model == nil {
+		return ""
+	}
+	return binding.Model.Info().Name
+}
+
+// listOrNone renders one list of names as the environment block names it: the
+// names in the order they were given, and a named empty face rather than a
+// blank line, so a request that reaches an agent with no tool still says so.
+func listOrNone(items []string) string {
+	if len(items) == 0 {
+		return "(none)"
+	}
+	return strings.Join(items, ", ")
 }

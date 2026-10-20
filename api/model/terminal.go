@@ -395,7 +395,7 @@ func responseErr(resp *Response) error {
 // returned Outcome as the terminal fact and MUST NOT write a second terminal
 // judgement beside it.
 func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)) (outcome Outcome) {
-	call := beginCall(ctx)
+	call := beginCall()
 	defer func() { call.end(outcome) }()
 	r := NewReducer(onAlert)
 	if ch == nil {
@@ -439,7 +439,7 @@ func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)
 // returned Outcome as the terminal fact and MUST NOT write a second terminal
 // judgement beside it.
 func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) (outcome Outcome) {
-	call := beginCall(ctx)
+	call := beginCall()
 	defer func() { call.end(outcome) }()
 	r := NewReducer(onAlert)
 	if seq == nil {

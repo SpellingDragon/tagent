@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
@@ -79,22 +80,47 @@ type BoundaryView struct {
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 type RequestFace func(ctx context.Context, boundary RequestBoundary) (BoundaryView, error)
 
-// RoleOf reports the native message role one frozen event type renders as on
-// the replay path, keeping the transcript shape the event loop speaks.
+// ErrProjectionTypeUnmapped reports a projection entry whose frozen type the
+// role table does not declare: the mapping from a presented entry type to the
+// role it renders as is one-to-one over the declared types, so a type outside
+// that table is refused by name instead of rendering under a role no declaration
+// gave it.
+var ErrProjectionTypeUnmapped = errors.New("agent: the projection type maps to no message role")
+
+// projectionTypeRecoveryHint, projectionTypeSegmentFold and
+// projectionTypeHistorySummary are the projection product words the replay layer
+// mints for the material it renders itself: a recovery hint answering a budget
+// cut, the folded process detail of the newest band, and the history summary of
+// the older bands. They name presented entries of the projection, never a frozen
+// event type, and they are spelled here as the frozen words they are so this
+// package stays clear of the projection layer.
+const (
+	projectionTypeRecoveryHint   = "recovery_hint"
+	projectionTypeSegmentFold    = "segment_fold"
+	projectionTypeHistorySummary = "history_summary"
+)
+
+// RoleOf reports the native message role one presented projection entry renders
+// as on the replay path, keeping the transcript shape the event loop speaks. The
+// table is the whole of the mapping and it is single-valued: every declared entry
+// type names exactly one role, and a type the table does not declare is refused
+// by ErrProjectionTypeUnmapped rather than rendered under a fallback role.
 //
-// The two settled-result paths are deliberately different and never conflated:
-// on this replay path a settled fact renders under the tool role its result
-// fact originally answered a call with, while the live settled observation a
-// dispatch feeds the next decision renders as user input material under its
-// call identity (see observationOf). One is history replayed as it stood, the
-// other is fresh input of the range.
-func RoleOf(eventType string) model.Role {
+// The settled result and the replay products each render under the one role their
+// entry type declares:
+// - a replayed settled fact is history replayed as it stood, so it renders under the tool role its result fact answered a call with
+// - the live settled observation a dispatch feeds the next decision is input of the range, and it renders under its call identity (see observationOf)
+// - the recovery hint, the folded segment and the history summary render as user input material, the history a range reads
+func RoleOf(eventType string) (model.Role, error) {
 	switch eventType {
+	case event.TypeExternalInput, event.TypeContextCompress, event.TypeFeedback, event.TypeGovernance,
+		projectionTypeRecoveryHint, projectionTypeSegmentFold, projectionTypeHistorySummary:
+		return model.RoleUser, nil
 	case event.TypeThinkingPlan, event.TypeAgentOutput:
-		return model.RoleAssistant
+		return model.RoleAssistant, nil
 	case event.TypeActionCommand, event.TypeTaskSettled:
-		return model.RoleTool
+		return model.RoleTool, nil
 	default:
-		return model.RoleUser
+		return "", fmt.Errorf("%w: %q", ErrProjectionTypeUnmapped, eventType)
 	}
 }

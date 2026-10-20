@@ -428,8 +428,11 @@ func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *rep
     AttachReplay registers the replayed projection of one session chain on this
     assembly: every request of that session carries the chain's budget assembly
     in front of its transcript, mapped under the frozen event-type→role table.
-    A chain that names no session is refused by name: assembling one would join
-    every user of the partition into one transcript.
+    The entries a registration carries were replayed from the chain, so they
+    are ended material and are presented at once; the facts the run commits
+    from here on present themselves once their range ends. A chain that names
+    no session is refused by name: assembling one would join every user of the
+    partition into one transcript.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address and
@@ -450,7 +453,10 @@ func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
     CommitHistory appends the transcript one ended drive accumulated to the
     history of its session, so the next invocation of the session reads the
     range's history as it actually ended while no two invocations ever batch
-    their ready input together.
+    their ready input together. A session whose chain carries a mapped sequence
+    commits no transcript here: that sequence carried every fact of the range
+    as it committed, and the range reads back from it instead of from a second
+    transcript of the same facts.
 
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
     Diagnostics reads every diagnostic face of this run under the caller's
@@ -532,6 +538,15 @@ func (r *Run) Recall(ctx context.Context, q search.Query) (search.Result, error)
     authorization of its own — and a run assembled beside no storage tier is
     refused by name with ErrRetrievalUnwired instead of answered as an empty
     set.
+
+func (r *Run) RecallReads() recall.Reads
+    RecallReads returns the recall read faces this run wires beside the
+    retrieval face Run.Recall serves: the observation table over the events
+    the storage tier committed, the scoped original store of that tier and the
+    embedding binding of this assembly. A run assembled beside no storage tier
+    wires no table and no original store, and a run beside no embedder wires no
+    embedding, so a caller binds exactly the faces that answer and leaves the
+    rest as the named refusal the recall surface already states.
 
 func (r *Run) RecordingLosses() []agent.RecordingLoss
     RecordingLosses reports the training records the production points of this

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -301,10 +302,17 @@ func (p *Policy) Judge(pass plugin.CallPass) (plugin.Decision, error) {
 // digest, and everything else waits. A held call is a wait and is never
 // reported as a denial; a denied or approved-and-retried call past its validity
 // never proceeds on the old request.
+//
+// Every ruling the approval record answers is observed beside this gate: an
+// approved, a denied, an expired and an unapprovable call each write one INFO
+// line carrying the argument digest, the ruling and the approver, while the
+// same pending wait writes one DEBUG line per judgment.
 func (p *Policy) riskCritical(call *trpcmodel.ToolCall, grade plugin.RiskLevel, ruleID, reason string) plugin.Decision {
 	if p.approvals == nil {
 		noChannel := "critical risk requires approval, but no approval channel is wired"
 		p.record(SubtypeDenial, call, grade, ruleID, noChannel)
+		approvalInfo("tagent: approval ruled tool=%s risk=%s rule=%s ruling=unavailable",
+			call.Function.Name, grade, ruleID)
 		return plugin.Decision{
 			Risk:   grade,
 			Rule:   ruleID,
@@ -312,15 +320,20 @@ func (p *Policy) riskCritical(call *trpcmodel.ToolCall, grade plugin.RiskLevel, 
 			Denial: denialOf(call, grade, ruleID, noChannel),
 		}
 	}
-	req := p.approvals.Lookup(call.Function.Name, approval.ArgsDigest(call.Function.Arguments))
+	digest := approval.ArgsDigest(call.Function.Arguments)
+	req := p.approvals.Lookup(call.Function.Name, digest)
 	switch {
 	case req != nil && req.Status == approval.ApprovalApproved:
 		approved := "the call was approved for these arguments"
 		p.record(SubtypeAudit, call, grade, ruleID, approved)
+		approvalInfo("tagent: approval ruled tool=%s digest=%s risk=%s rule=%s ruling=approved by=%s",
+			call.Function.Name, digest, grade, ruleID, req.DecidedBy)
 		return plugin.Decision{Disposition: plugin.DispositionRecord, Risk: grade, Rule: ruleID, Reason: approved}
 	case req != nil && req.Status == approval.ApprovalDenied:
 		reason := "the approval for this call was denied"
 		p.record(SubtypeDenial, call, grade, ruleID, reason)
+		approvalInfo("tagent: approval ruled tool=%s digest=%s risk=%s rule=%s ruling=denied by=%s",
+			call.Function.Name, digest, grade, ruleID, req.DecidedBy)
 		return plugin.Decision{
 			Risk:   grade,
 			Rule:   ruleID,
@@ -333,8 +346,51 @@ func (p *Policy) riskCritical(call *trpcmodel.ToolCall, grade plugin.RiskLevel, 
 			wait = reason + "; " + wait
 		}
 		p.record(SubtypeApproval, call, grade, ruleID, wait)
+		switch {
+		case req != nil && req.Status == approval.ApprovalExpired:
+			approvalInfo("tagent: approval ruled tool=%s digest=%s risk=%s rule=%s ruling=expired expires_ms=%d",
+				call.Function.Name, digest, grade, ruleID, req.ExpiresMs)
+		default:
+			approvalDebug("tagent: approval awaited tool=%s digest=%s risk=%s rule=%s",
+				call.Function.Name, digest, grade, ruleID)
+		}
 		return plugin.Decision{Disposition: plugin.DispositionHold, Risk: grade, Rule: ruleID, Reason: wait}
 	}
+}
+
+// approvalInfo renders one line of the approval channel at INFO: the tool, the
+// argument digest the ruling is bound to, the risk grade, the rule and the
+// ruling that took effect beside the approver who stated it. A ruling is one
+// event per request, so the INFO face stays bounded by the rulings an approver
+// really stated.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a changed ruling.
+// MUST write one line per stated ruling, never one per judgment of a pending wait.
+// MUST NOT render the arguments themselves, only their digest and the ruling.
+func approvalInfo(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Infof(format, args...)
+}
+
+// approvalDebug renders the wait of a critical call at DEBUG: the same identity
+// the ruling lines carry, written once per judgment while the approval record
+// still awaits an external ruling. A held call is judged again on every attempt,
+// so its wait stays out of the INFO stream.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a released wait.
+// MUST stay at DEBUG, since the same wait is judged again on every attempt.
+// MUST NOT render the arguments themselves, only their digest and the grade.
+func approvalDebug(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
 }
 
 // gradeOf reports the risk grade the ruling is rendered at: the grade the one

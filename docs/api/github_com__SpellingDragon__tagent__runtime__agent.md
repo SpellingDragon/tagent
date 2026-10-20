@@ -82,6 +82,13 @@ var ErrHandoffPartPayload = errors.New("agent: the data part carries no handoff 
     ErrHandoffPartPayload reports a data part whose payload does not decode as a
     handoff envelope.
 
+var ErrProjectionTypeUnmapped = errors.New("agent: the projection type maps to no message role")
+    ErrProjectionTypeUnmapped reports a projection entry whose frozen type the
+    role table does not declare: the mapping from a presented entry type to
+    the role it renders as is one-to-one over the declared types, so a type
+    outside that table is refused by name instead of rendering under a role no
+    declaration gave it.
+
 var ErrRequestChainSessionRequired = errors.New("agent: projected request assembly needs a named session chain")
     ErrRequestChainSessionRequired reports a request assembly under a chain that
     names no session: assembling one would join every user of the partition into
@@ -89,16 +96,21 @@ var ErrRequestChainSessionRequired = errors.New("agent: projected request assemb
 
 FUNCTIONS
 
-func RoleOf(eventType string) model.Role
-    RoleOf reports the native message role one frozen event type renders as on
-    the replay path, keeping the transcript shape the event loop speaks.
+func RoleOf(eventType string) (model.Role, error)
+    RoleOf reports the native message role one presented projection entry
+    renders as on the replay path, keeping the transcript shape the event loop
+    speaks. The table is the whole of the mapping and it is single-valued:
+    every declared entry type names exactly one role, and a type the table does
+    not declare is refused by ErrProjectionTypeUnmapped rather than rendered
+    under a fallback role.
 
-    The two settled-result paths are deliberately different and never conflated:
-    on this replay path a settled fact renders under the tool role its result
-    fact originally answered a call with, while the live settled observation a
-    dispatch feeds the next decision renders as user input material under its
-    call identity (see observationOf). One is history replayed as it stood,
-    the other is fresh input of the range.
+    The settled result and the replay products each render under the one role
+    their entry type declares: - a replayed settled fact is history replayed
+    as it stood, so it renders under the tool role its result fact answered
+    a call with - the live settled observation a dispatch feeds the next
+    decision is input of the range, and it renders under its call identity
+    (see observationOf) - the recovery hint, the folded segment and the history
+    summary render as user input material, the history a range reads
 
 TYPES
 
@@ -540,14 +552,17 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
     result fact into the native tool message it carries.
 
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
-    Backflow admits one settled notification of a call into the intake of
-    the invocation that issued that call, so it drives that invocation's next
-    decision and no other. A non-terminal notification carries no result to
-    pair and is ignored here. The settled delivery commits as the delivery fact
-    of the range before it is handed on, so the delivery boundary of a call
-    is observed as the fact it is; the After pass of that fact runs beside the
-    notification rather than under the cancellation of the caller that delivered
-    it, because observation is a bypass.
+    Backflow admits one notification of a call into the intake of the
+    invocation that issued that call, so it drives that invocation's next
+    decision and no other. A progress notification is admitted into that
+    invocation's notification lane as input material: it reports in-flight work,
+    so it answers no call, parks no result and is read by the next decision of
+    the range as the material it is. A non-terminal notification that is not
+    progress carries no result to pair and is ignored here. The settled delivery
+    commits as the delivery fact of the range before it is handed on, so the
+    delivery boundary of a call is observed as the fact it is; the After pass of
+    that fact runs beside the notification rather than under the cancellation of
+    the caller that delivered it, because observation is a bypass.
 
 func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     Drive runs one invocation until its latest decision reaches a terminal that

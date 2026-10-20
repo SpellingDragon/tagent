@@ -300,6 +300,104 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 	}
 }
 
+// TestProjectedContextKeepsItsFixedLayout checks the parts one decision is assembled from and the order they take.
+//   - the fixed file contents lead the request as one system prefix, in the order the binding carries them
+//   - the folded projection follows the prefix, its compaction summary first under the frozen event-type role table
+//   - the invocation's own input closes the request, so no fourth part sits between them
+//   - every callable face the binding carries sits on the request's tool field, not among the messages
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	writePromptAt(t, filepath.Join(root, "prompts", "system.md"), "system prompt\n")
+	writeSkillAt(t, root, "greet", "greet body v1\n")
+
+	base := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	proj := replay.NewReplayProjection()
+	for _, entry := range []replay.ProjectionEntry{
+		{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in", Content: "投影原文一", Time: base},
+		{Key: "p-0002", Type: event.TypeAgentOutput, Summary: "out", Content: "投影原文二", Time: base.Add(time.Minute)},
+	} {
+		proj.Append(ctx, entry)
+	}
+	summary, err := proj.Fold(ctx)
+	if err != nil {
+		t.Fatalf("Fold: %v", err)
+	}
+	if proj.Len() != 1 {
+		t.Fatalf("folded projection holds %d entries, want the one compaction entry the fold answers with", proj.Len())
+	}
+	if !strings.HasPrefix(summary.Content, "compaction: ") {
+		t.Fatalf("compaction entry content = %q, want the summary line the fold minted", summary.Content)
+	}
+
+	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
+		return entryFinalTurn("settled")
+	}}
+	decl := &config.Declaration{
+		Entry: "agent-a",
+		Agents: []config.AgentSpec{{
+			ID:    "agent-a",
+			Model: "model-a",
+			Files: []config.FileRef{
+				{Path: filepath.Join(root, "prompts", "system.md"), Kind: config.FileKindPrompt},
+				{Path: filepath.Join(root, "skills", "greet", skill.SkillFile), Kind: config.FileKindSkill},
+			},
+		}},
+	}
+	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		"agent-a": {Model: provider},
+	}, tagent.WithGovernance(passPolicy{}))
+	if err != nil {
+		t.Fatalf("assemble the runtime: %v", err)
+	}
+	chain := agent.RequestChain{PartitionID: 7, SessionID: event.SessionID("session-layout")}
+	if err := run.AttachReplay(chain, 100, proj); err != nil {
+		t.Fatalf("AttachReplay: %v", err)
+	}
+	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		InvocationID: "inv-layout",
+		Address:      event.Address{AgentID: "agent-a", SessionID: chain.SessionID},
+		Input:        []model.Message{{Role: model.RoleUser, Content: "装配序的请求"}},
+	}); err != nil {
+		t.Fatalf("invoke the layout request: %v", err)
+	}
+	requests := provider.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("recorded requests = %d, want exactly one formal request", len(requests))
+	}
+	got := requests[0].Messages
+	if len(got) != 4 {
+		t.Fatalf("request carries %d messages, want the two fixed files, the folded entry and the input and nothing else: %v", len(got), got)
+	}
+	if got[0].Role != model.RoleSystem || !strings.Contains(got[0].Content, "system prompt") {
+		t.Fatalf("message 0 = (%q, %q), want the prompt file content leading the request", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != model.RoleSystem || !strings.Contains(got[1].Content, "greet body v1") {
+		t.Fatalf("message 1 = (%q, %q), want the skill file content beside the prompt in the static prefix", got[1].Role, got[1].Content)
+	}
+	want, err := agent.RoleOf(replay.CompactionEventType)
+	if err != nil {
+		t.Fatalf("map %s onto a role: %v", replay.CompactionEventType, err)
+	}
+	if got[2].Role != want {
+		t.Fatalf("message 2 role = %q, want the frozen %s role %q", got[2].Role, replay.CompactionEventType, want)
+	}
+	if got[2].Content != summary.Content {
+		t.Fatalf("message 2 content = %q, want the compaction summary %q the fold answers with", got[2].Content, summary.Content)
+	}
+	if got[3].Role != model.RoleUser || got[3].Content != "装配序的请求" {
+		t.Fatalf("message 3 = (%q, %q), want the invocation input closing the request", got[3].Role, got[3].Content)
+	}
+	for _, name := range []string{"read_file", "save_file", "skill_load"} {
+		if face := requests[0].Tools[name]; face == nil {
+			t.Errorf("request tools carry no %q, want every registered native tool family on the tool field", name)
+		}
+	}
+}
+
 // writePromptAt writes one prompt file at the named path.
 func writePromptAt(t *testing.T, path, content string) {
 	t.Helper()

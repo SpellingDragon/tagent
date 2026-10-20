@@ -260,9 +260,10 @@ var (
 
 // The request-boundary assembly keeps its declared shape: the causal chain
 // identity the assembly is isolated under, the boundary material the request
-// face reads, the view it returns, and the face setter beside the frozen
-// event-type→role table. No projection entry shape is mirrored here: the face
-// crosses built-in, event, model and state types only.
+// face reads, the view it returns, and the face setter beside the closed
+// event-type→role table that refuses an undeclared type. No projection entry
+// shape is mirrored here: the face crosses built-in, event, model and state
+// types only.
 var (
 	_ = RequestChain{PartitionID: 0, SessionID: ""}
 
@@ -274,7 +275,9 @@ var (
 
 	_ func(*Loop, RequestFace) = (*Loop).SetRequestFace
 
-	_ func(string) model.Role = RoleOf
+	_ func(string) (model.Role, error) = RoleOf
 
 	_ error = ErrRequestChainSessionRequired
+
+	_ error = ErrProjectionTypeUnmapped
 )

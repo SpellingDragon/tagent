@@ -202,12 +202,12 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 | 插件相位 | `plugin.Pipeline` 的 Before/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、result、elapsed、call 或 fact 身份 | `tagent: plugin phase` |
 | 事件流（事实生产提交） | 主提交之后的 After 趟：`telemetry.LogObserver`（经 `commit-observer` 元素派发） | DEBUG 逐事实 / INFO 回合边界 | 事实类型、tool、task、call、invocation | `tagent: tool call`、`tagent: turn start`、`tagent: turn end` |
 | 事件消费 | `runtime/agent/loop.go`：`Loop.Drive` 的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
-| 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 + chat span | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response`；span 名 `chat <model>` |
+| 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response` |
 
 - **开 DEBUG**：默认 zap 级别是 Info，相位与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
-- **span 属性**（框架 semconv，Langfuse 直接读）：`gen_ai.operation.name=chat`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`、`gen_ai.usage.output_tokens`，provider 报了缓存命中时再加 `gen_ai.usage.input_tokens.cached`；失败请求的 span status 置 `Error`。
-- **旁路判据**：四个观察点的 logger/tracer 调用都在 `recover` 保护内，失败只丢一条观察，不改事实、不改终态、不改投递。
-- **Langfuse 装配（进程启动时一次）**：`telemetry/langfuse.Start` 装的就是模型响应面读的 `telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故模型响应的 span 无需为本仓库写转换代码。
+- **generation span 归框架**（框架 semconv，Langfuse 直接读）：一次模型调用恰好一条 `chat <model>` span，由**驱动模型的那一方**开——框架 `internal/flow/llmflow` 的模型步（`itrace.StartSpan`），或开了 `openai.WithChatTelemetry(true)` 的 provider 模型直调。`gen_ai.operation.name=chat`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`/`output_tokens`（provider 报了缓存命中时再加 `gen_ai.usage.input_tokens.cached`）、失败请求的 `Error` status，都由框架侧渲染；本仓的模型响应面只写那一行 INFO，不在同一个 tracer 上再开第二条。
+- **旁路判据**：四个观察点的 logger 调用都在 `recover` 保护内（模型响应面不再调 tracer），失败只丢一条观察，不改事实、不改终态、不改投递。
+- **Langfuse 装配（进程启动时一次）**：`telemetry/langfuse.Start` 装的是 `telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故 generation span 无需为本仓库写转换代码。**span 去重（已裁）**：框架已为每次模型调用开一条同名 `chat <model>` span，本仓 `api/model/observe.go` 曾在同一个 tracer 上再开一条（没有 input/output messages），一次调用在 Langfuse 上落两条 generation；裁决为**保留框架侧**，本仓那条已删、INFO 行与 token/latency 渲染不动。两种驱动方式下都只有一条：走框架模型步（llmflow）时框架必然开，直调 provider 模型时由宿主的 `openai.WithChatTelemetry(true)` 开——直调且未开该选项的宿主没有 generation span，需要时在模型构造处打开。复跑见 `go test ./api/model/... ./tests/integration/host -run 'ModelCallObservation|ModelRequestIsOneGeneration|FourFacesObservation' -count=1`。
 
 ```go
 clean, err := langfuse.Start(ctx,
@@ -222,6 +222,20 @@ defer clean(ctx)
 ```
 
 四类的断言各有一条可复跑测试：`go test ./api/model/ ./api/plugin/ ./runtime/agent/ ./tests/integration/host -run 'Observation' -count=1`。其中 `TestFourFacesObservationThroughTheFormalEntry` 走正式装配入口，四类一次性读同一个 logger 与同一个 tracer。
+
+**五机制观测（每事件一条，旁路不阻断）**：考古缺口清单上的五个机制各有一个有界观察点，级别按"会不会刷屏"与"是否静默改变语义"定。
+
+| 机制 | 观察点（源码） | 级别与载体 | 每次携带（有界） | 行首 |
+|---|---|---|---|---|
+| 压缩请求 | `memory/compress_filing.go` 的 `Produce`/`Consume` | DEBUG 日志 | producer、reason、id、pending、result | `tagent: compress request` |
+| 委派 | `runtime/agent/delegate.go` 的 `Delegate`/`Complete`/`land` | DEBUG 受理与拒答、INFO 落定 | task、agent、call、status、elapsed | `tagent: delegation` |
+| 审批 | `evolution/governance/policy.go` 的 `riskCritical` | INFO 裁定、DEBUG 等待 | tool、digest、risk、rule、ruling、by 或 expires_ms | `tagent: approval` |
+| 持久化 | `runtime/state/durable.go` 的 `Commit`/`Declare`/`load` | ERROR 日志 | task、mutation、result（uncommitted/uncertain/undeclared） | `tagent: durable` |
+| 恢复与存储 tier | `run.go` 的 `Assemble` 与 `restoreChains` | INFO 折叠、WARN 非持久 tier、ERROR 中断 | tier、durable、chains、recovered、dropped、elapsed | `tagent: storage tier`、`tagent: restore` |
+
+- **级别纪律**：写盘失败、屏障失败、装载失败一律 ERROR（静默的语义改变必须显式）；非持久 tier 的"进程退出即失忆"是 WARN；审批的每次裁定 INFO，同一等待的重复判定留 DEBUG；其余逐事件 DEBUG。
+- **旁路**：五个观察点的 logger 调用都在 `recover` 保护内，且先判 `log.Default` 非 nil——日志失败只丢一条行，不改判定、不改落定、不改恢复结果。
+- **可复跑**：`go test ./memory ./runtime/agent ./evolution/governance ./runtime/state -run 'Observation' -count=1` 验五个机制各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（压缩溢出、委派受理与落定、重启折叠）读观测行。
 
 ---
 

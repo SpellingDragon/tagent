@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -78,6 +79,7 @@ var (
 		Owner:      "",
 		Blocked:    []BlockedObligation{},
 		ExitReason: "",
+		Logical:    LogicalActive,
 	}
 
 	_ = BlockedObligation{
@@ -88,6 +90,22 @@ var (
 	_ = HandoffTarget{
 		Target:         event.Address{},
 		TargetInstance: "",
+	}
+
+	_ = LogicalChange{
+		TaskID: "",
+		Status: StatusUnknown,
+		From:   LogicalActive,
+		To:     LogicalActive,
+		Since:  time.Time{},
+	}
+
+	_ = Policy{
+		WatchAfter:       0,
+		StableAfter:      0,
+		SuspectAfter:     0,
+		ExecutionTimeout: 0,
+		TTL:              0,
 	}
 )
 
@@ -115,6 +133,17 @@ const (
 	_ = AdmissionFresh
 	_ = AdmissionDedup
 	_ = AdmissionRejected
+
+	_ = LogicalActive
+	_ = LogicalWatch
+	_ = LogicalStable
+	_ = LogicalSuspect
+	_ = LogicalTimedOut
+	_ = LogicalExpired
+
+	_ = PolicyDefault
+	_ = PolicyResponsive
+	_ = PolicyPatient
 )
 
 // The port method signatures are pinned exactly on their implementations.
@@ -122,6 +151,10 @@ var (
 	_ func(context.Context, CommitRecord) (CommitResult, error)                  = (*MemoryCommit)(nil).Commit
 	_ func(context.Context, Spec) (AdmissionReceipt, error)                      = (*MemoryRegistry)(nil).Register
 	_ func(context.Context, event.TaskID) (Spec, Status, error)                  = (*MemoryRegistry)(nil).Lookup
+	_ func(context.Context, event.TaskID, time.Time) (LogicalStatus, error)      = (*MemoryRegistry)(nil).Logical
+	_ func(context.Context, time.Time) []LogicalChange                           = (*MemoryRegistry)(nil).Watch
+	_ func(Policy) RegistryOption                                                = WithPolicy
+	_ func(string) (Policy, bool)                                                = PolicyNamed
 	_ func(context.Context, event.TaskID) error                                  = (*MemoryRegistry)(nil).Cancel
 	_ func(context.Context, event.TaskID, event.Event) (AdmissionReceipt, error) = (*MemoryRegistry)(nil).Resume
 	_ func(context.Context, Spec) (AdmissionReceipt, error)                      = (*MemoryManager)(nil).Admit

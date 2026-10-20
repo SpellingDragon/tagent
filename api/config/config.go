@@ -63,6 +63,17 @@ type AgentSpec struct {
 	// under. Every field of the zero budget is zero, which places no bound on
 	// any invocation.
 	FinalRound FinalRoundSpec
+	// ReplayBudget is the token budget the mapped sequence of this agent's
+	// session chain is assembled under at every request boundary: the committed
+	// events of the chain are projected into the request context under it. Zero
+	// attaches no replay, so every request runs on its fixed files and
+	// transcript alone.
+	ReplayBudget int
+	// EnvironmentBlock states whether every request of this agent closes with
+	// the dynamic environment block: the tool, skill and MCP faces the request
+	// carries beside the open asynchronous task state. False keeps a request
+	// exactly as it stands without the block.
+	EnvironmentBlock bool
 }
 
 // FinalRoundSpec is the declaration of one agent's watchdog budget: how many

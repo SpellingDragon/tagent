@@ -1,8 +1,9 @@
 // 契约: docs/wiki/agent/agent-architecture.md#framework-boundary
 //
-// The model-response observation checks: the span the framework tracer records
-// for one model request and the one bounded line the framework logger takes for
-// its terminal, read from a real reduction instead of a hand-built outcome.
+// The model-response observation checks: the one bounded line the framework
+// logger takes for one model request's terminal, read from a real reduction
+// instead of a hand-built outcome, beside the span the reduction never opens —
+// the generation span of a request stays with the framework that drives it.
 package model
 
 import (
@@ -12,72 +13,35 @@ import (
 	"sync"
 	"testing"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
-	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
-// observedSpan records the attributes, the name and the status of one span the
-// observation opened, beside whether it was ended.
-type observedSpan struct {
-	trace.Span
-	name   string
-	attrs  []attribute.KeyValue
-	status codes.Code
-	ended  bool
-}
-
-// SetName records the name the observation moved the span to.
-func (s *observedSpan) SetName(name string) { s.name = name }
-
-// SetAttributes records the attributes the observation rendered.
-func (s *observedSpan) SetAttributes(kv ...attribute.KeyValue) { s.attrs = append(s.attrs, kv...) }
-
-// SetStatus records the status the observation set.
-func (s *observedSpan) SetStatus(code codes.Code, _ string) { s.status = code }
-
-// End records that the observation closed the span.
-func (s *observedSpan) End(...trace.SpanEndOption) { s.ended = true }
-
-// attribute reports the rendered value of one attribute key.
-func (s *observedSpan) attribute(key string) (attribute.Value, bool) {
-	for _, kv := range s.attrs {
-		if string(kv.Key) == key {
-			return kv.Value, true
-		}
-	}
-	return attribute.Value{}, false
-}
-
-// observedTracer records every span the observation started.
+// observedTracer stands in for the framework tracer the observation reads: it
+// records the name of every span started through it, so a check can hold the
+// observation to opening none of its own.
 type observedTracer struct {
 	trace.Tracer
 	mu    sync.Mutex
-	spans []*observedSpan
+	spans []string
 }
 
-// Start records one span and answers it as the started span.
+// Start records one started span's name and answers a span nothing reads.
 func (t *observedTracer) Start(ctx context.Context, name string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	span := &observedSpan{name: name}
-	t.spans = append(t.spans, span)
-	return ctx, span
+	t.spans = append(t.spans, name)
+	return ctx, noop.Span{}
 }
 
-// only reports the single span the observation started.
-func (t *observedTracer) only(tb testing.TB) *observedSpan {
-	tb.Helper()
+// started reports the names of the spans started through the stand-in.
+func (t *observedTracer) started() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.spans) != 1 {
-		tb.Fatalf("spans = %d, want exactly one span per model request", len(t.spans))
-	}
-	return t.spans[0]
+	return append([]string(nil), t.spans...)
 }
 
 // observedLogger records every line the observation took, beside the level it
@@ -170,13 +134,13 @@ func watchObservation(tb testing.TB, tracer trace.Tracer, logger trpclog.Logger)
 }
 
 // TestModelCallObservation checks the model-response face of the observation bypass.
-// - one model request opens exactly one span, ends it and names it after the model the stream named
-// - the span carries the chat operation, the model and the token totals of the reduced outcome
+// - one model request opens no span of its own: the generation span stays with the framework that drives the model
 // - the terminal is rendered as one INFO line carrying the model, the terminal and the token totals
-// - a failed request marks the span as an error
+// - the line carries the latency of the request and the number of responses the stream produced
+// - a failed request renders its failed terminal beside the named absence of a model
 // - a logger that fails does not block the reduction and still leaves the terminal standing
 func TestModelCallObservation(t *testing.T) {
-	t.Run("one request is one span and one INFO line", func(t *testing.T) {
+	t.Run("one request is one INFO line and no span of its own", func(t *testing.T) {
 		tracer, logger := &observedTracer{}, &observedLogger{}
 		watchObservation(t, tracer, logger)
 		answer := invariantAnswer("hello", 7, 3)
@@ -190,26 +154,10 @@ func TestModelCallObservation(t *testing.T) {
 		if outcome.Kind != KindCompleted {
 			t.Fatalf("terminal = %s, want the completed terminal of the answer", outcome.Kind)
 		}
-		span := tracer.only(t)
-		if span.name != "chat model-a" {
-			t.Fatalf("span name = %q, want the chat span named after the model", span.name)
+		if spans := tracer.started(); len(spans) != 0 {
+			t.Fatalf("spans = %v, want no span beside the framework generation span of the request", spans)
 		}
-		if !span.ended {
-			t.Fatal("span ended = false, want the span closed once the terminal stood")
-		}
-		if got, ok := span.attribute(string(semconvtrace.KeyGenAIOperationName)); !ok || got.AsString() != "chat" {
-			t.Fatalf("gen_ai.operation.name = %v (present %t), want chat", got.AsString(), ok)
-		}
-		if got, ok := span.attribute(string(semconvtrace.KeyGenAIRequestModel)); !ok || got.AsString() != "model-a" {
-			t.Fatalf("gen_ai.request.model = %v (present %t), want model-a", got.AsString(), ok)
-		}
-		if got, ok := span.attribute(string(semconvtrace.KeyGenAIUsageInputTokens)); !ok || got.AsInt64() != 7 {
-			t.Fatalf("gen_ai.usage.input_tokens = %v (present %t), want 7", got.AsInt64(), ok)
-		}
-		if got, ok := span.attribute(string(semconvtrace.KeyGenAIUsageOutputTokens)); !ok || got.AsInt64() != 3 {
-			t.Fatalf("gen_ai.usage.output_tokens = %v (present %t), want 3", got.AsInt64(), ok)
-		}
-		if !logger.mentions("info", "model response", "model=model-a", "terminal=completed", "prompt_tokens=7", "completion_tokens=3", "responses=1") {
+		if !logger.mentions("info", "model response", "model=model-a", "terminal=completed", "prompt_tokens=7", "completion_tokens=3", "responses=1", "latency_ms=") {
 			t.Fatalf("info lines = %v, want the one bounded model-response line of the request", logger.lines)
 		}
 	})
@@ -227,8 +175,8 @@ func TestModelCallObservation(t *testing.T) {
 		if outcome.Kind != KindCompleted {
 			t.Fatalf("terminal = %s, want the completed terminal of the answer", outcome.Kind)
 		}
-		if span := tracer.only(t); span.name != "chat model-b" {
-			t.Fatalf("span name = %q, want the chat span named after the model", span.name)
+		if spans := tracer.started(); len(spans) != 0 {
+			t.Fatalf("spans = %v, want no span beside the framework generation span of the request", spans)
 		}
 		if !logger.mentions("info", "model response", "model=model-b", "prompt_tokens=5", "completion_tokens=2") {
 			t.Fatalf("info lines = %v, want the one bounded model-response line of the request", logger.lines)
@@ -255,15 +203,15 @@ func TestModelCallObservation(t *testing.T) {
 		if outcome.Kind != KindCompleted {
 			t.Fatalf("terminal = %s, want the completed terminal of the stream", outcome.Kind)
 		}
-		if span := tracer.only(t); span.name != "chat model-c" {
-			t.Fatalf("span name = %q, want the one chat span of the streamed request", span.name)
+		if spans := tracer.started(); len(spans) != 0 {
+			t.Fatalf("spans = %v, want no span beside the framework generation span of the request", spans)
 		}
 		if !logger.mentions("info", "model response", "model=model-c", "terminal=completed", "responses=3") {
 			t.Fatalf("info lines = %v, want the one line of the stream carrying its response count", logger.lines)
 		}
 	})
 
-	t.Run("a failed request marks the span as an error", func(t *testing.T) {
+	t.Run("a failed request renders its failed terminal", func(t *testing.T) {
 		tracer, logger := &observedTracer{}, &observedLogger{}
 		watchObservation(t, tracer, logger)
 		ch := make(chan *Response, 1)
@@ -275,8 +223,8 @@ func TestModelCallObservation(t *testing.T) {
 		if outcome.Kind != KindFailed {
 			t.Fatalf("terminal = %s, want the failed terminal of the error response", outcome.Kind)
 		}
-		if span := tracer.only(t); span.status != codes.Error {
-			t.Fatalf("span status = %v, want the error status of a failed request", span.status)
+		if spans := tracer.started(); len(spans) != 0 {
+			t.Fatalf("spans = %v, want no span beside the framework generation span of the request", spans)
 		}
 		if !logger.mentions("info", "model response", "terminal=failed", "model=unnamed") {
 			t.Fatalf("info lines = %v, want the failed terminal named in place of an unnamed model", logger.lines)

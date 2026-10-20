@@ -90,6 +90,10 @@ type Obligations struct {
 	// ExitReason is the reason an obligation ended without settlement; it is
 	// empty while no obligation has exited.
 	ExitReason string
+	// Logical is the logical status the task is read under at the instant of the
+	// report: the silence its recorded state has stood in, beside the status the
+	// machine holds. It states which silence the task is in and moves nothing.
+	Logical LogicalStatus
 	// Open lists the obligations still open as the classified detail, one entry
 	// per obligation with the class it waits in.
 	Open []Obligation

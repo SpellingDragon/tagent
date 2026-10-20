@@ -14,16 +14,19 @@ package owns is the request-scoped terminal reduction over tool-call streams
 (ReduceChannel/ReduceSeq); terminal.go states that contract, including that the
 reduction is the single terminal-decision entry point the agent loop consumes.
 
-The model-response face of the observation bypass: one chat span on the
-framework tracer beside one bounded line on the framework logger per model
-request, both rendered from the Outcome the single reduction already derived.
+The model-response face of the observation bypass: one bounded line on the
+framework logger per model request, rendered from the Outcome the single
+reduction already derived. The generation span of that request belongs to
+whoever drives the model, not to this package: a span opened here would land a
+second, empty generation beside the framework's one, so this face renders the
+line only and leaves the span to its owner.
 
-The redline list (4 rules): MUST render after the terminal stands,
-from the reduced Outcome, and never re-fold the stream. MUST keep every
-rendering bounded: identities, counts and token totals, never prompt or
-completion content. MUST stay a bypass: a failing tracer or logger is a missing
-observation, never a failed request. MUST NOT mint a second terminal beside the
-reduction it observes.
+The redline list (4 rules): MUST render after the terminal stands, from the
+reduced Outcome, and never re-fold the stream. MUST keep every rendering
+bounded: identities, counts and token totals, never prompt or completion
+content. MUST stay a bypass: a failing logger is a missing observation, never a
+failed request. MUST NOT open a span beside the framework generation span of the
+request it observes.
 
 Package model folds one tool-call response stream into one terminal per model
 request; this file declares the terminal reduction contract that every stream

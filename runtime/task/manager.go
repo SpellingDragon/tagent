@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -67,6 +68,7 @@ func (m *MemoryManager) Obligations(ctx context.Context, taskID event.TaskID) (O
 		Owner:      entry.spec.InvocationID,
 		Blocked:    append([]BlockedObligation(nil), entry.blocked...),
 		ExitReason: entry.exitReason,
+		Logical:    m.registry.policy.classify(entry.status, entry.stamps(), time.Now()),
 		Open:       make([]Obligation, 0, len(entry.obligations)),
 	}
 	for _, open := range entry.obligations {

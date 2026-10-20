@@ -104,7 +104,7 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if n == nil || n.kind != sourceMap {
 		return nil, &decodeError{source: source, line: nodeLine(n), field: path, reason: "expected a mapping"}
 	}
-	fields, err := mapFields(source, path, n, "id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params", "final_round")
+	fields, err := mapFields(source, path, n, "id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params", "final_round", "replay_budget", "environment_block")
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,29 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.FinalRound, err = finalRoundField(source, joinField(path, "final_round"), fields["final_round"]); err != nil {
 		return nil, err
 	}
+	if a.ReplayBudget, err = roundField(source, joinField(path, "replay_budget"), fields["replay_budget"]); err != nil {
+		return nil, err
+	}
+	if a.EnvironmentBlock, err = boolField(source, joinField(path, "environment_block"), fields["environment_block"]); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// boolField reads one optional boolean field; an absent or null field reads as
+// false.
+func boolField(source, field string, e *sourceEntry) (bool, error) {
+	if isAbsent(e) {
+		return false, nil
+	}
+	if e.value.kind != sourceScalar {
+		return false, &decodeError{source: source, line: nodeLine(e.value), field: field, reason: "expected a boolean"}
+	}
+	value, ok := e.value.scalar.(bool)
+	if !ok {
+		return false, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a boolean"}
+	}
+	return value, nil
 }
 
 // finalRoundField maps one watchdog budget mapping onto its declaration; an

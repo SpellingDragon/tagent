@@ -24,7 +24,7 @@
 
 装配上的三条拒绝（`plugin.NewPipeline` 的原文）：nil 元素报 `plugin: the pipeline holds a nil plugin`；相位不在四个声明相位内报 `plugin: %q serves phase %d, which is not one of the declared phases`；相位合法但没实现该相位的窄接口报 `plugin: %q serves phase %s but implements no narrow interface of that phase`。元素也不得服务两个相位：一个注册元素一个相位，相位的两个面可以同时带。
 
-**与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的元素装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献元素的次序，pipeline 不改写它。契约在 `api/plugin/phases.go` 与 `api/plugin/present.go`，呈现词汇（`Presentation`/`RenderedView`/`ObservationGap`）在 `api/view/presentation.go`，只引用 `event` 的事实身份。观测面复用框架面、不自造第二套：已提交事实由 `telemetry.LogObserver` 写进 `trpc-agent-go/log.Logger`，而相位派发、消费器执行、模型响应三面直接写框架全局面（`log.Default` 与 `telemetry/trace.Tracer`），四类的观察点与 Langfuse 装配见 OPERATION §七·E。
+**与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的元素装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献元素的次序，pipeline 不改写它。契约在 `api/plugin/phases.go` 与 `api/plugin/present.go`，呈现词汇（`Presentation`/`RenderedView`/`ObservationGap`）在 `api/view/presentation.go`，只引用 `event` 的事实身份。观测面复用框架面、不自造第二套：已提交事实由 `telemetry.LogObserver` 写进 `trpc-agent-go/log.Logger`，相位派发与消费器执行两面直接写 `log.Default`，模型响应只写 `log.Default` 的一行 INFO（generation span 归驱动模型的一方，本仓不再开），四类的观察点与 Langfuse 装配见 OPERATION §七·E。
 
 ---
 <a id="event-vocabulary"></a>

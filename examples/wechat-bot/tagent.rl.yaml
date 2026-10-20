@@ -1,17 +1,19 @@
 # ============================================================================
 # tagent WeChat Bot · RL rollout 参数基线
 # ============================================================================
-# 状态:RL 训练环路在本仓无实现——rl/ 包只保留 capture / export / reward,模型热换
-#   (SwappableModel)与 HTTP /task 面不在任何装配里,宿主 main.go 亦无 RL 分支,
-#   故 ./run.sh rl 入口已退役。本文件保留为**可装载的参数基线**:
+# 状态:RL 训练环路在本仓无实现——组合根只消费 rl/ 的 capture 侧(Recorder/RequestSnapshot),
+#   sft/import/verifier/reward_ledger 与 export 导出器无生产消费者;模型热换(SwappableModel)
+#   与 HTTP /task 面不在任何装配里,宿主 main.go 亦无 RL 分支,故 ./run.sh rl 入口已退役。
+#   本文件保留为**可装载的参数基线**:
 #   TAGENT_CONFIG=tagent.rl.yaml ./run.sh 可直接读它启动,重接线时以它为起点。
 #
 # 解码纪律:与 tagent.yaml 同一个 strict 面(未知键拒启动),故只写宿主 schema 读取的键;
 #   未接线键清单见 README「待接线清单」。
 #
-# 与 tagent.yaml 的差异仅三处:模型(glm-5,与训练侧一致) · 端点(本机 OpenAI 兼容
-#   proxy 占位,rollout 侧注入实际地址时经 TAGENT_API_ENDPOINT 覆盖 entry) · 超时
-#   (7200s,rollout 比对话长)。
+# 与 tagent.yaml 的差异四处:模型(glm-5 经 areal_proxy,与训练侧一致) · 端点(本机
+#   OpenAI 兼容 proxy 占位,rollout 侧注入实际地址时经 TAGENT_API_ENDPOINT 覆盖 entry) ·
+#   超时(7200s,rollout 比对话长) · entry 未声明 final_round(即无界,对话基线是 24 轮/3300s)。
+#   providers 表同时只留 areal_proxy/zhipu/deepseek 三条(未被引用的连接器不声明)。
 # ============================================================================
 
 provider: areal_proxy
@@ -83,4 +85,4 @@ app:
 
 # 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
 #   memory / compress / meditation / max_tool_iterations / max_tokens / temperature /
-#   thinking_enabled / compress_threshold,以及全部非 send 工具与子 agent 委派。
+#   thinking_enabled / compress_threshold,以及除 send 与已声明的 recall_* 外的工具面与子 agent 委派。

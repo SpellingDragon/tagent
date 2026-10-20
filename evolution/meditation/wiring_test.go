@@ -3,8 +3,13 @@ package meditation
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory"
@@ -456,6 +461,273 @@ func TestMeditationConsumesCompressionRequests(t *testing.T) {
 		}
 		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 1 {
 			t.Fatalf("pending without a product sink = (%v, %v), want the request still awaited", pending, err)
+		}
+	})
+}
+
+// compressPhaseLog records the compress requests one meditation tick dispatched, in
+// dispatch order, and answers the refusal it was built with.
+type compressPhaseLog struct {
+	mu       sync.Mutex
+	received []event.CompressRequest
+	order    *[]string
+	err      error
+}
+
+// TriggerCompress records the request it was dispatched for beside the refusal it
+// answers.
+func (p *compressPhaseLog) TriggerCompress(_ context.Context, request event.CompressRequest) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.received = append(p.received, request)
+	if p.order != nil {
+		*p.order = append(*p.order, "phase:"+string(request.ID))
+	}
+	return p.err
+}
+
+// dispatched reports the requests the phase was dispatched for so far.
+func (p *compressPhaseLog) dispatched() []event.CompressRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]event.CompressRequest(nil), p.received...)
+}
+
+// TestMeditationDispatchesCompressPhase pins the plugin face of one meditation tick.
+// - every request the tick reads is dispatched to the compress phase before its pass runs
+// - a phase that refused keeps its request pending and lands its refusal in the tick account
+// - a tick wired without a phase curates the material its requests name as it stands
+// 契约: docs/FACT-VOCABULARY.md#families
+func TestMeditationDispatchesCompressPhase(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("every read request is dispatched before its pass runs", func(t *testing.T) {
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		request, filed, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards)
+		if err != nil || !filed {
+			t.Fatalf("judge the over-limit sequence = (%+v, %v, %v), want the request it files", request, filed, err)
+		}
+
+		var order []string
+		phase := &compressPhaseLog{order: &order}
+		fixture.meditation.phase = phase
+		fixture.meditation.products = func(_ context.Context, artifact MeditationArtifact) error {
+			order = append(order, "product:"+string(artifact.Key))
+			fixture.products = append(fixture.products, artifact)
+			return nil
+		}
+
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
+		if err != nil {
+			t.Fatalf("tick through the compress phase: %v", err)
+		}
+		dispatched := phase.dispatched()
+		if len(dispatched) != 1 || dispatched[0].ID != request.ID {
+			t.Fatalf("dispatched requests = %+v, want the one request the tick read", dispatched)
+		}
+		if len(tick.Read) != 1 || tick.Read[0].ID != request.ID {
+			t.Fatalf("read requests = %+v, want the filed judgment", tick.Read)
+		}
+		if len(order) != 2 || order[0] != "phase:"+string(request.ID) || !strings.HasPrefix(order[1], "product:") {
+			t.Fatalf("dispatch order = %v, want the phase ahead of the product of its pass", order)
+		}
+		if len(tick.Failures) != 0 || len(tick.Products) != 1 {
+			t.Fatalf("tick = %+v, want the product of the dispatched request committed", tick)
+		}
+	})
+
+	t.Run("a phase that refused keeps its request pending", func(t *testing.T) {
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		refused := errors.New("the compress phase holds no capacity")
+		fixture.meditation.phase = &compressPhaseLog{err: refused}
+
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
+		if err != nil {
+			t.Fatalf("tick under a refused dispatch: %v", err)
+		}
+		if len(tick.Failures) != 1 || !errors.Is(tick.Failures[0], refused) {
+			t.Fatalf("tick failures = %v, want the refusal it degraded under", tick.Failures)
+		}
+		if len(tick.Reports) != 0 || len(tick.Products) != 0 {
+			t.Fatalf("tick = %+v, want no pass behind a refused request", tick)
+		}
+		if pending, err := fixture.requests.Pending(ctx); err != nil || len(pending) != 1 {
+			t.Fatalf("pending under a refused dispatch = (%v, %v), want the request still awaited", pending, err)
+		}
+	})
+
+	t.Run("a tick wired without a phase curates the material as it stands", func(t *testing.T) {
+		unwired := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, unwired.retention, "aa02")
+		if _, _, err := unwired.meditation.Judge(ctx, meditationNow, unwired.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		wired := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, wired.retention, "aa02")
+		if _, _, err := wired.meditation.Judge(ctx, meditationNow, wired.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+		var order []string
+		wired.meditation.phase = &compressPhaseLog{order: &order}
+
+		without, err := unwired.meditation.Tick(ctx, meditationNow)
+		if err != nil {
+			t.Fatalf("tick without a phase: %v", err)
+		}
+		with, err := wired.meditation.Tick(ctx, meditationNow)
+		if err != nil {
+			t.Fatalf("tick through an accepting phase: %v", err)
+		}
+		if len(order) != 1 {
+			t.Fatalf("dispatched requests = %v, want the one request the tick read", order)
+		}
+		if len(without.Reports) != 1 || len(with.Reports) != 1 || len(without.Products) != len(with.Products) {
+			t.Fatalf("ticks = (%+v, %+v), want one pass and one product either way", without, with)
+		}
+		unfaced, faced := without.Reports[0], with.Reports[0]
+		if unfaced.Triggered != faced.Triggered || len(unfaced.Evicted) != len(faced.Evicted) || len(unfaced.Failures) != len(faced.Failures) {
+			t.Fatalf("reports = (%+v, %+v), want the pass a tick without a phase runs", unfaced, faced)
+		}
+		if fmt.Sprintf("%v", unfaced.Fates) != fmt.Sprintf("%v", faced.Fates) {
+			t.Fatalf("fates = (%v, %v), want the fate each card was filed under either way", unfaced.Fates, faced.Fates)
+		}
+		if unfaced.Artifact == nil || faced.Artifact == nil || fmt.Sprintf("%+v", *unfaced.Artifact) != fmt.Sprintf("%+v", *faced.Artifact) {
+			t.Fatalf("artifacts = (%+v, %+v), want the artifact a tick without a phase mints", unfaced.Artifact, faced.Artifact)
+		}
+		if fmt.Sprintf("%+v", without.Products) != fmt.Sprintf("%+v", with.Products) {
+			t.Fatalf("products = (%+v, %+v), want the product a tick without a phase commits", without.Products, with.Products)
+		}
+	})
+}
+
+// meditationLog records the lines the meditation observation rendered: the DEBUG and
+// INFO levels the observation writes, and no other level.
+type meditationLog struct {
+	trpclog.Logger
+	mu         sync.Mutex
+	lines      []string
+	panicsLeft int
+}
+
+// take records one rendered line or refuses it by panicking.
+func (l *meditationLog) take(level, text string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.panicsLeft > 0 {
+		l.panicsLeft--
+		panic("the logger refused the write")
+	}
+	l.lines = append(l.lines, level+": "+text)
+}
+
+// Debugf records one formatted debug line.
+func (l *meditationLog) Debugf(format string, args ...any) {
+	l.take("debug", fmt.Sprintf(format, args...))
+}
+
+// Infof records one formatted info line.
+func (l *meditationLog) Infof(format string, args ...any) {
+	l.take("info", fmt.Sprintf(format, args...))
+}
+
+// at reports the lines taken at the named level.
+func (l *meditationLog) at(level string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.HasPrefix(line, level+": ") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// mentions reports whether one line at the level carries every fragment.
+func (l *meditationLog) mentions(level string, fragments ...string) bool {
+	for _, line := range l.at(level) {
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+				break
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// watchMeditationLog points the meditation observation at the given logger for the
+// duration of one check.
+func watchMeditationLog(tb testing.TB, logger trpclog.Logger) {
+	tb.Helper()
+	original := trpclog.Default
+	trpclog.Default = logger
+	tb.Cleanup(func() { trpclog.Default = original })
+}
+
+// TestMeditationObservationPinsOneLinePerStep pins the observation of one meditation tick and of each pass it drives.
+// - one tick renders a start line and an end line carrying what it read, committed and degraded under beside its elapsed time
+// - each pass renders one line carrying the cards it assessed, whether the bound triggered it, the artifact it left and its elapsed time
+// - the observation writes nothing at INFO, so the bounded stream stays with turn boundaries and model requests
+// - a logger that fails does not refuse a tick or its pass
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestMeditationObservationPinsOneLinePerStep(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("one tick renders one boundary line per step and one line per pass", func(t *testing.T) {
+		logger := &meditationLog{}
+		watchMeditationLog(t, logger)
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
+		if err != nil || len(tick.Reports) != 1 {
+			t.Fatalf("tick = (%+v, %v), want the one pass of the filed request", tick, err)
+		}
+		if !logger.mentions("debug", "tagent: meditation tick start") {
+			t.Fatalf("debug lines = %v, want the start line of the tick", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "tagent: meditation tick end",
+			fmt.Sprintf("read=%d reports=%d products=%d folds=%d failures=%d", len(tick.Read), len(tick.Reports), len(tick.Products), len(tick.Folds), len(tick.Failures)),
+			"elapsed=") {
+			t.Fatalf("debug lines = %v, want the end line carrying the accounts of the tick", logger.at("debug"))
+		}
+		report := tick.Reports[0]
+		if !logger.mentions("debug", "tagent: meditation pass",
+			fmt.Sprintf("cards=%d triggered=%t", len(fixture.cards), report.Triggered),
+			"artifact="+string(report.Artifact.Key),
+			fmt.Sprintf("evicted=%d failures=%d", len(report.Evicted), len(report.Failures)),
+			"elapsed=") {
+			t.Fatalf("debug lines = %v, want the pass line carrying the artifact it left", logger.at("debug"))
+		}
+		if lines := logger.at("info"); len(lines) != 0 {
+			t.Fatalf("info lines = %v, want the meditation observation kept at DEBUG", lines)
+		}
+	})
+
+	t.Run("a logger that fails does not refuse a tick", func(t *testing.T) {
+		watchMeditationLog(t, &meditationLog{panicsLeft: 3})
+		fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+		holdTicket(t, ctx, fixture.retention, "aa02")
+		if _, _, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards); err != nil {
+			t.Fatalf("judge the over-limit sequence: %v", err)
+		}
+
+		tick, err := fixture.meditation.Tick(ctx, meditationNow)
+		if err != nil || len(tick.Products) != 1 {
+			t.Fatalf("tick through a failing logger = (%+v, %v), want the product committed", tick, err)
 		}
 	})
 }

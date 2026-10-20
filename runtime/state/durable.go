@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -103,6 +105,7 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 		owed:      map[noticeKey]task.OutboxNotice{},
 	}
 	if err := d.load(context.Background()); err != nil {
+		durableError("tagent: durable commit load failed err=%v", err)
 		return nil, err
 	}
 	return d, nil
@@ -187,12 +190,17 @@ func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (t
 	}
 	body, err := task.EncodeTaskRecord(task.TaskRecord{Spec: d.specs[record.TaskID], Fact: record})
 	if err != nil {
+		durableError("tagent: durable commit encode failed task=%s mutation=%s err=%v", record.TaskID, record.MutationID, err)
 		return task.CommitNotCommitted, err
 	}
 	if err := d.log.Put(ctx, factKey(record.TaskID, record.MutationID), body); err != nil {
+		durableError("tagent: durable commit write failed task=%s mutation=%s result=uncommitted err=%v",
+			record.TaskID, record.MutationID, err)
 		return task.CommitNotCommitted, err
 	}
 	if err := d.log.Sync(ctx); err != nil {
+		durableError("tagent: durable commit barrier failed task=%s mutation=%s result=uncertain err=%v",
+			record.TaskID, record.MutationID, err)
 		return task.CommitUncertain, err
 	}
 	d.revisions[record.TaskID] = record.ExpectedRevision + 1
@@ -220,12 +228,15 @@ func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec t
 	}
 	body, err := json.Marshal(spec)
 	if err != nil {
+		durableError("tagent: durable declare encode failed task=%s err=%v", taskID, err)
 		return err
 	}
 	if err := d.log.Put(ctx, specPrefix+string(taskID), body); err != nil {
+		durableError("tagent: durable declare write failed task=%s result=undeclared err=%v", taskID, err)
 		return err
 	}
 	if err := d.log.Sync(ctx); err != nil {
+		durableError("tagent: durable declare barrier failed task=%s result=undeclared err=%v", taskID, err)
 		return err
 	}
 	d.specs[taskID] = spec
@@ -349,6 +360,25 @@ func equalOutbox(left, right []task.Envelope) bool {
 // mutation identity it carries.
 func factKey(taskID event.TaskID, mutation task.MutationID) string {
 	return factPrefix + string(taskID) + "\x00" + string(mutation)
+}
+
+// durableError renders one line of the persistence face at ERROR: a write, a
+// barrier or a load the durable carrier could not complete, beside the task and
+// the mutation it was about and the outcome the caller is answered with. A
+// failure here changes what the process may claim to have stored, which is a
+// semantic change nobody should have to grep for, so the level is ERROR and
+// never a quieter one.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a changed outcome.
+// MUST write one line per failed write, failed barrier or failed load.
+// MUST NOT render the record body, the arguments or the stored bytes.
+func durableError(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Errorf(format, args...)
 }
 
 // BindingOwners resolves a restored target's owner against the current

@@ -203,8 +203,9 @@ func NewMeditation(policy MeditationPolicy, retention *ledger.Retention, lifecyc
     condenser runs the deterministic engineering condensation. The retention
     ledger must be the one the lifecycle was built over, so a reference the pass
     holds is the protection the eviction consults. The options wire the consumer
-    face: the request log a tick consumes, the card sequence it curates and the
-    state its product facts are committed into.
+    face: the request log a tick consumes, the card sequence it curates, the
+    state its product facts are committed into and the plugin face its requests
+    are dispatched to.
 
 func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts, input ReflectionInput) (*Reflection, error)
     NewReflection assembles the reflection loop of one agent over its watermark
@@ -293,6 +294,24 @@ type Anchors struct {
     advances. The session anchor is carried beside it in the same record,
     and an entry this structure does not name is ignored when the record is read
     rather than refused.
+
+type CompressPhase interface {
+	// TriggerCompress dispatches one filed compress request. A nil error carries the
+	// request forward into the pass that compresses it; a non-nil error refuses it
+	// by name, so no material is curated and the request stays pending.
+	TriggerCompress(ctx context.Context, request event.CompressRequest) error
+}
+    CompressPhase is the plugin face a meditation tick hands the compress
+    requests it reads to: the face answers one filed judgment with the
+    compression it owes, and the request it is dispatched for is the one the log
+    filed, value for value. The tick curates the material only after the face
+    answered it, so a compression face that refused keeps its request pending
+    instead of being counted compressed.
+
+    The redline list (3 rules): MUST take the request as the log filed it:
+    the face answers the compression, never the judgment. MUST NOT retire
+    the request: the tick retires it once the products of its compression are
+    committed. MUST NOT curate material no filed request names.
 
 type Condenser func(ctx context.Context, run MeditationRun, now time.Time) (string, error)
     Condenser folds one over-limit card run into its condensed summary:
@@ -406,13 +425,13 @@ func (c *Meditation) Judge(ctx context.Context, now time.Time, cards []Meditatio
 func (c *Meditation) Tick(ctx context.Context, now time.Time) (MeditationTick, error)
     Tick runs one meditation tick at now: it reads the card sequence it curates
     and the compress requests pending in the request log, and for each pending
-    request naming that sequence it runs one pass, commits the condensed
-    artifact the pass minted into the state, pre-folds the compressed projection
-    once through the wired pre-fold, commits the compaction fact and retires the
-    request. A request naming other material stays pending, and a pass, commit,
-    pre-fold or retirement that failed keeps its request pending and lands in
-    the tick account, so a request is never counted consumed before the products
-    of its compression are held.
+    request naming that sequence it dispatches the compress phase, runs one
+    pass, commits the condensed artifact the pass minted into the state,
+    pre-folds the compressed projection once through the wired pre-fold, commits
+    the compaction fact and retires the request. A request naming other material
+    stays pending, and a phase, pass, commit, pre-fold or retirement that failed
+    keeps its request pending and lands in the tick account, so a request is
+    never counted consumed before the products of its compression are held.
 
 type MeditationArtifact struct {
 	// Key is the content-addressed identity of the artifact: the same
@@ -501,6 +520,12 @@ type MeditationFolds func(ctx context.Context, fact replay.CompactionFact) error
 type MeditationOption func(*Meditation)
     MeditationOption names one setting of the meditation engine at construction
     time.
+
+func WithCompressPhase(phase CompressPhase) MeditationOption
+    WithCompressPhase wires the plugin face the consumer tick dispatches every
+    compress request it reads to. A tick wired without one curates the material
+    its requests name and retires them as it stands: no compression face stands
+    between the judgment and the pass.
 
 func WithCompressRequests(requests *memory.CompressRequests) MeditationOption
     WithCompressRequests wires the compress request log the consumer tick reads:

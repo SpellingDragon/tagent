@@ -13,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
@@ -606,4 +607,110 @@ func invariantCarries(msgs []model.Message, content string) bool {
 		}
 	}
 	return false
+}
+
+// TestBackflowNotificationLanes pins the lanes one notification of a call is admitted into.
+// - a progress notification enters that invocation's notification lane and answers no call
+// - the progress of a call is read by the next decision of that range as input material, and read once
+// - a settled notification still pairs its result with the call and keeps the notification lane empty
+// - a notification that is neither progress nor terminal leaves the range exactly as it stands
+// 契约: docs/wiki/agent/execution-generations.md#turn-outcome
+func TestBackflowNotificationLanes(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("progress enters the range's next decision and answers no call", func(t *testing.T) {
+		behaviour := newInvariantLoopModel("answer-progress", nil)
+		loop, _, _ := invariantLoop(t, behaviour)
+		notice := task.Notice{TaskID: "task-progress", Round: 2, Kind: task.NoticeProgress, Seq: 0, Event: "fact-progress"}
+		loop.Backflow("invocation-progress", notice)
+
+		in := loop.intakeFor("invocation-progress")
+		in.mu.Lock()
+		parked := len(in.arrived["task-progress"])
+		waiters := len(in.waiters["task-progress"])
+		in.mu.Unlock()
+		if parked != 0 || waiters != 0 {
+			t.Fatalf("intake beside a progress notification = (%d parked, %d waits), want the settled wait left open", parked, waiters)
+		}
+
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-progress",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-progress",
+				Message: model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		})
+		if err != nil || turn.Terminal != model.KindCompleted {
+			t.Fatalf("drive beside a progress notification = (%v, %v), want the one completed turn", turn.Terminal, err)
+		}
+		requests := behaviour.requestMessages()
+		if len(requests) != 1 {
+			t.Fatalf("model requests = %d, want the one decision of the range", len(requests))
+		}
+		note := progressNoteOf(notice)
+		if !invariantCarries(requests[0], note.Content) {
+			t.Fatalf("first request messages = %+v, want the progress of the call as input material", requests[0])
+		}
+		if note.Role != model.RoleUser || note.ToolID != "" || note.ToolName != "" {
+			t.Fatalf("progress note = %+v, want input material that answers no call", note)
+		}
+		if notes := loop.progressNotes("invocation-progress"); len(notes) != 0 {
+			t.Fatalf("progress read twice = %+v, want the notification reported once", notes)
+		}
+	})
+
+	t.Run("a settled notification still pairs its result with the call", func(t *testing.T) {
+		behaviour := newInvariantLoopModel("answer-settled", nil)
+		loop, _, _ := invariantLoop(t, behaviour)
+		notice := task.Notice{TaskID: "task-settled", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "fact-settled"}
+		loop.Backflow("invocation-settled", notice)
+
+		in := loop.intakeFor("invocation-settled")
+		in.mu.Lock()
+		parked := len(in.arrived["task-settled"])
+		lane := len(in.notified)
+		in.mu.Unlock()
+		if parked != 1 || lane != 0 {
+			t.Fatalf("intake beside a settled notification = (%d parked, %d notified), want the paired result alone", parked, lane)
+		}
+	})
+
+	t.Run("a notification that is not progress leaves the range as it stands", func(t *testing.T) {
+		behaviour := newInvariantLoopModel("answer-accepted", nil)
+		loop, _, _ := invariantLoop(t, behaviour)
+		loop.Backflow("invocation-accepted", task.Notice{TaskID: "task-accepted", Round: 1, Kind: task.NoticeAccepted, Seq: 0, Event: "fact-accepted"})
+
+		in := loop.intakeFor("invocation-accepted")
+		in.mu.Lock()
+		parked := len(in.arrived["task-accepted"])
+		waits := len(in.waiters["task-accepted"])
+		in.mu.Unlock()
+		if parked != 0 || waits != 0 {
+			t.Fatalf("intake beside an accepted notification = (%d parked, %d waits), want the intake untouched", parked, waits)
+		}
+		if notes := loop.progressNotes("invocation-accepted"); len(notes) != 0 {
+			t.Fatalf("notification lane beside an accepted notification = %+v, want it empty", notes)
+		}
+
+		if _, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-accepted",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-accepted",
+				Message: model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		}); err != nil {
+			t.Fatalf("drive beside an accepted notification = %v, want the one completed turn", err)
+		}
+		requests := behaviour.requestMessages()
+		if len(requests) != 1 || len(requests[0]) != 1 {
+			t.Fatalf("first request messages = %+v, want the ready input alone", requests)
+		}
+		if requests[0][0].Content != "hello" {
+			t.Fatalf("first request message = %+v, want the accepted notification carried nowhere", requests[0][0])
+		}
+	})
 }

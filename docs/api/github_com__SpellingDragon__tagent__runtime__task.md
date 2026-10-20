@@ -1,5 +1,12 @@
 package task // import "github.com/SpellingDragon/tagent/runtime/task"
 
+This file holds the logical status of a task: the classification of how long
+the task's recorded state has stood unchanged. It is a second read-out beside
+the status machine, never a value the machine stores: the status a task holds is
+written by the transitions it commits, and this classification is derived from
+the movement stamps those transitions leave, so reading one leaves the other
+exactly as it stands.
+
 Package task is the runtime's task admission and settlement layer. It declares
 the declaration a tool, sub-agent or result-delivery call is admitted under,
 the status a task moves through, and the ports through which a transition is
@@ -10,7 +17,35 @@ commit and scheduling behaviour runs behind those ports in this package:
 the registry owns the life of a task, the manager owns its obligations, and the
 commit carrier records the transitions.
 
+CONSTANTS
+
+const (
+	// PolicyDefault is the name of DefaultPolicy; the empty name selects it too.
+	PolicyDefault = "default"
+	// PolicyResponsive is the name of the threshold set for tasks whose caller
+	// wants an earlier report of silence.
+	PolicyResponsive = "responsive"
+	// PolicyPatient is the name of the threshold set for tasks that stay in
+	// execution for a long while by design.
+	PolicyPatient = "patient"
+)
+    PolicyDefault, PolicyResponsive and PolicyPatient are the declared task
+    policy names: the name an agent declaration selects through its task policy,
+    and the threshold sets those names resolve to.
+
 VARIABLES
+
+var DefaultPolicy = Policy{
+	WatchAfter:       30 * time.Second,
+	StableAfter:      2 * time.Minute,
+	SuspectAfter:     10 * time.Minute,
+	ExecutionTimeout: 30 * time.Minute,
+	TTL:              2 * time.Hour,
+}
+    DefaultPolicy is the threshold set a task is read under when its declaration
+    names no other policy: silence is observed after half a minute, reported
+    stable after two minutes and suspected after ten, one round of execution is
+    waited for half an hour, and a task unsettled for two hours expires.
 
 var ErrApprovalDigestMismatch = errors.New("task: the approval response names other arguments than the held ones")
     ErrApprovalDigestMismatch reports an approval response whose argument digest
@@ -512,6 +547,51 @@ type HoldReceipt struct {
     channel. It answers the call with its wait and nothing more: the task it
     names executed nothing, and the receipt is read as no final refusal.
 
+type LogicalChange struct {
+	// TaskID is the task the change belongs to.
+	TaskID event.TaskID
+	// Status is the status the machine holds, unchanged by the change.
+	Status Status
+	// From is the logical status the task was last reported under.
+	From LogicalStatus
+	// To is the logical status the task is reported under now.
+	To LogicalStatus
+	// Since is the instant the change was identified at.
+	Since time.Time
+}
+    LogicalChange is one identified logical status change of one task: the task
+    it belongs to, the status the machine holds beside both logical statuses of
+    the change and the instant it was identified at.
+
+type LogicalStatus string
+    LogicalStatus is the classification of a task by how long its recorded state
+    has stood unchanged. A task keeps the status its transitions committed;
+    this classification names the silence that state was read under, so a stable
+    or a suspected task is reported as such without any status of it moving.
+
+const (
+	// LogicalActive is the zero value: the task's state moved within the watch
+	// threshold of its policy, or its movement carries no stamp, so no silence
+	// is identified.
+	LogicalActive LogicalStatus = ""
+	// LogicalWatch is a task whose state has stood unchanged for the watch
+	// threshold: the silence is observed and nothing is judged of it.
+	LogicalWatch LogicalStatus = "watch"
+	// LogicalStable is a task whose state has stood unchanged for the stable
+	// threshold: the silence itself is the report, and neither the status nor
+	// the obligations of the task change with it.
+	LogicalStable LogicalStatus = "stable"
+	// LogicalSuspect is a task whose state has stood unchanged for the suspect
+	// threshold: the task is reported as holding no live execution of its own.
+	LogicalSuspect LogicalStatus = "suspect"
+	// LogicalTimedOut is a task whose execution has run past the execution
+	// timeout of its policy: the caller stops holding the wait for that
+	// execution, and its result arrives as a notification when it settles.
+	LogicalTimedOut LogicalStatus = "timed-out"
+	// LogicalExpired is a task that stayed unsettled past the time to live of
+	// its policy.
+	LogicalExpired LogicalStatus = "expired"
+)
 type Manager interface {
 	// Admit accepts one task declaration and returns the admission receipt.
 	Admit(ctx context.Context, spec Spec) (AdmissionReceipt, error)
@@ -729,6 +809,11 @@ func (r *MemoryRegistry) IssueNotice(ctx context.Context, taskID event.TaskID, k
     the notifications issued after it, so the envelopes already issued keep the
     routing they froze and a retry of one never re-resolves a current target.
 
+func (r *MemoryRegistry) Logical(ctx context.Context, taskID event.TaskID, at time.Time) (LogicalStatus, error)
+    Logical reports the logical status of one task at the given instant: the
+    silence its recorded state has stood in, read beside the status machine. The
+    status, revision, mutations and obligations of the task stay as they stand.
+
 func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec, Status, error)
     Lookup returns the declaration and status of the task with the given
     identity.
@@ -768,6 +853,13 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
     flight refuses the declaration, and so does a cancelled task. A repeated
     declaration of the same input returns the fact already stored and opens no
     second obligation.
+
+func (r *MemoryRegistry) Watch(ctx context.Context, at time.Time) []LogicalChange
+    Watch identifies the logical status changes of every task the registry holds
+    non-terminal at the given instant, in task identity order. Each change is
+    reported once: a task already reported under a logical status is reported
+    again only when that status moves. The report reads the silence of the tasks
+    it covers and moves no status, revision or obligation of any of them.
 
 type MutationID string
 
@@ -895,6 +987,10 @@ type Obligations struct {
 	// ExitReason is the reason an obligation ended without settlement; it is
 	// empty while no obligation has exited.
 	ExitReason string
+	// Logical is the logical status the task is read under at the instant of the
+	// report: the silence its recorded state has stood in, beside the status the
+	// machine holds. It states which silence the task is in and moves nothing.
+	Logical LogicalStatus
 	// Open lists the obligations still open as the classified detail, one entry
 	// per obligation with the class it waits in.
 	Open []Obligation
@@ -934,6 +1030,33 @@ type OwnerBinding interface {
     not hold, by name. MUST NOT resolve an owner from a top-level singleton or
     from a most-recent target.
 
+type Policy struct {
+	// WatchAfter is how long a task's state may stand unchanged before that
+	// silence is observed.
+	WatchAfter time.Duration
+	// StableAfter is how long it may stand unchanged before the silence is
+	// reported as the stable state of the task.
+	StableAfter time.Duration
+	// SuspectAfter is how long it may stand unchanged before the task is
+	// reported as holding no live execution.
+	SuspectAfter time.Duration
+	// ExecutionTimeout is how long one round of execution may run before the
+	// caller stops holding the wait for its result.
+	ExecutionTimeout time.Duration
+	// TTL is how long a task may stay unsettled after its admission.
+	TTL time.Duration
+}
+    Policy is the threshold set one task's logical status is read under. A zero
+    threshold places no bound on the threshold it names, so a policy states only
+    the silences it wants identified and the zero policy identifies none.
+
+func PolicyNamed(name string) (Policy, bool)
+    PolicyNamed reports the threshold set the declared task policy name selects
+    and whether the name is one this table declares. The empty name selects
+    DefaultPolicy; a name outside the table is reported as unknown rather than
+    read as the default, so a misspelled declaration is visible where it is
+    resolved.
+
 type Registry interface {
 	// Register admits one task declaration and returns the admission receipt.
 	// Admission is not a result and does not clear the task's obligation.
@@ -968,6 +1091,10 @@ func WithConcurrencyLimit(limit int) RegistryOption
     WithConcurrencyLimit caps how many tasks the registry holds non-terminal at
     once. An admission past that limit is refused by name, and the tasks already
     admitted are kept.
+
+func WithPolicy(policy Policy) RegistryOption
+    WithPolicy sets the threshold set every task of the registry is read under.
+    A registry built beside no policy reads its tasks under DefaultPolicy.
 
 type RestoreOutcome struct {
 	// TaskID is the task the outcome is about.

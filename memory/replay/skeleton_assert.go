@@ -2,9 +2,10 @@
 //
 // Skeleton compile-time assertions for the replay shapes: the presentation
 // decision, the chain-isolated replay source and relation store, the compaction
-// payload and its refs, and the cold-start rebuild that replays a fact chain into
-// an empty projection. A renamed field or a widened signature stops this file
-// from compiling.
+// payload and its refs, the cold-start rebuild that replays a fact chain into
+// an empty projection, and the segment-age axis the bands and their folds are
+// declared under. A renamed field or a widened signature stops this file from
+// compiling.
 package replay
 
 import (
@@ -48,7 +49,43 @@ var (
 
 	_ func(*ReplayProjection, context.Context, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudget
 
+	_ func(*ReplayProjection, context.Context, int, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudgetPrefix
+
+	_ func(*ReplayProjection, context.Context, AgeFoldPlan) (AgeFoldReport, error) = (*ReplayProjection).FoldByAge
+
 	_ func(*ReplayProjection) []ReplaySettle = (*ReplayProjection).Settles
+)
+
+// The segment-age axis keeps its declared shapes: one band per age band, the
+// partition of a projection into task-turn segments, and the plan and report an
+// age-band fold is judged under.
+var (
+	_ Band = BandNew
+	_ Band = BandMid
+	_ Band = BandOld
+
+	_ = Segment{Index: 0, Age: 0, Level: 0, Band: BandNew, Complete: false, Entries: []ProjectionEntry{}}
+	_ = AgeFoldPlan{KeepRecent: 0, VolumeThreshold: 0}
+	_ = AgeFoldReport{
+		Volume:    0,
+		Threshold: 0,
+		Triggered: false,
+		NewFolded: 0,
+		MidFolded: 0,
+		Products:  []ProjectionEntry{},
+		Requests:  []event.CompressRequest{},
+	}
+
+	_ func(age int, keepRecent int) int      = LevelOfAge
+	_ func(level int) Band                   = BandOfLevel
+	_ func(age int, keepRecent int) Band     = BandOfAge
+	_ func([]ProjectionEntry, int) []Segment = SegmentsOf
+
+	_ string = ProjectionTypeSegmentFold
+	_ string = ProjectionTypeHistorySummary
+
+	_ = DefaultAgeKeepRecent
+	_ = DefaultAgeVolumeThreshold
 )
 
 // The projection replay keeps its declared shapes: the chain-isolated replay

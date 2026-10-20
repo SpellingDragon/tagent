@@ -1,9 +1,5 @@
-# Knowledge backend (app-level override fragment)
+Delegate to the knowledge agent: a research turn that finds skills, loads one, and reads files inside the workspace root.
 
-Active backend: **ima cloud knowledge base** (single source of truth since 2026-09-14).
+Use it when the answer needs material the conversation does not carry: a skill's procedure, a document under the read root, or a lookup the knowledge agent's own prompt describes. The turn runs on that agent's own tools (skill search, skill load, bounded file read), and its answer returns as the terminal notification of the admitted task.
 
-Routing:
-1. `skill_search` with keywords like "ima knowledge base", then `skill_load` its SKILL.md.
-2. Use the MCP tools listed there (prefer `search_knowledge`); if the MCP channel is unavailable, surface the exact `mcp_call` invocation for the caller.
-
-Historical note: the deployment previously used a local `knowledge_base/` directory tree — it is retired; do not read it (fails with ENOENT). Write-side constraints (add-only, citation-link rule) live in the ima SKILL.md.
+Do not use it to send messages or to reach memory: this conversation keeps those tools itself.

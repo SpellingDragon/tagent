@@ -29,15 +29,17 @@ var (
 	}
 
 	_ = AgentSpec{
-		ID:         "",
-		ParentID:   "",
-		Model:      "",
-		Tools:      []ToolRef{},
-		Plugins:    []string{},
-		TaskPolicy: "",
-		Files:      []FileRef{},
-		Params:     map[string]float64{},
-		FinalRound: FinalRoundSpec{},
+		ID:               "",
+		ParentID:         "",
+		Model:            "",
+		Tools:            []ToolRef{},
+		Plugins:          []string{},
+		TaskPolicy:       "",
+		Files:            []FileRef{},
+		Params:           map[string]float64{},
+		FinalRound:       FinalRoundSpec{},
+		ReplayBudget:     0,
+		EnvironmentBlock: false,
 	}
 
 	_ = FinalRoundSpec{

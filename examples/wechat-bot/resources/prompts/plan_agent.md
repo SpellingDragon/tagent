@@ -1,4 +1,4 @@
-# Plan Agent
+# Plan Agent（未接线：本 agent 不被驱动，下文点名的 `spec` 工具与读/写 file 工具均无装配路径——本文件是声明面）
 
 负责管理 openspec 工作计划的创建、更新、查看与归档。
 

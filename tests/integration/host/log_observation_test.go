@@ -17,7 +17,6 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/telemetry"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
-	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
 	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
@@ -256,7 +255,7 @@ func watchObservationFaces(tb testing.TB, logger trpclog.Logger, tracer trace.Tr
 // - 事件流: the committed tool-call fact writes its DEBUG line after its commit
 // - 插件相位: every executed face of the pipeline writes one DEBUG line carrying the phase, the plugin and its result
 // - 事件消费: the drive writes its start, its decision and its end lines beside the invocation identity
-// - 模型响应: each model request writes one INFO line and opens one chat span carrying the operation, the model and the token totals
+// - 模型响应: each model request writes one INFO line and leaves the generation span to the framework that drives the model
 // - the INFO stream stays bounded by the turn boundaries and the model responses, and no line renders payload content
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -289,19 +288,8 @@ func TestFourFacesObservationThroughTheFormalEntry(t *testing.T) {
 	}
 
 	spans := tracer.named("chat model-a")
-	if len(spans) != 2 {
-		t.Fatalf("chat spans = %d, want one per model request of the turn", len(spans))
-	}
-	for _, span := range spans {
-		if !span.ended {
-			t.Fatal("a chat span was left open, want every span closed once its terminal stood")
-		}
-		if got, ok := span.attribute(string(semconvtrace.KeyGenAIOperationName)); !ok || got.AsString() != "chat" {
-			t.Fatalf("gen_ai.operation.name = %v (present %t), want chat", got.AsString(), ok)
-		}
-		if got, ok := span.attribute(string(semconvtrace.KeyGenAIRequestModel)); !ok || got.AsString() != "model-a" {
-			t.Fatalf("gen_ai.request.model = %v (present %t), want model-a", got.AsString(), ok)
-		}
+	if len(spans) != 0 {
+		t.Fatalf("chat spans = %d, want the generation span left to the framework that drives the model", len(spans))
 	}
 
 	for _, line := range logger.all() {

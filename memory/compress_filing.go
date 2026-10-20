@@ -8,6 +8,8 @@
 // judgment is quoted by — is event vocabulary (event.CompressRequest). What
 // stands here is the memory side of that wiring: the judgment label this package
 // contributes and the log that holds it.
+//
+// 契约: docs/wiki/agent/compression-and-telemetry.md#output-overflow
 package memory
 
 import (
@@ -16,6 +18,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -75,6 +79,8 @@ func (l *CompressRequests) Produce(ctx context.Context, request event.CompressRe
 		return event.CompressRequest{}, err
 	}
 	if request.Producer == "" || request.Subject == "" || request.Reason == "" {
+		filingDebug("tagent: compress request judged result=refused producer=%q subject=%q reason=%q",
+			request.Producer, request.Subject, request.Reason)
 		return event.CompressRequest{}, ErrCompressRequestUnnamed
 	}
 	if request.ID == "" {
@@ -84,6 +90,8 @@ func (l *CompressRequests) Produce(ctx context.Context, request event.CompressRe
 	defer l.mu.Unlock()
 	for _, filed := range l.filed {
 		if filed.ID == request.ID {
+			filingDebug("tagent: compress request judged result=recorded producer=%s subject=%s reason=%s id=%s pending=%d",
+				filed.Producer, filed.Subject, filed.Reason, filed.ID, len(l.pending))
 			return filed, nil
 		}
 	}
@@ -92,6 +100,8 @@ func (l *CompressRequests) Produce(ctx context.Context, request event.CompressRe
 	}
 	l.filed = append(l.filed, request)
 	l.pending[request.ID] = true
+	filingDebug("tagent: compress request judged result=filed producer=%s subject=%s reason=%s id=%s pending=%d",
+		request.Producer, request.Subject, request.Reason, request.ID, len(l.pending))
 	return request, nil
 }
 
@@ -122,8 +132,29 @@ func (l *CompressRequests) Consume(ctx context.Context, key event.EventID) error
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.pending[key] {
+		filingDebug("tagent: compress request retired result=refused id=%s pending=%d", key, len(l.pending))
 		return fmt.Errorf("%w: %q", ErrCompressRequestNotPending, key)
 	}
 	delete(l.pending, key)
+	filingDebug("tagent: compress request retired result=retired id=%s pending=%d", key, len(l.pending))
 	return nil
+}
+
+// filingDebug renders one line of the compress request family at DEBUG: who
+// judged, why, which request identity the judgment is recorded under, whether a
+// new request was filed or the record kept, and how many requests still await
+// consumption. The producer, the subject and the reason are labels the
+// vocabulary fixes, so one line stays bounded whatever the judged material
+// holds.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed filing.
+// MUST keep one line per judgment, per retirement and per refusal, at DEBUG.
+// MUST NOT render the judged material or any card body behind the subject.
+func filingDebug(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
 }

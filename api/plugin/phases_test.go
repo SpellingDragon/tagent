@@ -96,6 +96,53 @@ func (p invariantPresenter) Present(_ context.Context, id event.EventID) (string
 	return p.text, p.dropped
 }
 
+// invariantTrigger is a compress-trigger element recording each request it answers
+// beside the refusal it was built with.
+type invariantTrigger struct {
+	invariantPlugin
+	order *[]string
+	seen  *[]event.EventID
+	err   error
+}
+
+// TriggerCompress records the request it was dispatched for and answers the configured
+// refusal.
+func (p invariantTrigger) TriggerCompress(_ context.Context, request event.CompressRequest) error {
+	if p.order != nil {
+		*p.order = append(*p.order, "trigger:"+p.name)
+	}
+	if p.seen != nil {
+		*p.seen = append(*p.seen, request.ID)
+	}
+	return p.err
+}
+
+// invariantInject is an environment-inject element answering the block it was built
+// with and recording the assembly it was dispatched for.
+type invariantInject struct {
+	invariantPlugin
+	order *[]string
+	seen  *[]EnvironmentRequest
+	text  string
+	err   error
+}
+
+// InjectEnvironment records the assembly it was dispatched for and answers its block.
+func (p invariantInject) InjectEnvironment(_ context.Context, request EnvironmentRequest) (string, error) {
+	if p.order != nil {
+		*p.order = append(*p.order, "inject:"+p.name)
+	}
+	if p.seen != nil {
+		*p.seen = append(*p.seen, request)
+	}
+	return p.text, p.err
+}
+
+// invariantRequest builds one compress request the way a producer files it.
+func invariantRequest() event.CompressRequest {
+	return event.CompressRequestFor("memory.meditation", "sequence-1", "the card sequence exceeds the bound")
+}
+
 // invariantCall builds one native tool call for the pass to transform.
 func invariantCall(id, tool, args string) trpcmodel.ToolCall {
 	return trpcmodel.ToolCall{ID: id, Function: trpcmodel.FunctionDefinitionParam{Name: tool, Arguments: []byte(args)}}
@@ -345,21 +392,21 @@ func TestBeforePassInvariants(t *testing.T) {
 }
 
 // TestAfterPassInvariants pins the one post-commit pass of a committed fact.
-// - observers read the committed fact before any presenter renders it
+// - observers read the committed fact before the presenter renders it
 // - a failed observation is a named gap beside the fact instead of a retraction or an error return
 // - a dropped presentation is reported as a dropped view, never omitted in silence
 // - the pass still presents the fact after an earlier observation failed
+// - a second presenter is refused by name, so one fact carries one presentation
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestAfterPassInvariants(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("observers run before presenters, each in registration order", func(t *testing.T) {
+	t.Run("observers run in registration order, then the one presenter renders", func(t *testing.T) {
 		var order []string
 		observerOne := invariantObserver{invariantPlugin: invariantPlugin{name: "one", phase: PhasePostCommitObserve}, order: &order}
 		observerTwo := invariantObserver{invariantPlugin: invariantPlugin{name: "two", phase: PhasePostCommitObserve}, order: &order}
-		presenterOne := invariantPresenter{invariantPlugin: invariantPlugin{name: "one", phase: PhaseFinalPresentation}, order: &order}
-		presenterTwo := invariantPresenter{invariantPlugin: invariantPlugin{name: "two", phase: PhaseFinalPresentation}, order: &order}
-		pipeline, err := NewPipeline([]Plugin{observerOne, presenterOne, observerTwo, presenterTwo})
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", phase: PhaseFinalPresentation}, order: &order, text: "rendered"}
+		pipeline, err := NewPipeline([]Plugin{observerOne, presenter, observerTwo})
 		if err != nil {
 			t.Fatalf("register the after pass: %v", err)
 		}
@@ -367,9 +414,12 @@ func TestAfterPassInvariants(t *testing.T) {
 		if presentation.Fact != "event-1" {
 			t.Fatalf("presentation fact = %q, want %q", presentation.Fact, "event-1")
 		}
-		want := []string{"observe:one", "observe:two", "present:one", "present:two"}
+		want := []string{"observe:one", "observe:two", "present:presenter"}
 		if strings.Join(order, ",") != strings.Join(want, ",") {
 			t.Fatalf("after pass order = %v, want observers first in registration order %v", order, want)
+		}
+		if len(presentation.Views) != 1 || presentation.Views[0].Plugin != "presenter" {
+			t.Fatalf("views = %+v, want the one view the presenter rendered", presentation.Views)
 		}
 	})
 
@@ -427,6 +477,208 @@ func TestAfterPassInvariants(t *testing.T) {
 		}
 		if len(presentation.Gaps) != 0 {
 			t.Fatalf("gaps = %+v, want a drop kept outside the observation gaps", presentation.Gaps)
+		}
+	})
+
+	t.Run("a second presenter is refused by name", func(t *testing.T) {
+		var order []string
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order}
+		pipeline, err := NewPipeline([]Plugin{first, second})
+		if err == nil {
+			t.Fatalf("register two presenters = %+v, want the second refused by name", pipeline)
+		}
+		if !strings.Contains(err.Error(), `"second"`) || !strings.Contains(err.Error(), `"first"`) {
+			t.Fatalf("refusal = %v, want it to name both presenters", err)
+		}
+		if !strings.Contains(err.Error(), "exactly one presenter") {
+			t.Fatalf("refusal = %v, want it to state the one-to-one mapping it keeps", err)
+		}
+		if len(order) != 0 {
+			t.Fatalf("presenters ran %v, want a refused pipeline to present nothing", order)
+		}
+	})
+}
+
+// TestCompressTriggerPassInvariants pins the trigger pass of the compress phase.
+// - an element reporting the compress-trigger phase is dispatched into that phase's face set alone
+// - every face answers the request the producer filed, in declared order, and the request is left as filed
+// - a face that refuses refuses the pass by name and stops the later faces
+// - a pipeline carrying no compress face answers nil and refuses nothing
+// - an element reporting the compress phase without its face is refused by name
+// - a phase past the declared table is refused by name, so the two further phases open no boundary
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestCompressTriggerPassInvariants(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("every face answers the filed request in declared order", func(t *testing.T) {
+		var order []string
+		var seen []event.EventID
+		first := invariantTrigger{invariantPlugin: invariantPlugin{name: "first", phase: PhaseCompressTrigger}, order: &order, seen: &seen}
+		second := invariantTrigger{invariantPlugin: invariantPlugin{name: "second", phase: PhaseCompressTrigger}, order: &order}
+		pipeline, err := NewPipeline([]Plugin{first, second})
+		if err != nil {
+			t.Fatalf("register two compress faces: %v", err)
+		}
+		if len(pipeline.triggers) != 2 || len(pipeline.transforms) != 0 || len(pipeline.injects) != 0 {
+			t.Fatalf("face sets = (triggers %d, transforms %d, injects %d), want the two compress faces alone",
+				len(pipeline.triggers), len(pipeline.transforms), len(pipeline.injects))
+		}
+		request := invariantRequest()
+		if err := pipeline.TriggerCompress(ctx, request); err != nil {
+			t.Fatalf("run the trigger pass: %v", err)
+		}
+		if strings.Join(order, ",") != "trigger:first,trigger:second" {
+			t.Fatalf("trigger order = %v, want the two faces in declared order", order)
+		}
+		if len(seen) != 1 || seen[0] != request.ID {
+			t.Fatalf("faces saw %v, want the identity the producer filed %q", seen, request.ID)
+		}
+		if request.Subject != "sequence-1" || request.Producer != "memory.meditation" {
+			t.Fatalf("request = %+v, want the filed judgment left as it stands", request)
+		}
+	})
+
+	t.Run("a refusing face refuses the pass by name", func(t *testing.T) {
+		refused := errors.New("the curator is not available")
+		var order []string
+		failing := invariantTrigger{invariantPlugin: invariantPlugin{name: "failing", phase: PhaseCompressTrigger}, order: &order, err: refused}
+		later := invariantTrigger{invariantPlugin: invariantPlugin{name: "later", phase: PhaseCompressTrigger}, order: &order}
+		pipeline, err := NewPipeline([]Plugin{failing, later})
+		if err != nil {
+			t.Fatalf("register the refusing pipeline: %v", err)
+		}
+		err = pipeline.TriggerCompress(ctx, invariantRequest())
+		if !errors.Is(err, refused) {
+			t.Fatalf("refused trigger pass = %v, want %v", err, refused)
+		}
+		if !strings.Contains(err.Error(), "failing") {
+			t.Fatalf("refusal = %q, want the refusing face named", err)
+		}
+		if strings.Join(order, ",") != "trigger:failing" {
+			t.Fatalf("trigger order = %v, want no later face after the refusal", order)
+		}
+	})
+
+	t.Run("a pipeline carrying no compress face refuses nothing", func(t *testing.T) {
+		pipeline, err := NewPipeline(nil)
+		if err != nil {
+			t.Fatalf("register an empty pipeline: %v", err)
+		}
+		if err := pipeline.TriggerCompress(ctx, invariantRequest()); err != nil {
+			t.Fatalf("trigger pass over no face = %v, want the request carried as it stands", err)
+		}
+	})
+
+	t.Run("an element of the compress phase without its face is refused by name", func(t *testing.T) {
+		pipeline, err := NewPipeline([]Plugin{invariantPlugin{name: "empty", phase: PhaseCompressTrigger}})
+		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
+			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "compress-trigger") {
+			t.Fatalf("refusal = %q, want the served phase named", err)
+		}
+	})
+
+	t.Run("a phase past the declared table is refused by name", func(t *testing.T) {
+		pipeline, err := NewPipeline([]Plugin{invariantTrigger{invariantPlugin: invariantPlugin{name: "outward", phase: PhaseEnvironmentInject + 1}}})
+		if err == nil || !strings.Contains(err.Error(), "not one of the declared phases") {
+			t.Fatalf("register a phase past the table = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "outward") {
+			t.Fatalf("refusal = %q, want the element named", err)
+		}
+	})
+}
+
+// TestEnvironmentInjectPassInvariants pins the injection pass of the request-assembly phase.
+// - the face answers the assembly for the agent the request names
+// - several faces render in declared order and a face answering no text contributes no block
+// - a face that refuses refuses the assembly by name instead of carrying a block it could not render
+// - a pipeline carrying no environment face answers no block
+// - an element reporting the environment phase without its face is refused by name
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestEnvironmentInjectPassInvariants(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("the face answers the assembly it was dispatched for", func(t *testing.T) {
+		var seen []EnvironmentRequest
+		block := "## Environment\n- agent: agent-a"
+		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, seen: &seen, text: block}
+		pipeline, err := NewPipeline([]Plugin{inject})
+		if err != nil {
+			t.Fatalf("register the environment face: %v", err)
+		}
+		got, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if err != nil {
+			t.Fatalf("run the injection pass: %v", err)
+		}
+		if got != block {
+			t.Fatalf("block = %q, want the rendered environment material %q", got, block)
+		}
+		if len(seen) != 1 || seen[0].Agent != "agent-a" {
+			t.Fatalf("faces saw %+v, want the agent the assembly runs as", seen)
+		}
+	})
+
+	t.Run("several faces render in declared order beside an empty one", func(t *testing.T) {
+		var order []string
+		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, order: &order, text: "first block"}
+		silent := invariantInject{invariantPlugin: invariantPlugin{name: "silent", phase: PhaseEnvironmentInject}, order: &order}
+		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", phase: PhaseEnvironmentInject}, order: &order, text: "third block"}
+		pipeline, err := NewPipeline([]Plugin{first, silent, third})
+		if err != nil {
+			t.Fatalf("register three environment faces: %v", err)
+		}
+		got, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if err != nil {
+			t.Fatalf("run the injection pass: %v", err)
+		}
+		if got != "first block\n\nthird block" {
+			t.Fatalf("block = %q, want the rendered blocks in declared order beside the empty face left out", got)
+		}
+		if strings.Join(order, ",") != "inject:first,inject:silent,inject:third" {
+			t.Fatalf("injection order = %v, want the three faces in declared order", order)
+		}
+	})
+
+	t.Run("a refusing face refuses the assembly by name", func(t *testing.T) {
+		refused := errors.New("the runtime is not readable")
+		failing := invariantInject{invariantPlugin: invariantPlugin{name: "failing", phase: PhaseEnvironmentInject}, text: "partial", err: refused}
+		pipeline, err := NewPipeline([]Plugin{failing})
+		if err != nil {
+			t.Fatalf("register the refusing pipeline: %v", err)
+		}
+		got, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if !errors.Is(err, refused) {
+			t.Fatalf("refused assembly = (%q, %v), want %v", got, err, refused)
+		}
+		if !strings.Contains(err.Error(), "failing") {
+			t.Fatalf("refusal = %q, want the refusing face named", err)
+		}
+		if got != "" {
+			t.Fatalf("block of a refused assembly = %q, want no block carried", got)
+		}
+	})
+
+	t.Run("a pipeline carrying no environment face answers no block", func(t *testing.T) {
+		pipeline, err := NewPipeline(nil)
+		if err != nil {
+			t.Fatalf("register an empty pipeline: %v", err)
+		}
+		got, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if err != nil || got != "" {
+			t.Fatalf("injection pass over no face = (%q, %v), want no block and no refusal", got, err)
+		}
+	})
+
+	t.Run("an element of the environment phase without its face is refused by name", func(t *testing.T) {
+		pipeline, err := NewPipeline([]Plugin{invariantPlugin{name: "empty", phase: PhaseEnvironmentInject}})
+		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
+			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "environment-inject") {
+			t.Fatalf("refusal = %q, want the served phase named", err)
 		}
 	})
 }
@@ -502,6 +754,7 @@ func watchPhaseLog(tb testing.TB, logger trpclog.Logger) {
 // TestPhaseObservation checks the plugin-phase face of the observation bypass.
 // - every executed face of both passes renders one DEBUG line carrying the phase, the face, the plugin, its result and the dispatched identity
 // - the line reports the result the face answered: a refusal, a risk grade, a dropped presentation
+// - the two dispatch passes render one line per executed face, carrying the request and the agent they were dispatched for
 // - the phase face writes nothing at INFO, so the bounded stream stays with turn boundaries and model requests
 // - a logger that fails does not refuse a pass or drop a presentation
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
@@ -543,6 +796,41 @@ func TestPhaseObservation(t *testing.T) {
 		}
 		if lines := logger.at("info"); len(lines) != 0 {
 			t.Fatalf("info lines = %v, want the phase face kept at DEBUG", lines)
+		}
+	})
+
+	t.Run("both dispatch passes render one line per executed face", func(t *testing.T) {
+		logger := &phaseLog{}
+		watchPhaseLog(t, logger)
+		var order []string
+		var seen []event.EventID
+		trigger := invariantTrigger{invariantPlugin: invariantPlugin{name: "curator", phase: PhaseCompressTrigger}, order: &order, seen: &seen}
+		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, text: "clock=noon"}
+		pipeline, err := NewPipeline([]Plugin{trigger, inject})
+		if err != nil {
+			t.Fatalf("register one element per dispatch phase: %v", err)
+		}
+
+		request := invariantRequest()
+		if err := pipeline.TriggerCompress(ctx, request); err != nil {
+			t.Fatalf("run the compress-trigger pass: %v", err)
+		}
+		block, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if err != nil || block != "clock=noon" {
+			t.Fatalf("run the environment-inject pass = (%q, %v), want the block of the registered face", block, err)
+		}
+
+		if !logger.mentions("debug", "phase=compress-trigger", "face=trigger", "plugin=curator", "result=ok", "request="+string(request.ID)) {
+			t.Fatalf("debug lines = %v, want the compress-trigger face line of %s", logger.at("debug"), request.ID)
+		}
+		if !logger.mentions("debug", "phase=environment-inject", "face=inject", "plugin=environment", "result=ok", "agent=agent-a") {
+			t.Fatalf("debug lines = %v, want the environment-inject face line of agent-a", logger.at("debug"))
+		}
+		if lines := logger.at("debug"); len(lines) != 2 {
+			t.Fatalf("debug lines = %v, want one line per executed dispatch face", lines)
+		}
+		if lines := logger.at("info"); len(lines) != 0 {
+			t.Fatalf("info lines = %v, want the dispatch faces kept at DEBUG", lines)
 		}
 	})
 
