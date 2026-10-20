@@ -687,23 +687,20 @@ func specOperationTurn(id, name, args string) *trpcmodel.Response {
 	}
 }
 
-// TestHostPlanAgentDeclaresThePlanSurface pins the plan declaration: the spec operation set beside the file tools over one sandbox.
+// TestHostPlanAgentDeclaresThePlanSurface pins the plan declaration: the spec operation set beside the file tools over one workspace.
 // - the spec tool is accepted from the declaration and constructed for the agent that names it
 // - its declaration advertises the closed operation set
-// - the file tools and the sandbox root land on the same declaration
+// - the declaration names no storage directory: the write root is the root the plan backend reports
+// - the file tools and that root meet on the same surface
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
 func TestHostPlanAgentDeclaresThePlanSurface(t *testing.T) {
 	workspace := t.TempDir()
-	sandbox := filepath.Join(workspace, "openspec")
-	if err := os.MkdirAll(sandbox, 0o755); err != nil {
-		t.Fatalf("create the plan sandbox: %v", err)
-	}
 	doc := &hostDocument{
 		Entry: "plan",
 		Agents: map[string]agentEntry{
 			"plan": {
 				Model: "model-plan",
-				File:  config.FileSpec{BaseDir: sandbox},
+				File:  config.FileSpec{ReadRoots: []string{"."}},
 				Tools: []hostToolRef{
 					{Kind: "tool", ID: spec.ToolName},
 					{Kind: "tool", ID: tagentfile.SaveFileToolName},
@@ -711,6 +708,7 @@ func TestHostPlanAgentDeclaresThePlanSurface(t *testing.T) {
 				},
 			},
 		},
+		specBackend: spec.NewOpenSpecBackend(spec.WithWorkDir(workspace)),
 	}
 	decl, err := doc.Declaration()
 	if err != nil {
@@ -725,8 +723,14 @@ func TestHostPlanAgentDeclaresThePlanSurface(t *testing.T) {
 	if plan.ID != "plan" {
 		t.Fatalf("declared agents = %v, want the plan agent", decl.Agents)
 	}
-	if plan.File.BaseDir != sandbox {
-		t.Fatalf("plan base dir = %q, want %q", plan.File.BaseDir, sandbox)
+	if plan.File.BaseDir != "" {
+		t.Fatalf("plan base dir = %q, want the declaration to name no storage directory", plan.File.BaseDir)
+	}
+	if len(plan.File.ReadRoots) != 1 || plan.File.ReadRoots[0] != "." {
+		t.Fatalf("plan read roots = %v, want the declared deployment root", plan.File.ReadRoots)
+	}
+	if got, want := doc.planBackend().WorkspaceRoot(), filepath.Join(workspace, "openspec"); got != want {
+		t.Fatalf("plan workspace root = %q, want the root the backend reports (%q)", got, want)
 	}
 	granted := make(map[string]bool, len(plan.Tools))
 	for _, ref := range plan.Tools {
@@ -758,9 +762,10 @@ func TestHostPlanAgentDeclaresThePlanSurface(t *testing.T) {
 
 // TestHostPlanDelegationRunsTheSpecTool drives the plan reference through the assembly the process runs.
 // - the entry model sees one tool named after the plan agent and no generic delegation tool
-// - the delegated turn carries the plan agent's own surface: the spec tool beside the sandboxed file tools
-// - the spec operations run the real openspec CLI and its output returns to the plan model
-// - a write outside the declared sandbox is refused and no file lands there
+// - the delegated turn carries the plan agent's own surface: the spec tool beside the file tools rooted at the plan workspace
+// - the spec operations run the real plan backend CLI and its output returns to the plan model
+// - the host prepares the workspace root, so a fresh deployment carries no plan directory
+// - a write outside the plan workspace is refused and no file lands there
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#startup-and-routing
 func TestHostPlanDelegationRunsTheSpecTool(t *testing.T) {
 	if _, err := exec.LookPath("openspec"); err != nil {
@@ -769,16 +774,13 @@ func TestHostPlanDelegationRunsTheSpecTool(t *testing.T) {
 	ctx := context.Background()
 	workspace := t.TempDir()
 	sandbox := filepath.Join(workspace, "openspec")
-	if err := os.MkdirAll(sandbox, 0o755); err != nil {
-		t.Fatalf("create the plan sandbox: %v", err)
-	}
 	doc := &hostDocument{
 		Entry: "tagent",
 		Agents: map[string]agentEntry{
 			"tagent": {Model: "model-main", Tools: []hostToolRef{{Agent: "plan"}}},
 			"plan": {
 				Model: "model-plan",
-				File:  config.FileSpec{BaseDir: sandbox},
+				File:  config.FileSpec{ReadRoots: []string{"."}},
 				Tools: []hostToolRef{
 					{Kind: "tool", ID: spec.ToolName},
 					{Kind: "tool", ID: tagentfile.SaveFileToolName},
@@ -792,6 +794,9 @@ func TestHostPlanDelegationRunsTheSpecTool(t *testing.T) {
 	planTools, err := doc.hostTools(ctx, "plan", &hostSendSeam{}, nil)
 	if err != nil {
 		t.Fatalf("construct the plan surface: %v", err)
+	}
+	if info, err := os.Stat(sandbox); err != nil || !info.IsDir() {
+		t.Fatalf("the host prepared no plan workspace at %s (info=%v, err=%v)", sandbox, info, err)
 	}
 	natives := map[event.AgentID]tagent.NativeAgent{
 		"tagent": {Model: namedModel{scriptModel: entry, name: "model-main"}},
@@ -861,7 +866,7 @@ func TestHostPlanDelegationRunsTheSpecTool(t *testing.T) {
 	sawCLIOutput := false
 	sawSandboxRefusal := false
 	for _, req := range delegated {
-		if requestCarries(req, "OpenSpec") {
+		if requestCarries(req, "Created change") {
 			sawCLIOutput = true
 		}
 		if requestCarries(req, "are not allowed") {

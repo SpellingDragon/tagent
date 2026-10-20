@@ -188,19 +188,19 @@ agents:
     # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold /
     #         temperature / thinking_enabled / reasoning_effort
 
-  # ---- Plan:工作计划管理子 Agent(openspec CLI,无通用 shell 逃逸面)----
+  # ---- Plan:工作计划管理子 Agent(计划后端 CLI,无通用 shell 逃逸面)----
   plan:
     provider: zhipu                      # 显式覆盖:全局 provider 可被改动,wiring 空 provider 时按全局回退→模型会被发给错误端点→400,故 plan 恒显式声明
     model: glm-5.3                       # 覆盖全局 flash(plan 需更强推理)
     system_prompt:
       files: [plan_agent.md]
-    # 文件面:全部相对路径的沙箱根是 openspec/——spec 工具与 file 工具同根,
-    # 写类工具只能落在计划工作区内,../ 与绝对路径由文件工具直接拒绝。
+    # 文件面:写根＝计划后端交出的工作区根(核心语义,配置不命名实现目录);此处只声明
+    # 读根:"."＝部署根,绝对路径可读;相对路径仍落在工作区内,写不出工作区。
     file:
-      base_dir: openspec
+      read_roots: ["."]
     tools:
       # spec 工具:闭集操作(init/new/status/validate/archive/instructions/list),
-      # 后端为 openspec CLI(argv 直调,无 shell);计划文件本身经 file 面读写。
+      # 后端为计划后端 CLI(argv 直调,无 shell);计划文件本身经 file 面读写。
       - { kind: tool, id: spec }
       - { kind: tool, id: save_file }
       - { kind: tool, id: read_file }

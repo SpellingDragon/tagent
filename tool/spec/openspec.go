@@ -4,13 +4,25 @@ package spec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
 // defaultBin is the CLI name the backend runs when the deployment names none.
 const defaultBin = "openspec"
+
+// workspaceDir is the directory the CLI keeps its plans under, relative to the
+// directory the CLI runs in.
+const workspaceDir = "openspec"
+
+// ErrBackendUnavailable reports a plan backend whose program the deployment does
+// not carry: the operation never ran. The message names the provisioning step
+// and masks the program's identity, so the model reads no implementation name
+// even when the deployment forgot to install the binary.
+var ErrBackendUnavailable = errors.New("spec: the plan backend binary is missing")
 
 // openspecBackend runs the openspec CLI: every operation maps onto one fixed
 // subcommand, and the typed fields of a Request become discrete argument
@@ -19,6 +31,9 @@ type openspecBackend struct {
 	bin string
 	dir string
 }
+
+// The plan backend implements the port it is declared over.
+var _ Backend = (*openspecBackend)(nil)
 
 // OpenSpecOption configures one openspec backend.
 type OpenSpecOption func(*openspecBackend)
@@ -52,13 +67,21 @@ func NewOpenSpecBackend(opts ...OpenSpecOption) Backend {
 	return b
 }
 
-// Name reports the backend identity.
-func (b *openspecBackend) Name() string { return "openspec" }
+// Name reports the backend identity: the semantic name of the plan-management
+// face, not the program behind it, so a diagnostic line never exposes the
+// implementation a deployment wired.
+func (b *openspecBackend) Name() string { return "plan" }
+
+// WorkspaceRoot reports the directory the plan files live under, so the host can
+// point the plan agent's file tools at the same tree the CLI writes.
+func (b *openspecBackend) WorkspaceRoot() string { return filepath.Join(b.dir, workspaceDir) }
 
 // Run maps one request onto an openspec invocation and answers with what the
 // CLI reported. An operation the backend cannot dispatch is a named error; an
 // operation the CLI ran and refused is a Result carrying its exit code, its
-// output and the hint that names the next step.
+// output and the hint that names the next step; a program the deployment does
+// not carry is the backend-unavailable error, with the program's identity masked
+// out so the model reads no implementation name.
 func (b *openspecBackend) Run(ctx context.Context, req Request) (Result, error) {
 	if !Valid(req.Op) {
 		return Result{}, fmt.Errorf("%w: %q (allowed: %s)", ErrUnknownOp, req.Op, allowedOps)
@@ -84,7 +107,8 @@ func (b *openspecBackend) Run(ctx context.Context, req Request) (Result, error) 
 	res.OK = res.ExitCode == 0 && runErr == nil
 
 	if runErr != nil && cmd.ProcessState == nil {
-		return res, fmt.Errorf("spec: cannot run %q: %w (is the openspec CLI installed? provision it in the deployment image or have the upper layer install it — the plan agent has no shell to self-install)", b.bin, runErr)
+		cause := strings.ReplaceAll(runErr.Error(), b.bin, "the plan backend")
+		return res, fmt.Errorf("%w (%s); provision it in the deployment image or have the upper layer install it — the plan agent has no shell to self-install", ErrBackendUnavailable, cause)
 	}
 	if !res.OK {
 		res.Hint = hintFor(req.Op, res.Output)

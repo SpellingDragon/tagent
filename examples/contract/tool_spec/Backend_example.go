@@ -9,9 +9,11 @@ import (
 
 // filedPlan is the canonical backend: it answers the plan operations from one fixed
 // workspace image, reports a refused operation as a Result carrying the hint that names the
-// next step, and reports an operation it cannot dispatch as a named error.
+// next step, reports an operation it cannot dispatch as a named error, and reports the
+// storage root the host points the plan agent's file tools at.
 type filedPlan struct {
 	tasksChecked bool
+	root         string
 }
 
 // Run answers one operation from the fixed workspace image.
@@ -36,23 +38,27 @@ func (b *filedPlan) Run(_ context.Context, req spec.Request) (spec.Result, error
 // Name identifies the canonical backend.
 func (b *filedPlan) Name() string { return "filed-plan" }
 
+// WorkspaceRoot reports the storage root the plan files live under.
+func (b *filedPlan) WorkspaceRoot() string { return b.root }
+
 var _ spec.Backend = (*filedPlan)(nil)
 
 // ExampleBackend drives the canonical backend through the distinction the port is built
-// on: a refused archive is a Result carrying its hint, and an operation outside the closed
-// set is a named error that reaches no backend work.
+// on: a refused archive is a Result carrying its hint, an operation outside the closed
+// set is a named error that reaches no backend work, and the workspace root is the
+// backend's own storage fact rather than a deployment setting.
 //
 // 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 func ExampleBackend() {
 	ctx := context.Background()
-	backend := &filedPlan{}
+	backend := &filedPlan{root: "plans"}
 	refused, err := backend.Run(ctx, spec.Request{Op: spec.OpArchive, Name: "wire-plan-tool"})
 	if err != nil || refused.OK || refused.Hint == "" {
 		return
 	}
 	backend.tasksChecked = true
 	archived, err := backend.Run(ctx, spec.Request{Op: spec.OpArchive, Name: "wire-plan-tool"})
-	if err != nil || !archived.OK {
+	if err != nil || !archived.OK || backend.WorkspaceRoot() == "" {
 		return
 	}
 	if _, err := backend.Run(ctx, spec.Request{Op: spec.Op("rm -rf /")}); err == nil {

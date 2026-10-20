@@ -198,10 +198,8 @@ prepare_runtime_dirs() {
   [ -f "$cfg" ] || { warn "配置文件 $cfg 不存在，跳过目录准备"; return 0; }
   local dirs
   dirs=$(grep -hoE '(base_dir|work_dir|directory)[:=][[:space:]]*[A-Za-z0-9_./-]+' "$cfg" 2>/dev/null | sed -E 's/.*[:=][[:space:]]*//' | sort -u)
-  local extra=""
-  grep -q 'openspec' "$cfg" 2>/dev/null && extra="openspec"
   local d created=0
-  for d in $dirs $extra; do
+  for d in $dirs; do
     [ -z "$d" ] && continue
     case "$d" in
       /*|*..*|~*) continue ;;

@@ -45,13 +45,13 @@ type specArgs struct {
 func (t *Tool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
 		Name: ToolName,
-		Description: "manage specification-driven work plans without a shell: one typed operation per call. " +
-			"op=init makes the workspace ready (idempotent); op=new creates a plan (name required); " +
-			"op=status reports the artifact state of a plan (name optional) or of the workspace; " +
-			"op=validate checks a plan under the strict rule set (name required, plans carrying no spec deltas fail by design); " +
-			"op=archive closes a plan whose tasks are all checked (name required); " +
-			"op=instructions returns the writing instructions of one artifact (artifact required: proposal/specs/design/tasks); " +
-			"op=list lists the plans of the workspace. Plan files are written and read through the file tools, not through this one.",
+		Description: "manage work plans without a shell: one typed operation per call, covering the whole plan lifecycle. " +
+			"The operations prepare the plan workspace (idempotent), create a plan (name required), " +
+			"report the artifact state of a plan (name optional) or of the workspace, " +
+			"check a plan under the strict rule set (name required; plans carrying no spec deltas fail by design), " +
+			"close a plan whose tasks are all checked (name required), " +
+			"return the writing instructions of one artifact (artifact required: proposal/specs/design/tasks), " +
+			"and list the plans of the workspace. Plan files are written and read through the file tools, not through this one.",
 		InputSchema: &trpctool.Schema{
 			Type: "object",
 			Properties: map[string]*trpctool.Schema{

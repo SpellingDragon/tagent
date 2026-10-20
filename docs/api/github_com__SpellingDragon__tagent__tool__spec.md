@@ -1,10 +1,14 @@
 package spec // import "github.com/SpellingDragon/tagent/tool/spec"
 
-Package spec is the model-facing face of specification-driven work plans:
-one typed operation set over a plan backend, so plan management reaches the
-model without handing it a general shell.
+Package spec is the model-facing face of work-plan management: one typed
+operation set over a plan backend, so plan management reaches the model without
+handing it a general shell.
 
-- The plan format sits behind Backend, so a deployment swaps
+- The plan format sits behind Backend, so a deployment swaps the backend without
+changing the model-visible surface: the declarations, the hints and the refusals
+speak of plans and their workspace, never of the backend a deployment wired,
+and the workspace root is a core semantic the backend reports rather than a
+deployment setting.
 
 CONSTANTS
 
@@ -17,6 +21,12 @@ VARIABLES
 var ErrBackendMissing = errors.New("spec: the deployment wires no plan backend")
     ErrBackendMissing reports a tool assembled beside no plan backend: the call
     is refused by name instead of dispatching anywhere.
+
+var ErrBackendUnavailable = errors.New("spec: the plan backend binary is missing")
+    ErrBackendUnavailable reports a plan backend whose program the deployment
+    does not carry: the operation never ran. The message names the provisioning
+    step and masks the program's identity, so the model reads no implementation
+    name even when the deployment forgot to install the binary.
 
 var ErrBadArguments = errors.New("spec: the call arguments are not the declared shape")
     ErrBadArguments reports a call whose arguments are not the declared shape,
@@ -38,12 +48,18 @@ type Backend interface {
 	// failure the backend observed is a Result with OK false, not an error; an
 	// error means the operation never ran.
 	Run(ctx context.Context, req Request) (Result, error)
-	// Name identifies the backend for logging and diagnostics.
+	// Name identifies the backend for logging and diagnostics by what it does
+	// rather than by what implements it, so one diagnostic line reads the same
+	// whichever backend a deployment wires.
 	Name() string
+	// WorkspaceRoot reports the directory the plan files live under. The host
+	// points the file tools of the plan agent at this root, so the deployment's
+	// own configuration never names the backend's storage directory.
+	WorkspaceRoot() string
 }
-    Backend abstracts a plan-management system. The implementation beside this
-    declaration runs the openspec CLI; swapping the plan format means providing
-    another Backend, and neither the tool nor the model changes.
+    Backend abstracts a plan-management system: the operations it answers and
+    the storage root its plan files live under. Swapping the plan format means
+    providing another Backend, and neither the tool nor the model changes.
 
     红线： MUST pass every argument as a discrete argv entry of a fixed program.
     MUST NOT run a model-controlled string through a shell. MUST report a failed

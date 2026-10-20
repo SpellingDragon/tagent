@@ -111,8 +111,8 @@ type hostDocument struct {
 	mapped      document.Document
 	mappedError error
 
-	// specBackend is the plan backend a test installs; nil runs the openspec CLI
-	// in the process working directory, the one that holds the openspec workspace.
+	// specBackend is the plan backend a test installs; nil runs the default plan
+	// backend in the process working directory.
 	specBackend spec.Backend
 }
 
@@ -405,9 +405,13 @@ func (d *hostDocument) nativeAgents(ctx context.Context, send *hostSendSeam, rec
 // hostTools constructs the tool instances one declared agent's declaration
 // grants, in declaration order: the outbound tool, every recall tool the
 // declaration names, every knowledge tool whose faces this host wires, the
-// plan tool over the openspec CLI and the file tools over the face the
-// declaration fixes. A tool the declaration does not name is never constructed,
-// so a declaration outside the set sees none of them.
+// plan tool over the plan backend and the file tools over the face the
+// declaration fixes. The plan workspace root is a core semantic the backend
+// reports, so the deployment's configuration names no storage directory: the
+// same root is the write root of the file face this host contributes, and the
+// host prepares that tree because a fresh deployment carries no plan yet. A
+// tool the declaration does not name is never constructed, so a declaration
+// outside the set sees none of them.
 func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendSeam, recallPort *tagent.RecallPort) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolNames))
 	if d.declaresTool(id, sendToolID) {
@@ -428,11 +432,17 @@ func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendS
 			available[candidate.Declaration().Name] = candidate
 		}
 	}
+	planRoot := ""
 	if d.declaresTool(id, spec.ToolName) {
-		available[spec.ToolName] = spec.NewTool(d.planBackend())
+		backend := d.planBackend()
+		available[spec.ToolName] = spec.NewTool(backend)
+		planRoot = backend.WorkspaceRoot()
+		if err := os.MkdirAll(planRoot, 0o755); err != nil {
+			return nil, fmt.Errorf("wechat-bot: create the plan workspace %s: %w", planRoot, err)
+		}
 	}
 	if d.declaresFileTools(id) {
-		surface, err := d.fileTools(ctx, id)
+		surface, err := d.fileTools(ctx, id, planRoot)
 		if err != nil {
 			return nil, err
 		}
@@ -453,7 +463,8 @@ func (d *hostDocument) hostTools(ctx context.Context, id string, send *hostSendS
 }
 
 // planBackend returns the backend the plan tool dispatches through: the
-// installed backend, or the openspec CLI in the process working directory.
+// installed backend, or the default plan backend in the process working
+// directory.
 func (d *hostDocument) planBackend() spec.Backend {
 	if d.specBackend != nil {
 		return d.specBackend
@@ -473,11 +484,24 @@ func (d *hostDocument) declaresFileTools(id string) bool {
 
 // fileTools constructs the file surface one declared agent's declaration grants
 // over the face its declaration fixes: the base directory every relative path
-// resolves under and the read roots an absolute read may name. The host
-// contributes the instance because a delegated agent's surface is its native
-// tools; the core constructs the same surface for the agent's own binding.
-func (d *hostDocument) fileTools(ctx context.Context, id string) ([]trpctool.CallableTool, error) {
+// resolves under and the read roots an absolute read may name. The write root is
+// the plan workspace when the agent declares the plan tool — the plan backend
+// reports it, so the deployment declares no storage directory of its own — and
+// the declared base directory otherwise. The read roots stay the declaration's,
+// resolved against the deployment root so a relative root names a real scope.
+// The host contributes the instance because a delegated agent's surface is its
+// native tools; the core constructs the same surface for the agent's own
+// binding.
+func (d *hostDocument) fileTools(ctx context.Context, id, writeRoot string) ([]trpctool.CallableTool, error) {
 	face := d.Agents[id].File
+	base := face.BaseDir
+	if writeRoot != "" {
+		base = writeRoot
+	}
+	readRoots, err := deploymentReadRoots(face.ReadRoots)
+	if err != nil {
+		return nil, fmt.Errorf("wechat-bot: resolve the read roots of agent %q: %w", id, err)
+	}
 	granted := make([]string, 0, len(tagentfile.Names()))
 	for _, ref := range d.Agents[id].Tools {
 		if ref.Kind != "tool" {
@@ -490,8 +514,8 @@ func (d *hostDocument) fileTools(ctx context.Context, id string) ([]trpctool.Cal
 		}
 	}
 	surface, err := tagentfile.New(tagentfile.Options{
-		BaseDir:   face.BaseDir,
-		ReadRoots: face.ReadRoots,
+		BaseDir:   base,
+		ReadRoots: readRoots,
 		Tools:     granted,
 	})
 	if err != nil {
@@ -510,6 +534,25 @@ func (d *hostDocument) fileTools(ctx context.Context, id string) ([]trpctool.Cal
 		tools = append(tools, callable)
 	}
 	return tools, nil
+}
+
+// deploymentReadRoots resolves the read roots a declaration names against the
+// deployment root: a read root is a read scope, and a relative one has to become
+// an absolute path before the file tools can match an absolute read against it.
+func deploymentReadRoots(declared []string) ([]string, error) {
+	roots := make([]string, 0, len(declared))
+	for _, root := range declared {
+		trimmed := strings.TrimSpace(root)
+		if trimmed == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %q: %w", trimmed, err)
+		}
+		roots = append(roots, absolute)
+	}
+	return roots, nil
 }
 
 // declaresRecall reports whether one declared agent names any recall tool.

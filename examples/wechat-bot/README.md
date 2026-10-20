@@ -27,7 +27,7 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.
 | 驱动 | `host.Drive` → 按会址加锁 → `run.Invoke(ctx, tagent.InvokeRequest{InvocationID, Address, TriggerSource: "user", Input})`；收尾走 `run.Close(ctx, agent.CloseRequest{})` |
 | HTTP 面 | `newTaskFace(ctx, host, TAGENT_RL_AUTH_TOKEN)` → `Listen()` 绑 `127.0.0.1:<TAGENT_HTTP_PORT>`，`GET /healthz` 答存活、`POST /task` 收一条注入（202 先行、回合在后台跑），驱动面是 `faceDrive{Drive, mostRecentChat}` |
 
-- **已接线的键**：`entry`/`provider`/`model`/`prompt_dir`/`providers`/`mcp_servers{transport,url,api_key_env}`/`agents{provider,model,system_prompt.files,tools,file{base_dir,read_roots},exec{monitor{interval,stable_duration,interactive_stable_duration,fake_dead_duration}},final_round{max_rounds,budget_seconds,timeout_seconds,prompt},memory{...},meditation{...}}`/`request_timeout_seconds`/`governance{enabled,enforcement,dir,approval_ttl_minutes}`/`app.wechat{config_dir,token_file,context_token_dir,workspace_dir,approvers}`；工具面按 `hostToolNames` 固定清单过滤（`send`、四个 `recall_*`、`skill_search`/`skill_load`、`spec`、七件 file 工具、`exec`、`mcp_call`/`mcp_discover`），写清单外的 `id` 不进声明，`agent:` 键在 schema 里但零消费（写了不报错也不生效）；file/exec/mcp 三类 id 由核心按声明装配、file 面同时由宿主按声明贡献（委派 target 的工具面只取 `NativeAgent.Tools`；file 面根在 `file.base_dir`，`exec` 授予 `exec_run`/`exec_release` 并取 `exec.monitor` 节奏，MCP 网关读 `mcp_servers` 绑定的活注册表），宿主只转发声明；看门狗预算只读 entry agent 的 `final_round`（`run.go` 按声明为整条 run 接一次 `SetFinalRound`），不声明即无界。
+- **已接线的键**：`entry`/`provider`/`model`/`prompt_dir`/`providers`/`mcp_servers{transport,url,api_key_env}`/`agents{provider,model,system_prompt.files,tools,file{base_dir,read_roots},exec{monitor{interval,stable_duration,interactive_stable_duration,fake_dead_duration}},final_round{max_rounds,budget_seconds,timeout_seconds,prompt},memory{...},meditation{...}}`/`request_timeout_seconds`/`governance{enabled,enforcement,dir,approval_ttl_minutes}`/`app.wechat{config_dir,token_file,context_token_dir,workspace_dir,approvers}`；工具面按 `hostToolNames` 固定清单过滤（`send`、四个 `recall_*`、`skill_search`/`skill_load`、`spec`、七件 file 工具、`exec`、`mcp_call`/`mcp_discover`），写清单外的 `id` 不进声明，`agent:` 键在 schema 里但零消费（写了不报错也不生效）；file/exec/mcp 三类 id 由核心按声明装配、file 面同时由宿主按声明贡献（委派 target 的工具面只取 `NativeAgent.Tools`；file 面写根在 `file.base_dir`，声明 `spec` 的 agent 改由计划后端交出工作区根，`exec` 授予 `exec_run`/`exec_release` 并取 `exec.monitor` 节奏，MCP 网关读 `mcp_servers` 绑定的活注册表），宿主只转发声明；看门狗预算只读 entry agent 的 `final_round`（`run.go` 按声明为整条 run 接一次 `SetFinalRound`），不声明即无界。
 - **环境变量**（码面实际读取）：`TAGENT_CONFIG`、`TAGENT_API_ENDPOINT`（覆盖 entry endpoint）、`TAGENT_SESSION_ID`（会址前缀标签，默认 `wechat-session`）、`TAGENT_WECHAT_WORKSPACE_DIR`、`TAGENT_HTTP_PORT`（HTTP 面端口，默认 8089）、`TAGENT_RL_AUTH_TOKEN`（HTTP 面凭据；空则只信回环对端）、`providers.*.api_key_env` 点名的每个变量（被 agent 引用的必需，未被引用的可选）。
 - **HTTP 面**：宿主自己装配的最小面（**不经** `cli.NewCLI`，故无 `/query`、`/diagnostics`、`/feedback`）：`GET /healthz` 无凭据答 `200 ok`；`POST /task` 收 `{"messages":[{"role":"user","content":"..."}],"trigger_source":"user"}`，有 token 则要求 `Authorization: Bearer <token>`，否则仅回环对端；注入没有会话身份，投到**最近一次有投递的会话**上（无会话答 503）。mail-poller 走的就是这条通道。
 
@@ -40,7 +40,7 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.
 | `log_level` / `trajectory_*` / `working_dir` | 无读取点；环境变量侧同样没读点，故 `wizard.sh`/`run.sh`/`.env.example` 已不再采集（配置即业务：不读就不采） |
 | `evolution` / `reliability` / `governance.budget_*`、`max_*_risk`、`goal_required_for` | 平台面只装配治理闸：预算与 goal 未接，只消费 `enabled`/`enforcement`/`dir`/`approval_ttl_minutes` |
 | `agents.*.compress` / `max_tokens` / `temperature` / `thinking_enabled` / `reasoning_effort` / `compress_threshold` / `task_*_ttl` | 装配面不读，schema 未声明（`memory` 与 `meditation` 已接线，见下节） |
-| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），读面由宿主装配后注入（Searcher=`Run.Recall`、Table=观测表、Originals=scoped 原始层、Embedder=`memory.engine` 的真 embedding、Trace=宿主关系账本），有 `memory` 声明即可用，无声明则调用即具名拒绝；`{kind: agent, ...}` 委派已接、`description_file`/`event_params` 已消费；file 由宿主与核心按声明装配、`exec`/`mcp_*`/`skill_*` 由核心装配，`spec` 已接线（七操作闭集，后端 openspec CLI），清单外的 id 仍被固定清单挡下 |
+| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall），读面由宿主装配后注入（Searcher=`Run.Recall`、Table=观测表、Originals=scoped 原始层、Embedder=`memory.engine` 的真 embedding、Trace=宿主关系账本），有 `memory` 声明即可用，无声明则调用即具名拒绝；`{kind: agent, ...}` 委派已接、`description_file`/`event_params` 已消费；file 由宿主与核心按声明装配、`exec`/`mcp_*`/`skill_*` 由核心装配，`spec` 已接线（七操作闭集，后端为可替换的计划后端），清单外的 id 仍被固定清单挡下 |
 
 ## 记忆与定时策展（已接线）
 
@@ -79,7 +79,7 @@ agents:
 | `knowledge` | 知识获取与翻译 | — |
 | `recall` | 记忆召回执行体 | `recall_query` / `recall_get` / `recall_recent` / `recall_trace`（读面由宿主注入；`read_namespaces` 决定跨分区范围） |
 | `action` | 命令与文件执行 | — |
-| `plan` | 工作计划管理（拆解 / 记账 / 归档审计，**不代工**） | `spec` + 七件 file 工具（沙箱根 `openspec/`） |
+| `plan` | 工作计划管理（拆解 / 记账 / 归档审计，**不代工**） | `spec` + 七件 file 工具（写根＝计划后端交出的工作区根） |
 | `meditator` | 旁路冥想线（宿主定时驱动的反思主体） | `send` |
 
 ## 治理审批（critical 操作人工把关）

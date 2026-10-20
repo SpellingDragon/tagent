@@ -10,8 +10,9 @@ it.
 FUNCTIONS
 
 func ExampleBackend()
-    ExampleBackend drives the canonical backend through the distinction the
-    port is built on: a refused archive is a Result carrying its hint, and an
-    operation outside the closed set is a named error that reaches no backend
-    work.
+    ExampleBackend drives the canonical backend through the distinction the port
+    is built on: a refused archive is a Result carrying its hint, an operation
+    outside the closed set is a named error that reaches no backend work,
+    and the workspace root is the backend's own storage fact rather than a
+    deployment setting.
 

@@ -30,14 +30,13 @@ const (
 var (
 	_ func(Backend, context.Context, Request) (Result, error) = Backend.Run
 	_ func(Backend) string                                    = Backend.Name
+	_ func(Backend) string                                    = Backend.WorkspaceRoot
 )
 
-// The tool keeps the native call surface and the plan backend implements the
-// port it is declared over.
+// The tool keeps the native call surface the runtime admits it through.
 var (
 	_ trpctool.CallableTool = (*Tool)(nil)
 	_ trpctool.Tool         = (*Tool)(nil)
-	_ Backend               = (*openspecBackend)(nil)
 )
 
 // The request and the result keep every documented field.

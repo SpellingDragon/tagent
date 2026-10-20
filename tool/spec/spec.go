@@ -1,9 +1,10 @@
-// Package spec is the model-facing face of specification-driven work plans: one
-// typed operation set over a plan backend, so plan management reaches the model
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
+//
+// Package spec is the model-facing face of work-plan management: one typed
+// operation set over a plan backend, so plan management reaches the model
 // without handing it a general shell.
 //
-// - The plan format sits behind Backend, so a deployment swaps the backend without changing the model-visible surface.
-// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
+// - The plan format sits behind Backend, so a deployment swaps the backend without changing the model-visible surface: the declarations, the hints and the refusals speak of plans and their workspace, never of the backend a deployment wired, and the workspace root is a core semantic the backend reports rather than a deployment setting.
 package spec
 
 import (
@@ -92,9 +93,9 @@ type Result struct {
 	Hint string `json:"hint,omitempty"`
 }
 
-// Backend abstracts a plan-management system. The implementation beside this
-// declaration runs the openspec CLI; swapping the plan format means providing
-// another Backend, and neither the tool nor the model changes.
+// Backend abstracts a plan-management system: the operations it answers and the
+// storage root its plan files live under. Swapping the plan format means
+// providing another Backend, and neither the tool nor the model changes.
 //
 // 红线：
 // MUST pass every argument as a discrete argv entry of a fixed program.
@@ -105,6 +106,12 @@ type Backend interface {
 	// failure the backend observed is a Result with OK false, not an error; an
 	// error means the operation never ran.
 	Run(ctx context.Context, req Request) (Result, error)
-	// Name identifies the backend for logging and diagnostics.
+	// Name identifies the backend for logging and diagnostics by what it does
+	// rather than by what implements it, so one diagnostic line reads the same
+	// whichever backend a deployment wires.
 	Name() string
+	// WorkspaceRoot reports the directory the plan files live under. The host
+	// points the file tools of the plan agent at this root, so the deployment's
+	// own configuration never names the backend's storage directory.
+	WorkspaceRoot() string
 }

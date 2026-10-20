@@ -23,6 +23,9 @@ func (b *recordingBackend) Run(_ context.Context, req Request) (Result, error) {
 // Name reports the stub identity.
 func (b *recordingBackend) Name() string { return "recording" }
 
+// WorkspaceRoot reports the stub storage root.
+func (b *recordingBackend) WorkspaceRoot() string { return "recorded-plans" }
+
 // TestToolDeclaresTheClosedSet pins the model-visible surface: one enumerated operation field over the dispatch set, beside the fields the operations consume.
 // - the declared name is the name the prompt and the declaration share
 // - the op field is enumerated over every operation of the dispatch set
@@ -56,6 +59,28 @@ func TestToolDeclaresTheClosedSet(t *testing.T) {
 		if _, ok := decl.InputSchema.Properties[field]; !ok {
 			t.Fatalf("the declaration carries no %q field", field)
 		}
+	}
+}
+
+// modelFaceDescription is the frozen declaration description: the model-visible
+// surface names plans and their workspace, never the backend a deployment wired,
+// so a wording change here is a prompt change and a declaration change in one
+// breath.
+const modelFaceDescription = "manage work plans without a shell: one typed operation per call, covering the whole plan lifecycle. " +
+	"The operations prepare the plan workspace (idempotent), create a plan (name required), " +
+	"report the artifact state of a plan (name optional) or of the workspace, " +
+	"check a plan under the strict rule set (name required; plans carrying no spec deltas fail by design), " +
+	"close a plan whose tasks are all checked (name required), " +
+	"return the writing instructions of one artifact (artifact required: proposal/specs/design/tasks), " +
+	"and list the plans of the workspace. Plan files are written and read through the file tools, not through this one."
+
+// TestDeclarationSpeaksThePlanLanguage pins the frozen model-visible description.
+// - the description is the plan-language text, so an implementation name cannot slip in unnoticed
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
+func TestDeclarationSpeaksThePlanLanguage(t *testing.T) {
+	got := NewTool(&recordingBackend{}).Declaration().Description
+	if got != modelFaceDescription {
+		t.Fatalf("declaration description = %q, want the frozen plan-language text", got)
 	}
 }
 
