@@ -199,7 +199,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 | 类 | 观察点（源码） | 级别与载体 | 每次携带（有界） | 行首 |
 |---|---|---|---|---|
-| 插件相位 | `plugin.Pipeline` 的 Before/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、result、elapsed、call 或 fact 身份 | `tagent: plugin phase` |
+| 插件相位 | `plugin.Pipeline` 的 Before/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、result、elapsed、call 或 fact 身份（After 每个 presenter 各一行，同 fact） | `tagent: plugin phase` |
 | 事件流（事实生产提交） | 主提交之后的 After 趟：`telemetry.LogObserver`（经 `commit-observer` 元素派发） | DEBUG 逐事实 / INFO 回合边界 | 事实类型、tool、task、call、invocation | `tagent: tool call`、`tagent: turn start`、`tagent: turn end` |
 | 事件消费 | `runtime/agent/loop.go`：`Loop.Drive` 的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
 | 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response` |

@@ -10,7 +10,16 @@
 // runs exactly once; the post-commit faces form the After pass, which reads only facts
 // whose canonical commit already happened and answers with a Presentation. The two
 // further phases answer their own pass: one request assembly asks for its environment
-// block, and one compress request is handed to the faces that answer it.
+// block, and one compress request is handed to the faces that answer it. The faces
+// answer two obligations, and their difference is traceability: a face that maps a fact
+// into a projection — the final presentation, the environment block of a request
+// assembly — answers a product that stays traceable to what it was rendered from, and
+// the map answers any number of products, the empty map included, since the environment
+// block is created for an assembly that consumes no fact at all; a face that answers a
+// consumption instead — the call transform before the call is admitted, the compress
+// trigger answering a filed request — owes its products no traceability, because what
+// it produces becomes a new fact, a new fact is its own source, and one consumption may
+// produce several of them.
 //
 //   - the extension-face vocabulary: the phases, the narrow interfaces each phase owns, the pipeline that dispatches them, the post-commit observation wiring and the presentation pass;
 //   - the extension policies at the governance gate: the pre-execution ruling, the risk rules, the approval channel, the denial ledger, the goal registry and the budget window, each stated in its own file and reaching the pipeline only through the one face it serves.
@@ -147,13 +156,15 @@ type PostCommitObserver interface {
 
 // FinalPresenter is the final-presentation face: Present renders the presentation of
 // one fact for its channel and reports the presentation text with whether it was
-// dropped.
+// dropped. One fact may be projected through several presenters: each answers its own
+// view, the views stand in the declared order, and every view carries the fact it was
+// rendered from, so the products a fact answers stay traceable — one presenter,
+// several, or none at all.
 //
-// The redline list (4 rules):
+// The redline list (3 rules):
 // MUST answer the presentation text beside whether the channel dropped it.
 // MUST NOT drop a presentation without reporting the drop.
 // MUST NOT retract the committed fact it was rendered from.
-// MUST NOT be registered beside a second presenter: one fact carries one presentation.
 type FinalPresenter interface {
 	Present(ctx context.Context, id event.EventID) (string, bool)
 }
@@ -161,7 +172,8 @@ type FinalPresenter interface {
 // EnvironmentRequest names the request assembly one environment block is rendered
 // for: the agent the request runs as. The material itself is read by the face from the
 // runtime it holds, so an assembly never has to hand a bundle of its own state across
-// the phase.
+// the phase. The request is the block's source: a block created for an assembly that
+// consumes no fact at all is still traced back to the assembly it was rendered for.
 type EnvironmentRequest struct {
 	// Agent is the agent the request assembly runs as.
 	Agent event.AgentID
@@ -169,7 +181,8 @@ type EnvironmentRequest struct {
 
 // EnvironmentInject is the request-assembly face: InjectEnvironment renders the dynamic
 // environment material one request carries, and the assembly places that text where its
-// own layout puts it.
+// own layout puts it. The block is the product of the request it was dispatched with, so
+// the assembly named there is the source the text traces back to.
 //
 // The redline list (3 rules):
 // MUST render the material the request assembly holds at this boundary, and never a snapshot taken earlier.
@@ -212,12 +225,13 @@ type served[T any] struct {
 // The pre-execution faces run as the one Before pass of a tool call; the
 // post-commit faces run as the After pass of a committed fact. The pipeline is
 // assembled once per dispatch from the borrowed generation's plugins and is
-// never reassembled mid-request. The presentation phase holds at most one
-// face, because the fact-to-presentation mapping is one-to-one.
+// never reassembled mid-request. The presentation phase keeps every face it was
+// declared, because the fact-to-presentation mapping is a traceable one with
+// free cardinality: a fact answers one view, several views, or none.
 //
 //   - declaration order: every face runs in the order its plugin was declared;
-//   - conflict refusal: the one Views projection field has exactly one writer, so a second final presenter is refused by name;
-//   - composition closure: one After pass answers one Presentation for one fact carrying the one view its one presenter rendered.
+//   - provenance refusal: a name identifies the one element that wrote a product, so a second element declared under one name is refused by name instead of leaving two products untraceable;
+//   - composition closure: one After pass answers one Presentation for one fact, and every view it carries names the presenter that wrote it beside the fact it was rendered from, so every product of the chain stays traceable.
 type Pipeline struct {
 	transforms []served[TransformCall]
 	risks      []served[RiskAssessor]
@@ -231,15 +245,20 @@ type Pipeline struct {
 // NewPipeline groups the registered plugins into their phase's narrow interface
 // set, in the declared order. A plugin whose phase is not one of the declared
 // phases, a nil plugin, a plugin that implements no narrow interface of its own
-// phase, and a second final presenter each refuse the pipeline by name instead
-// of being trimmed in silence.
+// phase, and a name declared twice each refuse the pipeline by name instead of
+// being trimmed in silence.
 func NewPipeline(plugins []Plugin) (Pipeline, error) {
 	var out Pipeline
+	names := make(map[string]struct{}, len(plugins))
 	for _, element := range plugins {
 		if element == nil {
 			return Pipeline{}, errors.New("plugin: the pipeline holds a nil plugin")
 		}
 		name := element.Name()
+		if _, declared := names[name]; declared {
+			return Pipeline{}, fmt.Errorf("plugin: %q is declared twice: a product's name must trace back to the one element that wrote it", name)
+		}
+		names[name] = struct{}{}
 		servedAny := false
 		switch element.Phase() {
 		case PhaseCallTransform:
@@ -263,9 +282,6 @@ func NewPipeline(plugins []Plugin) (Pipeline, error) {
 			}
 		case PhaseFinalPresentation:
 			if impl, ok := element.(FinalPresenter); ok {
-				if len(out.presenters) > 0 {
-					return Pipeline{}, fmt.Errorf("plugin: %q serves final presentation beside %q: one fact is presented through exactly one presenter", name, out.presenters[0].name)
-				}
 				out.presenters = append(out.presenters, served[FinalPresenter]{name, impl})
 				servedAny = true
 			}
@@ -386,6 +402,8 @@ func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressReq
 // environment face renders its block in pipeline order, and the pass answers the
 // blocks that carried text, in that order. A face answering no text contributes
 // no block, and a pipeline carrying no environment face answers no block at all.
+// Every block is rendered for the one request the pass was dispatched with, so the
+// blocks of one assembly share the one stated source.
 //
 // A face that answers an error refuses the pass at that face by name: no later
 // face runs and the assembly answers with the refusal instead of carrying a

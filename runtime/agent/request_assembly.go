@@ -81,10 +81,10 @@ type BoundaryView struct {
 type RequestFace func(ctx context.Context, boundary RequestBoundary) (BoundaryView, error)
 
 // ErrProjectionTypeUnmapped reports a projection entry whose frozen type the
-// role table does not declare: the mapping from a presented entry type to the
-// role it renders as is one-to-one over the declared types, so a type outside
-// that table is refused by name instead of rendering under a role no declaration
-// gave it.
+// role table does not declare: the table routes the declared types onto roles
+// deterministically — every declared type names exactly one role, and several
+// types may share one role — so a type outside that table is refused by name
+// instead of rendering under a role no declaration gave it.
 var ErrProjectionTypeUnmapped = errors.New("agent: the projection type maps to no message role")
 
 // projectionTypeRecoveryHint, projectionTypeSegmentFold and
@@ -102,9 +102,14 @@ const (
 
 // RoleOf reports the native message role one presented projection entry renders
 // as on the replay path, keeping the transcript shape the event loop speaks. The
-// table is the whole of the mapping and it is single-valued: every declared entry
-// type names exactly one role, and a type the table does not declare is refused
-// by ErrProjectionTypeUnmapped rather than rendered under a fallback role.
+// table is the whole of the routing and it is deterministic: every declared entry
+// type names exactly one role, several types may name the same role, and a type
+// the table does not declare is refused by ErrProjectionTypeUnmapped rather than
+// rendered under a fallback role. The table routes what one consumption reads and
+// binds the reading side only: the core logic of a consumption may mint several
+// events from the one projection it read — the calls it admits beside the answer it
+// gives — and those products owe no traceability, because a new fact is its own
+// source.
 //
 // The settled result and the replay products each render under the one role their
 // entry type declares:

@@ -392,16 +392,17 @@ func TestBeforePassInvariants(t *testing.T) {
 }
 
 // TestAfterPassInvariants pins the one post-commit pass of a committed fact.
-// - observers read the committed fact before the presenter renders it
+// - observers read the committed fact before the presenters render it
 // - a failed observation is a named gap beside the fact instead of a retraction or an error return
 // - a dropped presentation is reported as a dropped view, never omitted in silence
 // - the pass still presents the fact after an earlier observation failed
-// - a second presenter is refused by name, so one fact carries one presentation
+// - several presenters answer the one fact with a view each, in declared order
+// - every view names its producer beside the fact it was rendered from, so the products stay traceable
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestAfterPassInvariants(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("observers run in registration order, then the one presenter renders", func(t *testing.T) {
+	t.Run("observers run in registration order, then the presenter renders", func(t *testing.T) {
 		var order []string
 		observerOne := invariantObserver{invariantPlugin: invariantPlugin{name: "one", phase: PhasePostCommitObserve}, order: &order}
 		observerTwo := invariantObserver{invariantPlugin: invariantPlugin{name: "two", phase: PhasePostCommitObserve}, order: &order}
@@ -480,31 +481,65 @@ func TestAfterPassInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("a second presenter is refused by name", func(t *testing.T) {
+	t.Run("a pipeline carrying no presenter answers no view", func(t *testing.T) {
 		var order []string
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order}
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", phase: PhasePostCommitObserve}, order: &order}
+		pipeline, err := NewPipeline([]Plugin{observer})
+		if err != nil {
+			t.Fatalf("register an observer alone: %v", err)
+		}
+		presentation := pipeline.After(ctx, "event-1")
+		if presentation.Fact != "event-1" {
+			t.Fatalf("presentation fact = %q, want the source fact kept beside no view", presentation.Fact)
+		}
+		if len(presentation.Views) != 0 {
+			t.Fatalf("views = %+v, want no view when no presenter is declared", presentation.Views)
+		}
+		if len(order) != 1 || order[0] != "observe:watcher" {
+			t.Fatalf("after pass order = %v, want the observer still run for the fact", order)
+		}
+	})
+
+	t.Run("several presenters answer the one fact with a view each", func(t *testing.T) {
+		var order []string
+		var firstSeen, secondSeen []event.EventID
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, seen: &firstSeen, text: "first view"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, seen: &secondSeen, text: "second view"}
 		pipeline, err := NewPipeline([]Plugin{first, second})
-		if err == nil {
-			t.Fatalf("register two presenters = %+v, want the second refused by name", pipeline)
+		if err != nil {
+			t.Fatalf("register two presenters: %v", err)
 		}
-		if !strings.Contains(err.Error(), `"second"`) || !strings.Contains(err.Error(), `"first"`) {
-			t.Fatalf("refusal = %v, want it to name both presenters", err)
+		presentation := pipeline.After(ctx, "event-1")
+		if strings.Join(order, ",") != "present:first,present:second" {
+			t.Fatalf("presenter order = %v, want the declared order", order)
 		}
-		if !strings.Contains(err.Error(), "exactly one presenter") {
-			t.Fatalf("refusal = %v, want it to state the one-to-one mapping it keeps", err)
+		if len(presentation.Views) != 2 {
+			t.Fatalf("views = %+v, want one view per presenter", presentation.Views)
 		}
-		if len(order) != 0 {
-			t.Fatalf("presenters ran %v, want a refused pipeline to present nothing", order)
+		for i, want := range []struct{ plugin, text string }{{"first", "first view"}, {"second", "second view"}} {
+			got := presentation.Views[i]
+			if got.Plugin != want.plugin || got.Text != want.text || got.Dropped {
+				t.Fatalf("view %d = %+v, want the view %q answered by %q", i, got, want.text, want.plugin)
+			}
+			if presentation.Fact != "event-1" {
+				t.Fatalf("presentation fact = %q, want the source fact every view traces back to", presentation.Fact)
+			}
+		}
+		if len(firstSeen) != 1 || firstSeen[0] != "event-1" || len(secondSeen) != 1 || secondSeen[0] != "event-1" {
+			t.Fatalf("presenters saw (%v, %v), want both rendered the one source fact", firstSeen, secondSeen)
+		}
+		if len(presentation.Gaps) != 0 {
+			t.Fatalf("gaps = %+v, want none", presentation.Gaps)
 		}
 	})
 }
 
-// TestPipelineCompositionContracts pins the three contracts one plugin chain is held to at this boundary.
+// TestPipelineCompositionContracts pins the composition contracts one plugin chain is held to at this boundary.
 // - the faces run in the order the plugins were declared, not the order of their names
-// - two plugins presenting the one Views projection field are refused by name, and no partially built pipeline is returned
-// - a multi-plugin chain answers one Presentation per fact
-// - that Presentation carries exactly the one view its presenter rendered, so the mapping stays one-to-one
+// - several presenters over the one projection field are legal: each answers its own view, in declared order
+// - a name declared twice is refused by name, because a product's name must trace back to the one element that wrote it
+// - a multi-plugin chain answers one Presentation per fact, and that Presentation carries one view per presenter
+// - every view names its producer beside the fact it was rendered from, so each product stays traceable
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestPipelineCompositionContracts(t *testing.T) {
 	ctx := context.Background()
@@ -525,21 +560,36 @@ func TestPipelineCompositionContracts(t *testing.T) {
 		}
 	})
 
-	t.Run("two presenters over the one projection field are refused by name", func(t *testing.T) {
+	t.Run("several presenters over the one projection field answer their own views", func(t *testing.T) {
 		var order []string
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order}
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, text: "first view"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, text: "second view"}
+		pipeline, err := NewPipeline([]Plugin{first, second})
+		if err != nil {
+			t.Fatalf("register two presenters: %v", err)
+		}
+		presentation := pipeline.After(ctx, "event-1")
+		if len(presentation.Views) != 2 || presentation.Views[0].Plugin != "first" || presentation.Views[1].Plugin != "second" {
+			t.Fatalf("views = %+v, want one view per presenter in declared order", presentation.Views)
+		}
+		if strings.Join(order, ",") != "present:first,present:second" {
+			t.Fatalf("presenter order = %v, want the declared order", order)
+		}
+	})
+
+	t.Run("a name declared twice is refused by name", func(t *testing.T) {
+		var order []string
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "shared", phase: PhaseFinalPresentation}, order: &order}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "shared", phase: PhaseFinalPresentation}, order: &order}
 		pipeline, err := NewPipeline([]Plugin{first, second})
 		if err == nil {
-			t.Fatalf("register two presenters = %+v, want the conflict refused by name", pipeline)
+			t.Fatalf("register one name twice = %+v, want the second element refused by name", pipeline)
 		}
-		for _, name := range []string{`"first"`, `"second"`} {
-			if !strings.Contains(err.Error(), name) {
-				t.Fatalf("refusal = %v, want it to name both plugins (%s missing)", err, name)
-			}
+		if !strings.Contains(err.Error(), `"shared"`) || !strings.Contains(err.Error(), "declared twice") {
+			t.Fatalf("refusal = %v, want it to name the shared name and the repeat", err)
 		}
-		if !strings.Contains(err.Error(), "exactly one presenter") {
-			t.Fatalf("refusal = %v, want it to state the one-to-one projection it keeps", err)
+		if !strings.Contains(err.Error(), "trace back") {
+			t.Fatalf("refusal = %v, want it to state the provenance it keeps", err)
 		}
 		if len(pipeline.presenters) != 0 || len(pipeline.observers) != 0 {
 			t.Fatalf("refused pipeline = %+v, want no partially built faces", pipeline)
@@ -549,18 +599,13 @@ func TestPipelineCompositionContracts(t *testing.T) {
 		}
 	})
 
-	t.Run("a multi-plugin chain keeps one fact on one projection", func(t *testing.T) {
+	t.Run("a multi-plugin chain answers every fact through every presenter", func(t *testing.T) {
 		var order []string
-		var seen []event.EventID
-		first := invariantObserver{invariantPlugin: invariantPlugin{name: "one", phase: PhasePostCommitObserve}, order: &order}
-		second := invariantObserver{invariantPlugin: invariantPlugin{name: "two", phase: PhasePostCommitObserve}, order: &order}
-		presenter := invariantPresenter{
-			invariantPlugin: invariantPlugin{name: "presenter", phase: PhaseFinalPresentation},
-			order:           &order,
-			seen:            &seen,
-			text:            "rendered",
-		}
-		pipeline, err := NewPipeline([]Plugin{first, second, presenter})
+		var seenFirst, seenSecond []event.EventID
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", phase: PhasePostCommitObserve}, order: &order}
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, seen: &seenFirst, text: "first view"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, seen: &seenSecond, text: "second view"}
+		pipeline, err := NewPipeline([]Plugin{observer, first, second})
 		if err != nil {
 			t.Fatalf("register the multi-plugin chain: %v", err)
 		}
@@ -568,21 +613,21 @@ func TestPipelineCompositionContracts(t *testing.T) {
 		for _, fact := range facts {
 			presentation := pipeline.After(ctx, fact)
 			if presentation.Fact != fact {
-				t.Fatalf("presentation fact = %q, want %q", presentation.Fact, fact)
+				t.Fatalf("presentation fact = %q, want the source fact %q every view traces back to", presentation.Fact, fact)
 			}
-			if len(presentation.Views) != 1 || presentation.Views[0].Plugin != "presenter" {
-				t.Fatalf("views of %s = %+v, want the one view the presenter rendered", fact, presentation.Views)
+			if len(presentation.Views) != 2 || presentation.Views[0].Plugin != "first" || presentation.Views[1].Plugin != "second" {
+				t.Fatalf("views of %s = %+v, want one view per presenter in declared order", fact, presentation.Views)
 			}
 			if len(presentation.Gaps) != 0 {
 				t.Fatalf("gaps of %s = %+v, want none", fact, presentation.Gaps)
 			}
 		}
-		if len(seen) != len(facts) {
-			t.Fatalf("presenter saw %v, want each fact presented exactly once", seen)
+		if len(seenFirst) != len(facts) || len(seenSecond) != len(facts) {
+			t.Fatalf("presenters saw (%v, %v), want each fact rendered by each presenter", seenFirst, seenSecond)
 		}
 		for i, fact := range facts {
-			if seen[i] != fact {
-				t.Fatalf("presenter saw %v, want the facts in the order they were presented", seen)
+			if seenFirst[i] != fact || seenSecond[i] != fact {
+				t.Fatalf("presenters saw (%v, %v), want the facts in the order they were presented", seenFirst, seenSecond)
 			}
 		}
 	})
@@ -682,6 +727,7 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 // TestEnvironmentInjectPassInvariants pins the injection pass of the request-assembly phase.
 // - the face answers the assembly for the agent the request names
 // - several faces render in declared order and a face answering no text contributes no block
+// - a request that consumes no fact still answers every block from the request it was dispatched with
 // - a face that refuses refuses the assembly by name instead of carrying a block it could not render
 // - a pipeline carrying no environment face answers no block
 // - an element reporting the environment phase without its face is refused by name
@@ -727,6 +773,27 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		}
 		if strings.Join(order, ",") != "inject:first,inject:silent,inject:third" {
 			t.Fatalf("injection order = %v, want the three faces in declared order", order)
+		}
+	})
+
+	t.Run("an assembly that consumes no fact still answers every block from its request", func(t *testing.T) {
+		var seen []EnvironmentRequest
+		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, seen: &seen, text: "first block"}
+		second := invariantInject{invariantPlugin: invariantPlugin{name: "second", phase: PhaseEnvironmentInject}, seen: &seen, text: "second block"}
+		pipeline, err := NewPipeline([]Plugin{first, second})
+		if err != nil {
+			t.Fatalf("register two environment faces: %v", err)
+		}
+		request := EnvironmentRequest{Agent: "agent-a"}
+		got, err := pipeline.InjectEnvironment(ctx, request)
+		if err != nil {
+			t.Fatalf("run the injection pass: %v", err)
+		}
+		if got != "first block\n\nsecond block" {
+			t.Fatalf("block = %q, want every block rendered for the one request", got)
+		}
+		if len(seen) != 2 || seen[0] != request || seen[1] != request {
+			t.Fatalf("faces saw %+v, want the one dispatched request as each block's source", seen)
 		}
 	})
 
@@ -884,6 +951,27 @@ func TestPhaseObservation(t *testing.T) {
 		}
 		if lines := logger.at("info"); len(lines) != 0 {
 			t.Fatalf("info lines = %v, want the phase face kept at DEBUG", lines)
+		}
+	})
+
+	t.Run("every presenter renders its own line for the one fact", func(t *testing.T) {
+		logger := &phaseLog{}
+		watchPhaseLog(t, logger)
+		var order []string
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, text: "one"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, text: "two"}
+		pipeline, err := NewPipeline([]Plugin{first, second})
+		if err != nil {
+			t.Fatalf("register two presenters: %v", err)
+		}
+		pipeline.After(ctx, "fact-1")
+
+		if !logger.mentions("debug", "phase=final-presentation", "plugin=first", "fact=fact-1") ||
+			!logger.mentions("debug", "phase=final-presentation", "plugin=second", "fact=fact-1") {
+			t.Fatalf("debug lines = %v, want one presentation line per presenter", logger.at("debug"))
+		}
+		if lines := logger.at("debug"); len(lines) != 2 {
+			t.Fatalf("debug lines = %v, want exactly one line per presenter", lines)
 		}
 	})
 

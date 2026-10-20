@@ -8,21 +8,21 @@
 <a id="pipeline-phases"></a>
 ## 一、plugin：四个相位，每个相位一个窄接口
 
-扩展者只需做两件事：实现 `plugin.Plugin`（报一个稳定名字**和恰好一个**相位），再实现该相位的那一个窄接口。相位既决定元素在 pipeline 里的次序，也决定它被派发进哪个接口集；`plugin.NewPipeline` 按声明序分组时逐个核对，越界即拒绝。
+扩展者只需做两件事：实现 `plugin.Plugin`（报一个稳定名字**和恰好一个**相位），再实现该相位的那一个窄接口。相位既决定元素在 pipeline 里的次序，也决定它被派发进哪个接口集；`plugin.NewPipeline` 按声明序分组时逐个核对，越界即拒绝。名字是产物的溯源标签：f 的产物（presenter 的视图、环境块）可回查来源，g 的产物（新事实）自己就是源头——两类义务的差别正在这里，而一个名字只标识写它的那一个元素，重复即按破坏溯源拒绝。
 
 | 相位 | 扩展者实现的接口 | 出现在哪一趟 | 与什么有关系 | 拒绝语义 |
 |---|---|---|---|---|
 | `PhaseCallTransform` | `TransformCall(ctx, *model.ToolCall) error` | Before 趟，admission 之前、副作用之前 | 这一次工具调用本身：可改工具名与参数，不改 `CallID` 与已解析的可信作用域 | 返回 error 即拒绝**整趟**：该调用不执行、不记录，也不产生 `CallPass`；移动 `CallID` 报 `plugin.ErrCallIdentityChanged` |
 | `PhaseRiskPolicy` | `RiskAssessor.AssessRisk(ctx, *model.ToolCall) RiskLevel` 与 `Governor` | Before 趟，全部 transform 之后 | 同一个调用的风险等级与执行前裁决：等级只评级一次，裁决读它而不重算 | 相位内两个面可只实现其一或都实现，一个都不实现按"相位无实现"拒绝 |
 | `PhasePostCommitObserve` | `ObserveCommit(ctx, event.EventID) error` | After 趟，先于全部 presenter | 一个**已提交**事实的只读观察 | 失败不返回错误、不回滚事实：失败落成 `view.ObservationGap`（插件名+事实+错误） |
-| `PhaseFinalPresentation` | `Present(ctx, event.EventID) (string, bool)` | After 趟，最后 | 一个已提交事实的呈现文本，以及通道是否丢弃它 | 丢弃只丢呈现（`view.RenderedView.Dropped`），不撤回事实；丢弃必须如实报出 |
+| `PhaseFinalPresentation` | `Present(ctx, event.EventID) (string, bool)` | After 趟，最后 | 一个已提交事实的呈现文本：每个 presenter 各产一视图，视图带源事实与写它的插件名，可回查 | 丢弃只丢呈现（`view.RenderedView.Dropped`），不撤回事实；丢弃必须如实报出 |
 
 两趟的边界是这段接口的全部意义：
 
 - **Before 一趟**：每个调用恰好一次，先跑全部 transforms（各自在私有副本上改），再跑全部 risk faces，产出 `plugin.CallPass{Final, Risk}`。改后的 `Final` 是**被执行、也被记录**的那一个，且仍要过核心的受理路径（身份、权限、审批、去重都在核心，plugin 不自己执行调用）。没有风险面时 `Risk` 为空，裁决读作 `RiskMedium`——空等级不是一张免检通行证。
-- **After 一趟**：提交之后才跑，先 observers 再 presenters，返回 `view.Presentation{Fact, Views, Gaps}` 且**没有 error 返回值**——这个趟的任何失败都不能成为动已提交事实的理由。被拒绝的调用与提交失败的调用不产生呈现。
+- **After 一趟**：提交之后才跑，先 observers 再 presenters，每个 presenter 各产一视图、按声明序追加（视图数即注册 presenter 数，可为 0），返回 `view.Presentation{Fact, Views, Gaps}` 且**没有 error 返回值**——这个趟的任何失败都不能成为动已提交事实的理由。被拒绝的调用与提交失败的调用不产生呈现。
 
-装配上的三条拒绝（`plugin.NewPipeline` 的原文）：nil 元素报 `plugin: the pipeline holds a nil plugin`；相位不在四个声明相位内报 `plugin: %q serves phase %d, which is not one of the declared phases`；相位合法但没实现该相位的窄接口报 `plugin: %q serves phase %s but implements no narrow interface of that phase`。元素也不得服务两个相位：一个注册元素一个相位，相位的两个面可以同时带。
+装配上的四条拒绝（`plugin.NewPipeline` 的原文）：nil 元素报 `plugin: the pipeline holds a nil plugin`；相位不在四个声明相位内报 `plugin: %q serves phase %d, which is not one of the declared phases`；相位合法但没实现该相位的窄接口报 `plugin: %q serves phase %s but implements no narrow interface of that phase`；同一个名字声明两次报 `plugin: %q is declared twice: a product's name must trace back to the one element that wrote it`。元素也不得服务两个相位：一个注册元素一个相位，相位的两个面可以同时带。
 
 **与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的元素装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献元素的次序，pipeline 不改写它。契约在 `api/plugin/phases.go` 与 `api/plugin/present.go`，呈现词汇（`Presentation`/`RenderedView`/`ObservationGap`）在 `api/view/presentation.go`，只引用 `event` 的事实身份。观测面复用框架面、不自造第二套：已提交事实由 `telemetry.LogObserver` 写进 `trpc-agent-go/log.Logger`，相位派发与消费器执行两面直接写 `log.Default`，模型响应只写 `log.Default` 的一行 INFO（generation span 归驱动模型的一方，本仓不再开），四类的观察点与 Langfuse 装配见 OPERATION §七·E。
 

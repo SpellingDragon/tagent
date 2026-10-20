@@ -10,9 +10,18 @@ A plugin is a registration unit: it reports the phase it serves and implements
 that phase's one narrow interface. The pre-execution faces form one Before
 pass a request runs exactly once; the post-commit faces form the After pass,
 which reads only facts whose canonical commit already happened and answers
-with a Presentation. The two further phases answer their own pass: one request
-assembly asks for its environment block, and one compress request is handed to
-the faces that answer it.
+with a Presentation. The two further phases answer their own pass:
+one request assembly asks for its environment block, and one compress request
+is handed to the faces that answer it. The faces answer two obligations,
+and their difference is traceability: a face that maps a fact into a projection
+— the final presentation, the environment block of a request assembly — answers
+a product that stays traceable to what it was rendered from, and the map answers
+any number of products, the empty map included, since the environment block
+is created for an assembly that consumes no fact at all; a face that answers
+a consumption instead — the call transform before the call is admitted, the
+compress trigger answering a filed request — owes its products no traceability,
+because what it produces becomes a new fact, a new fact is its own source,
+and one consumption may produce several of them.
 
   - the extension-face vocabulary: the phases, the narrow interfaces each phase
     owns, the pipeline that dispatches them, the post-commit observation wiring
@@ -206,7 +215,9 @@ type EnvironmentInject interface {
 }
     EnvironmentInject is the request-assembly face: InjectEnvironment renders
     the dynamic environment material one request carries, and the assembly
-    places that text where its own layout puts it.
+    places that text where its own layout puts it. The block is the product
+    of the request it was dispatched with, so the assembly named there is the
+    source the text traces back to.
 
     The redline list (3 rules): MUST render the material the request assembly
     holds at this boundary, and never a snapshot taken earlier. MUST NOT write
@@ -221,7 +232,9 @@ type EnvironmentRequest struct {
     EnvironmentRequest names the request assembly one environment block is
     rendered for: the agent the request runs as. The material itself is read
     by the face from the runtime it holds, so an assembly never has to hand a
-    bundle of its own state across the phase.
+    bundle of its own state across the phase. The request is the block's source:
+    a block created for an assembly that consumes no fact at all is still traced
+    back to the assembly it was rendered for.
 
 type FactLookup interface {
 	// CommittedFact returns the committed fact the identity names. An identity
@@ -242,12 +255,14 @@ type FinalPresenter interface {
 }
     FinalPresenter is the final-presentation face: Present renders the
     presentation of one fact for its channel and reports the presentation text
-    with whether it was dropped.
+    with whether it was dropped. One fact may be projected through several
+    presenters: each answers its own view, the views stand in the declared
+    order, and every view carries the fact it was rendered from, so the products
+    a fact answers stay traceable — one presenter, several, or none at all.
 
-    The redline list (4 rules): MUST answer the presentation text beside whether
+    The redline list (3 rules): MUST answer the presentation text beside whether
     the channel dropped it. MUST NOT drop a presentation without reporting the
-    drop. MUST NOT retract the committed fact it was rendered from. MUST NOT be
-    registered beside a second presenter: one fact carries one presentation.
+    drop. MUST NOT retract the committed fact it was rendered from.
 
 type Governor interface {
 	// Judge returns the ruling for one tool call before its side effect runs,
@@ -405,36 +420,42 @@ type Pipeline struct {
     The pre-execution faces run as the one Before pass of a tool call; the
     post-commit faces run as the After pass of a committed fact. The pipeline
     is assembled once per dispatch from the borrowed generation's plugins and
-    is never reassembled mid-request. The presentation phase holds at most one
-    face, because the fact-to-presentation mapping is one-to-one.
+    is never reassembled mid-request. The presentation phase keeps every face
+    it was declared, because the fact-to-presentation mapping is a traceable one
+    with free cardinality: a fact answers one view, several views, or none.
 
       - declaration order: every face runs in the order its plugin was declared;
-      - conflict refusal: the one Views projection field has exactly one writer,
-        so a second final presenter is refused by name;
+      - provenance refusal: a name identifies the one element that wrote a
+        product, so a second element declared under one name is refused by name
+        instead of leaving two products untraceable;
       - composition closure: one After pass answers one Presentation for one
-        fact carrying the one view its one presenter rendered.
+        fact, and every view it carries names the presenter that wrote it beside
+        the fact it was rendered from, so every product of the chain stays
+        traceable.
 
 func NewPipeline(plugins []Plugin) (Pipeline, error)
     NewPipeline groups the registered plugins into their phase's narrow
     interface set, in the declared order. A plugin whose phase is not one of the
     declared phases, a nil plugin, a plugin that implements no narrow interface
-    of its own phase, and a second final presenter each refuse the pipeline by
-    name instead of being trimmed in silence.
+    of its own phase, and a name declared twice each refuse the pipeline by name
+    instead of being trimmed in silence.
 
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation
     After runs the After pass over one fact whose canonical commit already
-    happened: every observer reads the fact first, then the presenter renders
+    happened: every observer reads the fact first, then every presenter renders
     it. The pass runs after the commit and never before it, so a refused call
     and a call whose commit failed present nothing at all. An observation that
     fails is recorded as a named gap in the returned presentation and never
-    rolls the committed fact back; a presenter that drops its text drops the
-    presentation only. The pass carries no error return: a failure here is a gap
-    or a dropped view, never a reason to touch the committed fact.
+    rolls the committed fact back; a presenter that drops its text drops its own
+    view only. The pass carries no error return: a failure here is a gap or a
+    dropped view, never a reason to touch the committed fact.
 
-    The fact enters the presentation pass exactly once, because the pipeline
-    holds at most one presenter: one fact carries one presentation, so the
-    returned views hold the one view that presenter rendered or none when the
-    pipeline carries no presenter at all.
+    The fact enters the presentation pass once and every presenter renders it:
+    each answers its own view, the views stand in the order the presenters were
+    declared, and each view names the presenter that wrote it beside the fact
+    it was rendered from, so a fact answers one view, several, or none when
+    the pipeline carries no presenter at all — and every view it answers stays
+    traceable to its source.
 
 func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass, error)
     Before runs the one Before pass of one tool call: every transform face
@@ -456,8 +477,9 @@ func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequ
     InjectEnvironment runs the injection pass of one request assembly: every
     environment face renders its block in pipeline order, and the pass answers
     the blocks that carried text, in that order. A face answering no text
-    contributes no block, and a pipeline carrying no environment face answers no
-    block at all.
+    contributes no block, and a pipeline carrying no environment face answers
+    no block at all. Every block is rendered for the one request the pass was
+    dispatched with, so the blocks of one assembly share the one stated source.
 
     A face that answers an error refuses the pass at that face by name: no later
     face runs and the assembly answers with the refusal instead of carrying a

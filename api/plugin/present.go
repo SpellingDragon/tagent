@@ -9,18 +9,20 @@ import (
 )
 
 // After runs the After pass over one fact whose canonical commit already
-// happened: every observer reads the fact first, then the presenter renders it.
-// The pass runs after the commit and never before it, so a refused call and a
-// call whose commit failed present nothing at all. An observation that fails is
-// recorded as a named gap in the returned presentation and never rolls the
-// committed fact back; a presenter that drops its text drops the presentation
-// only. The pass carries no error return: a failure here is a gap or a dropped
-// view, never a reason to touch the committed fact.
+// happened: every observer reads the fact first, then every presenter renders
+// it. The pass runs after the commit and never before it, so a refused call and
+// a call whose commit failed present nothing at all. An observation that fails
+// is recorded as a named gap in the returned presentation and never rolls the
+// committed fact back; a presenter that drops its text drops its own view only.
+// The pass carries no error return: a failure here is a gap or a dropped view,
+// never a reason to touch the committed fact.
 //
-// The fact enters the presentation pass exactly once, because the pipeline holds
-// at most one presenter: one fact carries one presentation, so the returned
-// views hold the one view that presenter rendered or none when the pipeline
-// carries no presenter at all.
+// The fact enters the presentation pass once and every presenter renders it:
+// each answers its own view, the views stand in the order the presenters were
+// declared, and each view names the presenter that wrote it beside the fact it
+// was rendered from, so a fact answers one view, several, or none when the
+// pipeline carries no presenter at all — and every view it answers stays
+// traceable to its source.
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation {
@@ -33,14 +35,12 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
 			out.Gaps = append(out.Gaps, view.ObservationGap{Plugin: face.name, Fact: fact, Err: err})
 		}
 	}
-	if len(p.presenters) == 0 {
-		return out
+	for _, face := range p.presenters {
+		started := time.Now()
+		text, dropped := face.impl.Present(ctx, fact)
+		observePhase(PhaseFinalPresentation, facePresent, face.name, phasePresentation(dropped), "fact="+string(fact), started)
+		out.Views = append(out.Views, view.RenderedView{Plugin: face.name, Text: text, Dropped: dropped})
 	}
-	face := p.presenters[0]
-	started := time.Now()
-	text, dropped := face.impl.Present(ctx, fact)
-	observePhase(PhaseFinalPresentation, facePresent, face.name, phasePresentation(dropped), "fact="+string(fact), started)
-	out.Views = append(out.Views, view.RenderedView{Plugin: face.name, Text: text, Dropped: dropped})
 	return out
 }
 
