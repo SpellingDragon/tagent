@@ -63,7 +63,6 @@ type ReplayProjection struct {
 	originals map[event.EventID]string
 	decisions map[event.EventID]PresentationDecision
 	consumed  map[event.EventID]struct{}
-	foldSeq   int
 	fold      *CompactionFact
 	settles   []ReplaySettle
 	boundary  event.EventID

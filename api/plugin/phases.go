@@ -214,6 +214,10 @@ type served[T any] struct {
 // assembled once per dispatch from the borrowed generation's plugins and is
 // never reassembled mid-request. The presentation phase holds at most one
 // face, because the fact-to-presentation mapping is one-to-one.
+//
+//   - declaration order: every face runs in the order its plugin was declared;
+//   - conflict refusal: the one Views projection field has exactly one writer, so a second final presenter is refused by name;
+//   - composition closure: one After pass answers one Presentation for one fact carrying the one view its one presenter rendered.
 type Pipeline struct {
 	transforms []served[TransformCall]
 	risks      []served[RiskAssessor]

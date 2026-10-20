@@ -195,8 +195,9 @@ func TestCompressionProductsAreEquivalent(t *testing.T) {
 		if direct.Summary.Type != replay.CompactionEventType || direct.FullBoundary != "cc-4" {
 			t.Fatalf("fold summary = %+v boundary = %q, want the compaction type and the last keyed entry", direct.Summary, direct.FullBoundary)
 		}
-		if refs := compressionRefKeys(direct.Refs); !reflect.DeepEqual(refs, []event.EventID{"cc-3", "-ref-1-4"}) {
-			t.Fatalf("fold refs = %v, want the synthetic ref and the retained tool fact in payload order", refs)
+		refs := compressionRefKeys(direct.Refs)
+		if len(refs) != 2 || refs[0] != "cc-3" || !replay.SyntheticKey(refs[1]) || !strings.HasPrefix(string(refs[1]), "-ref-") {
+			t.Fatalf("fold refs = %v, want the retained tool fact and a content-addressed synthetic ref in payload order", refs)
 		}
 
 		identity := meditation.CompactionFactKey(direct)

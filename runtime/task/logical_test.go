@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ const logicalMargin = 10 * time.Second
 // - an execution past the execution timeout is marked timed out while its status and its owed result stay as they stand
 // - a task holding a terminal fact carries no logical status, and a record carrying no movement stamp is read as moving
 // - reading the logical status of a task moves no status of it and stores no fact
+// - a suspected or timed out task is marked only: its status, facts and obligations stay as they stand, and no termination is requested
 // 契约: docs/wiki/agent/task-lifecycle.md#status-machine
 func TestLogicalStatusRecognition(t *testing.T) {
 	ctx := context.Background()
@@ -154,6 +156,56 @@ func TestLogicalStatusRecognition(t *testing.T) {
 		}
 		if got := invariantObligationCount(t, manager, taskID); got != held {
 			t.Fatalf("obligations after the identification = %d, want the open obligation kept", got)
+		}
+	})
+
+	t.Run("a suspected or timed out task is marked but never terminated", func(t *testing.T) {
+		rig := logicalRegistry(logicalThresholds)
+		registry, carrier := rig.registry, rig.carrier
+		manager := NewMemoryManager(registry, nil)
+		silent := invariantRegister(t, registry, "call-1", "dedup-1")
+		running := invariantRegister(t, registry, "call-2", "dedup-2")
+		if result, err := registry.Advance(ctx, running, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the second task under way = (%v, %v), want a committed change", result, err)
+		}
+		probe := time.Now().Add(4*time.Minute + logicalMargin)
+		if got, err := registry.Logical(ctx, silent, probe); err != nil || got != LogicalSuspect {
+			t.Fatalf("logical status of the silent task = (%q, %v), want %q", got, err, LogicalSuspect)
+		}
+		if got, err := registry.Logical(ctx, running, probe); err != nil || got != LogicalTimedOut {
+			t.Fatalf("logical status of the running task = (%q, %v), want %q", got, err, LogicalTimedOut)
+		}
+		if changes := registry.Watch(ctx, probe); len(changes) != 2 {
+			t.Fatalf("changes the identification reported = %+v, want the suspected and the timed out task", changes)
+		}
+		facts := map[event.TaskID]int{silent: len(carrier.Facts(silent)), running: len(carrier.Facts(running))}
+		held := map[event.TaskID]int{
+			silent:  invariantObligationCount(t, manager, silent),
+			running: invariantObligationCount(t, manager, running),
+		}
+		if _, status, err := registry.Lookup(ctx, silent); err != nil || status != StatusAccepted {
+			t.Fatalf("status of the suspected task = (%v, %v), want the accepted status kept", status, err)
+		}
+		if _, status, err := registry.Lookup(ctx, running); err != nil || status != StatusRunning {
+			t.Fatalf("status of the timed out task = (%v, %v), want the running status kept", status, err)
+		}
+		for _, taskID := range []event.TaskID{silent, running} {
+			if got := len(carrier.Facts(taskID)); got != facts[taskID] {
+				t.Fatalf("stored facts of %s after the identification = %d, want %d", taskID, got, facts[taskID])
+			}
+			if got := invariantObligationCount(t, manager, taskID); got != held[taskID] {
+				t.Fatalf("obligations of %s after the identification = %d, want %d", taskID, got, held[taskID])
+			}
+			stop := StopEvidence{TaskID: taskID, Stopped: true, Reason: "termination probe"}
+			if err := manager.RecordStop(ctx, stop); !errors.Is(err, ErrCancelNotRequested) {
+				t.Fatalf("stop evidence of %s beside no cancellation request = %v, want %v", taskID, err, ErrCancelNotRequested)
+			}
+		}
+		if _, status, err := registry.Lookup(ctx, silent); err != nil || status != StatusAccepted {
+			t.Fatalf("status of the suspected task after the stop probe = (%v, %v), want the accepted status kept", status, err)
+		}
+		if _, status, err := registry.Lookup(ctx, running); err != nil || status != StatusRunning {
+			t.Fatalf("status of the timed out task after the stop probe = (%v, %v), want the running status kept", status, err)
 		}
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -17,6 +18,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 )
 
@@ -362,6 +364,32 @@ func (p environmentBlockPlugin) InjectEnvironment(ctx context.Context, _ plugin.
 // the request without bound.
 const environmentTaskLines = 16
 
+// environmentBlockGenerations counts the environment blocks the request boundary
+// has rendered in this process, so the block's rewrite frequency is a measured
+// face for a later throttle decision rather than an inference from the lines.
+var environmentBlockGenerations atomic.Int64
+
+// EnvironmentBlockGenerations reports how many environment blocks the request
+// boundary has rendered in this process so far.
+func EnvironmentBlockGenerations() int64 { return environmentBlockGenerations.Load() }
+
+// environmentBlockDebug renders one line of the environment-block face at DEBUG:
+// the trigger reason, the agent and the task count one generation named. One line
+// per generation keeps the rewrite frequency observable, and the line carries no
+// task text.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
+// MUST keep the INFO stream bounded by leaving every generation line at DEBUG.
+// MUST NOT render task text or any boundary content.
+func environmentBlockDebug(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
+}
+
 // environmentBlock renders the dynamic environment material one request carries
 // at the bottom of the boundary assembly, for an agent that declares it: the
 // agent the request runs as, the tool, skill and MCP faces available to it, and
@@ -373,6 +401,8 @@ const environmentTaskLines = 16
 func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary) string {
 	spec := r.agentSpecOf(boundary.Agent)
 	open, omitted := r.openTaskLines(ctx)
+	environmentBlockGenerations.Add(1)
+	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s tasks=%d omitted=%d", boundary.Agent, len(open)+omitted, omitted)
 	var b strings.Builder
 	b.WriteString("## Environment\n")
 	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)

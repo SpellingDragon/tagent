@@ -408,6 +408,12 @@ type Pipeline struct {
     is never reassembled mid-request. The presentation phase holds at most one
     face, because the fact-to-presentation mapping is one-to-one.
 
+      - declaration order: every face runs in the order its plugin was declared;
+      - conflict refusal: the one Views projection field has exactly one writer,
+        so a second final presenter is refused by name;
+      - composition closure: one After pass answers one Presentation for one
+        fact carrying the one view its one presenter rendered.
+
 func NewPipeline(plugins []Plugin) (Pipeline, error)
     NewPipeline groups the registered plugins into their phase's narrow
     interface set, in the declared order. A plugin whose phase is not one of the

@@ -5,13 +5,25 @@
 // The retained refs keep the payload order, the payload records the boundary the
 // tail is replayed after, and the summary entry is returned first on every
 // restore.
+//
+// A fold is idempotent: every product is filed under a content-addressed
+// negative key — the summary under the digest of the folded run, each synthetic
+// ref under the digest of the entry it carries — so the same material always
+// folds under the same keys and a second fold mints no second product. A
+// projection that already carries a compaction payload answers it as it stands:
+// one body of material folds once, and a projection rebuilt from the chain is
+// folded no further.
 package replay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"hash"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -30,6 +42,8 @@ var ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry"
 // remaining entries are represented by the summary alone. The compaction payload
 // records the fullBoundary value the tail is replayed after, and the summary
 // entry is returned first on every restore.
+//
+// - A projection already carrying a compaction payload answers that payload's summary entry and moves nothing, so one body of material folds once even when a rebuilt projection is offered to the fold again.
 func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return ProjectionEntry{}, err
@@ -39,8 +53,9 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 	if len(p.entries) == 0 {
 		return ProjectionEntry{}, ErrFoldEmpty
 	}
-	p.foldSeq++
-	seq := strconv.Itoa(p.foldSeq)
+	if p.fold != nil {
+		return entryOfRef(p.fold.Summary), nil
+	}
 	minTs := p.entries[0].Time
 	summaries := make([]string, 0, len(p.entries))
 	refEntries := make([]ProjectionEntry, 0, len(p.entries))
@@ -53,7 +68,7 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 		summaries = append(summaries, entry.Summary)
 		if entry.Key == "" || SyntheticKey(entry.Key) {
 			ref := CompactionRef{
-				Key:     event.EventID("-ref-" + seq + "-" + strconv.Itoa(i)),
+				Key:     foldRefKey(i, entry),
 				Type:    entry.Type,
 				Summary: entry.Summary,
 				Content: entry.Content,
@@ -83,17 +98,21 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 		}
 	}
 	summaryRef := CompactionRef{
-		Key:     event.EventID("-" + strconv.FormatInt(minTs.UnixNano(), 10)),
+		Key:     foldSummaryKey(p.entries),
 		Type:    CompactionEventType,
 		Summary: "compaction",
 		Content: "compaction: " + strings.Join(summaries, "; "),
 		Time:    minTs,
 	}
+	consumed := p.consumedKeysLocked()
+	if len(consumed) == 0 {
+		consumed = nil
+	}
 	payload := CompactionFact{
 		Summary:      summaryRef,
 		Refs:         refs,
 		FullBoundary: boundary,
-		ConsumedKeys: p.consumedKeysLocked(),
+		ConsumedKeys: consumed,
 	}
 	p.fold = &payload
 	p.boundary = boundary
@@ -108,4 +127,36 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 // what the summary speaks for.
 func RetainRefType(typ string) bool {
 	return typ == event.TypeActionCommand || typ == event.TypeTaskSettled
+}
+
+// foldSummaryKey reports the content-addressed negative key one fold files its
+// summary under: the digest of the folded run in payload order, so the same
+// material always folds under the same key.
+func foldSummaryKey(entries []ProjectionEntry) event.EventID {
+	digest := sha256.New()
+	for _, entry := range entries {
+		foldDigestEntry(digest, entry)
+	}
+	return event.EventID("-fold-" + hex.EncodeToString(digest.Sum(nil)[:8]))
+}
+
+// foldRefKey reports the content-addressed negative key one synthetic ref is
+// filed under: the entry's position beside its content, because two identical
+// keyless entries must keep two refs while the same material keeps one key.
+func foldRefKey(index int, entry ProjectionEntry) event.EventID {
+	digest := sha256.New()
+	digest.Write([]byte(strconv.Itoa(index)))
+	digest.Write([]byte{0})
+	foldDigestEntry(digest, entry)
+	return event.EventID("-ref-" + hex.EncodeToString(digest.Sum(nil)[:8]))
+}
+
+// foldDigestEntry writes one entry into a product digest: identity, frozen type,
+// summary, full text and recorded time, so two entries of the same text but a
+// different identity never share a product key.
+func foldDigestEntry(digest hash.Hash, entry ProjectionEntry) {
+	for _, part := range []string{string(entry.Key), entry.Type, entry.Summary, entry.Content, entry.Time.UTC().Format(time.RFC3339Nano)} {
+		digest.Write([]byte(part))
+		digest.Write([]byte{0})
+	}
 }

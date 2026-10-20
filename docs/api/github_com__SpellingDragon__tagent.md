@@ -68,6 +68,10 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 
 FUNCTIONS
 
+func EnvironmentBlockGenerations() int64
+    EnvironmentBlockGenerations reports how many environment blocks the request
+    boundary has rendered in this process so far.
+
 func ExecLeaseExplainer(manager *tagentexec.Manager) query.LeaseExplainer
     ExecLeaseExplainer returns the blocker explanation face over one execution
     resource ledger. The manager may be absent for an assembly beside no

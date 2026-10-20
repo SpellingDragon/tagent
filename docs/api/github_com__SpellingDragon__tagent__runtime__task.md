@@ -7,6 +7,8 @@ written by the transitions it commits, and this classification is derived from
 the movement stamps those transitions leave, so reading one leaves the other
 exactly as it stands.
 
+红线: 逻辑状态=纯观测：只标记，不改状态机、不自动处置（不 kill 不中断）——处置走 Governor 策略面。
+
 Package task is the runtime's task admission and settlement layer. It declares
 the declaration a tool, sub-agent or result-delivery call is admitted under,
 the status a task moves through, and the ports through which a transition is

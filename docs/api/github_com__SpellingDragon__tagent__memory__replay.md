@@ -21,6 +21,13 @@ entry, stated as a fact of the chain rather than kept beside it. The retained
 refs keep the payload order, the payload records the boundary the tail is
 replayed after, and the summary entry is returned first on every restore.
 
+A fold is idempotent: every product is filed under a content-addressed negative
+key — the summary under the digest of the folded run, each synthetic ref under
+the digest of the entry it carries — so the same material always folds under the
+same keys and a second fold mints no second product. A projection that already
+carries a compaction payload answers it as it stands: one body of material folds
+once, and a projection rebuilt from the chain is folded no further.
+
 Cold-start replay: the projection is the pure replay of one fact chain.
 
 The projection holds no state outside the fact chain: a rebuild replays the
@@ -479,8 +486,11 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
     first, then the retained refs in payload order, positive keys hydrated from
     the chain and synthetic refs from the payload text — and the tail is paged
     by minimum event key and appended in EventKey write order after the payload
-    boundary. Without a compaction the rebuild runs the bounded fallback instead
-    of a no-op, and a successfully scanned empty chain is reported as empty.
+    boundary. The restored payload is kept as the projection's compaction
+    payload, so a fold offered to the rebuilt projection answers it instead of
+    folding a second time. Without a compaction the rebuild runs the bounded
+    fallback instead of a no-op, and a successfully scanned empty chain is
+    reported as empty.
 
     The causal chain is maintained through relations.SetParent inside this
     (PartitionID, SessionID) chain alone: a replay never links one session's
@@ -564,6 +574,10 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error)
     the remaining entries are represented by the summary alone. The compaction
     payload records the fullBoundary value the tail is replayed after, and the
     summary entry is returned first on every restore.
+
+    - A projection already carrying a compaction payload answers that payload's
+    summary entry and moves nothing, so one body of material folds once even
+    when a rebuilt projection is offered to the fold again.
 
 func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error)
     FoldByAge folds the projection along its segment-age bands once its rendered

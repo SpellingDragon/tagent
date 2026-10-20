@@ -340,9 +340,11 @@ func entryOfRef(ref CompactionRef) ProjectionEntry {
 // compaction the snapshot is restored first — the summary entry first, then the
 // retained refs in payload order, positive keys hydrated from the chain and
 // synthetic refs from the payload text — and the tail is paged by minimum event
-// key and appended in EventKey write order after the payload boundary. Without
-// a compaction the rebuild runs the bounded fallback instead of a no-op, and a
-// successfully scanned empty chain is reported as empty.
+// key and appended in EventKey write order after the payload boundary. The
+// restored payload is kept as the projection's compaction payload, so a fold
+// offered to the rebuilt projection answers it instead of folding a second
+// time. Without a compaction the rebuild runs the bounded fallback instead of a
+// no-op, and a successfully scanned empty chain is reported as empty.
 //
 // The causal chain is maintained through relations.SetParent inside this
 // (PartitionID, SessionID) chain alone: a replay never links one session's
@@ -413,6 +415,7 @@ func RebuildProjectionFromWAL(ctx context.Context, target *ReplayProjection, cha
 			return RebuildReport{}, fmt.Errorf("%w: %w", ErrCompactionCorrupt, err)
 		}
 		report.FullBoundary = payload.FullBoundary
+		target.fold = &payload
 		target.boundary = payload.FullBoundary
 		target.Append(ctx, entryOfRef(payload.Summary))
 		report.Entries++
