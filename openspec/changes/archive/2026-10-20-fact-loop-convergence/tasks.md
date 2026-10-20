@@ -24,4 +24,4 @@
 - [x] F1 契约零改动断言（本 change specs + 既有 golden 合同零改动：`git diff` 契约目录）
 - [x] F2 全量门禁：`bash scripts/lint.sh` exit 0＋golden 12 场景全 match（行为零变化）
 - [x] F3 DoD 核验入 evidence
-- [ ] F4 archive（需用户明示）
+- [x] F4 archive（本次全量归档明示）

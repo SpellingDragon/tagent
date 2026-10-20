@@ -26,4 +26,4 @@
 - [x] F1 契约零改动断言（本 change 自身 specs 目录）
 - [x] F2 全量门禁：`bash scripts/lint.sh` exit 0＋`go test ./... -count=1` 健康
 - [x] F3 DoD 逐项核验入 evidence
-- [ ] F4 archive（需用户明示）
+- [x] F4 archive（本次全量归档明示）

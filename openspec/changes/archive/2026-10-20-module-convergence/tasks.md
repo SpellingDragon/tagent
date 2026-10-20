@@ -22,4 +22,4 @@
 - [x] F1 契约零改动断言（本 change specs）＋golden 合同零改动
 - [x] F2 全量门禁：lint exit 0＋golden 12 场景全 match
 - [x] F3 DoD 核验入 evidence
-- [ ] F4 archive（需明示）
+- [x] F4 archive（本次全量归档明示）
