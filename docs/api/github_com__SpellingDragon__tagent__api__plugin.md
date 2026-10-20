@@ -10,18 +10,18 @@ A plugin is a registration unit: it reports the phase it serves and implements
 that phase's one narrow interface. The pre-execution faces form one Before
 pass a request runs exactly once; the post-commit faces form the After pass,
 which reads only facts whose canonical commit already happened and answers
-with a Presentation. The two further phases answer their own pass:
-one request assembly asks for its environment block, and one compress request
-is handed to the faces that answer it. The faces answer two obligations,
+with a Presentation. The two further phases answer their own pass: one request
+assembly asks for its environment blocks, and one compress request is handed to
+the faces that start the chain answering it. The faces answer two obligations,
 and their difference is traceability: a face that maps a fact into a projection
-— the final presentation, the environment block of a request assembly — answers
-a product that stays traceable to what it was rendered from, and the map answers
-any number of products, the empty map included, since the environment block
-is created for an assembly that consumes no fact at all; a face that answers
-a consumption instead — the call transform before the call is admitted, the
-compress trigger answering a filed request — owes its products no traceability,
-because what it produces becomes a new fact, a new fact is its own source,
-and one consumption may produce several of them.
+— the final presentation, the environment blocks of a request assembly — answers
+a product that stays traceable to what it was rendered from, and the map
+answers any number of products, the empty map included, since the environment
+blocks are created for an assembly that consumes no fact at all; a face that
+answers a consumption instead — the call transform before the call is admitted,
+the compress trigger starting the mapping chain a filed request drives — owes
+its products no traceability, because what it produces becomes a new fact,
+a new fact is its own source, and one consumption may produce several of them.
 
   - the extension-face vocabulary: the phases, the narrow interfaces each phase
     owns, the pipeline that dispatches them, the post-commit observation wiring
@@ -119,15 +119,19 @@ type CallPass struct {
     knows what started the call, so a ruling has no hidden input of its own.
 
 type CompressTrigger interface {
-	// TriggerCompress dispatches one filed compress request. A nil error carries the
-	// request forward into the compression that answers it; a non-nil error refuses
-	// it by name, so the material is not compressed and the request stays pending.
+	// TriggerCompress starts the compression one filed compress request drives. A nil
+	// error carries the request forward into the compression that answers it; a
+	// non-nil error refuses it by name, so the material is not compressed and the
+	// request stays pending.
 	TriggerCompress(ctx context.Context, request event.CompressRequest) error
 }
-    CompressTrigger is the compress-consumption face: TriggerCompress answers
-    one filed compress request with the compression it owes. The request is the
-    judgment that material is over its bound; the face is the mechanism that
-    answers it.
+    CompressTrigger is the compress-trigger face: TriggerCompress starts the
+    traceable mapping chain one filed compress request drives — the curation
+    that consumes the request and answers the compression it owes — and hands
+    that chain the request as filed. The request is the judgment that material
+    is over its bound; this face is the chain's starter, never the mapping
+    itself, so it answers no product of its own to trace: the products the
+    curation mints are the traceable ones.
 
     The redline list (3 rules): MUST answer the request it was handed:
     its identity and subject stay as filed. MUST NOT retire the request:
@@ -208,16 +212,17 @@ const (
 	DispositionHold Disposition = "hold"
 )
 type EnvironmentInject interface {
-	// InjectEnvironment renders the environment block of one request assembly. A nil
-	// error carries the rendered text; a non-nil error refuses the assembly by name,
-	// so no request is built over a block that failed to render.
-	InjectEnvironment(ctx context.Context, request EnvironmentRequest) (string, error)
+	// InjectEnvironment renders the environment blocks of one request assembly. A nil
+	// error carries the rendered blocks as separate products; a non-nil error refuses
+	// the assembly by name, so no request is built over a block that failed to render.
+	InjectEnvironment(ctx context.Context, request EnvironmentRequest) ([]string, error)
 }
     EnvironmentInject is the request-assembly face: InjectEnvironment renders
     the dynamic environment material one request carries, and the assembly
-    places that text where its own layout puts it. The block is the product
-    of the request it was dispatched with, so the assembly named there is the
-    source the text traces back to.
+    places those blocks where its own layout puts them. Each block is one
+    product of this face and traces back to the request it was rendered for:
+    the face answers one block, several, or none, and it never merges two
+    products into one text.
 
     The redline list (3 rules): MUST render the material the request assembly
     holds at this boundary, and never a snapshot taken earlier. MUST NOT write
@@ -226,15 +231,16 @@ type EnvironmentInject interface {
     block.
 
 type EnvironmentRequest struct {
-	// Agent is the agent the request assembly runs as.
+	// Agent is the agent the request assembly runs as: provenance, the source that
+	// every block rendered for this request traces back to.
 	Agent event.AgentID
 }
-    EnvironmentRequest names the request assembly one environment block is
+    EnvironmentRequest names the request assembly the environment blocks are
     rendered for: the agent the request runs as. The material itself is read
-    by the face from the runtime it holds, so an assembly never has to hand a
-    bundle of its own state across the phase. The request is the block's source:
-    a block created for an assembly that consumes no fact at all is still traced
-    back to the assembly it was rendered for.
+    by the face from the runtime it holds, so an assembly never has to hand
+    a bundle of its own state across the phase. The request is every block's
+    provenance: each block traces back to the assembly it was rendered for,
+    a block created for an assembly that consumes no fact at all included.
 
 type FactLookup interface {
 	// CommittedFact returns the committed fact the identity names. An identity
@@ -402,12 +408,15 @@ const (
 
 	// PhaseCompressTrigger is the consumption phase of a compress request: the
 	// filed judgment that material is over its bound is handed to the faces that
-	// answer it with the compression it owes, before the request is retired.
+	// answer it with the compression it owes, before the request is retired. The
+	// phase is the starter of the traceable mapping chain the request drives, never
+	// the curation itself.
 	PhaseCompressTrigger
 
 	// PhaseEnvironmentInject is the request-assembly phase: the faces render the
 	// dynamic environment material one request carries at the bottom of its
-	// assembly, so what changes with the run never moves the stable prefix.
+	// assembly, so what changes with the run never moves the stable prefix. Each
+	// block a face answers is one product of that request, traceable to it.
 	PhaseEnvironmentInject
 )
 type Pipeline struct {
@@ -422,7 +431,9 @@ type Pipeline struct {
     is assembled once per dispatch from the borrowed generation's plugins and
     is never reassembled mid-request. The presentation phase keeps every face
     it was declared, because the fact-to-presentation mapping is a traceable one
-    with free cardinality: a fact answers one view, several views, or none.
+    with free cardinality: a fact answers one view, several views, or none. The
+    environment phase answers the same traceable way: a face answers one block,
+    several blocks, or none, and every block it answers is one product.
 
       - declaration order: every face runs in the order its plugin was declared;
       - provenance refusal: a name identifies the one element that wrote a
@@ -473,24 +484,29 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
     identity and permission at the wrapper's admission path — and the same final
     call is the one both executed and recorded.
 
-func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequest) (string, error)
+func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequest) ([]string, error)
     InjectEnvironment runs the injection pass of one request assembly: every
-    environment face renders its block in pipeline order, and the pass answers
-    the blocks that carried text, in that order. A face answering no text
-    contributes no block, and a pipeline carrying no environment face answers
-    no block at all. Every block is rendered for the one request the pass was
-    dispatched with, so the blocks of one assembly share the one stated source.
+    environment face renders its blocks in pipeline order, and the pass answers
+    every block that carried text, in the order their faces are declared.
+    One element of the answer is one product of one face: the blocks of a face
+    stay separate products, and a face answering no text contributes no block,
+    so a pipeline carrying no environment face answers none at all. Every block
+    is rendered for the one request the pass was dispatched with, so each block
+    traces back to the one stated source.
 
     A face that answers an error refuses the pass at that face by name: no later
     face runs and the assembly answers with the refusal instead of carrying a
     block it could not render.
 
 func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressRequest) error
-    TriggerCompress runs the trigger pass of one filed compress request: every
-    compress face answers the request in pipeline order, so the compression
-    a producer judged due is the one the wired faces deliver. The request is
-    dispatched as the log filed it, and the consumer retires it afterwards —
-    never here — so a request whose compression failed stays pending.
+    TriggerCompress runs the trigger pass of one filed compress request:
+    every compress face is started with the request in pipeline order,
+    so the compression a producer judged due is the one the wired faces deliver.
+    The pass starts the traceable mapping chain and answers no product of its
+    own: the products the curation mints downstream are what traces back to the
+    request. The request is dispatched as the log filed it, and the consumer
+    retires it afterwards — never here — so a request whose compression failed
+    stays pending.
 
     A face that answers an error refuses the pass at that face by name: no later
     face runs, and the caller answers with the refusal instead of counting the

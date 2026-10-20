@@ -117,25 +117,25 @@ func (p invariantTrigger) TriggerCompress(_ context.Context, request event.Compr
 	return p.err
 }
 
-// invariantInject is an environment-inject element answering the block it was built
+// invariantInject is an environment-inject element answering the blocks it was built
 // with and recording the assembly it was dispatched for.
 type invariantInject struct {
 	invariantPlugin
-	order *[]string
-	seen  *[]EnvironmentRequest
-	text  string
-	err   error
+	order  *[]string
+	seen   *[]EnvironmentRequest
+	blocks []string
+	err    error
 }
 
-// InjectEnvironment records the assembly it was dispatched for and answers its block.
-func (p invariantInject) InjectEnvironment(_ context.Context, request EnvironmentRequest) (string, error) {
+// InjectEnvironment records the assembly it was dispatched for and answers its blocks.
+func (p invariantInject) InjectEnvironment(_ context.Context, request EnvironmentRequest) ([]string, error) {
 	if p.order != nil {
 		*p.order = append(*p.order, "inject:"+p.name)
 	}
 	if p.seen != nil {
 		*p.seen = append(*p.seen, request)
 	}
-	return p.text, p.err
+	return p.blocks, p.err
 }
 
 // invariantRequest builds one compress request the way a producer files it.
@@ -726,7 +726,8 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 
 // TestEnvironmentInjectPassInvariants pins the injection pass of the request-assembly phase.
 // - the face answers the assembly for the agent the request names
-// - several faces render in declared order and a face answering no text contributes no block
+// - every face answers its blocks in declared order and a face answering no text contributes no block
+// - one face may answer several blocks, and each block stands as its own product
 // - a request that consumes no fact still answers every block from the request it was dispatched with
 // - a face that refuses refuses the assembly by name instead of carrying a block it could not render
 // - a pipeline carrying no environment face answers no block
@@ -738,7 +739,7 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	t.Run("the face answers the assembly it was dispatched for", func(t *testing.T) {
 		var seen []EnvironmentRequest
 		block := "## Environment\n- agent: agent-a"
-		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, seen: &seen, text: block}
+		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, seen: &seen, blocks: []string{block}}
 		pipeline, err := NewPipeline([]Plugin{inject})
 		if err != nil {
 			t.Fatalf("register the environment face: %v", err)
@@ -747,8 +748,8 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run the injection pass: %v", err)
 		}
-		if got != block {
-			t.Fatalf("block = %q, want the rendered environment material %q", got, block)
+		if len(got) != 1 || got[0] != block {
+			t.Fatalf("blocks = %q, want the one rendered environment block %q", got, block)
 		}
 		if len(seen) != 1 || seen[0].Agent != "agent-a" {
 			t.Fatalf("faces saw %+v, want the agent the assembly runs as", seen)
@@ -757,9 +758,9 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 
 	t.Run("several faces render in declared order beside an empty one", func(t *testing.T) {
 		var order []string
-		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, order: &order, text: "first block"}
+		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, order: &order, blocks: []string{"first block"}}
 		silent := invariantInject{invariantPlugin: invariantPlugin{name: "silent", phase: PhaseEnvironmentInject}, order: &order}
-		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", phase: PhaseEnvironmentInject}, order: &order, text: "third block"}
+		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", phase: PhaseEnvironmentInject}, order: &order, blocks: []string{"third block"}}
 		pipeline, err := NewPipeline([]Plugin{first, silent, third})
 		if err != nil {
 			t.Fatalf("register three environment faces: %v", err)
@@ -768,18 +769,34 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run the injection pass: %v", err)
 		}
-		if got != "first block\n\nthird block" {
-			t.Fatalf("block = %q, want the rendered blocks in declared order beside the empty face left out", got)
+		if len(got) != 2 || got[0] != "first block" || got[1] != "third block" {
+			t.Fatalf("blocks = %q, want the rendered blocks in declared order beside the empty face left out", got)
 		}
 		if strings.Join(order, ",") != "inject:first,inject:silent,inject:third" {
 			t.Fatalf("injection order = %v, want the three faces in declared order", order)
 		}
 	})
 
+	t.Run("one face answers several blocks as separate products", func(t *testing.T) {
+		both := invariantInject{invariantPlugin: invariantPlugin{name: "both", phase: PhaseEnvironmentInject}, blocks: []string{"first product", "second product"}}
+		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", phase: PhaseEnvironmentInject}, blocks: []string{"third product"}}
+		pipeline, err := NewPipeline([]Plugin{both, third})
+		if err != nil {
+			t.Fatalf("register the environment faces: %v", err)
+		}
+		got, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if err != nil {
+			t.Fatalf("run the injection pass: %v", err)
+		}
+		if len(got) != 3 || got[0] != "first product" || got[1] != "second product" || got[2] != "third product" {
+			t.Fatalf("blocks = %q, want every answer element kept as its own product in declared order", got)
+		}
+	})
+
 	t.Run("an assembly that consumes no fact still answers every block from its request", func(t *testing.T) {
 		var seen []EnvironmentRequest
-		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, seen: &seen, text: "first block"}
-		second := invariantInject{invariantPlugin: invariantPlugin{name: "second", phase: PhaseEnvironmentInject}, seen: &seen, text: "second block"}
+		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, seen: &seen, blocks: []string{"first block"}}
+		second := invariantInject{invariantPlugin: invariantPlugin{name: "second", phase: PhaseEnvironmentInject}, seen: &seen, blocks: []string{"second block"}}
 		pipeline, err := NewPipeline([]Plugin{first, second})
 		if err != nil {
 			t.Fatalf("register two environment faces: %v", err)
@@ -789,8 +806,8 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run the injection pass: %v", err)
 		}
-		if got != "first block\n\nsecond block" {
-			t.Fatalf("block = %q, want every block rendered for the one request", got)
+		if len(got) != 2 || got[0] != "first block" || got[1] != "second block" {
+			t.Fatalf("blocks = %q, want every block rendered for the one request", got)
 		}
 		if len(seen) != 2 || seen[0] != request || seen[1] != request {
 			t.Fatalf("faces saw %+v, want the one dispatched request as each block's source", seen)
@@ -799,7 +816,7 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 
 	t.Run("a refusing face refuses the assembly by name", func(t *testing.T) {
 		refused := errors.New("the runtime is not readable")
-		failing := invariantInject{invariantPlugin: invariantPlugin{name: "failing", phase: PhaseEnvironmentInject}, text: "partial", err: refused}
+		failing := invariantInject{invariantPlugin: invariantPlugin{name: "failing", phase: PhaseEnvironmentInject}, blocks: []string{"partial"}, err: refused}
 		pipeline, err := NewPipeline([]Plugin{failing})
 		if err != nil {
 			t.Fatalf("register the refusing pipeline: %v", err)
@@ -811,8 +828,8 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		if !strings.Contains(err.Error(), "failing") {
 			t.Fatalf("refusal = %q, want the refusing face named", err)
 		}
-		if got != "" {
-			t.Fatalf("block of a refused assembly = %q, want no block carried", got)
+		if len(got) != 0 {
+			t.Fatalf("blocks of a refused assembly = %q, want no block carried", got)
 		}
 	})
 
@@ -822,7 +839,7 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 			t.Fatalf("register an empty pipeline: %v", err)
 		}
 		got, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
-		if err != nil || got != "" {
+		if err != nil || len(got) != 0 {
 			t.Fatalf("injection pass over no face = (%q, %v), want no block and no refusal", got, err)
 		}
 	})
@@ -981,7 +998,7 @@ func TestPhaseObservation(t *testing.T) {
 		var order []string
 		var seen []event.EventID
 		trigger := invariantTrigger{invariantPlugin: invariantPlugin{name: "curator", phase: PhaseCompressTrigger}, order: &order, seen: &seen}
-		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, text: "clock=noon"}
+		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, blocks: []string{"clock=noon"}}
 		pipeline, err := NewPipeline([]Plugin{trigger, inject})
 		if err != nil {
 			t.Fatalf("register one element per dispatch phase: %v", err)
@@ -991,9 +1008,9 @@ func TestPhaseObservation(t *testing.T) {
 		if err := pipeline.TriggerCompress(ctx, request); err != nil {
 			t.Fatalf("run the compress-trigger pass: %v", err)
 		}
-		block, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
-		if err != nil || block != "clock=noon" {
-			t.Fatalf("run the environment-inject pass = (%q, %v), want the block of the registered face", block, err)
+		blocks, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-a"})
+		if err != nil || len(blocks) != 1 || blocks[0] != "clock=noon" {
+			t.Fatalf("run the environment-inject pass = (%q, %v), want the block of the registered face", blocks, err)
 		}
 
 		if !logger.mentions("debug", "phase=compress-trigger", "face=trigger", "plugin=curator", "result=ok", "request="+string(request.ID)) {

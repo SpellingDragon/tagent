@@ -33,7 +33,7 @@ var (
 
 	_ func(FinalPresenter, context.Context, event.EventID) (string, bool) = FinalPresenter.Present
 
-	_ func(EnvironmentInject, context.Context, EnvironmentRequest) (string, error) = EnvironmentInject.InjectEnvironment
+	_ func(EnvironmentInject, context.Context, EnvironmentRequest) ([]string, error) = EnvironmentInject.InjectEnvironment
 
 	_ func(CompressTrigger, context.Context, event.CompressRequest) error = CompressTrigger.TriggerCompress
 
@@ -127,7 +127,7 @@ var (
 
 	_ func(Pipeline, context.Context, event.CompressRequest) error = Pipeline.TriggerCompress
 
-	_ func(Pipeline, context.Context, EnvironmentRequest) (string, error) = Pipeline.InjectEnvironment
+	_ func(Pipeline, context.Context, EnvironmentRequest) ([]string, error) = Pipeline.InjectEnvironment
 
 	_ error = ErrCallIdentityChanged
 )

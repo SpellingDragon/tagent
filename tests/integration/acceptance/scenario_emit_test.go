@@ -47,9 +47,9 @@ func EmitScenarioRecord(t *testing.T, scenario Scenario, refs []string, observat
 
 // scenarioLabels maps the product identities of one run onto the stable call,
 // task and decision labels of the report: the first identity filed under a prefix
-// takes suffix "a", the second "b", and so on. The mapping preserves the
-// one-to-one relation, the order and the causal direction of the real identities
-// without freezing a random identifier into a report.
+// takes suffix "a", the second "b", and so on. The mapping keeps every real
+// identity distinct, and preserves the order and the causal direction of the real
+// identities without freezing a random identifier into a report.
 type scenarioLabels struct {
 	byID    map[string]string
 	counter map[string]int

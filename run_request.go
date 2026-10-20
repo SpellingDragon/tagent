@@ -262,9 +262,10 @@ func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *rep
 // beside them (skill-name order, once each, and never a body the fixed files
 // already carry), then the replayed projection of the session chain, and
 // finally the dynamic environment material of the request when the agent
-// declares it: that block is the answer of the request-assembly plugin phase,
-// rendered by the element this assembly registers for it. The content version
-// the boundary fixed is reported back as the version the request runs on.
+// declares it: those blocks are the answer of the request-assembly plugin phase,
+// rendered by the element this assembly registers for it, and each block is
+// appended as its own system message. The content version the boundary fixed is
+// reported back as the version the request runs on.
 //
 // The order is the cache ordering the environment block exists for: what stays
 // the same between two requests of one session — the fixed prompt and skill
@@ -323,19 +324,22 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 		if err != nil {
 			return agent.BoundaryView{}, err
 		}
-		block, err := pipeline.InjectEnvironment(ctx, plugin.EnvironmentRequest{Agent: boundary.Agent})
+		blocks, err := pipeline.InjectEnvironment(ctx, plugin.EnvironmentRequest{Agent: boundary.Agent})
 		if err != nil {
 			return agent.BoundaryView{}, err
 		}
-		view.Messages = append(view.Messages, model.Message{Role: model.RoleSystem, Content: block})
+		for _, block := range blocks {
+			view.Messages = append(view.Messages, model.Message{Role: model.RoleSystem, Content: block})
+		}
 	}
 	return view, nil
 }
 
 // environmentBlockPlugin is the request-assembly element of this run: the
 // environment-injection phase face over one request boundary of one agent. The
-// block it renders is the dynamic material the boundary closes its assembly with,
-// read from the runtime at this boundary.
+// blocks it renders are the dynamic material the boundary closes its assembly
+// with, read from the runtime at this boundary; one element of its answer is one
+// block, so each block stays its own product of this request.
 type environmentBlockPlugin struct {
 	run      *Run
 	boundary agent.RequestBoundary
@@ -353,10 +357,11 @@ func (p environmentBlockPlugin) Name() string { return "environment-block" }
 // Phase reports the request-assembly phase this plugin serves.
 func (p environmentBlockPlugin) Phase() plugin.Phase { return plugin.PhaseEnvironmentInject }
 
-// InjectEnvironment renders the environment block of this assembly: the one
-// block a request carries at the bottom of its boundary material.
-func (p environmentBlockPlugin) InjectEnvironment(ctx context.Context, _ plugin.EnvironmentRequest) (string, error) {
-	return p.run.environmentBlock(ctx, p.boundary), nil
+// InjectEnvironment renders the environment blocks of this assembly: the one
+// block a request carries at the bottom of its boundary material today, answered
+// as the one element of this face's answer.
+func (p environmentBlockPlugin) InjectEnvironment(ctx context.Context, _ plugin.EnvironmentRequest) ([]string, error) {
+	return []string{p.run.environmentBlock(ctx, p.boundary)}, nil
 }
 
 // environmentTaskLines bounds how many open obligations one environment block
@@ -394,10 +399,10 @@ func environmentBlockDebug(format string, args ...any) {
 // at the bottom of the boundary assembly, for an agent that declares it: the
 // agent the request runs as, the tool, skill and MCP faces available to it, and
 // the asynchronous work it holds open at this boundary. The block is one system
-// message and it closes the assembly, because everything in it changes with the
-// run while the material above it — the fixed prompt, the skill bodies and the
-// transcript ahead of the assembly — does not, so the changing part never moves
-// the stable prefix it follows.
+// message on its own and the assembly appends it as it stands, because everything
+// in it changes with the run while the material above it — the fixed prompt, the
+// skill bodies and the transcript ahead of the assembly — does not, so the
+// changing part never moves the stable prefix it follows.
 func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary) string {
 	spec := r.agentSpecOf(boundary.Agent)
 	open, omitted := r.openTaskLines(ctx)

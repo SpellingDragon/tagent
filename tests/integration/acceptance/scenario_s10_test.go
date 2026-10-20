@@ -734,8 +734,8 @@ func scenarioS10SessionCount(episodes []rl.EpisodeRecord, id event.EpisodeID) in
 // labels the evidence contract carries: the capture and the episode keep the
 // identity the chain declared for them, and the seal, the export, the sample and
 // the consumer input — each carrying a counter or a time — are labelled by the
-// order the chain produced them in, so the relation stays one-to-one without
-// freezing a generated identity into the report.
+// order the chain produced them in, so each produced artifact keeps one label of
+// its own without freezing a generated identity into the report.
 func scenarioS10ArtifactLinks(t *testing.T, manifest rl.CaptureManifest, exported rl.ExportResult, samples []rl.SampleLine, consumed rl.SFTConsumerResult) map[string]any {
 	t.Helper()
 	if len(consumed.Artifacts) == 0 {

@@ -51,9 +51,9 @@ type Observation struct {
 }
     Observation is one normalized observation derived from the official API
     output of a scenario run. The runner MUST derive observations from real
-    API output instead of copying a scenario's expected values; random ids and
-    timestamps may be normalized, but one-to-one relations, order, and causality
-    are preserved.
+    API output instead of copying a scenario's expected values; random ids
+    and timestamps may be normalized, but distinct identities stay distinct,
+    and their order and causality are preserved.
 
 type Result struct {
 	ScenarioID   string        `json:"scenario_id"`
