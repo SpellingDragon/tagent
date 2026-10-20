@@ -92,11 +92,6 @@ func EnvironmentBlockGenerations() int64
     EnvironmentBlockGenerations reports how many environment blocks the request
     boundary has rendered in this process so far.
 
-func ExecLeaseExplainer(manager *tagentexec.Manager) query.LeaseExplainer
-    ExecLeaseExplainer returns the blocker explanation face over one execution
-    resource ledger. The manager may be absent for an assembly beside no
-    execution resources, in which case no ledger is attached to the read.
-
 TYPES
 
 type DiagnosticFace struct {
@@ -346,10 +341,10 @@ type NativeAgent struct {
 	Model model.Model
 	// Tools lists the native callable tools of the agent.
 	Tools []trpctool.CallableTool
-	// Plugins lists the plugin pipeline elements the agent's binding generation
+	// Plugins lists the plugin instances the agent's binding generation
 	// carries: the one Before pass grades and the After pass presents every call
-	// of that generation over these elements, in the declared order.
-	Plugins []plugin.Plugin
+	// of that generation over these instances, in the declared order.
+	Plugins []plugin.Instance
 }
     NativeAgent is what the embedding process contributes for one declared
     agent: the native model the agent runs against and the native tools visible
@@ -617,14 +612,6 @@ func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches
     face is closed. A face the assembly carries no wiring for names that state
     in its reason instead of failing the whole read.
 
-func (r *Run) Explain(ctx context.Context, filter query.ListFilter) (query.BlockerReport, error)
-    Explain returns one authorized explanation of what keeps this run from
-    advancing: every blocker named beside its readable reason and the party that
-    advances it, every obligation still open, and every registered lease beside
-    the retention facts of its resource, under the authorization scope the
-    caller presents. The read grants no authorization of its own and reads every
-    fact from the owners at read time.
-
 func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error)
     InjectEvent commits one explicit input event of the named responsibility
     range and drives the loop session of its address with it, exactly as the
@@ -691,18 +678,6 @@ func (r *Run) Query(ctx context.Context, filter query.ListFilter) (query.Snapsho
     the detail entries it returns: an object outside the presented scope is
     excluded rather than rewritten, and a source that cannot be read is refused
     by name instead of being answered as empty detail.
-
-func (r *Run) Recall(ctx context.Context, q search.Query) (search.Result, error)
-    Recall runs one retrieval over the recall face of this run and answers the
-    reference set the query hit, ordered from the best hit down and cut to the
-    page the query asks for. The retrieval reads through the observation table
-    over the committed store and the searcher fusing its two legs, so a hit is
-    answered as the recall reference its event was landed with and never as a
-    copy of the text behind it: the original stays behind the scoped read path.
-    The query carries its own authorized partition set — the recall grants no
-    authorization of its own — and a run assembled beside no storage tier is
-    refused by name with ErrRetrievalUnwired instead of answered as an empty
-    set.
 
 func (r *Run) RecallReads() recall.Reads
     RecallReads returns the recall read faces this run wires beside the

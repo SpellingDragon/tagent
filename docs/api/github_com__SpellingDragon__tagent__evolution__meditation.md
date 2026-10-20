@@ -1,55 +1,17 @@
 package meditation // import "github.com/SpellingDragon/tagent/evolution/meditation"
 
-The scheduled reflection driver of one meditation loop: the plan it runs,
-the delivery port a fired reflection flows back through, one Tick per declared
-interval, and the named refusals a plan that cannot drive answers at assembly.
-
 The meditation domain's own judgments over the facts it consumes: the freshness
 judgment that reads one observed fact and the delivery judgment that reads one
 fired reflection's input. A fact carries its trigger-source stamp as recording
 metadata; these judgments state, in the domain's own vocabulary, which stamps
 open the freshness gate and which may leave through the delivery port.
 
-The declaration face of one scheduled reflection: a document states which
-agent observes, at which cadence, over which namespaces, with which prompt
-and to which declared targets, and PlanOf resolves that section once into the
-plan a driver runs. The host maps its own document onto document.Document;
-the resolution rules — one loop per host, cadence bounds, the observation face
-inside the authorized read scope, the declared delivery targets and the anchor
-record path — live here, not in the host.
-
-The pre-fold face of the meditation consumer: the fold a consumer runs when it
-consumes a compress request, the compaction fact it files into the state, and
-the fold identity that fact is quoted by. A pre-fold runs ahead of the request
-boundary, so the assembly path reads the folded projection and never folds it
-inline.
-
-Skeleton compile-time assertions for the meditation shapes: the consumer faces
-a tick reads, the engine's pass, judgment and tick signatures, the pre-fold seam
-and the refusals each unwired face answers by name. The reflection loop and the
-pass it reads keep their own declared surface here as well: the loop's assembly
+Skeleton compile-time assertions for the meditation shapes: the reflection loop
+and the pass it reads keep their own declared surface here: the loop's assembly
 and tick operations, the observation face it reads, the digest it renders and
 the execution watermark it advances only on a consumed turn. One file holds the
 one shape pin of the package: a renamed field or a widened signature stops it
 from compiling.
-
-The meditation strategy face: the deterministic value assessment of one card,
-the policy bound a pass is judged against and the condenser seat an LLM would
-take beside the engineering condensation. The assessment is a pure function of
-the card and the pass time, so two identical passes reach identical fates.
-
-The meditation vocabulary: the fate one card is filed under, the retention kind
-a held reference is registered as, and the condensed card a pass leaves behind
-as a fact of its own — the artifact is a new reference over the refs it keeps,
-never a rewrite of a fact it condenses. The card sequence and the artifact are
-identified by content, so one body of material and one condensation each answer
-one identity.
-
-The meditation consumer wiring: the engine that assesses a card sequence and
-condenses its over-limit run, the tick that drives it from the compress request
-facts its producers filed, and the option surface that wires the card source,
-the product sink and the pre-fold. The engine rewrites no original fact and no
-reference metadata, whatever the outcome.
 
 CONSTANTS
 
@@ -60,84 +22,14 @@ const (
 	// DefaultDigestFactLimit bounds how many hydrated facts one digest lists.
 	DefaultDigestFactLimit = 8
 )
-const (
-	// MeditationLinkWeight is the value one standing causal link adds.
-	MeditationLinkWeight = 10
-	// MeditationSkeletonWeight is the value a boundary fact (external input or
-	// agent output) adds: the task skeleton the condensation keeps.
-	MeditationSkeletonWeight = 5
-	// MeditationRecencyWeight is the value a fact inside the recent window adds.
-	MeditationRecencyWeight = 2
-)
-    MeditationLinkWeight, MeditationSkeletonWeight and MeditationRecencyWeight
-    are the value assessment weights: a standing causal link is worth more than
-    the boundary skeleton weight, which is worth more than the recency bonus.
-
-const DefaultInterval = 30 * time.Minute
-    DefaultInterval is the tick cadence of a driver whose plan names none.
-
 const LineageReflection = "meditation"
 
     LineageReflection is the trigger-source stamp a reflection input carries:
     the reflection turn's own lineage, which is self-managed traffic, so an
     agent's own reflection never makes it reflect on itself again.
 
-const MeditationArtifactType = "memory.condensed_card"
-    MeditationArtifactType is the frozen type label of the condensed card
-    artifact one meditation pass leaves behind.
-
-const MeditationHolderPrefix = "curation:"
-    MeditationHolderPrefix is the identity prefix of the holder a meditation
-    pass registers its retention hold under. A holder id is durable ledger
-    identity carried by every reference the hold protects, so the prefix is
-    fixed vocabulary of the ledger rather than a name this package chooses.
-
-const RetentionMeditation ledger.RetentionKind = "curation_reference"
-    RetentionMeditation is the kind of a retention registration protecting
-    material a condensed artifact still references: the hold a meditation pass
-    takes on each key its artifact cites, so the referenced original is never
-    tombstoned or reclaimed while the artifact can still recall it by key.
-
-    The registered kind rides the ledger as durable identity: it answers the
-    window lookup of every reference held under it, so its value is fixed
-    vocabulary of the ledger rather than a name this package chooses.
-
 VARIABLES
 
-var (
-	// ErrPrefoldUnwired reports a pre-fold asked without the projection it
-	// folds: no material is named and no compaction fact could be filed.
-	ErrPrefoldUnwired = errors.New("meditation: pre-fold needs the projection of the material it folds")
-	// ErrMeditationProjectionUnwired reports a consumer tick pre-folding without
-	// the projection source: the tick names no material it could fold.
-	ErrMeditationProjectionUnwired = errors.New("meditation: consumer pre-fold needs the projection source")
-	// ErrMeditationFoldsUnwired reports a pre-fold whose compaction fact has
-	// nowhere to be committed: the fold would be counted while no state carries
-	// it.
-	ErrMeditationFoldsUnwired = errors.New("meditation: consumer pre-fold needs the fold sink")
-)
-var (
-	// ErrMeditationUnwired reports a meditation engine constructed without the
-	// retention ledger or the lifecycle it coordinates with.
-	ErrMeditationUnwired = errors.New("memory: meditation needs a retention ledger and a lifecycle")
-	// ErrMeditationPolicy reports a meditation policy that names no sequence
-	// bound, so no pass could ever know when to trigger.
-	ErrMeditationPolicy = errors.New("memory: meditation policy names no sequence bound")
-	// ErrMeditationCardKey reports a card that carries no event key, or a
-	// sequence that repeats one: no fate could be filed under it.
-	ErrMeditationCardKey = errors.New("memory: meditation card carries no unique event key")
-	// ErrMeditationRequestsUnwired reports a consumer tick attempted without the
-	// request log it consumes: a tick that cannot read the judgments it answers
-	// would compress material no producer judged due.
-	ErrMeditationRequestsUnwired = errors.New("memory: meditation consumer needs the compress request log")
-	// ErrMeditationCardsUnwired reports a consumer tick attempted without the card
-	// sequence source: the tick names no material it could curate.
-	ErrMeditationCardsUnwired = errors.New("memory: meditation consumer needs the card sequence source")
-	// ErrMeditationProductsUnwired reports a condensed pass whose product has
-	// nowhere to be committed: the artifact would be counted as held while no
-	// state carries it.
-	ErrMeditationProductsUnwired = errors.New("memory: meditation consumer needs the product sink")
-)
 var ErrAnchorStoreUnusable = errors.New("evolution: the anchor store requires a path")
     ErrAnchorStoreUnusable reports an anchor store built without a path:
     a watermark that has nowhere to be recorded cannot carry across a restart.
@@ -146,13 +38,6 @@ var ErrAnchorUnreadable = errors.New("evolution: the anchor record cannot be rea
     ErrAnchorUnreadable reports an anchor record that exists but cannot be read
     or parsed. The gate reads it as an unestablished watermark and stays closed;
     no default and no fallback criterion is substituted for it.
-
-var ErrDeclaration = errors.New("tagent: the meditation declaration is inconsistent")
-    ErrDeclaration reports a meditation section that cannot be resolved into
-    one scheduled reflection: more than one agent enabling the loop, a negative
-    cadence, an unreadable or empty prompt, an observation face outside the
-    authorized read scope, an undeclared delivery target, or an enabled section
-    beside no shared storage tier for its anchor record.
 
 var ErrDigestFaceUnavailable = errors.New("evolution: the digest has no observed pass to render")
     ErrDigestFaceUnavailable reports a digest asked to render without the pass
@@ -164,18 +49,6 @@ var ErrDigestScanMismatch = errors.New("evolution: the observed pass opened at a
     at a watermark other than the one it was asked about. The pass a digest
     summarizes is the one its caller already read, so the rendering never
     triggers a second pass over the fact chain.
-
-var ErrDriverCadence = errors.New("evolution: the meditation driver requires a non-negative cadence")
-    ErrDriverCadence reports a plan whose interval or rhythm floor is negative:
-    no ticker can run at such a cadence.
-
-var ErrDriverUntargeted = errors.New("evolution: the meditation driver requires a declared delivery target")
-    ErrDriverUntargeted reports a plan that names no delivery target: a fired
-    reflection whose result nobody receives is refused at assembly.
-
-var ErrDriverUnwired = errors.New("evolution: the meditation driver requires a delivery port")
-    ErrDriverUnwired reports a driver assembled without the delivery port a
-    fired reflection hands its result to.
 
 var ErrObservationScopeOutOfBounds = errors.New("evolution: the observed namespaces reach outside the authorized read scope")
     ErrObservationScopeOutOfBounds reports an observation face that names a
@@ -214,75 +87,10 @@ var ErrWatermarkSourceUnwired = errors.New("evolution: the execution watermark s
 
 FUNCTIONS
 
-func CompactionChainFact(chain replay.ChainKey, payload replay.CompactionFact, at time.Time) (replay.ChainFact, error)
-    CompactionChainFact returns the state fact one compaction payload is
-    committed as: the compaction event a replay reads back, filed under the fold
-    identity the payload answers. A payload that cannot be written back as a
-    chain fact is reported by name.
-
-func CompactionFactKey(payload replay.CompactionFact) event.EventID
-    CompactionFactKey derives the identity the fold fact of one compaction
-    payload is filed under: content-addressed over the summary it reports,
-    the boundary it covers and the refs it retains in payload order, so one fold
-    files one fact and a re-file keeps that identity.
-
 func DeliverableLineage(stamp string) bool
     DeliverableLineage reports whether a trigger-source stamp names traffic
     the host may see delivered, from the vocabulary the delivery policy reads.
     The stamp stays on the fact as recording metadata.
-
-func NewAnchorStore(path string) (*AnchorStore, error)
-    NewAnchorStore returns the anchor store of the record at path, creating
-    its directory when the directory is absent. A store built without a path is
-    refused with ErrAnchorStoreUnusable.
-
-func NewDriver(plan DriverPlan, gate WatermarkGate, facts ObservedFacts, input ReflectionInput, deliver Deliver) (*Driver, error)
-    NewDriver assembles the scheduled reflection of one plan over its watermark
-    gate, its observed fact-chain face, its loop-session injection face and
-    its delivery port. A negative cadence, a plan naming no target and a
-    missing port are refused by name; a plan leaving the interval unset runs at
-    DefaultInterval.
-
-func NewMeditation(policy MeditationPolicy, retention *ledger.Retention, lifecycle *ledger.Lifecycle, condense Condenser, options ...MeditationOption) (*Meditation, error)
-    NewMeditation returns the meditation engine over the retention ledger and
-    the lifecycle it drives: the ledger holds what the artifact references
-    and the lifecycle owns the tombstone channel every eviction travels. A nil
-    condenser runs the deterministic engineering condensation. The retention
-    ledger must be the one the lifecycle was built over, so a reference the pass
-    holds is the protection the eviction consults. The options wire the consumer
-    face: the request log a tick consumes, the card sequence it curates, the
-    state its product facts are committed into and the plugin face its requests
-    are dispatched to.
-
-func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts, input ReflectionInput) (*Reflection, error)
-    NewReflection assembles the reflection loop of one agent over its watermark
-    gate, its observed fact-chain face and the loop-session injection face. A
-    declared observation face outside the authorized scope refuses the assembly
-    by name.
-
-func PlanOf(doc *document.Document, promptDir, storageRoot string) (*Plan, error)
-    PlanOf resolves the one meditation section doc enables: the entry agent is
-    resolved first and the remaining agents in declared order, so one document
-    resolves to one plan across restarts. A document enabling none reports a nil
-    plan. Every inconsistent section is refused by name at assembly rather than
-    driven into a reflection the declaration did not state.
-
-func Prefold(ctx context.Context, projection *replay.ReplayProjection) (replay.CompactionFact, error)
-    Prefold folds the projection a consumer owns ahead of assembly and answers
-    the compaction payload the fold left, so the fold fact is filed when
-    its request is consumed and the request boundary only reads the folded
-    projection. A projection already carrying a compaction payload is answered
-    with it: one body of material folds once.
-
-func ResolveObservationScope(own string, declared, read []string) (ReflectionScope, error)
-    ResolveObservationScope resolves the observation face of one agent from its
-    declared namespaces, the namespaces it is authorized to read and its own
-    namespace.
-
-    An undeclared face is the agent's own partition and never falls back to the
-    authorized read scope: what an agent may read is not what it reflects on.
-    A declared name that is neither the agent's own nor inside the read scope is
-    refused with ErrObservationScopeOutOfBounds naming every such namespace.
 
 func SelfManagedLineage(stamp string) bool
     SelfManagedLineage reports whether a trigger-source stamp names traffic
@@ -303,6 +111,11 @@ type AnchorStore struct {
     as a start with no prior execution, while a record that exists but cannot be
     read or parsed is refused by name: an unreadable watermark is never reported
     as a fresh one.
+
+func NewAnchorStore(path string) (*AnchorStore, error)
+    NewAnchorStore returns the anchor store of the record at path, creating
+    its directory when the directory is absent. A store built without a path is
+    refused with ErrAnchorStoreUnusable.
 
 func (s *AnchorStore) Advance(ctx context.Context, moment time.Time) error
     Advance moves the execution watermark to the moment a consumed reflection
@@ -344,40 +157,6 @@ type Anchors struct {
     and an entry this structure does not name is ignored when the record is read
     rather than refused.
 
-type CompressPhase = ConsumerPhase
-    CompressPhase is the consumption-phase face under its compress vocabulary: a
-    plugin pipeline answering compress requests satisfies it without an adapter.
-
-type Condenser func(ctx context.Context, run MeditationRun, now time.Time) (string, error)
-    Condenser folds one over-limit card run into its condensed summary:
-    the seat an LLM meditation would take beside the deterministic engineering
-    condensation. A condenser that fails degrades the pass to that engineering
-    fallback — the overflow run sinks into an "(earlier n items)" count line —
-    and never collapses the pass or rewrites a fact.
-
-type ConsumerPhase interface {
-	// TriggerCompress dispatches one filed compress request. A nil error carries the
-	// request forward into the pass that compresses it; a non-nil error refuses it
-	// by name, so no material is curated and the request stays pending.
-	TriggerCompress(ctx context.Context, request event.CompressRequest) error
-}
-    ConsumerPhase is the consumption-phase face of a meditation tick:
-    every compress request the tick reads is handed to this face, and the face
-    answers the compression it owes, so the request's judgment is answered on
-    the consuming side of the material flow. The tick curates the material only
-    after the face answered it, so a consumption face that refused keeps its
-    request pending instead of being counted compressed.
-
-    The redline list (3 rules): MUST take the request as the log filed it:
-    the face answers the compression, never the judgment. MUST NOT retire
-    the request: the tick retires it once the products of its compression are
-    committed. MUST NOT curate material no filed request names.
-
-type Deliver func(ctx context.Context, source event.Address, targets []event.AgentID)
-    Deliver hands the output of one fired reflection to the declared targets:
-    the source is the observing agent's own loop address, and the targets are
-    the declared recipients in declaration order.
-
 type DeliveryPolicy struct{}
     DeliveryPolicy is the meditation domain's delivery policy: one fired
     reflection's own input in, whether its output may leave through the delivery
@@ -417,41 +196,6 @@ type DigestSummary struct {
     DigestSummary is the rendered self-state summary together with the count of
     facts the render bound left out.
 
-type Driver struct {
-	// Has unexported fields.
-}
-    Driver drives one declared reflection loop: each tick reads the observed
-    face through the reflection chain, injects the reflection input into the
-    observing agent's own loop session, and hands a fired reflection's output
-    to the delivery port. The zero value is not usable; build a driver with
-    NewDriver.
-
-func (d *Driver) Scope() ReflectionScope
-    Scope reports the resolved observation face of this driver's reflection.
-
-func (d *Driver) Start(ctx context.Context)
-    Start begins the tick loop: the first tick runs one interval after the
-    start, so a restart never fires a reflection the previous process just
-    consumed.
-
-func (d *Driver) Stop()
-    Stop ends the tick loop and waits for the tick in flight to return. A driver
-    never started returns immediately.
-
-func (d *Driver) Tick(ctx context.Context) TickOutcome
-    Tick runs one scheduled reflection and, when it fired, hands what the
-    reflection turn produced to the delivery port. A tick that decided not to
-    fire delivers nothing, and a fired input the delivery policy does not read
-    as host-visible is withheld.
-
-type DriverPlan struct {
-	ReflectionConfig
-	// Targets is the declared delivery white list of one fired reflection.
-	Targets []event.AgentID
-}
-    DriverPlan is the one scheduled reflection a host declares: the reflection
-    loop, face, cadence and prompt, beside the declared delivery targets.
-
 type FactAttribution struct {
 	// Lineage is the trigger-source stamp the fact carries; empty means the fact
 	// carries none.
@@ -481,282 +225,6 @@ type FactIdentity struct {
 }
     FactIdentity is which fact a pass read and where it was filed: the canonical
     identity the fact committed under and the namespace name it was filed as.
-
-type Meditation struct {
-	// Has unexported fields.
-}
-    Meditation is the memory meditation engine: it assesses card value
-    deterministically, triggers on the sequence bound, condenses the over-limit
-    run into a new artifact that relates to the existing facts through its key
-    references, holds those references against eviction, and evicts the rest
-    through the one tombstone channel the lifecycle owns. The engine rewrites no
-    original fact and no reference metadata, whatever the outcome.
-
-    A consumer tick drives the same pass from the compress request facts its
-    producers filed: the request is the judgment that material is over its
-    bound and the tick is the compression that answers it. A wired pre-fold
-    lets the tick fold the compressed projection and commit its compaction fact,
-    so the assembly path reads a folded projection.
-
-func (c *Meditation) Curate(ctx context.Context, now time.Time, cards []MeditationCard) (MeditationReport, error)
-    Curate runs one meditation pass over the card sequence at the given time.
-
-    A sequence within the bound is never curated: every card retains and no
-    artifact is produced. A sequence over the bound triggers the pass: the
-    over-limit run is the oldest cards beyond the bound, the condensation folds
-    that run into the artifact that relates to the existing facts through its
-    key references, each referenced key is held against eviction (the referenced
-    original is never deleted), the unprotected cards below the value floor are
-    evicted through the tombstone channel alone, and everything else retains.
-    A failing condensation sinks into the engineering fallback — the overflow
-    run collapses into an "(earlier n items)" count line — and a failing channel
-    step degrades that card to retention with its failure recorded in the sink
-    account, so the pass degrades instead of collapsing and no outcome rewrites
-    an original fact.
-
-func (c *Meditation) Judge(ctx context.Context, now time.Time, cards []MeditationCard) (event.CompressRequest, bool, error)
-    Judge files the request fact the card sequence's bound judgment is:
-    a sequence at or within the bound files nothing and answers false,
-    and an over-limit one files the request naming the sequence, the meditation
-    producer and the bound reason, and answers that request with true.
-    The judgment is filed under the sequence's content-addressed identity,
-    so judging one body of material again files no second request and keeps the
-    first filing moment. A sequence no fate could be filed over is refused by
-    name and files nothing.
-
-func (c *Meditation) Tick(ctx context.Context, now time.Time) (MeditationTick, error)
-    Tick runs one meditation tick at now: it reads the card sequence it curates
-    and the compress requests pending in the request log, and for each pending
-    request naming that sequence it dispatches the compress phase, runs one
-    pass, commits the condensed artifact the pass minted into the state,
-    pre-folds the compressed projection once through the wired pre-fold, commits
-    the compaction fact and retires the request. A request naming other material
-    stays pending, and a phase, pass, commit, pre-fold or retirement that failed
-    keeps its request pending and lands in the tick account, so a request is
-    never counted consumed before the products of its compression are held.
-
-type MeditationArtifact struct {
-	// Key is the content-addressed identity of the artifact: the same
-	// condensation always mints the same identity.
-	Key event.EventID
-	// Type is the frozen type label of the artifact.
-	Type string
-	// Summary is the condensed text of the overflow run, or the count line
-	// the degraded pass sank it into.
-	Summary string
-	// Refs are the key references the condensed result keeps, in value order.
-	Refs []event.EventID
-	// Sunk is how many card lines the degraded pass sank into the count line.
-	Sunk int
-	// CreatedAt is the time the pass created the artifact.
-	CreatedAt time.Time
-}
-    MeditationArtifact is the condensed card one pass leaves behind:
-    the new reference the meditation produces, never a rewrite of any fact it
-    condenses. Its refs are the [evt_key] tickets of the key cards it keeps,
-    so the condensed result stays traceable and recall still refills by key.
-    Sunk counts the card lines the pass collapsed into its count line when it
-    degraded to the engineering fallback, and is zero while a condensation
-    holds.
-
-func (a MeditationArtifact) FactKey() string
-    FactKey returns the condensed artifact's identity as a fact key:
-    the content-addressed key of the card references it carries, so the same
-    condensation answers the same key every time it is asked.
-
-func (a MeditationArtifact) FactType() string
-    FactType returns the frozen type a condensed artifact is read as.
-
-type MeditationCard struct {
-	// Key is the [evt_key] ticket of the fact the card line carries.
-	Key event.EventID
-	// Type is the frozen event type of the fact.
-	Type string
-	// Summary is the small rendering text of the card line.
-	Summary string
-	// RecordedAt is the time the fact was recorded.
-	RecordedAt time.Time
-	// Links counts the standing causal links (references and parent keys)
-	// pointing at the fact.
-	Links int
-}
-    MeditationCard is one card line of the sequence a meditation pass runs over:
-    the [evt_key] ticket of the fact behind it, its frozen type, the small
-    rendering text of the line, the time the fact was recorded, and the count of
-    standing causal links — references and parent keys — that point at the fact.
-
-type MeditationCards func(ctx context.Context) ([]MeditationCard, error)
-    MeditationCards reads the card sequence one meditation tick curates:
-    the cards of the partition the tick owns, oldest first as the caller renders
-    them. A read that fails is reported by name and a tick never curates a
-    partial sequence.
-
-type MeditationFate string
-    MeditationFate names the one channel a card's meditation fate is filed
-    under: exactly one of retain, evict or protect for every card of a pass.
-    The fates are mutually exclusive and exhaustive — a card belongs to one
-    channel and never to a fourth — so the eviction a pass declares is the whole
-    eviction it performs, and it is performed on the tombstone channel alone.
-
-const (
-	// MeditationRetain is the fate of a card the pass keeps: the fact stays as
-	// it is and takes no part in any eviction.
-	MeditationRetain MeditationFate = "retain"
-	// MeditationEvict is the fate of a card the pass evicts: the fact is
-	// tombstoned through the one eviction channel and stays readable until
-	// compaction reclaims it. Eviction never rewrites or destroys bytes
-	// directly.
-	MeditationEvict MeditationFate = "evict"
-	// MeditationProtect is the fate of a card whose original is protected from
-	// eviction: the condensed artifact references it or another holder already
-	// holds it, so the referenced original is never deleted while that
-	// reference stands.
-	MeditationProtect MeditationFate = "protect"
-)
-type MeditationFolds func(ctx context.Context, fact replay.CompactionFact) error
-    MeditationFolds commits the compaction fact one pre-fold left into the
-    state: the fold fact its request is answered with. A commit that fails
-    is reported by name, so a fold is never counted as held before the state
-    carries it.
-
-type MeditationOption func(*Meditation)
-    MeditationOption names one setting of the meditation engine at construction
-    time.
-
-func WithCompressPhase(phase CompressPhase) MeditationOption
-    WithCompressPhase wires the consumption-phase face the consumer tick
-    dispatches every compress request it reads to, under the compress
-    vocabulary.
-
-func WithCompressRequests(requests *memory.CompressRequests) MeditationOption
-    WithCompressRequests wires the compress request log the consumer tick reads:
-    the requests its producers filed, and the retirement a tick performs once
-    the products of one compression are committed.
-
-func WithConsumerPhase(phase ConsumerPhase) MeditationOption
-    WithConsumerPhase wires the consumption-phase face the consumer tick
-    dispatches every compress request it reads to. A tick wired without one
-    curates the material its requests name and retires them as it stands:
-    no consumption face stands between the judgment and the pass.
-
-func WithMeditationCards(cards MeditationCards) MeditationOption
-    WithMeditationCards wires the card sequence source the consumer tick
-    curates. A failed read is reported by name and never read as an empty
-    sequence.
-
-func WithMeditationPreFold(projection MeditationProjection, folds MeditationFolds) MeditationOption
-    WithMeditationPreFold wires the consumer-side fold: the projection a tick
-    folds when it consumes a compress request and the state its compaction fact
-    is committed into. The request stays pending until the fold fact is held,
-    so the assembly path never folds inline.
-
-func WithMeditationProducts(products MeditationSink) MeditationOption
-    WithMeditationProducts wires the state face the consumer tick commits its
-    product facts into: the condensed artifact of every pass that condensed a
-    run.
-
-type MeditationPolicy struct {
-	// MaxCards is the card sequence bound: a sequence of at most this many
-	// cards is never curated, and a longer one triggers the pass. A bound
-	// below one is refused by name at construction.
-	MaxCards int
-	// Keep caps how many overflow cards survive as the key references of the
-	// condensed artifact, highest value first. A non-positive cap keeps every
-	// card that clears the value floor.
-	Keep int
-	// MinScore is the value floor: an overflow card whose assessment lands
-	// below it and that no holder protects is evicted through the tombstone
-	// channel. A floor-clearing overflow card the Keep cap cuts stays retained.
-	MinScore int
-}
-    MeditationPolicy shapes one meditation pass: the sequence bound that
-    triggers it, how many key cards survive as artifact references, and the
-    value floor below which an unprotected overflow card is evicted.
-
-type MeditationProjection func(ctx context.Context) (*replay.ReplayProjection, error)
-    MeditationProjection reads the replay projection one consumer tick
-    pre-folds: the material its compress requests name. A read that fails is
-    reported by name and a tick never folds a partial projection.
-
-type MeditationReport struct {
-	// Triggered reports whether the card sequence ran over the bound and the
-	// pass curated it.
-	Triggered bool
-	// Fates is the one channel each card's fate was filed under. Every card
-	// of the sequence carries exactly one fate.
-	Fates map[event.EventID]MeditationFate
-	// Artifact is the condensed card the pass left behind, or nil beside an
-	// untriggered sequence.
-	Artifact *MeditationArtifact
-	// Evicted lists the keys the pass evicted, in overflow order: every one
-	// of them was tombstoned through the one eviction channel.
-	Evicted []event.EventID
-	// Failures is the engineering sink account: the condensation and channel
-	// failures the pass degraded under, recorded and never swallowed silently.
-	Failures []error
-}
-    MeditationReport is what one pass did: whether the sequence bound triggered
-    it, the one fate each card was filed under, the condensed artifact it
-    left behind, the keys it evicted through the tombstone channel, and the
-    engineering sink account holding every failure the pass degraded under.
-
-type MeditationRun struct {
-	// Overflow is the over-limit card run, oldest first.
-	Overflow []MeditationCard
-	// Keep is the key card set the artifact references, highest value first.
-	Keep []MeditationCard
-}
-    MeditationRun is the over-limit card run one condensation folds: the cards
-    that overflowed the sequence bound, oldest first, and the key cards the pass
-    keeps as artifact references beside them.
-
-type MeditationSink func(ctx context.Context, artifact MeditationArtifact) error
-    MeditationSink commits the product fact one meditation pass minted into the
-    state: the condensed artifact, filed under its content-addressed identity.
-    A commit that fails is reported by name, so a product is never counted as
-    held before the state carries it.
-
-type MeditationTick struct {
-	// Read is the requests the tick took in: the pending requests naming the card
-	// sequence it curates, in filing order.
-	Read []event.CompressRequest
-	// Reports is one meditation report per request whose pass completed, in the
-	// order the requests were read.
-	Reports []MeditationReport
-	// Products is the artifact facts the tick committed into the state, one per
-	// condensed pass.
-	Products []MeditationArtifact
-	// Folds is the compaction facts the tick's pre-folds committed into the
-	// state, one per folded projection of the tick.
-	Folds []replay.CompactionFact
-	// Failures is the sink account of the tick: the pass, commit, pre-fold and
-	// retirement failures it degraded under, recorded and never swallowed
-	// silently.
-	Failures []error
-}
-    MeditationTick is what one meditation tick did: the request facts it took
-    in, the passes they drove, the product facts it committed into the state,
-    the fold facts its pre-folds left and the failures it degraded under.
-    A request stays pending until the products and the fold fact of its
-    compression are committed, so the account names every request whose
-    compression is still owed.
-
-type MeditationValue struct {
-	// Key is the card the assessment describes.
-	Key event.EventID
-	// Score is the assessed value of the card.
-	Score int
-}
-    MeditationValue is the deterministic value assessment of one card: the score
-    the pass decides keep and evict against, and nothing else. The assessment
-    is a pure function of the card and the pass time, so two identical passes
-    always reach identical verdicts and no LLM judgment enters the decision.
-
-func AssessValue(card MeditationCard, now time.Time) MeditationValue
-    AssessValue returns the deterministic value assessment of one card: a pure
-    function of its causal link count, its frozen type and its age against the
-    pass time. The same inputs always return the same score, so the pass that
-    runs twice reaches the same fates.
 
 type NoveltyPolicy struct{}
     NoveltyPolicy is the meditation domain's freshness policy: one observed fact
@@ -837,45 +305,6 @@ type PartitionActivity struct {
     of the reference page belongs to it and how the hydrated sample splits by
     lineage.
 
-type Plan struct {
-	// Has unexported fields.
-}
-    Plan is the one scheduled reflection a document declares, resolved at
-    assembly: the observing agent, the cadence, the prompt the input carries,
-    the resolved observation face, the declared delivery targets and the anchor
-    record its watermark persists in. A document enabling no meditation resolves
-    to a nil plan, which starts no driver.
-
-func (p *Plan) Agent() string
-    Agent reports the observing agent's identity.
-
-func (p *Plan) AnchorsPath() string
-    AnchorsPath reports the anchor record the reflection watermark persists in:
-    the store beside the shared storage tier the document names.
-
-func (p *Plan) DeliverTo() []string
-    DeliverTo reports the declared delivery white list the fired reflection
-    flows back through.
-
-func (p *Plan) Interval() time.Duration
-    Interval reports the tick cadence the reflection loop runs at.
-
-func (p *Plan) MinGap() time.Duration
-    MinGap reports the rhythm floor between two fired reflections; zero keeps
-    the cadence as the only bound.
-
-func (p *Plan) ObservedNamespaces() []string
-    ObservedNamespaces reports the resolved observation face: the declared
-    namespaces inside the authorized read scope, or the agent's own namespace
-    beside no declaration.
-
-func (p *Plan) Prompt() string
-    Prompt reports the static prompt every reflection input carries.
-
-func (p *Plan) ReadNamespaces() []string
-    ReadNamespaces reports the namespaces the observing agent may read across,
-    its own first and every granted cross-namespace read after it.
-
 type Reflection struct {
 	// Has unexported fields.
 }
@@ -892,6 +321,12 @@ type Reflection struct {
     stays inside the next window. A read the pass cannot complete keeps the gate
     closed by name, and no fallback criterion is substituted for an unreachable
     chain.
+
+func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts, input ReflectionInput) (*Reflection, error)
+    NewReflection assembles the reflection loop of one agent over its watermark
+    gate, its observed fact-chain face and the loop-session injection face. A
+    declared observation face outside the authorized scope refuses the assembly
+    by name.
 
 func (r *Reflection) DeferredCount() int
     DeferredCount reports how many reflections yielded since the last consumed
@@ -1070,6 +505,16 @@ type ReflectionScope struct {
     the application authorized for reading plus the agent's own partition,
     an undeclared face is the agent's own partition, and a declared face that
     reaches past that boundary is refused at assembly.
+
+func ResolveObservationScope(own string, declared, read []string) (ReflectionScope, error)
+    ResolveObservationScope resolves the observation face of one agent from its
+    declared namespaces, the namespaces it is authorized to read and its own
+    namespace.
+
+    An undeclared face is the agent's own partition and never falls back to the
+    authorized read scope: what an agent may read is not what it reflects on.
+    A declared name that is neither the agent's own nor inside the read scope is
+    refused with ErrObservationScopeOutOfBounds naming every such namespace.
 
 type ScanCounts struct {
 	// ReferenceTotal is the size of the reference page the pass read.

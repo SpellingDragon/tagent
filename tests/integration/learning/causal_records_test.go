@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +30,6 @@ import (
 // - a record round-trips through its versioned line without losing fields
 // - the minimal real production fields are kept: the native response, usage, error text, input events, model view and timestamps
 // - two concurrent drives keep their attempts independent under the race
-// - the v2 JSONL import is read-only and marks unknown lineage and unknown fields explicitly instead of guessing
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 func TestCausalTrainingRecords(t *testing.T) {
 	t.Run("the production points write episode, decision and attempt records over a real loop", func(t *testing.T) {
@@ -346,77 +344,6 @@ func TestCausalTrainingRecords(t *testing.T) {
 				t.Fatalf("attempt id %q written twice, want every attempt kept independent", attempt.ID)
 			}
 			seen[attempt.ID] = true
-		}
-	})
-
-	t.Run("the legacy import reads old JSONL read-only and marks unknown lineage explicitly", func(t *testing.T) {
-		dir := t.TempDir()
-		path := filepath.Join(dir, "legacy.jsonl")
-		current, err := rl.MarshalLine(rl.NewEpisodeLine(rl.EpisodeRecord{ID: "ep-current"}))
-		if err != nil {
-			t.Fatalf("marshal the current schema line: %v", err)
-		}
-		lines := []string{
-			`{"timestamp":1700000000,"session_id":"s-1","user_id":"u-1","batch_index":0,"llm_call":{"request":{"messages":[]},"response":{"choices":[]}},"metadata":{"model_endpoint":"http://x"}}`,
-			`{"schema_version":2,"capture_scope":"sdk_request","run_id":"r-1","call_id":"c-1","response_id":"resp-1","request_digest":"d1","binding_status":"bound","missing_reasons":[],"owner":{"agent_name":"a"},"llm_call":{"request":{},"response":{}},"tool_calls":[],"tool_results":[],"metadata":{}}`,
-			`{"schema_version":2,"call_id":"c-2","carrier_pigeon":"coo"}`,
-			`{"llm_call":{"request":{"messages":[]}}}`,
-			`{"schema_version":3,"call_id":"c-3"}`,
-			`{"schema_version":"2.5","call_id":"c-4"}`,
-			`{not json`,
-			string(current),
-		}
-		body := strings.Join(lines, "\n") + "\n"
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatalf("write the legacy source: %v", err)
-		}
-		before := fileDigest(t, path)
-
-		result, err := rl.ImportFile(path)
-		if err != nil {
-			t.Fatalf("import the legacy source: %v", err)
-		}
-		if after := fileDigest(t, path); after != before {
-			t.Fatalf("source digest = %s after import, want %s: the import must never write back", after, before)
-		}
-		if len(result.Records) != 1 || result.Records[0].Episode == nil || result.Records[0].Episode.ID != "ep-current" {
-			t.Fatalf("imported records = %+v, want exactly the current schema line", result.Records)
-		}
-		if len(result.Legacy) != 4 {
-			t.Fatalf("legacy records = %d, want the four legacy rows kept read-only", len(result.Legacy))
-		}
-		wantSchemas := []rl.SchemaVersion{rl.SchemaLegacyV1, rl.SchemaLegacyV2, rl.SchemaLegacyV2, rl.SchemaLegacyV1}
-		wantLines := []int{1, 2, 3, 4}
-		for i, legacy := range result.Legacy {
-			if legacy.Schema != wantSchemas[i] || legacy.Line != wantLines[i] {
-				t.Fatalf("legacy %d = (%q at line %d), want (%q at line %d)", i, legacy.Schema, legacy.Line, wantSchemas[i], wantLines[i])
-			}
-			if legacy.Lineage != rl.LineageUnknown {
-				t.Fatalf("legacy %d lineage = %v, want an explicit unknown lineage", i, legacy.Lineage)
-			}
-			if len(legacy.Fields) == 0 || legacy.Raw == "" {
-				t.Fatalf("legacy %d = %+v, want the raw fields kept as they stood", i, legacy)
-			}
-		}
-		extra := result.Legacy[2]
-		if len(extra.UnknownFields) != 1 || extra.UnknownFields[0] != "carrier_pigeon" {
-			t.Fatalf("legacy unknown fields = %v, want the unknown field named explicitly", extra.UnknownFields)
-		}
-		if _, kept := extra.Fields["carrier_pigeon"]; !kept {
-			t.Fatalf("legacy fields = %v, want the unknown field kept in the row", extra.Fields)
-		}
-		if len(result.Unknown) != 3 {
-			t.Fatalf("gaps = %+v, want three explicit gaps", result.Unknown)
-		}
-		wantReasons := []string{rl.ImportReasonUnknownSchemaVersion, rl.ImportReasonUnknownSchemaVersion, rl.ImportReasonParseError}
-		wantGapLines := []int{5, 6, 7}
-		for i, gap := range result.Unknown {
-			if gap.Reason != wantReasons[i] || gap.Line != wantGapLines[i] {
-				t.Fatalf("gap %d = (%q at line %d), want (%q at line %d)", i, gap.Reason, gap.Line, wantReasons[i], wantGapLines[i])
-			}
-			if gap.Raw == "" {
-				t.Fatalf("gap %d = %+v, want the raw bytes of the unreadable line kept", i, gap)
-			}
 		}
 	})
 }

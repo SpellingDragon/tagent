@@ -1,18 +1,18 @@
+main.go 只做 wiring：读配置 → 装配 → 登录 → 注册挂点 → 启动 → 注入面。
+微信协议语义（收发/文件/路由/去重/send/审批/通知）全部在 wechat.go； 声明、模型与工具面的构造走
+api/document、api/config 与 tagent.Assemble 现有入口。
 
-The delivery face of the scheduled reflection: the declaration resolves in the
-core (meditation.PlanOf), and what this host adds is its own loop session — the
-observing agent's reserved meditation session, which never occupies the business
-conversation — beside the one outbound path a fired reflection's result leaves
-through. A target no chat ever reached receives nothing and the delivery is
-named in the log instead of being retargeted to another session.
-
-本文件承载换装后的转世通报：检测、组装、注入与记消费。
-
-send 工具给任何谱系的回合一个显式送达用户的面：正文经宿主唯一的发送通路送进调用方的会话，
-通道由装配期闭包固定，模型只给正文；送达目标取自本次调用的显式会址，不猜、不回退他会话。 投递本体由
+wechat.go 是微信宿主唯一的适配文件：SDK 调用、收发、文件、路由、去重、send、审批与通知 都是微信协议语义的一部分。main.go 只做
+wiring；核心的声明、装配、模型与工具面一律走 api/document、api/config 与 tagent.Assemble 现有入口。
 
 VARIABLES
 
+var (
+	// ErrUnknownAgentReference reports an agent reference that names no declared agent.
+	ErrUnknownAgentReference = errors.New("wechat-bot: the agent reference names no declared agent")
+	// ErrUnknownHostTool reports a declared tool this host does not contribute.
+	ErrUnknownHostTool = errors.New("wechat-bot: the declared tool is not contributed by this host")
+)
 var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one pending approval")
     ErrApprovalAmbiguous reports a ruling whose digest prefix names more than
     one pending request: an ambiguous ruling is refused instead of applied to a
@@ -21,10 +21,6 @@ var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one
 var ErrApprovalNotApprover = errors.New("wechat-bot: the sender is not in the approval whitelist")
     ErrApprovalNotApprover reports a message-channel ruling from a user outside
     the approver whitelist: an empty whitelist refuses every message ruling.
-
-var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was already admitted")
-    ErrDuplicateInbound reports an inbound message whose identity was already
-    admitted: one channel delivery drives one invocation.
 
 var ErrFaceEmptyInjection = errors.New("wechat-bot: the injection carries no user message")
     ErrFaceEmptyInjection reports an injection request whose messages carry no
@@ -41,22 +37,10 @@ var ErrFaceUnauthenticated = errors.New("wechat-bot: the injection request is no
     authenticate: no credential is configured for the face and the peer is not
     the loopback address, or a configured credential was missing or unmatched.
 
-var ErrMeditationDeclaration = meditation.ErrDeclaration
-    ErrMeditationDeclaration reports a meditation section this host cannot
-    resolve into one scheduled reflection. The resolution rules — one loop
-    per host, cadence bounds, the observation face inside the read scope,
-    the declared delivery targets and the anchor record path — are the core
-    declaration ones; this host names the refusal in its own vocabulary.
-
 var ErrNoChatAddress = errors.New("wechat-bot: the inbound message names no chat identity")
     ErrNoChatAddress reports an inbound message that names no chat identity.
     The refusal is the whole answer: a message without an address is never
     routed to a session that belongs to somebody else.
-
-var ErrNoEntryAgent = document.ErrDeclarationEntry
-    ErrNoEntryAgent reports a host document that names no entry agent or names
-    an agent it does not declare. The derivation rules are the core declaration
-    ones; this host names the refusal in its own vocabulary.
 
 var ErrSessionPrefixMissing = errors.New("wechat-bot: the session router carries no session prefix")
     ErrSessionPrefixMissing reports a router constructed without the explicit
@@ -67,39 +51,14 @@ var ErrTargetRebind = errors.New("wechat-bot: the address is already bound to an
     already delivered to another chat. The bound target is the delivery identity
     of that session and is never rewritten by a later claim.
 
-var ErrUnknownAgentReference = errors.New("wechat-bot: the agent reference names no declared agent")
-    ErrUnknownAgentReference reports an agent reference whose target this
-    document does not declare: the declaration is the authorization, so a
-    reference to an undeclared agent stops the startup instead of reaching the
-    assembly.
-
-var ErrUnknownHostTool = errors.New("wechat-bot: the declared tool is not contributed by this host")
-    ErrUnknownHostTool reports a declared host tool this host contributes no
-    instance for: the schema names the ids it reads, and a document that drifts
-    from them stops the startup instead of exposing a name nothing answers.
-
-var ErrUnknownProvider = errors.New("wechat-bot: the host document declares no such provider")
-    ErrUnknownProvider reports an agent whose provider name resolves to no
-    provider entry of the document.
-
 FUNCTIONS
 
 func ComposeMediaInject(outcome IntakeOutcome, userText, workspaceDir, chatID string, now time.Time) string
     ComposeMediaInject 拼装媒体消息的注入文本：附件路径列表 + 语音转写 + 用户附言。 转写超过阈值时同样转存文件（走
-    SaveLongText）。 无可注入内容（全部被拒且无转写无附言）时返回空串。
+    SaveLongText）。无可注入内容时返回空串。
 
 func DedupKey(msg *wechat.Message) string
-    DedupKey builds the layered dedup key for an inbound message (see SeenStore
-    doc for the layering rationale).
-
-func DeliverFiles(sender FileSender, ctx context.Context, chatID, content, workspaceDir string) error
-    DeliverFiles 将文本中解析出的本地文件按类型发送给用户。
-
-    文本发送（含 >2000 字长文本分片）由消费者负责，本函数仅负责文件投递， 以保证既有 SendLongText
-    逻辑不被破坏（SendLongText 为包级函数，无法纳入 FileSender 接口）。 任一文件发送失败仅记录日志并继续，不阻断其余文件。
-
-func ExtractFilePaths(text, workspaceDir string) []string
-    ExtractFilePaths 从 agent 回复文本中解析本地文件路径：六条识别规则（本地路径形态、
+    DedupKey builds the layered dedup key for an inbound message.
 
 TYPES
 
@@ -110,8 +69,7 @@ type FileSender interface {
 	SendVideoFromPath(ctx context.Context, toUserID, videoPath string) error
 	SendFileFromPath(ctx context.Context, toUserID, filePath string) error
 }
-    FileSender 是 wechat-bot 投递层依赖的窄接口。 *wechat.Bot 天然满足该接口（方法签名一致），测试时可用 mock
-    替代， 从而脱离真实微信登录 / CDN / LLM 进行单元测试。
+    FileSender 是投递层依赖的窄接口；*wechat.Bot 天然满足，测试以替身顶上。
 
 type InboundKind int
     InboundKind 是入站消息的处理分类。
@@ -127,7 +85,7 @@ const (
 	InboundMedia
 )
 func ClassifyInbound(msg *wechat.Message, workspaceConfigured bool) InboundKind
-    ClassifyInbound 对入站消息分类。纯函数，便于单测。 workspaceConfigured 为 false 时长文本降级为
+    ClassifyInbound 对入站消息分类。纯函数。workspaceConfigured 为 false 时长文本降级为
     ShortText（保持现状行为）。
 
 type IntakeOutcome struct {
@@ -138,9 +96,9 @@ type IntakeOutcome struct {
     IntakeOutcome 是一条媒体消息的接收结果。
 
 func IntakeMedia(ctx context.Context, dl MediaDownloader, cdnBaseURL, workspaceDir, chatID string, msg *wechat.Message, now time.Time) IntakeOutcome
-    IntakeMedia 处理一条含媒体 item 的消息：逐 item 预判大小（体验优化，超限免下载） → O_EXCL 创建目标文件 → SDK
-    流式下载直落盘（MaxSize 传输中强制）。 单 item 失败/被拒不阻断其余 item；原因归入 Rejects（面向用户，不注入 agent）；
-    任何失败路径删除不完整残留文件。
+    IntakeMedia 处理一条含媒体 item 的消息：逐 item 预判大小（超限免下载）→ O_EXCL 创建目标文件 → SDK
+    流式下载直落盘（MaxSize 传输中强制）。单 item 失败/被拒不阻断其余 item； 原因归入 Rejects（面向用户，不注入
+    agent）；任何失败路径删除不完整残留文件。
 
 type MediaDownloader interface {
 	DownloadImageFromItemTo(ctx context.Context, cdnBaseURL string, img *wechat.ImageItem, w io.Writer, opts wechat.DownloadOptions) (int64, error)
@@ -148,8 +106,7 @@ type MediaDownloader interface {
 	DownloadFileFromItemTo(ctx context.Context, file *wechat.FileItem, cdnBaseURL string, w io.Writer, opts wechat.DownloadOptions) (int64, error)
 	DownloadVideoFromItemTo(ctx context.Context, video *wechat.VideoItem, cdnBaseURL string, w io.Writer, opts wechat.DownloadOptions) (int64, error)
 }
-    MediaDownloader 是入站接收层依赖的窄接口（流式：SDK 边下边解密写入 Writer， MaxSize 由 SDK
-    在传输中强制）。*wechat.Bot 天然满足该接口，测试时可用 mock 替代（与 FileSender 同一模式）。
+    MediaDownloader 是入站接收层的窄接口：SDK 边下边解密写入 Writer，MaxSize 由 SDK 在传输中强制。
 
 type SavedFile struct {
 	Path     string
@@ -159,16 +116,18 @@ type SavedFile struct {
     SavedFile 描述一个已落盘的入站文件。
 
 func SaveLongText(workspaceDir, chatID, text, nameHint string, now time.Time) (SavedFile, string, error)
-    SaveLongText 将超长文本落盘为 .txt，返回保存结果与注入文本 。
+    SaveLongText 将超长文本落盘为 .txt，返回保存结果与注入文本。
 
 type SeenStore struct {
 	// Has unexported fields.
 }
     SeenStore provides message-level idempotency across restarts.
 
-    - Dedup key layering: ClientID when non-empty, otherwise uid plus a text
-    hash prefix. - seen.json sits next to the bot config, loads at start,
-    prunes by TTL and capacity, writes atomically; a corrupted file
+      - Dedup key layering: ClientID when non-empty, otherwise uid plus a text
+        hash prefix.
+      - seen.json sits next to the bot config, loads at start, prunes by TTL and
+        capacity, writes atomically; a corrupted file degrades to an empty set
+        so dedup never blocks the pipeline.
 
 func NewSeenStore(dir string, logger *slog.Logger) *SeenStore
     NewSeenStore loads (or initializes) the seen set from dir/seen.json.
@@ -185,9 +144,7 @@ type SendFunc func(ctx context.Context, addr event.Address, content string) (tar
 type SendTool struct {
 	// Has unexported fields.
 }
-    SendTool 是模型可见的主动送达面。
-
-      - send 是装配完成后绑定的发送缝；未绑定时的调用得到具名拒绝。
+    SendTool 是模型可见的主动送达面：send 是装配完成后绑定的发送缝； 未绑定时的调用得到具名拒绝。
 
 func NewSendTool(send SendFunc) *SendTool
     NewSendTool 构造送达面：send 传 nil 表示延后绑定，装配尾段经 SetSend 补上。
@@ -198,7 +155,7 @@ func (t *SendTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
       - 一切拒绝与发送失败都作为结果文本返回给模型（回合继续），目标规则随文案点名；
       - err 只留给解不出参数形态的协议错，此时回合交由框架处置。
 
-func (t *SendTool) Declaration() *tool.Declaration
+func (t *SendTool) Declaration() *trpctool.Declaration
     Declaration implements tool.CallableTool.
 
 func (t *SendTool) SetSend(send SendFunc)
@@ -235,17 +192,14 @@ func (r *SessionRouter) Bind(addr event.Address, chatID string) error
 
 func (r *SessionRouter) BoundAddresses(agentID event.AgentID) []event.Address
     BoundAddresses reports the addresses of the named agent that a drive bound
-    to a chat identity, in session order. The reflection delivery resolves
-    its declared target through this face: an agent no drive reached holds no
-    address, so its result is withheld rather than sent to a session of another
-    agent.
+    to a chat identity, in session order.
 
 func (r *SessionRouter) NextInvocation(addr event.Address) event.InvocationID
     NextInvocation mints the responsibility range identity of one drive of the
     address. The identity is unique per drive and derived from the address,
     so a range never collides with the range of another session.
 
-func (r *SessionRouter) TakeUndelivered(addr event.Address, history []model.Message) []model.Message
+func (r *SessionRouter) TakeUndelivered(addr event.Address, history []tagentmodel.Message) []tagentmodel.Message
     TakeUndelivered returns the transcript messages the address accumulated
     since the previous take and records them as consumed. Delivery reads one
     session's own transcript only, so a reply never carries another session's
@@ -257,15 +211,13 @@ func (r *SessionRouter) Target(addr event.Address) (string, bool)
     of resolving a most-recent chat of another session.
 
 type WechatAppConfig struct {
-	ConfigDir       string `yaml:"config_dir" json:"config_dir"`
-	TokenFile       string `yaml:"token_file" json:"token_file"`
-	ContextTokenDir string `yaml:"context_token_dir" json:"context_token_dir"`
-	WorkspaceDir    string `yaml:"workspace_dir" json:"workspace_dir"`
-	// Approvers：可经消息通道批准 critical 操作的用户 ID 白名单。
-	// 空 = 消息通道批准关闭（安全默认），批准仅经 CLI（wechat-bot approve <digest>）。
-	Approvers []string `yaml:"approvers" json:"approvers,omitempty"`
+	ConfigDir       string   `yaml:"config_dir" json:"config_dir"`
+	TokenFile       string   `yaml:"token_file" json:"token_file"`
+	ContextTokenDir string   `yaml:"context_token_dir" json:"context_token_dir"`
+	WorkspaceDir    string   `yaml:"workspace_dir" json:"workspace_dir"`
+	Approvers       []string `yaml:"approvers" json:"approvers,omitempty"`
 }
-    WechatAppConfig holds WeChat-specific configuration.
+    WechatAppConfig is the WeChat-specific application section of the document.
 
 func (c *WechatAppConfig) EnsureDirs() error
     EnsureDirs creates the directories the channel and the workspace need.

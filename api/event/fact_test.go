@@ -25,8 +25,6 @@ func TestFactCategoryContract(t *testing.T) {
 		event.Event{Key: "evt-1", Type: event.TypeAgentOutput},
 		notice,
 		rl.AttemptRecord{ID: "attempt-1"},
-		rl.FeedbackRecord{FeedbackID: "feedback-1"},
-		rl.RewardRecord{InstanceID: "reward-1", Revision: 1},
 		config.Declaration{Entry: "main", Baseline: "v1"},
 		ledger.OriginalRef{Key: "blob-1", Owner: event.Address{AgentID: "agent-1"}, Format: "text/plain"},
 	}
@@ -92,20 +90,6 @@ func TestFactCategorySeals(t *testing.T) {
 			restated:     rl.AttemptRecord{ID: "attempt-1", DecisionID: "decision-2"},
 			reidentified: rl.AttemptRecord{ID: "attempt-2", DecisionID: "decision-1"},
 			kind:         "rl.attempt",
-		},
-		{
-			family:       "feedback",
-			fact:         rl.FeedbackRecord{FeedbackID: "feedback-1", EventKey: "evt-1"},
-			restated:     rl.FeedbackRecord{FeedbackID: "feedback-1", EventKey: "evt-2"},
-			reidentified: rl.FeedbackRecord{FeedbackID: "feedback-2", EventKey: "evt-1"},
-			kind:         "rl.feedback",
-		},
-		{
-			family:       "reward",
-			fact:         rl.RewardRecord{InstanceID: "reward-1", Revision: 1},
-			restated:     rl.RewardRecord{InstanceID: "reward-1", Revision: 2},
-			reidentified: rl.RewardRecord{InstanceID: "reward-2", Revision: 1},
-			kind:         "rl.reward",
 		},
 		{
 			family:       "declaration",

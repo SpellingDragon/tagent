@@ -530,7 +530,7 @@ func newGovRig(t *testing.T, cfg govConfig) *govRig {
 		r.approvals.AddChannel(ch)
 	}
 	r.policy = policyOf(cfg, r.approvals)
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{r.grader})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{r.grader})
 	if err != nil {
 		t.Fatalf("assemble the plugin pipeline: %v", err)
 	}
@@ -768,8 +768,10 @@ type govGrader struct {
 // Name reports the stable name of the risk face.
 func (g *govGrader) Name() string { return g.name }
 
-// Phase reports the risk-policy phase the risk face serves.
-func (g *govGrader) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port reports the call->ruling port the risk face serves.
+func (g *govGrader) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // AssessRisk grades one tool call before its side effect runs.
 func (g *govGrader) AssessRisk(ctx context.Context, call *model.ToolCall) plugin.RiskLevel {

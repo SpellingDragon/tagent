@@ -18,8 +18,8 @@
 | 层 | 目录 | 职责 |
 |---|---|---|
 | 词汇 | `api/event/` `api/model/` `api/config/` `api/plugin/` `api/view/` | 事件契约与元数据、模型抽象、声明式配置装载（严格解码）、插件阶段、呈现词汇 |
-| 核心 | `runtime/task/` `runtime/state/` `runtime/agent/` `memory/` | 任务生命周期、绑定与现场、事件循环、原文/投影与召回（含 `memory/replica/` 临时副本） |
-| 供面 | `tool/`（`mcp/` `exec/` `remote/`）、`rl/`、`evolution/`（`meditation/` `refine/` `consolidation/` `governance/`）、`telemetry/`、`memory/query/` | 工具与外部执行、训练数据侧、自进化、观测实现、只读查询 |
+| 核心 | `runtime/task/` `runtime/state/` `runtime/agent/` `memory/` | 任务生命周期、绑定与现场、事件循环、原文/投影与召回 |
+| 供面 | `tool/`（`exec/` `file/` `knowledge/` `mcp/` `recall/` `spec/` `subagent/`）、`rl/`、`evolution/`（`governance/` `meditation/`）、`telemetry/`、`memory/query/` | 工具与外部执行、训练数据侧、自进化、观测实现、只读查询 |
 | 组合根 | 根包（11 文件：`tagent.go` `run*.go` `prepare.go` `read.go` `host_face.go` `skeleton_assert.go`） | 装配、公共入口、诊断注入点；`opts.go` 的装配选项并入 `run.go` |
 | 宿主壳 | `cli/` | 命令面（`invoke`/`query`/`start`）与宿主转换面（`HostBridge`/回执/审批）；位于组合根之上（`cli`→根），运行时不反向依赖 |
 | 宿主 | `examples/wechat-bot/`（独立 module） | 微信宿主：收发、去重、投递回执；经 `replace` 指向本仓 |
@@ -44,8 +44,7 @@ bash scripts/lint.sh                    # 仓库门禁：格式、构建、vet�
 |---|---|
 | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照（一句话定义＋领域类比＋在哪看） |
 | [`docs/api/index.md`](docs/api/index.md) | **API 权威**：由源码注释生成，`gen_godoc --check` 保证与码面同步 |
-| [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim）：机制背景与分叉点，非当期码面事实 |
-| [`internal/prototype/README.md`](internal/prototype/README.md) | 保留的原型骨架（事件消费壳/任务表/记忆票据），用于语义对照，不是现架构 |
+| [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim）：机制背景，非当期码面事实 |
 | [`docs/notes/risk-remediation-plan.md`](docs/notes/risk-remediation-plan.md) | 当期风险处置计划（分片、验收通则） |
 | [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账：变更的 proposal/design/tasks 与波次记录 |
 

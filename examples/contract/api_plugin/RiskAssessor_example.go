@@ -15,8 +15,10 @@ type argumentSize struct{}
 // Name reports the stable name of the element.
 func (argumentSize) Name() string { return "argument-size" }
 
-// Phase reports the one phase the element serves.
-func (argumentSize) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port reports the call->ruling port the element serves.
+func (argumentSize) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // AssessRisk grades one call before its side effect and answers one declared grade.
 func (argumentSize) AssessRisk(_ context.Context, call *trpcmodel.ToolCall) plugin.RiskLevel {
@@ -27,7 +29,7 @@ func (argumentSize) AssessRisk(_ context.Context, call *trpcmodel.ToolCall) plug
 }
 
 var (
-	_ plugin.Plugin       = argumentSize{}
+	_ plugin.Instance     = argumentSize{}
 	_ plugin.RiskAssessor = argumentSize{}
 )
 
@@ -37,7 +39,7 @@ var (
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#disposition-and-risk
 func ExampleRiskAssessor() {
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{argumentSize{}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{argumentSize{}})
 	if err != nil {
 		return
 	}

@@ -16,9 +16,11 @@ type sizeAndRuling struct{}
 // Name reports the stable name of the element.
 func (sizeAndRuling) Name() string { return "size-and-ruling" }
 
-// Phase reports the one phase the element serves; the two faces of that phase are the
-// ones this element implements.
-func (sizeAndRuling) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port reports the call->ruling port the element serves; the two faces of that port are
+// the ones this element implements.
+func (sizeAndRuling) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // AssessRisk renders the grade of one call before its side effect.
 func (sizeAndRuling) AssessRisk(_ context.Context, call *trpcmodel.ToolCall) plugin.RiskLevel {
@@ -35,7 +37,7 @@ func (sizeAndRuling) Judge(pass plugin.CallPass) (plugin.Decision, error) {
 }
 
 var (
-	_ plugin.Plugin       = sizeAndRuling{}
+	_ plugin.Instance     = sizeAndRuling{}
 	_ plugin.RiskAssessor = sizeAndRuling{}
 	_ plugin.Governor     = sizeAndRuling{}
 )
@@ -47,7 +49,7 @@ var (
 // 契约: docs/wiki/agent/governance-enforcement.md#disposition-and-risk
 func ExamplePhase_riskPolicy() {
 	element := sizeAndRuling{}
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{element})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{element})
 	if err != nil {
 		return
 	}

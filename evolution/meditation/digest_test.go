@@ -21,6 +21,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
+// meditationNow is the pass time every meditation invariant judges age against.
+var meditationNow = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
 func TestDigestRendersTheSamePassIdentically(t *testing.T) {
 	ctx := context.Background()
 	scan := digestScan(10)

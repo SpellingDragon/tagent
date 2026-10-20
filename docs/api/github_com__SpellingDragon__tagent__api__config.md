@@ -13,7 +13,6 @@ the state owner, not here.
   - config.go states the declaration vocabulary every host shares;
   - decode.go maps a decoded source tree onto it, rejecting every key the
     surface does not name;
-  - load.go is the assembly entry that reads a source and applies defaults;
   - source.go decodes the source syntax, while defaults.go, clone.go and
     fingerprint.go hold the default pass, the deep copy and the content
     fingerprint.
@@ -24,12 +23,6 @@ surface does not name, every repeated key and every value of the wrong shape,
 and it names the offending source, line and field path in the error. The field
 readers below are the only place the source node shapes are inspected, so the
 declaration types never carry syntax knowledge.
-
-The assembly face of the declaration layer: the one entry that turns a source
-file into a Declaration. Decoding the source syntax belongs to source.go,
-mapping the decoded tree onto the declaration types belongs to decode.go and the
-default pass belongs to defaults.go; this file only sequences them, so a caller
-reads one door instead of three.
 
 The source-syntax face of the declaration layer: it turns the bytes of a .yaml,
 .yml or .json source into one sourceNode tree and rejects every other extension
@@ -166,15 +159,7 @@ type Declaration struct {
     A Declaration describes an organization in terms of data only: the entry
     agent, the declared agent graph, the references those agents use, and the
     version baseline the declaration was loaded against. Applying defaults and
-    normalizing content is the job of Load.
-
-func Load(ctx context.Context, path string) (*Declaration, error)
-
-    Load reads the declaration document at path, applies defaults to it and
-    returns the normalized Declaration. Sources ending in .yaml or .yml decode
-    as YAML, sources ending in .json decode as JSON, and every other extension
-    is rejected by name. Failures are reported as errors that name the offending
-    source, the line within it, the field path and the reason.
+    normalizing content happens in the decode path that produces it.
 
 func (d *Declaration) AgentSpecs() []AgentSpec
     AgentSpecs returns the declared agents as a deep copy, so callers may mutate

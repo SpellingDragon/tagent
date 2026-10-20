@@ -41,10 +41,10 @@ var (
 
 // The binding's live fields keep their native framework types.
 var (
-	_ model.Model      = AgentBinding{}.Model
-	_ []trpctool.Tool  = AgentBinding{}.Tools
-	_ []plugin.Plugin  = AgentBinding{}.Plugins
-	_ trpctool.ToolSet = AgentBinding{}.Set
+	_ model.Model       = AgentBinding{}.Model
+	_ []trpctool.Tool   = AgentBinding{}.Tools
+	_ []plugin.Instance = AgentBinding{}.Plugins
+	_ trpctool.ToolSet  = AgentBinding{}.Set
 )
 
 // The binding reference keeps its documented fields, and the borrowed binding
@@ -96,7 +96,7 @@ var (
 	_ = AgentBinding{
 		Model:        nil,
 		Tools:        []trpctool.Tool{},
-		Plugins:      []plugin.Plugin{},
+		Plugins:      []plugin.Instance{},
 		PromptSource: PromptSource{},
 		Set:          nil,
 	}

@@ -26,23 +26,23 @@ import (
 // supplier produces the native pieces of one agent's candidate binding on
 // demand. Its factories run in the assembly order the construction chain fixes
 // for one agent: the model first, then the native tools and their tool-set
-// connection, then the file source, then the plugin registration units. Every
+// connection, then the file source, then the plugin instances. Every
 // factory reports the release that frees what it acquired beside the piece
 // itself, so an acquisition is registered before the next factory runs. wrap is
 // the admission wrap every native callable tool of the agent is registered
 // under, so the contributed, file and skill families are admitted through one
 // and the same registration wrapper.
 //
-// The plugins factory answers the ordered registration units of the agent and
-// builds no pipeline here: the two-phase flow is assembled from them by the
-// dispatch-time consumer (plugin.NewPipeline on the published binding), so the
-// assembly phase owns construction and registration alone and never grows a
-// second phase channel beside the published pipeline.
+// The plugins factory answers the ordered instances of the agent and builds no
+// flow here: the material flow is assembled from them by the dispatch-time
+// consumer (plugin.NewFlow on the published binding), so the assembly phase
+// owns construction and registration alone and never grows a second dispatch
+// channel beside the published pipeline.
 type supplier struct {
 	model   func(context.Context, config.AgentSpec) (model.Model, func(context.Context) error, error)
 	tools   func(context.Context, config.AgentSpec) ([]trpctool.Tool, trpctool.ToolSet, func(context.Context) error, error)
 	prompt  func(context.Context, config.AgentSpec) (state.PromptSource, error)
-	plugins func(context.Context, config.AgentSpec) ([]plugin.Plugin, error)
+	plugins func(context.Context, config.AgentSpec) ([]plugin.Instance, error)
 	wrap    func(trpctool.CallableTool) trpctool.Tool
 }
 

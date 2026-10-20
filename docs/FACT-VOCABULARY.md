@@ -5,7 +5,7 @@
 <a id="fact-category"></a>
 ## 一、事实类别契约
 
-`event.Fact`（`api/event/fact.go`）是自证契约，只问两件事：`FactKey() string`（身份，同一事实同一身份）与 `FactType() string`（类型，冻结后不再改写）。实现者在**所属包内**加方法，不搬包——域边界=语义单元，事件包只声明契约与词汇。唯一例外是压缩请求族：判定它的机制跨三域（memory/replica 的溢出结果、evolution.meditation 的卡片序列、memory 的请求日志），判定词汇归 event 轴，producer/reason 仍留判定机制。
+`event.Fact`（`api/event/fact.go`）是自证契约，只问两件事：`FactKey() string`（身份，同一事实同一身份）与 `FactType() string`（类型，冻结后不再改写）。实现者在**所属包内**加方法，不搬包——域边界=语义单元，事件包只声明契约与词汇。唯一例外是压缩请求族：判定它的机制跨域（`memory` 的溢出结果与请求日志、`evolution/meditation` 的卡片序列），判定词汇归 event 轴，producer/reason 仍留判定机制。
 
 - 身份是字符串而非 `event.EventID`：身份是一处**拼写**（事件 hex 键、四元组合成串、指纹 hex），声明族所在包不得 import event，契约若要求事件类型，恰好把要登记的族挡在门外。
 - 两问就是"产出即锁定"的最小自证：它叫什么、它是什么。第三问（谁消费、什么时态）属于化归判据，不属于事实本体。

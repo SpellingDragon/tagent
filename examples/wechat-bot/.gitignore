@@ -10,11 +10,8 @@
 !go.mod
 !go.sum
 !main.go
-!system_alert.go
-!file_delivery.go
-!file_delivery_test.go
-!file_intake.go
-!file_intake_test.go
+!wechat.go
+!wechat_test.go
 !scripts/
 !scripts/verify_large_file.go
 !scripts/loggrep.py
@@ -91,8 +88,6 @@ logs/
 wechat-bot
 data/
 openspec/
-!dedup.go
-!dedup_test.go
 
 # ---- mail-poller (openspec: agentmail-email-inbound-channel) ----
 # 白名单制补充: 拉取器代码/文档/部署单元入库; .env 与 data/ 运行态保持忽略
@@ -107,10 +102,6 @@ openspec/
 # Tracked source that the whitelist must name explicitly (tracked ⇒ must not be ignored).
 !skills/
 !skills/url-fetcher/
-!reincarnation_notice.go
-!reincarnation_notice_test.go
-!delivery_receipt.go
-!delivery_receipt_test.go
 !skills/README.md
 !skills/url-fetcher/README.md
 !skills/url-fetcher/TESTING.md
@@ -124,28 +115,3 @@ openspec/
 !skills/url-fetcher/url_fetcher.js
 !scripts/ima-note-upload.sh
 
-# 主动送达面（send 工具）源码与测试：白名单制必须点名，否则新文件永远不进版本控制。
-!send_tool.go
-!send_tool_test.go
-
-# 宿主运行时与会话路由：装配入口、会址解析与审批裁决通道，同样必须点名。
-!host_runtime.go
-!host_runtime_test.go
-!host_memory.go
-!host_memory_test.go
-!meditation_delivery.go
-!meditation_delivery_test.go
-!session_routing.go
-!approval_channel.go
-!main_test.go
-!session_routing_test.go
-
-# 出站文件投递的副本生命周期：同样必须点名。
-!file_replica.go
-
-# 宿主 HTTP 面（探活 + 注入端点）源码与测试：白名单制必须点名。
-!inject_face.go
-!inject_face_test.go
-
-# 真实微信发送面的资源门测试: 白名单制必须点名入库, 否则门测试本身不在版本控制。
-!main_real_test.go

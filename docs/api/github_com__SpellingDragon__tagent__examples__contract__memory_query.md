@@ -29,10 +29,6 @@ func ExampleDetail_refusal()
     object the bounded snapshot does not hold each refuse by name instead of
     answering an empty detail.
 
-func ExampleLeaseExplainer()
-    ExampleLeaseExplainer explains one held lease beside the counts of the
-    ledger, and reports a key the ledger holds nothing under as not held.
-
 func ExampleReading()
     ExampleReading gathers one reading of the three semantic units: the
     generation in effect, the session sites it serves and the tasks the task

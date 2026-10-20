@@ -5,15 +5,14 @@
 // and the consuming phase, each dispatched by the material a face reads, and the
 // six ports those phases serve.
 //
-// A plugin is a registration unit: it reports the stable name of one flow
-// instance and the route word of the port the instance serves — the material it
-// reads and the product it answers — and the instance implements that port's
-// narrow interface. The flow derives the phase from the port and dispatches the
-// instance by the material that port reads. A built-in consumer — the drive that
-// runs one decision, the tick that runs one reflection, the assembler that
-// builds one request — is an instance of the same flow: the difference between a
-// built-in instance and a mounted plugin is who mounts it, never how it is
-// dispatched.
+// An instance is a registration unit: it reports the stable name of one flow
+// instance and the port it serves — the material it reads and the product it
+// answers — and the instance implements that port's narrow interface. The flow
+// derives the phase from the port and dispatches the instance by the material
+// that port reads. A built-in consumer — the drive that runs one decision, the
+// tick that runs one reflection, the assembler that builds one request — is an
+// instance of the same flow: the difference between a built-in instance and a
+// mounted plugin is who mounts it, never how it is dispatched.
 //
 //   - the extension-face vocabulary: the phases, the ports, the narrow interfaces each port owns, the pipeline that dispatches them by material, the post-commit observation wiring and the presentation pass;
 //   - the extension policies at the governance gate: the pre-execution ruling, the risk rules, the approval channel, the denial ledger, the goal registry and the budget window, each stated in its own file and reaching the pipeline only through the one face it serves.
@@ -53,77 +52,6 @@ const (
 // phaseUnstated is the phase of a port the closed table does not declare; it is
 // answered beside the refusal and is never a phase of the flow.
 const phaseUnstated Phase = -1
-
-// routeWordBase separates the six route words a Plugin reports from the two
-// phases: a route word names one port of the flow and reads as that port's
-// phase.
-const routeWordBase Phase = 1 << 8
-
-// PhaseCallTransform, PhaseRiskPolicy, PhasePostCommitObserve, PhaseFinalPresentation,
-// PhaseCompressTrigger and PhaseEnvironmentInject are the six route words of Plugin:
-// each names one port of the flow, and an element registering under it is dispatched
-// exactly as an Instance declaring that port is dispatched.
-//
-//   - PhaseCallTransform → call->call: the call transform face
-//   - PhaseRiskPolicy → call->ruling: the risk face and the ruling face
-//   - PhasePostCommitObserve → fact->observation: the post-commit observation face
-//   - PhaseFinalPresentation → fact->view: the final presentation face
-//   - PhaseCompressTrigger → fact->compression: the compress-trigger face
-//   - PhaseEnvironmentInject → request->environment: the request-assembly face
-const (
-	// PhaseCallTransform is the route word of the call->call port: the call is
-	// corrected before its side effect and before its admission ruling, and the
-	// corrected call is the one re-checked, executed and recorded.
-	PhaseCallTransform Phase = routeWordBase + iota
-
-	// PhaseRiskPolicy is the route word of the call->ruling port: the grade of
-	// one call before its side effect beside the one pre-execution ruling over
-	// it. The port carries two faces of that one ruling: a RiskAssessor renders
-	// the grade and a Governor renders the ruling over it; the grade is read
-	// once and never recomputed by the ruling.
-	PhaseRiskPolicy
-
-	// PhasePostCommitObserve is the route word of the fact->observation port: one
-	// committed fact observed after its canonical commit, as a read-only duty.
-	PhasePostCommitObserve
-
-	// PhaseFinalPresentation is the route word of the fact->view port: the final
-	// presentation of one committed fact for its channel.
-	PhaseFinalPresentation
-
-	// PhaseCompressTrigger is the route word of the fact->compression port: the
-	// filed judgment that material is over its bound is handed to the faces that
-	// answer it with the compression it owes, before the request is retired. The
-	// port is the starter of the traceable mapping chain the request drives,
-	// never the curation itself.
-	PhaseCompressTrigger
-
-	// PhaseEnvironmentInject is the route word of the request->environment port:
-	// the faces render the dynamic environment material one request carries at
-	// the bottom of its assembly, so what changes with the run never moves the
-	// stable prefix. Each block a face answers is one product of that request,
-	// traceable to it.
-	PhaseEnvironmentInject
-)
-
-// Plugin is the registration unit a mounted element reports, distinct from the
-// framework's plugin.Plugin: the stable name of one pipeline element and one of
-// the six route words, each naming the port that element serves. The flow reads
-// the port the word names and dispatches the element exactly as an Instance
-// declaring that port is dispatched; the element implements the narrow interface
-// of its port.
-//
-// The redline list (3 rules):
-// MUST report the one route word of the port it serves and implement that port's narrow interface.
-// MUST NOT report a route word whose narrow interface it does not implement.
-// MUST NOT serve two ports: one registration element serves one port and may carry both faces of the ruling port.
-type Plugin interface {
-	// Name returns the stable name of this plugin.
-	Name() string
-
-	// Phase reports the route word of the one port this plugin serves.
-	Phase() Phase
-}
 
 // TransformCall is the call->call port's narrow face, and it is where the
 // allowed tool-call parameter transform is carried: it runs once per tool call
@@ -281,28 +209,6 @@ type declaration struct {
 	name string
 	port Port
 	impl any
-}
-
-// NewPipeline assembles the material flow out of the registration units that
-// report a route word, in the declared order. It reads the port each route word
-// names and dispatches the element exactly as NewFlow dispatches an instance
-// declaring that port. A plugin whose phase is not one of the route words, a nil
-// plugin, a plugin that implements no narrow interface of its port, and a name
-// declared twice each refuse the flow by name instead of being trimmed in
-// silence.
-func NewPipeline(plugins []Plugin) (Pipeline, error) {
-	declarations := make([]declaration, 0, len(plugins))
-	for _, element := range plugins {
-		if element == nil {
-			return Pipeline{}, errors.New("plugin: the pipeline holds a nil plugin")
-		}
-		port, declared := portOfPhase(element.Phase())
-		if !declared {
-			return Pipeline{}, fmt.Errorf("plugin: %q serves phase %d, which is not one of the declared phases", element.Name(), element.Phase())
-		}
-		declarations = append(declarations, declaration{name: element.Name(), port: port, impl: element})
-	}
-	return assemble(declarations)
 }
 
 // assemble groups the declarations into their port's face set, in the declared
@@ -509,47 +415,14 @@ func copyCall(in trpcmodel.ToolCall) trpcmodel.ToolCall {
 	return out
 }
 
-// portOfPhase reports the port one route word names. A value that is neither a
-// route word nor a phase of the flow is not declared.
-func portOfPhase(phase Phase) (Port, bool) {
-	switch phase {
-	case PhaseCallTransform:
-		return Port{Reads: MaterialCall, Produces: ProductCall}, true
-	case PhaseRiskPolicy:
-		return Port{Reads: MaterialCall, Produces: ProductRuling}, true
-	case PhasePostCommitObserve:
-		return Port{Reads: MaterialFact, Produces: ProductObservation}, true
-	case PhaseFinalPresentation:
-		return Port{Reads: MaterialFact, Produces: ProductView}, true
-	case PhaseCompressTrigger:
-		return Port{Reads: MaterialFact, Produces: ProductCompression}, true
-	case PhaseEnvironmentInject:
-		return Port{Reads: MaterialRequest, Produces: ProductEnvironment}, true
-	default:
-		return Port{}, false
-	}
-}
-
-// phaseName reports the declared name of one phase or route word for a refusal
-// message and one observation line.
+// phaseName reports the declared name of one phase for a refusal message and
+// one observation line.
 func phaseName(phase Phase) string {
 	switch phase {
 	case PhaseProduce:
 		return "produce"
 	case PhaseConsume:
 		return "consume"
-	case PhaseCallTransform:
-		return "call-transform"
-	case PhaseRiskPolicy:
-		return "risk-policy"
-	case PhasePostCommitObserve:
-		return "post-commit-observe"
-	case PhaseFinalPresentation:
-		return "final-presentation"
-	case PhaseCompressTrigger:
-		return "compress-trigger"
-	case PhaseEnvironmentInject:
-		return "environment-inject"
 	default:
 		return fmt.Sprintf("phase-%d", phase)
 	}
@@ -557,8 +430,7 @@ func phaseName(phase Phase) string {
 
 // faceTransform names the call->call face in one observation line; the rest
 // name the one face of their own port the same way. The face is the narrow
-// interface the dispatched element was held to, not the route word it
-// registered under.
+// interface the dispatched element was held to, not the port it declared.
 const (
 	faceTransform = "transform"
 	faceRisk      = "risk"

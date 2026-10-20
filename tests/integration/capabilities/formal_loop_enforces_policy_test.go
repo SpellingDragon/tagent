@@ -71,7 +71,7 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			"agent-a": {
 				Model:   provider,
 				Tools:   []trpctool.CallableTool{probe},
-				Plugins: []plugin.Plugin{&policyGrader{high: map[string]bool{"danger_tool": true}}},
+				Plugins: []plugin.Instance{&policyGrader{high: map[string]bool{"danger_tool": true}}},
 			},
 		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(governor))
 		if err != nil {
@@ -136,7 +136,7 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
-				Plugins: []plugin.Plugin{
+				Plugins: []plugin.Instance{
 					&policyObserver{name: "down-observer"},
 					&policyPresenter{name: "final-presenter"},
 				},
@@ -231,8 +231,10 @@ type policyGrader struct {
 // Name returns the stable name of the test plugin.
 func (g *policyGrader) Name() string { return "policy-grader" }
 
-// Phase returns the single phase the test plugin serves.
-func (g *policyGrader) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port returns the single port the test instance serves.
+func (g *policyGrader) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // AssessRisk grades one tool call from the name it carries.
 func (g *policyGrader) AssessRisk(_ context.Context, call *model.ToolCall) plugin.RiskLevel {
@@ -276,8 +278,10 @@ type policyObserver struct {
 // Name returns the stable name of the test plugin.
 func (o *policyObserver) Name() string { return o.name }
 
-// Phase returns the single phase the test plugin serves.
-func (o *policyObserver) Phase() plugin.Phase { return plugin.PhasePostCommitObserve }
+// Port returns the single port the test instance serves.
+func (o *policyObserver) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+}
 
 // ObserveCommit fails the observation beside the plugin name and the fact.
 func (o *policyObserver) ObserveCommit(_ context.Context, id event.EventID) error {
@@ -293,8 +297,10 @@ type policyPresenter struct {
 // Name returns the stable name of the test plugin.
 func (p *policyPresenter) Name() string { return p.name }
 
-// Phase returns the single phase the test plugin serves.
-func (p *policyPresenter) Phase() plugin.Phase { return plugin.PhaseFinalPresentation }
+// Port returns the single port the test instance serves.
+func (p *policyPresenter) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+}
 
 // Present renders the presentation text of one committed fact.
 func (p *policyPresenter) Present(_ context.Context, id event.EventID) (string, bool) {

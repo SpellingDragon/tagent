@@ -6,12 +6,12 @@ exactly one channel — the FP generation face, the SRC source-pull face, the FI
 lazy-read face, or the named RESTART refusal — and one change takes effect only
 on the channel its dimension belongs to.
 
-The two paths never stand in for each other: a structural change runs
-config.Load → Compile → Prepare → the precondition checks → commit and commits
-only through the sole publication entry, while a file change takes effect
-directly at the request boundary. A structural difference never rides the file
-channel around the precondition checks, and a file change is never claimed to
-have passed them.
+The two paths never stand in for each other: a structural change runs the strict
+decode → Compile → Prepare → the precondition checks → commit and commits only
+through the sole publication entry, while a file change takes effect directly
+at the request boundary. A structural difference never rides the file channel
+around the precondition checks, and a file change is never claimed to have
+passed them.
 
 The failure cause chain of the two reload paths: a structural change that is
 refused or fails keeps the chain of the causes it rests on — the source file,
@@ -350,7 +350,7 @@ type AgentBinding struct {
 	Tools []trpctool.Tool
 	// Plugins is the ordered plugin pipeline of the agent; the order is the
 	// published order and is never reassembled mid-request.
-	Plugins []plugin.Plugin
+	Plugins []plugin.Instance
 	// PromptSource is the prompt source of the agent.
 	PromptSource PromptSource
 	// Set is the tool-set connection of the agent; its Close is governed by a

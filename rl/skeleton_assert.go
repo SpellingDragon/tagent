@@ -156,15 +156,11 @@ const (
 	_ = BoundInFlight
 	_ = BoundBytes
 	_ = BoundClosed
-
-	_ = VerificationRuleHeuristic
-	_ = VerificationRuleLLMJudge
-	_ = DefaultVerificationPassScore
 )
 
 // The record production face and the versioned line keep their declared shapes:
-// the three recorder methods, the line envelope fields and the three import
-// chains each stay pinned by name and type.
+// the three recorder methods and the line envelope fields each stay pinned by
+// name and type.
 var (
 	_ Recorder = (Recorder)(nil)
 
@@ -178,29 +174,6 @@ var (
 		Episode:  nil,
 		Decision: nil,
 		Attempt:  nil,
-	}
-
-	_ = LegacyRecord{
-		Schema:        "",
-		Line:          0,
-		Fields:        map[string]any{},
-		UnknownFields: []string{},
-		Lineage:       LineageUnknown,
-		Raw:           "",
-	}
-
-	_ = ImportGap{
-		Line:   0,
-		Reason: "",
-		Detail: "",
-		Raw:    "",
-		Err:    nil,
-	}
-
-	_ = ImportResult{
-		Records: []Line{},
-		Legacy:  []LegacyRecord{},
-		Unknown: []ImportGap{},
 	}
 )
 
@@ -333,35 +306,6 @@ var (
 	_ func(string) (CaptureManifest, error)         = ReadCaptureSeal
 )
 
-// The open-domain verification port keeps its declared shape: one judging
-// method, the verdict fields, the offline verifier and the reward entry each
-// stay pinned by name and type.
-var (
-	_ Verifier = (Verifier)(nil)
-
-	_ func(Verifier, context.Context, EpisodeRecord) (Verification, error) = Verifier.Verify
-
-	_ = Verification{
-		Score:   0,
-		Passed:  false,
-		Reasons: []string{},
-	}
-
-	_ = Verdict{
-		Passed:  false,
-		Reasons: []string{},
-	}
-
-	_ func(...HeuristicOption) (*HeuristicVerifier, error)                           = NewHeuristicVerifier
-	_ func(*HeuristicVerifier, context.Context, EpisodeRecord) (Verification, error) = (*HeuristicVerifier).Verify
-	_ func(*HeuristicVerifier) string                                                = (*HeuristicVerifier).RuleVersion
-
-	_ func(Verifier, *RewardLedger, string) (*VerificationConsumer, error)                                                 = NewVerificationConsumer
-	_ func(*VerificationConsumer, context.Context, event.DecisionID, event.AttemptID, EpisodeRecord) (RewardRecord, error) = (*VerificationConsumer).Consume
-
-	_ func(*RewardLedger, event.DecisionID, event.AttemptID, string, Verification) (RewardRecord, error) = (*RewardLedger).RecordVerification
-)
-
 // The default capture bounds stay compile-time constants, so a queue is never
 // built over a computed or swapped-in bound.
 const (
@@ -385,123 +329,6 @@ var (
 	_ error = ErrWriterFileName
 	_ error = ErrWriterOpenBound
 	_ error = ErrCaptureRefused
-)
-
-// The feedback and reward accounts keep their declared shapes: the raw
-// feedback record, its ledger face, the derivation rule and the derived reward
-// ledger each stay pinned by name and type, so the two accounts never merge
-// into one.
-var (
-	_ = FeedbackRecord{
-		Schema:       "",
-		FeedbackID:   "",
-		EventKey:     "",
-		DecisionID:   "",
-		AttemptID:    "",
-		ModelVersion: "",
-		Conclusion:   "",
-		Source:       "",
-		Version:      "",
-		RecordedAt:   time.Time{},
-	}
-
-	_ func(*FeedbackLedger, FeedbackRecord) error    = (*FeedbackLedger).Add
-	_ func(*FeedbackLedger, string) []FeedbackRecord = (*FeedbackLedger).BoundTo
-	_ func(*FeedbackLedger) []FeedbackRecord         = (*FeedbackLedger).All
-
-	_ = RewardRule{
-		Version: "",
-		Value:   nil,
-	}
-
-	_ func(*RewardLedger, event.DecisionID, event.AttemptID, RewardRule, []FeedbackRecord) (RewardRecord, error) = (*RewardLedger).Derive
-	_ func(*RewardLedger, event.DecisionID, event.AttemptID) (RewardRecord, bool)                                = (*RewardLedger).Latest
-	_ func(*RewardLedger, event.DecisionID, event.AttemptID) []RewardRecord                                      = (*RewardLedger).Records
-	_ func(*RewardLedger, event.DecisionID, event.AttemptID) RewardState                                         = (*RewardLedger).StateOf
-	_ func(*RewardLedger, RewardRecord) error                                                                    = (*RewardLedger).Restore
-)
-
-// The feedback face keeps the zero-selection construction: the evidence, the two
-// accounts and the derivation rule are positional and the credential and request
-// bounds are named by the option that adds them, so the face carries no
-// configuration value to choose from.
-var (
-	_ func(FeedbackTargetResolver, *FeedbackLedger, *RewardLedger, RewardRule, ...FeedbackEndpointOption) (*FeedbackEndpoint, error) = NewFeedbackEndpoint
-
-	_ func(string) FeedbackEndpointOption = WithFeedbackToken
-
-	_ func(RequestLimits) FeedbackEndpointOption = WithFeedbackLimits
-
-	_ = []FeedbackEndpointOption{WithFeedbackToken(""), WithFeedbackLimits(RequestLimits{})}
-)
-
-// The named feedback and reward errors stay errors, so a refused record,
-// derivation or restore is routed by name instead of matched on message text.
-var (
-	_ error = ErrFeedbackIDMissing
-	_ error = ErrFeedbackKeyMissing
-	_ error = ErrFeedbackVersionMissing
-	_ error = ErrFeedbackConflict
-	_ error = ErrRewardNoFeedback
-	_ error = ErrRewardRuleMissing
-	_ error = ErrRewardConflict
-	_ error = ErrRewardRecordInvalid
-)
-
-// The authorized export keeps its declared shapes: the paged read seam, the
-// fact and sample line it produces and the exporter that runs it each stay
-// pinned by name and type, so a widened grant or a renamed field stops the
-// package from compiling.
-var (
-	_ = ExportedFact{
-		EventKey:   "",
-		Partition:  "",
-		CallID:     "",
-		CaptureID:  "",
-		EpisodeID:  "",
-		DecisionID: "",
-		AttemptID:  "",
-		Schema:     "",
-		ParentKey:  "",
-		Timestamp:  0,
-		Body:       nil,
-	}
-
-	_ ExportSource                                                                  = (ExportSource)(nil)
-	_ func(ExportSource, context.Context, string, int, int) ([]ExportedFact, error) = ExportSource.Page
-	_ func(ExportSource, context.Context) ([]EpisodeRecord, error)                  = ExportSource.Episodes
-
-	_ = SampleLine{
-		Schema:     "",
-		Provenance: SampleProvenance{},
-		Fact:       ExportedFact{},
-		Feedback:   []FeedbackRecord{},
-		Reward:     RewardRecord{},
-	}
-
-	_ Exporter = (*TrainingExporter)(nil)
-
-	_ func(ExportSource, *FeedbackLedger, *RewardLedger, RewardRule) *TrainingExporter = NewTrainingExporter
-	_ func(*TrainingExporter, string, []SampleLine) error                              = (*TrainingExporter).SealSnapshot
-	_ func(*TrainingExporter, string) ([]SampleLine, bool)                             = (*TrainingExporter).Snapshot
-	_ func(*TrainingExporter) []string                                                 = (*TrainingExporter).SnapshotIDs
-)
-
-// The named export errors stay errors and the page limits stay constants, so a
-// run refused or cut short is routed by name and a page limit is never clamped
-// into a silently different size.
-var (
-	_ error = ErrExportUnauthorized
-	_ error = ErrExportPageLimit
-	_ error = ErrExportRepeatedPage
-	_ error = ErrExportReadFailed
-	_ error = ErrExportConflict
-	_ error = ErrExportWriteFailed
-)
-
-const (
-	_ = DefaultExportPageLimit
-	_ = MaxExportPageLimit
 )
 
 // The replacement lease keeps its declared shapes: the identity an attempt is
@@ -560,5 +387,4 @@ var (
 	_ error = ErrLeaseHistoryInvalid
 	_ error = ErrLeaseStreamMissing
 	_ error = ErrLeaseRestoreMismatch
-	_ error = ErrRewardVersionConflict
 )

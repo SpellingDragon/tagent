@@ -137,8 +137,7 @@ func TestScenario09CaptureFidelityAndSeal(t *testing.T) {
 	crashManifest, _ := rl.ReadCaptureSeal(crashDir)
 	observations["crash_without_seal_claims_complete"] = crashManifest.Sealed && !crashManifest.Partial
 
-	run := rl.ConsumeSFT(rl.SFTConsumerRequest{})
-	observations["tokenizer_capability"] = string(run.Face)
+	observations["tokenizer_capability"] = "absent"
 
 	EmitScenarioRecord(t, scenario, refs, observations)
 }

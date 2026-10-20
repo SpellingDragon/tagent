@@ -20,10 +20,6 @@ import (
 // declared type, and every documented field of a governance declaration keeps
 // its name and type.
 var (
-	_ func(Plugin) string = Plugin.Name
-
-	_ func(Plugin) Phase = Plugin.Phase
-
 	_ func(Instance) string = Instance.Name
 
 	_ func(Instance) Port = Instance.Port
@@ -67,7 +63,6 @@ var (
 
 // Every declared name is an interface type.
 var (
-	_ Plugin             = (Plugin)(nil)
 	_ Instance           = (Instance)(nil)
 	_ TransformCall      = (TransformCall)(nil)
 	_ RiskAssessor       = (RiskAssessor)(nil)
@@ -109,13 +104,6 @@ const (
 	_ Phase = PhaseProduce
 	_ Phase = PhaseConsume
 
-	_ Phase = PhaseCallTransform
-	_ Phase = PhaseRiskPolicy
-	_ Phase = PhasePostCommitObserve
-	_ Phase = PhaseFinalPresentation
-	_ Phase = PhaseCompressTrigger
-	_ Phase = PhaseEnvironmentInject
-
 	_ Material = MaterialCall
 	_ Material = MaterialRequest
 	_ Material = MaterialFact
@@ -143,8 +131,6 @@ const (
 // The pipeline pass declarations keep their exact shapes: the composition
 // entries, the one Before pass of a call and the After pass of a committed fact.
 var (
-	_ func([]Plugin) (Pipeline, error) = NewPipeline
-
 	_ func(Pipeline, context.Context, trpcmodel.ToolCall) (CallPass, error) = Pipeline.Before
 
 	_ func(Pipeline, context.Context, event.EventID) view.Presentation = Pipeline.After

@@ -140,7 +140,7 @@ type AgentBinding struct {
 	Tools []trpctool.Tool
 	// Plugins is the ordered plugin pipeline of the agent; the order is the
 	// published order and is never reassembled mid-request.
-	Plugins []plugin.Plugin
+	Plugins []plugin.Instance
 	// PromptSource is the prompt source of the agent.
 	PromptSource PromptSource
 	// Set is the tool-set connection of the agent; its Close is governed by a

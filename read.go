@@ -2,7 +2,6 @@ package tagent
 
 import (
 	"context"
-	"errors"
 	"sort"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -11,7 +10,6 @@ import (
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/state"
-	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -29,26 +27,15 @@ func (r *Run) Query(ctx context.Context, filter query.ListFilter) (query.Snapsho
 	return snapshot, err
 }
 
-// Explain returns one authorized explanation of what keeps this run from
-// advancing: every blocker named beside its readable reason and the party that
-// advances it, every obligation still open, and every registered lease beside
-// the retention facts of its resource, under the authorization scope the
-// caller presents. The read grants no authorization of its own and reads every
-// fact from the owners at read time.
-func (r *Run) Explain(ctx context.Context, filter query.ListFilter) (query.BlockerReport, error) {
-	return r.explainer.Explain(ctx, filter)
-}
-
-// Recall runs one retrieval over the recall face of this run and answers the
-// reference set the query hit, ordered from the best hit down and cut to the
-// page the query asks for. The retrieval reads through the observation table
+// recall runs one retrieval over the recall face of this run and answers the
+// reference set the query hit. The retrieval reads through the observation table
 // over the committed store and the searcher fusing its two legs, so a hit is
 // answered as the recall reference its event was landed with and never as a
 // copy of the text behind it: the original stays behind the scoped read path.
 // The query carries its own authorized partition set — the recall grants no
 // authorization of its own — and a run assembled beside no storage tier is
 // refused by name with ErrRetrievalUnwired instead of answered as an empty set.
-func (r *Run) Recall(ctx context.Context, q search.Query) (search.Result, error) {
+func (r *Run) recall(ctx context.Context, q search.Query) (search.Result, error) {
 	if r.retrieval == nil {
 		return search.Result{}, ErrRetrievalUnwired
 	}
@@ -210,62 +197,4 @@ func (t runReading) Tasks(ctx context.Context) ([]query.TaskReading, error) {
 		})
 	}
 	return readings, nil
-}
-
-// execLedger is the execution resource ledger face of the blocker explanation:
-// the retained state of one registered lease and the accounting of the ledger,
-// read from the manager that holds both. It reports what the ledger records and
-// adds no fact of its own.
-type execLedger struct{ manager *tagentexec.Manager }
-
-// The ledger face answers the lease retention readings of the explanation.
-var _ query.LeaseExplainer = execLedger{}
-
-// ExplainLease returns the retained state of the resource the ledger holds
-// under the registration. A key the ledger holds nothing under answers as not
-// held, so a registration whose resource was freed stays explainable.
-func (l execLedger) ExplainLease(ref state.LeaseRef) (query.LeaseRetention, error) {
-	explanation, err := l.manager.Explain(tagentexec.ResourceKey{Kind: ref.Kind, Key: ref.Key})
-	if errors.Is(err, tagentexec.ErrResourceUnknown) {
-		return query.LeaseRetention{Ref: ref, Held: false}, nil
-	}
-	if err != nil {
-		return query.LeaseRetention{}, err
-	}
-	retention := query.LeaseRetention{
-		Ref:                 ref,
-		Held:                explanation.Held,
-		Deadline:            explanation.Deadline,
-		Renewed:             explanation.Renewed,
-		Adopted:             explanation.Adopted,
-		ConsecutiveUnknowns: explanation.ConsecutiveUnknowns,
-		Escalations:         explanation.Escalations,
-		Obligations:         append([]string(nil), explanation.Obligations...),
-	}
-	if explanation.LastStop != nil && !explanation.LastStop.Confirmed {
-		retention.StopReason = explanation.LastStop.Reason
-	}
-	return retention, nil
-}
-
-// LeaseCounts returns the accounting the ledger keeps over its leases.
-func (l execLedger) LeaseCounts() query.LeaseLedgerCounts {
-	return query.LeaseLedgerCounts{
-		Held:      l.manager.Held(),
-		Acquired:  l.manager.Acquired(),
-		Adopted:   l.manager.Adopted(),
-		Reused:    l.manager.Reused(),
-		Released:  l.manager.Released(),
-		Escalated: l.manager.Escalated(),
-	}
-}
-
-// ExecLeaseExplainer returns the blocker explanation face over one execution
-// resource ledger. The manager may be absent for an assembly beside no
-// execution resources, in which case no ledger is attached to the read.
-func ExecLeaseExplainer(manager *tagentexec.Manager) query.LeaseExplainer {
-	if manager == nil {
-		return nil
-	}
-	return execLedger{manager: manager}
 }

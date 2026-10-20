@@ -13,17 +13,14 @@
 | `github.com/SpellingDragon/tagent/api/view` | [github_com__SpellingDragon__tagent__api__view.md](github_com__SpellingDragon__tagent__api__view.md) |
 | `github.com/SpellingDragon/tagent/cli` | [github_com__SpellingDragon__tagent__cli.md](github_com__SpellingDragon__tagent__cli.md) |
 | `github.com/SpellingDragon/tagent/evolution` | [github_com__SpellingDragon__tagent__evolution.md](github_com__SpellingDragon__tagent__evolution.md) |
-| `github.com/SpellingDragon/tagent/evolution/consolidation` | [github_com__SpellingDragon__tagent__evolution__consolidation.md](github_com__SpellingDragon__tagent__evolution__consolidation.md) |
 | `github.com/SpellingDragon/tagent/evolution/governance` | [github_com__SpellingDragon__tagent__evolution__governance.md](github_com__SpellingDragon__tagent__evolution__governance.md) |
 | `github.com/SpellingDragon/tagent/evolution/meditation` | [github_com__SpellingDragon__tagent__evolution__meditation.md](github_com__SpellingDragon__tagent__evolution__meditation.md) |
-| `github.com/SpellingDragon/tagent/evolution/refine` | [github_com__SpellingDragon__tagent__evolution__refine.md](github_com__SpellingDragon__tagent__evolution__refine.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/api_event` | [github_com__SpellingDragon__tagent__examples__contract__api_event.md](github_com__SpellingDragon__tagent__examples__contract__api_event.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/api_plugin` | [github_com__SpellingDragon__tagent__examples__contract__api_plugin.md](github_com__SpellingDragon__tagent__examples__contract__api_plugin.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/cli` | [github_com__SpellingDragon__tagent__examples__contract__cli.md](github_com__SpellingDragon__tagent__examples__contract__cli.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/evolution` | [github_com__SpellingDragon__tagent__examples__contract__evolution.md](github_com__SpellingDragon__tagent__examples__contract__evolution.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/evolution_governance` | [github_com__SpellingDragon__tagent__examples__contract__evolution_governance.md](github_com__SpellingDragon__tagent__examples__contract__evolution_governance.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/evolution_meditation` | [github_com__SpellingDragon__tagent__examples__contract__evolution_meditation.md](github_com__SpellingDragon__tagent__examples__contract__evolution_meditation.md) |
-| `github.com/SpellingDragon/tagent/examples/contract/evolution_refine` | [github_com__SpellingDragon__tagent__examples__contract__evolution_refine.md](github_com__SpellingDragon__tagent__examples__contract__evolution_refine.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/memory` | [github_com__SpellingDragon__tagent__examples__contract__memory.md](github_com__SpellingDragon__tagent__examples__contract__memory.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/memory_ledger` | [github_com__SpellingDragon__tagent__examples__contract__memory_ledger.md](github_com__SpellingDragon__tagent__examples__contract__memory_ledger.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/memory_query` | [github_com__SpellingDragon__tagent__examples__contract__memory_query.md](github_com__SpellingDragon__tagent__examples__contract__memory_query.md) |
@@ -39,11 +36,9 @@
 | `github.com/SpellingDragon/tagent/examples/contract/tool_exec` | [github_com__SpellingDragon__tagent__examples__contract__tool_exec.md](github_com__SpellingDragon__tagent__examples__contract__tool_exec.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/tool_mcp` | [github_com__SpellingDragon__tagent__examples__contract__tool_mcp.md](github_com__SpellingDragon__tagent__examples__contract__tool_mcp.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/tool_recall` | [github_com__SpellingDragon__tagent__examples__contract__tool_recall.md](github_com__SpellingDragon__tagent__examples__contract__tool_recall.md) |
-| `github.com/SpellingDragon/tagent/examples/contract/tool_remote` | [github_com__SpellingDragon__tagent__examples__contract__tool_remote.md](github_com__SpellingDragon__tagent__examples__contract__tool_remote.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/tool_spec` | [github_com__SpellingDragon__tagent__examples__contract__tool_spec.md](github_com__SpellingDragon__tagent__examples__contract__tool_spec.md) |
 | `github.com/SpellingDragon/tagent/examples/contract/tool_subagent` | [github_com__SpellingDragon__tagent__examples__contract__tool_subagent.md](github_com__SpellingDragon__tagent__examples__contract__tool_subagent.md) |
 | `github.com/SpellingDragon/tagent/internal/bench` | [github_com__SpellingDragon__tagent__internal__bench.md](github_com__SpellingDragon__tagent__internal__bench.md) |
-| `github.com/SpellingDragon/tagent/internal/prototype` | [github_com__SpellingDragon__tagent__internal__prototype.md](github_com__SpellingDragon__tagent__internal__prototype.md) |
 | `github.com/SpellingDragon/tagent/memory` | [github_com__SpellingDragon__tagent__memory.md](github_com__SpellingDragon__tagent__memory.md) |
 | `github.com/SpellingDragon/tagent/memory/embedder` | [github_com__SpellingDragon__tagent__memory__embedder.md](github_com__SpellingDragon__tagent__memory__embedder.md) |
 | `github.com/SpellingDragon/tagent/memory/ledger` | [github_com__SpellingDragon__tagent__memory__ledger.md](github_com__SpellingDragon__tagent__memory__ledger.md) |
@@ -74,9 +69,8 @@
 | `github.com/SpellingDragon/tagent/tool/knowledge` | [github_com__SpellingDragon__tagent__tool__knowledge.md](github_com__SpellingDragon__tagent__tool__knowledge.md) |
 | `github.com/SpellingDragon/tagent/tool/mcp` | [github_com__SpellingDragon__tagent__tool__mcp.md](github_com__SpellingDragon__tagent__tool__mcp.md) |
 | `github.com/SpellingDragon/tagent/tool/recall` | [github_com__SpellingDragon__tagent__tool__recall.md](github_com__SpellingDragon__tagent__tool__recall.md) |
-| `github.com/SpellingDragon/tagent/tool/remote` | [github_com__SpellingDragon__tagent__tool__remote.md](github_com__SpellingDragon__tagent__tool__remote.md) |
 | `github.com/SpellingDragon/tagent/tool/spec` | [github_com__SpellingDragon__tagent__tool__spec.md](github_com__SpellingDragon__tagent__tool__spec.md) |
 | `github.com/SpellingDragon/tagent/tool/subagent` | [github_com__SpellingDragon__tagent__tool__subagent.md](github_com__SpellingDragon__tagent__tool__subagent.md) |
 | `wechat-bot` | [wechat-bot.md](wechat-bot.md) |
 
-包总数：74。文档覆盖由 scripts/comment_policy 单点判定。
+包总数：68。文档覆盖由 scripts/comment_policy 单点判定。

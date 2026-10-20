@@ -18,8 +18,10 @@ type passingCompress struct {
 // Name reports the stable name of the element.
 func (passingCompress) Name() string { return "passing-compress" }
 
-// Phase reports the one phase the element serves.
-func (passingCompress) Phase() plugin.Phase { return plugin.PhaseCompressTrigger }
+// Port reports the fact->compression port the element serves.
+func (passingCompress) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+}
 
 // TriggerCompress answers the request it was handed without an error, so the pass carries
 // the request forward into the compression.
@@ -38,8 +40,10 @@ type refusingCompress struct {
 // Name reports the stable name of the element.
 func (refusingCompress) Name() string { return "refusing-compress" }
 
-// Phase reports the one phase the element serves.
-func (refusingCompress) Phase() plugin.Phase { return plugin.PhaseCompressTrigger }
+// Port reports the fact->compression port the element serves.
+func (refusingCompress) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+}
 
 // TriggerCompress answers the refusal it was built with, which refuses the whole pass.
 func (p refusingCompress) TriggerCompress(_ context.Context, request event.CompressRequest) error {
@@ -48,9 +52,9 @@ func (p refusingCompress) TriggerCompress(_ context.Context, request event.Compr
 }
 
 var (
-	_ plugin.Plugin          = passingCompress{}
+	_ plugin.Instance        = passingCompress{}
 	_ plugin.CompressTrigger = passingCompress{}
-	_ plugin.Plugin          = refusingCompress{}
+	_ plugin.Instance        = refusingCompress{}
 	_ plugin.CompressTrigger = refusingCompress{}
 )
 
@@ -65,7 +69,7 @@ func ExampleCompressTrigger() {
 	refusal := errors.New("compress-trigger: the compression surface is at capacity")
 
 	var refusedSeen, laterSeen []event.EventID
-	refusing, err := plugin.NewPipeline([]plugin.Plugin{
+	refusing, err := plugin.NewFlow([]plugin.Instance{
 		refusingCompress{started: &refusedSeen, refusal: refusal},
 		passingCompress{started: &laterSeen},
 	})
@@ -81,7 +85,7 @@ func ExampleCompressTrigger() {
 	}
 
 	var passedSeen []event.EventID
-	passing, err := plugin.NewPipeline([]plugin.Plugin{passingCompress{started: &passedSeen}})
+	passing, err := plugin.NewFlow([]plugin.Instance{passingCompress{started: &passedSeen}})
 	if err != nil {
 		return
 	}

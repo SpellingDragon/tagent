@@ -3,12 +3,36 @@ package config
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// decodeConfigFile reads, decodes and normalizes one declaration source through
+// the package's decoding pipeline: the same sequence a caller performs, without
+// a file-door entry of its own.
+func decodeConfigFile(ctx context.Context, path string) (*Declaration, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: %s: %w", path, err)
+	}
+	root, err := decodeSource(path, data)
+	if err != nil {
+		return nil, err
+	}
+	d, err := decodeDeclaration(path, root)
+	if err != nil {
+		return nil, err
+	}
+	applyDefaults(d)
+	return d, nil
+}
 
 // TestStrictDecodeRefusesEveryUndeclaredShape pins the startup gate: every shape the declaration surface does not name is refused before defaults run.
 // - an unknown root key is refused by field path and source line
@@ -260,25 +284,25 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfigSource(t, tc.file, tc.body)
-			decl, err := Load(context.Background(), path)
+			decl, err := decodeConfigFile(context.Background(), path)
 			if err == nil {
-				t.Fatalf("Load(%q) = %+v, want a refusal", tc.body, decl)
+				t.Fatalf("decodeConfigFile(%q) = %+v, want a refusal", tc.body, decl)
 			}
 			if decl != nil {
-				t.Fatalf("Load(%q) returned a declaration beside the refusal: %+v", tc.body, decl)
+				t.Fatalf("decodeConfigFile(%q) returned a declaration beside the refusal: %+v", tc.body, decl)
 			}
 			var refused *decodeError
 			if !errors.As(err, &refused) {
-				t.Fatalf("Load(%q) error = %T (%v), want *decodeError", tc.body, err, err)
+				t.Fatalf("decodeConfigFile(%q) error = %T (%v), want *decodeError", tc.body, err, err)
 			}
 			if refused.field != tc.field {
-				t.Fatalf("Load(%q) field = %q, want %q (error: %v)", tc.body, refused.field, tc.field, err)
+				t.Fatalf("decodeConfigFile(%q) field = %q, want %q (error: %v)", tc.body, refused.field, tc.field, err)
 			}
 			if !strings.Contains(refused.reason, tc.reason) {
-				t.Fatalf("Load(%q) reason = %q, want it to name %q", tc.body, refused.reason, tc.reason)
+				t.Fatalf("decodeConfigFile(%q) reason = %q, want it to name %q", tc.body, refused.reason, tc.reason)
 			}
 			if tc.wantLine != 0 && refused.line != tc.wantLine {
-				t.Fatalf("Load(%q) line = %d, want %d (error: %v)", tc.body, refused.line, tc.wantLine, err)
+				t.Fatalf("decodeConfigFile(%q) line = %d, want %d (error: %v)", tc.body, refused.line, tc.wantLine, err)
 			}
 			if !strings.Contains(err.Error(), filepath.Base(path)) {
 				t.Fatalf("refusal %q does not name the source %q", err, filepath.Base(path))
@@ -297,9 +321,9 @@ func TestStrictDecodeReadsTheWatchdogBudget(t *testing.T) {
 		"      budget_seconds: 3300\n      timeout_seconds: 120\n      prompt: deliver\n" +
 		"  - id: helper\n" +
 		"  - id: bounded\n    final_round:\n      max_rounds: 3\n"
-	decl, err := Load(context.Background(), writeConfigSource(t, "org.yaml", body))
+	decl, err := decodeConfigFile(context.Background(), writeConfigSource(t, "org.yaml", body))
 	if err != nil {
-		t.Fatalf("Load over a declared watchdog budget = %v, want the budget read", err)
+		t.Fatalf("decodeConfigFile over a declared watchdog budget = %v, want the budget read", err)
 	}
 	want := FinalRoundSpec{MaxRounds: 24, BudgetSeconds: 3300, TimeoutSeconds: 120, Prompt: "deliver"}
 	if got := decl.Agents[0].FinalRound; got != want {
@@ -355,9 +379,9 @@ agents:
         fake_dead_duration: 5s
   - id: plain
 `
-	decl, err := Load(context.Background(), writeConfigSource(t, "org.yaml", body))
+	decl, err := decodeConfigFile(context.Background(), writeConfigSource(t, "org.yaml", body))
 	if err != nil {
-		t.Fatalf("Load over the four declared sections = %v, want the sections read", err)
+		t.Fatalf("decodeConfigFile over the four declared sections = %v, want the sections read", err)
 	}
 	agent := decl.Agents[0]
 	if agent.Memory.Type != "localfile" || agent.Memory.Path != "/var/lib/tagent/memory" || len(agent.Memory.ReadNamespaces) != 2 {
@@ -396,9 +420,9 @@ agents:
 		t.Fatalf("undeclared sections = %+v/%+v/%+v/%+v, want the zero section of each kind",
 			plain.Memory, plain.Meditation, plain.File, plain.Exec)
 	}
-	partial, err := Load(context.Background(), writeConfigSource(t, "partial.yaml", "entry: main\nagents:\n  - id: main\n    memory:\n      type: localfile\n"))
+	partial, err := decodeConfigFile(context.Background(), writeConfigSource(t, "partial.yaml", "entry: main\nagents:\n  - id: main\n    memory:\n      type: localfile\n"))
 	if err != nil {
-		t.Fatalf("Load over a partial memory section = %v, want the section read", err)
+		t.Fatalf("decodeConfigFile over a partial memory section = %v, want the section read", err)
 	}
 	if got := partial.Agents[0].Memory; got.Type != "localfile" || got.Path != "" || len(got.ReadNamespaces) != 0 {
 		t.Fatalf("partial memory = %+v, want only the entry the declaration names", got)
@@ -463,22 +487,22 @@ func TestStrictDecodeRefusesUndeclaredSectionKeys(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfigSource(t, "org.yaml", tc.body)
-			_, err := Load(context.Background(), path)
+			_, err := decodeConfigFile(context.Background(), path)
 			if err == nil {
-				t.Fatalf("Load(%q) = nil error, want a refusal", tc.body)
+				t.Fatalf("decodeConfigFile(%q) = nil error, want a refusal", tc.body)
 			}
 			var refused *decodeError
 			if !errors.As(err, &refused) {
-				t.Fatalf("Load(%q) error = %T (%v), want *decodeError", tc.body, err, err)
+				t.Fatalf("decodeConfigFile(%q) error = %T (%v), want *decodeError", tc.body, err, err)
 			}
 			if refused.field != tc.field {
-				t.Fatalf("Load(%q) field = %q, want %q (error: %v)", tc.body, refused.field, tc.field, err)
+				t.Fatalf("decodeConfigFile(%q) field = %q, want %q (error: %v)", tc.body, refused.field, tc.field, err)
 			}
 			if !strings.Contains(refused.reason, tc.reason) {
-				t.Fatalf("Load(%q) reason = %q, want it to name %q", tc.body, refused.reason, tc.reason)
+				t.Fatalf("decodeConfigFile(%q) reason = %q, want it to name %q", tc.body, refused.reason, tc.reason)
 			}
 			if refused.line != tc.wantLine {
-				t.Fatalf("Load(%q) line = %d, want %d (error: %v)", tc.body, refused.line, tc.wantLine, err)
+				t.Fatalf("decodeConfigFile(%q) line = %d, want %d (error: %v)", tc.body, refused.line, tc.wantLine, err)
 			}
 		})
 	}
@@ -501,30 +525,14 @@ func TestStrictDecodeMapsEmptyDocumentsOntoTheZeroDeclaration(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			decl, err := Load(context.Background(), writeConfigSource(t, tc.file, tc.body))
+			decl, err := decodeConfigFile(context.Background(), writeConfigSource(t, tc.file, tc.body))
 			if err != nil {
-				t.Fatalf("Load(%q) = %v, want the zero declaration", tc.body, err)
+				t.Fatalf("decodeConfigFile(%q) = %v, want the zero declaration", tc.body, err)
 			}
 			if decl.Entry != "" || decl.Baseline != "" || decl.Agents != nil || decl.Refs != nil || decl.Raw != nil {
-				t.Fatalf("Load(%q) = %+v, want the zero declaration with no raw document", tc.body, decl)
+				t.Fatalf("decodeConfigFile(%q) = %+v, want the zero declaration with no raw document", tc.body, decl)
 			}
 		})
-	}
-}
-
-// TestLoadRefusesACancelledContextBeforeReading pins that a cancelled caller stops the load at its door.
-// - a cancelled context returns its own error and no declaration
-// 契约: docs/wiki/platform/platform-subsystems.md#config-surface
-func TestLoadRefusesACancelledContextBeforeReading(t *testing.T) {
-	path := writeConfigSource(t, "org.yaml", "entry: main\n")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	decl, err := Load(ctx, path)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Load over a cancelled context = %v, want context.Canceled", err)
-	}
-	if decl != nil {
-		t.Fatalf("Load over a cancelled context returned %+v, want no declaration", decl)
 	}
 }
 

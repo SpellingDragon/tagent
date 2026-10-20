@@ -94,7 +94,7 @@
 
 不做全文件点号扫描是有意的：`scheduler.type=local` 这类配置覆盖语法、文档行文里的包名都会被误伤。门的强度来自位置精确，不来自范围贪大。扫描面是 git 索引里的 `*.sh`/`*.yaml`/`*.yml`，排除 `openspec/`（规格会原文引用已退役路径作为记录）与 `archive/`、`_tmp_report`。
 
-本门的出生背景：AReaL 在线训练桥退役时发现，`train_rl_config.yaml` 里的 `workflow: train.rl.tagent_adapter.*` 指向 AReaL 改名前的包布局——这类"看着对"的死配置，此前没有任何机器门能看见。
+本门拦的对象：`train_rl_config.yaml` 里的 `workflow: train.rl.tagent_adapter.*` 指向 AReaL 改名前的包布局，这类"看着对"的死配置没有任何机器门能看见。
 
 <a id="test-file-split"></a>
 ## 七、测试文件的域锚切分
@@ -134,7 +134,7 @@
 
 镜像比对复用 §七 的**同一份**定义（精确 `<stem>.go`，宽容表冻结为 `_real` 一个后缀），不另立第二份变体表：两张表迟早会给出两个答案。
 
-三处豁免各有明确边界，不是宽容而是对象不存在：`examples/contract/` 的文件名是它实现的接口（`<Iface>_example.go`，由 `check_concept_budget.py` 强制），`internal/prototype/` 是历史参照原型，`tests/integration/` 是驱动运行时的夹具包——这三处都没有可供镜像的生产家族。
+两处豁免各有明确边界，不是宽容而是对象不存在：`examples/contract/` 的文件名是它实现的接口（`<Iface>_example.go`，由 `check_concept_budget.py` 强制），`tests/integration/` 是驱动运行时的夹具包——这两处都没有可供镜像的生产家族。
 
 判定逻辑是对文件列表的**纯函数**，单测因此不需要仓库；live 命令只是把目录遍历的结果喂进去。自测 `scripts/test_check_package_layout.sh` 造五个 fixture（干净／变体名／撞名／大写／孤儿测试）跑**真命令**，见证是进程退出码：只打印规则却退出 0 的门、或变成不可达的规则，都会在那里红；干净 fixture 是正向对照，恒红的门过不了它。目录 root 不存在是**不可用输入**，退出 2 而不是 0。
 

@@ -529,7 +529,7 @@ func TestBoundedToolInvariants(t *testing.T) {
 // - an over-threshold result files one request naming who judged, why and the original it judged
 // - the preview and the kept original answer the same call, so the judgment waits for no consumer
 // - a result inside the bound, a nil result and a tool error file nothing
-// - a repeated judgment over the same body keeps the request already on record
+// - a repeated judgment files the same request identity
 // - a filing that failed is reported beside the preview the kept original answers
 // - a tool with no filing wired judges nothing and answers as it did before
 // 契约: docs/FACT-VOCABULARY.md#families
@@ -545,9 +545,9 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 
 	t.Run("an over-threshold result files the request it judged", func(t *testing.T) {
 		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
-		requests := memory.NewCompressRequests()
+		filing := &invariantFiling{}
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: result},
-			invariantExternalizer(t, store, WithMaxTokens(2)), scope, requests)
+			invariantExternalizer(t, store, WithMaxTokens(2)), scope, filing)
 
 		got, err := bounded.Call(ctx, []byte(`{}`))
 		if err != nil {
@@ -562,14 +562,11 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 			t.Fatalf("recall of the judged original = %v, want it kept by the same call", recalled.Outcome)
 		}
 
-		pending, err := requests.Pending(ctx)
-		if err != nil {
-			t.Fatalf("read the filed requests: %v", err)
+		filed := filing.recorded()
+		if len(filed) != 1 {
+			t.Fatalf("filed requests = %+v, want exactly the one judgment", filed)
 		}
-		if len(pending) != 1 {
-			t.Fatalf("filed requests = %+v, want exactly the one judgment", pending)
-		}
-		request := pending[0]
+		request := filed[0]
 		if request.Producer != CompressProducerToolOverflow || request.Reason != CompressReasonToolOverflow {
 			t.Fatalf("request = %+v, want the tool-overflow producer and reason", request)
 		}
@@ -579,37 +576,42 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 		if request.FactType() != event.CompressRequestType || request.FactKey() != string(request.ID) {
 			t.Fatalf("request fact = (%q, %q), want its identity read as %q", request.FactKey(), request.FactType(), event.CompressRequestType)
 		}
-		if request.At.IsZero() {
-			t.Fatal("the request carries no filing moment, want the moment it was filed")
+		if request.ID == "" {
+			t.Fatal("the request carries no identity, want the one its judgment answers")
 		}
 	})
 
 	t.Run("a result inside the bound files nothing", func(t *testing.T) {
 		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
-		requests := memory.NewCompressRequests()
+		filing := &invariantFiling{}
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: "ok"},
-			invariantExternalizer(t, store, WithMaxTokens(2)), scope, requests)
+			invariantExternalizer(t, store, WithMaxTokens(2)), scope, filing)
 		if got, err := bounded.Call(ctx, nil); err != nil || got != "ok" {
 			t.Fatalf("call inside the bound = (%v, %v), want the tool's own result", got, err)
 		}
-		if pending, err := requests.Pending(ctx); err != nil || len(pending) != 0 {
-			t.Fatalf("filed requests = (%v, %v), want none inside the bound", pending, err)
+		if filed := filing.recorded(); len(filed) != 0 {
+			t.Fatalf("filed requests = %+v, want none inside the bound", filed)
 		}
 	})
 
-	t.Run("a repeated judgment keeps the request on record", func(t *testing.T) {
+	t.Run("a repeated judgment files one identity", func(t *testing.T) {
 		store := &invariantCountingStore{MemoryOriginalStore: ledger.NewMemoryOriginalStore()}
-		requests := memory.NewCompressRequests()
+		filing := &invariantFiling{}
 		bounded := invariantBoundedTool(t, invariantFakeTool{decl: declaration, result: result},
-			invariantExternalizer(t, store, WithMaxTokens(2)), scope, requests)
+			invariantExternalizer(t, store, WithMaxTokens(2)), scope, filing)
 		for round := 0; round < 3; round++ {
 			if _, err := bounded.Call(ctx, nil); err != nil {
 				t.Fatalf("call %d: %v", round, err)
 			}
 		}
-		pending, err := requests.Pending(ctx)
-		if err != nil || len(pending) != 1 {
-			t.Fatalf("filed requests after three judgments = (%v, %v), want the one on record", pending, err)
+		filed := filing.recorded()
+		if len(filed) != 3 {
+			t.Fatalf("filed requests after three judgments = %+v, want one filing per judgment", filed)
+		}
+		for _, request := range filed[1:] {
+			if request.ID != filed[0].ID {
+				t.Fatalf("request identities = (%q, %q), want one identity per body of material", filed[0].ID, request.ID)
+			}
 		}
 	})
 
@@ -649,15 +651,36 @@ func TestCompressionRequestIsAFact(t *testing.T) {
 	})
 }
 
+// invariantFiling records the compress requests one bounded tool filed, in call order.
+type invariantFiling struct {
+	mu       sync.Mutex
+	requests []event.CompressRequest
+}
+
+// file records one judgment as the bounded tool filed it and answers it unchanged.
+func (f *invariantFiling) file(_ context.Context, request event.CompressRequest) (event.CompressRequest, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, request)
+	return request, nil
+}
+
+// recorded lists the requests the bounded tool filed, in call order.
+func (f *invariantFiling) recorded() []event.CompressRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]event.CompressRequest(nil), f.requests...)
+}
+
 // invariantBoundedTool assembles the bounded tool over one judgment filing: the
-// request log when a log is named, or a filing that always fails with the given
+// recorder when one is named, or a filing that always fails with the given
 // cause.
 func invariantBoundedTool(t *testing.T, inner trpctool.CallableTool, externalizer *ResultExternalizer, scope ResultScope, filing any) *BoundedTool {
 	t.Helper()
 	var file memory.CompressRequestFiling
 	switch named := filing.(type) {
-	case *memory.CompressRequests:
-		file = named.Produce
+	case *invariantFiling:
+		file = named.file
 	case error:
 		file = func(context.Context, event.CompressRequest) (event.CompressRequest, error) {
 			return event.CompressRequest{}, named

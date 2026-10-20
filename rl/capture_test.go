@@ -206,6 +206,10 @@ func mentions(reasons []string, text string) bool {
 	return false
 }
 
+// exportAt is the fixed record time the capture invariants stamp their records and
+// writer sync evidence with.
+var exportAt = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
 // sinkAttempt is one attempt record the sink admits or refuses.
 func sinkAttempt(id event.AttemptID) AttemptRecord {
 	return AttemptRecord{

@@ -7,7 +7,7 @@
 <a id="module-position"></a>
 ## 一、模块定位
 
-`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**，骨架源于 [internal/prototype/agent.go](../../../internal/prototype/agent.go)（可替换函数字段构成的框架骨架）。
+`tagent/agent` 是 tagent 项目的**事件驱动执行引擎**，骨架源于"可替换函数字段构成"的原型形态（下表左侧一列为原型构件）。
 
 | 原型 | 生产 | 说明 |
 |------|------|------|
@@ -163,7 +163,7 @@ InjectMessage / 外部事件 → `EventBus.Publish(external_input)` → runEvent
 <a id="framework-boundary"></a>
 ## 五、tagent 与 trpc-agent-go 的边界
 
-跨这条边界的数据流是**严格单向**的：送给模型的最终消息列表只由投影装配（`[system] + render(projection)`，任务面板由后续回调注入），绝不从框架的 message 尾部读回任何东西。每一个事件（用户输入、工具调用、工具结果、终局、总线注入）都经事件插件管线或 `persistBusEvent` 进入投影，因此"模型可见"与"已被投影"是同一件事——曾经存在过的"可见但未投影"状态就是顺序缺陷的根源。
+跨这条边界的数据流是**严格单向**的：送给模型的最终消息列表只由投影装配（`[system] + render(projection)`，任务面板由后续回调注入），绝不从框架的 message 尾部读回任何东西。每一个事件（用户输入、工具调用、工具结果、终局、总线注入）都经事件插件管线或 `persistBusEvent` 进入投影，因此"模型可见"与"已被投影"是同一件事——任何"可见但未投影"的状态都是顺序缺陷的根源。
 
 **tagent 独有**：`EventBus` + `runEventLoop`（持久循环 + 异步注入）；`SessionProjection` + `Compactor`（有界投影与清理）；`SmartCompressor`（两阶段压缩）；`MemoryStore` + `MemoryPlugin`（结构化事件存储 + 因果链）；`MeditationManager`（触发＝新颖性门 ∧ 节奏门 ∧ pending 防重入，见 §2.14）；`DeliverToAgent`（根包 `delivery.go`：进程内跨 agent 投递缝，白名单+盲投+未知目标+未运行四道具名拒绝，收口在目标既有的 `InjectMessageWithSource`）；`TrajectoryRecorder`（LLM 调用轨迹记录）。
 

@@ -6,7 +6,6 @@
   "description": "runtime-rebuild 的结构覆盖政策（人工制定，不从当前残件的 imports 自动学习）。只登记计划允许的一方差包与允许的包间边；未登记的包、未允许的边一律失败并等人工批准，不用通配豁免。",
   "scope": {
     "exclude_dir_names": [
-      "prototype",
       "scripts",
       "tests",
       "examples",
@@ -21,7 +20,7 @@
       ".tagent-workspace",
       ".pre-isolation-backup"
     ],
-    "reason": "prototype（现居 internal/prototype，按目录名排除）为历史参照实现、scripts 为仓库工程脚本（含 codetools/comment_policy 的 Go）、tests 为集成测试、examples 为微信独立 module、vendor/node_modules 为第三方；这些都不是根 module 的一方产品包，按域内各自门禁处理。"
+    "reason": "scripts 为仓库工程脚本（含 codetools/comment_policy 的 Go）、tests 为集成测试、examples 为微信独立 module、vendor/node_modules 为第三方；这些都不是根 module 的一方产品包，按域内各自门禁处理。"
   },
   "packages": [
     {
@@ -157,12 +156,6 @@
       "reason": "MCP 连接/发现/固定网关适配（工具适配位于 tool/ 子树，与既有 tool/mcp 路径一致），不重写协议。"
     },
     {
-      "pattern": "tool/remote",
-      "role": "adapter",
-      "required": true,
-      "reason": "A2A 与内部显式投递适配（工具适配位于 tool/ 子树）。"
-    },
-    {
       "pattern": "memory/localfile",
       "role": "storage-tier",
       "required": false,
@@ -203,18 +196,6 @@
       "role": "self-improve",
       "required": true,
       "reason": "冥想＝自进化引擎的凝缩机制：卡片词汇、绑定判定策略与消费接线（package-restructure 01.1）。消费 memory 的保留/压缩请求事实与 replay 的 folding 载荷；反思回路与旁路冥想的观察、摘要与水位同住此包（package-zero-debt Z1）。"
-    },
-    {
-      "pattern": "evolution/refine",
-      "role": "self-improve",
-      "required": true,
-      "reason": "refine＝改进登记通道：改进台账、受控路径与 git 原生登记/回滚（package-zero-debt Z1）。消费根 evolution 的评估裁决类型，不反向依赖组合根或执行器。"
-    },
-    {
-      "pattern": "evolution/consolidation",
-      "role": "self-improve",
-      "required": true,
-      "reason": "consolidation＝记忆侧巩固通道的事件词汇：巩固唤醒的触发源戳（package-zero-debt Z1）。纯词汇叶子，不依赖任何一方包。"
     },
     {
       "pattern": "internal/bench",
@@ -268,7 +249,6 @@
         "tool/exec",
         "tool/file",
         "tool/mcp",
-        "tool/remote",
         "memory/localfile",
         "memory/rustviking",
         "api/event",
@@ -276,8 +256,6 @@
         "memory/ledger",
         "memory/replay",
         "evolution/meditation",
-        "evolution/refine",
-        "evolution/consolidation",
         "internal/bench",
         "tool/subagent",
         "tool/recall",
@@ -290,7 +268,7 @@
         "cli"
       ],
       "forbidden": [],
-      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；evolution/refine、evolution/consolidation 随 package-zero-debt Z1 显式登记；memory/replica 随终审显式登记；governance/telemetry/task/approval 随 package-zero-debt 终审反转显式登记；cli 随终审第五弹显式登记）。"
+      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；memory/replica 随终审显式登记；governance/telemetry/task/approval 随 package-zero-debt 终审反转显式登记；cli 随终审第五弹显式登记）。"
     },
     {
       "from": "cli",
@@ -554,7 +532,6 @@
         "memory",
         "memory/ledger",
         "memory/replay",
-        "evolution/consolidation",
         "api/document"
       ],
       "forbidden": [
@@ -564,34 +541,7 @@
         "api/plugin",
         "rl"
       ],
-      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读 consolidation 的巩固唤醒词汇；不依赖执行器/状态容器/训练。"
-    },
-    {
-      "from": "evolution/refine",
-      "allow": [
-        "evolution"
-      ],
-      "forbidden": [
-        "runtime/agent",
-        "runtime/state",
-        "runtime/task",
-        "api/plugin",
-        "rl",
-        "memory"
-      ],
-      "reason": "登记通道只读根 evolution 的评估裁决读面（GateReport/EvidenceWindow/PosteriorReport）并记录自己的改进台账；不依赖执行器、状态容器、训练与存储。"
-    },
-    {
-      "from": "evolution/consolidation",
-      "allow": [],
-      "forbidden": [
-        "evolution",
-        "evolution/meditation",
-        "evolution/refine",
-        "memory",
-        "api/event"
-      ],
-      "reason": "巩固通道词汇是纯叶子：一个触发源戳常量，不 import 任何其他一方包。"
+      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读巩固唤醒的触发源戳；不依赖执行器/状态容器/训练。"
     },
     {
       "from": "api/plugin",
@@ -742,17 +692,6 @@
         "runtime/state"
       ],
       "reason": "MCP 适配只做连接/发现/网关与事件，不重写协议。"
-    },
-    {
-      "from": "tool/remote",
-      "allow": [
-        "api/event"
-      ],
-      "forbidden": [
-        "runtime/agent",
-        "runtime/state"
-      ],
-      "reason": "远端投递适配经显式目标与事件关联，不藏调度。"
     },
     {
       "from": "memory/search",

@@ -15,8 +15,10 @@ type argumentDefaults struct{}
 // Name reports the stable name of the element.
 func (argumentDefaults) Name() string { return "argument-defaults" }
 
-// Phase reports the one phase the element serves.
-func (argumentDefaults) Phase() plugin.Phase { return plugin.PhaseCallTransform }
+// Port reports the call->call port the element serves.
+func (argumentDefaults) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+}
 
 // TransformCall fills in the argument a call left out, keeping the ID the call was
 // resolved under.
@@ -28,7 +30,7 @@ func (argumentDefaults) TransformCall(_ context.Context, call *trpcmodel.ToolCal
 }
 
 var (
-	_ plugin.Plugin        = argumentDefaults{}
+	_ plugin.Instance      = argumentDefaults{}
 	_ plugin.TransformCall = argumentDefaults{}
 )
 
@@ -38,7 +40,7 @@ var (
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func ExampleTransformCall() {
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{argumentDefaults{}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{argumentDefaults{}})
 	if err != nil {
 		return
 	}

@@ -39,7 +39,7 @@ func TestPluginPhaseOrdering(t *testing.T) {
 		}}
 		log := &phaseLog{}
 		var sawTransformName, sawTransformArgs, sawRiskName, sawRiskArgs string
-		renamer := &phaseFace{name: "renamer", phase: plugin.PhaseCallTransform, log: log,
+		renamer := &phaseFace{name: "renamer", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}, log: log,
 			transform: func(call *model.ToolCall) error {
 				sawTransformName = call.Function.Name
 				sawTransformArgs = string(call.Function.Arguments)
@@ -47,7 +47,7 @@ func TestPluginPhaseOrdering(t *testing.T) {
 				call.Function.Arguments = []byte(`{"x":2}`)
 				return nil
 			}}
-		grader := &phaseFace{name: "grader", phase: plugin.PhaseRiskPolicy, log: log,
+		grader := &phaseFace{name: "grader", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}, log: log,
 			risk: func(call *model.ToolCall) plugin.RiskLevel {
 				sawRiskName = call.Function.Name
 				sawRiskArgs = string(call.Function.Arguments)
@@ -55,7 +55,7 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			}}
 		raw := &phaseTool{name: "echo-raw", output: "raw-out", log: log}
 		cooked := &phaseTool{name: "echo-final", output: "final-out", log: log}
-		rig := newPhaseRig(t, provider, []*phaseTool{raw, cooked}, []plugin.Plugin{renamer, grader}, nil, log)
+		rig := newPhaseRig(t, provider, []*phaseTool{raw, cooked}, []plugin.Instance{renamer, grader}, nil, log)
 
 		turn := rig.drive(t, ctx, "run")
 		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
@@ -125,13 +125,13 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			return convFinalTurn("settled")
 		}}
 		log := &phaseLog{}
-		observer := &phaseFace{name: "observer", phase: plugin.PhasePostCommitObserve, log: log}
-		presenter := &phaseFace{name: "presenter", phase: plugin.PhaseFinalPresentation, log: log}
+		observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log}
+		presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
 		cooked := &phaseTool{name: "echo-final", output: "never", log: log}
 		deny := task.Approver(func(ctx context.Context, tool string, jsonArgs []byte) (task.Ruling, error) {
 			return task.Ruling{Kind: task.RulingDeny, Reason: "risk rule"}, nil
 		})
-		rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Plugin{observer, presenter}, deny, log)
+		rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, deny, log)
 
 		turn := rig.drive(t, ctx, "run")
 		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
@@ -186,15 +186,15 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			var rig *phaseRig
 			var observed event.EventID
 			var observedCommitted bool
-			observer := &phaseFace{name: "observer", phase: plugin.PhasePostCommitObserve, log: log,
+			observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log,
 				observe: func(fact event.EventID) error {
 					observed = fact
 					_, observedCommitted = rig.facts.resolve(fact)
 					return nil
 				}}
-			presenter := &phaseFace{name: "presenter", phase: plugin.PhaseFinalPresentation, log: log}
+			presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
 			cooked := &phaseTool{name: "echo-final", output: "final-out", log: log}
-			rig = newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Plugin{observer, presenter}, nil, log)
+			rig = newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, nil, log)
 
 			turn := rig.drive(t, ctx, "run")
 			if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
@@ -220,13 +220,13 @@ func TestPluginPhaseOrdering(t *testing.T) {
 				return convFinalTurn("settled")
 			}}
 			log := &phaseLog{}
-			observer := &phaseFace{name: "observer", phase: plugin.PhasePostCommitObserve, log: log}
-			presenter := &phaseFace{name: "presenter", phase: plugin.PhaseFinalPresentation, log: log}
+			observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log}
+			presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
 			cooked := &phaseTool{name: "echo-final", output: "never", log: log}
 			deny := task.Approver(func(ctx context.Context, tool string, jsonArgs []byte) (task.Ruling, error) {
 				return task.Ruling{Kind: task.RulingDeny, Reason: "risk rule"}, nil
 			})
-			rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Plugin{observer, presenter}, deny, log)
+			rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, deny, log)
 
 			turn := rig.drive(t, ctx, "run")
 			if turn.Terminal != model.KindCompleted {
@@ -245,10 +245,10 @@ func TestPluginPhaseOrdering(t *testing.T) {
 				return convFinalTurn("settled")
 			}}
 			log := &phaseLog{}
-			observer := &phaseFace{name: "observer", phase: plugin.PhasePostCommitObserve, log: log}
-			presenter := &phaseFace{name: "presenter", phase: plugin.PhaseFinalPresentation, log: log}
+			observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log}
+			presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
 			cooked := &phaseTool{name: "echo-final", output: "final-out", log: log}
-			rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Plugin{observer, presenter}, nil, log)
+			rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, nil, log)
 			rig.failRecord(errors.New("the recorder is down"))
 
 			turn := rig.drive(t, ctx, "run")
@@ -277,16 +277,16 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			return convFinalTurn("settled")
 		}}
 		log := &phaseLog{}
-		bad := &phaseFace{name: "bad-observer", phase: plugin.PhasePostCommitObserve, log: log,
+		bad := &phaseFace{name: "bad-observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log,
 			observe: func(event.EventID) error {
 				return errors.New("the observer is down")
 			}}
-		presenter := &phaseFace{name: "presenter", phase: plugin.PhaseFinalPresentation, log: log,
+		presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log,
 			present: func(fact event.EventID) (string, bool) {
 				return "view:" + string(fact), false
 			}}
 		cooked := &phaseTool{name: "echo-final", output: "kept", log: log}
-		rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Plugin{bad, presenter}, nil, log)
+		rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{bad, presenter}, nil, log)
 
 		turn := rig.drive(t, ctx, "run")
 		if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
@@ -357,7 +357,7 @@ type approvalSeen struct {
 // newPhaseRig assembles the real loop and task layer around one scripted model
 // and its tools, with the named plugins published on the borrowed binding and
 // every phase entry written into the shared log.
-func newPhaseRig(t *testing.T, provider *convModel, tools []*phaseTool, faces []plugin.Plugin, approve task.Approver, log *phaseLog) *phaseRig {
+func newPhaseRig(t *testing.T, provider *convModel, tools []*phaseTool, faces []plugin.Instance, approve task.Approver, log *phaseLog) *phaseRig {
 	t.Helper()
 	rig := &phaseRig{
 		admission:    task.NewMemoryAdmission(),
@@ -556,13 +556,13 @@ func (l *phaseLog) indexOf(entry string) int {
 	return -1
 }
 
-// phaseFace is one test plugin of the pipeline: a named element serving one
-// phase, whose transform, risk, observe and present closures the sub-case arms
+// phaseFace is one test instance of the pipeline: a named element serving one
+// port, whose transform, risk, observe and present closures the sub-case arms
 // and whose every entry is written into the shared phase log.
 type phaseFace struct {
-	name  string
-	phase plugin.Phase
-	log   *phaseLog
+	name string
+	port plugin.Port
+	log  *phaseLog
 
 	transform func(call *model.ToolCall) error
 	risk      func(call *model.ToolCall) plugin.RiskLevel
@@ -570,11 +570,11 @@ type phaseFace struct {
 	present   func(fact event.EventID) (string, bool)
 }
 
-// Name returns the stable name of the test plugin.
+// Name returns the stable name of the test instance.
 func (f *phaseFace) Name() string { return f.name }
 
-// Phase returns the single phase the test plugin serves.
-func (f *phaseFace) Phase() plugin.Phase { return f.phase }
+// Port returns the single port the test instance serves.
+func (f *phaseFace) Port() plugin.Port { return f.port }
 
 // TransformCall logs the entry and runs the armed transform closure.
 func (f *phaseFace) TransformCall(_ context.Context, call *model.ToolCall) error {

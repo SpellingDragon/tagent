@@ -120,10 +120,10 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				r.rememberFixer(event.AgentID(spec.ID), fixer)
 				return state.PromptSource{Files: spec.Files}, nil
 			},
-			plugins: func(context.Context, config.AgentSpec) ([]plugin.Plugin, error) {
+			plugins: func(context.Context, config.AgentSpec) ([]plugin.Instance, error) {
 				elements := contributed.Plugins
 				if r.observer != nil {
-					elements = append(append([]plugin.Plugin(nil), contributed.Plugins...),
+					elements = append(append([]plugin.Instance(nil), contributed.Plugins...),
 						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, r.observer)})
 				}
 				return elements, nil
@@ -175,7 +175,7 @@ func (r *Run) presetTools(ctx context.Context, decl *config.Declaration, agents 
 		}
 		refs = append(refs, ref)
 	}
-	presets, err := subagent.ResolvePresets(ctx, refs, subagent.PresetOptions{Recall: r.Recall})
+	presets, err := subagent.ResolvePresets(ctx, refs, subagent.PresetOptions{Recall: r.recall})
 	if err != nil {
 		return nil, err
 	}
@@ -666,7 +666,7 @@ func NewRecallPort(embedder memory.Embedder, trace *replay.MemoryRelations) *Rec
 // Bind attaches the read faces of the assembled run.
 func (p *RecallPort) Bind(r *Run) {
 	p.mu.Lock()
-	p.searcher = r.Recall
+	p.searcher = r.recall
 	p.reads = r.RecallReads()
 	p.mu.Unlock()
 }

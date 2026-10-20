@@ -856,7 +856,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 // receipts, entering the next decision as input material rather than as a
 // second synchronous response under the same call identifier.
 // - The plugin pipeline of the borrowed generation runs its one Before pass per call before that call is admitted, and its After pass only over facts whose canonical commit already happened.
-// - The pipeline is assembled from the registration units of that generation through the two-phase thin adapter: a plugin's route word dispatches it exactly as NewFlow dispatches an instance declaring that port, so the loop and the plugin set share one dispatch and no second assembly arises here.
+// - The pipeline is assembled from the instances of that generation: every declared port dispatches its instance exactly as NewFlow dispatches it, so the loop and the plugin set share one dispatch and no second assembly arises here.
 // - The one Before pass travels on the context into the admission ruling beside the call frame, so the pre-execution ruling consumes the risk grade its risk faces rendered and never runs a second risk face of its own.
 // - The transformed final call is the one both executed and recorded; the identity it is admitted under stays the resolved CallID.
 // - The receipt is the synchronous answer of the call: the model reads the admission and the task identity it was registered under, and the settled result never answers the call again.
@@ -864,7 +864,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 // - The settled result fact is the stored event the next decision of this range reduces; a call that recorded no fact contributes none.
 // - The After pass reads only a fact whose canonical commit already happened: a failed observation is a visible gap in the returned presentation and never rolls the committed fact back, and a dropped presentation drops the presentation only. The presentation is the read-out the inspection face consumes; the loop keeps the committed fact itself.
 func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool) ([]model.Message, []model.Message, []event.EventID, error) {
-	pipeline, err := plugin.NewPipeline(decision.Binding.Plugins)
+	pipeline, err := plugin.NewFlow(decision.Binding.Plugins)
 	if err != nil {
 		return nil, nil, nil, err
 	}

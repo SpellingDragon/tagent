@@ -12,7 +12,6 @@
 //
 //   - config.go states the declaration vocabulary every host shares;
 //   - decode.go maps a decoded source tree onto it, rejecting every key the surface does not name;
-//   - load.go is the assembly entry that reads a source and applies defaults;
 //   - source.go decodes the source syntax, while defaults.go, clone.go and fingerprint.go hold the default pass, the deep copy and the content fingerprint.
 package config
 
@@ -24,7 +23,7 @@ import "time"
 // A Declaration describes an organization in terms of data only: the entry
 // agent, the declared agent graph, the references those agents use, and the
 // version baseline the declaration was loaded against. Applying defaults and
-// normalizing content is the job of Load.
+// normalizing content happens in the decode path that produces it.
 type Declaration struct {
 	// Entry is the name of the entry agent that receives application input.
 	Entry string

@@ -331,9 +331,9 @@ agents:
 
 func loadConfigDeclaration(t *testing.T, body string) *Declaration {
 	t.Helper()
-	decl, err := Load(context.Background(), writeConfigSource(t, "org.yaml", body))
+	decl, err := decodeConfigFile(context.Background(), writeConfigSource(t, "org.yaml", body))
 	if err != nil {
-		t.Fatalf("Load(%q) = %v, want a declaration", body, err)
+		t.Fatalf("decodeConfigFile(%q) = %v, want a declaration", body, err)
 	}
 	return decl
 }

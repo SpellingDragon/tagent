@@ -15,8 +15,10 @@ type brokenAudit struct{}
 // Name reports the stable name of the element.
 func (brokenAudit) Name() string { return "broken-audit" }
 
-// Phase reports the one phase the element serves.
-func (brokenAudit) Phase() plugin.Phase { return plugin.PhasePostCommitObserve }
+// Port reports the fact->observation port the element serves.
+func (brokenAudit) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+}
 
 // ObserveCommit fails on every committed fact, so the After pass records a gap.
 func (brokenAudit) ObserveCommit(_ context.Context, id event.EventID) error {
@@ -27,7 +29,7 @@ func (brokenAudit) ObserveCommit(_ context.Context, id event.EventID) error {
 }
 
 var (
-	_ plugin.Plugin             = brokenAudit{}
+	_ plugin.Instance           = brokenAudit{}
 	_ plugin.PostCommitObserver = brokenAudit{}
 )
 
@@ -38,7 +40,7 @@ var (
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func ExamplePresentation() {
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{brokenAudit{}, presentText{}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{brokenAudit{}, presentText{}})
 	if err != nil {
 		return
 	}

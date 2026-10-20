@@ -64,10 +64,10 @@ type NativeAgent struct {
 	Model model.Model
 	// Tools lists the native callable tools of the agent.
 	Tools []trpctool.CallableTool
-	// Plugins lists the plugin pipeline elements the agent's binding generation
+	// Plugins lists the plugin instances the agent's binding generation
 	// carries: the one Before pass grades and the After pass presents every call
-	// of that generation over these elements, in the declared order.
-	Plugins []plugin.Plugin
+	// of that generation over these instances, in the declared order.
+	Plugins []plugin.Instance
 }
 
 // InvokeRequest is one invocation admitted at the assembly entry: the
@@ -135,7 +135,6 @@ type Run struct {
 	delegations *agent.Delegator
 	watermark   meditation.WatermarkGate
 	projection  *query.Projection
-	explainer   *query.Explainer
 	retrieval   *retrievalSupply
 	tier        *ledger.Tier
 	observed    *memory.MemoryEventQuery
@@ -268,7 +267,6 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	}
 	inventory := query.NewInventory(runReading{run: r})
 	r.projection = query.NewProjection(inventory, projectionWindow)
-	r.explainer = query.NewExplainer(inventory, ExecLeaseExplainer(cfg.execManager))
 	r.mcpServers = mcpgw.NewServerRegistry()
 	r.mcpGateways = mcpgw.NewGateways(r.mcpServers, mcpgw.NewRegistryDiscovery())
 	r.mcpBinder = mcpgw.NewBinder(r.mcpServers)

@@ -67,7 +67,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{ruleProbe, plainProbe},
-				Plugins: []plugin.Plugin{&criticalGrader{grades: map[string]plugin.RiskLevel{
+				Plugins: []plugin.Instance{&criticalGrader{grades: map[string]plugin.RiskLevel{
 					"critical_tool":  plugin.RiskCritical,
 					"critical_plain": plugin.RiskCritical,
 				}}},
@@ -200,7 +200,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
-				Plugins: []plugin.Plugin{&criticalGrader{grades: map[string]plugin.RiskLevel{
+				Plugins: []plugin.Instance{&criticalGrader{grades: map[string]plugin.RiskLevel{
 					"danger_tool": plugin.RiskHigh,
 				}}},
 			},
@@ -312,7 +312,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
-				Plugins: []plugin.Plugin{&criticalGrader{grades: map[string]plugin.RiskLevel{
+				Plugins: []plugin.Instance{&criticalGrader{grades: map[string]plugin.RiskLevel{
 					"critical_tool": plugin.RiskCritical,
 				}}},
 			},
@@ -398,8 +398,10 @@ type criticalGrader struct {
 // Name returns the stable name of the test plugin.
 func (g *criticalGrader) Name() string { return "critical-grader" }
 
-// Phase returns the single phase the test plugin serves.
-func (g *criticalGrader) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port returns the single port the test instance serves.
+func (g *criticalGrader) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // AssessRisk grades one tool call from the table the grader carries.
 func (g *criticalGrader) AssessRisk(_ context.Context, call *model.ToolCall) plugin.RiskLevel {

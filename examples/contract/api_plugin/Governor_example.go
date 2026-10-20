@@ -13,8 +13,10 @@ type allowReads struct{}
 // Name reports the stable name of the element.
 func (allowReads) Name() string { return "allow-reads" }
 
-// Phase reports the one phase the element serves.
-func (allowReads) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port reports the call->ruling port the element serves.
+func (allowReads) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // Judge renders the ruling of one call over the one Before pass that call carries:
 // a read is allowed, every other call is recorded and runs. What triggered the call
@@ -31,7 +33,7 @@ func (allowReads) Judge(pass plugin.CallPass) (plugin.Decision, error) {
 }
 
 var (
-	_ plugin.Plugin   = allowReads{}
+	_ plugin.Instance = allowReads{}
 	_ plugin.Governor = allowReads{}
 )
 

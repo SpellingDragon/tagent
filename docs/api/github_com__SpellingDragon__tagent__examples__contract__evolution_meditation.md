@@ -9,13 +9,6 @@ function that drives it through its real caller.
 
 FUNCTIONS
 
-func ExampleCompressPhase()
-    ExampleCompressPhase drives one meditation tick through the plugin pipeline
-    that satisfies the port: the request the tick read is handed to the pipeline
-    face before the pass it drives commits its product, the face answers the
-    request as filed, and the tick retires it only after the products of its
-    compression are committed.
-
 func ExampleDigest()
     ExampleDigest renders the summary of a face that holds more facts than the
     bound renders, so the count left out travels with the body.

@@ -183,7 +183,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
   | grep NO-WHITEBOX
 ```
 
-口径与现状：生产包 = `examples/contract/*`（生成面契约样例，按设计无测试）以外的一切。计划口径登记 **14 个顶层生产包**（根包 + 13 个域包），加 4 个子包（`memory/search`、`tool/exec`、`tool/mcp`、`tool/remote`）合计 18 个生产包曾无任何白盒测试。核心三包 `state`/`task`/`agent` 先行，其余按序续补。
+口径与现状：生产包 = `examples/contract/*`（生成面契约样例，按设计无测试）以外的一切。计划口径登记 **14 个顶层生产包**（根包 + 13 个域包）加若干子包，合计 18 个生产包曾无任何白盒测试。核心三包 `state`/`task`/`agent` 先行，其余按序续补。
 
 > 实测快照（2026-10-18）：该命令列出 **16 个**生产包仍无白盒测试（根包 1 + 域包 11 + 子包 4）。核心三包 `state`/`task`/`agent` 由专门批次先行补齐，这三个包是否还在清单里随该批次逐日变化——**以复跑输出为准**；本文登记的是判定方法与欠账结构，不是一次性的计数承诺。
 
@@ -199,12 +199,12 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 | 类 | 观察点（源码） | 级别与载体 | 每次携带（有界） | 行首 |
 |---|---|---|---|---|
-| 插件相位 | `plugin.Pipeline` 的 Before/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、result、elapsed、call 或 fact 身份（After 每个 presenter 各一行，同 fact） | `tagent: plugin phase` |
+| 插件端口派发 | `plugin.Pipeline` 的 Before/InjectEnvironment/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、port、result、elapsed、call 或 fact 身份（After 每个 presenter 各一行，同 fact） | `tagent: plugin phase` |
 | 事件流（事实生产提交） | 主提交之后的 After 趟：`telemetry.LogObserver`（经 `commit-observer` 元素派发） | DEBUG 逐事实 / INFO 回合边界 | 事实类型、tool、task、call、invocation | `tagent: tool call`、`tagent: turn start`、`tagent: turn end` |
 | 事件消费 | `runtime/agent/loop.go`：`Loop.Drive` 的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
 | 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response` |
 
-- **开 DEBUG**：默认 zap 级别是 Info，相位与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
+- **开 DEBUG**：默认 zap 级别是 Info，端口派发与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
 - **generation span 归框架**（框架 semconv，Langfuse 直接读）：一次模型调用恰好一条 `chat <model>` span，由**驱动模型的那一方**开——框架 `internal/flow/llmflow` 的模型步（`itrace.StartSpan`），或开了 `openai.WithChatTelemetry(true)` 的 provider 模型直调。`gen_ai.operation.name=chat`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`/`output_tokens`（provider 报了缓存命中时再加 `gen_ai.usage.input_tokens.cached`）、失败请求的 `Error` status，都由框架侧渲染；本仓的模型响应面只写那一行 INFO，不在同一个 tracer 上再开第二条。
 - **旁路判据**：四个观察点的 logger 调用都在 `recover` 保护内（模型响应面不再调 tracer），失败只丢一条观察，不改事实、不改终态、不改投递。
 - **Langfuse 装配（进程启动时一次）**：`telemetry/langfuse.Start` 装的是 `telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故 generation span 无需为本仓库写转换代码。**span 去重（已裁）**：框架已为每次模型调用开一条同名 `chat <model>` span，本仓 `api/model/observe.go` 曾在同一个 tracer 上再开一条（没有 input/output messages），一次调用在 Langfuse 上落两条 generation；裁决为**保留框架侧**，本仓那条已删、INFO 行与 token/latency 渲染不动。两种驱动方式下都只有一条：走框架模型步（llmflow）时框架必然开，直调 provider 模型时由宿主的 `openai.WithChatTelemetry(true)` 开——直调且未开该选项的宿主没有 generation span，需要时在模型构造处打开。复跑见 `go test ./api/model/... ./tests/integration/host -run 'ModelCallObservation|ModelRequestIsOneGeneration|FourFacesObservation' -count=1`。

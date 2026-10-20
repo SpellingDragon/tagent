@@ -316,7 +316,7 @@ func (r *Run) factPipeline(agentID event.AgentID) (plugin.Pipeline, error) {
 	if !published {
 		return plugin.Pipeline{}, fmt.Errorf("tagent: no published binding of agent %s to observe through", agentID)
 	}
-	return plugin.NewPipeline(binding.Plugins)
+	return plugin.NewFlow(binding.Plugins)
 }
 
 // sink admits one notification of a settled call into the mailbox of its
@@ -446,17 +446,19 @@ func (f runFacts) CommittedFact(_ context.Context, id event.EventID) (event.Even
 // wired with.
 type observePlugin struct{ observer *telemetry.CommitObserver }
 
-// The element satisfies both registration and phase faces of the pipeline.
+// The element satisfies both registration and port faces of the pipeline.
 var (
-	_ plugin.Plugin             = observePlugin{}
+	_ plugin.Instance           = observePlugin{}
 	_ plugin.PostCommitObserver = observePlugin{}
 )
 
 // Name returns the stable plugin name recorded in every observation gap.
 func (p observePlugin) Name() string { return "commit-observer" }
 
-// Phase reports the post-commit observation phase this plugin serves.
-func (p observePlugin) Phase() plugin.Phase { return plugin.PhasePostCommitObserve }
+// Port reports the fact->observation port this instance serves.
+func (p observePlugin) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+}
 
 // ObserveCommit delegates one committed fact to the wired commit observer.
 func (p observePlugin) ObserveCommit(ctx context.Context, id event.EventID) error {

@@ -94,11 +94,6 @@ var DetailRetired = DetailState{NoticePhase: NoticePhaseConsumed}
     invocation keeps its own decision reading, so the two are never collapsed
     into one shared label.
 
-var ErrLeaseExplainerMissing = errors.New("query: no execution resource ledger is attached to this read")
-    ErrLeaseExplainerMissing reports an explain read asked to explain the
-    retention of a registered lease beside no execution resource ledger to read
-    it from. The absence is named instead of answering a retention in silence.
-
 var ErrSourceUnreadable = errors.New("query: an inventory source could not be read")
     ErrSourceUnreadable reports an inventory read whose source could not be
     read, so the dimension it feeds cannot be answered. It is the class every
@@ -139,19 +134,6 @@ type Advancer string
     Advancer names the next party that can move one blocked obligation forward:
     the executor, notification transport or storage action the projection
     identifies as the one that will advance that obligation.
-
-const AdvancerDiagnosis Advancer = "diagnosis"
-    AdvancerDiagnosis names the diagnosis escalation of a run of undecidable
-    probes as the advancement action of that run: an undecidable observation
-    raises diagnosis beside the resource and never decides a death of it.
-
-const AdvancerExecutor Advancer = "executor"
-    AdvancerExecutor names the executor running a call as the party that moves
-    its open execution obligation forward.
-
-const AdvancerExplicitStop Advancer = "explicit-stop"
-    AdvancerExplicitStop names the explicit stop handling of a retained
-    execution resource as the party that frees it beside a confirmed stop.
 
 const AdvancerNoticeTransport Advancer = "notice-transport"
     AdvancerNoticeTransport names the notification transport and its replay as
@@ -211,68 +193,6 @@ type AuthorizationScope struct {
     to read. It is carried into a filter and is never widened by one: an empty
     scope reads nothing, and a dimension outside the scope is excluded rather
     than rewritten.
-
-type Blocker struct {
-	// Ref names the object the blocker sits on: the task whose obligation
-	// cannot proceed, or the lease whose resource is retained.
-	Ref ObjectRef
-	// Notice names the blocked notification; its zero value marks a blocker
-	// that sits on a retained resource rather than on a notification.
-	Notice task.Notice
-	// Reason is the readable reason the blocker cannot proceed, kept exactly as
-	// its owner records it.
-	Reason string
-	// Advancer names the next party that advances this blocker: the executor,
-	// notification transport, diagnosis escalation or explicit stop handling it
-	// waits on.
-	Advancer Advancer
-	// State is how far the advance of this blocker has got.
-	State AdvanceState
-	// Retention carries the retention facts when the blocker sits on a retained
-	// execution resource; it stays zero beside a blocked notification.
-	Retention LeaseRetention
-}
-    Blocker is one named runtime blocker: an obligation that cannot proceed,
-    or an execution resource retained under its key. Each blocker carries the
-    identity it is recorded under, the readable reason beside it and the party
-    that advances it, so one blocker is explained by name rather than reported
-    as a nameless stall.
-
-type BlockerCounts struct {
-	// Blockers counts the blockers listed in the report.
-	Blockers int
-	// Open counts the obligations still open listed in the report.
-	Open int
-	// Leases counts the lease retentions listed in the report.
-	Leases int
-}
-    BlockerCounts is the derived reading of one report: the numbers counted off
-    the very entries the report lists beside them. The counts are taken after
-    the authorization filter, so an object the caller may not read is excluded
-    before anything is counted.
-
-type BlockerReport struct {
-	// Blockers lists every blocker of the filtered view in the stable identity
-	// order of the objects they sit on.
-	Blockers []Blocker
-	// Open lists every obligation a task manager still holds for the filtered
-	// view, each beside its own advancer.
-	Open []OpenObligation
-	// Leases explains every lease registration of the filtered view beside the
-	// retention facts of its resource; a registration whose key the ledger
-	// holds nothing under reads as Held false.
-	Leases []LeaseRetention
-	// Counts is derived from the three lists above after the authorization
-	// filter.
-	Counts BlockerCounts
-	// Ledger is the counting face of the execution resource ledger, read beside
-	// the retentions; it stays zero beside a read run with no ledger attached.
-	Ledger LeaseLedgerCounts
-}
-    BlockerReport is one authorized, read-only explanation of what keeps the
-    runtime from advancing: every blocker named beside its reason and its next
-    advancer, every obligation still open, and every registered lease explained
-    beside the retention facts of its resource.
 
 type Budget struct {
 	// MaxObjects is the largest number of snapshot objects one read may
@@ -391,36 +311,6 @@ type DetailState struct {
     every other field stays zero and is never read as a second vocabulary for
     that kind. The states are kept apart and never collapse into one aggregate
     "running" reading.
-
-type Explainer struct {
-	// Has unexported fields.
-}
-
-    Explainer is the read-only blocker explanation service of the runtime:
-    it reads the owners' own records at read time and answers with every
-    blocker named beside its reason and the party that advances it, under the
-    authorization scope the caller already holds.
-
-    The service holds faces and nothing else: it records nothing, keeps no copy
-    of a blocker between two reads and grants no authorization of its own.
-    The authorization filter runs before any owner is read and before anything
-    is counted, so an object outside the presented scope is never read and never
-    counted.
-
-func NewExplainer(inv *Inventory, leases LeaseExplainer) *Explainer
-    NewExplainer returns the blocker explanation service over one runtime
-    inventory and one execution resource ledger. The lease face may be absent
-    for an assembly beside no execution resources: the reads then explain the
-    task and notification blockers and refuse a registered lease by name instead
-    of answering its retention in silence.
-
-func (e *Explainer) Explain(ctx context.Context, filter ListFilter) (BlockerReport, error)
-    Explain returns one authorized explanation of what keeps the runtime
-    from advancing: the blockers, the obligations still open and the lease
-    retentions, each beside the party that advances it and beside the accounting
-    of the execution resource ledger. A source that cannot be read refuses the
-    read by name beside the dimension it affects instead of answering an empty
-    report as a normal one.
 
 type Gap struct {
 	// From is the first missing revision of the range.
@@ -610,68 +500,6 @@ type LeaseEntry struct {
     LeaseEntry is one held resource lease, kept exactly as the resource ledger
     registered it.
 
-type LeaseExplainer interface {
-	// ExplainLease returns the retained state of the resource registered under
-	// ref. A key the ledger holds nothing under answers as not held.
-	ExplainLease(ref state.LeaseRef) (LeaseRetention, error)
-	// LeaseCounts returns the counting face of the ledger.
-	LeaseCounts() LeaseLedgerCounts
-}
-    LeaseExplainer reads one execution resource ledger: the retained state of
-    one resource beside the counts the ledger keeps over its leases. It is a
-    read face over facts a ledger owner already holds and records nothing of its
-    own. 红线清单（3 条）： MUST 只读：回答账本持有者已记录的事实，自身不记录第二份 MUST 让账本未持有的 ref 以 not held
-    回答，绝不臆造保留态 MUST NOT 把逐类计数合成一个总量：分类计数就是审计面
-
-type LeaseLedgerCounts struct {
-	// Held counts the resources the ledger currently holds.
-	Held int
-	// Acquired counts the resources started under a lease.
-	Acquired int
-	// Adopted counts the resources reattached under a lease.
-	Adopted int
-	// Reused counts the acquisitions answered from a resource already held
-	// instead of starting a second one.
-	Reused int
-	// Released counts the resources freed beside a confirmed stop.
-	Released int
-	// Escalated counts the diagnosis escalations undecidable probes raised.
-	Escalated int
-}
-    LeaseLedgerCounts is the counting face of one execution resource ledger:
-    the counts the ledger keeps over the leases it acquired, renewed, swept
-    and freed. Every number is read from the ledger beside the retention of its
-    resources, so a caller reads one accounting rather than two.
-
-type LeaseRetention struct {
-	// Ref names the lease registration of the resource.
-	Ref state.LeaseRef
-	// Held reports whether the ledger still holds the resource under its key.
-	Held bool
-	// Deadline is the lease deadline the resource is held to.
-	Deadline time.Time
-	// Renewed counts the lease renewals the resource received.
-	Renewed int
-	// Adopted reports whether the resource was reattached rather than started.
-	Adopted bool
-	// ConsecutiveUnknowns counts the undecidable probes since the last probe
-	// that did decide. The count is a diagnosis reading: it escalates diagnosis
-	// beside the resource and never decides a death of it.
-	ConsecutiveUnknowns int
-	// Escalations counts the diagnosis escalations raised against the resource.
-	Escalations int
-	// StopReason carries the reason the last stop of the resource stayed
-	// unconfirmed; it is empty beside a stop the ledger observed confirmed.
-	StopReason string
-	// Obligations lists the obligations the ledger keeps open beside the lease.
-	Obligations []string
-}
-    LeaseRetention is the retained state of one execution resource beside the
-    facts its ledger holds it on: the lease deadline, the renewals it received,
-    the probe readings recorded against it and the obligations kept open beside
-    it. The reading is a projection of what the ledger records and adds no fact
-    of its own.
-
 type ListFilter struct {
 	// Scope is the authorization scope the caller already holds.
 	Scope AuthorizationScope
@@ -821,21 +649,6 @@ type ObligationProgress struct {
     set of obligations in one batch, and every obligation keeps its own advancer
     and its own state so the advancement of the object is readable obligation by
     obligation instead of as one shared step.
-
-type OpenObligation struct {
-	// Ref names the task the obligation belongs to.
-	Ref ObjectRef
-	// Obligation is the open obligation as its owner classifies it.
-	Obligation task.Obligation
-	// Advancer names the next party that advances this obligation.
-	Advancer Advancer
-	// State is how far the advance of this obligation has got.
-	State AdvanceState
-}
-    OpenObligation is one obligation a task manager still holds, explained
-    beside the party that advances it. An obligation stays listed while its
-    owner holds it open: a queue that holds nothing is not read as a settled
-    obligation.
 
 type Projection struct {
 	// Has unexported fields.

@@ -14,17 +14,17 @@ import (
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
-// invariantPlugin is one registration element reporting the phase it serves.
+// invariantPlugin is one registration element reporting the port it serves.
 type invariantPlugin struct {
-	name  string
-	phase Phase
+	name string
+	port Port
 }
 
 // Name reports the stable name of the element.
 func (p invariantPlugin) Name() string { return p.name }
 
-// Phase reports the one phase the element serves.
-func (p invariantPlugin) Phase() Phase { return p.phase }
+// Port reports the one port the element serves.
+func (p invariantPlugin) Port() Port { return p.port }
 
 // invariantTransform is a call-transform element running the given correction.
 type invariantTransform struct {
@@ -161,13 +161,13 @@ func invariantIndex(index int) *int { return &index }
 func TestPipelineRegistrationInvariants(t *testing.T) {
 	t.Run("every element is dispatched into the face set of the phase it reports", func(t *testing.T) {
 		var order []string
-		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "transform", phase: PhaseCallTransform}}
-		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "risk", phase: PhaseRiskPolicy}, grade: RiskLow}
-		dual := invariantRiskBoth{invariantPlugin: invariantPlugin{name: "dual", phase: PhaseRiskPolicy}, grade: RiskHigh}
-		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "observer", phase: PhasePostCommitObserve}, order: &order}
-		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", phase: PhaseFinalPresentation}, order: &order}
+		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "transform", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
+		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "risk", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskLow}
+		dual := invariantRiskBoth{invariantPlugin: invariantPlugin{name: "dual", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskHigh}
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "observer", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order}
 
-		pipeline, err := NewPipeline([]Plugin{transform, risk, dual, observer, presenter})
+		pipeline, err := NewFlow([]Instance{transform, risk, dual, observer, presenter})
 		if err != nil {
 			t.Fatalf("register one element per phase: %v", err)
 		}
@@ -190,20 +190,20 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 	t.Run("the faces inside one phase run in registration order", func(t *testing.T) {
 		var order []string
 		first := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "first", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run: func(call *trpcmodel.ToolCall) error {
 				order = append(order, "first:"+call.Function.Name)
 				return nil
 			},
 		}
 		second := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "second", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run: func(call *trpcmodel.ToolCall) error {
 				order = append(order, "second:"+call.Function.Name)
 				return nil
 			},
 		}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err != nil {
 			t.Fatalf("register two transforms: %v", err)
 		}
@@ -216,20 +216,20 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 	})
 
 	t.Run("a nil element refuses the pipeline and registers nothing", func(t *testing.T) {
-		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "transform", phase: PhaseCallTransform}}
-		pipeline, err := NewPipeline([]Plugin{transform, nil})
-		if err == nil || !strings.Contains(err.Error(), "nil plugin") {
-			t.Fatalf("register a nil element = (%v, %v), want a refusal naming the nil plugin", pipeline, err)
+		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "transform", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
+		pipeline, err := NewFlow([]Instance{transform, nil})
+		if err == nil || !strings.Contains(err.Error(), "nil instance") {
+			t.Fatalf("register a nil element = (%v, %v), want a refusal naming the nil instance", pipeline, err)
 		}
 		if len(pipeline.transforms) != 0 || len(pipeline.risks) != 0 {
 			t.Fatalf("refused pipeline = %+v, want no partially registered faces", pipeline)
 		}
 	})
 
-	t.Run("an undeclared phase is refused by name", func(t *testing.T) {
-		pipeline, err := NewPipeline([]Plugin{invariantPlugin{name: "odd", phase: Phase(99)}})
-		if err == nil || !strings.Contains(err.Error(), "not one of the declared phases") {
-			t.Fatalf("register an undeclared phase = (%v, %v), want a named refusal", pipeline, err)
+	t.Run("an undeclared port is refused by name", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "odd", port: Port{Reads: "odd", Produces: ProductCall}}})
+		if err == nil || !strings.Contains(err.Error(), "not a declared material of the flow") {
+			t.Fatalf("register an undeclared port = (%v, %v), want a named refusal", pipeline, err)
 		}
 		if !strings.Contains(err.Error(), "odd") {
 			t.Fatalf("refusal = %q, want the element named", err)
@@ -237,7 +237,7 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 	})
 
 	t.Run("a declared phase without its face is refused by name", func(t *testing.T) {
-		pipeline, err := NewPipeline([]Plugin{invariantPlugin{name: "empty", phase: PhaseCallTransform}})
+		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "empty", port: Port{Reads: MaterialCall, Produces: ProductCall}}})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
 		}
@@ -258,7 +258,7 @@ func TestBeforePassInvariants(t *testing.T) {
 
 	t.Run("a transform corrects a private copy of the recorded call", func(t *testing.T) {
 		transform := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "correct", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "correct", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run: func(call *trpcmodel.ToolCall) error {
 				call.Function.Name = "write"
 				call.Function.Arguments[0] = '['
@@ -267,7 +267,7 @@ func TestBeforePassInvariants(t *testing.T) {
 				return nil
 			},
 		}
-		pipeline, err := NewPipeline([]Plugin{transform})
+		pipeline, err := NewFlow([]Instance{transform})
 		if err != nil {
 			t.Fatalf("register the transform: %v", err)
 		}
@@ -303,18 +303,18 @@ func TestBeforePassInvariants(t *testing.T) {
 		refused := errors.New("the correction refused the call")
 		var ran int
 		failing := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "failing", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "failing", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run:             func(*trpcmodel.ToolCall) error { return refused },
 		}
 		later := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "later", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "later", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run: func(*trpcmodel.ToolCall) error {
 				ran++
 				return nil
 			},
 		}
-		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "risk", phase: PhaseRiskPolicy}, grade: RiskCritical}
-		pipeline, err := NewPipeline([]Plugin{failing, later, risk})
+		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "risk", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskCritical}
+		pipeline, err := NewFlow([]Instance{failing, later, risk})
 		if err != nil {
 			t.Fatalf("register the refusing pipeline: %v", err)
 		}
@@ -338,10 +338,10 @@ func TestBeforePassInvariants(t *testing.T) {
 
 	t.Run("a transform that moves the call identity is refused by name", func(t *testing.T) {
 		moving := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "moving", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "moving", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run:             func(call *trpcmodel.ToolCall) error { call.ID = "moved"; return nil },
 		}
-		pipeline, err := NewPipeline([]Plugin{moving})
+		pipeline, err := NewFlow([]Instance{moving})
 		if err != nil {
 			t.Fatalf("register the moving transform: %v", err)
 		}
@@ -358,10 +358,10 @@ func TestBeforePassInvariants(t *testing.T) {
 	})
 
 	t.Run("the pass reports the strongest rendered grade", func(t *testing.T) {
-		pipeline, err := NewPipeline([]Plugin{
-			invariantRisk{invariantPlugin: invariantPlugin{name: "low", phase: PhaseRiskPolicy}, grade: RiskLow},
-			invariantRisk{invariantPlugin: invariantPlugin{name: "critical", phase: PhaseRiskPolicy}, grade: RiskCritical},
-			invariantRisk{invariantPlugin: invariantPlugin{name: "medium", phase: PhaseRiskPolicy}, grade: RiskMedium},
+		pipeline, err := NewFlow([]Instance{
+			invariantRisk{invariantPlugin: invariantPlugin{name: "low", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskLow},
+			invariantRisk{invariantPlugin: invariantPlugin{name: "critical", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskCritical},
+			invariantRisk{invariantPlugin: invariantPlugin{name: "medium", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskMedium},
 		})
 		if err != nil {
 			t.Fatalf("register the risk faces: %v", err)
@@ -377,7 +377,7 @@ func TestBeforePassInvariants(t *testing.T) {
 			t.Fatalf("pass risk = %q, want a weaker grade never to win over a stronger one", pass.Risk)
 		}
 
-		unrated, err := NewPipeline([]Plugin{&invariantTransform{invariantPlugin: invariantPlugin{name: "only", phase: PhaseCallTransform}}})
+		unrated, err := NewFlow([]Instance{&invariantTransform{invariantPlugin: invariantPlugin{name: "only", port: Port{Reads: MaterialCall, Produces: ProductCall}}}})
 		if err != nil {
 			t.Fatalf("register a pipeline without risk faces: %v", err)
 		}
@@ -404,10 +404,10 @@ func TestAfterPassInvariants(t *testing.T) {
 
 	t.Run("observers run in registration order, then the presenter renders", func(t *testing.T) {
 		var order []string
-		observerOne := invariantObserver{invariantPlugin: invariantPlugin{name: "one", phase: PhasePostCommitObserve}, order: &order}
-		observerTwo := invariantObserver{invariantPlugin: invariantPlugin{name: "two", phase: PhasePostCommitObserve}, order: &order}
-		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", phase: PhaseFinalPresentation}, order: &order, text: "rendered"}
-		pipeline, err := NewPipeline([]Plugin{observerOne, presenter, observerTwo})
+		observerOne := invariantObserver{invariantPlugin: invariantPlugin{name: "one", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		observerTwo := invariantObserver{invariantPlugin: invariantPlugin{name: "two", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "rendered"}
+		pipeline, err := NewFlow([]Instance{observerOne, presenter, observerTwo})
 		if err != nil {
 			t.Fatalf("register the after pass: %v", err)
 		}
@@ -428,15 +428,15 @@ func TestAfterPassInvariants(t *testing.T) {
 		var order []string
 		var seen []event.EventID
 		failure := errors.New("the observation failed")
-		broken := invariantObserver{invariantPlugin: invariantPlugin{name: "broken", phase: PhasePostCommitObserve}, order: &order, err: failure}
-		sound := invariantObserver{invariantPlugin: invariantPlugin{name: "sound", phase: PhasePostCommitObserve}, order: &order}
+		broken := invariantObserver{invariantPlugin: invariantPlugin{name: "broken", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order, err: failure}
+		sound := invariantObserver{invariantPlugin: invariantPlugin{name: "sound", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
 		presenter := invariantPresenter{
-			invariantPlugin: invariantPlugin{name: "presenter", phase: PhaseFinalPresentation},
+			invariantPlugin: invariantPlugin{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}},
 			order:           &order,
 			seen:            &seen,
 			text:            "rendered",
 		}
-		pipeline, err := NewPipeline([]Plugin{broken, sound, presenter})
+		pipeline, err := NewFlow([]Instance{broken, sound, presenter})
 		if err != nil {
 			t.Fatalf("register the failing pass: %v", err)
 		}
@@ -459,12 +459,12 @@ func TestAfterPassInvariants(t *testing.T) {
 	t.Run("a dropped presentation is reported as a dropped view", func(t *testing.T) {
 		var order []string
 		dropping := invariantPresenter{
-			invariantPlugin: invariantPlugin{name: "dropping", phase: PhaseFinalPresentation},
+			invariantPlugin: invariantPlugin{name: "dropping", port: Port{Reads: MaterialFact, Produces: ProductView}},
 			order:           &order,
 			text:            "rendered",
 			dropped:         true,
 		}
-		pipeline, err := NewPipeline([]Plugin{dropping})
+		pipeline, err := NewFlow([]Instance{dropping})
 		if err != nil {
 			t.Fatalf("register the dropping presenter: %v", err)
 		}
@@ -483,8 +483,8 @@ func TestAfterPassInvariants(t *testing.T) {
 
 	t.Run("a pipeline carrying no presenter answers no view", func(t *testing.T) {
 		var order []string
-		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", phase: PhasePostCommitObserve}, order: &order}
-		pipeline, err := NewPipeline([]Plugin{observer})
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		pipeline, err := NewFlow([]Instance{observer})
 		if err != nil {
 			t.Fatalf("register an observer alone: %v", err)
 		}
@@ -503,9 +503,9 @@ func TestAfterPassInvariants(t *testing.T) {
 	t.Run("several presenters answer the one fact with a view each", func(t *testing.T) {
 		var order []string
 		var firstSeen, secondSeen []event.EventID
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, seen: &firstSeen, text: "first view"}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, seen: &secondSeen, text: "second view"}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, seen: &firstSeen, text: "first view"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, seen: &secondSeen, text: "second view"}
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err != nil {
 			t.Fatalf("register two presenters: %v", err)
 		}
@@ -546,10 +546,10 @@ func TestPipelineCompositionContracts(t *testing.T) {
 
 	t.Run("the declared order is the order the faces run, not the name order", func(t *testing.T) {
 		var order []string
-		zeta := invariantObserver{invariantPlugin: invariantPlugin{name: "zeta", phase: PhasePostCommitObserve}, order: &order}
-		alpha := invariantObserver{invariantPlugin: invariantPlugin{name: "alpha", phase: PhasePostCommitObserve}, order: &order}
-		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", phase: PhaseFinalPresentation}, order: &order, text: "rendered"}
-		pipeline, err := NewPipeline([]Plugin{zeta, alpha, presenter})
+		zeta := invariantObserver{invariantPlugin: invariantPlugin{name: "zeta", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		alpha := invariantObserver{invariantPlugin: invariantPlugin{name: "alpha", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "rendered"}
+		pipeline, err := NewFlow([]Instance{zeta, alpha, presenter})
 		if err != nil {
 			t.Fatalf("register the declared chain: %v", err)
 		}
@@ -562,9 +562,9 @@ func TestPipelineCompositionContracts(t *testing.T) {
 
 	t.Run("several presenters over the one projection field answer their own views", func(t *testing.T) {
 		var order []string
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, text: "first view"}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, text: "second view"}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "first view"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "second view"}
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err != nil {
 			t.Fatalf("register two presenters: %v", err)
 		}
@@ -579,9 +579,9 @@ func TestPipelineCompositionContracts(t *testing.T) {
 
 	t.Run("a name declared twice is refused by name", func(t *testing.T) {
 		var order []string
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "shared", phase: PhaseFinalPresentation}, order: &order}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "shared", phase: PhaseFinalPresentation}, order: &order}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "shared", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "shared", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order}
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err == nil {
 			t.Fatalf("register one name twice = %+v, want the second element refused by name", pipeline)
 		}
@@ -602,10 +602,10 @@ func TestPipelineCompositionContracts(t *testing.T) {
 	t.Run("a multi-plugin chain answers every fact through every presenter", func(t *testing.T) {
 		var order []string
 		var seenFirst, seenSecond []event.EventID
-		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", phase: PhasePostCommitObserve}, order: &order}
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, seen: &seenFirst, text: "first view"}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, seen: &seenSecond, text: "second view"}
-		pipeline, err := NewPipeline([]Plugin{observer, first, second})
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, seen: &seenFirst, text: "first view"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, seen: &seenSecond, text: "second view"}
+		pipeline, err := NewFlow([]Instance{observer, first, second})
 		if err != nil {
 			t.Fatalf("register the multi-plugin chain: %v", err)
 		}
@@ -639,7 +639,7 @@ func TestPipelineCompositionContracts(t *testing.T) {
 // - a face that refuses refuses the pass by name and stops the later faces
 // - a pipeline carrying no compress face answers nil and refuses nothing
 // - an element reporting the compress phase without its face is refused by name
-// - a phase past the declared table is refused by name, so the two further phases open no boundary
+// - a port past the declared table is refused by name, so the two further ports open no boundary
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestCompressTriggerPassInvariants(t *testing.T) {
 	ctx := context.Background()
@@ -647,9 +647,9 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 	t.Run("every face answers the filed request in declared order", func(t *testing.T) {
 		var order []string
 		var seen []event.EventID
-		first := invariantTrigger{invariantPlugin: invariantPlugin{name: "first", phase: PhaseCompressTrigger}, order: &order, seen: &seen}
-		second := invariantTrigger{invariantPlugin: invariantPlugin{name: "second", phase: PhaseCompressTrigger}, order: &order}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		first := invariantTrigger{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &order, seen: &seen}
+		second := invariantTrigger{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &order}
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err != nil {
 			t.Fatalf("register two compress faces: %v", err)
 		}
@@ -675,9 +675,9 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 	t.Run("a refusing face refuses the pass by name", func(t *testing.T) {
 		refused := errors.New("the curator is not available")
 		var order []string
-		failing := invariantTrigger{invariantPlugin: invariantPlugin{name: "failing", phase: PhaseCompressTrigger}, order: &order, err: refused}
-		later := invariantTrigger{invariantPlugin: invariantPlugin{name: "later", phase: PhaseCompressTrigger}, order: &order}
-		pipeline, err := NewPipeline([]Plugin{failing, later})
+		failing := invariantTrigger{invariantPlugin: invariantPlugin{name: "failing", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &order, err: refused}
+		later := invariantTrigger{invariantPlugin: invariantPlugin{name: "later", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &order}
+		pipeline, err := NewFlow([]Instance{failing, later})
 		if err != nil {
 			t.Fatalf("register the refusing pipeline: %v", err)
 		}
@@ -694,7 +694,7 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 	})
 
 	t.Run("a pipeline carrying no compress face refuses nothing", func(t *testing.T) {
-		pipeline, err := NewPipeline(nil)
+		pipeline, err := NewFlow(nil)
 		if err != nil {
 			t.Fatalf("register an empty pipeline: %v", err)
 		}
@@ -704,7 +704,7 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 	})
 
 	t.Run("an element of the compress phase without its face is refused by name", func(t *testing.T) {
-		pipeline, err := NewPipeline([]Plugin{invariantPlugin{name: "empty", phase: PhaseCompressTrigger}})
+		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "empty", port: Port{Reads: MaterialFact, Produces: ProductCompression}}})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
 		}
@@ -713,10 +713,10 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("a phase past the declared table is refused by name", func(t *testing.T) {
-		pipeline, err := NewPipeline([]Plugin{invariantTrigger{invariantPlugin: invariantPlugin{name: "outward", phase: PhaseEnvironmentInject + 1}}})
-		if err == nil || !strings.Contains(err.Error(), "not one of the declared phases") {
-			t.Fatalf("register a phase past the table = (%v, %v), want a named refusal", pipeline, err)
+	t.Run("a port past the declared table is refused by name", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{invariantTrigger{invariantPlugin: invariantPlugin{name: "outward", port: Port{Reads: MaterialCall, Produces: ProductView}}}})
+		if err == nil || !strings.Contains(err.Error(), "not one of the declared ports of the flow") {
+			t.Fatalf("register a port past the table = (%v, %v), want a named refusal", pipeline, err)
 		}
 		if !strings.Contains(err.Error(), "outward") {
 			t.Fatalf("refusal = %q, want the element named", err)
@@ -739,8 +739,8 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	t.Run("the face answers the assembly it was dispatched for", func(t *testing.T) {
 		var seen []EnvironmentRequest
 		block := "## Environment\n- agent: agent-a"
-		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, seen: &seen, blocks: []string{block}}
-		pipeline, err := NewPipeline([]Plugin{inject})
+		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, seen: &seen, blocks: []string{block}}
+		pipeline, err := NewFlow([]Instance{inject})
 		if err != nil {
 			t.Fatalf("register the environment face: %v", err)
 		}
@@ -758,10 +758,10 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 
 	t.Run("several faces render in declared order beside an empty one", func(t *testing.T) {
 		var order []string
-		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, order: &order, blocks: []string{"first block"}}
-		silent := invariantInject{invariantPlugin: invariantPlugin{name: "silent", phase: PhaseEnvironmentInject}, order: &order}
-		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", phase: PhaseEnvironmentInject}, order: &order, blocks: []string{"third block"}}
-		pipeline, err := NewPipeline([]Plugin{first, silent, third})
+		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, order: &order, blocks: []string{"first block"}}
+		silent := invariantInject{invariantPlugin: invariantPlugin{name: "silent", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, order: &order}
+		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, order: &order, blocks: []string{"third block"}}
+		pipeline, err := NewFlow([]Instance{first, silent, third})
 		if err != nil {
 			t.Fatalf("register three environment faces: %v", err)
 		}
@@ -778,9 +778,9 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	})
 
 	t.Run("one face answers several blocks as separate products", func(t *testing.T) {
-		both := invariantInject{invariantPlugin: invariantPlugin{name: "both", phase: PhaseEnvironmentInject}, blocks: []string{"first product", "second product"}}
-		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", phase: PhaseEnvironmentInject}, blocks: []string{"third product"}}
-		pipeline, err := NewPipeline([]Plugin{both, third})
+		both := invariantInject{invariantPlugin: invariantPlugin{name: "both", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, blocks: []string{"first product", "second product"}}
+		third := invariantInject{invariantPlugin: invariantPlugin{name: "third", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, blocks: []string{"third product"}}
+		pipeline, err := NewFlow([]Instance{both, third})
 		if err != nil {
 			t.Fatalf("register the environment faces: %v", err)
 		}
@@ -795,9 +795,9 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 
 	t.Run("an assembly that consumes no fact still answers every block from its request", func(t *testing.T) {
 		var seen []EnvironmentRequest
-		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", phase: PhaseEnvironmentInject}, seen: &seen, blocks: []string{"first block"}}
-		second := invariantInject{invariantPlugin: invariantPlugin{name: "second", phase: PhaseEnvironmentInject}, seen: &seen, blocks: []string{"second block"}}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		first := invariantInject{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, seen: &seen, blocks: []string{"first block"}}
+		second := invariantInject{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, seen: &seen, blocks: []string{"second block"}}
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err != nil {
 			t.Fatalf("register two environment faces: %v", err)
 		}
@@ -816,8 +816,8 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 
 	t.Run("a refusing face refuses the assembly by name", func(t *testing.T) {
 		refused := errors.New("the runtime is not readable")
-		failing := invariantInject{invariantPlugin: invariantPlugin{name: "failing", phase: PhaseEnvironmentInject}, blocks: []string{"partial"}, err: refused}
-		pipeline, err := NewPipeline([]Plugin{failing})
+		failing := invariantInject{invariantPlugin: invariantPlugin{name: "failing", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, blocks: []string{"partial"}, err: refused}
+		pipeline, err := NewFlow([]Instance{failing})
 		if err != nil {
 			t.Fatalf("register the refusing pipeline: %v", err)
 		}
@@ -834,7 +834,7 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	})
 
 	t.Run("a pipeline carrying no environment face answers no block", func(t *testing.T) {
-		pipeline, err := NewPipeline(nil)
+		pipeline, err := NewFlow(nil)
 		if err != nil {
 			t.Fatalf("register an empty pipeline: %v", err)
 		}
@@ -845,7 +845,7 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	})
 
 	t.Run("an element of the environment phase without its face is refused by name", func(t *testing.T) {
-		pipeline, err := NewPipeline([]Plugin{invariantPlugin{name: "empty", phase: PhaseEnvironmentInject}})
+		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "empty", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
 		}
@@ -937,11 +937,11 @@ func TestPhaseObservation(t *testing.T) {
 		logger := &phaseLog{}
 		watchPhaseLog(t, logger)
 		var order []string
-		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", phase: PhaseCallTransform}}
-		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "grader", phase: PhaseRiskPolicy}, grade: RiskHigh}
-		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", phase: PhasePostCommitObserve}, order: &order}
-		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", phase: PhaseFinalPresentation}, order: &order, text: "done"}
-		pipeline, err := NewPipeline([]Plugin{transform, risk, observer, presenter})
+		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
+		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "grader", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskHigh}
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &order}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "done"}
+		pipeline, err := NewFlow([]Instance{transform, risk, observer, presenter})
 		if err != nil {
 			t.Fatalf("register one element per phase: %v", err)
 		}
@@ -975,9 +975,9 @@ func TestPhaseObservation(t *testing.T) {
 		logger := &phaseLog{}
 		watchPhaseLog(t, logger)
 		var order []string
-		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", phase: PhaseFinalPresentation}, order: &order, text: "one"}
-		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", phase: PhaseFinalPresentation}, order: &order, text: "two"}
-		pipeline, err := NewPipeline([]Plugin{first, second})
+		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "one"}
+		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "two"}
+		pipeline, err := NewFlow([]Instance{first, second})
 		if err != nil {
 			t.Fatalf("register two presenters: %v", err)
 		}
@@ -997,9 +997,9 @@ func TestPhaseObservation(t *testing.T) {
 		watchPhaseLog(t, logger)
 		var order []string
 		var seen []event.EventID
-		trigger := invariantTrigger{invariantPlugin: invariantPlugin{name: "curator", phase: PhaseCompressTrigger}, order: &order, seen: &seen}
-		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", phase: PhaseEnvironmentInject}, blocks: []string{"clock=noon"}}
-		pipeline, err := NewPipeline([]Plugin{trigger, inject})
+		trigger := invariantTrigger{invariantPlugin: invariantPlugin{name: "curator", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &order, seen: &seen}
+		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, blocks: []string{"clock=noon"}}
+		pipeline, err := NewFlow([]Instance{trigger, inject})
 		if err != nil {
 			t.Fatalf("register one element per dispatch phase: %v", err)
 		}
@@ -1032,11 +1032,11 @@ func TestPhaseObservation(t *testing.T) {
 		watchPhaseLog(t, logger)
 		var order []string
 		refusing := &invariantTransform{
-			invariantPlugin: invariantPlugin{name: "refusing", phase: PhaseCallTransform},
+			invariantPlugin: invariantPlugin{name: "refusing", port: Port{Reads: MaterialCall, Produces: ProductCall}},
 			run:             func(*trpcmodel.ToolCall) error { return errPhaseRefused },
 		}
-		dropping := invariantPresenter{invariantPlugin: invariantPlugin{name: "dropping", phase: PhaseFinalPresentation}, order: &order, dropped: true}
-		pipeline, err := NewPipeline([]Plugin{refusing, dropping})
+		dropping := invariantPresenter{invariantPlugin: invariantPlugin{name: "dropping", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, dropped: true}
+		pipeline, err := NewFlow([]Instance{refusing, dropping})
 		if err != nil {
 			t.Fatalf("register the refusing transform: %v", err)
 		}
@@ -1057,9 +1057,9 @@ func TestPhaseObservation(t *testing.T) {
 	t.Run("a logger that fails does not refuse a pass", func(t *testing.T) {
 		watchPhaseLog(t, &phaseLog{panicsLeft: 2})
 		var order []string
-		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", phase: PhaseCallTransform}}
-		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", phase: PhaseFinalPresentation}, order: &order, text: "done"}
-		pipeline, err := NewPipeline([]Plugin{transform, presenter})
+		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "done"}
+		pipeline, err := NewFlow([]Instance{transform, presenter})
 		if err != nil {
 			t.Fatalf("register the phase elements: %v", err)
 		}

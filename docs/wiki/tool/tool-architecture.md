@@ -1,16 +1,17 @@
-> **历史文档（historical-verbatim）**：本篇是已移除生产实现的压缩重写，原版逐字归档于 [docs/archive/wiki/tool/tool-architecture.md](../../archive/wiki/tool/tool-architecture.md)；当期契约以 `tool/{exec,mcp,remote,subagent}` 码面为准（[docs/api/](../../api/index.md)），当前架构入口见 [docs/wiki/README.md](../README.md#当前架构速览)。
+> **历史文档（historical-verbatim）**：本篇是已移除生产实现的压缩重写，原版逐字归档于 [docs/archive/wiki/tool/tool-architecture.md](../../archive/wiki/tool/tool-architecture.md)；当期契约以 `tool/{exec,file,knowledge,mcp,recall,spec,subagent}` 码面为准（[docs/api/](../../api/index.md)），当前架构入口见 [docs/wiki/README.md](../README.md#当前架构速览)。
 
 # tagent/tool：工具面契约与历史机制对照
 
-当期 `tool/` 只有四个产品包：**`exec`（外部执行的资源与租约）、`mcp`（活注册表与调用网关）、`remote`（显式寻址的远程委派）、`subagent`（子 agent 声明装配与 handoff）**。原 `tagent/tool` 的召回、知识、动作、任务与 Plan 工具面已移除，其判据压缩在第六节之后，原版在归档中。
+当期 `tool/` 的产品包是 `exec`、`file`、`knowledge`、`mcp`、`recall`、`spec`、`subagent`（逐一职责见 [docs/api/](../../api/index.md)）。原 `tagent/tool` 的召回、知识、动作、任务与 Plan 工具面已移除，其判据压缩在第六节之后，原版在归档中。
 
-## 一、工具面地图（当期）
+## 一、工具面地图
+
+当期 `tool/` 的完整子包清单以 [docs/api/](../../api/index.md) 为准；下表是本文机制章节展开的三个面。
 
 | 包 | 职责 | 边 |
 |---|---|---|
 | `tool/exec` | 一次外部执行的**声明**（`ExecutionDecl`）、资源身份（`ResourceKey{Kind,Key}`）、执行器端口（`Executor`）与资源管理器（`Manager`：获取/续租/回收/清扫） | 只依赖 `context` 与标准库；tmux 机制在端口之后 |
 | `tool/mcp` | 服务端名→活工具集的并发安全表（`ServerRegistry`）、`mcp_call` 网关（**恒定声明**，调用时读表） | 复用框架原生 MCP 工具集，自身不说 MCP 协议 |
-| `tool/remote` | 调用方**显式声明**可寻址的远程 agent（`Endpoints`），一次调用携带 `CallIdentity` 与 `Handoff` | 传输走 A2A；不做默认对端解析 |
 | `tool/subagent` | agents 文件（YAML frontmatter + prompt）→ `Definition`；`Assembly` 装配工具/技能/MCP；`handoff` 结构化交接；`presets` 解析 `knowledge`/`recall`/`call_subagent` 引用 | 检索能力由调用方注入，本包不自持检索 |
 
 工具面共同的硬边界：**声明是模型侧请求前缀的一部分**，因此任何会随部署配置漂移的东西（向量能力、注册表内容、远端地址）都不得进声明，只能在调用期解析。
@@ -130,7 +131,7 @@ running/suspect/cancelled --resume--> 拒绝并引导
 
 **typed nil 坑**：把一个类型化空指针赋给接口字段，接口本身**并不等于 nil**，于是"有注册表就启用"会假判成立、调用期才炸。装配侧必须在赋值之前判空——宁可不注入，也不要塞一个带类型的空指针进去；`normalizeRegistry` 是这条守卫的落点。
 
-## 六、远程委派面
+## 六、历史契约：远程委派面
 
 <a id="delegation-retry"></a>
 <a id="十七、委派调用的取消归属与重试形状"></a>

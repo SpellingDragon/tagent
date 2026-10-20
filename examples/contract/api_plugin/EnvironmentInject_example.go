@@ -13,8 +13,10 @@ type environmentBlocks struct{}
 // Name reports the stable name of the element.
 func (environmentBlocks) Name() string { return "environment-blocks" }
 
-// Phase reports the one phase the element serves.
-func (environmentBlocks) Phase() plugin.Phase { return plugin.PhaseEnvironmentInject }
+// Port reports the request->environment port the element serves.
+func (environmentBlocks) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialRequest, Produces: plugin.ProductEnvironment}
+}
 
 // InjectEnvironment renders the environment material of one assembly: the clock and the
 // roster are two blocks, and the material that renders no text is answered as the empty
@@ -30,8 +32,10 @@ type silentEnvironment struct{}
 // Name reports the stable name of the element.
 func (silentEnvironment) Name() string { return "silent-environment" }
 
-// Phase reports the one phase the element serves.
-func (silentEnvironment) Phase() plugin.Phase { return plugin.PhaseEnvironmentInject }
+// Port reports the request->environment port the element serves.
+func (silentEnvironment) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialRequest, Produces: plugin.ProductEnvironment}
+}
 
 // InjectEnvironment answers no block and no error for the assembly it holds nothing for.
 func (silentEnvironment) InjectEnvironment(context.Context, plugin.EnvironmentRequest) ([]string, error) {
@@ -39,9 +43,9 @@ func (silentEnvironment) InjectEnvironment(context.Context, plugin.EnvironmentRe
 }
 
 var (
-	_ plugin.Plugin            = environmentBlocks{}
+	_ plugin.Instance          = environmentBlocks{}
 	_ plugin.EnvironmentInject = environmentBlocks{}
-	_ plugin.Plugin            = silentEnvironment{}
+	_ plugin.Instance          = silentEnvironment{}
 	_ plugin.EnvironmentInject = silentEnvironment{}
 )
 
@@ -52,7 +56,7 @@ var (
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func ExampleEnvironmentInject() {
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{environmentBlocks{}, silentEnvironment{}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{environmentBlocks{}, silentEnvironment{}})
 	if err != nil {
 		return
 	}

@@ -1,30 +1,36 @@
-> **历史文档（historical-verbatim）**：本篇是已移除生产实现的压缩重写，原版逐字归档于 [docs/archive/wiki/plugin/plugin-architecture.md](../../archive/wiki/plugin/plugin-architecture.md)；当期契约以 `api/plugin` 码面为准（[docs/api/](../../api/index.md)），当前架构入口见 [docs/wiki/README.md](../README.md#当前架构速览)。
+> **本篇第一节是当期契约**：Go 注释里的 `// 契约: docs/wiki/plugin/plugin-architecture.md#overview` 指向的正是 §1.1。第二节起是已移除实现的压缩重写，原版可按 [docs/archive/wiki/PRE-REWRITE-MANIFEST.md](../../archive/wiki/PRE-REWRITE-MANIFEST.md) 记录的提交取回；当期包面以 `api/plugin` 码面为准（[docs/api/](../../api/index.md)），当前架构入口见 [docs/wiki/README.md](../README.md#当前架构速览)。
 
-# tagent/plugin：四相位插件管线与历史机制对照
+# tagent/plugin：两相位材料流与窄口扩展点
 
-`tagent/plugin` 的当期形态是 **`api/plugin` 声明的一条有序相位管线**：tagent 通过它在框架事件流的四个位置注入差异化能力——执行前的一次调用变换与一次风险裁决，提交后的一次观测与一次呈现。本页只留契约、判据与历史对照；过程叙事与代码清单在原版归档中。
+`tagent/plugin` 的形态是 **`api/plugin` 声明的一条材料流**：tagent 通过它在框架事件流的三个位置注入差异化能力——执行前的一次调用变换与一次风险裁决，请求装配时的一次环境块贡献，提交后的一次观测、一次呈现与一次压缩触发。本页只留契约、判据与历史对照；过程叙事与代码清单在原版归档中。
 
-## 一、四相位（当期契约）
+## 一、材料流（当期契约）
 
 <a id="overview"></a>
 ### 1.1 词汇与窄接口
 
-一个 **plugin 是注册单元**：它报告自己服务的唯一相位，并实现该相位的那**一个窄接口**。`Pipeline` 按注册顺序收编，把每个元素分派进它所属相位的接口集。
+一个 **plugin 是注册单元**（`plugin.Instance`）：它报告一个稳定名字与**恰好一个** `plugin.Port`，并实现该端口的那**一个窄接口**。端口是「读哪一种材料（`plugin.Material`）、产哪一种产物（`plugin.Product`）」的一对；`plugin.NewFlow` 按声明序收编它们，`plugin.RouteOf` 把端口归成相位——**相位是端口的读法，不是时间位置**。
 
-| 相位（常量顺序即管线顺序） | 窄接口 | 时点与判据 |
+| 端口（`Port{Reads, Produces}`） | 窄接口 | 时点与判据 |
 |---|---|---|
-| `PhaseCallTransform` | `TransformCall` | 副作用之前、准入之前，每 call 一次；改工具名/参数，**不得改 call 身份（CallID 与已解析的信任域）** |
-| `PhaseRiskPolicy` | `RiskAssessor` + `Governor` | 同一裁定的两张脸：`AssessRisk` 出 grade，`Governor` 在 grade 上出唯一执行前裁定；grade 只读一次，绝不重算 |
-| `PhasePostCommitObserve` | `PostCommitObserver` | 事实的规范提交**之后**，只读旁路；失败只记具名 gap，不回滚、不重跑、不写事实 |
-| `PhaseFinalPresentation` | `FinalPresenter` | 为渠道渲染呈现文本并回答是否被丢弃；**丢弃必须报告**，不撤回事实 |
+| `call->call` | `TransformCall` | 副作用之前、准入之前，每 call 一次；改工具名/参数，**不得改 call 身份（CallID 与已解析的信任域）** |
+| `call->ruling` | `RiskAssessor` + `Governor` | 同一裁定的两张脸：`AssessRisk` 出 grade，`Governor` 在 grade 上出唯一执行前裁定；grade 只读一次，绝不重算 |
+| `request->environment` | `EnvironmentInject` | 请求装配的 InjectEnvironment 趟；每块是一个产物，回查发起它的请求；不写运行时、不改请求 |
+| `fact->observation` | `PostCommitObserver` | 事实的规范提交**之后**，只读旁路；失败只记具名 gap，不回滚、不重跑、不写事实 |
+| `fact->view` | `FinalPresenter` | 为渠道渲染呈现文本并回答是否被丢弃；**丢弃必须报告**，不撤回事实 |
+| `fact->compression` | `CompressTrigger` | 已归档压缩请求的 TriggerCompress 趟；请求身份与 subject 保持原样，本面不压缩、不退役请求 |
 
-红线（码面 `Plugin` doc 的三条）：必须报告自己实现的相位；不得报告未实现其窄接口的相位；**一个注册元素只服务一个相位**（风险相位可同时带两张脸）。
+从 call 或 request 出发的三个端口是 **`PhaseProduce`**（自读到的材料长出一个产物），从 fact 出发的三个端口是 **`PhaseConsume`**（对一个已提交材料作答）。闭合表之外的读材料、产产物与端口对都按名拒绝，不回落成相位。
+
+红线（码面 `Instance` doc 的三条）：必须报告自己服务的那一个端口并实现它的窄接口；不得报告未实现其窄接口的端口；**一个注册元素只服务一个端口**（风险端口可同时带两张脸）。
 
 `Before` 的语义：每个 transform 在自己的**私有副本**上改正，随后风险面在改正后的 call 上打分，pass 回答最终 call 与**最强** grade。任一 transform 报错即拒绝整个 pass（后续面不跑、不裁定、不执行、不记录）；`final.ID != call.ID` 以 `ErrCallIdentityChanged` 具名拒绝。空 grade 不是一种 grade，裁定读作 `RiskMedium`，因此旁边没有风险面的 call 仍按普通变更调用被裁。
 
 `After` 的语义：先跑全部 observer，再跑全部 presenter；观测失败进 `view.Presentation.Gaps`，presenter 丢弃只丢视图。**pass 不返回 error**——这里的失败只能是 gap 或 dropped view，绝不是碰已提交事实的理由。
 
-历史对照：原版描述的是框架 `plugin.Plugin`（`Name()/Register(r *Registry)`）与 `MemoryPlugin`/`SummaryPlugin` 两个 OnEvent 钩子。该注册面已不在当期码面；当期 `Plugin` 只报告 `Name()` 与 `Phase()`，分派权在管线而非框架 Registry。
+`TriggerCompress` 与 `InjectEnvironment` 各自成趟：前者驱动一个已归档压缩请求的映射链（失败即拒绝该请求，材料不压缩、请求保持待处理），后者按声明序追加环境块（空面必须如实报空，单面失败即拒绝这次装配）。
+
+**装配上的四条拒绝**（`plugin.NewFlow` 原文）：nil 实例、端口不在闭合表内、端口合法但没实现该端口的窄接口、同一个名字声明两次——各自按名拒绝，不做静默修剪，因为一个产物的名字必须溯回写它的那一个元素。
 
 <a id="memory-plugin"></a>
 ## 二、MemoryPlugin — 事件持久化（历史机制）
@@ -69,7 +75,7 @@
 
 | 发布物 | `stored=true` | `stored=false`（写失败或未接存储） |
 |---|---|---|
-| `StateDelta[event_key]`、`StateDelta[partition_id]` | 写入（hex 契约） | **连本插件此前可能写入的同名字段一并 delete**，只 Debugf 留痕 |
+| `StateDelta[event_key]`、`StateDelta[partition_id]` | 写入（hex 契约） | **连本插件在同一 map 里写入的同名字段一并 delete**，只 Debugf 留痕 |
 | 本调用投影 `sink.Append` | 追加 | 不追加（投影里永不出现取不回的事实） |
 | 因果游标 `lastEventKeys` | 推进到本键 | 不推进（失败键从未落库，作父即断链） |
 | `event_type` / `event_summary` | 写入 | **照常写入** |
@@ -148,8 +154,7 @@ Session 是框架提供的通用会话管理（完整 `event.Event`、`StateDelt
 
 | 原版机制 | 当期状态 |
 |---|---|
-| 框架 `plugin.Plugin`（`Register(r *Registry)`）+ 注册顺序约定 | 已移除；当期 `api/plugin.Plugin` 报告 `Name()/Phase()`，由 `Pipeline` 分派 |
-| `MemoryPlugin` / `SummaryPlugin` 两个 OnEvent 钩子 | 已移除；事件持久化与摘要视图归 `memory` 的写入路径，`plugin` 只留四相位扩展点 |
+| `MemoryPlugin` / `SummaryPlugin` 两个 OnEvent 钩子 | 事件持久化与摘要视图归 `memory` 的写入路径，`plugin` 只留两相位六端口的扩展点 |
 | `ProjectionSink`、`StateDelta[event_key]` 持久票据 | 归入 `memory` 同点投影与事件编号契约，判据（不猜父/不回滚/同点）保留 |
 | SmartCompress 两阶段压缩、TokenCounter | 当期压缩归 `runtime/agent` 的压缩面；本页只留"摘要=原文视图、截断是设计外折损"的边界 |
 | `QueryOptions`/`MemoryStore` 存储实现细节 | 归 `memory` 篇与 [docs/api/](../../api/index.md)，本页不复制 |

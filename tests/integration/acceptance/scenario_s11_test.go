@@ -3,7 +3,6 @@ package acceptance
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,11 +41,24 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	childPrompt := filepath.Join(root, "child.md")
 	scenarioWritePrompt(t, parentPrompt, scenarioParentInstruction+"\n")
 	scenarioWritePrompt(t, childPrompt, scenarioChildInstruction+"\n")
-	declarationPath := filepath.Join(root, "declaration.yaml")
-	scenarioWritePrompt(t, declarationPath, scenarioConfigDeclaration(parentPrompt, childPrompt))
-	decl, err := orgconfig.Load(ctx, declarationPath)
-	if err != nil {
-		t.Fatalf("load the declaration: %v", err)
+	decl := &orgconfig.Declaration{
+		Entry: "agent-parent",
+		Agents: []orgconfig.AgentSpec{
+			{
+				ID:      "agent-parent",
+				Model:   "model-parent",
+				Files:   []orgconfig.FileRef{{Path: parentPrompt, Kind: orgconfig.FileKindPrompt}},
+				Plugins: []string{"transform-a", "transform-b", "observe-a", "presenter-b"},
+				Tools:   []orgconfig.ToolRef{{Name: "call_subagent"}},
+			},
+			{
+				ID:       "agent-child",
+				ParentID: "agent-parent",
+				Model:    "model-child",
+				Files:    []orgconfig.FileRef{{Path: childPrompt, Kind: orgconfig.FileKindPrompt}},
+				Tools:    []orgconfig.ToolRef{{Name: "echo-child"}},
+			},
+		},
 	}
 
 	recorder := &scenarioPhaseRecorder{}
@@ -94,13 +106,15 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	childRequests := child.recorded()
 
 	declared := decl.Agents[0].Plugins
-	declaredAfter := scenarioDeclaredPhaseOrder(declared, recorder.plugins(),
-		plugin.PhasePostCommitObserve, plugin.PhaseFinalPresentation)
+	declaredAfter := scenarioDeclaredPortOrder(declared, recorder.plugins(),
+		plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation},
+		plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView})
 	afterGroups := recorder.afterGroups()
 	observations["parent_pipeline_before_order"] = recorder.beforeOrder()
 	observations["parent_pipeline_after_order"] = afterGroups
 	observations["parent_pipeline_matches_declaration"] =
-		scenarioSameOrder(recorder.beforeOrder(), scenarioDeclaredOrder(declared, recorder.plugins(), plugin.PhaseCallTransform)) &&
+		scenarioSameOrder(recorder.beforeOrder(), scenarioDeclaredOrder(declared, recorder.plugins(),
+			plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall})) &&
 			scenarioEveryGroupIs(afterGroups, declaredAfter)
 	observations["parent_instruction_from_declared_file"] =
 		scenarioAnyMessage(parentRequests[0].Messages, scenarioParentInstruction)
@@ -189,13 +203,13 @@ func (r *scenarioPhaseRecorder) afterGroups() [][]string {
 // declaredElements reports the pipeline elements the declaration names, in the
 // order it names them, so the host contributes what the declaration spells
 // instead of one fixed list beside it.
-func (r *scenarioPhaseRecorder) declaredElements(t *testing.T, names []string) []plugin.Plugin {
+func (r *scenarioPhaseRecorder) declaredElements(t *testing.T, names []string) []plugin.Instance {
 	t.Helper()
-	registry := make(map[string]plugin.Plugin, len(names))
+	registry := make(map[string]plugin.Instance, len(names))
 	for _, element := range r.plugins() {
 		registry[element.Name()] = element
 	}
-	out := make([]plugin.Plugin, 0, len(names))
+	out := make([]plugin.Instance, 0, len(names))
 	for _, name := range names {
 		element, ok := registry[name]
 		if !ok {
@@ -206,30 +220,30 @@ func (r *scenarioPhaseRecorder) declaredElements(t *testing.T, names []string) [
 	return out
 }
 
-// plugins reports the four pipeline elements the drive carries, one per phase
+// plugins reports the four pipeline elements the drive carries, one per port
 // face the declaration names.
-func (r *scenarioPhaseRecorder) plugins() []plugin.Plugin {
-	return []plugin.Plugin{
-		&scenarioPhasePlugin{name: "transform-a", phase: plugin.PhaseCallTransform, recorder: r},
-		&scenarioPhasePlugin{name: "transform-b", phase: plugin.PhaseCallTransform, recorder: r},
-		&scenarioPhasePlugin{name: "observe-a", phase: plugin.PhasePostCommitObserve, recorder: r},
-		&scenarioPhasePlugin{name: "presenter-b", phase: plugin.PhaseFinalPresentation, recorder: r},
+func (r *scenarioPhaseRecorder) plugins() []plugin.Instance {
+	return []plugin.Instance{
+		&scenarioPhasePlugin{name: "transform-a", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}, recorder: r},
+		&scenarioPhasePlugin{name: "transform-b", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}, recorder: r},
+		&scenarioPhasePlugin{name: "observe-a", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, recorder: r},
+		&scenarioPhasePlugin{name: "presenter-b", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, recorder: r},
 	}
 }
 
-// scenarioPhasePlugin is one pipeline element of the drive: it serves one phase
-// and files every visit of that phase under its name.
+// scenarioPhasePlugin is one pipeline element of the drive: it serves one port
+// and files every visit of that port under its name.
 type scenarioPhasePlugin struct {
 	name     string
-	phase    plugin.Phase
+	port     plugin.Port
 	recorder *scenarioPhaseRecorder
 }
 
 // Name reports the stable name of the element.
 func (p *scenarioPhasePlugin) Name() string { return p.name }
 
-// Phase reports the one phase the element serves.
-func (p *scenarioPhasePlugin) Phase() plugin.Phase { return p.phase }
+// Port reports the one port the element serves.
+func (p *scenarioPhasePlugin) Port() plugin.Port { return p.port }
 
 // TransformCall files the Before pass visit of a call-transform element.
 func (p *scenarioPhasePlugin) TransformCall(context.Context, *trpcmodel.ToolCall) error {
@@ -249,35 +263,6 @@ func (p *scenarioPhasePlugin) ObserveCommit(_ context.Context, id event.EventID)
 func (p *scenarioPhasePlugin) Present(_ context.Context, id event.EventID) (string, bool) {
 	p.recorder.recordFact(string(id), p.name)
 	return "presentation:" + string(id), false
-}
-
-// scenarioConfigDeclaration spells the parent and child agents the drive
-// declares: the child names its own model, prompt file and tool, and the parent
-// names the plugin pipeline in execution order.
-func scenarioConfigDeclaration(parentPrompt, childPrompt string) string {
-	return fmt.Sprintf(`entry: agent-parent
-agents:
-  - id: agent-parent
-    model: model-parent
-    files:
-      - path: %q
-        kind: prompt
-    plugins:
-      - transform-a
-      - transform-b
-      - observe-a
-      - presenter-b
-    tools:
-      - name: call_subagent
-  - id: agent-child
-    parent_id: agent-parent
-    model: model-child
-    files:
-      - path: %q
-        kind: prompt
-    tools:
-      - name: echo-child
-`, parentPrompt, childPrompt)
 }
 
 // scenarioSubagentArgs reports the call arguments derived from the child
@@ -322,16 +307,16 @@ func scenarioDeclaredAgent(t *testing.T, decl *orgconfig.Declaration) orgconfig.
 }
 
 // scenarioDeclaredOrder reports the names of the declaration whose elements serve
-// one of the given phases, in declaration order.
-func scenarioDeclaredOrder(names []string, elements []plugin.Plugin, phases ...plugin.Phase) []string {
-	phaseOf := make(map[string]plugin.Phase, len(elements))
+// one of the given ports, in declaration order.
+func scenarioDeclaredOrder(names []string, elements []plugin.Instance, ports ...plugin.Port) []string {
+	portOf := make(map[string]plugin.Port, len(elements))
 	for _, element := range elements {
-		phaseOf[element.Name()] = element.Phase()
+		portOf[element.Name()] = element.Port()
 	}
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		for _, phase := range phases {
-			if phaseOf[name] == phase {
+		for _, port := range ports {
+			if portOf[name] == port {
 				out = append(out, name)
 				break
 			}
@@ -355,15 +340,15 @@ func scenarioEveryGroupIs(groups [][]string, want []string) bool {
 	return true
 }
 
-// scenarioDeclaredPhaseOrder reports the declared elements serving the given
-// phases in the order the After pass visits them: the phases in the order the
-// pass runs them, and each phase in the declaration's own order. The phase is
+// scenarioDeclaredPortOrder reports the declared elements serving the given
+// ports in the order the After pass visits them: the ports in the order the
+// pass runs them, and each port in the declaration's own order. The port is
 // what places an element in the pipeline, so this is the declaration read the way
 // the pipeline reads it.
-func scenarioDeclaredPhaseOrder(names []string, elements []plugin.Plugin, phases ...plugin.Phase) []string {
+func scenarioDeclaredPortOrder(names []string, elements []plugin.Instance, ports ...plugin.Port) []string {
 	out := make([]string, 0, len(names))
-	for _, phase := range phases {
-		out = append(out, scenarioDeclaredOrder(names, elements, phase)...)
+	for _, port := range ports {
+		out = append(out, scenarioDeclaredOrder(names, elements, port)...)
 	}
 	return out
 }

@@ -192,24 +192,23 @@ func TestScenario08QueryWithoutOtel(t *testing.T) {
 	if viewErr != nil {
 		t.Fatalf("read the runtime inventory: %v", viewErr)
 	}
-	explainer := query.NewExplainer(inventory, nil)
-	report, explainErr := explainer.Explain(ctx, query.ListFilter{Scope: query.AuthorizationScope{Agents: []event.AgentID{addrA.AgentID, addrB.AgentID}}})
-	if explainErr != nil {
-		t.Fatalf("explain the runtime blockers: %v", explainErr)
-	}
 	projection := query.NewProjection(inventory, 8)
 	snapshot, cursor, snapshotErr := projection.Snapshot(ctx, query.ListFilter{Scope: query.AuthorizationScope{Agents: []event.AgentID{addrA.AgentID, addrB.AgentID}}})
 	if snapshotErr != nil {
 		t.Fatalf("read the runtime snapshot: %v", snapshotErr)
 	}
-	observations["query_ok_with_otel_disabled"] = viewErr == nil && explainErr == nil && snapshotErr == nil
+	observations["query_ok_with_otel_disabled"] = viewErr == nil && snapshotErr == nil
 
+	blocked := 0
+	for _, entry := range view.Tasks() {
+		blocked += len(entry.Obligations.Blocked)
+	}
 	counts := view.Counts()
 	derived := map[string]any{
 		"configured": counts.Agents.Configured,
 		"resident":   counts.Agents.Resident,
 		"busy":       counts.Agents.Busy,
-		"blocked":    report.Counts.Blockers,
+		"blocked":    blocked,
 	}
 	observations["derived_counts"] = derived
 	fromDetail := 0
@@ -218,29 +217,27 @@ func TestScenario08QueryWithoutOtel(t *testing.T) {
 			fromDetail++
 		}
 	}
-	observations["statistics_derived_from_detail"] = counts.Agents.Configured == fromDetail &&
-		counts.Agents.Resident == len(view.Sessions()) &&
-		report.Counts.Blockers == len(report.Blockers)
-
 	advancing := 0
 	rows := []map[string]any{}
 	labels := newScenarioLabels()
-	for _, blocker := range report.Blockers {
-		if blocker.Advancer != "" {
+	for _, entry := range view.Tasks() {
+		for _, record := range entry.Obligations.Blocked {
 			advancing++
+			rows = append(rows, map[string]any{
+				"object":   labels.label("task", string(entry.TaskID)),
+				"owner":    string(entry.Spec.Source.SessionID),
+				"blocker":  record.Reason,
+				"advancer": string(query.AdvancerNoticeTransport),
+			})
 		}
-		row := map[string]any{
-			"object":   labels.label("task", string(blocker.Ref.TaskID)),
-			"owner":    string(blocker.Ref.Address.SessionID),
-			"blocker":  blocker.Reason,
-			"advancer": string(blocker.Advancer),
-		}
-		rows = append(rows, row)
 	}
+	observations["statistics_derived_from_detail"] = counts.Agents.Configured == fromDetail &&
+		counts.Agents.Resident == len(view.Sessions()) &&
+		blocked == len(rows)
 	observations["blockers_with_next_advancer"] = advancing
 	observations["blocker_detail_rows"] = rows
-	observations["blocker_statistic_matches_detail"] = report.Counts.Blockers == len(report.Blockers) &&
-		(len(report.Blockers) == 0 || blockedReason != "")
+	observations["blocker_statistic_matches_detail"] = blocked == len(rows) &&
+		(len(rows) == 0 || blockedReason != "")
 
 	filtered, _, err := projection.Snapshot(ctx, query.ListFilter{Scope: query.AuthorizationScope{Agents: []event.AgentID{addrA.AgentID}}})
 	if err != nil {

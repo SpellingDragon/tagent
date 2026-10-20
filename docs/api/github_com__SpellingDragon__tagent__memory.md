@@ -1,13 +1,10 @@
 package memory // import "github.com/SpellingDragon/tagent/memory"
 
-Consumer wiring for the compress request family: the producer and the reason
-the meditation bound states when it judges material due for compression,
-and the in-process log a filed request waits in until its consumer retires it.
+The filing seam of the compress request family: where the judgment that material
+is due for compression is filed, and the answer the filing gives.
 
 The fact itself — who judged, why, what was judged, and the identity the
-judgment is quoted by — is event vocabulary (event.CompressRequest). What
-stands here is the memory side of that wiring: the judgment label this package
-contributes and the log that holds it.
+judgment is quoted by — is event vocabulary (event.CompressRequest).
 
 Package memory is the runtime's durable original-text layer: it names one stored
 original and the reference metadata that scopes it, commits those bytes and
@@ -49,12 +46,12 @@ The unconfirmed-delivery replay engine: the obligations a committed record still
 owes, re-delivered at the owner the current orchestration binding resolves. The
 durable fact surface beside it lives with the storage tiers in memory/ledger.
 
-Skeleton compile-time assertions for the read face of the memory package:
-the delivery replay engine, the compress request family and the archive
-original-text adapter. The storage shapes are pinned beside their declarations
-in memory/ledger, the projection shapes in memory/replay and the meditation
-shapes in evolution/meditation; this file pins what this package itself
-declares, so a renamed field or a widened signature stops it from compiling.
+Skeleton compile-time assertions for the read face of the memory package: the
+delivery replay engine and the compress request filing seam. The storage shapes
+are pinned beside their declarations in memory/ledger, the projection shapes in
+memory/replay and the meditation shapes in evolution/meditation; this file pins
+what this package itself declares, so a renamed field or a widened signature
+stops it from compiling.
 
 The observation table between the segment store and the query face: a committed
 event reaches the query face by being decoded and landed here first, and only
@@ -64,19 +61,6 @@ an event after the table observes it, and never at the moment its bytes happen
 to be committed.
 
 CONSTANTS
-
-const (
-	// CompressProducerMeditation names the meditation bound judgment.
-	CompressProducerMeditation = "memory.meditation"
-	// CompressReasonMeditation states why the meditation bound judgment files a
-	// request.
-	CompressReasonMeditation = "the card sequence exceeds the meditation bound"
-)
-    CompressProducerMeditation names the mechanism that judges a card sequence
-    against the meditation bound, and CompressReasonMeditation states why
-    that judgment files a request. The producer and the reason are part of the
-    request identity, so the same material judged by two mechanisms stays two
-    facts.
 
 const (
 	QueryOrderByAsc  = "timestamp_asc"
@@ -99,15 +83,6 @@ const PartitionBits = 10
 
 VARIABLES
 
-var (
-	// ErrCompressRequestUnnamed reports a judgment that names no producer, no
-	// subject or no reason: no identity is derived from it and no consumer could
-	// tell what it asks for.
-	ErrCompressRequestUnnamed = errors.New("memory: a compress request names no producer, subject or reason")
-	// ErrCompressRequestNotPending reports a retirement of a request that does not
-	// await consumption: a repeated retirement never retires a second one.
-	ErrCompressRequestNotPending = errors.New("memory: no compress request awaits consumption under that identity")
-)
 var ErrBodyKeyMismatch = errors.New("memory: event body key disagrees with the stored event key")
     ErrBodyKeyMismatch reports a committed body whose canonical key disagrees
     with the key it is stored under, so the body cannot stand for that event.
@@ -144,65 +119,11 @@ func PartitionsOf(id string, extra []string) []string
 
 TYPES
 
-type ArchiveOriginals struct {
-	// Has unexported fields.
-}
-
-    ArchiveOriginals is the original-text face one archive migration writes
-    and reads back through: it maps the byte identity and the reference
-    metadata a migration carries onto the ledger.OriginalStore of the tier it
-    stands over. Its method signatures carry built-in and event types only,
-    so the migration's original port matches it structurally and no package edge
-    is required in either direction.
-
-func NewArchiveOriginals(store ledger.OriginalStore) *ArchiveOriginals
-    NewArchiveOriginals returns the archive face over one original store.
-
-func (a *ArchiveOriginals) GetOriginal(ctx context.Context, key event.EventID) ([]byte, bool, error)
-    GetOriginal returns the exact bytes the store holds under key and whether it
-    holds any: a key nothing is registered under reads back as absent beside no
-    error, and a failed read reports its cause.
-
-func (a *ArchiveOriginals) PutOriginal(ctx context.Context, key event.EventID, owner event.Address, format, retention, digest string, length int64, body []byte) error
-    PutOriginal commits body under key beside the reference metadata the
-    migration names, so a repeated import of the same dump lands the same bytes
-    under the same reference.
-
 type CompressRequestFiling func(ctx context.Context, request event.CompressRequest) (event.CompressRequest, error)
     CompressRequestFiling files one compress request into the log its consumer
     reads and answers the request as it stands on record, so a repeated judgment
     keeps the identity and the filing moment of the first one. A filing that
     fails is reported by name and a judgment is never dropped silently.
-
-type CompressRequests struct {
-	// Has unexported fields.
-}
-    CompressRequests is the in-process log of compress request facts:
-    every request filed, the order it was filed in and the ones still awaiting
-    consumption. The log is the identity authority of the family — a filed
-    request is answered as it stands on record, so one judgment keeps its
-    identity and first filing moment — and a request leaves the pending set
-    exactly once, when its consumer retires it after the products of its
-    compression are committed.
-
-func NewCompressRequests() *CompressRequests
-    NewCompressRequests returns an empty request log.
-
-func (l *CompressRequests) Consume(ctx context.Context, key event.EventID) error
-    Consume retires one request once the products of its compression are
-    committed. A request that does not await consumption is refused by name,
-    so a retirement is never counted twice.
-
-func (l *CompressRequests) Pending(ctx context.Context) ([]event.CompressRequest, error)
-    Pending lists the requests awaiting consumption, in filing order, exactly as
-    they stand on record.
-
-func (l *CompressRequests) Produce(ctx context.Context, request event.CompressRequest) (event.CompressRequest, error)
-    Produce files one compress request and answers it as it stands on record:
-    a judgment already filed is answered with the recorded request,
-    so its identity and filing moment never move and no second entry is added.
-    A request naming no producer, subject or reason is refused by name, and the
-    filing moment of a request that carries none is stamped on the first filing.
 
 type DeliveryRecord struct {
 	// TaskID is the task the notification belongs to.

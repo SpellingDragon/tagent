@@ -55,16 +55,16 @@ func (s *stubSet) Name() string {
 }
 
 type stubPlugin struct {
-	name  string
-	phase plugin.Phase
+	name string
+	port plugin.Port
 }
 
 func (p *stubPlugin) Name() string {
 	return p.name
 }
 
-func (p *stubPlugin) Phase() plugin.Phase {
-	return p.phase
+func (p *stubPlugin) Port() plugin.Port {
+	return p.port
 }
 
 // TestStateOwnsPipeline checks how the state owner holds the candidate live bindings and hands one generation to each request as its execution begins.
@@ -89,9 +89,9 @@ func TestStateOwnsPipeline(t *testing.T) {
 		bindingA := orgstate.AgentBinding{
 			Model: first,
 			Tools: []trpctool.Tool{&stubTool{name: "tool-1"}, &stubTool{name: "tool-2"}},
-			Plugins: []plugin.Plugin{
-				&stubPlugin{name: "enrich", phase: plugin.PhaseCallTransform},
-				&stubPlugin{name: "risk", phase: plugin.PhaseRiskPolicy},
+			Plugins: []plugin.Instance{
+				&stubPlugin{name: "enrich", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}},
+				&stubPlugin{name: "risk", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}},
 			},
 			PromptSource: orgstate.PromptSource{Files: []config.FileRef{{Path: "prompts/a.md", Kind: config.FileKindPrompt}}},
 			Set:          set,

@@ -15,8 +15,10 @@ type auditObserver struct{}
 // Name reports the stable name of the element.
 func (auditObserver) Name() string { return "audit-observer" }
 
-// Phase reports the one phase the element serves.
-func (auditObserver) Phase() plugin.Phase { return plugin.PhasePostCommitObserve }
+// Port reports the fact->observation port the element serves.
+func (auditObserver) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+}
 
 // ObserveCommit observes one committed fact as a read-only duty: a failure returns an
 // error, which the After pass records as a visible gap beside this element's name.
@@ -28,7 +30,7 @@ func (auditObserver) ObserveCommit(_ context.Context, id event.EventID) error {
 }
 
 var (
-	_ plugin.Plugin             = auditObserver{}
+	_ plugin.Instance           = auditObserver{}
 	_ plugin.PostCommitObserver = auditObserver{}
 )
 
@@ -38,7 +40,7 @@ var (
 //
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 func ExamplePostCommitObserver() {
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{auditObserver{}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{auditObserver{}})
 	if err != nil {
 		return
 	}

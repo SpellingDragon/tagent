@@ -7,7 +7,7 @@
 // takes effect only on the channel its dimension belongs to.
 //
 // The two paths never stand in for each other: a structural change runs
-// config.Load → Compile → Prepare → the precondition checks → commit and
+// the strict decode → Compile → Prepare → the precondition checks → commit and
 // commits only through the sole publication entry, while a file change takes
 // effect directly at the request boundary. A structural difference never rides
 // the file channel around the precondition checks, and a file change is never

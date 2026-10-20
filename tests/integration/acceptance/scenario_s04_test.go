@@ -26,8 +26,10 @@ type scenarioTransform struct {
 // Name reports the stable name of the element.
 func (p *scenarioTransform) Name() string { return "scenario-transform" }
 
-// Phase reports the pre-execution call phase.
-func (p *scenarioTransform) Phase() plugin.Phase { return plugin.PhaseCallTransform }
+// Port reports the call->call port.
+func (p *scenarioTransform) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+}
 
 // TransformCall rewrites one call's arguments to the final body.
 func (p *scenarioTransform) TransformCall(ctx context.Context, call *trpcmodel.ToolCall) error {
@@ -57,8 +59,10 @@ type scenarioPolicy struct {
 // Name reports the stable name of the element.
 func (p *scenarioPolicy) Name() string { return "scenario-policy" }
 
-// Phase reports the risk-policy phase the ruling belongs to.
-func (p *scenarioPolicy) Phase() plugin.Phase { return plugin.PhaseRiskPolicy }
+// Port reports the call->ruling port the ruling belongs to.
+func (p *scenarioPolicy) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
 
 // Judge renders the one ruling of a call.
 func (p *scenarioPolicy) Judge(pass plugin.CallPass) (plugin.Decision, error) {
@@ -114,8 +118,10 @@ type scenarioPresenter struct{}
 // Name reports the stable name of the element.
 func (p *scenarioPresenter) Name() string { return "scenario-presenter" }
 
-// Phase reports the final-presentation phase.
-func (p *scenarioPresenter) Phase() plugin.Phase { return plugin.PhaseFinalPresentation }
+// Port reports the fact->view port.
+func (p *scenarioPresenter) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+}
 
 // Present renders the presentation text of one fact identity.
 func (p *scenarioPresenter) Present(ctx context.Context, id event.EventID) (string, bool) {
@@ -159,7 +165,7 @@ func TestScenario04PluginPhaseAndGovernance(t *testing.T) {
 		"agent-a": {
 			Model:   provider,
 			Tools:   []trpctool.CallableTool{allowed, refused},
-			Plugins: []plugin.Plugin{transform, policy, presenter},
+			Plugins: []plugin.Instance{transform, policy, presenter},
 		},
 	}, tagent.WithGovernance(governance), tagent.WithPolicy(policy))
 	if err != nil {

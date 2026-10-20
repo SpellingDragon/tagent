@@ -14,8 +14,10 @@ type presentText struct{}
 // Name reports the stable name of the element.
 func (presentText) Name() string { return "present-text" }
 
-// Phase reports the one phase the element serves.
-func (presentText) Phase() plugin.Phase { return plugin.PhaseFinalPresentation }
+// Port reports the fact->view port the element serves.
+func (presentText) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+}
 
 // Present renders the presentation of one committed fact and reports it beside whether
 // the channel dropped it; a drop drops the presentation only.
@@ -27,7 +29,7 @@ func (presentText) Present(_ context.Context, id event.EventID) (string, bool) {
 }
 
 var (
-	_ plugin.Plugin         = presentText{}
+	_ plugin.Instance       = presentText{}
 	_ plugin.FinalPresenter = presentText{}
 )
 
@@ -37,7 +39,7 @@ var (
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func ExampleFinalPresenter() {
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{presentText{}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{presentText{}})
 	if err != nil {
 		return
 	}

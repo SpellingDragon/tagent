@@ -23,8 +23,10 @@ type provenancePresenter struct {
 // Name reports the stable name of the presenter.
 func (p *provenancePresenter) Name() string { return p.name }
 
-// Phase reports the one phase the presenter serves.
-func (p *provenancePresenter) Phase() plugin.Phase { return plugin.PhaseFinalPresentation }
+// Port reports the fact->view port the presenter serves.
+func (p *provenancePresenter) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+}
 
 // Present records the source fact and answers the view this presenter writes.
 func (p *provenancePresenter) Present(_ context.Context, fact event.EventID) (string, bool) {
@@ -51,7 +53,7 @@ func TestMultiplePresentersEachAnswerATraceableView(t *testing.T) {
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
 	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
-		"agent-a": {Model: provider, Plugins: []plugin.Plugin{summary, detail}},
+		"agent-a": {Model: provider, Plugins: []plugin.Instance{summary, detail}},
 	}, tagent.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)

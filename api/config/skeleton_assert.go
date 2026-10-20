@@ -1,7 +1,5 @@
 package config
 
-import "context"
-
 // 契约: docs/wiki/platform/platform-subsystems.md#config-surface
 //
 // Skeleton compile-time assertions for the phase 1 declaration layer. The
@@ -14,8 +12,7 @@ import "context"
 // root to compile against them, and the assertions prove the declaration types
 // stay usable by that consumer.
 var (
-	_ func(context.Context, string) (*Declaration, error) = Load
-	_ func(Declaration) (string, error)                   = Fingerprint
+	_ func(Declaration) (string, error) = Fingerprint
 )
 
 // Declared declaration types and their fields.

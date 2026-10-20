@@ -45,6 +45,12 @@ func ExampleGovernor()
     with no trace duty, and the recorded ruling runs beside its audit record.
     A hold rendered here stays a wait, never a denial.
 
+func ExampleInstance()
+    ExampleInstance shows both outcomes of one instance: an instance that
+    declares a port without the narrow face of that port is refused by name,
+    while an instance that carries the face is dispatched into that port's set
+    and runs in the one Before pass.
+
 func ExampleObservationSink()
     ExampleObservationSink hands one committed fact to the observation side: the
     sink never rewrites the fact and never withholds it, so a failed observation
@@ -65,12 +71,6 @@ func ExamplePhase_riskPolicy()
     other: one element grades a call and renders the ruling over that grade,
     and a pass that carries no grade is ruled as an ordinary mutating call
     instead of passing ungraded.
-
-func ExamplePlugin()
-    ExamplePlugin shows both outcomes of one registration unit: a plugin that
-    reports a phase without the narrow face of that phase is refused by name,
-    while a plugin that carries the face is dispatched into that phase's set and
-    runs in the one Before pass.
 
 func ExamplePostCommitObserver()
     ExamplePostCommitObserver observes one committed fact through the After
@@ -103,14 +103,14 @@ func ExampleTransformCall_refusal()
 TYPES
 
 type TransformFace struct{}
-    TransformFace is the canonical registration unit: one name, the one phase it
-    serves and the one narrow face of that phase.
+    TransformFace is the canonical instance: one name, the one port it serves
+    and the one narrow face of that port.
 
 func (TransformFace) Name() string
     Name reports the stable name of the element.
 
-func (TransformFace) Phase() plugin.Phase
-    Phase reports the one phase the element serves.
+func (TransformFace) Port() plugin.Port
+    Port reports the call->call port the element serves.
 
 func (TransformFace) TransformCall(context.Context, *trpcmodel.ToolCall) error
     TransformCall corrects one call before its side effect; the corrected call

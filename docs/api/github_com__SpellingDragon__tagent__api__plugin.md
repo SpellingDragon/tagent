@@ -5,14 +5,14 @@ differentiated capabilities into the framework event flow: the producing phase
 and the consuming phase, each dispatched by the material a face reads, and the
 six ports those phases serve.
 
-A plugin is a registration unit: it reports the stable name of one flow instance
-and the route word of the port the instance serves — the material it reads
-and the product it answers — and the instance implements that port's narrow
-interface. The flow derives the phase from the port and dispatches the instance
-by the material that port reads. A built-in consumer — the drive that runs
-one decision, the tick that runs one reflection, the assembler that builds one
-request — is an instance of the same flow: the difference between a built-in
-instance and a mounted plugin is who mounts it, never how it is dispatched.
+An instance is a registration unit: it reports the stable name of one flow
+instance and the port it serves — the material it reads and the product it
+answers — and the instance implements that port's narrow interface. The flow
+derives the phase from the port and dispatches the instance by the material
+that port reads. A built-in consumer — the drive that runs one decision,
+the tick that runs one reflection, the assembler that builds one request — is
+an instance of the same flow: the difference between a built-in instance and a
+mounted plugin is who mounts it, never how it is dispatched.
 
   - the extension-face vocabulary: the phases, the ports, the narrow
     interfaces each port owns, the pipeline that dispatches them by material,
@@ -420,55 +420,6 @@ const (
 	// material it read.
 	PhaseConsume
 )
-const (
-	// PhaseCallTransform is the route word of the call->call port: the call is
-	// corrected before its side effect and before its admission ruling, and the
-	// corrected call is the one re-checked, executed and recorded.
-	PhaseCallTransform Phase = routeWordBase + iota
-
-	// PhaseRiskPolicy is the route word of the call->ruling port: the grade of
-	// one call before its side effect beside the one pre-execution ruling over
-	// it. The port carries two faces of that one ruling: a RiskAssessor renders
-	// the grade and a Governor renders the ruling over it; the grade is read
-	// once and never recomputed by the ruling.
-	PhaseRiskPolicy
-
-	// PhasePostCommitObserve is the route word of the fact->observation port: one
-	// committed fact observed after its canonical commit, as a read-only duty.
-	PhasePostCommitObserve
-
-	// PhaseFinalPresentation is the route word of the fact->view port: the final
-	// presentation of one committed fact for its channel.
-	PhaseFinalPresentation
-
-	// PhaseCompressTrigger is the route word of the fact->compression port: the
-	// filed judgment that material is over its bound is handed to the faces that
-	// answer it with the compression it owes, before the request is retired. The
-	// port is the starter of the traceable mapping chain the request drives,
-	// never the curation itself.
-	PhaseCompressTrigger
-
-	// PhaseEnvironmentInject is the route word of the request->environment port:
-	// the faces render the dynamic environment material one request carries at
-	// the bottom of its assembly, so what changes with the run never moves the
-	// stable prefix. Each block a face answers is one product of that request,
-	// traceable to it.
-	PhaseEnvironmentInject
-)
-    PhaseCallTransform, PhaseRiskPolicy, PhasePostCommitObserve,
-    PhaseFinalPresentation, PhaseCompressTrigger and PhaseEnvironmentInject
-    are the six route words of Plugin: each names one port of the flow, and an
-    element registering under it is dispatched exactly as an Instance declaring
-    that port is dispatched.
-
-      - PhaseCallTransform → call->call: the call transform face
-      - PhaseRiskPolicy → call->ruling: the risk face and the ruling face
-      - PhasePostCommitObserve → fact->observation: the post-commit observation
-        face
-      - PhaseFinalPresentation → fact->view: the final presentation face
-      - PhaseCompressTrigger → fact->compression: the compress-trigger face
-      - PhaseEnvironmentInject → request->environment: the request-assembly face
-
 func RouteOf(port Port) (Phase, error)
     RouteOf reports the phase one port serves, by the closed table of the flow:
     the producing ports grow a product out of the material they read, and the
@@ -518,15 +469,6 @@ func NewFlow(instances []Instance) (Pipeline, error)
     twice each refuse the flow by name instead of being trimmed in silence.
     The name refusal keeps provenance: a product's name must trace back to the
     one element that wrote it.
-
-func NewPipeline(plugins []Plugin) (Pipeline, error)
-    NewPipeline assembles the material flow out of the registration units that
-    report a route word, in the declared order. It reads the port each route
-    word names and dispatches the element exactly as NewFlow dispatches an
-    instance declaring that port. A plugin whose phase is not one of the route
-    words, a nil plugin, a plugin that implements no narrow interface of its
-    port, and a name declared twice each refuse the flow by name instead of
-    being trimmed in silence.
 
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation
     After runs the one consuming pass over one fact whose canonical commit
@@ -590,26 +532,6 @@ func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressReq
     face runs, and the caller answers with the refusal instead of counting the
     request as compressed. A pipeline carrying no compression face answers nil,
     so a consumer wired without one refuses nothing of the request it read.
-
-type Plugin interface {
-	// Name returns the stable name of this plugin.
-	Name() string
-
-	// Phase reports the route word of the one port this plugin serves.
-	Phase() Phase
-}
-    Plugin is the registration unit a mounted element reports, distinct from
-    the framework's plugin.Plugin: the stable name of one pipeline element
-    and one of the six route words, each naming the port that element serves.
-    The flow reads the port the word names and dispatches the element exactly
-    as an Instance declaring that port is dispatched; the element implements the
-    narrow interface of its port.
-
-    The redline list (3 rules): MUST report the one route word of the port it
-    serves and implement that port's narrow interface. MUST NOT report a route
-    word whose narrow interface it does not implement. MUST NOT serve two ports:
-    one registration element serves one port and may carry both faces of the
-    ruling port.
 
 type Port struct {
 	// Reads is the material this instance reads.

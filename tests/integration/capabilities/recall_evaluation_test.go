@@ -190,6 +190,14 @@ func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *tag
 	return run
 }
 
+// evalRecallPort binds the recall port of one assembled run, so the test drives
+// the same recall face the production tools read through.
+func evalRecallPort(run *tagent.Run) *tagent.RecallPort {
+	port := tagent.NewRecallPort(nil, nil)
+	port.Bind(run)
+	return port
+}
+
 // awaitEvalRecall waits until the production recall of q answers every wanted
 // key, failing on a bounded wait so a vector generation that never becomes
 // ready fails the case instead of hanging the run.
@@ -199,7 +207,7 @@ func awaitEvalRecall(t *testing.T, run *tagent.Run, q search.Query, want []event
 	deadline := time.Now().Add(realAwaitLimit)
 	var last []event.EventID
 	for {
-		result, err := run.Recall(ctx, q)
+		result, err := evalRecallPort(run).Search(ctx, q)
 		if err != nil {
 			t.Fatalf("Recall(%q): %v", q.Text, err)
 		}
@@ -271,7 +279,7 @@ func countRecovered(want, got []event.EventID) int {
 // endpoint happens to produce.
 func mintEvalCursor(t *testing.T, run *tagent.Run, partitions []string) search.Cursor {
 	t.Helper()
-	paged, err := run.Recall(context.Background(), search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: partitions, Limit: 1})
+	paged, err := evalRecallPort(run).Search(context.Background(), search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: partitions, Limit: 1})
 	if err != nil {
 		t.Fatalf("mint the foreign cursor: %v", err)
 	}
@@ -297,7 +305,7 @@ func runEvalRow(t *testing.T, run *tagent.Run, spec evalRowSpec, partitions []st
 		Want:     spec.want,
 	}
 	start := time.Now()
-	result, err := run.Recall(ctx, search.Query{
+	result, err := evalRecallPort(run).Search(ctx, search.Query{
 		Text:       spec.text,
 		Strategy:   search.StrategyHybrid,
 		Cursor:     spec.cursor,
@@ -318,7 +326,7 @@ func runEvalRow(t *testing.T, run *tagent.Run, spec evalRowSpec, partitions []st
 	}
 	row.Got = originalKeysOf(result.Refs)
 	row.Hits = len(row.Got)
-	baseline, err := run.Recall(ctx, search.Query{
+	baseline, err := evalRecallPort(run).Search(ctx, search.Query{
 		Text:       spec.text,
 		Strategy:   search.StrategyKeywordOnly,
 		Partitions: partitions,
@@ -418,14 +426,14 @@ func TestRecallEvaluation(t *testing.T) {
 			t.Fatalf("scoped recall read %q, want the committed original byte for byte", exact)
 		}
 
-		unfiltered, err := run.Recall(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: alpha})
+		unfiltered, err := evalRecallPort(run).Search(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: alpha})
 		if err != nil {
 			t.Fatalf("Recall(%q): %v", evalFilterText, err)
 		}
 		if want := []event.EventID{"0a03", "0a02"}; !reflect.DeepEqual(originalKeysOf(unfiltered.Refs), want) {
 			t.Fatalf("keyword recall keys = %v, want %v (newest first): the query face orders exactly as the read face states", originalKeysOf(unfiltered.Refs), want)
 		}
-		typed, err := run.Recall(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Types: []string{event.TypeAgentOutput}, Partitions: alpha})
+		typed, err := evalRecallPort(run).Search(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Types: []string{event.TypeAgentOutput}, Partitions: alpha})
 		if err != nil {
 			t.Fatalf("Recall(typed): %v", err)
 		}
@@ -441,14 +449,14 @@ func TestRecallEvaluation(t *testing.T) {
 			t.Fatalf("both-partition recall keys = %v, want 0b05 among them once its partition is authorized", originalKeysOf(wider.Refs))
 		}
 
-		first, err := run.Recall(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: alpha, Limit: 2})
+		first, err := evalRecallPort(run).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: alpha, Limit: 2})
 		if err != nil {
 			t.Fatalf("Recall(page 1): %v", err)
 		}
 		if want := []event.EventID{"0a01", "0a02"}; !reflect.DeepEqual(originalKeysOf(first.Refs), want) || first.NextCursor == "" {
 			t.Fatalf("page 1 = (%v, cursor %q), want %v beside a continuation", originalKeysOf(first.Refs), first.NextCursor, want)
 		}
-		second, err := run.Recall(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Cursor: first.NextCursor, Partitions: alpha, Limit: 2})
+		second, err := evalRecallPort(run).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Cursor: first.NextCursor, Partitions: alpha, Limit: 2})
 		if err != nil {
 			t.Fatalf("Recall(page 2): %v", err)
 		}
@@ -456,7 +464,7 @@ func TestRecallEvaluation(t *testing.T) {
 			t.Fatalf("page 2 = (%v, cursor %q), want %v as the last page", originalKeysOf(second.Refs), second.NextCursor, want)
 		}
 
-		_, err = run.Recall(ctx, search.Query{Text: evalKeywordText, Strategy: search.StrategyHybrid, Cursor: first.NextCursor, Partitions: alpha})
+		_, err = evalRecallPort(run).Search(ctx, search.Query{Text: evalKeywordText, Strategy: search.StrategyHybrid, Cursor: first.NextCursor, Partitions: alpha})
 		if !errors.Is(err, search.ErrCursorUnbound) {
 			t.Fatalf("foreign-cursor recall = %v, want the named refusal ErrCursorUnbound", err)
 		}
@@ -464,21 +472,21 @@ func TestRecallEvaluation(t *testing.T) {
 
 	t.Run("负锚: 无存储具名拒绝与无 embedding 零行为变化", func(t *testing.T) {
 		bare := evalAssemble(t, "", nil)
-		if _, err := bare.Recall(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}}); !errors.Is(err, tagent.ErrRetrievalUnwired) {
+		if _, err := evalRecallPort(bare).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}}); !errors.Is(err, tagent.ErrRetrievalUnwired) {
 			t.Fatalf("recall beside no storage = %v, want the named refusal ErrRetrievalUnwired", err)
 		}
 
 		storeRoot := t.TempDir()
 		seedEvalCorpus(t, storeRoot)
 		plain := evalAssemble(t, storeRoot, nil)
-		vectorOnly, err := plain.Recall(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}, Limit: 20})
+		vectorOnly, err := evalRecallPort(plain).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}, Limit: 20})
 		if err != nil {
 			t.Fatalf("Recall(no embedder): %v", err)
 		}
 		if len(vectorOnly.Refs) != 0 {
 			t.Fatalf("unconfigured recall answered %v, want none: without an embedding there is no vector leg to speak", originalKeysOf(vectorOnly.Refs))
 		}
-		keyword, err := plain.Recall(ctx, search.Query{Text: evalKeywordText, Strategy: search.StrategyKeywordOnly, Partitions: []string{realAlphaPartition}})
+		keyword, err := evalRecallPort(plain).Search(ctx, search.Query{Text: evalKeywordText, Strategy: search.StrategyKeywordOnly, Partitions: []string{realAlphaPartition}})
 		if err != nil {
 			t.Fatalf("Recall(keyword, no embedder): %v", err)
 		}
@@ -489,13 +497,13 @@ func TestRecallEvaluation(t *testing.T) {
 		counter := &evalCountingEmbedder{inner: memoryembedder.NewHashEmbedder(0)}
 		counted := evalAssemble(t, storeRoot, counter)
 		generated := awaitEvalVectorCount(t, counter, len(realCorpusOf()))
-		if _, err := counted.Recall(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: []string{realAlphaPartition}}); err != nil {
+		if _, err := evalRecallPort(counted).Search(ctx, search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: []string{realAlphaPartition}}); err != nil {
 			t.Fatalf("Recall(keyword-only): %v", err)
 		}
 		if got := counter.count(); got != generated {
 			t.Fatalf("keyword-only recall made %d embedding calls, want %d: the keyword leg never reaches the embedding", got-generated, 0)
 		}
-		if _, err := counted.Recall(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}, Limit: 20}); err != nil {
+		if _, err := evalRecallPort(counted).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}, Limit: 20}); err != nil {
 			t.Fatalf("Recall(hybrid): %v", err)
 		}
 		if got := counter.count(); got <= generated {

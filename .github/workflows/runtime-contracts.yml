@@ -14,9 +14,9 @@
 # go build ./...、go vet ./...、go test ./... -short -count=1，产品包上的 gofmt -l、
 # comment_policy -no-baseline、codetools tracked-hygiene，加 openspec strict。
 # 产品包口径 = golden/runtime/architecture.json 登记的第一方包（其 scope 明确排除
-# scripts/tests/prototype/examples/docs/resources）；PRODUCT_PACKAGES 的顶层目录集由
+# scripts/tests/examples/docs/resources）；PRODUCT_PACKAGES 的顶层目录集由
 # scripts/test_check_runtime_workflow.py 对 golden 钉住，防漂移。根包用 *.go 是因为
-# `gofmt -l .`/`comment_policy .` 会递归整个根 module（含 scripts/tests/prototype）。
+# `gofmt -l .`/`comment_policy .` 会递归整个根 module（含 scripts/tests）。
 #
 # 双 module 现状（2026-10-18 实测，不再是缺口）：examples/wechat-bot 是独立 module（无
 # go.work，根 module 的 ./... 到不了它），rebuild 落地后已重新可编译并通过自身测试——以
@@ -28,8 +28,8 @@
 # 不重复 bot 步骤（重复会造两处升级点）。“当前不可编译（main.go 引用已删除包
 # tagent/agent/governance、tagent/memory/engine）”是 rebuild 过渡期记录，已失效。
 #
-# 本 workflow 不代表产品行为通过；openspec strict 步骤只校验 runtime-rebuild 变更，
-# 不代表全部规格通过。也不是旧产品门的替代（ci.yml/lint.sh/race_check.sh/gen_godoc.sh
+# 本 workflow 不代表产品行为通过；openspec strict 步骤以 `--all` 校验全部主规格与
+# 全部活跃 change（`--all` 覆盖面含 change），任一未 strict-valid 即如实红。也不是旧产品门的替代（ci.yml/lint.sh/race_check.sh/gen_godoc.sh
 # 的迁移属 09.3）。不使用 continue-on-error，不内嵌第二套校验器；检查器本体纯标准库，
 # 只有 workflow 自测解析本文件需要 PyYAML（自测步骤安装这一件）。旧的
 # .github/workflows/ci.yml 不变。
@@ -66,9 +66,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # First-party product packages per golden/runtime/architecture.json (its
-      # scope excludes scripts/tests/prototype/examples/docs/resources). The root
+      # scope excludes scripts/tests/examples/docs/resources). The root
       # package is *.go: a bare `.` would recurse the whole root module.
-      PRODUCT_PACKAGES: "*.go api runtime memory evolution telemetry rl tool bench cli"
+      PRODUCT_PACKAGES: "*.go api runtime memory evolution telemetry rl tool internal cli"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4
@@ -156,7 +156,7 @@ jobs:
         run: go run ./scripts/codetools tracked-hygiene
 
       - name: OpenSpec strict (all specs)
-        # 归档后 change 不再位于活动目录: 该步改为校验全部主规格(含本次合成的 121 项)。
+        # 该步以 `--all` 校验全部主规格与全部活跃 change；规格或 change 未 strict-valid 时如实红，不以 continue-on-error 掩盖。
         run: openspec validate --all --strict --no-interactive
 
   real-acceptance:

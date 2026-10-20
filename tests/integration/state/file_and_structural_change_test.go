@@ -72,7 +72,7 @@ func writeSkillFile(t *testing.T, root, name, body string) {
 // fileCandidate prepares the candidate of one declared agent beside the
 // structural file binding and the candidate-exclusive resources the caller
 // registered.
-func fileCandidate(t *testing.T, baseline, fingerprint string, m model.Model, tools []trpctool.Tool, plugins []plugin.Plugin, files []config.FileRef, leases *orgstate.Leases) orgstate.Candidate {
+func fileCandidate(t *testing.T, baseline, fingerprint string, m model.Model, tools []trpctool.Tool, plugins []plugin.Instance, files []config.FileRef, leases *orgstate.Leases) orgstate.Candidate {
 	t.Helper()
 	decl := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}}}
 	plan := orgstate.OrgPlan{Declaration: decl, Baseline: baseline, Fingerprint: fingerprint, NextPrompt: "prompt-a"}
@@ -310,9 +310,9 @@ func TestFileAndStructuralChange(t *testing.T) {
 		ctx := context.Background()
 		rig := newFileRig(t)
 		tools := []trpctool.Tool{&stubTool{name: "tool-1"}}
-		pipeline := []plugin.Plugin{
-			&stubPlugin{name: "enrich", phase: plugin.PhaseCallTransform},
-			&stubPlugin{name: "risk", phase: plugin.PhaseRiskPolicy},
+		pipeline := []plugin.Instance{
+			&stubPlugin{name: "enrich", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}},
+			&stubPlugin{name: "risk", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}},
 		}
 		first := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, tools, pipeline, rig.files, orgstate.NewLeases())
 		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionPlugins, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 4}, first); err != nil {
@@ -326,7 +326,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 
 		second := fileCandidate(t, rig.pub.Baseline(), "fp-2", &stubModel{name: "gen-2"},
 			[]trpctool.Tool{&stubTool{name: "tool-2"}},
-			[]plugin.Plugin{&stubPlugin{name: "present", phase: plugin.PhaseFinalPresentation}},
+			[]plugin.Instance{&stubPlugin{name: "present", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}}},
 			rig.files, orgstate.NewLeases())
 		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionPlugins, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 5}, second); err != nil {
 			t.Fatalf("publish the second generation beside the in-flight request: %v", err)

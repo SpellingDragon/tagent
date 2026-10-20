@@ -1,11 +1,12 @@
 package learning
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,8 +16,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/cli"
-	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -26,7 +25,6 @@ import (
 //   - a replacement publishes one new binding generation, so later requests run the new version and earlier records keep theirs
 //   - a failed rebuild publishes no binding at all, records the attempt as refused beside its reason and leaves the version untouched
 //   - a request already in flight keeps its version until its stream ends, and that version is closed only once the stream ended
-//   - a reward derived after a replacement binds the version that served its evidence and never rewrites the reward before it
 //   - a restarted lease reads the persisted version back and refuses a history that ends on another version
 //
 // 契约: docs/wiki/rl/rl-architecture.md#swappable-model
@@ -88,57 +86,6 @@ func TestModelReplacementLifecycle(t *testing.T) {
 		}
 		if attempts[0].ModelVersion != "v1" || attempts[1].ModelVersion != "v2" {
 			t.Fatalf("stored attempt versions = (%q, %q), want the version that served each attempt", attempts[0].ModelVersion, attempts[1].ModelVersion)
-		}
-
-		source, err := rl.NewCaptureExportSource(dir)
-		if err != nil {
-			t.Fatalf("build the export source over the sealed capture: %v", err)
-		}
-		feedback := rl.NewFeedbackLedger()
-		rewards := rl.NewRewardLedger()
-		endpoint, err := rl.NewFeedbackEndpoint(
-			rl.NewCaptureFeedbackResolver(source),
-			feedback,
-			rewards,
-			exportTestRule(),
-			rl.WithFeedbackToken(feedbackCredential),
-			rl.WithFeedbackLimits(rl.RequestLimits{}),
-		)
-		if err != nil {
-			t.Fatalf("build the feedback endpoint: %v", err)
-		}
-		base := serveReplacementFeedback(t, ctx, run, endpoint, "session-replacement-1")
-
-		reply := postFeedback(t, base, "Bearer "+feedbackCredential, feedbackBody(t, string(attempts[0].ID), "good"))
-		if reply.status != http.StatusOK {
-			t.Fatalf("submission of the first version status = %d (%s), want the accepted binding", reply.status, reply.body)
-		}
-		if got := decodeFeedbackSubmission(t, reply).ModelVersion; got != "v1" {
-			t.Fatalf("submission of the first version bound model version %q, want the version that served it", got)
-		}
-		before, held := rewards.Latest(attempts[0].DecisionID, attempts[0].ID)
-		if !held || before.State != rl.RewardRated || before.ModelVersion != "v1" || before.Revision != 1 {
-			t.Fatalf("reward of the first version = (%+v, %v), want the rated first revision of v1", before, held)
-		}
-
-		reply = postFeedback(t, base, "Bearer "+feedbackCredential, feedbackBody(t, string(attempts[1].ID), "good"))
-		if reply.status != http.StatusOK {
-			t.Fatalf("submission of the second version status = %d (%s), want the accepted binding", reply.status, reply.body)
-		}
-		if got := decodeFeedbackSubmission(t, reply).ModelVersion; got != "v2" {
-			t.Fatalf("submission of the second version bound model version %q, want the version that served it", got)
-		}
-		after, held := rewards.Latest(attempts[1].DecisionID, attempts[1].ID)
-		if !held || after.ModelVersion != "v2" {
-			t.Fatalf("reward of the second version = (%+v, %v), want the rated reward of v2", after, held)
-		}
-		kept, held := rewards.Latest(attempts[0].DecisionID, attempts[0].ID)
-		if !held || kept.InstanceID != before.InstanceID || kept.Revision != before.Revision ||
-			kept.ModelVersion != before.ModelVersion || kept.Value != before.Value || len(kept.DerivedFrom) != len(before.DerivedFrom) {
-			t.Fatalf("reward of the first version = %+v, want the record derived before the replacement as it was", kept)
-		}
-		if records := rewards.Records(attempts[0].DecisionID, attempts[0].ID); len(records) != 1 {
-			t.Fatalf("the first version carries %d rewards, want the one derivation of its own evidence", len(records))
 		}
 	})
 
@@ -453,30 +400,6 @@ func replacementPublisher(ctx context.Context, run *tagent.Run, calls *int) func
 	}
 }
 
-// serveReplacementFeedback serves the RL feedback face of one run over a real
-// listener and returns its base address.
-func serveReplacementFeedback(t *testing.T, ctx context.Context, run *tagent.Run, endpoint *rl.FeedbackEndpoint, session event.SessionID) string {
-	t.Helper()
-	shell := cli.NewCLI(run, query.AuthorizationScope{
-		Agents:   []event.AgentID{"agent-a"},
-		Sessions: []event.Address{{AgentID: "agent-a", SessionID: session}},
-	}, cli.WithRequestCredential(feedbackCredential), cli.WithFeedbackEndpoint(endpoint))
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	serveCtx, stopServe := context.WithCancel(ctx)
-	serving := make(chan error, 1)
-	go func() { serving <- shell.Serve(serveCtx, listener) }()
-	t.Cleanup(func() {
-		stopServe()
-		if err := <-serving; err != nil {
-			t.Errorf("serve: %v", err)
-		}
-	})
-	return "http://" + listener.Addr().String()
-}
-
 // replacementAttemptsOf reads the attempt records one sealed capture holds, in
 // stored order.
 func replacementAttemptsOf(t *testing.T, dir string) []rl.AttemptRecord {
@@ -488,6 +411,36 @@ func replacementAttemptsOf(t *testing.T, dir string) []rl.AttemptRecord {
 		}
 	}
 	return attempts
+}
+
+// storedRecord is one line of the sealed record file beside the raw bytes it
+// was written as, so a stored attempt is reconciled against the very bytes the
+// writer sealed.
+type storedRecord struct {
+	raw  []byte
+	line rl.Line
+}
+
+// storedRecordsOf reads the sealed record file of one capture directory back,
+// line by line.
+func storedRecordsOf(t *testing.T, dir string) []storedRecord {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(dir, rl.SinkRecordsFile))
+	if err != nil {
+		t.Fatalf("read the stored records: %v", err)
+	}
+	var out []storedRecord
+	for _, raw := range bytes.Split(content, []byte("\n")) {
+		if len(raw) == 0 {
+			continue
+		}
+		line, err := rl.ParseLine(raw)
+		if err != nil {
+			t.Fatalf("parse stored record %q: %v", raw, err)
+		}
+		out = append(out, storedRecord{raw: append([]byte(nil), raw...), line: line})
+	}
+	return out
 }
 
 // waitForReplacement waits until the condition holds or the wait runs out, so a

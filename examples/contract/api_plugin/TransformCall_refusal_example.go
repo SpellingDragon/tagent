@@ -16,8 +16,10 @@ type refusingTransform struct{}
 // Name reports the stable name of the element.
 func (refusingTransform) Name() string { return "refusing-transform" }
 
-// Phase reports the one phase the element serves.
-func (refusingTransform) Phase() plugin.Phase { return plugin.PhaseCallTransform }
+// Port reports the call->call port the element serves.
+func (refusingTransform) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+}
 
 // TransformCall refuses the call it was handed by answering an error.
 func (refusingTransform) TransformCall(_ context.Context, call *trpcmodel.ToolCall) error {
@@ -31,8 +33,10 @@ type identityMover struct{}
 // Name reports the stable name of the element.
 func (identityMover) Name() string { return "identity-mover" }
 
-// Phase reports the one phase the element serves.
-func (identityMover) Phase() plugin.Phase { return plugin.PhaseCallTransform }
+// Port reports the call->call port the element serves.
+func (identityMover) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+}
 
 // TransformCall rewrites the CallID, which a transform is never allowed to move.
 func (identityMover) TransformCall(_ context.Context, call *trpcmodel.ToolCall) error {
@@ -41,9 +45,9 @@ func (identityMover) TransformCall(_ context.Context, call *trpcmodel.ToolCall) 
 }
 
 var (
-	_ plugin.Plugin        = refusingTransform{}
+	_ plugin.Instance      = refusingTransform{}
 	_ plugin.TransformCall = refusingTransform{}
-	_ plugin.Plugin        = identityMover{}
+	_ plugin.Instance      = identityMover{}
 	_ plugin.TransformCall = identityMover{}
 )
 
@@ -56,7 +60,7 @@ var (
 func ExampleTransformCall_refusal() {
 	call := trpcmodel.ToolCall{ID: "call-1", Function: trpcmodel.FunctionDefinitionParam{Name: "write"}}
 
-	refusing, err := plugin.NewPipeline([]plugin.Plugin{refusingTransform{}})
+	refusing, err := plugin.NewFlow([]plugin.Instance{refusingTransform{}})
 	if err != nil {
 		return
 	}
@@ -65,7 +69,7 @@ func ExampleTransformCall_refusal() {
 		return
 	}
 
-	moving, err := plugin.NewPipeline([]plugin.Plugin{identityMover{}})
+	moving, err := plugin.NewFlow([]plugin.Instance{identityMover{}})
 	if err != nil {
 		return
 	}

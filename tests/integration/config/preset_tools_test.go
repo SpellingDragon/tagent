@@ -1,8 +1,9 @@
+// Package config exercises the agent declaration end to end: one declaration
+// referencing preset tools assembles into a run that serves them.
 package config
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,10 +52,18 @@ func TestPresetToolsAssemble(t *testing.T) {
 	storeRoot := t.TempDir()
 	seedPresetRecall(t, storeRoot)
 
-	declPath := writeSource(t, "presets.yaml", presetDeclarationYAML(root, docs))
-	decl, err := orgconfig.Load(ctx, declPath)
-	if err != nil {
-		t.Fatalf("load the preset declaration: %v", err)
+	decl := &orgconfig.Declaration{
+		Entry: "agent-preset",
+		Agents: []orgconfig.AgentSpec{{
+			ID:    "agent-preset",
+			Model: "model-preset",
+			Files: []orgconfig.FileRef{{Path: filepath.Join(root, "prompts", "system.md"), Kind: orgconfig.FileKindPrompt}},
+			Tools: []orgconfig.ToolRef{
+				{Name: "knowledge", Params: map[string]string{"source": docs, "max_results": "3"}},
+				{Name: "recall"},
+				{Name: "call_subagent"},
+			},
+		}},
 	}
 
 	var roundMu sync.Mutex
@@ -147,27 +156,6 @@ func presetObservation(t *testing.T, messages []model.Message, callID string) mo
 	}
 	t.Fatalf("messages = %+v, want the settled observation of call %q", messages, callID)
 	return model.Message{}
-}
-
-// presetDeclarationYAML spells one declaration referencing the three preset
-// tools: the knowledge reference names the local document folder and the recall
-// and call_subagent references name no parameter.
-func presetDeclarationYAML(root, docs string) string {
-	return fmt.Sprintf(`entry: agent-preset
-agents:
-  - id: agent-preset
-    model: model-preset
-    files:
-      - path: "%s"
-        kind: prompt
-    tools:
-      - name: knowledge
-        params:
-          source: "%s"
-          max_results: "3"
-      - name: recall
-      - name: call_subagent
-`, filepath.Join(root, "prompts", "system.md"), docs)
 }
 
 // seedPresetRecall commits one event into a real storage tier, so the recall

@@ -119,8 +119,10 @@ type observePlugin struct {
 // Name returns the stable plugin name recorded in every gap.
 func (p observePlugin) Name() string { return "observation" }
 
-// Phase reports the post-commit observation phase this plugin serves.
-func (p observePlugin) Phase() plugin.Phase { return plugin.PhasePostCommitObserve }
+// Port reports the fact->observation port this instance serves.
+func (p observePlugin) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+}
 
 // ObserveCommit delegates one committed fact to the wired observer.
 func (p observePlugin) ObserveCommit(ctx context.Context, id event.EventID) error {
@@ -128,16 +130,16 @@ func (p observePlugin) ObserveCommit(ctx context.Context, id event.EventID) erro
 }
 
 var (
-	_ plugin.Plugin             = observePlugin{}
+	_ plugin.Instance           = observePlugin{}
 	_ plugin.PostCommitObserver = observePlugin{}
 )
 
 // newObservePipeline assembles the After pass around one observation wiring.
 func newObservePipeline(t *testing.T, observer plugin.PostCommitObserver) plugin.Pipeline {
 	t.Helper()
-	pipeline, err := plugin.NewPipeline([]plugin.Plugin{observePlugin{observer: observer}})
+	pipeline, err := plugin.NewFlow([]plugin.Instance{observePlugin{observer: observer}})
 	if err != nil {
-		t.Fatalf("NewPipeline: %v", err)
+		t.Fatalf("NewFlow: %v", err)
 	}
 	return pipeline
 }
