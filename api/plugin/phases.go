@@ -17,7 +17,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -259,7 +261,10 @@ var ErrCallIdentityChanged = errors.New("plugin: the transform changed the call 
 func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass, error) {
 	final := copyCall(call)
 	for _, face := range p.transforms {
-		if err := face.impl.TransformCall(ctx, &final); err != nil {
+		started := time.Now()
+		err := face.impl.TransformCall(ctx, &final)
+		observePhase(PhaseCallTransform, faceTransform, face.name, phaseResult(err), "call="+call.ID, started)
+		if err != nil {
 			return CallPass{}, fmt.Errorf("plugin: transform %s: %w", face.name, err)
 		}
 		if final.ID != call.ID {
@@ -268,7 +273,9 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
 	}
 	risk := RiskLevel("")
 	for _, face := range p.risks {
+		started := time.Now()
 		graded := face.impl.AssessRisk(ctx, &final)
+		observePhase(PhaseRiskPolicy, faceRisk, face.name, phaseGrade(graded), "call="+call.ID, started)
 		if graded.Rank() > risk.Rank() {
 			risk = graded
 		}
@@ -312,4 +319,50 @@ func phaseName(phase Phase) string {
 	default:
 		return fmt.Sprintf("phase-%d", phase)
 	}
+}
+
+// faceTransform names the transform face of the call-transform phase in one
+// observation line; the rest name the single face of their own phase the same
+// way. The face is the narrow interface the dispatched element was held to, not
+// the phase it registered for.
+const (
+	faceTransform = "transform"
+	faceRisk      = "risk"
+	faceObserve   = "observe"
+	facePresent   = "present"
+)
+
+// observePhase renders one line of one executed phase face at DEBUG: the phase,
+// the face, the plugin that served it, the face's own result, the elapsed time
+// and the identity the face was dispatched for. The line carries no call
+// arguments and no fact content.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a refused pass.
+// MUST render after the face returned, and never stand a second pass outcome of its own.
+// MUST NOT render call arguments, tool output or fact content.
+func observePhase(phase Phase, face, name, result, subject string, started time.Time) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf("tagent: plugin phase phase=%s face=%s plugin=%s result=%s elapsed=%s %s",
+		phaseName(phase), face, name, result, time.Since(started).Round(time.Microsecond), subject)
+}
+
+// phaseResult spells whether one face answered without an error.
+func phaseResult(err error) string {
+	if err != nil {
+		return "refused"
+	}
+	return "ok"
+}
+
+// phaseGrade spells the risk grade one assessing face rendered, and names the
+// absence of a grade instead of rendering an empty result.
+func phaseGrade(graded RiskLevel) string {
+	if graded == "" {
+		return "unstated"
+	}
+	return string(graded)
 }

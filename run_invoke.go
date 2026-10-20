@@ -25,7 +25,9 @@ import (
 // The composition root establishes the session site of the explicit address on
 // this instance and grants the diagnostic read face of the run a read of it, so
 // the site is owned and read back from the state owner rather than mirrored
-// beside it.
+// beside it. Every input message commits as an entry fact of the range before
+// the drive begins, so the turn-start boundary is one committed fact the
+// observation reads back.
 // The redline list (3 rules):
 // MUST aggregate the input into the range's own transcript and never batch two invocations of one session.
 // MUST borrow the binding generation effective at each decision's own start.
@@ -57,8 +59,7 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 	ready := make([]event.Event, 0, len(req.Input))
 	now := time.Now()
 	for _, msg := range req.Input {
-		ready = append(ready, event.Event{
-			Key:          r.mintEventID(),
+		evt := event.Event{
 			Type:         typeOf(msg),
 			Timestamp:    now,
 			Message:      msg,
@@ -68,7 +69,9 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 			InvocationID: req.InvocationID,
 			InstanceID:   r.instance,
 			EpisodeID:    req.Episode,
-		})
+		}
+		evt.Key = r.commitFact(evt)
+		ready = append(ready, evt)
 	}
 	inv := agent.Invocation{
 		InvocationID: req.InvocationID,

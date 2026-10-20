@@ -285,6 +285,7 @@ func main() {
 	bot := wechat.NewBot(
 		wechat.WithLogger(slogLogger),
 		wechat.WithCursorStore(cursorStore),
+		wechat.WithTokenFile(wechatCfg.TokenFile),
 	)
 	gateway.SetSender(bot)
 

@@ -210,6 +210,12 @@
       "role": "adapter",
       "required": true,
       "reason": "call_subagent 装配面：agents 文件/显式参数装配经 trpc 构建器落地，执行走既有 agent.Delegate task 化；不重造 provider/stream。"
+    },
+    {
+      "pattern": "tool/recall",
+      "role": "adapter",
+      "required": true,
+      "reason": "召回工具面：四工具（recall_query/get/recent/trace）只做端口转换，检索与读取走 memory/search 与 memory/query 的既有读面，不重造检索。"
     }
   ],
   "edges": [
@@ -241,6 +247,7 @@
         "evolution/consolidation",
         "internal/bench",
         "tool/subagent",
+        "tool/recall",
         "api/view",
         "evolution/governance",
         "telemetry",
@@ -704,6 +711,17 @@
         "runtime/task"
       ],
       "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖。"
+    },
+    {
+      "from": "tool/recall",
+      "allow": [
+        "api/event",
+        "memory",
+        "memory/ledger",
+        "memory/replay",
+        "memory/search"
+      ],
+      "reason": "工具面只读记忆域的既有读面（观测表/原文读路径/父链/检索端口）与事件身份，自己既不持存储也不做检索。"
     }
   ],
   "external": {

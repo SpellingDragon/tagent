@@ -170,6 +170,20 @@ type EventRecord struct {
 	WindowTS int64
 }
 
+// Reference returns the light reference of this record: the rendering subset a
+// query answers with, carrying no content and no payload. It is the one place
+// the reference fields are derived, so a record and the reference a query
+// answers for it never disagree.
+func (r EventRecord) Reference() EventReference {
+	return EventReference{
+		Key:         r.Key,
+		PartitionID: r.PartitionID,
+		Type:        r.Type,
+		Summary:     r.Summary,
+		Timestamp:   r.Timestamp,
+	}
+}
+
 // MemoryEventQuery is the in-process query source over recorded events. It is
 // the deterministic reference implementation of the read-port query semantics;
 // it keeps no durability promise of its own — a new instance answers only the
@@ -253,13 +267,7 @@ func queryEventRecords(byKey map[event.EventID]EventRecord, opts QueryOptions) (
 		if keyword != "" && !keywordMatches(keyword, rec) {
 			continue
 		}
-		matched = append(matched, EventReference{
-			Key:         rec.Key,
-			PartitionID: rec.PartitionID,
-			Type:        rec.Type,
-			Summary:     rec.Summary,
-			Timestamp:   rec.Timestamp,
-		})
+		matched = append(matched, rec.Reference())
 	}
 	descending := opts.OrderBy == QueryOrderByDesc
 	sort.Slice(matched, func(i, j int) bool {

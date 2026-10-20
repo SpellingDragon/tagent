@@ -50,6 +50,11 @@ agents:
   recall:
     system_prompt:
       files: [recall_agent.md]
+    tools:
+      - { kind: tool, id: recall_query }
+      - { kind: tool, id: recall_get }
+      - { kind: tool, id: recall_recent }
+      - { kind: tool, id: recall_trace }
 
   action:
     system_prompt:

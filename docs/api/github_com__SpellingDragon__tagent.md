@@ -484,16 +484,19 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     The composition root establishes the session site of the explicit address on
     this instance and grants the diagnostic read face of the run a read of it,
     so the site is owned and read back from the state owner rather than mirrored
-    beside it. The redline list (3 rules): MUST aggregate the input into the
-    range's own transcript and never batch two invocations of one session.
-    MUST borrow the binding generation effective at each decision's own start.
-    MUST NOT let an admission receipt stand for the result of the call.
+    beside it. Every input message commits as an entry fact of the range before
+    the drive begins, so the turn-start boundary is one committed fact the
+    observation reads back. The redline list (3 rules): MUST aggregate the
+    input into the range's own transcript and never batch two invocations of one
+    session. MUST borrow the binding generation effective at each decision's own
+    start. MUST NOT let an admission receipt stand for the result of the call.
 
 func (r *Run) Presentations() []view.Presentation
-    Presentations reports the After pass presentations this run handed to its
-    diagnostic read face, in the order the facts committed, as a copy the caller
-    owns. The presentations are read-out material beside the committed facts;
-    reading them moves nothing.
+    Presentations reports the After pass presentations this run handed to
+    its diagnostic read face, in the order those passes ran — each only
+    after the canonical commit of its own fact — as a copy the caller owns.
+    The presentations are read-out material beside the committed facts; reading
+    them moves nothing.
 
 func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent) (state.PublishOutcome, error)
     Publish runs one declaration's candidate binding through the sole

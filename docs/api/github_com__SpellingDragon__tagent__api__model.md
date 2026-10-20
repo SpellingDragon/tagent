@@ -14,6 +14,17 @@ package owns is the request-scoped terminal reduction over tool-call streams
 (ReduceChannel/ReduceSeq); terminal.go states that contract, including that the
 reduction is the single terminal-decision entry point the agent loop consumes.
 
+The model-response face of the observation bypass: one chat span on the
+framework tracer beside one bounded line on the framework logger per model
+request, both rendered from the Outcome the single reduction already derived.
+
+The redline list (4 rules): MUST render after the terminal stands,
+from the reduced Outcome, and never re-fold the stream. MUST keep every
+rendering bounded: identities, counts and token totals, never prompt or
+completion content. MUST stay a bypass: a failing tracer or logger is a missing
+observation, never a failed request. MUST NOT mint a second terminal beside the
+reduction it observes.
+
 Package model folds one tool-call response stream into one terminal per model
 request; this file declares the terminal reduction contract that every stream
 consumer is held to.
@@ -170,6 +181,12 @@ const (
 	// partial output.
 	KindPartialOnly
 )
+func (k Kind) String() string
+    String reports the frozen spelling of one terminal kind: the five
+    declarations above are the terminals a reduction answers, and a value
+    outside them reports its ordinal so a gap never reads as a declared
+    terminal.
+
 type Message = trpcmodel.Message
     Message is an alias for the locked tRPC conversation message, preserving the
     native role, content parts, tool calls and reasoning fields.
@@ -199,7 +216,7 @@ type Outcome struct {
     recorded evidence and MUST NOT re-classify the six states or re-derive the
     terminal.
 
-func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)) Outcome
+func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)) (outcome Outcome)
     ReduceChannel is one of the two terminal reduction entry points:
     it consumes a response channel of one tool-call stream into that request's
     single terminal outcome, and reports every alert to onAlert while it is
@@ -215,7 +232,7 @@ func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)
     reads the returned Outcome as the terminal fact and MUST NOT write a second
     terminal judgement beside it.
 
-func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) Outcome
+func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) (outcome Outcome)
     ReduceSeq is the other terminal reduction entry point: it consumes a
     response sequence of one tool-call stream into that request's single
     terminal outcome, and reports every alert to onAlert while it is non-nil.

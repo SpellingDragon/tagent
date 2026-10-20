@@ -19,6 +19,23 @@ import (
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
+// commitFact stores one fact of this run in the ledger the post-commit
+// observation reads back, and reports the identity it committed under: an event
+// that arrives without an identity is minted one here, and the whole event is
+// kept exactly as it stands, so the observer restores the fact as it committed
+// instead of reconstructing one.
+// - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive and the settled delivery all land here.
+// - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
+func (r *Run) commitFact(evt event.Event) event.EventID {
+	if evt.Key == "" {
+		evt.Key = r.mintEventID()
+	}
+	r.mu.Lock()
+	r.facts[evt.Key] = evt
+	r.mu.Unlock()
+	return evt.Key
+}
+
 // record stores one wrapped call result as a fact of this run and reports the
 // identity of that fact. The fact keeps the whole event as committed: the
 // native tool message the result pairs with beside the call identity the
@@ -26,9 +43,7 @@ import (
 // restores the pairing for the invocation's next request and the post-commit
 // observer reads the fact back exactly as it committed.
 func (r *Run) record(ctx context.Context, result task.Result) (event.EventID, error) {
-	id := r.mintEventID()
 	evt := event.Event{
-		Key:       id,
 		Type:      event.TypeActionCommand,
 		Timestamp: time.Now(),
 		Message: model.Message{
@@ -51,10 +66,23 @@ func (r *Run) record(ctx context.Context, result task.Result) (event.EventID, er
 			evt.CallID = frame.Identity.CallID
 		}
 	}
+	return r.commitFact(evt), nil
+}
+
+// factPipeline assembles the After pass pipeline of one agent from the binding
+// generation this run published last, so a fact this run commits outside a
+// dispatch — the ready input of a range, the output of a drive, the settled
+// delivery of a call — is observed through the very plugin faces the published
+// generation carries. A refused assembly is reported by name and lands as a gap
+// beside the fact: observation is a bypass, never part of the commit.
+func (r *Run) factPipeline(agentID event.AgentID) (plugin.Pipeline, error) {
 	r.mu.Lock()
-	r.facts[id] = evt
+	binding, published := r.current.Agents[agentID]
 	r.mu.Unlock()
-	return id, nil
+	if !published {
+		return plugin.Pipeline{}, fmt.Errorf("tagent: no published binding of agent %s to observe through", agentID)
+	}
+	return plugin.NewPipeline(binding.Plugins)
 }
 
 // sink admits one notification of a settled call into the mailbox of its
@@ -207,9 +235,10 @@ func (r *Run) takePresentation(presentation view.Presentation) {
 }
 
 // Presentations reports the After pass presentations this run handed to its
-// diagnostic read face, in the order the facts committed, as a copy the caller
-// owns. The presentations are read-out material beside the committed facts;
-// reading them moves nothing.
+// diagnostic read face, in the order those passes ran — each only after the
+// canonical commit of its own fact — as a copy the caller owns. The
+// presentations are read-out material beside the committed facts; reading them
+// moves nothing.
 func (r *Run) Presentations() []view.Presentation {
 	r.mu.Lock()
 	defer r.mu.Unlock()

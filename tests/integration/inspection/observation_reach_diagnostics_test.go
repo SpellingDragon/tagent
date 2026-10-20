@@ -200,11 +200,70 @@ func obsInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation, s
 	return req
 }
 
+// obsKindCoverage counts the observed facts of one turn per frozen fact type,
+// so the coverage of the observation face is read from the facts themselves
+// instead of asserted type by type in the check that walks them.
+type obsKindCoverage struct {
+	entry   int
+	output  int
+	tool    int
+	settled int
+}
+
+// take counts one observed fact under its frozen type and checks the payload
+// and identity that type commits with.
+func (c *obsKindCoverage) take(t *testing.T, evt event.Event) {
+	t.Helper()
+	switch evt.Type {
+	case event.TypeExternalInput:
+		c.entry++
+		if evt.Message.Content != "hello" {
+			t.Fatalf("turn-start 事实内容 = %q, want the input the turn was invoked with", evt.Message.Content)
+		}
+	case event.TypeAgentOutput:
+		c.output++
+		if evt.Message.Content != "settled" {
+			t.Fatalf("turn-end 事实内容 = %q, want the output the turn answered with", evt.Message.Content)
+		}
+		if evt.DecisionID == "" {
+			t.Fatalf("turn-end 事实缺决策身份: %+v", evt)
+		}
+	case event.TypeActionCommand:
+		c.tool++
+		if evt.Message.Content != obsToolOutput {
+			t.Fatalf("观察事实内容 = %q, want the tool output %q byte-identical", evt.Message.Content, obsToolOutput)
+		}
+		if evt.CallID != "call-1" || evt.Message.ToolName != "echo" {
+			t.Fatalf("观察事实身份 = %+v, want the call identity the result committed under", evt)
+		}
+	case event.TypeTaskSettled:
+		c.settled++
+		if evt.TaskID == "" {
+			t.Fatalf("delivery 事实缺任务身份: %+v", evt)
+		}
+	default:
+		t.Fatalf("观察事实类型 = %q, want one of the four frozen types of a turn", evt.Type)
+	}
+}
+
+// want reports whether every frozen fact type of one turn reached the observer
+// exactly once: the entry input, the assistant output, the call result and the
+// settled delivery.
+func (c obsKindCoverage) want(t *testing.T) {
+	t.Helper()
+	if c.entry != 1 || c.output != 1 || c.tool != 1 || c.settled != 1 {
+		t.Fatalf("观察面覆盖 = entry %d / output %d / tool %d / settled %d, want one of each",
+			c.entry, c.output, c.tool, c.settled)
+	}
+}
+
 // TestObservationReachDiagnostics proves the post-commit observation consumption of the formal assembly:
 // - the After pass resolves each committed fact through the assembly's own ledger and hands it to the observer
 // - every observation failure settles as a visible gap on the diagnostic read face beside the committed fact
 // - 正式装配消费: the observer wired at the assembly entry consumes each committed fact of a real turn
-// - 观察事实逐字节保真: the observed fact carries the tool output byte-identical beside the call identity it committed under
+// - 四类事实全达: the entry input, the assistant output, the call result and the settled delivery each reach the observer as the fact it committed as
+// - 观察逐字节保真: the observed call result is byte-identical beside the call identity, and each boundary carries the very message of the turn
+// - 边界次序真实: the turn-start fact is observed first and the turn-end fact last, so the boundaries frame the facts between them
 // - 缺口可从诊断读到: a failed observation lands as a named gap on the read face of the run and drops nothing
 // - 观察不建第二真源: the observation hangs off the committed ledger read-only and moves no query reading
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
@@ -250,19 +309,25 @@ func TestObservationReachDiagnostics(t *testing.T) {
 				t.Fatalf("presentation 事实 %s 未被观察: observed = %v", pres.Fact, seen)
 			}
 		}
+		covered := obsKindCoverage{}
 		for i, evt := range observed {
 			if records[i].Fact != evt.Key {
 				t.Fatalf("审计事实 = %s, want the observed fact identity %s", records[i].Fact, evt.Key)
 			}
-			if evt.Message.Content != obsToolOutput {
-				t.Fatalf("观察事实内容 = %q, want the tool output %q byte-identical", evt.Message.Content, obsToolOutput)
-			}
-			if evt.Type != event.TypeActionCommand || evt.CallID != "call-1" || evt.InvocationID != req.InvocationID {
-				t.Fatalf("观察事实身份 = %+v, want the call identity the fact committed under", evt)
+			if evt.InvocationID != req.InvocationID {
+				t.Fatalf("观察事实 invocation = %q, want the range %q", evt.InvocationID, req.InvocationID)
 			}
 			if evt.Owner != req.Address || evt.Target != req.Address {
-				t.Fatalf("观察事实地址 = %+v, want the address the call was admitted at %+v", evt, req.Address)
+				t.Fatalf("观察事实地址 = %+v, want the address the fact committed at %+v", evt, req.Address)
 			}
+			covered.take(t, evt)
+		}
+		covered.want(t)
+		if observed[0].Type != event.TypeExternalInput {
+			t.Fatalf("首条观察事实 = %q, want the turn-start fact first", observed[0].Type)
+		}
+		if last := observed[len(observed)-1]; last.Type != event.TypeAgentOutput {
+			t.Fatalf("末条观察事实 = %q, want the turn-end fact last", last.Type)
 		}
 	})
 

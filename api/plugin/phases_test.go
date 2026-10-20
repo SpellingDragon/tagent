@@ -3,12 +3,15 @@ package plugin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // invariantPlugin is one registration element reporting the phase it serves.
@@ -427,3 +430,169 @@ func TestAfterPassInvariants(t *testing.T) {
 		}
 	})
 }
+
+// phaseLog records the phase lines the pipeline rendered: the DEBUG and INFO
+// levels the observation writes, and no other level.
+type phaseLog struct {
+	trpclog.Logger
+	mu         sync.Mutex
+	lines      []string
+	panicsLeft int
+}
+
+// take records one rendered line or refuses it by panicking.
+func (l *phaseLog) take(level, text string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.panicsLeft > 0 {
+		l.panicsLeft--
+		panic("the logger refused the write")
+	}
+	l.lines = append(l.lines, level+": "+text)
+}
+
+// Debugf records one formatted debug line.
+func (l *phaseLog) Debugf(format string, args ...any) {
+	l.take("debug", fmt.Sprintf(format, args...))
+}
+
+// Infof records one formatted info line.
+func (l *phaseLog) Infof(format string, args ...any) {
+	l.take("info", fmt.Sprintf(format, args...))
+}
+
+// at reports the lines taken at the named level.
+func (l *phaseLog) at(level string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.HasPrefix(line, level+": ") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// mentions reports whether one line at the level carries every fragment.
+func (l *phaseLog) mentions(level string, fragments ...string) bool {
+	for _, line := range l.at(level) {
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// watchPhaseLog points the phase observation at the given logger for the
+// duration of one check.
+func watchPhaseLog(tb testing.TB, logger trpclog.Logger) {
+	tb.Helper()
+	original := trpclog.Default
+	trpclog.Default = logger
+	tb.Cleanup(func() { trpclog.Default = original })
+}
+
+// TestPhaseObservation checks the plugin-phase face of the observation bypass.
+// - every executed face of both passes renders one DEBUG line carrying the phase, the face, the plugin, its result and the dispatched identity
+// - the line reports the result the face answered: a refusal, a risk grade, a dropped presentation
+// - the phase face writes nothing at INFO, so the bounded stream stays with turn boundaries and model requests
+// - a logger that fails does not refuse a pass or drop a presentation
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestPhaseObservation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("both passes render one line per executed face", func(t *testing.T) {
+		logger := &phaseLog{}
+		watchPhaseLog(t, logger)
+		var order []string
+		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", phase: PhaseCallTransform}}
+		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "grader", phase: PhaseRiskPolicy}, grade: RiskHigh}
+		observer := invariantObserver{invariantPlugin: invariantPlugin{name: "watcher", phase: PhasePostCommitObserve}, order: &order}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", phase: PhaseFinalPresentation}, order: &order, text: "done"}
+		pipeline, err := NewPipeline([]Plugin{transform, risk, observer, presenter})
+		if err != nil {
+			t.Fatalf("register one element per phase: %v", err)
+		}
+
+		if _, err := pipeline.Before(ctx, invariantCall("call-1", "echo", `{"x":1}`)); err != nil {
+			t.Fatalf("run the before pass: %v", err)
+		}
+		pipeline.After(ctx, "fact-1")
+
+		if !logger.mentions("debug", "phase=call-transform", "face=transform", "plugin=corrector", "result=ok", "call=call-1") {
+			t.Fatalf("debug lines = %v, want the transform face line of call-1", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "phase=risk-policy", "face=risk", "plugin=grader", "result=high", "call=call-1") {
+			t.Fatalf("debug lines = %v, want the risk face line carrying its grade", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "phase=post-commit-observe", "face=observe", "plugin=watcher", "result=ok", "fact=fact-1") {
+			t.Fatalf("debug lines = %v, want the observation face line of fact-1", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "phase=final-presentation", "face=present", "plugin=renderer", "result=rendered", "fact=fact-1") {
+			t.Fatalf("debug lines = %v, want the presentation face line of fact-1", logger.at("debug"))
+		}
+		if lines := logger.at("debug"); len(lines) != 4 {
+			t.Fatalf("debug lines = %v, want one line per executed face", lines)
+		}
+		if lines := logger.at("info"); len(lines) != 0 {
+			t.Fatalf("info lines = %v, want the phase face kept at DEBUG", lines)
+		}
+	})
+
+	t.Run("a refused face and a dropped presentation keep their own result", func(t *testing.T) {
+		logger := &phaseLog{}
+		watchPhaseLog(t, logger)
+		var order []string
+		refusing := &invariantTransform{
+			invariantPlugin: invariantPlugin{name: "refusing", phase: PhaseCallTransform},
+			run:             func(*trpcmodel.ToolCall) error { return errPhaseRefused },
+		}
+		dropping := invariantPresenter{invariantPlugin: invariantPlugin{name: "dropping", phase: PhaseFinalPresentation}, order: &order, dropped: true}
+		pipeline, err := NewPipeline([]Plugin{refusing, dropping})
+		if err != nil {
+			t.Fatalf("register the refusing transform: %v", err)
+		}
+
+		if _, err := pipeline.Before(ctx, invariantCall("call-2", "echo", `{}`)); !errors.Is(err, errPhaseRefused) {
+			t.Fatalf("before pass error = %v, want the refusal of the transform reported", err)
+		}
+		pipeline.After(ctx, "fact-2")
+
+		if !logger.mentions("debug", "plugin=refusing", "result=refused", "call=call-2") {
+			t.Fatalf("debug lines = %v, want the refused transform reported as refused", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "plugin=dropping", "result=dropped", "fact=fact-2") {
+			t.Fatalf("debug lines = %v, want the dropped presentation reported as dropped", logger.at("debug"))
+		}
+	})
+
+	t.Run("a logger that fails does not refuse a pass", func(t *testing.T) {
+		watchPhaseLog(t, &phaseLog{panicsLeft: 2})
+		var order []string
+		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", phase: PhaseCallTransform}}
+		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", phase: PhaseFinalPresentation}, order: &order, text: "done"}
+		pipeline, err := NewPipeline([]Plugin{transform, presenter})
+		if err != nil {
+			t.Fatalf("register the phase elements: %v", err)
+		}
+
+		pass, err := pipeline.Before(ctx, invariantCall("call-3", "echo", `{}`))
+		if err != nil || pass.Final.ID != "call-3" {
+			t.Fatalf("before pass = (%+v, %v), want the pass of call-3 through a failing logger", pass.Final, err)
+		}
+		presentation := pipeline.After(ctx, "fact-3")
+		if len(presentation.Views) != 1 || presentation.Views[0].Dropped {
+			t.Fatalf("views = %+v, want the rendered presentation kept through a failing logger", presentation.Views)
+		}
+	})
+}
+
+// errPhaseRefused is the refusal one transform answers in these checks.
+var errPhaseRefused = errors.New("the transform refused the call")

@@ -82,14 +82,16 @@ func (o *visibilityObserver) observed() int {
 
 // visibilityRun assembles one runtime through the sole assembly entry beside the
 // options the caller names, over the scripted model and echo tool of the public
-// entry harness.
+// entry harness. Every scripted response names the model that served it, as a
+// provider reports it, so the model-response face of the observation reads the
+// very name the declaration registered.
 func visibilityRun(t *testing.T, ctx context.Context, opts ...tagent.Option) (*tagent.Run, *entryTool) {
 	t.Helper()
 	provider := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		if last := req.Messages[len(req.Messages)-1]; last.Content == "hello" {
-			return entryToolTurn(entryCall("call-1", "echo", `{"x":1}`))
+			return visibilityNamed(entryToolTurn(entryCall("call-1", "echo", `{"x":1}`)))
 		}
-		return entryFinalTurn("settled")
+		return visibilityNamed(entryFinalTurn("settled"))
 	}}
 	tool := &entryTool{name: "echo", output: "out-a"}
 	decl := &config.Declaration{
@@ -103,6 +105,12 @@ func visibilityRun(t *testing.T, ctx context.Context, opts ...tagent.Option) (*t
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	return run, tool
+}
+
+// visibilityNamed stamps one scripted response with the model that served it.
+func visibilityNamed(resp *model.Response) *model.Response {
+	resp.Model = "model-a"
+	return resp
 }
 
 // visibilityInvoke drives one invocation through the formal runtime entry at the

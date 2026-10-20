@@ -330,6 +330,12 @@ type EventRecord struct {
     its target layer before deleting the source — the record of the higher
     window is the canonical one and the query returns it exactly once.
 
+func (r EventRecord) Reference() EventReference
+    Reference returns the light reference of this record: the rendering subset a
+    query answers with, carrying no content and no payload. It is the one place
+    the reference fields are derived, so a record and the reference a query
+    answers for it never disagree.
+
 type EventReference struct {
 	// Key is the canonical identity of the event, in its hex form.
 	Key event.EventID
@@ -526,6 +532,12 @@ type StoreQuerySource struct {
 
 func NewStoreQuerySource() *StoreQuerySource
     NewStoreQuerySource returns an empty observation table.
+
+func (s *StoreQuerySource) Event(key event.EventID) (EventReference, bool)
+    Event returns the reference of the landed event under the key, and reports
+    whether the table holds it. A reader that already holds a key re-checks the
+    attribution the key claims against this one record instead of trusting the
+    key alone.
 
 func (s *StoreQuerySource) LandEvent(ctx context.Context, stored ledger.StoredEvent) error
     LandEvent decodes one committed event under the body schema and lands it in

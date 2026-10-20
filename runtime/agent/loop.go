@@ -15,6 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -27,6 +28,39 @@ const executionSerialization task.Serialization = "session-serialized"
 // carries. The fact identity comes from the settled notification of a call, so
 // the loop pairs the tool message with the call it answers.
 type FactResolver func(id event.EventID) (model.Message, bool)
+
+// FactCommit is the one commit face of the facts the loop produces: it stores
+// the whole event as the ledger of the run keeps it and reports the identity
+// that fact committed under, minting one for an event that arrives without an
+// identity. The identity it answers is the one the After pass reads back, so an
+// observation never reconstructs the fact it observes.
+//
+// The redline list (2 rules):
+// MUST store the whole event as it stands, minting an identity only for an event that carries none.
+// MUST report the identity that fact committed under, so the observation reads that very fact back.
+type FactCommit func(evt event.Event) event.EventID
+
+// FactPipelines assembles the ordered plugin pipeline of one agent, so the
+// After pass of a fact the loop commits outside a dispatch — the ready input of
+// a range, the output of a drive, the settled delivery of a call — runs through
+// the very faces the published generation of that agent carries. A refused
+// assembly stays a named gap beside the committed fact: observation is a
+// bypass, never part of the commit.
+//
+// The redline list (2 rules):
+// MUST assemble the faces of the published generation of the named agent, in its declared order.
+// MUST NOT run a second observation beside the pipeline it answers.
+type FactPipelines func(agentID event.AgentID) (plugin.Pipeline, error)
+
+// factPipelineName is the stable name a refused fact pipeline assembly is
+// reported under, so a fact that committed without its observation is readable
+// as a gap by the face that failed to assemble.
+const factPipelineName = "fact-pipeline"
+
+// ErrFactPipelineUnwired reports a committed fact the loop could not observe
+// because no pipeline face was attached: a gap by name, never a silently
+// dropped observation.
+var ErrFactPipelineUnwired = errors.New("agent: no fact pipeline is attached to observe through")
 
 // Recorder is the narrow training-record production face this loop writes its
 // episode, decision and attempt records through. The methods receive the
@@ -100,17 +134,19 @@ type Loop struct {
 	instance event.InstanceID
 	facts    FactResolver
 
-	mu       sync.Mutex
-	seq      uint64
-	intakes  map[event.InvocationID]*intake
-	history  HistoryFace
-	recorder Recorder
-	present  PresentationSink
-	boundary RequestFace
-	snapshot RequestSnapshotFace
-	watch    func(taskID event.TaskID, stopped func() bool) error
-	final    FinalRoundPolicy
-	losses   []RecordingLoss
+	mu        sync.Mutex
+	seq       uint64
+	intakes   map[event.InvocationID]*intake
+	history   HistoryFace
+	recorder  Recorder
+	commit    FactCommit
+	pipelines FactPipelines
+	present   PresentationSink
+	boundary  RequestFace
+	snapshot  RequestSnapshotFace
+	watch     func(taskID event.TaskID, stopped func() bool) error
+	final     FinalRoundPolicy
+	losses    []RecordingLoss
 }
 
 // NewLoop returns the event loop over the state owner's borrowing face, the
@@ -137,11 +173,21 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
 // - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
 // - A drive whose budget is spent runs one closing round and ends there: the closing round delivers what the range already produced, its transcript is committed the same way, and the obligation it opens is none.
-func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
-	turn := Turn{InvocationID: inv.InvocationID, Terminal: model.KindUnknown}
+// - The drive is observed as one consumer run: its start and its end are DEBUG lines carrying identities, counts and the terminal, never transcript content.
+func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error) {
+	turn = Turn{InvocationID: inv.InvocationID, Terminal: model.KindUnknown}
+	consumerStarted := time.Now()
+	consumerDebug("tagent: consumer drive start agent=%s session=%s invocation=%s ready=%d",
+		inv.Address.AgentID, inv.Address.SessionID, inv.InvocationID, len(inv.Ready))
+	defer func() {
+		consumerDebug("tagent: consumer drive end invocation=%s decisions=%d terminal=%s elapsed=%s failed=%t",
+			inv.InvocationID, len(turn.Decisions), turn.Terminal, time.Since(consumerStarted).Round(time.Microsecond), err != nil)
+	}()
 	production := &inFlightProducer{}
 	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
 	defer production.stop()
+	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
+	l.observeReady(ctx, inv)
 	history := l.sessionHistory(inv.Address)
 	transcript := append(append([]model.Message(nil), history...), aggregateReady(inv.Ready)...)
 	l.recordEpisode(ctx, inv)
@@ -151,9 +197,9 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
 	rounds := 0
 	for {
 		round := closingRound(policy, rounds, time.Since(started))
-		decision, outcome, receipts, observations, facts, err := l.decide(ctx, inv, transcript, inputs, round)
-		if err != nil {
-			return turn, err
+		decision, outcome, receipts, observations, facts, decideErr := l.decide(ctx, inv, transcript, inputs, round)
+		if decideErr != nil {
+			return turn, decideErr
 		}
 		turn.Decisions = append(turn.Decisions, decision)
 		turn.Terminal = outcome.Kind
@@ -161,10 +207,12 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
 		if round.final {
 			turn.FinalRound = round.reason
 			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
+			l.commitOutput(ctx, inv, decision, outcome)
 			return turn, nil
 		}
 		if len(receipts) == 0 && len(observations) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
+			l.commitOutput(ctx, inv, decision, outcome)
 			return turn, nil
 		}
 		transcript = append(transcript, assistantOf(outcome))
@@ -174,10 +222,31 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error) {
 	}
 }
 
+// consumerDebug renders one line of the consumer face at DEBUG: the drive's start
+// and end beside each decision the drive consumed. The consumer is the turn driver
+// of one invocation, and a line carries identities, counts and the terminal, never
+// transcript content.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
+// MUST keep the INFO stream bounded by leaving every consumer line at DEBUG.
+// MUST NOT render transcript, message or tool-output content.
+func consumerDebug(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
+}
+
 // Backflow admits one settled notification of a call into the intake of the
 // invocation that issued that call, so it drives that invocation's next
 // decision and no other. A non-terminal notification carries no result to pair
-// and is ignored here.
+// and is ignored here. The settled delivery commits as the delivery fact of the
+// range before it is handed on, so the delivery boundary of a call is observed
+// as the fact it is; the After pass of that fact runs beside the notification
+// rather than under the cancellation of the caller that delivered it, because
+// observation is a bypass.
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
 	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
@@ -190,7 +259,114 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 			msg = got
 		}
 	}
-	l.intakeFor(invocationID).deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
+	in := l.intakeFor(invocationID)
+	l.commitSettled(context.Background(), invocationID, in.rangeAddress(), notice)
+	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
+}
+
+// observeReady runs the After pass of the ready input of one invocation: every
+// ready event carries the identity it committed under at the entry of its
+// range, so the turn-start boundary of this drive is observed as the fact the
+// run already holds. A ready event that carries no identity names no committed
+// fact and is not observed; the drive itself reads the event either way.
+func (l *Loop) observeReady(ctx context.Context, inv Invocation) {
+	for _, ev := range inv.Ready {
+		if ev.Key == "" {
+			continue
+		}
+		l.afterPass(ctx, inv.Address.AgentID, ev.Key)
+	}
+}
+
+// commitOutput commits the assistant output one ended drive answers with as the
+// turn-end fact of the range and runs its After pass: the message the drive
+// commits to the transcript of its session beside the decision, invocation and
+// address it belongs to, so the turn end is one committed fact of the run and
+// not a line derived from the outcome afterwards.
+func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) {
+	l.commitFact(ctx, inv.Address.AgentID, event.Event{
+		Type:         event.TypeAgentOutput,
+		Timestamp:    time.Now(),
+		Message:      assistantOf(outcome),
+		Owner:        inv.Address,
+		Source:       inv.Address,
+		Target:       inv.Address,
+		InvocationID: inv.InvocationID,
+		InstanceID:   inv.Instance,
+		DecisionID:   decision.DecisionID,
+		EpisodeID:    episodeOfReady(inv.Ready),
+	})
+}
+
+// commitSettled commits one settled notification as the delivery fact of the
+// range it settles into, beside the task it belongs to and the address the
+// notification was accepted at, and runs the After pass of that fact. A
+// notification that arrived before the range recorded its own address commits
+// no delivery fact: the fact of a delivery names the range it lands in.
+func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice) {
+	if addr.AgentID == "" || addr.SessionID == "" {
+		return
+	}
+	l.commitFact(ctx, addr.AgentID, event.Event{
+		Type:         event.TypeTaskSettled,
+		Timestamp:    time.Now(),
+		TaskID:       notice.TaskID,
+		Owner:        addr,
+		Source:       addr,
+		Target:       addr,
+		InvocationID: invocationID,
+		InstanceID:   l.instance,
+	})
+}
+
+// commitFact commits one fact of the run through the attached commit face and
+// runs the After pass of that fact through the pipeline of the named agent. A
+// loop beside no commit face commits nothing and observes nothing; a commit
+// face beside no pipeline face still commits the fact but leaves its
+// observation unnetted, so the missing face is a named gap beside a fact that
+// stays committed as it stands.
+func (l *Loop) commitFact(ctx context.Context, agentID event.AgentID, evt event.Event) {
+	l.mu.Lock()
+	commit, pipelines := l.commit, l.pipelines
+	l.mu.Unlock()
+	if commit == nil {
+		return
+	}
+	key := commit(evt)
+	if key == "" {
+		return
+	}
+	if pipelines == nil {
+		l.publish(view.Presentation{Fact: key, Gaps: []view.ObservationGap{{
+			Plugin: factPipelineName,
+			Fact:   key,
+			Err:    ErrFactPipelineUnwired,
+		}}})
+		return
+	}
+	l.afterPass(ctx, agentID, key)
+}
+
+// afterPass runs the After pass of one committed fact through the pipeline of
+// the named agent, and records a refused assembly as a named gap beside that
+// fact: the fact stays committed exactly as it committed and the drive moves on.
+func (l *Loop) afterPass(ctx context.Context, agentID event.AgentID, key event.EventID) {
+	l.mu.Lock()
+	pipelines := l.pipelines
+	l.mu.Unlock()
+	if pipelines == nil {
+		return
+	}
+	pipeline, err := pipelines(agentID)
+	if err != nil {
+		l.publish(view.Presentation{Fact: key, Gaps: []view.ObservationGap{{
+			Plugin: factPipelineName,
+			Fact:   key,
+			Err:    err,
+		}}})
+		return
+	}
+	l.publish(pipeline.After(ctx, key))
 }
 
 // SetRecorder attaches the training record production face this loop writes its
@@ -202,6 +378,30 @@ func (l *Loop) SetRecorder(recorder Recorder) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.recorder = recorder
+}
+
+// SetFactCommit attaches the commit face the loop commits the facts it produces
+// through — the ready input of a range, the output of a drive and the settled
+// delivery of a call — so every one of them lands in the one ledger of the run
+// and is observed back as it committed. A nil face keeps the loop committing
+// nothing of its own. The setter is separate from the constructor so the
+// declared construction shape of the loop stays as it is.
+func (l *Loop) SetFactCommit(commit FactCommit) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.commit = commit
+}
+
+// SetFactPipelines attaches the pipeline face the After pass of a fact
+// committed outside a dispatch is assembled through, so that pass runs over the
+// faces of the published generation rather than a pipeline of the loop's own. A
+// nil face beside a commit face is a wiring gap reported on the first committed
+// fact. The setter is separate from the constructor so the declared
+// construction shape of the loop stays as it is.
+func (l *Loop) SetFactPipelines(pipelines FactPipelines) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pipelines = pipelines
 }
 
 // SetRequestFace attaches the request-boundary face this loop assembles each
@@ -476,6 +676,8 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	outcome := model.ReduceChannel(ctx, stream, nil)
 	production.stop()
 	l.recordDecisionAttempt(ctx, inv, decisionID, attemptID, inputs, view, outcome)
+	consumerDebug("tagent: consumer decision invocation=%s decision=%s terminal=%s calls=%d closing=%t",
+		inv.InvocationID, decisionID, outcome.Kind, len(callsOf(outcome)), round.final)
 
 	decision := Decision{
 		DecisionID:   decisionID,
@@ -631,13 +833,31 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 	return in
 }
 
-// intake is one invocation's backflow intake: the settled tool messages that
-// arrived before their wait began, and the waits of the calls still running.
-// A notification of one invocation never reaches the intake of another.
+// intake is one invocation's backflow intake: the address its range runs at,
+// the settled tool messages that arrived before their wait began, and the waits
+// of the calls still running. A notification of one invocation never reaches the
+// intake of another.
 type intake struct {
 	mu      sync.Mutex
+	address event.Address
 	waiters map[event.TaskID][]chan delivered
 	arrived map[event.TaskID][]delivered
+}
+
+// setAddress records the address the range of this intake runs at, so the
+// delivery fact of a settled call names the range it lands in.
+func (in *intake) setAddress(addr event.Address) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.address = addr
+}
+
+// rangeAddress reports the address the range of this intake runs at, or the
+// zero address while no drive of it recorded one.
+func (in *intake) rangeAddress() event.Address {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.address
 }
 
 // delivered is one settled tool result as it arrives through the backflow: the

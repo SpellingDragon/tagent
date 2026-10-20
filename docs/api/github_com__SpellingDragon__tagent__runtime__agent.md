@@ -60,6 +60,11 @@ var (
     ErrProducerMissing are the named refusals of the close: each one names the
     case it refuses instead of answering a silent default.
 
+var ErrFactPipelineUnwired = errors.New("agent: no fact pipeline is attached to observe through")
+    ErrFactPipelineUnwired reports a committed fact the loop could not observe
+    because no pipeline face was attached: a gap by name, never a silently
+    dropped observation.
+
 var ErrHandoffConstraintsMissing = errors.New("agent: the handoff envelope names no acceptance constraint")
     ErrHandoffConstraintsMissing reports an envelope that carries no non-empty
     acceptance constraint, so no handed-back result could be accepted or refused
@@ -335,6 +340,29 @@ type DrainReport struct {
     reached real termination, and the obligations that were still open when the
     close reported.
 
+type FactCommit func(evt event.Event) event.EventID
+    FactCommit is the one commit face of the facts the loop produces: it stores
+    the whole event as the ledger of the run keeps it and reports the identity
+    that fact committed under, minting one for an event that arrives without
+    an identity. The identity it answers is the one the After pass reads back,
+    so an observation never reconstructs the fact it observes.
+
+    The redline list (2 rules): MUST store the whole event as it stands, minting
+    an identity only for an event that carries none. MUST report the identity
+    that fact committed under, so the observation reads that very fact back.
+
+type FactPipelines func(agentID event.AgentID) (plugin.Pipeline, error)
+    FactPipelines assembles the ordered plugin pipeline of one agent,
+    so the After pass of a fact the loop commits outside a dispatch — the ready
+    input of a range, the output of a drive, the settled delivery of a call —
+    runs through the very faces the published generation of that agent carries.
+    A refused assembly stays a named gap beside the committed fact: observation
+    is a bypass, never part of the commit.
+
+    The redline list (2 rules): MUST assemble the faces of the published
+    generation of the named agent, in its declared order. MUST NOT run a second
+    observation beside the pipeline it answers.
+
 type FactResolver func(id event.EventID) (model.Message, bool)
     FactResolver reports the native tool message one recorded result fact
     carries. The fact identity comes from the settled notification of a call,
@@ -514,10 +542,14 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
     Backflow admits one settled notification of a call into the intake of
     the invocation that issued that call, so it drives that invocation's next
-    decision and no other. A non-terminal notification carries no result to pair
-    and is ignored here.
+    decision and no other. A non-terminal notification carries no result to
+    pair and is ignored here. The settled delivery commits as the delivery fact
+    of the range before it is handed on, so the delivery boundary of a call
+    is observed as the fact it is; the After pass of that fact runs beside the
+    notification rather than under the cancellation of the caller that delivered
+    it, because observation is a bypass.
 
-func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error)
+func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     Drive runs one invocation until its latest decision reaches a terminal that
     dispatches no tool: every decision aggregates the transcript the range has
     accumulated beside the session history the drives that already ended on this
@@ -534,13 +566,31 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (Turn, error)
     waits included — and confirms its stop only when the drive really ended.
     - A drive whose budget is spent runs one closing round and ends there:
     the closing round delivers what the range already produced, its transcript
-    is committed the same way, and the obligation it opens is none.
+    is committed the same way, and the obligation it opens is none. - The drive
+    is observed as one consumer run: its start and its end are DEBUG lines
+    carrying identities, counts and the terminal, never transcript content.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could
     not write, in arrival order, each beside its record identity and the named
     failure that stopped the write. The account is the explicit gap ledger of
     the run: nothing the recorder refused is silently forgotten here.
+
+func (l *Loop) SetFactCommit(commit FactCommit)
+    SetFactCommit attaches the commit face the loop commits the facts it
+    produces through — the ready input of a range, the output of a drive and the
+    settled delivery of a call — so every one of them lands in the one ledger
+    of the run and is observed back as it committed. A nil face keeps the loop
+    committing nothing of its own. The setter is separate from the constructor
+    so the declared construction shape of the loop stays as it is.
+
+func (l *Loop) SetFactPipelines(pipelines FactPipelines)
+    SetFactPipelines attaches the pipeline face the After pass of a fact
+    committed outside a dispatch is assembled through, so that pass runs over
+    the faces of the published generation rather than a pipeline of the loop's
+    own. A nil face beside a commit face is a wiring gap reported on the first
+    committed fact. The setter is separate from the constructor so the declared
+    construction shape of the loop stays as it is.
 
 func (l *Loop) SetFinalRound(policy FinalRoundPolicy)
     SetFinalRound attaches the watchdog budget the drives of this loop run

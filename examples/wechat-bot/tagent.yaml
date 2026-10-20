@@ -79,9 +79,15 @@ agents:
   # ---- Recall:记忆检索子 Agent ----
   recall:
     system_prompt:
-      files: [recall_agent.md]      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace;工具面本身仍待接线)
+      files: [recall_agent.md]      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
+    # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
+    # 检索与原文读取走 memory 的既有读面,分区授权取本 agent 的 ID。
+    tools:
+      - { kind: tool, id: recall_query }
+      - { kind: tool, id: recall_get }
+      - { kind: tool, id: recall_recent }
+      - { kind: tool, id: recall_trace }
     # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
-    #         以及工具面(recall_query/recall_get/recall_recent/recall_trace)
 
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:

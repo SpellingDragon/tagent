@@ -6,6 +6,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -209,6 +210,25 @@ var (
 	_ = modelView{modelName: "", promptVersion: "", visibleTools: []string{}}
 
 	_ func(event.EventID) (model.Message, bool) = FactResolver(nil)
+
+	// The commit face and the pipeline face are attached through their own
+	// setters, so the declared construction shape above stays exactly as it is:
+	// every fact the loop produces lands in the one ledger of the run, and the
+	// After pass of a fact committed outside a dispatch is assembled from the
+	// published generation of its agent.
+	_ FactCommit = (FactCommit)(nil)
+
+	_ func(event.Event) event.EventID = FactCommit(nil)
+
+	_ func(*Loop, FactCommit) = (*Loop).SetFactCommit
+
+	_ FactPipelines = (FactPipelines)(nil)
+
+	_ func(event.AgentID) (plugin.Pipeline, error) = FactPipelines(nil)
+
+	_ func(*Loop, FactPipelines) = (*Loop).SetFactPipelines
+
+	_ error = ErrFactPipelineUnwired
 
 	// The training-record gap account keeps its declared shape: one counted
 	// loss beside the record kind, identity and named failure it carries.

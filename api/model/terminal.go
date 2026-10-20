@@ -11,6 +11,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
@@ -42,6 +43,26 @@ const (
 	// partial output.
 	KindPartialOnly
 )
+
+// String reports the frozen spelling of one terminal kind: the five declarations
+// above are the terminals a reduction answers, and a value outside them reports
+// its ordinal so a gap never reads as a declared terminal.
+func (k Kind) String() string {
+	switch k {
+	case KindUnknown:
+		return "unknown"
+	case KindCompleted:
+		return "completed"
+	case KindFailed:
+		return "failed"
+	case KindCancelled:
+		return "cancelled"
+	case KindPartialOnly:
+		return "partial-only"
+	default:
+		return fmt.Sprintf("kind-%d", int(k))
+	}
+}
 
 // Signal identifies one input category that the single terminal reduction path
 // must observe and evidence separately while it derives the terminal Kind.
@@ -373,7 +394,9 @@ func responseErr(resp *Response) error {
 // AlertUnknownTerminal when no terminal evidence stands. The consumer reads the
 // returned Outcome as the terminal fact and MUST NOT write a second terminal
 // judgement beside it.
-func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)) Outcome {
+func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)) (outcome Outcome) {
+	call := beginCall(ctx)
+	defer func() { call.end(outcome) }()
 	r := NewReducer(onAlert)
 	if ch == nil {
 		r.failNilStream()
@@ -395,6 +418,7 @@ func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)
 				r.ProducerDone()
 				return r.Outcome()
 			}
+			call.saw(resp)
 			r.Observe(resp)
 		}
 	}
@@ -414,7 +438,9 @@ func ReduceChannel(ctx context.Context, ch <-chan *Response, onAlert func(Alert)
 // AlertUnknownTerminal when no terminal evidence stands. The consumer reads the
 // returned Outcome as the terminal fact and MUST NOT write a second terminal
 // judgement beside it.
-func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) Outcome {
+func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) (outcome Outcome) {
+	call := beginCall(ctx)
+	defer func() { call.end(outcome) }()
 	r := NewReducer(onAlert)
 	if seq == nil {
 		r.failNilStream()
@@ -424,6 +450,7 @@ func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) Out
 		if ctx.Err() != nil {
 			return false
 		}
+		call.saw(resp)
 		r.Observe(resp)
 		return true
 	})

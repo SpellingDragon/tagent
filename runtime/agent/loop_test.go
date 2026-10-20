@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // invariantLoopAddress is the session address the invariants' drives run in.
@@ -433,6 +436,166 @@ func invariantAwait(t *testing.T, cond func() bool) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("the expected state did not arrive before the deadline")
+}
+
+// consumerLog records the consumer lines one drive rendered: the DEBUG and INFO
+// levels the observation writes, and no other level.
+type consumerLog struct {
+	trpclog.Logger
+	mu         sync.Mutex
+	lines      []string
+	panicsLeft int
+}
+
+// take records one rendered line or refuses it by panicking.
+func (l *consumerLog) take(level, text string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.panicsLeft > 0 {
+		l.panicsLeft--
+		panic("the logger refused the write")
+	}
+	l.lines = append(l.lines, level+": "+text)
+}
+
+// Debugf records one formatted debug line.
+func (l *consumerLog) Debugf(format string, args ...any) {
+	l.take("debug", fmt.Sprintf(format, args...))
+}
+
+// Infof records one formatted info line.
+func (l *consumerLog) Infof(format string, args ...any) {
+	l.take("info", fmt.Sprintf(format, args...))
+}
+
+// at reports the lines taken at the named level.
+func (l *consumerLog) at(level string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.HasPrefix(line, level+": ") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// mentions reports whether one line at the level carries every fragment.
+func (l *consumerLog) mentions(level string, fragments ...string) bool {
+	for _, line := range l.at(level) {
+		holds := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				holds = false
+			}
+		}
+		if holds {
+			return true
+		}
+	}
+	return false
+}
+
+// watchConsumerLog points the consumer observation at the given logger for the
+// duration of one check.
+func watchConsumerLog(tb testing.TB, logger trpclog.Logger) {
+	tb.Helper()
+	original := trpclog.Default
+	trpclog.Default = logger
+	tb.Cleanup(func() { trpclog.Default = original })
+}
+
+// TestConsumerObservation checks the consumer face of the observation bypass.
+// - one drive renders a start line carrying the address and the ready count, and an end line carrying the decision count and the terminal
+// - every decision the drive consumes renders one line carrying its terminal and the number of calls the decision admitted
+// - the consumer face writes nothing at INFO, so the bounded stream stays with turn boundaries and model requests
+// - a logger that fails does not end the drive
+// 契约: docs/wiki/agent/execution-generations.md#turn-outcome
+func TestConsumerObservation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("one drive renders its start, its decision and its end", func(t *testing.T) {
+		logger := &consumerLog{}
+		watchConsumerLog(t, logger)
+		loop, _, _ := invariantLoop(t, newInvariantLoopModel("answer-a", nil))
+
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-1",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-1",
+				Message: model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		})
+
+		if err != nil {
+			t.Fatalf("drive = %v, want a completed turn", err)
+		}
+		if !logger.mentions("debug", "consumer drive start", "agent=agent-a", "session=session-a", "invocation=invocation-1", "ready=1") {
+			t.Fatalf("debug lines = %v, want the start line of the drive's own invocation", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "consumer decision", "invocation=invocation-1", "terminal=completed", "calls=0", "closing=false") {
+			t.Fatalf("debug lines = %v, want the decision line of the one answer", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "consumer drive end", "invocation=invocation-1", "decisions=1", "terminal=completed", "failed=false") {
+			t.Fatalf("debug lines = %v, want the end line of the drive", logger.at("debug"))
+		}
+		if lines := logger.at("debug"); len(lines) != 3 {
+			t.Fatalf("debug lines = %v, want one start, one decision and one end", lines)
+		}
+		if lines := logger.at("info"); len(lines) != 1 || !logger.mentions("info", "model response", "terminal=completed") {
+			t.Fatalf("info lines = %v, want the one bounded model-response line and no consumer line above DEBUG", lines)
+		}
+		if turn.Terminal != model.KindCompleted {
+			t.Fatalf("terminal = %v, want the completed turn of the one answer", turn.Terminal)
+		}
+	})
+
+	t.Run("a failed decision is named in the lines of its drive", func(t *testing.T) {
+		logger := &consumerLog{}
+		watchConsumerLog(t, logger)
+		loop, _, _ := invariantLoop(t, newInvariantLoopModel("", errors.New("agent: the model entry refused the request")))
+
+		if _, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-2",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-2",
+				Message: model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		}); err != nil {
+			t.Fatalf("drive beside a refused model entry = %v, want the refusal reduced", err)
+		}
+
+		if !logger.mentions("debug", "consumer decision", "invocation=invocation-2", "terminal=failed") {
+			t.Fatalf("debug lines = %v, want the failed terminal named in the decision line", logger.at("debug"))
+		}
+		if !logger.mentions("debug", "consumer drive end", "invocation=invocation-2", "terminal=failed", "failed=false") {
+			t.Fatalf("debug lines = %v, want the reduced terminal beside a drive that itself ended", logger.at("debug"))
+		}
+	})
+
+	t.Run("a logger that fails does not end the drive", func(t *testing.T) {
+		watchConsumerLog(t, &consumerLog{panicsLeft: 3})
+		loop, _, _ := invariantLoop(t, newInvariantLoopModel("answer-c", nil))
+
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-3",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-3",
+				Message: model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		})
+
+		if err != nil || turn.Terminal != model.KindCompleted || len(turn.Decisions) != 1 {
+			t.Fatalf("drive through a failing logger = (%v, %d decisions, %v), want the one completed decision", turn.Terminal, len(turn.Decisions), err)
+		}
+	})
 }
 
 // invariantCarries reports whether one message set carries the content named.

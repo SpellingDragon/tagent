@@ -108,6 +108,20 @@ func (s *StoreQuerySource) Reference(key event.EventID) (ledger.OriginalRef, boo
 	return entry.ref, true
 }
 
+// Event returns the reference of the landed event under the key, and reports
+// whether the table holds it. A reader that already holds a key re-checks the
+// attribution the key claims against this one record instead of trusting the
+// key alone.
+func (s *StoreQuerySource) Event(key event.EventID) (EventReference, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, held := s.entries[key]
+	if !held {
+		return EventReference{}, false
+	}
+	return entry.record.Reference(), true
+}
+
 // QueryEvents returns the references matching opts over the landed events, on
 // exactly the declarative terms of QueryOptions. An event the table has not
 // landed takes no part in the answer, whatever the store behind the table

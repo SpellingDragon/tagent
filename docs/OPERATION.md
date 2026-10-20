@@ -191,7 +191,37 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 **D4 文档面规模。** 全仓 markdown 实测 1836 篇，其中 `openspec` 1074 篇（变更过程工件）、`examples` 586 篇（第二 module 自带）、`docs` 155 篇。**`docs` 面只有 155 篇**——外部风险评估里"1833 篇"的口径是全仓 markdown（当时 1833，本文落笔时 1836），不是 `docs`。分区对象因此只有 `docs` 这 155 篇，见 §八。
 
-**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**监控面同在此登记、只登记不接线**：trpc `telemetry/{trace,metric,langfuse}` 插件挂到 `telemetry.SDKObserver` 的 tracer/meter 即得 OTel/Langfuse 导出，日志面由 `telemetry.LogObserver` 写 `trpc-agent-go/log.Logger`——复用框架面，不在仓库里自造第二套。
+**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**观测面见 §七·E**：四类识别点都直接写 trpc 框架面（`trpc-agent-go/log` 与 `telemetry/trace`），仓库不在其上叠第二套抽象。
+
+### E. 观测面：四类识别的观察点（复用框架 log + telemetry）
+
+四类各有一个观察点。日志一律写 `trpc-agent-go/log` 的 `log.Default`，链路一律写 `trpc-agent-go/telemetry/trace` 的 `trace.Tracer`；仓库内的 `telemetry/` 只把这两面接到宿主 sink，不定义新抽象。
+
+| 类 | 观察点（源码） | 级别与载体 | 每次携带（有界） | 行首 |
+|---|---|---|---|---|
+| 插件相位 | `plugin.Pipeline` 的 Before/After 派发处：`api/plugin/phases.go`、`api/plugin/present.go` | DEBUG 日志 | phase、face、plugin、result、elapsed、call 或 fact 身份 | `tagent: plugin phase` |
+| 事件流（事实生产提交） | 主提交之后的 After 趟：`telemetry.LogObserver`（经 `commit-observer` 元素派发） | DEBUG 逐事实 / INFO 回合边界 | 事实类型、tool、task、call、invocation | `tagent: tool call`、`tagent: turn start`、`tagent: turn end` |
+| 事件消费 | `runtime/agent/loop.go`：`Loop.Drive` 的起止与每个 decision | DEBUG 日志 | agent、session、invocation、ready 数、decisions、terminal、calls、elapsed | `tagent: consumer drive start`、`tagent: consumer drive end`、`tagent: consumer decision` |
+| 模型响应 | `model.ReduceChannel`、`model.ReduceSeq`（唯一终端归约入口） | INFO 日志 + chat span | model、terminal、prompt/completion/total token、responses、latency_ms | `tagent: model response`；span 名 `chat <model>` |
+
+- **开 DEBUG**：默认 zap 级别是 Info，相位与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
+- **span 属性**（框架 semconv，Langfuse 直接读）：`gen_ai.operation.name=chat`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`、`gen_ai.usage.output_tokens`，provider 报了缓存命中时再加 `gen_ai.usage.input_tokens.cached`；失败请求的 span status 置 `Error`。
+- **旁路判据**：四个观察点的 logger/tracer 调用都在 `recover` 保护内，失败只丢一条观察，不改事实、不改终态、不改投递。
+- **Langfuse 装配（进程启动时一次）**：`telemetry/langfuse.Start` 装的就是模型响应面读的 `telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故模型响应的 span 无需为本仓库写转换代码。
+
+```go
+clean, err := langfuse.Start(ctx,
+	langfuse.WithHost("cloud.langfuse.com:443"),
+	langfuse.WithPublicKey(os.Getenv("LANGFUSE_PUBLIC_KEY")),
+	langfuse.WithSecretKey(os.Getenv("LANGFUSE_SECRET_KEY")),
+)
+if err != nil {
+	return err
+}
+defer clean(ctx)
+```
+
+四类的断言各有一条可复跑测试：`go test ./api/model/ ./api/plugin/ ./runtime/agent/ ./tests/integration/host -run 'Observation' -count=1`。其中 `TestFourFacesObservationThroughTheFormalEntry` 走正式装配入口，四类一次性读同一个 logger 与同一个 tracer。
 
 ---
 

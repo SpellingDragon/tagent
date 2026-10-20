@@ -226,6 +226,8 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.loop.SetHistory(r)
 	r.loop.SetWatch(r.shutdown.Watch)
 	r.loop.SetPresentations(r.takePresentation)
+	r.loop.SetFactCommit(r.commitFact)
+	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
 	r.loop.SetRequestSnapshotFace(r.snapshotRequest)
 	if cfg.recorder != nil {

@@ -20,8 +20,10 @@ import (
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/memory/search"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/tool/recall"
 	"github.com/openai/openai-go/option"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -40,6 +42,16 @@ var ErrDuplicateInbound = errors.New("wechat-bot: the inbound message was alread
 // ErrUnknownProvider reports an agent whose provider name resolves to no
 // provider entry of the document.
 var ErrUnknownProvider = errors.New("wechat-bot: the host document declares no such provider")
+
+// hostToolNames lists the tools this host contributes, in the order one
+// declaration receives them: the outbound tool, then the recall tools.
+var hostToolNames = []string{
+	sendToolID,
+	recall.QueryToolName,
+	recall.GetToolName,
+	recall.RecentToolName,
+	recall.TraceToolName,
+}
 
 // hostDocument is the host-side view of one configuration source: the entry
 // agent, the provider registry, the declared agents, and the governance and
@@ -146,8 +158,8 @@ func (d *hostDocument) Declaration() (*config.Declaration, error) {
 			return nil, err
 		}
 		spec.Files = files
-		if d.declaresSend(id) {
-			spec.Tools = append(spec.Tools, config.ToolRef{Name: sendToolID})
+		for _, name := range d.declaredTools(id) {
+			spec.Tools = append(spec.Tools, config.ToolRef{Name: name})
 		}
 		spec.FinalRound = d.Agents[id].finalRound()
 		decl.Agents = append(decl.Agents, spec)
@@ -216,17 +228,34 @@ func (d *hostDocument) modelName(id string) string {
 // declaresSend reports whether one declared agent declares the send tool: the
 // declaration is the grant, so an agent outside it never sees the tool.
 func (d *hostDocument) declaresSend(id string) bool {
+	return d.declaresTool(id, sendToolID)
+}
+
+// declaresTool reports whether one declared agent declares the named host tool.
+func (d *hostDocument) declaresTool(id, name string) bool {
 	for _, ref := range d.Agents[id].Tools {
-		if ref.Kind == "tool" && ref.ID == sendToolID {
+		if ref.Kind == "tool" && ref.ID == name {
 			return true
 		}
 	}
 	return false
 }
 
+// declaredTools returns the host tools one declared agent declares, in the
+// fixed order this host contributes them.
+func (d *hostDocument) declaredTools(id string) []string {
+	names := make([]string, 0, len(hostToolNames))
+	for _, name := range hostToolNames {
+		if d.declaresTool(id, name) {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // nativeAgents constructs the live pieces every declared agent is assembled
 // with: its own model and the contributed tools its declaration grants.
-func (d *hostDocument) nativeAgents(seam *hostSendSeam) (map[event.AgentID]tagent.NativeAgent, error) {
+func (d *hostDocument) nativeAgents(send *hostSendSeam, recallSeam *hostRecallSeam) (map[event.AgentID]tagent.NativeAgent, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
@@ -238,13 +267,61 @@ func (d *hostDocument) nativeAgents(seam *hostSendSeam) (map[event.AgentID]tagen
 		if err != nil {
 			return nil, err
 		}
-		tools := make([]trpctool.CallableTool, 0, 1)
-		if d.declaresSend(spec.ID) {
-			tools = append(tools, sendToolFactory(seam))
-		}
-		out[event.AgentID(spec.ID)] = tagent.NativeAgent{Model: native, Tools: tools}
+		out[event.AgentID(spec.ID)] = tagent.NativeAgent{Model: native, Tools: d.hostTools(spec.ID, send, recallSeam)}
 	}
 	return out, nil
+}
+
+// hostTools constructs the tool instances one declared agent's declaration
+// grants: the outbound tool first, then every recall tool the declaration names.
+func (d *hostDocument) hostTools(id string, send *hostSendSeam, recallSeam *hostRecallSeam) []trpctool.CallableTool {
+	tools := make([]trpctool.CallableTool, 0, len(hostToolNames))
+	if d.declaresTool(id, sendToolID) {
+		tools = append(tools, sendToolFactory(send))
+	}
+	for _, candidate := range recall.New(recallSeam.reads(), []string{id}) {
+		if d.declaresTool(id, candidate.Declaration().Name) {
+			tools = append(tools, candidate)
+		}
+	}
+	return tools
+}
+
+// hostRecallSeam is the recall read seam of this host: the tools are
+// constructed before the runtime exists, so the retrieval face is bound to the
+// assembled run once the assembly returns. A call before that binding answers
+// the named refusal of the recall surface.
+type hostRecallSeam struct {
+	mu   sync.RWMutex
+	face func(ctx context.Context, query search.Query) (search.Result, error)
+}
+
+var _ search.Searcher = (*hostRecallSeam)(nil)
+
+// bind attaches the retrieval face of the assembled run.
+func (s *hostRecallSeam) bind(face func(ctx context.Context, query search.Query) (search.Result, error)) {
+	s.mu.Lock()
+	s.face = face
+	s.mu.Unlock()
+}
+
+// Search answers one retrieval through the bound face.
+func (s *hostRecallSeam) Search(ctx context.Context, query search.Query) (search.Result, error) {
+	s.mu.RLock()
+	face := s.face
+	s.mu.RUnlock()
+	if face == nil {
+		return search.Result{}, recall.ErrRecallUnwired
+	}
+	return face(ctx, query)
+}
+
+// reads is the read face this host wires for the recall tools: the retrieval
+// port over the assembled run. The observation table, the scoped original store
+// and the parent ledger are not faces this host assembles, so every read that
+// needs one refuses by name instead of answering an empty result.
+func (s *hostRecallSeam) reads() recall.Reads {
+	return recall.Reads{Searcher: s}
 }
 
 // requestTimeout reports the model call timeout the document declares.
@@ -327,12 +404,18 @@ type inboundMessage struct {
 // drives it: the live pieces of every declared agent are constructed here and
 // the assembly they form is the one this process runs.
 func assembleHost(ctx context.Context, doc *hostDocument, gateway *approvalGateway, seen *SeenStore) (*hostRuntime, error) {
-	seam := &hostSendSeam{}
-	natives, err := doc.nativeAgents(seam)
+	send := &hostSendSeam{}
+	recallSeam := &hostRecallSeam{}
+	natives, err := doc.nativeAgents(send, recallSeam)
 	if err != nil {
 		return nil, err
 	}
-	return assembleHostFrom(ctx, doc, gateway, seen, seam, natives)
+	host, err := assembleHostFrom(ctx, doc, gateway, seen, send, natives)
+	if err != nil {
+		return nil, err
+	}
+	recallSeam.bind(host.run.Recall)
+	return host, nil
 }
 
 // assembleHostFrom builds the host around the live pieces every declared agent

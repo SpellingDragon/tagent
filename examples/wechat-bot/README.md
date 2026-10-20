@@ -40,7 +40,7 @@ tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.
 | `log_level` / `trajectory_*` / `working_dir` / `mcp_servers` | 无读取点；环境变量侧同样没读点，故 `wizard.sh`/`run.sh`/`.env.example` 已不再采集（配置即业务：不读就不采）；MCP 工具面也未接 |
 | `evolution` / `reliability` / `governance.budget_*`、`max_*_risk`、`goal_required_for` | 平台面只装配治理闸：预算与 goal 未接，只消费 `enabled`/`enforcement`/`dir`/`approval_ttl_minutes` |
 | `agents.*.memory` / `compress` / `meditation` / `max_tokens` / `temperature` / `thinking_enabled` / `reasoning_effort` / `compress_threshold` / `task_*_ttl` | 装配面不读，schema 未声明 |
-| `agents.*.tools[]` 除 `{kind: tool, id: send}` | 工具面只接 `send`：file 工具、`exec`、`recall`、`spec`、`mcp_*`、`skill_*`、子 agent 委派均无实现 |
+| `agents.*.tools[]` 除 `{kind: tool, id: send}` 与 `recall_*` | 工具面接了 `send`＋`recall_query/get/recent/trace`（tool/recall）；file、`exec`、`spec`、`mcp_*`、`skill_*`、子 agent 委派仍无实现 |
 
 ## Agent 声明（六个，`tagent.yaml`）
 

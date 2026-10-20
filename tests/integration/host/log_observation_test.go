@@ -11,8 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/telemetry"
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+	semconvtrace "trpc.group/trpc-go/trpc-agent-go/telemetry/semconv/trace"
+	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 // observationLine is one line the observation logger took: the level it was
@@ -124,6 +130,7 @@ func (l *observationLogger) mentions(level string, fragments ...string) bool {
 
 // TestLogObservationThroughTheFormalEntry checks the log face of the observation bypass through the formal assembly entry.
 // - the admitted tool call of the turn is one DEBUG line carrying tool, task and call
+// - the turn boundaries are INFO lines: the entry input opens the turn and the assistant output closes it
 // - no line renders the payload content the turn carried
 // - a logger that fails does not block the turn and still leaves its facts presented
 //
@@ -149,6 +156,21 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 		}
 	})
 
+	t.Run("the turn boundaries are observed at INFO", func(t *testing.T) {
+		logger := &observationLogger{}
+		run, _ := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+		visibilityInvoke(t, ctx, run, "inv-log-boundary", "session-log-boundary")
+		if !logger.mentions("info", "turn start", "agent=agent-a", "invocation=inv-log-boundary") {
+			t.Fatalf("info lines = %v, want the turn-start boundary of the invocation", logger.at("info"))
+		}
+		if !logger.mentions("info", "turn end", "agent=agent-a", "invocation=inv-log-boundary") {
+			t.Fatalf("info lines = %v, want the turn-end boundary of the invocation", logger.at("info"))
+		}
+		if len(logger.at("info")) != 2 {
+			t.Fatalf("info lines = %v, want the INFO stream bounded by the two turn boundaries", logger.at("info"))
+		}
+	})
+
 	t.Run("a failing logger does not block the turn", func(t *testing.T) {
 		logger := &observationLogger{panicsLeft: 1}
 		run, _ := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
@@ -160,4 +182,131 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 			t.Fatal("presentations = none, want the committed facts presented after the refused line")
 		}
 	})
+}
+
+// observedSpan records the name, the attributes and the end of one span the
+// observation opened on the framework tracer.
+type observedSpan struct {
+	trace.Span
+	name  string
+	attrs []attribute.KeyValue
+	ended bool
+}
+
+// SetName records the name the observation moved the span to.
+func (s *observedSpan) SetName(name string) { s.name = name }
+
+// SetAttributes records the attributes the observation rendered.
+func (s *observedSpan) SetAttributes(kv ...attribute.KeyValue) { s.attrs = append(s.attrs, kv...) }
+
+// End records that the observation closed the span.
+func (s *observedSpan) End(...trace.SpanEndOption) { s.ended = true }
+
+// attribute reports the rendered value of one attribute key.
+func (s *observedSpan) attribute(key string) (attribute.Value, bool) {
+	for _, kv := range s.attrs {
+		if string(kv.Key) == key {
+			return kv.Value, true
+		}
+	}
+	return attribute.Value{}, false
+}
+
+// observedTracer records every span the observation started through the
+// framework tracer it stands in for.
+type observedTracer struct {
+	trace.Tracer
+	mu    sync.Mutex
+	spans []*observedSpan
+}
+
+// Start records one span and answers it as the started span.
+func (t *observedTracer) Start(ctx context.Context, name string, _ ...trace.SpanStartOption) (context.Context, trace.Span) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	span := &observedSpan{name: name}
+	t.spans = append(t.spans, span)
+	return ctx, span
+}
+
+// named reports the spans the observation started under the name.
+func (t *observedTracer) named(name string) []*observedSpan {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []*observedSpan
+	for _, span := range t.spans {
+		if span.name == name {
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+// watchObservationFaces points the framework logger and the framework tracer at
+// the given stand-ins for the duration of one check, so every face of the
+// observation is read from one sink beside one tracer.
+func watchObservationFaces(tb testing.TB, logger trpclog.Logger, tracer trace.Tracer) {
+	tb.Helper()
+	originalLogger, originalTracer := trpclog.Default, ftrace.Tracer
+	trpclog.Default, ftrace.Tracer = logger, tracer
+	tb.Cleanup(func() { trpclog.Default, ftrace.Tracer = originalLogger, originalTracer })
+}
+
+// TestFourFacesObservationThroughTheFormalEntry checks the four faces of the observation bypass through the formal assembly entry.
+// - 事件流: the committed tool-call fact writes its DEBUG line after its commit
+// - 插件相位: every executed face of the pipeline writes one DEBUG line carrying the phase, the plugin and its result
+// - 事件消费: the drive writes its start, its decision and its end lines beside the invocation identity
+// - 模型响应: each model request writes one INFO line and opens one chat span carrying the operation, the model and the token totals
+// - the INFO stream stays bounded by the turn boundaries and the model responses, and no line renders payload content
+//
+// 契约: docs/wiki/platform/platform-subsystems.md#composition-root
+func TestFourFacesObservationThroughTheFormalEntry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger, tracer := &observationLogger{}, &observedTracer{}
+	watchObservationFaces(t, logger, tracer)
+	run, _ := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+	visibilityInvoke(t, ctx, run, "inv-faces", "session-faces")
+
+	if !logger.mentions("debug", "tool call", "tool=echo", "call=call-1") {
+		t.Fatalf("debug lines = %v, want the committed tool-call fact of the turn", logger.at("debug"))
+	}
+	if !logger.mentions("debug", "plugin phase", "phase=post-commit-observe", "face=observe", "plugin=commit-observer", "result=ok") {
+		t.Fatalf("debug lines = %v, want the dispatched post-commit face of the pipeline", logger.at("debug"))
+	}
+	if !logger.mentions("debug", "consumer drive start", "agent=agent-a", "session=session-faces", "invocation=inv-faces") {
+		t.Fatalf("debug lines = %v, want the start line of the drive", logger.at("debug"))
+	}
+	if !logger.mentions("debug", "consumer drive end", "invocation=inv-faces", "decisions=2", "terminal=completed") {
+		t.Fatalf("debug lines = %v, want the end line of the drive beside its two decisions", logger.at("debug"))
+	}
+	if !logger.mentions("info", "model response", "model=model-a", "terminal=completed", "responses=1") {
+		t.Fatalf("info lines = %v, want the model-response line of a served request", logger.at("info"))
+	}
+	if lines := logger.at("info"); len(lines) != 4 {
+		t.Fatalf("info lines = %v, want the two turn boundaries beside the two model responses", lines)
+	}
+
+	spans := tracer.named("chat model-a")
+	if len(spans) != 2 {
+		t.Fatalf("chat spans = %d, want one per model request of the turn", len(spans))
+	}
+	for _, span := range spans {
+		if !span.ended {
+			t.Fatal("a chat span was left open, want every span closed once its terminal stood")
+		}
+		if got, ok := span.attribute(string(semconvtrace.KeyGenAIOperationName)); !ok || got.AsString() != "chat" {
+			t.Fatalf("gen_ai.operation.name = %v (present %t), want chat", got.AsString(), ok)
+		}
+		if got, ok := span.attribute(string(semconvtrace.KeyGenAIRequestModel)); !ok || got.AsString() != "model-a" {
+			t.Fatalf("gen_ai.request.model = %v (present %t), want model-a", got.AsString(), ok)
+		}
+	}
+
+	for _, line := range logger.all() {
+		if strings.Contains(line, "out-a") || strings.Contains(line, "settled") {
+			t.Fatalf("line = %q, want no payload or message content rendered", line)
+		}
+	}
 }

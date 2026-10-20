@@ -161,26 +161,32 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			t.Fatalf("echo_tool executions = %d, want the allowed call executed once", got)
 		}
 		shown := run.Presentations()
-		if len(shown) != 1 {
-			t.Fatalf("presentations = %+v, want exactly one After presentation handed to the read face", shown)
+		if len(shown) != 4 {
+			t.Fatalf("presentations = %+v, want one After presentation per committed fact of the turn (entry input, settled delivery, call result and output)", shown)
 		}
-		presentation := shown[0]
-		if presentation.Fact == "" {
-			t.Fatalf("presentation = %+v, want the committed fact it was rendered from", presentation)
-		}
-		if len(presentation.Gaps) != 1 {
-			t.Fatalf("gaps = %+v, want the failed observation left as one visible gap", presentation.Gaps)
-		}
-		gap := presentation.Gaps[0]
-		if gap.Plugin != "down-observer" || gap.Fact != presentation.Fact || gap.Err == nil || !strings.Contains(gap.Err.Error(), "down-observer") {
-			t.Fatalf("gap = %+v, want the failed observation named beside its plugin, fact and error", gap)
-		}
-		if len(presentation.Views) != 1 {
-			t.Fatalf("views = %+v, want the rendered presentation beside the gap", presentation.Views)
-		}
-		view := presentation.Views[0]
-		if view.Plugin != "final-presenter" || !strings.Contains(view.Text, string(presentation.Fact)) || view.Dropped {
-			t.Fatalf("view = %+v, want the rendered view kept beside the gap and not dropped", view)
+		facts := map[event.EventID]bool{}
+		for _, presentation := range shown {
+			if presentation.Fact == "" {
+				t.Fatalf("presentation = %+v, want the committed fact it was rendered from", presentation)
+			}
+			if facts[presentation.Fact] {
+				t.Fatalf("presentation fact = %s, want one presentation per committed fact", presentation.Fact)
+			}
+			facts[presentation.Fact] = true
+			if len(presentation.Gaps) != 1 {
+				t.Fatalf("gaps = %+v, want the failed observation left as one visible gap", presentation.Gaps)
+			}
+			gap := presentation.Gaps[0]
+			if gap.Plugin != "down-observer" || gap.Fact != presentation.Fact || gap.Err == nil || !strings.Contains(gap.Err.Error(), "down-observer") {
+				t.Fatalf("gap = %+v, want the failed observation named beside its plugin, fact and error", gap)
+			}
+			if len(presentation.Views) != 1 {
+				t.Fatalf("views = %+v, want the rendered presentation beside the gap", presentation.Views)
+			}
+			view := presentation.Views[0]
+			if view.Plugin != "final-presenter" || !strings.Contains(view.Text, string(presentation.Fact)) || view.Dropped {
+				t.Fatalf("view = %+v, want the rendered view kept beside the gap and not dropped", view)
+			}
 		}
 	})
 }

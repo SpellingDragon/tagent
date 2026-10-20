@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/view"
@@ -22,13 +23,27 @@ import (
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation {
 	out := view.Presentation{Fact: fact}
 	for _, face := range p.observers {
-		if err := face.impl.ObserveCommit(ctx, fact); err != nil {
+		started := time.Now()
+		err := face.impl.ObserveCommit(ctx, fact)
+		observePhase(PhasePostCommitObserve, faceObserve, face.name, phaseResult(err), "fact="+string(fact), started)
+		if err != nil {
 			out.Gaps = append(out.Gaps, view.ObservationGap{Plugin: face.name, Fact: fact, Err: err})
 		}
 	}
 	for _, face := range p.presenters {
+		started := time.Now()
 		text, dropped := face.impl.Present(ctx, fact)
+		observePhase(PhaseFinalPresentation, facePresent, face.name, phasePresentation(dropped), "fact="+string(fact), started)
 		out.Views = append(out.Views, view.RenderedView{Plugin: face.name, Text: text, Dropped: dropped})
 	}
 	return out
+}
+
+// phasePresentation spells the outcome one presenting face reported: the text it
+// rendered, or the drop it declared instead of a silent empty view.
+func phasePresentation(dropped bool) string {
+	if dropped {
+		return "dropped"
+	}
+	return "rendered"
 }

@@ -388,8 +388,22 @@
           "transform-b"
         ],
         "parent_pipeline_after_order": [
-          "observe-a",
-          "presenter-b"
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ]
         ],
         "parent_pipeline_matches_declaration": true,
         "parent_instruction_from_declared_file": true,

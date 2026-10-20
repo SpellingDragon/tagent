@@ -94,12 +94,14 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	childRequests := child.recorded()
 
 	declared := decl.Agents[0].Plugins
-	observations["parent_pipeline_before_order"] = recorder.order("before")
-	observations["parent_pipeline_after_order"] = recorder.order("after")
+	declaredAfter := scenarioDeclaredPhaseOrder(declared, recorder.plugins(),
+		plugin.PhasePostCommitObserve, plugin.PhaseFinalPresentation)
+	afterGroups := recorder.afterGroups()
+	observations["parent_pipeline_before_order"] = recorder.beforeOrder()
+	observations["parent_pipeline_after_order"] = afterGroups
 	observations["parent_pipeline_matches_declaration"] =
-		scenarioSameOrder(recorder.order("before"), scenarioDeclaredOrder(declared, recorder.plugins(), plugin.PhaseCallTransform)) &&
-			scenarioSameOrder(recorder.order("after"), scenarioDeclaredOrder(declared, recorder.plugins(),
-				plugin.PhasePostCommitObserve, plugin.PhaseFinalPresentation))
+		scenarioSameOrder(recorder.beforeOrder(), scenarioDeclaredOrder(declared, recorder.plugins(), plugin.PhaseCallTransform)) &&
+			scenarioEveryGroupIs(afterGroups, declaredAfter)
 	observations["parent_instruction_from_declared_file"] =
 		scenarioAnyMessage(parentRequests[0].Messages, scenarioParentInstruction)
 
@@ -131,28 +133,57 @@ const (
 type scenarioPhaseRecorder struct {
 	mu     sync.Mutex
 	before []string
-	after  []string
+	after  []scenarioAfterVisit
 }
 
-// record files one pass visit under the element name.
-func (r *scenarioPhaseRecorder) record(pass, name string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if pass == "before" {
-		r.before = append(r.before, name)
-		return
-	}
-	r.after = append(r.after, name)
+// scenarioAfterVisit is one After pass visit: the element the pass reached
+// beside the committed fact it was reached for.
+type scenarioAfterVisit struct {
+	fact string
+	name string
 }
 
-// order reports the element names one pass visited, in visit order.
-func (r *scenarioPhaseRecorder) order(pass string) []string {
+// recordBefore files one Before pass visit under the element name.
+func (r *scenarioPhaseRecorder) recordBefore(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if pass == "before" {
-		return append([]string{}, r.before...)
+	r.before = append(r.before, name)
+}
+
+// recordFact files one After pass visit under the element name and the committed
+// fact the pass observed.
+func (r *scenarioPhaseRecorder) recordFact(fact, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.after = append(r.after, scenarioAfterVisit{fact: string(fact), name: name})
+}
+
+// beforeOrder reports the element names the Before pass visited, in visit order.
+func (r *scenarioPhaseRecorder) beforeOrder() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string{}, r.before...)
+}
+
+// afterGroups reports the elements each committed fact's After pass visited, one
+// group per fact in the order the facts committed. The After pass runs once per
+// committed fact through the pipeline of the fact's own agent — the turn-start
+// input, the turn-end output and the settled delivery of a range each commit a
+// fact of their own — so a fact is observed in the declaration's order while two
+// distinct facts carry no order between them.
+func (r *scenarioPhaseRecorder) afterGroups() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]string, 0, len(r.after))
+	last := ""
+	for _, visit := range r.after {
+		if len(out) == 0 || visit.fact != last {
+			out = append(out, []string{})
+		}
+		out[len(out)-1] = append(out[len(out)-1], visit.name)
+		last = visit.fact
 	}
-	return append([]string{}, r.after...)
+	return out
 }
 
 // declaredElements reports the pipeline elements the declaration names, in the
@@ -202,19 +233,21 @@ func (p *scenarioPhasePlugin) Phase() plugin.Phase { return p.phase }
 
 // TransformCall files the Before pass visit of a call-transform element.
 func (p *scenarioPhasePlugin) TransformCall(context.Context, *trpcmodel.ToolCall) error {
-	p.recorder.record("before", p.name)
+	p.recorder.recordBefore(p.name)
 	return nil
 }
 
-// ObserveCommit files the After pass visit of a post-commit observer.
-func (p *scenarioPhasePlugin) ObserveCommit(context.Context, event.EventID) error {
-	p.recorder.record("after", p.name)
+// ObserveCommit files the After pass visit of a post-commit observer beside the
+// fact it observed.
+func (p *scenarioPhasePlugin) ObserveCommit(_ context.Context, id event.EventID) error {
+	p.recorder.recordFact(string(id), p.name)
 	return nil
 }
 
-// Present files the After pass visit of a final presenter.
+// Present files the After pass visit of a final presenter beside the fact it
+// presented.
 func (p *scenarioPhasePlugin) Present(_ context.Context, id event.EventID) (string, bool) {
-	p.recorder.record("after", p.name)
+	p.recorder.recordFact(string(id), p.name)
 	return "presentation:" + string(id), false
 }
 
@@ -303,6 +336,34 @@ func scenarioDeclaredOrder(names []string, elements []plugin.Plugin, phases ...p
 				break
 			}
 		}
+	}
+	return out
+}
+
+// scenarioEveryGroupIs reports whether every group of a per-fact grouping of one
+// pass visited exactly the declared order, and at least one fact was observed: a
+// pass that reached no fact at all matches no declaration.
+func scenarioEveryGroupIs(groups [][]string, want []string) bool {
+	if len(groups) == 0 {
+		return false
+	}
+	for _, group := range groups {
+		if !scenarioSameOrder(group, want) {
+			return false
+		}
+	}
+	return true
+}
+
+// scenarioDeclaredPhaseOrder reports the declared elements serving the given
+// phases in the order the After pass visits them: the phases in the order the
+// pass runs them, and each phase in the declaration's own order. The phase is
+// what places an element in the pipeline, so this is the declaration read the way
+// the pipeline reads it.
+func scenarioDeclaredPhaseOrder(names []string, elements []plugin.Plugin, phases ...plugin.Phase) []string {
+	out := make([]string, 0, len(names))
+	for _, phase := range phases {
+		out = append(out, scenarioDeclaredOrder(names, elements, phase)...)
 	}
 	return out
 }
