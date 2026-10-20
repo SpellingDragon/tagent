@@ -56,9 +56,12 @@ func (r *Run) commitFact(evt event.Event) event.EventID {
 // flight: a new range is admitted by an external input under an invocation of
 // its own, and that first fact is where everything the earlier ranges committed
 // becomes ended material the next request presents while the transcript stops
-// carrying it. Facts of the range in flight — the reasoning, the calls and the
-// output of a round — stay behind that boundary, because the transcript of the
-// drive carries them.
+// carrying it. Facts of the range in flight — the reasoning, the calls, the
+// output of a round and the notice of a call it admitted — stay behind that
+// boundary, because the transcript of the drive carries them. A notice fact is a
+// mapped fact like any other, so a notification enters the chain's projection as
+// it commits and the range reads it back as a projection increment instead of
+// from a lane of its own.
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -106,13 +109,93 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 		budget = specOfLocked(r.current.Plan.Declaration, agentOf(evt)).ReplayBudget
 	}
 	r.mu.Unlock()
-	if held || budget <= 0 {
+	if held {
+		r.attachNoticeFeed()
+		return
+	}
+	if budget <= 0 {
 		return
 	}
 	err := r.AttachReplay(agent.RequestChain{SessionID: session}, budget, replay.NewReplayProjection())
 	if err != nil {
 		return
 	}
+	r.attachNoticeFeed()
+}
+
+// noticeProjection is the incremental read face of the session chains' notice
+// facts: the mapped sequence the commits of this run record, read from the
+// ended-material boundary of the chain. The face is attached to the loop beside
+// the mapped sequence of a session, so a range reads the notifications of its
+// own call as a projection increment and the fact chain stays the only truth of
+// what a notification is — a restarted process reads the same facts back.
+//
+// The redline list (3 rules):
+// MUST answer a chain that carries no projection as carrying none.
+// MUST report only the facts under the identity prefix it was handed.
+// MUST NOT write the projection it reads: the read is a read.
+type noticeProjection struct{ run *Run }
+
+// The face satisfies the incremental notice read the loop drives.
+var _ agent.NoticeFeed = noticeProjection{}
+
+// NoticeBoundary reports the position the ended material of the named chain ends
+// at, and whether that chain carries a projection at all: the material before it
+// is the material a request presents, so a notice committed before it has
+// already reached the range and is never reported again.
+func (p noticeProjection) NoticeBoundary(chain agent.RequestChain) (int, bool) {
+	p.run.mu.Lock()
+	defer p.run.mu.Unlock()
+	held, carried := p.run.replays[chain.SessionID]
+	if !carried || held.projection == nil {
+		return 0, false
+	}
+	return held.ended, true
+}
+
+// NoticesFrom reports the notice facts of the named chain appended after cursor
+// under the given identity prefix, in chain order, beside the position the read
+// reached and whether the chain carries a projection. A fact outside the prefix
+// is never reported, so one range reads the notices of its own call alone.
+func (p noticeProjection) NoticesFrom(chain agent.RequestChain, prefix event.EventID, cursor int) ([]agent.NoticeView, int, bool) {
+	p.run.mu.Lock()
+	defer p.run.mu.Unlock()
+	held, carried := p.run.replays[chain.SessionID]
+	if !carried || held.projection == nil {
+		return nil, cursor, false
+	}
+	entries := held.projection.Entries()
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(entries) {
+		cursor = len(entries)
+	}
+	var views []agent.NoticeView
+	for at := cursor; at < len(entries); at++ {
+		entry := entries[at]
+		if entry.Type != event.TypeFeedback || !strings.HasPrefix(string(entry.Key), string(prefix)) {
+			continue
+		}
+		text := entry.Content
+		if original, kept := held.projection.Original(entry.Key); kept {
+			text = original
+		}
+		views = append(views, agent.NoticeView{Key: entry.Key, Text: text})
+	}
+	return views, len(entries), true
+}
+
+// attachNoticeFeed points the loop at the incremental read face of this run's
+// session chains, so the drive of a range reads the notices of its chain as the
+// projection increments they are. The loop is built before the run, so the face
+// is attached beside the first mapped fact of a session; the attach is
+// idempotent and a run beside no loop attaches nothing.
+func (r *Run) attachNoticeFeed() {
+	if r.loop == nil {
+		return
+	}
+	r.loop.SetNoticeFeed(noticeProjection{run: r})
 }
 
 // agentOf reports the agent one committed fact belongs to, by the precedence

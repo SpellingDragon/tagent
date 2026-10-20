@@ -35,6 +35,12 @@ type Spec struct {
 	Source event.Address
 	// Target is the address the task's notifications are delivered to.
 	Target event.Address
+	// TriggerSource is the trigger-source stamp the admission carries, recorded
+	// on the task_spawned material. A delegated call carries
+	// event.LineageDelegation; an empty stamp records no source, so an
+	// admission that names none behaves exactly as it did before the stamp
+	// existed.
+	TriggerSource string
 	// Execution references the serialized-execution declaration the task runs
 	// under.
 	Execution Serialization

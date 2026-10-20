@@ -319,6 +319,7 @@ func (r *Run) surfaceBuilder(agents map[event.AgentID]NativeAgent, spec config.A
 		}
 	}
 	builder := subagent.Builder{
+		Facts: r.CommittedEvent,
 		Model: func(_ context.Context, name string) (model.Model, error) {
 			if name == "" {
 				return nil, subagent.ErrModelMissing
@@ -388,6 +389,7 @@ func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]Nativ
 		return nil, err
 	}
 	builder := subagent.Builder{
+		Facts: r.CommittedEvent,
 		Model: func(_ context.Context, name string) (model.Model, error) {
 			if name == "" {
 				return nil, subagent.ErrModelMissing

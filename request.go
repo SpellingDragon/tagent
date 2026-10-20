@@ -12,7 +12,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -262,9 +261,12 @@ func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *rep
 // beside them (skill-name order, once each, and never a body the fixed files
 // already carry), then the replayed projection of the session chain, and
 // finally the dynamic environment material of the request when the agent
-// declares it: those blocks are the answer of the request-assembly plugin phase,
-// rendered by the element this assembly registers for it, and each block is
-// appended as its own system message. The content version the boundary fixed is
+// declares it: the environment segment is one product of the assembly, rendered
+// by the assembler itself, and it enters the prefix as its own system message.
+// Every segment of the prefix is a product of that one assembler, and the
+// projected main context is assembled under the same budget assembly the
+// delegated refs render under, so the request side never grows a second
+// assembly channel beside it. The content version the boundary fixed is
 // reported back as the version the request runs on.
 //
 // The order is the cache ordering the environment block exists for: what stays
@@ -277,91 +279,171 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 	if boundary.Chain.SessionID == "" {
 		return agent.BoundaryView{}, agent.ErrRequestChainSessionRequired
 	}
-	view := agent.BoundaryView{}
 	r.mu.Lock()
 	fixer := r.fixers[boundary.Agent]
 	sequence, registered := r.replays[boundary.Chain.SessionID]
 	r.mu.Unlock()
-	fixedSkills := map[string]bool{}
-	if fixer != nil {
-		snapshot, err := fixer.fixate(ctx, boundary.Binding.PromptSource)
-		if err != nil {
-			return agent.BoundaryView{}, err
-		}
-		for _, fixed := range snapshot.Files {
-			view.Messages = append(view.Messages, model.Message{Role: model.RoleSystem, Content: fixed.Content})
-			if fixed.Ref.Kind == config.FileKindSkill {
-				fixedSkills[skillNameOf(fixed.Ref.Path)] = true
-			}
-		}
-		if snapshot.Version != "" {
-			view.PromptVersion = snapshot.Version
-		}
+	assembly := requestAssembly{
+		run:         r,
+		boundary:    boundary,
+		fixer:       fixer,
+		sequence:    sequence,
+		registered:  registered,
+		fixedSkills: map[string]bool{},
 	}
-	if resources, ok := boundary.Binding.Set.(*state.ToolResources); ok {
-		for _, load := range resources.SkillLoads() {
-			if !load.Loaded || fixedSkills[load.Skill] {
-				continue
-			}
-			view.Messages = append(view.Messages, model.Message{Role: model.RoleSystem, Content: load.Body})
-		}
-	}
-	if registered {
-		projected, err := sequence.projection.AssembleBudgetPrefix(ctx, sequence.budget, sequence.ended)
-		if err != nil {
-			return agent.BoundaryView{}, err
-		}
-		for _, entry := range projected {
-			role, err := agent.RoleOf(entry.Type)
-			if err != nil {
-				return agent.BoundaryView{}, err
-			}
-			view.Messages = append(view.Messages, model.Message{Role: role, Content: entry.Content})
-		}
-	}
-	if r.agentSpecOf(boundary.Agent).EnvironmentBlock {
-		pipeline, err := plugin.NewPipeline([]plugin.Plugin{environmentBlockPlugin{run: r, boundary: boundary}})
-		if err != nil {
-			return agent.BoundaryView{}, err
-		}
-		blocks, err := pipeline.InjectEnvironment(ctx, plugin.EnvironmentRequest{Agent: boundary.Agent})
-		if err != nil {
-			return agent.BoundaryView{}, err
-		}
-		for _, block := range blocks {
-			view.Messages = append(view.Messages, model.Message{Role: model.RoleSystem, Content: block})
-		}
-	}
-	return view, nil
+	return assembly.assemble(ctx)
 }
 
-// environmentBlockPlugin is the request-assembly element of this run: the
-// environment-injection phase face over one request boundary of one agent. The
-// blocks it renders are the dynamic material the boundary closes its assembly
-// with, read from the runtime at this boundary; one element of its answer is one
-// block, so each block stays its own product of this request.
-type environmentBlockPlugin struct {
-	run      *Run
-	boundary agent.RequestBoundary
+// requestSegment produces one segment of a request assembly: the messages the
+// segment contributes to the prefix, in the order the assembly lays them out.
+type requestSegment func(ctx context.Context) ([]model.Message, error)
+
+// projectionAssembler is the one assembler the request boundary builds the
+// prefix of a request through: every segment of the prefix is a product of this
+// assembler — the fixed file contents, the loaded skill bodies, the projected
+// main context and the environment segment — laid out in the order the segments
+// are declared. No segment grows a dispatch channel of its own beside the
+// assembly, and the environment segment in particular is the assembler's own
+// producing product of the request material, never a phase pass routed around
+// it.
+type projectionAssembler struct {
+	segments []requestSegment
 }
 
-// The element satisfies both the registration face and the phase face it serves.
-var (
-	_ plugin.Plugin            = environmentBlockPlugin{}
-	_ plugin.EnvironmentInject = environmentBlockPlugin{}
-)
+// segment declares one segment of the assembly in layout order.
+func (a *projectionAssembler) segment(produce requestSegment) {
+	a.segments = append(a.segments, produce)
+}
 
-// Name returns the stable plugin name the phase line records.
-func (p environmentBlockPlugin) Name() string { return "environment-block" }
+// assemble runs every declared segment in order and answers the prefix they
+// produce together. A refused segment refuses the assembly at that segment, so
+// no request is built over material that failed to render.
+func (a *projectionAssembler) assemble(ctx context.Context) ([]model.Message, error) {
+	var out []model.Message
+	for _, produce := range a.segments {
+		messages, err := produce(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, messages...)
+	}
+	return out, nil
+}
 
-// Phase reports the request-assembly phase this plugin serves.
-func (p environmentBlockPlugin) Phase() plugin.Phase { return plugin.PhaseEnvironmentInject }
+// requestAssembly is one request boundary's assembly: the assembler that lays
+// the prefix out beside the material its segments settle while they run — the
+// skill bodies the fixed files already carry and the content version the
+// request runs on.
+type requestAssembly struct {
+	run           *Run
+	boundary      agent.RequestBoundary
+	fixer         *fileFixer
+	sequence      replayEntry
+	registered    bool
+	fixedSkills   map[string]bool
+	promptVersion string
+	assembler     projectionAssembler
+}
 
-// InjectEnvironment renders the environment blocks of this assembly: the one
-// block a request carries at the bottom of its boundary material today, answered
-// as the one element of this face's answer.
-func (p environmentBlockPlugin) InjectEnvironment(ctx context.Context, _ plugin.EnvironmentRequest) ([]string, error) {
-	return []string{p.run.environmentBlock(ctx, p.boundary)}, nil
+// assemble declares the segments of the layout in the fixed order, runs them
+// through the one assembler and answers the boundary view they produce.
+func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, error) {
+	if a.fixer != nil {
+		a.assembler.segment(a.fixedFiles)
+	}
+	a.assembler.segment(a.loadedSkillBodies)
+	if a.registered {
+		a.assembler.segment(a.projectedMainContext)
+	}
+	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
+		a.assembler.segment(a.environmentSegment)
+	}
+	messages, err := a.assembler.assemble(ctx)
+	if err != nil {
+		return agent.BoundaryView{}, err
+	}
+	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion}, nil
+}
+
+// fixedFiles reads the declared prompt and skill bodies afresh at this boundary
+// and contributes them as the leading system messages, in the structural order
+// the binding carries. The skill names it read are kept beside the messages, so
+// the loaded-skill segment never repeats a body the fixed files already carry.
+func (a *requestAssembly) fixedFiles(ctx context.Context) ([]model.Message, error) {
+	snapshot, err := a.fixer.fixate(ctx, a.boundary.Binding.PromptSource)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]model.Message, 0, len(snapshot.Files))
+	for _, fixed := range snapshot.Files {
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: fixed.Content})
+		if fixed.Ref.Kind == config.FileKindSkill {
+			a.fixedSkills[skillNameOf(fixed.Ref.Path)] = true
+		}
+	}
+	if snapshot.Version != "" {
+		a.promptVersion = snapshot.Version
+	}
+	return messages, nil
+}
+
+// loadedSkillBodies contributes the skill bodies already loaded on the
+// binding's tool resources: skill-name order, once each, and never a body the
+// fixed files already carry. It runs after the fixed-file segment, so the names
+// that segment read are exactly the ones it skips.
+func (a *requestAssembly) loadedSkillBodies(context.Context) ([]model.Message, error) {
+	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
+	if !ok {
+		return nil, nil
+	}
+	var messages []model.Message
+	for _, load := range resources.SkillLoads() {
+		if !load.Loaded || a.fixedSkills[load.Skill] {
+			continue
+		}
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: load.Body})
+	}
+	return messages, nil
+}
+
+// projectedMainContext contributes the replayed projection of the session chain
+// as the main context of the request: the budget assembly of the registration
+// the chain fixed, bounded to the entries that already ended.
+func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
+	return projectedSegment(ctx, a.sequence.projection, a.sequence.budget, a.sequence.ended)
+}
+
+// environmentSegment contributes the dynamic environment material of the
+// request when the agent declares it: the block the assembler renders at this
+// boundary, as its own system message at the bottom of the prefix.
+func (a *requestAssembly) environmentSegment(ctx context.Context) ([]model.Message, error) {
+	return []model.Message{{Role: model.RoleSystem, Content: a.run.environmentBlock(ctx, a.boundary)}}, nil
+}
+
+// projectedSegment renders projected material under the budget assembly: the
+// leading prefix of the projection, mapped under the frozen event-type→role
+// table. It is the one entry the request side presents projected material
+// through — the main context of a request here, and the refs a delegated turn
+// starts from through the same AssembleBudgetPrefix rule — so both degrade
+// full→ticket→summary under one budget assembly and neither grows a budget
+// assembly of its own. A negative prefix assembles the whole projection.
+func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, budget, prefix int) ([]model.Message, error) {
+	if projection == nil {
+		return nil, nil
+	}
+	entries, err := projection.AssembleBudgetPrefix(ctx, budget, prefix)
+	if err != nil {
+		return nil, err
+	}
+	messages := make([]model.Message, 0, len(entries))
+	for _, entry := range entries {
+		role, err := agent.RoleOf(entry.Type)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, model.Message{Role: role, Content: entry.Content})
+	}
+	return messages, nil
 }
 
 // environmentTaskLines bounds how many open obligations one environment block

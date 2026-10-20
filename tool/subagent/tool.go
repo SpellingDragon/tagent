@@ -221,11 +221,12 @@ func (d delegationFaces) admit(ctx context.Context, builder Builder, frame task.
 		return task.AdmissionReceipt{}, err
 	}
 	receipt, err := d.delegation.Delegate(ctx, agent.Delegation{
-		InvocationID: frame.Identity.InvocationID,
-		DecisionID:   frame.Identity.DecisionID,
-		CallID:       frame.Identity.CallID,
-		Target:       frame.Address,
-		Ref:          handle.Ref,
+		InvocationID:  frame.Identity.InvocationID,
+		DecisionID:    frame.Identity.DecisionID,
+		CallID:        frame.Identity.CallID,
+		Target:        frame.Address,
+		TriggerSource: event.LineageDelegation,
+		Ref:           handle.Ref,
 	})
 	releaseErr := handle.Release(ctx)
 	if err != nil {

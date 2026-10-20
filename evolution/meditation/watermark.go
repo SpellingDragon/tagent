@@ -23,7 +23,7 @@ import (
 // reflection covered stay no older than the watermark instead of being burned
 // out of the window, and a start with no watermark passes once and then locks
 // itself. The watermark is advanced by consumption only, and the freshness
-// judgment excludes the agent's own managed lineage, so a notification the
+// policy excludes the agent's own reflection traffic, so a notification the
 // agent sends about its own work never makes the agent reflect on itself again.
 type Watermark struct {
 	// Moment is the moment the last consumed reflection turn advanced the

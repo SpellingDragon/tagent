@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/evolution/consolidation"
 	"github.com/SpellingDragon/tagent/memory"
 )
 
@@ -36,34 +35,6 @@ var ErrObservedFaceUnwired = errors.New("evolution: the observed fact-chain read
 // watermark has no source. The gate stays closed instead of reading a fresh
 // default.
 var ErrWatermarkSourceUnwired = errors.New("evolution: the execution watermark source is not wired")
-
-// DeliverableLineage reports whether a trigger-source stamp names traffic the
-// host may see delivered. A stamp outside the declared vocabulary is internal
-// and withheld, so an unrecognised stamp is never treated as host traffic.
-func DeliverableLineage(stamp string) bool {
-	switch stamp {
-	case "user", "task", "reincarnation", "system_alert", LineageReflection:
-		return true
-	default:
-		return false
-	}
-}
-
-// SelfManagedLineage reports whether a trigger-source stamp names traffic the
-// agent initiated for itself rather than an interaction someone awaits, from the
-// same vocabulary as DeliverableLineage so no consumer holds a list of its own.
-//
-// A stamp the vocabulary does not name derives as self-managed: an event without
-// a readable trigger source is never counted as freshness, and a reflection input
-// or a consolidation hint never re-arms the judgment that produced it.
-func SelfManagedLineage(stamp string) bool {
-	switch stamp {
-	case LineageReflection, consolidation.LineageConsolidationHint:
-		return true
-	default:
-		return !DeliverableLineage(stamp)
-	}
-}
 
 // ObservedFacts is the read-only fact-chain face the reflection judgment runs on:
 // the conditional retrieval the authorization-scoped query answers through, beside
@@ -94,11 +65,11 @@ type PartitionActivity struct {
 	// References counts this partition's entries on the reference page, which
 	// the read face answers without any hydration.
 	References int
-	// External counts hydrated facts whose lineage is not self-managed: the
-	// freshness evidence.
+	// External counts hydrated facts the freshness policy reads as new
+	// material: the freshness evidence.
 	External int
-	// SelfManaged counts hydrated facts the lineage derivation calls self-managed,
-	// unknown attribution included.
+	// SelfManaged counts hydrated facts the freshness policy reads as
+	// self-managed, unknown attribution included.
 	SelfManaged int
 }
 
@@ -161,13 +132,14 @@ type ScanCounts struct {
 }
 
 // ScanVerdict is what the freshness judgment read off one pass: whether the face
-// holds a fact newer than the watermark that is not self-managed, and that fact.
+// holds a fact newer than the watermark that the freshness policy reads as new
+// material, and that fact.
 type ScanVerdict struct {
-	// Novelty reports whether the face holds a fact newer than the watermark whose
-	// lineage is not self-managed.
+	// Novelty reports whether the face holds a fact newer than the watermark that
+	// the freshness policy reads as new material.
 	Novelty bool
-	// Recent is the newest fact whose lineage is not self-managed, when the pass
-	// found one.
+	// Recent is the newest fact the freshness policy reads as new material, when
+	// the pass found one.
 	Recent *ScannedFact
 }
 
@@ -235,8 +207,9 @@ func partitionOf(fact event.Event, fallback int) int {
 
 // observe runs one pass over the observed face: the authorization-scoped query
 // answers the reference page, the tally splits that page by partition, and the
-// hydration walk reads the newest references until its first non-self-managed
-// fact, so the judgment costs one page read and at most one page of hydrations.
+// hydration walk reads the newest references until the first fact the freshness
+// policy reads as new material, so the judgment costs one page read and at most
+// one page of hydrations.
 //
 // A read failure is returned by name and never reinterpreted as an empty face or
 // as a fresh one: the gate that consumes this pass stays closed and there is no
@@ -295,6 +268,7 @@ func observe(ctx context.Context, scope ReflectionScope, facts ObservedFacts, re
 			continue
 		}
 		stamp := fact.Meta[event.MetaKeyTriggerSource]
+		novel := NoveltyPolicy{}.Novel(fact)
 		entry := ScannedFact{
 			Identity: FactIdentity{Key: ref.Key, Partition: scan.Partitions[at].Name},
 			Content: FactContent{
@@ -306,7 +280,7 @@ func observe(ctx context.Context, scope ReflectionScope, facts ObservedFacts, re
 		}
 		scan.Counts.HydratedTotal++
 		scan.Facts = append(scan.Facts, entry)
-		if entry.Attribution.SelfManaged {
+		if !novel {
 			scan.Partitions[at].SelfManaged++
 			if stamp == "" {
 				scan.Counts.UnknownLineage++

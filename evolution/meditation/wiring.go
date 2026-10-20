@@ -55,22 +55,27 @@ type MeditationCards func(ctx context.Context) ([]MeditationCard, error)
 // the state carries it.
 type MeditationSink func(ctx context.Context, artifact MeditationArtifact) error
 
-// CompressPhase is the plugin face a meditation tick hands the compress requests it
-// reads to: the face answers one filed judgment with the compression it owes, and the
-// request it is dispatched for is the one the log filed, value for value. The tick
-// curates the material only after the face answered it, so a compression face that
-// refused keeps its request pending instead of being counted compressed.
+// ConsumerPhase is the consumption-phase face of a meditation tick: every
+// compress request the tick reads is handed to this face, and the face answers
+// the compression it owes, so the request's judgment is answered on the
+// consuming side of the material flow. The tick curates the material only after
+// the face answered it, so a consumption face that refused keeps its request
+// pending instead of being counted compressed.
 //
 // The redline list (3 rules):
 // MUST take the request as the log filed it: the face answers the compression, never the judgment.
 // MUST NOT retire the request: the tick retires it once the products of its compression are committed.
 // MUST NOT curate material no filed request names.
-type CompressPhase interface {
+type ConsumerPhase interface {
 	// TriggerCompress dispatches one filed compress request. A nil error carries the
 	// request forward into the pass that compresses it; a non-nil error refuses it
 	// by name, so no material is curated and the request stays pending.
 	TriggerCompress(ctx context.Context, request event.CompressRequest) error
 }
+
+// CompressPhase is the consumption-phase face under its compress vocabulary: a
+// plugin pipeline answering compress requests satisfies it without an adapter.
+type CompressPhase = ConsumerPhase
 
 // MeditationTick is what one meditation tick did: the request facts it took in, the
 // passes they drove, the product facts it committed into the state, the fold
@@ -116,7 +121,7 @@ type Meditation struct {
 	requests   *memory.CompressRequests
 	cards      MeditationCards
 	products   MeditationSink
-	phase      CompressPhase
+	phase      ConsumerPhase
 	projection MeditationProjection
 	folds      MeditationFolds
 }
@@ -166,12 +171,18 @@ func WithMeditationProducts(products MeditationSink) MeditationOption {
 	return func(meditation *Meditation) { meditation.products = products }
 }
 
-// WithCompressPhase wires the plugin face the consumer tick dispatches every compress
-// request it reads to. A tick wired without one curates the material its requests name
-// and retires them as it stands: no compression face stands between the judgment and
-// the pass.
-func WithCompressPhase(phase CompressPhase) MeditationOption {
+// WithConsumerPhase wires the consumption-phase face the consumer tick dispatches
+// every compress request it reads to. A tick wired without one curates the material
+// its requests name and retires them as it stands: no consumption face stands
+// between the judgment and the pass.
+func WithConsumerPhase(phase ConsumerPhase) MeditationOption {
 	return func(meditation *Meditation) { meditation.phase = phase }
+}
+
+// WithCompressPhase wires the consumption-phase face the consumer tick dispatches
+// every compress request it reads to, under the compress vocabulary.
+func WithCompressPhase(phase CompressPhase) MeditationOption {
+	return WithConsumerPhase(phase)
 }
 
 // NewMeditation returns the meditation engine over the retention ledger and the
@@ -453,11 +464,12 @@ func (c *Meditation) Tick(ctx context.Context, now time.Time) (MeditationTick, e
 	return tick, nil
 }
 
-// dispatchCompress hands one filed compress request to the plugin face the tick was
-// wired with, so the compression a producer judged due is answered through the plugin
-// surface instead of inside the tick. A tick wired without a compression face
-// dispatches nothing and curates the material as it stands; a face that refuses is
-// reported by name beside its request, so the request is never counted compressed.
+// dispatchCompress hands one filed compress request to the consumption-phase face
+// the tick was wired with, so the compression a producer judged due is answered
+// through the plugin surface instead of inside the tick. A tick wired without a
+// consumption face dispatches nothing and curates the material as it stands; a face
+// that refuses is reported by name beside its request, so the request is never
+// counted compressed.
 func (c *Meditation) dispatchCompress(ctx context.Context, request event.CompressRequest) error {
 	if c.phase == nil {
 		return nil

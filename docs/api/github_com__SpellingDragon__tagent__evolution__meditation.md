@@ -4,6 +4,12 @@ The scheduled reflection driver of one meditation loop: the plan it runs,
 the delivery port a fired reflection flows back through, one Tick per declared
 interval, and the named refusals a plan that cannot drive answers at assembly.
 
+The meditation domain's own judgments over the facts it consumes: the freshness
+judgment that reads one observed fact and the delivery judgment that reads one
+fired reflection's input. A fact carries its trigger-source stamp as recording
+metadata; these judgments state, in the domain's own vocabulary, which stamps
+open the freshness gate and which may leave through the delivery port.
+
 The declaration face of one scheduled reflection: a document states which
 agent observes, at which cadence, over which namespaces, with which prompt
 and to which declared targets, and PlanOf resolves that section once into the
@@ -221,9 +227,9 @@ func CompactionFactKey(payload replay.CompactionFact) event.EventID
     files one fact and a re-file keeps that identity.
 
 func DeliverableLineage(stamp string) bool
-    DeliverableLineage reports whether a trigger-source stamp names traffic the
-    host may see delivered. A stamp outside the declared vocabulary is internal
-    and withheld, so an unrecognised stamp is never treated as host traffic.
+    DeliverableLineage reports whether a trigger-source stamp names traffic
+    the host may see delivered, from the vocabulary the delivery policy reads.
+    The stamp stays on the fact as recording metadata.
 
 func NewAnchorStore(path string) (*AnchorStore, error)
     NewAnchorStore returns the anchor store of the record at path, creating
@@ -280,14 +286,9 @@ func ResolveObservationScope(own string, declared, read []string) (ReflectionSco
 
 func SelfManagedLineage(stamp string) bool
     SelfManagedLineage reports whether a trigger-source stamp names traffic
-    the agent initiated for itself rather than an interaction someone awaits,
-    from the same vocabulary as DeliverableLineage so no consumer holds a list
-    of its own.
-
-    A stamp the vocabulary does not name derives as self-managed: an event
-    without a readable trigger source is never counted as freshness, and a
-    reflection input or a consolidation hint never re-arms the judgment that
-    produced it.
+    the agent manages for itself rather than an interaction someone awaits. The
+    derivation is the recording reading of the stamp: an unknown or empty stamp
+    is self-managed, and no freshness decision is read from this derivation.
 
 TYPES
 
@@ -343,23 +344,9 @@ type Anchors struct {
     and an entry this structure does not name is ignored when the record is read
     rather than refused.
 
-type CompressPhase interface {
-	// TriggerCompress dispatches one filed compress request. A nil error carries the
-	// request forward into the pass that compresses it; a non-nil error refuses it
-	// by name, so no material is curated and the request stays pending.
-	TriggerCompress(ctx context.Context, request event.CompressRequest) error
-}
-    CompressPhase is the plugin face a meditation tick hands the compress
-    requests it reads to: the face answers one filed judgment with the
-    compression it owes, and the request it is dispatched for is the one the log
-    filed, value for value. The tick curates the material only after the face
-    answered it, so a compression face that refused keeps its request pending
-    instead of being counted compressed.
-
-    The redline list (3 rules): MUST take the request as the log filed it:
-    the face answers the compression, never the judgment. MUST NOT retire
-    the request: the tick retires it once the products of its compression are
-    committed. MUST NOT curate material no filed request names.
+type CompressPhase = ConsumerPhase
+    CompressPhase is the consumption-phase face under its compress vocabulary: a
+    plugin pipeline answering compress requests satisfies it without an adapter.
 
 type Condenser func(ctx context.Context, run MeditationRun, now time.Time) (string, error)
     Condenser folds one over-limit card run into its condensed summary:
@@ -368,10 +355,37 @@ type Condenser func(ctx context.Context, run MeditationRun, now time.Time) (stri
     fallback — the overflow run sinks into an "(earlier n items)" count line —
     and never collapses the pass or rewrites a fact.
 
+type ConsumerPhase interface {
+	// TriggerCompress dispatches one filed compress request. A nil error carries the
+	// request forward into the pass that compresses it; a non-nil error refuses it
+	// by name, so no material is curated and the request stays pending.
+	TriggerCompress(ctx context.Context, request event.CompressRequest) error
+}
+    ConsumerPhase is the consumption-phase face of a meditation tick:
+    every compress request the tick reads is handed to this face, and the face
+    answers the compression it owes, so the request's judgment is answered on
+    the consuming side of the material flow. The tick curates the material only
+    after the face answered it, so a consumption face that refused keeps its
+    request pending instead of being counted compressed.
+
+    The redline list (3 rules): MUST take the request as the log filed it:
+    the face answers the compression, never the judgment. MUST NOT retire
+    the request: the tick retires it once the products of its compression are
+    committed. MUST NOT curate material no filed request names.
+
 type Deliver func(ctx context.Context, source event.Address, targets []event.AgentID)
     Deliver hands the output of one fired reflection to the declared targets:
     the source is the observing agent's own loop address, and the targets are
     the declared recipients in declaration order.
+
+type DeliveryPolicy struct{}
+    DeliveryPolicy is the meditation domain's delivery policy: one fired
+    reflection's own input in, whether its output may leave through the delivery
+    port out. A stamp the policy does not name is withheld.
+
+func (DeliveryPolicy) Deliverable(input event.Event) bool
+    Deliverable reports whether the output behind one fired reflection input may
+    leave through the delivery port.
 
 type Digest interface {
 	// Render returns the bounded self-state summary of the observed face since
@@ -427,7 +441,8 @@ func (d *Driver) Stop()
 func (d *Driver) Tick(ctx context.Context) TickOutcome
     Tick runs one scheduled reflection and, when it fired, hands what the
     reflection turn produced to the delivery port. A tick that decided not to
-    fire delivers nothing.
+    fire delivers nothing, and a fired input the delivery policy does not read
+    as host-visible is withheld.
 
 type DriverPlan struct {
 	ReflectionConfig
@@ -609,15 +624,20 @@ type MeditationOption func(*Meditation)
     time.
 
 func WithCompressPhase(phase CompressPhase) MeditationOption
-    WithCompressPhase wires the plugin face the consumer tick dispatches every
-    compress request it reads to. A tick wired without one curates the material
-    its requests name and retires them as it stands: no compression face stands
-    between the judgment and the pass.
+    WithCompressPhase wires the consumption-phase face the consumer tick
+    dispatches every compress request it reads to, under the compress
+    vocabulary.
 
 func WithCompressRequests(requests *memory.CompressRequests) MeditationOption
     WithCompressRequests wires the compress request log the consumer tick reads:
     the requests its producers filed, and the retirement a tick performs once
     the products of one compression are committed.
+
+func WithConsumerPhase(phase ConsumerPhase) MeditationOption
+    WithConsumerPhase wires the consumption-phase face the consumer tick
+    dispatches every compress request it reads to. A tick wired without one
+    curates the material its requests name and retires them as it stands:
+    no consumption face stands between the judgment and the pass.
 
 func WithMeditationCards(cards MeditationCards) MeditationOption
     WithMeditationCards wires the card sequence source the consumer tick
@@ -738,6 +758,14 @@ func AssessValue(card MeditationCard, now time.Time) MeditationValue
     pass time. The same inputs always return the same score, so the pass that
     runs twice reaches the same fates.
 
+type NoveltyPolicy struct{}
+    NoveltyPolicy is the meditation domain's freshness policy: one observed fact
+    in, whether it is new material for the reflection out. The criteria live in
+    this domain, so a stamp the policy does not name is never new material.
+
+func (NoveltyPolicy) Novel(fact event.Event) bool
+    Novel reports whether one observed fact opens the freshness gate.
+
 type ObservationScan struct {
 	// Watermark is the execution watermark the window opened after.
 	Watermark time.Time
@@ -798,11 +826,11 @@ type PartitionActivity struct {
 	// References counts this partition's entries on the reference page, which
 	// the read face answers without any hydration.
 	References int
-	// External counts hydrated facts whose lineage is not self-managed: the
-	// freshness evidence.
+	// External counts hydrated facts the freshness policy reads as new
+	// material: the freshness evidence.
 	External int
-	// SelfManaged counts hydrated facts the lineage derivation calls self-managed,
-	// unknown attribution included.
+	// SelfManaged counts hydrated facts the freshness policy reads as
+	// self-managed, unknown attribution included.
 	SelfManaged int
 }
     PartitionActivity is one observed partition's tally in a pass: how much
@@ -871,7 +899,7 @@ func (r *Reflection) DeferredCount() int
 
 func (r *Reflection) FreshSince(ctx context.Context, since time.Time) (bool, error)
     FreshSince reports whether the observed face holds a fact recorded after
-    since whose lineage is not managed by the observing agent itself.
+    since that the freshness policy reads as new material.
 
     A face that cannot be read is reported as an error and never as "nothing
     fresh": the fact chain is the judgment's only data face.
@@ -1084,16 +1112,16 @@ func (d *ScanDigest) Render(ctx context.Context, since Watermark) (DigestSummary
     at another watermark than the one since names.
 
 type ScanVerdict struct {
-	// Novelty reports whether the face holds a fact newer than the watermark whose
-	// lineage is not self-managed.
+	// Novelty reports whether the face holds a fact newer than the watermark that
+	// the freshness policy reads as new material.
 	Novelty bool
-	// Recent is the newest fact whose lineage is not self-managed, when the pass
-	// found one.
+	// Recent is the newest fact the freshness policy reads as new material, when
+	// the pass found one.
 	Recent *ScannedFact
 }
-    ScanVerdict is what the freshness judgment read off one pass: whether
-    the face holds a fact newer than the watermark that is not self-managed,
-    and that fact.
+    ScanVerdict is what the freshness judgment read off one pass: whether the
+    face holds a fact newer than the watermark that the freshness policy reads
+    as new material, and that fact.
 
 type ScannedFact struct {
 	// Identity is the fact and the partition it was filed under.
@@ -1132,7 +1160,7 @@ const (
 	// could not be established.
 	TickClosed TickDisposition = "closed"
 	// TickNoNovelty reports a readable face holding nothing newer than the
-	// watermark with non-self-managed lineage.
+	// watermark that the freshness policy reads as new material.
 	TickNoNovelty TickDisposition = "no-novelty"
 	// TickRhythm reports that the rhythm floor has not elapsed since the last
 	// consumed reflection.
@@ -1167,7 +1195,7 @@ type Watermark struct {
     reflection covered stay no older than the watermark instead of being burned
     out of the window, and a start with no watermark passes once and then locks
     itself. The watermark is advanced by consumption only, and the freshness
-    judgment excludes the agent's own managed lineage, so a notification the
+    policy excludes the agent's own reflection traffic, so a notification the
     agent sends about its own work never makes the agent reflect on itself
     again.
 

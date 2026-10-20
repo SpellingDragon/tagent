@@ -1,0 +1,591 @@
+package plugin
+
+import (
+	"context"
+	"reflect"
+	"strings"
+	"testing"
+
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/view"
+)
+
+// flowInstance is one phase instance carrying the name and the port it declares.
+type flowInstance struct {
+	name string
+	port Port
+}
+
+// Name reports the stable name of the instance.
+func (i flowInstance) Name() string { return i.name }
+
+// Port reports the port the instance declares.
+func (i flowInstance) Port() Port { return i.port }
+
+// flowTransform is one call->call instance answering a corrected call.
+type flowTransform struct {
+	flowInstance
+	run func(*trpcmodel.ToolCall) error
+}
+
+// TransformCall runs the correction the instance was built with.
+func (i flowTransform) TransformCall(_ context.Context, call *trpcmodel.ToolCall) error {
+	return i.run(call)
+}
+
+// flowRisk is one call->ruling instance answering a fixed grade.
+type flowRisk struct {
+	flowInstance
+	grade RiskLevel
+}
+
+// AssessRisk answers the grade the instance was built with.
+func (i flowRisk) AssessRisk(context.Context, *trpcmodel.ToolCall) RiskLevel { return i.grade }
+
+// flowRiskBoth is one call->ruling instance carrying both faces of its port.
+type flowRiskBoth struct {
+	flowInstance
+	grade RiskLevel
+}
+
+// AssessRisk answers the grade the instance was built with.
+func (i flowRiskBoth) AssessRisk(context.Context, *trpcmodel.ToolCall) RiskLevel { return i.grade }
+
+// Judge answers the ruling over the grade the instance rendered.
+func (i flowRiskBoth) Judge(CallPass) (Decision, error) {
+	return Decision{Disposition: DispositionAllow, Risk: i.grade}, nil
+}
+
+// flowObserver is one fact->observation instance recording each fact it reads.
+type flowObserver struct {
+	flowInstance
+	order *[]string
+	err   error
+}
+
+// ObserveCommit records the instance and answers the configured failure.
+func (i flowObserver) ObserveCommit(_ context.Context, _ event.EventID) error {
+	*i.order = append(*i.order, "observe:"+i.name)
+	return i.err
+}
+
+// flowPresenter is one fact->view instance recording each fact it reads.
+type flowPresenter struct {
+	flowInstance
+	order   *[]string
+	text    string
+	dropped bool
+}
+
+// Present records the instance and answers the configured view.
+func (i flowPresenter) Present(_ context.Context, _ event.EventID) (string, bool) {
+	*i.order = append(*i.order, "present:"+i.name)
+	return i.text, i.dropped
+}
+
+// flowTrigger is one fact->compression instance recording each request it starts.
+type flowTrigger struct {
+	flowInstance
+	order *[]string
+	err   error
+}
+
+// TriggerCompress records the instance and answers the configured refusal.
+func (i flowTrigger) TriggerCompress(_ context.Context, _ event.CompressRequest) error {
+	*i.order = append(*i.order, "trigger:"+i.name)
+	return i.err
+}
+
+// flowInject is one request->environment instance recording each assembly it serves.
+type flowInject struct {
+	flowInstance
+	order  *[]string
+	blocks []string
+	err    error
+}
+
+// InjectEnvironment records the instance and answers the configured blocks.
+func (i flowInject) InjectEnvironment(_ context.Context, _ EnvironmentRequest) ([]string, error) {
+	*i.order = append(*i.order, "inject:"+i.name)
+	return i.blocks, i.err
+}
+
+// faceShape spells the registered names of every face set in one assembled flow.
+type faceShape struct {
+	Transforms []string
+	Risks      []string
+	Governors  []string
+	Injects    []string
+	Observers  []string
+	Presenters []string
+	Triggers   []string
+}
+
+// servedNames spells the registered names of one face set in declared order.
+func servedNames[T any](faces []served[T]) []string {
+	if len(faces) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(faces))
+	for _, face := range faces {
+		names = append(names, face.name)
+	}
+	return names
+}
+
+// shapeOf spells the face sets one assembled flow carries.
+func shapeOf(p Pipeline) faceShape {
+	return faceShape{
+		Transforms: servedNames(p.transforms),
+		Risks:      servedNames(p.risks),
+		Governors:  servedNames(p.governors),
+		Injects:    servedNames(p.injects),
+		Observers:  servedNames(p.observers),
+		Presenters: servedNames(p.presenters),
+		Triggers:   servedNames(p.triggers),
+	}
+}
+
+// TestRouteOfClosedTable pins the closed port table the flow routes by.
+// - each of the six declared ports reads as its producing or consuming phase
+// - an undeclared material, an undeclared product and an undeclared port pair are each refused by name
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestRouteOfClosedTable(t *testing.T) {
+	declared := []struct {
+		port Port
+		want Phase
+	}{
+		{Port{Reads: MaterialCall, Produces: ProductCall}, PhaseProduce},
+		{Port{Reads: MaterialCall, Produces: ProductRuling}, PhaseProduce},
+		{Port{Reads: MaterialRequest, Produces: ProductEnvironment}, PhaseProduce},
+		{Port{Reads: MaterialFact, Produces: ProductObservation}, PhaseConsume},
+		{Port{Reads: MaterialFact, Produces: ProductView}, PhaseConsume},
+		{Port{Reads: MaterialFact, Produces: ProductCompression}, PhaseConsume},
+	}
+	for _, row := range declared {
+		t.Run(row.port.String(), func(t *testing.T) {
+			phase, err := RouteOf(row.port)
+			if err != nil {
+				t.Fatalf("route %s: %v", row.port, err)
+			}
+			if phase != row.want {
+				t.Fatalf("route %s = %q, want %q", row.port, phaseName(phase), phaseName(row.want))
+			}
+		})
+	}
+
+	t.Run("an undeclared material is refused by name", func(t *testing.T) {
+		phase, err := RouteOf(Port{Reads: Material("ticket"), Produces: ProductCall})
+		if err == nil || !strings.Contains(err.Error(), `"ticket" is not a declared material`) {
+			t.Fatalf("route an undeclared material = (%q, %v), want a named refusal", phaseName(phase), err)
+		}
+		if phase != phaseUnstated {
+			t.Fatalf("refused material reads as %q, want no phase of the flow", phaseName(phase))
+		}
+	})
+
+	t.Run("an undeclared product is refused by name", func(t *testing.T) {
+		phase, err := RouteOf(Port{Reads: MaterialCall, Produces: Product("summary")})
+		if err == nil || !strings.Contains(err.Error(), `"summary" is not a declared product`) {
+			t.Fatalf("route an undeclared product = (%q, %v), want a named refusal", phaseName(phase), err)
+		}
+		if phase != phaseUnstated {
+			t.Fatalf("refused product reads as %q, want no phase of the flow", phaseName(phase))
+		}
+	})
+
+	t.Run("a pair outside the closed table is refused by name", func(t *testing.T) {
+		for _, port := range []Port{
+			{Reads: MaterialRequest, Produces: ProductCall},
+			{Reads: MaterialFact, Produces: ProductCall},
+			{Reads: MaterialCall, Produces: ProductObservation},
+			{Reads: MaterialRequest, Produces: ProductView},
+		} {
+			phase, err := RouteOf(port)
+			if err == nil || !strings.Contains(err.Error(), port.String()+" is not one of the declared ports") {
+				t.Fatalf("route %s = (%q, %v), want a named refusal", port, phaseName(phase), err)
+			}
+			if phase != phaseUnstated {
+				t.Fatalf("refused port %s reads as %q, want no phase of the flow", port, phaseName(phase))
+			}
+		}
+	})
+}
+
+// TestFlowDispatchesByMaterial pins the dispatch of every pass by the material it reads.
+// - the call material runs the call->call and call->ruling faces, never a fact or request face
+// - the fact material runs the observation faces before the view and compression faces, in declared order inside one port
+// - the request material runs only the request->environment face
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestFlowDispatchesByMaterial(t *testing.T) {
+	ctx := context.Background()
+	request := invariantRequest()
+	var order []string
+
+	presenter := flowPresenter{
+		flowInstance: flowInstance{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}},
+		order:        &order,
+		text:         "the view",
+	}
+	observer := flowObserver{
+		flowInstance: flowInstance{name: "observer", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+		order:        &order,
+	}
+	transform := flowTransform{
+		flowInstance: flowInstance{name: "transformer", port: Port{Reads: MaterialCall, Produces: ProductCall}},
+		run: func(call *trpcmodel.ToolCall) error {
+			order = append(order, "call->call")
+			call.Function.Name = "write"
+			return nil
+		},
+	}
+	risk := flowRisk{
+		flowInstance: flowInstance{name: "risk-assessor", port: Port{Reads: MaterialCall, Produces: ProductRuling}},
+		grade:        RiskHigh,
+	}
+	trigger := flowTrigger{
+		flowInstance: flowInstance{name: "trigger", port: Port{Reads: MaterialFact, Produces: ProductCompression}},
+		order:        &order,
+	}
+	inject := flowInject{
+		flowInstance: flowInstance{name: "injector", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}},
+		order:        &order,
+		blocks:       []string{"env:one", "", "env:two"},
+	}
+
+	pipeline, err := NewFlow([]Instance{presenter, inject, risk, trigger, transform, observer})
+	if err != nil {
+		t.Fatalf("assemble one instance per port: %v", err)
+	}
+	want := faceShape{
+		Transforms: []string{"transformer"},
+		Risks:      []string{"risk-assessor"},
+		Injects:    []string{"injector"},
+		Observers:  []string{"observer"},
+		Presenters: []string{"presenter"},
+		Triggers:   []string{"trigger"},
+	}
+	if got := shapeOf(pipeline); !reflect.DeepEqual(got, want) {
+		t.Fatalf("assembled faces = %+v, want every instance in its own port's set %+v", got, want)
+	}
+
+	pass, err := pipeline.Before(ctx, invariantCall("call-1", "read", `{}`))
+	if err != nil {
+		t.Fatalf("run the call material pass: %v", err)
+	}
+	if pass.Final.Function.Name != "write" || pass.Risk != RiskHigh {
+		t.Fatalf("call pass = (%q, %q), want the transform and the grade of the call material", pass.Final.Function.Name, pass.Risk)
+	}
+	if !reflect.DeepEqual(order, []string{"call->call"}) {
+		t.Fatalf("faces run for the call material = %v, want only the call->call face", order)
+	}
+
+	order = nil
+	presentation := pipeline.After(ctx, "fact-1")
+	if !reflect.DeepEqual(order, []string{"observe:observer", "present:presenter"}) {
+		t.Fatalf("faces run for the fact material = %v, want the observation before the view", order)
+	}
+	if len(presentation.Views) != 1 || presentation.Views[0].Plugin != "presenter" || presentation.Views[0].Text != "the view" {
+		t.Fatalf("presentation = %+v, want the one view of the fact->view face", presentation)
+	}
+	if len(presentation.Gaps) != 0 {
+		t.Fatalf("presentation gaps = %v, want none", presentation.Gaps)
+	}
+
+	order = nil
+	if err := pipeline.TriggerCompress(ctx, request); err != nil {
+		t.Fatalf("run the compression material pass: %v", err)
+	}
+	if !reflect.DeepEqual(order, []string{"trigger:trigger"}) {
+		t.Fatalf("faces run for the compression material = %v, want only the fact->compression face", order)
+	}
+
+	order = nil
+	blocks, err := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-1"})
+	if err != nil {
+		t.Fatalf("run the request material pass: %v", err)
+	}
+	if !reflect.DeepEqual(order, []string{"inject:injector"}) {
+		t.Fatalf("faces run for the request material = %v, want only the request->environment face", order)
+	}
+	if !reflect.DeepEqual(blocks, []string{"env:one", "env:two"}) {
+		t.Fatalf("environment blocks = %v, want every non-empty block in declared order", blocks)
+	}
+}
+
+// flowOutcome is the whole answer of one scenario driven through one pipeline.
+type flowOutcome struct {
+	Pass        CallPass
+	Views       []view.RenderedView
+	Gaps        []view.ObservationGap
+	Ruling      Decision
+	CompressErr error
+	Blocks      []string
+	InjectErr   error
+}
+
+// drive runs the same scenario through one assembled flow: the call material, the
+// fact material, the compression material and the request material.
+func drive(t *testing.T, pipeline Pipeline) flowOutcome {
+	t.Helper()
+	ctx := context.Background()
+	request := invariantRequest()
+	pass, err := pipeline.Before(ctx, invariantCall("call-1", "read", `{}`))
+	if err != nil {
+		t.Fatalf("run the call material pass: %v", err)
+	}
+	presentation := pipeline.After(ctx, "fact-1")
+	ruling, err := pipeline.governors[0].impl.Judge(pass)
+	if err != nil {
+		t.Fatalf("render the ruling over the call pass: %v", err)
+	}
+	compressErr := pipeline.TriggerCompress(ctx, request)
+	blocks, injectErr := pipeline.InjectEnvironment(ctx, EnvironmentRequest{Agent: "agent-1"})
+	return flowOutcome{
+		Pass:        pass,
+		Views:       presentation.Views,
+		Gaps:        presentation.Gaps,
+		Ruling:      ruling,
+		CompressErr: compressErr,
+		Blocks:      blocks,
+		InjectErr:   injectErr,
+	}
+}
+
+// TestFlowMirrorsRegistrationUnits pins the material flow equivalence of the six capabilities.
+// - the same six capabilities registered as instances answer the same products as registered as plugins
+// - every pass reads the same material and answers the same views, ruling, blocks and refusal
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestFlowMirrorsRegistrationUnits(t *testing.T) {
+	var unitOrder, flowOrder []string
+	transform := func(call *trpcmodel.ToolCall) error {
+		call.Function.Name = "write"
+		call.Function.Arguments = []byte(`{"path":"a"}`)
+		return nil
+	}
+
+	units, err := NewPipeline([]Plugin{
+		&invariantTransform{invariantPlugin: invariantPlugin{name: "transform", phase: PhaseCallTransform}, run: transform},
+		invariantRiskBoth{invariantPlugin: invariantPlugin{name: "risk", phase: PhaseRiskPolicy}, grade: RiskHigh},
+		invariantObserver{invariantPlugin: invariantPlugin{name: "observe", phase: PhasePostCommitObserve}, order: &unitOrder},
+		invariantPresenter{invariantPlugin: invariantPlugin{name: "present", phase: PhaseFinalPresentation}, order: &unitOrder, text: "the view"},
+		invariantTrigger{invariantPlugin: invariantPlugin{name: "trigger", phase: PhaseCompressTrigger}, order: &unitOrder},
+		invariantInject{invariantPlugin: invariantPlugin{name: "inject", phase: PhaseEnvironmentInject}, order: &unitOrder, blocks: []string{"env:one"}},
+	})
+	if err != nil {
+		t.Fatalf("assemble the registration units: %v", err)
+	}
+	flow, err := NewFlow([]Instance{
+		flowTransform{flowInstance: flowInstance{name: "transform", port: Port{Reads: MaterialCall, Produces: ProductCall}}, run: transform},
+		flowRiskBoth{flowInstance: flowInstance{name: "risk", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskHigh},
+		flowObserver{flowInstance: flowInstance{name: "observe", port: Port{Reads: MaterialFact, Produces: ProductObservation}}, order: &flowOrder},
+		flowPresenter{flowInstance: flowInstance{name: "present", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &flowOrder, text: "the view"},
+		flowTrigger{flowInstance: flowInstance{name: "trigger", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &flowOrder},
+		flowInject{flowInstance: flowInstance{name: "inject", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, order: &flowOrder, blocks: []string{"env:one"}},
+	})
+	if err != nil {
+		t.Fatalf("assemble the instances: %v", err)
+	}
+
+	if got, want := shapeOf(flow), shapeOf(units); !reflect.DeepEqual(got, want) {
+		t.Fatalf("instance faces = %+v, want the registration faces %+v", got, want)
+	}
+
+	unitOutcome := drive(t, units)
+	flowOutcome := drive(t, flow)
+	if !reflect.DeepEqual(flowOutcome, unitOutcome) {
+		t.Fatalf("instance outcome = %+v, want the registration outcome %+v", flowOutcome, unitOutcome)
+	}
+	if !reflect.DeepEqual(flowOrder, unitOrder) {
+		t.Fatalf("instance dispatch order = %v, want the registration order %v", flowOrder, unitOrder)
+	}
+	if len(flowOrder) != 4 {
+		t.Fatalf("dispatched faces = %v, want the four recording faces run once each", flowOrder)
+	}
+	if flowOutcome.Pass.Final.Function.Name != "write" || flowOutcome.Pass.Risk != RiskHigh {
+		t.Fatalf("call pass = (%q, %q), want the corrected call and the strongest grade", flowOutcome.Pass.Final.Function.Name, flowOutcome.Pass.Risk)
+	}
+	if len(flowOutcome.Views) != 1 || flowOutcome.Views[0].Plugin != "present" {
+		t.Fatalf("views = %+v, want the one view of the fact->view face", flowOutcome.Views)
+	}
+	if flowOutcome.Ruling.Risk != RiskHigh {
+		t.Fatalf("ruling risk = %q, want the grade the call pass carried", flowOutcome.Ruling.Risk)
+	}
+	if !reflect.DeepEqual(flowOutcome.Blocks, []string{"env:one"}) {
+		t.Fatalf("environment blocks = %v, want the blocks of the request->environment face", flowOutcome.Blocks)
+	}
+}
+
+// TestRouteWordsReadAsTheirPorts pins the one-to-one reading of the six route words as ports.
+// - each route word assembles the same face set as the instance declaring the port it names
+// - the risk route word carries both faces of its port, and a single-face risk element carries one
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestRouteWordsReadAsTheirPorts(t *testing.T) {
+	cases := []struct {
+		name   string
+		unit   Plugin
+		flow   Instance
+		expect faceShape
+	}{
+		{
+			name:   "call-transform",
+			unit:   &invariantTransform{invariantPlugin: invariantPlugin{name: "x", phase: PhaseCallTransform}},
+			flow:   flowTransform{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialCall, Produces: ProductCall}}, run: func(*trpcmodel.ToolCall) error { return nil }},
+			expect: faceShape{Transforms: []string{"x"}},
+		},
+		{
+			name:   "risk-policy",
+			unit:   invariantRisk{invariantPlugin: invariantPlugin{name: "x", phase: PhaseRiskPolicy}, grade: RiskLow},
+			flow:   flowRisk{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskLow},
+			expect: faceShape{Risks: []string{"x"}},
+		},
+		{
+			name:   "risk-policy carries both faces",
+			unit:   invariantRiskBoth{invariantPlugin: invariantPlugin{name: "x", phase: PhaseRiskPolicy}, grade: RiskLow},
+			flow:   flowRiskBoth{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskLow},
+			expect: faceShape{Risks: []string{"x"}, Governors: []string{"x"}},
+		},
+		{
+			name:   "post-commit-observe",
+			unit:   invariantObserver{invariantPlugin: invariantPlugin{name: "x", phase: PhasePostCommitObserve}},
+			flow:   flowObserver{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialFact, Produces: ProductObservation}}},
+			expect: faceShape{Observers: []string{"x"}},
+		},
+		{
+			name:   "final-presentation",
+			unit:   invariantPresenter{invariantPlugin: invariantPlugin{name: "x", phase: PhaseFinalPresentation}},
+			flow:   flowPresenter{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialFact, Produces: ProductView}}},
+			expect: faceShape{Presenters: []string{"x"}},
+		},
+		{
+			name:   "compress-trigger",
+			unit:   invariantTrigger{invariantPlugin: invariantPlugin{name: "x", phase: PhaseCompressTrigger}},
+			flow:   flowTrigger{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialFact, Produces: ProductCompression}}},
+			expect: faceShape{Triggers: []string{"x"}},
+		},
+		{
+			name:   "environment-inject",
+			unit:   invariantInject{invariantPlugin: invariantPlugin{name: "x", phase: PhaseEnvironmentInject}},
+			flow:   flowInject{flowInstance: flowInstance{name: "x", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}},
+			expect: faceShape{Injects: []string{"x"}},
+		},
+	}
+	for _, row := range cases {
+		t.Run(row.name, func(t *testing.T) {
+			units, err := NewPipeline([]Plugin{row.unit})
+			if err != nil {
+				t.Fatalf("assemble the route word: %v", err)
+			}
+			flow, err := NewFlow([]Instance{row.flow})
+			if err != nil {
+				t.Fatalf("assemble the instance: %v", err)
+			}
+			if got := shapeOf(units); !reflect.DeepEqual(got, row.expect) {
+				t.Fatalf("route word faces = %+v, want %+v", got, row.expect)
+			}
+			if got := shapeOf(flow); !reflect.DeepEqual(got, shapeOf(units)) {
+				t.Fatalf("instance faces = %+v, want the route word faces %+v", got, shapeOf(units))
+			}
+		})
+	}
+}
+
+// TestNewFlowRefusals pins the named refusals of the assembled flow.
+// - a nil instance refuses the flow and registers nothing
+// - an undeclared material, product or port pair is refused beside the instance that declared it
+// - a declared port without its narrow face is refused by name
+// - a name declared twice is refused, so a product keeps the one element that wrote it
+// 契约: docs/wiki/plugin/plugin-architecture.md#overview
+func TestNewFlowRefusals(t *testing.T) {
+	t.Run("a nil instance refuses the flow", func(t *testing.T) {
+		var unset Instance
+		pipeline, err := NewFlow([]Instance{
+			flowTransform{flowInstance: flowInstance{name: "transform", port: Port{Reads: MaterialCall, Produces: ProductCall}}, run: func(*trpcmodel.ToolCall) error { return nil }},
+			unset,
+		})
+		if err == nil || !strings.Contains(err.Error(), "nil instance") {
+			t.Fatalf("assemble a nil instance = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if len(pipeline.transforms) != 0 {
+			t.Fatalf("refused flow faces = %+v, want no partially assembled faces", pipeline)
+		}
+	})
+
+	t.Run("an undeclared material is refused beside its instance", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{
+			flowInstance{name: "foreign", port: Port{Reads: Material("ticket"), Produces: ProductCall}},
+		})
+		if err == nil || !strings.Contains(err.Error(), `"ticket" is not a declared material`) {
+			t.Fatalf("assemble an undeclared material = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "foreign") {
+			t.Fatalf("refusal = %q, want the declaring instance named", err)
+		}
+	})
+
+	t.Run("an undeclared product is refused beside its instance", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{
+			flowInstance{name: "foreign", port: Port{Reads: MaterialCall, Produces: Product("summary")}},
+		})
+		if err == nil || !strings.Contains(err.Error(), `"summary" is not a declared product`) {
+			t.Fatalf("assemble an undeclared product = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "foreign") {
+			t.Fatalf("refusal = %q, want the declaring instance named", err)
+		}
+	})
+
+	t.Run("a port pair outside the closed table is refused beside its instance", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{
+			flowInstance{name: "crossed", port: Port{Reads: MaterialRequest, Produces: ProductCall}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "request->call is not one of the declared ports") {
+			t.Fatalf("assemble a crossed port = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "crossed") {
+			t.Fatalf("refusal = %q, want the declaring instance named", err)
+		}
+	})
+
+	t.Run("a declared port without its narrow face is refused by name", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{
+			flowInstance{name: "faceless", port: Port{Reads: MaterialCall, Produces: ProductCall}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
+			t.Fatalf("assemble a faceless instance = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "call->call") {
+			t.Fatalf("refusal = %q, want the declared port named", err)
+		}
+	})
+
+	t.Run("a face of another port is refused by name", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{
+			flowPresenter{flowInstance: flowInstance{name: "misplaced", port: Port{Reads: MaterialFact, Produces: ProductObservation}}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
+			t.Fatalf("assemble a misplaced face = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "fact->observation") {
+			t.Fatalf("refusal = %q, want the declared port named", err)
+		}
+	})
+
+	t.Run("a name declared twice is refused and keeps provenance", func(t *testing.T) {
+		pipeline, err := NewFlow([]Instance{
+			flowTransform{flowInstance: flowInstance{name: "same", port: Port{Reads: MaterialCall, Produces: ProductCall}}, run: func(*trpcmodel.ToolCall) error { return nil }},
+			flowObserver{flowInstance: flowInstance{name: "same", port: Port{Reads: MaterialFact, Produces: ProductObservation}}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "is declared twice") {
+			t.Fatalf("assemble a duplicate name = (%v, %v), want a named refusal", pipeline, err)
+		}
+		if !strings.Contains(err.Error(), "trace back to the one element") {
+			t.Fatalf("refusal = %q, want provenance stated", err)
+		}
+		if len(pipeline.transforms) != 0 || len(pipeline.observers) != 0 {
+			t.Fatalf("refused flow faces = %+v, want no partially assembled faces", pipeline)
+		}
+	})
+}

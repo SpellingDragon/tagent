@@ -1,31 +1,22 @@
 package plugin // import "github.com/SpellingDragon/tagent/api/plugin"
 
-Package plugin declares the ordered per-phase pipeline through which tagent
-injects its differentiated capabilities into the framework event flow:
-the pre-execution call transform and risk ruling, the post-commit observation
-and final presentation, the request-assembly environment injection and the
-compress-request consumption.
+Package plugin declares the material flow through which tagent injects its
+differentiated capabilities into the framework event flow: the producing phase
+and the consuming phase, each dispatched by the material a face reads, and the
+six ports those phases serve.
 
-A plugin is a registration unit: it reports the phase it serves and implements
-that phase's one narrow interface. The pre-execution faces form one Before
-pass a request runs exactly once; the post-commit faces form the After pass,
-which reads only facts whose canonical commit already happened and answers
-with a Presentation. The two further phases answer their own pass: one request
-assembly asks for its environment blocks, and one compress request is handed to
-the faces that start the chain answering it. The faces answer two obligations,
-and their difference is traceability: a face that maps a fact into a projection
-— the final presentation, the environment blocks of a request assembly — answers
-a product that stays traceable to what it was rendered from, and the map
-answers any number of products, the empty map included, since the environment
-blocks are created for an assembly that consumes no fact at all; a face that
-answers a consumption instead — the call transform before the call is admitted,
-the compress trigger starting the mapping chain a filed request drives — owes
-its products no traceability, because what it produces becomes a new fact,
-a new fact is its own source, and one consumption may produce several of them.
+A plugin is a registration unit: it reports the stable name of one flow instance
+and the route word of the port the instance serves — the material it reads
+and the product it answers — and the instance implements that port's narrow
+interface. The flow derives the phase from the port and dispatches the instance
+by the material that port reads. A built-in consumer — the drive that runs
+one decision, the tick that runs one reflection, the assembler that builds one
+request — is an instance of the same flow: the difference between a built-in
+instance and a mounted plugin is who mounts it, never how it is dispatched.
 
-  - the extension-face vocabulary: the phases, the narrow interfaces each phase
-    owns, the pipeline that dispatches them, the post-commit observation wiring
-    and the presentation pass;
+  - the extension-face vocabulary: the phases, the ports, the narrow
+    interfaces each port owns, the pipeline that dispatches them by material,
+    the post-commit observation wiring and the presentation pass;
   - the extension policies at the governance gate: the pre-execution ruling,
     the risk rules, the approval channel, the denial ledger, the goal registry
     and the budget window, each stated in its own file and reaching the pipeline
@@ -119,19 +110,19 @@ type CallPass struct {
     knows what started the call, so a ruling has no hidden input of its own.
 
 type CompressTrigger interface {
-	// TriggerCompress starts the compression one filed compress request drives. A nil
-	// error carries the request forward into the compression that answers it; a
-	// non-nil error refuses it by name, so the material is not compressed and the
-	// request stays pending.
+	// TriggerCompress starts the compression one filed compress request drives. A
+	// nil error carries the request forward into the compression that answers it;
+	// a non-nil error refuses it by name, so the material is not compressed and
+	// the request stays pending.
 	TriggerCompress(ctx context.Context, request event.CompressRequest) error
 }
-    CompressTrigger is the compress-trigger face: TriggerCompress starts the
-    traceable mapping chain one filed compress request drives — the curation
-    that consumes the request and answers the compression it owes — and hands
-    that chain the request as filed. The request is the judgment that material
-    is over its bound; this face is the chain's starter, never the mapping
-    itself, so it answers no product of its own to trace: the products the
-    curation mints are the traceable ones.
+    CompressTrigger is the fact->compression port's narrow face: TriggerCompress
+    starts the traceable mapping chain one filed compress request drives —
+    the curation that consumes the request and answers the compression it
+    owes — and hands that chain the request as filed. The request is the
+    judgment that material is over its bound; this face is the chain's starter,
+    never the mapping itself, so it answers no product of its own to trace:
+    the products the curation mints are the traceable ones.
 
     The redline list (3 rules): MUST answer the request it was handed:
     its identity and subject stay as filed. MUST NOT retire the request:
@@ -212,17 +203,18 @@ const (
 	DispositionHold Disposition = "hold"
 )
 type EnvironmentInject interface {
-	// InjectEnvironment renders the environment blocks of one request assembly. A nil
-	// error carries the rendered blocks as separate products; a non-nil error refuses
-	// the assembly by name, so no request is built over a block that failed to render.
+	// InjectEnvironment renders the environment blocks of one request assembly. A
+	// nil error carries the rendered blocks as separate products; a non-nil error
+	// refuses the assembly by name, so no request is built over a block that
+	// failed to render.
 	InjectEnvironment(ctx context.Context, request EnvironmentRequest) ([]string, error)
 }
-    EnvironmentInject is the request-assembly face: InjectEnvironment renders
-    the dynamic environment material one request carries, and the assembly
-    places those blocks where its own layout puts them. Each block is one
-    product of this face and traces back to the request it was rendered for:
-    the face answers one block, several, or none, and it never merges two
-    products into one text.
+    EnvironmentInject is the request->environment port's narrow face:
+    InjectEnvironment renders the dynamic environment material one request
+    carries, and the assembly places those blocks where its own layout puts
+    them. Each block is one product of this face and traces back to the request
+    it was rendered for: the face answers one block, several, or none, and it
+    never merges two products into one text.
 
     The redline list (3 rules): MUST render the material the request assembly
     holds at this boundary, and never a snapshot taken earlier. MUST NOT write
@@ -259,7 +251,7 @@ type FactLookup interface {
 type FinalPresenter interface {
 	Present(ctx context.Context, id event.EventID) (string, bool)
 }
-    FinalPresenter is the final-presentation face: Present renders the
+    FinalPresenter is the fact->view port's narrow face: Present renders the
     presentation of one fact for its channel and reports the presentation text
     with whether it was dropped. One fact may be projected through several
     presenters: each answers its own view, the views stand in the declared
@@ -278,11 +270,31 @@ type Governor interface {
 	// the execution and for the record. A hold is a wait, not a denial.
 	Judge(pass CallPass) (Decision, error)
 }
-    Governor renders the single pre-execution ruling for one tool call.
+    Governor is the call->ruling port's ruling face, and it renders the single
+    pre-execution ruling for one tool call over the grade a RiskAssessor
+    rendered.
 
     The redline list (3 rules): MUST render one ruling per call, over the one
     Before pass that call carries. MUST NOT execute the call, and MUST NOT
     bypass a hold it rendered. MUST NOT report a hold as a denial.
+
+type Instance interface {
+	// Name returns the stable name of this instance.
+	Name() string
+
+	// Port reports the material this instance reads and the product it answers.
+	Port() Port
+}
+    Instance is one phase instance of the material flow. The drive that runs
+    one decision, the tick that runs one reflection and the assembler that
+    builds one request are built-in instances; a plugin is an instance the
+    composition root mounts. What an instance is differs only in who mounts it:
+    the flow dispatches every instance by the material its port reads.
+
+    The redline list (3 rules): MUST declare the one port it serves and
+    implement that port's narrow interface. MUST NOT declare a port it does
+    not implement. MUST NOT serve two ports: one instance is one port, and the
+    ruling port may carry both of its faces.
 
 type Layer string
     Layer names one layer of the layered SDK observation attempted for one
@@ -298,6 +310,23 @@ const (
 	// LayerMetric is the metric layer: the counter the SDK adds for one
 	// committed fact.
 	LayerMetric Layer = "metric"
+)
+type Material string
+
+    Material names one kind of material the flow moves between its faces:
+    the call a tool is about to run, the request an assembly builds, and the
+    fact a commit wrote. A face reads exactly one material and never rewrites it
+    in place.
+
+const (
+	// MaterialCall is the call material: one tool call before its side effect.
+	MaterialCall Material = "call"
+
+	// MaterialRequest is the request material: one request assembly.
+	MaterialRequest Material = "request"
+
+	// MaterialFact is the fact material: one committed fact.
+	MaterialFact Material = "fact"
 )
 type ObservationSink interface {
 	// Observe reports one committed fact to the observation side. The fact is
@@ -369,73 +398,111 @@ type Observer interface {
     to satisfy an observer.
 
 type Phase int
-    Phase names one stage of the single ordered plugin pipeline; the constant
-    order is the pipeline order. Each phase owns one narrow interface set, and
-    the phase a plugin reports selects the set that plugin is dispatched into:
+    Phase names the role one face serves in the material flow, and the roles are
+    two:
+      - PhaseProduce: the face answers a product that grows out of the material
+        it read — a corrected call, a ruling over a call, the environment blocks
+        of a request;
+      - PhaseConsume: the face answers a consumption of the material it read
+        — an observation of a fact, a view of a fact, the compression a filed
+        request asks for.
 
-      - PhaseCallTransform → TransformCall
-      - PhaseRiskPolicy → RiskAssessor and Governor
-      - PhasePostCommitObserve → PostCommitObserver
-      - PhaseFinalPresentation → FinalPresenter
-      - PhaseCompressTrigger → CompressTrigger
-      - PhaseEnvironmentInject → EnvironmentInject
-
-    The risk phase carries two faces of one ruling: a RiskAssessor renders the
-    grade and a Governor renders the one pre-execution ruling over that grade.
-    The two stand beside each other as two faces of one phase, never as two risk
-    faces — no grade is rendered twice — and one element may implement either
-    face or both.
+    The phase is a reading of the port, never a position in time: the flow
+    dispatches a face by the material it reads, and the order inside one
+    material is the order the instances were declared in.
 
 const (
-	// PhaseCallTransform is the pre-execution call phase: the call is corrected
-	// before its side effect and before its admission ruling, and the corrected
-	// call is the one re-checked, executed and recorded.
-	PhaseCallTransform Phase = iota
+	// PhaseProduce is the producing phase: the face answers a product of the
+	// material it read.
+	PhaseProduce Phase = iota
 
-	// PhaseRiskPolicy grades the risk of a tool call before its side effect and
-	// renders the pre-execution ruling. The phase carries two faces of that one
-	// ruling: a RiskAssessor renders the grade and a Governor renders the ruling
-	// over it; the grade is read once and never recomputed by the ruling.
+	// PhaseConsume is the consuming phase: the face answers a consumption of the
+	// material it read.
+	PhaseConsume
+)
+const (
+	// PhaseCallTransform is the route word of the call->call port: the call is
+	// corrected before its side effect and before its admission ruling, and the
+	// corrected call is the one re-checked, executed and recorded.
+	PhaseCallTransform Phase = routeWordBase + iota
+
+	// PhaseRiskPolicy is the route word of the call->ruling port: the grade of
+	// one call before its side effect beside the one pre-execution ruling over
+	// it. The port carries two faces of that one ruling: a RiskAssessor renders
+	// the grade and a Governor renders the ruling over it; the grade is read
+	// once and never recomputed by the ruling.
 	PhaseRiskPolicy
 
-	// PhasePostCommitObserve observes a fact after its canonical commit, as a
-	// read-only duty.
+	// PhasePostCommitObserve is the route word of the fact->observation port: one
+	// committed fact observed after its canonical commit, as a read-only duty.
 	PhasePostCommitObserve
 
-	// PhaseFinalPresentation renders the final presentation of a fact for its
-	// channel.
+	// PhaseFinalPresentation is the route word of the fact->view port: the final
+	// presentation of one committed fact for its channel.
 	PhaseFinalPresentation
 
-	// PhaseCompressTrigger is the consumption phase of a compress request: the
+	// PhaseCompressTrigger is the route word of the fact->compression port: the
 	// filed judgment that material is over its bound is handed to the faces that
 	// answer it with the compression it owes, before the request is retired. The
-	// phase is the starter of the traceable mapping chain the request drives, never
-	// the curation itself.
+	// port is the starter of the traceable mapping chain the request drives,
+	// never the curation itself.
 	PhaseCompressTrigger
 
-	// PhaseEnvironmentInject is the request-assembly phase: the faces render the
-	// dynamic environment material one request carries at the bottom of its
-	// assembly, so what changes with the run never moves the stable prefix. Each
-	// block a face answers is one product of that request, traceable to it.
+	// PhaseEnvironmentInject is the route word of the request->environment port:
+	// the faces render the dynamic environment material one request carries at
+	// the bottom of its assembly, so what changes with the run never moves the
+	// stable prefix. Each block a face answers is one product of that request,
+	// traceable to it.
 	PhaseEnvironmentInject
 )
+    PhaseCallTransform, PhaseRiskPolicy, PhasePostCommitObserve,
+    PhaseFinalPresentation, PhaseCompressTrigger and PhaseEnvironmentInject
+    are the six route words of Plugin: each names one port of the flow, and an
+    element registering under it is dispatched exactly as an Instance declaring
+    that port is dispatched.
+
+      - PhaseCallTransform → call->call: the call transform face
+      - PhaseRiskPolicy → call->ruling: the risk face and the ruling face
+      - PhasePostCommitObserve → fact->observation: the post-commit observation
+        face
+      - PhaseFinalPresentation → fact->view: the final presentation face
+      - PhaseCompressTrigger → fact->compression: the compress-trigger face
+      - PhaseEnvironmentInject → request->environment: the request-assembly face
+
+func RouteOf(port Port) (Phase, error)
+    RouteOf reports the phase one port serves, by the closed table of the flow:
+    the producing ports grow a product out of the material they read, and the
+    consuming ports answer a consumption of it.
+
+      - call->call, call->ruling and request->environment are producing ports;
+      - fact->observation, fact->view and fact->compression are consuming ports.
+
+    A material the table does not declare, a product it does not declare,
+    and a pair no port serves are each refused by name instead of falling back
+    to a phase.
+
 type Pipeline struct {
 	// Has unexported fields.
 }
-    Pipeline is the phase-grouped face set of one ordered plugin pipeline:
-    every registered Plugin is dispatched into its own phase's narrow interface
-    set in the declared order, and one plugin serves exactly one phase.
+    Pipeline is the material flow of one borrowed generation: every registered
+    instance is dispatched into the face set of the port it declares, and every
+    pass dispatches by the one material it reads.
 
-    The pre-execution faces run as the one Before pass of a tool call; the
-    post-commit faces run as the After pass of a committed fact. The pipeline
-    is assembled once per dispatch from the borrowed generation's plugins and
-    is never reassembled mid-request. The presentation phase keeps every face
-    it was declared, because the fact-to-presentation mapping is a traceable one
-    with free cardinality: a fact answers one view, several views, or none. The
-    environment phase answers the same traceable way: a face answers one block,
-    several blocks, or none, and every block it answers is one product.
+      - the call material runs as the one Before pass of a tool call;
+      - the fact material runs as the one After pass of a committed fact,
+        and as the one TriggerCompress pass of a filed compress request;
+      - the request material runs as the one InjectEnvironment pass of a request
+        assembly.
 
-      - declaration order: every face runs in the order its plugin was declared;
+    The view port keeps every face it was declared, because the fact-to-view
+    mapping is a traceable one with free cardinality: a fact answers one view,
+    several views, or none. The environment port answers the same traceable way:
+    a face answers one block, several blocks, or none, and every block it
+    answers is one product. The flow is assembled once per dispatch from the
+    borrowed generation's instances and is never reassembled mid-request.
+
+      - declaration order: every face of one material runs in the order its
+        instance was declared;
       - provenance refusal: a name identifies the one element that wrote a
         product, so a second element declared under one name is refused by name
         instead of leaving two products untraceable;
@@ -444,22 +511,33 @@ type Pipeline struct {
         the fact it was rendered from, so every product of the chain stays
         traceable.
 
+func NewFlow(instances []Instance) (Pipeline, error)
+    NewFlow assembles the material flow out of its instances, in the declared
+    order. A nil instance, a port the closed table does not declare, an instance
+    that implements no narrow interface of its port, and a name declared
+    twice each refuse the flow by name instead of being trimmed in silence.
+    The name refusal keeps provenance: a product's name must trace back to the
+    one element that wrote it.
+
 func NewPipeline(plugins []Plugin) (Pipeline, error)
-    NewPipeline groups the registered plugins into their phase's narrow
-    interface set, in the declared order. A plugin whose phase is not one of the
-    declared phases, a nil plugin, a plugin that implements no narrow interface
-    of its own phase, and a name declared twice each refuse the pipeline by name
-    instead of being trimmed in silence.
+    NewPipeline assembles the material flow out of the registration units that
+    report a route word, in the declared order. It reads the port each route
+    word names and dispatches the element exactly as NewFlow dispatches an
+    instance declaring that port. A plugin whose phase is not one of the route
+    words, a nil plugin, a plugin that implements no narrow interface of its
+    port, and a name declared twice each refuse the flow by name instead of
+    being trimmed in silence.
 
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation
-    After runs the After pass over one fact whose canonical commit already
-    happened: every observer reads the fact first, then every presenter renders
-    it. The pass runs after the commit and never before it, so a refused call
-    and a call whose commit failed present nothing at all. An observation that
-    fails is recorded as a named gap in the returned presentation and never
-    rolls the committed fact back; a presenter that drops its text drops its own
-    view only. The pass carries no error return: a failure here is a gap or a
-    dropped view, never a reason to touch the committed fact.
+    After runs the one consuming pass over one fact whose canonical commit
+    already happened: every fact->observation face reads the fact first, then
+    every fact->view face renders it. The pass runs after the commit and never
+    before it, so a refused call and a call whose commit failed present nothing
+    at all. An observation that fails is recorded as a named gap in the returned
+    presentation and never rolls the committed fact back; a presenter that
+    drops its text drops its own view only. The pass carries no error return:
+    a failure here is a gap or a dropped view, never a reason to touch the
+    committed fact.
 
     The fact enters the presentation pass once and every presenter renders it:
     each answers its own view, the views stand in the order the presenters were
@@ -469,13 +547,13 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
     traceable to its source.
 
 func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass, error)
-    Before runs the one Before pass of one tool call: every transform face
-    corrects a private copy of the call in pipeline order, then every risk face
-    grades the transformed call, and the pass reports the final call beside the
-    strongest grade. The pass runs exactly once per call — before the call is
-    admitted and before its side effect — and is never run again when a recorded
-    fact is replayed. The call the model recorded is left byte-identical:
-    the transform works on its own copy.
+    Before runs the one producing pass over one tool call: every call->call
+    face corrects a private copy of the call in pipeline order, then every
+    call->ruling face grades the transformed call, and the pass reports the
+    final call beside the strongest grade. The pass runs exactly once per call
+    — before the call is admitted and before its side effect — and is never run
+    again when a recorded fact is replayed. The call the model recorded is left
+    byte-identical: the transform works on its own copy.
 
     A transform that answers an error refuses the whole pass at that face:
     no later face runs, no ruling is rendered, and the call is neither executed
@@ -485,22 +563,22 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
     call is the one both executed and recorded.
 
 func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequest) ([]string, error)
-    InjectEnvironment runs the injection pass of one request assembly: every
-    environment face renders its blocks in pipeline order, and the pass answers
-    every block that carried text, in the order their faces are declared.
-    One element of the answer is one product of one face: the blocks of a face
-    stay separate products, and a face answering no text contributes no block,
-    so a pipeline carrying no environment face answers none at all. Every block
-    is rendered for the one request the pass was dispatched with, so each block
-    traces back to the one stated source.
+    InjectEnvironment runs the producing pass of one request assembly:
+    every request->environment face renders its blocks in pipeline order, and
+    the pass answers every block that carried text, in the order their faces are
+    declared. One element of the answer is one product of one face: the blocks
+    of a face stay separate products, and a face answering no text contributes
+    no block, so a pipeline carrying no environment face answers none at all.
+    Every block is rendered for the one request the pass was dispatched with,
+    so each block traces back to the one stated source.
 
     A face that answers an error refuses the pass at that face by name: no later
     face runs and the assembly answers with the refusal instead of carrying a
     block it could not render.
 
 func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressRequest) error
-    TriggerCompress runs the trigger pass of one filed compress request:
-    every compress face is started with the request in pipeline order,
+    TriggerCompress runs the consuming pass of one filed compress request:
+    every fact->compression face is started with the request in pipeline order,
     so the compression a producer judged due is the one the wired faces deliver.
     The pass starts the traceable mapping chain and answers no product of its
     own: the products the curation mints downstream are what traces back to the
@@ -510,47 +588,96 @@ func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressReq
 
     A face that answers an error refuses the pass at that face by name: no later
     face runs, and the caller answers with the refusal instead of counting the
-    request as compressed. A pipeline carrying no compress face answers nil,
+    request as compressed. A pipeline carrying no compression face answers nil,
     so a consumer wired without one refuses nothing of the request it read.
 
 type Plugin interface {
 	// Name returns the stable name of this plugin.
 	Name() string
 
-	// Phase reports the single phase this plugin serves, which both orders the
-	// plugin inside the pipeline and selects the narrow interface it implements.
+	// Phase reports the route word of the one port this plugin serves.
 	Phase() Phase
 }
-    Plugin is a tagent registration unit, distinct from the framework's
-    plugin.Plugin: it reports the stable name of one pipeline element and the
-    single phase that element serves, and the element implements that phase's
-    narrow interface. The composition root reads the phase of every registered
-    Plugin and dispatches the element into that phase's narrow interface set —
-    TransformCall, RiskAssessor, Governor, PostCommitObserver, FinalPresenter,
-    CompressTrigger, EnvironmentInject — in the declared order.
+    Plugin is the registration unit a mounted element reports, distinct from
+    the framework's plugin.Plugin: the stable name of one pipeline element
+    and one of the six route words, each naming the port that element serves.
+    The flow reads the port the word names and dispatches the element exactly
+    as an Instance declaring that port is dispatched; the element implements the
+    narrow interface of its port.
 
-    The redline list (3 rules): MUST report the one phase the element serves
-    and implement that phase's narrow interface. MUST NOT report a phase
-    whose narrow interface it does not implement. MUST NOT serve two phases:
-    one registration element serves one phase and may carry the faces of that
-    phase (the risk phase carries two faces of one ruling).
+    The redline list (3 rules): MUST report the one route word of the port it
+    serves and implement that port's narrow interface. MUST NOT report a route
+    word whose narrow interface it does not implement. MUST NOT serve two ports:
+    one registration element serves one port and may carry both faces of the
+    ruling port.
+
+type Port struct {
+	// Reads is the material this instance reads.
+	Reads Material
+
+	// Produces is the product this instance answers.
+	Produces Product
+}
+    Port is the declaration of one phase instance: the material it reads and the
+    product it answers. The pair is the whole routing of the flow — the phase
+    and the narrow interface are both readings of it.
+
+    The redline list (2 rules): MUST declare exactly one read material and one
+    product; an element serving two ports is two instances. MUST implement the
+    narrow interface of the declared port.
+
+func (p Port) String() string
+    String spells one port as the material it reads beside the product it
+    answers.
 
 type PostCommitObserver interface {
 	ObserveCommit(ctx context.Context, id event.EventID) error
 }
-    PostCommitObserver is the post-commit observation face: ObserveCommit
-    observes one fact after its canonical commit, as a read-only duty.
+    PostCommitObserver is the fact->observation port's narrow face:
+    ObserveCommit observes one fact after its canonical commit, as a read-only
+    duty.
 
     The redline list (3 rules): MUST observe a fact whose canonical commit
     already happened. MUST NOT roll the committed fact back or re-run the work
     when the observation fails. MUST NOT write the fact it observes.
 
+type Product string
+    Product names what one face answers out of the material it reads:
+    the corrected call, the ruling over a call, the observation of a fact, the
+    view of a fact, the compression a filed request asks for and the environment
+    blocks of a request.
+
+const (
+	// ProductCall is the corrected call: the same identity, a corrected name and
+	// corrected arguments.
+	ProductCall Product = "call"
+
+	// ProductRuling is the ruling over one call: the grade of the call beside the
+	// one pre-execution decision.
+	ProductRuling Product = "ruling"
+
+	// ProductObservation is the observation of one fact: a read-only reading that
+	// never rewrites the fact.
+	ProductObservation Product = "observation"
+
+	// ProductView is the presentation of one fact: one view per presenter, traced
+	// to the fact it was rendered from.
+	ProductView Product = "view"
+
+	// ProductCompression is the compression one filed request asks for: the chain
+	// the request drives, never the curation itself.
+	ProductCompression Product = "compression"
+
+	// ProductEnvironment is the environment material one request assembly carries:
+	// one block per product, each block traced to the request.
+	ProductEnvironment Product = "environment"
+)
 type RiskAssessor interface {
 	AssessRisk(ctx context.Context, call *trpcmodel.ToolCall) RiskLevel
 }
-    RiskAssessor is the pre-side-effect risk face: AssessRisk grades one tool
-    call before its side effect runs, from the parameters and identity already
-    resolved for that call.
+    RiskAssessor is the call->ruling port's grade face: AssessRisk grades one
+    tool call before its side effect runs, from the parameters and identity
+    already resolved for that call.
 
     The redline list (2 rules): MUST grade the call it was handed and answer
     a declared RiskLevel. MUST NOT run a side effect or render the ruling:
@@ -597,16 +724,16 @@ type TransformCall interface {
 	// the call is neither executed nor recorded.
 	TransformCall(ctx context.Context, call *trpcmodel.ToolCall) error
 }
-    TransformCall is the tool-call-level pre-side-effect face, and it is where
-    the allowed tool-call parameter transform is carried: it runs once per
-    tool call before that call's side effect, not once at request assembly.
-    The transform happens before the tool runs, earlier than every execution
-    side effect other than admission, so it may correct or constrain the tool
-    name and parameters of the call and must not change the call's identity: its
-    CallID and trusted scope stay as resolved. A transformed call never bypasses
-    the core: the transformed call is admitted through the wrapper's admission
-    path, approval and dedup included, before it runs, the plugin never executes
-    from the transform result directly, and the transformed call is the one both
+    TransformCall is the call->call port's narrow face, and it is where the
+    allowed tool-call parameter transform is carried: it runs once per tool call
+    before that call's side effect, not once at request assembly. The transform
+    happens before the tool runs, earlier than every execution side effect other
+    than admission, so it may correct or constrain the tool name and parameters
+    of the call and must not change the call's identity: its CallID and trusted
+    scope stay as resolved. A transformed call never bypasses the core:
+    the transformed call is admitted through the wrapper's admission path,
+    approval and dedup included, before it runs, the plugin never executes from
+    the transform result directly, and the transformed call is the one both
     executed and recorded. A transform that answers an error refuses the pass:
     the call does not run, nothing of it is recorded, and the pass answers no
     CallPass.

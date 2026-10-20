@@ -366,6 +366,16 @@ func (p *Policy) Mode() Enforcement
     that chose no grade runs under warn, the default. A gate that is not on
     reports the empty grade.
 
+func (p *Policy) Name() string
+    Name returns the stable name of the governance gate in the flow: the one
+    element a rendered ruling traces back to.
+
+func (p *Policy) Port() plugin.Port
+    Port reports the material this policy reads and the product it answers:
+    one tool call before its side effect, answered with the pre-execution ruling
+    over it. The grade the ruling consumes is the risk face's product, so this
+    face declares the call->ruling port without rendering a second grade.
+
 type PolicyOption func(*Policy)
     PolicyOption configures the governance gate at construction.
 

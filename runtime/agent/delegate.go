@@ -43,6 +43,11 @@ type Delegation struct {
 	TaskID event.TaskID
 	// Target is the agent session address the delegated turn runs in.
 	Target event.Address
+	// TriggerSource is the trigger-source stamp the admission record carries.
+	// The call_subagent tool stamps event.LineageDelegation, so a delegated call
+	// is recorded as traffic the agent manages for itself; an empty stamp
+	// records no source.
+	TriggerSource string
 	// Ref is the initiating binding reference the delegated request carries: the
 	// delegated turn binds the target the application selected at the generation
 	// its initiator took, and never the generation effective at its own start.
@@ -246,12 +251,13 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 			DecisionID:   req.DecisionID,
 			CallID:       req.CallID,
 		}.DedupKey() + ":delegate",
-		InvocationID: req.InvocationID,
-		InstanceID:   d.instance,
-		Description:  fmt.Sprintf("delegate %s to %s", req.CallID, req.Target.AgentID),
-		Source:       req.Target,
-		Target:       req.Target,
-		Execution:    executionSerialization,
+		InvocationID:  req.InvocationID,
+		InstanceID:    d.instance,
+		Description:   fmt.Sprintf("delegate %s to %s", req.CallID, req.Target.AgentID),
+		Source:        req.Target,
+		Target:        req.Target,
+		TriggerSource: req.TriggerSource,
+		Execution:     executionSerialization,
 	})
 	if err != nil || !receipt.Accepted {
 		d.withdrawBooking()

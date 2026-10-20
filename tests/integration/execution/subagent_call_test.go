@@ -62,6 +62,10 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 		if !ok || !receipt.Accepted || receipt.Kind != task.AdmissionFresh || receipt.TaskID == "" {
 			t.Fatalf("call result = %+v, want one accepted fresh admission beside its task identity", got.out)
 		}
+		spec, _, err := rig.tasks.Lookup(context.Background(), receipt.TaskID)
+		if err != nil || spec.TriggerSource != event.LineageDelegation {
+			t.Fatalf("admitted task material = (%+v, %v), want the delegation lineage on the record", spec, err)
+		}
 		select {
 		case <-delegated.started:
 		case <-time.After(5 * time.Second):

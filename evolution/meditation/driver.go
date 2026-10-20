@@ -99,12 +99,18 @@ func (d *Driver) Scope() ReflectionScope {
 
 // Tick runs one scheduled reflection and, when it fired, hands what the
 // reflection turn produced to the delivery port. A tick that decided not to fire
-// delivers nothing.
+// delivers nothing, and a fired input the delivery policy does not read as
+// host-visible is withheld.
 func (d *Driver) Tick(ctx context.Context) TickOutcome {
 	outcome := d.reflection.Tick(ctx, time.Now())
 	if outcome.Decision.Disposition != TickFired {
 		observeDriver("tagent: meditation driver %s tick %s (%s)",
 			d.plan.Loop.Agent, outcome.Decision.Disposition, outcome.Decision.Reason)
+		return outcome
+	}
+	delivery := DeliveryPolicy{}
+	if outcome.Injection == nil || !delivery.Deliverable(outcome.Injection.Event) {
+		observeDriver("tagent: meditation driver %s withheld reflection: the fired input carries no host-visible lineage", d.plan.Loop.Agent)
 		return outcome
 	}
 	observeDriverFired("tagent: meditation driver %s fired reflection %s", d.plan.Loop.Agent, outcome.Injection.Key)

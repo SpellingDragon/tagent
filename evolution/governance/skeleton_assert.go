@@ -11,12 +11,17 @@ import (
 
 // 契约: docs/wiki/agent/governance-enforcement.md#enforcement-modes
 //
-// This file holds compile-time assertions only: the policy is the concrete
-// governor of the pipeline's risk-policy phase, every entry point keeps its
-// exact shape, and every documented field of a governance declaration keeps
-// its name and type.
+// This file holds compile-time assertions only: the policy is one instance of
+// the pipeline's call->ruling port — the concrete ruling face beside the port it
+// declares — every entry point keeps its exact shape, and every documented field
+// of a governance declaration keeps its name and type.
 var (
 	_ plugin.Governor = (*Policy)(nil)
+	_ plugin.Instance = (*Policy)(nil)
+
+	_ func(*Policy) string = (*Policy).Name
+
+	_ func(*Policy) plugin.Port = (*Policy).Port
 
 	_ func(*Policy, plugin.CallPass) (plugin.Decision, error) = (*Policy).Judge
 

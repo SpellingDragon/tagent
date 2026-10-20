@@ -422,3 +422,48 @@ func watchApprovalLog(t *testing.T, observer trpclog.Logger) func() {
 	t.Cleanup(restore)
 	return restore
 }
+
+// TestPolicyDeclaresTheRulingPort pins the gate as one declared call->ruling instance.
+func TestPolicyDeclaresTheRulingPort(t *testing.T) {
+	policy := Open()
+	if got, want := policy.Name(), "governance-policy"; got != want {
+		t.Fatalf("policy name = %q, want %q", got, want)
+	}
+	want := plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	if got := policy.Port(); got != want {
+		t.Fatalf("policy port = %s, want %s", got, want)
+	}
+	if got, want := policy.Port().String(), "call->ruling"; got != want {
+		t.Fatalf("policy port reads = %q, want %q", got, want)
+	}
+	phase, err := plugin.RouteOf(policy.Port())
+	if err != nil {
+		t.Fatalf("route the policy port: %v", err)
+	}
+	if phase != plugin.PhaseProduce {
+		t.Fatalf("policy phase = %v, want the producing phase %v", phase, plugin.PhaseProduce)
+	}
+	if _, err := plugin.NewFlow([]plugin.Instance{policy}); err != nil {
+		t.Fatalf("assemble the policy into the flow: %v", err)
+	}
+}
+
+// TestDeclaredPortMustMatchTheFace pins the refusal of a declared port with no matching face.
+func TestDeclaredPortMustMatchTheFace(t *testing.T) {
+	_, err := plugin.NewFlow([]plugin.Instance{misdeclaredPolicy{Policy: Open()}})
+	if err == nil {
+		t.Fatal("NewFlow accepted a policy declaring a port it does not serve")
+	}
+	if !strings.Contains(err.Error(), "implements no narrow interface") {
+		t.Fatalf("refusal = %q, want the missing narrow interface named", err)
+	}
+}
+
+// misdeclaredPolicy declares the fact->compression port while carrying only the
+// governance ruling face, so the flow must refuse it by name.
+type misdeclaredPolicy struct{ *Policy }
+
+// Port reports a port the embedded policy does not implement.
+func (misdeclaredPolicy) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+}

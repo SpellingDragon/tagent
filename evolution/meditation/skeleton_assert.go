@@ -63,14 +63,17 @@ var (
 	_ MeditationProjection = func(context.Context) (*replay.ReplayProjection, error) { return nil, nil }
 	_ MeditationFolds      = func(context.Context, replay.CompactionFact) error { return nil }
 	_ MeditationOption     = func(*Meditation) {}
+	_ ConsumerPhase        = (ConsumerPhase)(nil)
 	_ CompressPhase        = (CompressPhase)(nil)
 
 	_ func(*memory.CompressRequests) MeditationOption              = WithCompressRequests
 	_ func(MeditationCards) MeditationOption                       = WithMeditationCards
 	_ func(MeditationSink) MeditationOption                        = WithMeditationProducts
+	_ func(ConsumerPhase) MeditationOption                         = WithConsumerPhase
 	_ func(CompressPhase) MeditationOption                         = WithCompressPhase
 	_ func(MeditationProjection, MeditationFolds) MeditationOption = WithMeditationPreFold
 
+	_ func(ConsumerPhase, context.Context, event.CompressRequest) error = ConsumerPhase.TriggerCompress
 	_ func(CompressPhase, context.Context, event.CompressRequest) error = CompressPhase.TriggerCompress
 
 	_ func(MeditationPolicy, *ledger.Retention, *ledger.Lifecycle, Condenser, ...MeditationOption) (*Meditation, error) = NewMeditation
@@ -78,6 +81,16 @@ var (
 	_ func(*Meditation, context.Context, time.Time, []MeditationCard) (MeditationReport, error)            = (*Meditation).Curate
 	_ func(*Meditation, context.Context, time.Time, []MeditationCard) (event.CompressRequest, bool, error) = (*Meditation).Judge
 	_ func(*Meditation, context.Context, time.Time) (MeditationTick, error)                                = (*Meditation).Tick
+)
+
+// The domain's judgments keep their declared shapes: one event in and one verdict
+// out, beside the recording readings of the same trigger-source stamp.
+var (
+	_ func(NoveltyPolicy, event.Event) bool  = NoveltyPolicy.Novel
+	_ func(DeliveryPolicy, event.Event) bool = DeliveryPolicy.Deliverable
+
+	_ func(string) bool = DeliverableLineage
+	_ func(string) bool = SelfManagedLineage
 )
 
 // The pre-fold face keeps its declared shapes and the refusals each unwired
@@ -182,9 +195,6 @@ var (
 	_ func(ObservedFacts, context.Context, memory.QueryOptions) ([]memory.EventReference, error) = ObservedFacts.QueryEvents
 
 	_ func(ObservedFacts, context.Context, event.EventID) (event.Event, error) = ObservedFacts.CommittedFact
-
-	_ func(string) bool = DeliverableLineage
-	_ func(string) bool = SelfManagedLineage
 
 	_ = PartitionActivity{Name: "", Partition: 0, References: 0, External: 0, SelfManaged: 0}
 

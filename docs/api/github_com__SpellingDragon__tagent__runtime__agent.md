@@ -96,6 +96,18 @@ var ErrRequestChainSessionRequired = errors.New("agent: projected request assemb
 
 FUNCTIONS
 
+func NoticeFactKey(invocationID event.InvocationID, notice task.Notice) event.EventID
+    NoticeFactKey reports the canonical identity one notification commits under:
+    the identity prefix of its range beside the notification's own stable
+    four-tuple. A retried delivery of one notification keeps that identity,
+    so the chain appends the notice once.
+
+func NoticeFactPrefix(invocationID event.InvocationID) event.EventID
+    NoticeFactPrefix reports the identity prefix every notice fact of one range
+    carries: the range marker of the fact family, spelled as hex so the identity
+    stays a canonical event key. A read face selects the notifications of that
+    range alone through it.
+
 func RoleOf(eventType string) (model.Role, error)
     RoleOf reports the native message role one presented projection entry
     renders as on the replay path, keeping the transcript shape the event loop
@@ -217,6 +229,11 @@ type Delegation struct {
 	TaskID event.TaskID
 	// Target is the agent session address the delegated turn runs in.
 	Target event.Address
+	// TriggerSource is the trigger-source stamp the admission record carries.
+	// The call_subagent tool stamps event.LineageDelegation, so a delegated call
+	// is recorded as traffic the agent manages for itself; an empty stamp
+	// records no source.
+	TriggerSource string
 	// Ref is the initiating binding reference the delegated request carries: the
 	// delegated turn binds the target the application selected at the generation
 	// its initiator took, and never the generation effective at its own start.
@@ -556,17 +573,17 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
     result fact into the native tool message it carries.
 
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
-    Backflow admits one notification of a call into the intake of the
-    invocation that issued that call, so it drives that invocation's next
-    decision and no other. A progress notification is admitted into that
-    invocation's notification lane as input material: it reports in-flight work,
-    so it answers no call, parks no result and is read by the next decision of
-    the range as the material it is. A non-terminal notification that is not
-    progress carries no result to pair and is ignored here. The settled delivery
-    commits as the delivery fact of the range before it is handed on, so the
-    delivery boundary of a call is observed as the fact it is; the After pass of
-    that fact runs beside the notification rather than under the cancellation of
-    the caller that delivered it, because observation is a bypass.
+    Backflow admits one notification of a call into the range of the invocation
+    that issued that call, so it drives that range's next decision and no other.
+    A progress notification commits as a notice fact of that range before it
+    is read: the chain is the truth of the notification, so the range reads it
+    back as a projection increment, and a loop beside no chain reads the cache
+    it kept beside the commit. A non-terminal notification that is not progress
+    carries no result to pair and is ignored here. The settled delivery commits
+    as the delivery fact of the range before it is handed on, so the delivery
+    boundary of a call is observed as the fact it is; the After pass of that
+    fact runs beside the notification rather than under the cancellation of the
+    caller that delivered it, because observation is a bypass.
 
 func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     Drive runs one invocation until its latest decision reaches a terminal that
@@ -583,11 +600,15 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     reads the range's history as it actually ended. - The whole drive is watched
     as one in-flight production beside its invocation identity — the queueing
     waits included — and confirms its stop only when the drive really ended.
-    - A drive whose budget is spent runs one closing round and ends there:
-    the closing round delivers what the range already produced, its transcript
-    is committed the same way, and the obligation it opens is none. - The drive
-    is observed as one consumer run: its start and its end are DEBUG lines
-    carrying identities, counts and the terminal, never transcript content.
+    - A progress notification of the range's own call is read at each round head
+    as a projection increment of the session chain — the chain is the truth of
+    the notification — and a range beside no chain reads the cache kept beside
+    its commit. - A drive whose budget is spent runs one closing round and
+    ends there: the closing round delivers what the range already produced, its
+    transcript is committed the same way, and the obligation it opens is none.
+    - The drive is observed as one consumer run: its start and its end are
+    DEBUG lines carrying identities, counts and the terminal, never transcript
+    content.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could
@@ -622,6 +643,14 @@ func (l *Loop) SetHistory(face HistoryFace)
     session history from and commits one ended drive's transcript back to.
     The setter is separate from the constructor so the declared construction
     shape of the loop stays as it is.
+
+func (l *Loop) SetNoticeFeed(feed NoticeFeed)
+    SetNoticeFeed attaches the incremental read face the drive reads the
+    progress notifications of its range through: the notices are facts of
+    the session chain, so the read is a projection increment seeded at the
+    ended-material boundary. A nil face keeps the read at the cache the loop
+    keeps beside each commit. The setter is separate from the constructor so the
+    declared construction shape of the loop stays as it is.
 
 func (l *Loop) SetPresentations(sink PresentationSink)
     SetPresentations attaches the presentation sink this loop hands each After
@@ -664,6 +693,39 @@ func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) err
     The redline list (2 rules): MUST register a production when it really starts
     and confirm its stop only when it really ended. MUST NOT read a cancelled
     request, an emptied queue or an elapsed timeout as a stop.
+
+type NoticeFeed interface {
+	// NoticeBoundary reports the position the ended material of the named chain
+	// ends at and whether that chain carries a projection at all.
+	NoticeBoundary(chain RequestChain) (int, bool)
+	// NoticesFrom reports the notification facts of the named chain appended
+	// after cursor under the given identity prefix, in chain order, beside the
+	// position the read reached and whether the chain carries a projection.
+	NoticesFrom(chain RequestChain, prefix event.EventID, cursor int) ([]NoticeView, int, bool)
+}
+    NoticeFeed is the incremental read face of a session chain's notification
+    facts: the boundary the ended material ends at and the entries appended
+    after a read cursor. A notification is a fact of the chain, so a drive
+    reads the notices of its range as a projection increment rather than from
+    a lane of its own; a chain beside no projection says so and the loop reads
+    the cache it keeps beside the commit instead. The face crosses built-in and
+    event types only, so the composition root attaches it with no package edge
+    into the projection layer.
+
+    The redline list (3 rules): MUST report the ended-material boundary and
+    the entries appended after the cursor, in chain order. MUST report a chain
+    that carries no projection as carrying none, never as an empty projection.
+    MUST NOT answer an entry outside the identity prefix it was handed.
+
+type NoticeView struct {
+	// Key is the canonical identity the notification fact committed under.
+	Key event.EventID
+	// Text is the input material the notification reads as.
+	Text string
+}
+    NoticeView is one notification fact as the session chain's projection
+    carries it: the canonical identity the fact committed under beside the input
+    material it reads as.
 
 type PresentationSink func(presentation view.Presentation)
     PresentationSink consumes the After pass presentation of one committed fact:

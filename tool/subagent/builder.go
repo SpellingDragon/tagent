@@ -52,6 +52,14 @@ type Builder struct {
 	// Sessions is the session service a delegated turn runs on; nil gives every turn
 	// an in-memory session service of its own.
 	Sessions session.Service
+	// Facts reads the committed fact one handoff reference names, so the block a
+	// delegated turn receives carries the content of each ref under the projection
+	// budget instead of its bare identity. A builder beside no reader renders the
+	// identities alone, exactly as it did before the reader existed.
+	Facts FactReader
+	// RefBudget is the token budget the handoff refs render under; zero keeps the
+	// package default, the budget unit the request assembly packs under.
+	RefBudget int
 }
 
 // ErrAssemblyMissing reports a build or a turn asked for without an assembly.
@@ -91,12 +99,14 @@ type Turn struct {
 
 // request returns the input one delegated turn hands its agent: the external-context
 // block of the handoff in front of the natural-language request when the turn carries
-// one, and the request alone when it carries none.
-func (t Turn) request() string {
+// one, and the request alone when it carries none. A handoff carrying refs renders each
+// of them with the fact it names under the refs budget, so the block carries content
+// and not the bare identities; a turn carrying none renders exactly as it always did.
+func (t Turn) request(ctx context.Context, facts FactReader, budget int) string {
 	if t.Handoff == nil {
 		return t.Input
 	}
-	block := t.Handoff.ExternalContext()
+	block := externalContext(ctx, *t.Handoff, facts, budget)
 	if t.Input == "" {
 		return block
 	}
@@ -159,7 +169,7 @@ func (b Builder) Serve(ctx context.Context, a *Assembly, turn Turn) (TurnResult,
 	driven := runner.NewRunner(a.Name, built, opts...)
 	defer func() { _ = driven.Close() }()
 	var input trpcmodel.Message
-	if content := turn.request(); content != "" {
+	if content := turn.request(ctx, b.Facts, b.RefBudget); content != "" {
 		input = trpcmodel.NewUserMessage(content)
 	}
 	events, err := driven.Run(ctx, turn.UserID, turn.SessionID, input)

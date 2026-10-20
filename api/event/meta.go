@@ -8,6 +8,8 @@ import "strings"
 // TypeContextCompress, TypeTaskSettled, TypeFeedback and TypeGovernance are the
 // frozen skeleton event type strings.
 //
+// LineageDelegation is the trigger-source stamp a delegated call carries on its
+// admission record: the delegated turn is traffic the agent manages for itself.
 // Every value except TypeTaskSettled is kept from the stored event vocabulary, so
 // events already stored stay readable; TypeTaskSettled raises the settled task
 // notification to a first-class event type and carries its own name.
@@ -20,6 +22,11 @@ const (
 	TypeTaskSettled     = "task_settled"
 	TypeFeedback        = "feedback"
 	TypeGovernance      = "governance"
+
+	// LineageDelegation is the trigger-source stamp of a delegated call: the
+	// delegated turn is traffic the agent manages for itself, so the stamp
+	// opens no host-facing gate and is never a freshness fact.
+	LineageDelegation = "delegation"
 )
 
 // MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,

@@ -605,6 +605,44 @@ func TestMeditationDispatchesCompressPhase(t *testing.T) {
 	})
 }
 
+// TestConsumerPhaseOptionNamesWireTheSameFace pins the consumption-phase wiring under both option names.
+// - each name dispatches every read request to the face it wired
+// - each name leaves the pass and the committed product of that request intact
+func TestConsumerPhaseOptionNamesWireTheSameFace(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		option func(ConsumerPhase) MeditationOption
+	}{
+		{name: "consumer phase", option: WithConsumerPhase},
+		{name: "compress phase", option: WithCompressPhase},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newConsumingMeditation(t, MeditationPolicy{MaxCards: 2, MinScore: 10})
+			holdTicket(t, ctx, fixture.retention, "aa02")
+			request, filed, err := fixture.meditation.Judge(ctx, meditationNow, fixture.cards)
+			if err != nil || !filed {
+				t.Fatalf("judge the over-limit sequence = (%+v, %v, %v), want the request it files", request, filed, err)
+			}
+			phase := &compressPhaseLog{}
+			tc.option(phase)(fixture.meditation)
+
+			tick, err := fixture.meditation.Tick(ctx, meditationNow)
+			if err != nil {
+				t.Fatalf("tick through the wired phase: %v", err)
+			}
+			dispatched := phase.dispatched()
+			if len(dispatched) != 1 || dispatched[0].ID != request.ID {
+				t.Fatalf("dispatched requests = %+v, want the one request the tick read", dispatched)
+			}
+			if len(tick.Products) != 1 || len(tick.Failures) != 0 {
+				t.Fatalf("tick = %+v, want the product of the dispatched request committed", tick)
+			}
+		})
+	}
+}
+
 // meditationLog records the lines the meditation observation rendered: the DEBUG and
 // INFO levels the observation writes, and no other level.
 type meditationLog struct {

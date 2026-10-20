@@ -241,8 +241,8 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
 		}
-		if !strings.Contains(err.Error(), "call-transform") {
-			t.Fatalf("refusal = %q, want the served phase named", err)
+		if !strings.Contains(err.Error(), "call->call") {
+			t.Fatalf("refusal = %q, want the declared port named", err)
 		}
 	})
 }
@@ -708,8 +708,8 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
 		}
-		if !strings.Contains(err.Error(), "compress-trigger") {
-			t.Fatalf("refusal = %q, want the served phase named", err)
+		if !strings.Contains(err.Error(), "fact->compression") {
+			t.Fatalf("refusal = %q, want the declared port named", err)
 		}
 	})
 
@@ -849,8 +849,8 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
 		}
-		if !strings.Contains(err.Error(), "environment-inject") {
-			t.Fatalf("refusal = %q, want the served phase named", err)
+		if !strings.Contains(err.Error(), "request->environment") {
+			t.Fatalf("refusal = %q, want the declared port named", err)
 		}
 	})
 }
@@ -951,16 +951,16 @@ func TestPhaseObservation(t *testing.T) {
 		}
 		pipeline.After(ctx, "fact-1")
 
-		if !logger.mentions("debug", "phase=call-transform", "face=transform", "plugin=corrector", "result=ok", "call=call-1") {
+		if !logger.mentions("debug", "phase=produce", "face=transform", "plugin=corrector", "port=call->call", "result=ok", "call=call-1") {
 			t.Fatalf("debug lines = %v, want the transform face line of call-1", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "phase=risk-policy", "face=risk", "plugin=grader", "result=high", "call=call-1") {
+		if !logger.mentions("debug", "phase=produce", "face=risk", "plugin=grader", "port=call->ruling", "result=high", "call=call-1") {
 			t.Fatalf("debug lines = %v, want the risk face line carrying its grade", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "phase=post-commit-observe", "face=observe", "plugin=watcher", "result=ok", "fact=fact-1") {
+		if !logger.mentions("debug", "phase=consume", "face=observe", "plugin=watcher", "port=fact->observation", "result=ok", "fact=fact-1") {
 			t.Fatalf("debug lines = %v, want the observation face line of fact-1", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "phase=final-presentation", "face=present", "plugin=renderer", "result=rendered", "fact=fact-1") {
+		if !logger.mentions("debug", "phase=consume", "face=present", "plugin=renderer", "port=fact->view", "result=rendered", "fact=fact-1") {
 			t.Fatalf("debug lines = %v, want the presentation face line of fact-1", logger.at("debug"))
 		}
 		if lines := logger.at("debug"); len(lines) != 4 {
@@ -983,8 +983,8 @@ func TestPhaseObservation(t *testing.T) {
 		}
 		pipeline.After(ctx, "fact-1")
 
-		if !logger.mentions("debug", "phase=final-presentation", "plugin=first", "fact=fact-1") ||
-			!logger.mentions("debug", "phase=final-presentation", "plugin=second", "fact=fact-1") {
+		if !logger.mentions("debug", "phase=consume", "face=present", "plugin=first", "port=fact->view", "fact=fact-1") ||
+			!logger.mentions("debug", "phase=consume", "face=present", "plugin=second", "port=fact->view", "fact=fact-1") {
 			t.Fatalf("debug lines = %v, want one presentation line per presenter", logger.at("debug"))
 		}
 		if lines := logger.at("debug"); len(lines) != 2 {
@@ -1013,10 +1013,10 @@ func TestPhaseObservation(t *testing.T) {
 			t.Fatalf("run the environment-inject pass = (%q, %v), want the block of the registered face", blocks, err)
 		}
 
-		if !logger.mentions("debug", "phase=compress-trigger", "face=trigger", "plugin=curator", "result=ok", "request="+string(request.ID)) {
+		if !logger.mentions("debug", "phase=consume", "face=trigger", "plugin=curator", "port=fact->compression", "result=ok", "request="+string(request.ID)) {
 			t.Fatalf("debug lines = %v, want the compress-trigger face line of %s", logger.at("debug"), request.ID)
 		}
-		if !logger.mentions("debug", "phase=environment-inject", "face=inject", "plugin=environment", "result=ok", "agent=agent-a") {
+		if !logger.mentions("debug", "phase=produce", "face=inject", "plugin=environment", "port=request->environment", "result=ok", "agent=agent-a") {
 			t.Fatalf("debug lines = %v, want the environment-inject face line of agent-a", logger.at("debug"))
 		}
 		if lines := logger.at("debug"); len(lines) != 2 {

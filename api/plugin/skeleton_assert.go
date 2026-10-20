@@ -12,18 +12,21 @@ import (
 
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 //
-// Skeleton compile-time assertions for the phase 1 pipeline and governance
+// Skeleton compile-time assertions for the material flow and the governance
 // declarations.
 //
-// The phase 2 types that will satisfy these interfaces do not exist yet, so there is
-// no implementation assertion to write. The assertions below pin what the skeleton
-// proves on its own: every declared method keeps its exact shape, every declared name
-// is a constant of its declared type, and every documented field of a governance
-// declaration keeps its name and type.
+// The assertions below pin what the package proves on its own: every declared
+// method keeps its exact shape, every declared name is a constant of its
+// declared type, and every documented field of a governance declaration keeps
+// its name and type.
 var (
 	_ func(Plugin) string = Plugin.Name
 
 	_ func(Plugin) Phase = Plugin.Phase
+
+	_ func(Instance) string = Instance.Name
+
+	_ func(Instance) Port = Instance.Port
 
 	_ func(TransformCall, context.Context, *trpcmodel.ToolCall) error = TransformCall.TransformCall
 
@@ -54,11 +57,18 @@ var (
 	_ func(RiskLevel) int = RiskLevel.Rank
 
 	_ func(Decision) bool = Decision.Refused
+
+	_ func(Port) (Phase, error) = RouteOf
+
+	_ func(Port) string = Port.String
+
+	_ func([]Instance) (Pipeline, error) = NewFlow
 )
 
 // Every declared name is an interface type.
 var (
 	_ Plugin             = (Plugin)(nil)
+	_ Instance           = (Instance)(nil)
 	_ TransformCall      = (TransformCall)(nil)
 	_ RiskAssessor       = (RiskAssessor)(nil)
 	_ PostCommitObserver = (PostCommitObserver)(nil)
@@ -92,16 +102,30 @@ var (
 	}
 )
 
-// Phase values, dispositions and risk grades must stay compile-time constants
-// of their declared types: a variable or a bare string stops this block from
-// compiling.
+// Phase values, materials, products, dispositions and risk grades must stay
+// compile-time constants of their declared types: a variable or a bare string
+// stops this block from compiling.
 const (
+	_ Phase = PhaseProduce
+	_ Phase = PhaseConsume
+
 	_ Phase = PhaseCallTransform
 	_ Phase = PhaseRiskPolicy
 	_ Phase = PhasePostCommitObserve
 	_ Phase = PhaseFinalPresentation
 	_ Phase = PhaseCompressTrigger
 	_ Phase = PhaseEnvironmentInject
+
+	_ Material = MaterialCall
+	_ Material = MaterialRequest
+	_ Material = MaterialFact
+
+	_ Product = ProductCall
+	_ Product = ProductRuling
+	_ Product = ProductObservation
+	_ Product = ProductView
+	_ Product = ProductCompression
+	_ Product = ProductEnvironment
 
 	_ Disposition = DispositionAllow
 	_ Disposition = DispositionRecord
@@ -116,8 +140,8 @@ const (
 	_ Layer = LayerMetric
 )
 
-// The 02.6 pipeline pass declarations keep their exact shapes: the composition
-// entry, the one Before pass of a call and the After pass of a committed fact.
+// The pipeline pass declarations keep their exact shapes: the composition
+// entries, the one Before pass of a call and the After pass of a committed fact.
 var (
 	_ func([]Plugin) (Pipeline, error) = NewPipeline
 
@@ -132,8 +156,13 @@ var (
 	_ error = ErrCallIdentityChanged
 )
 
-// The pass outcome declarations keep every documented field.
+// The flow declarations keep every documented field.
 var (
+	_ = Port{
+		Reads:    MaterialCall,
+		Produces: ProductCall,
+	}
+
 	_ = CallPass{
 		Final:         trpcmodel.ToolCall{},
 		Risk:          "",

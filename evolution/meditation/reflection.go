@@ -51,7 +51,7 @@ const (
 	// could not be established.
 	TickClosed TickDisposition = "closed"
 	// TickNoNovelty reports a readable face holding nothing newer than the
-	// watermark with non-self-managed lineage.
+	// watermark that the freshness policy reads as new material.
 	TickNoNovelty TickDisposition = "no-novelty"
 	// TickRhythm reports that the rhythm floor has not elapsed since the last
 	// consumed reflection.
@@ -214,7 +214,7 @@ func (r *Reflection) Scope() ReflectionScope {
 }
 
 // FreshSince reports whether the observed face holds a fact recorded after since
-// whose lineage is not managed by the observing agent itself.
+// that the freshness policy reads as new material.
 //
 // A face that cannot be read is reported as an error and never as "nothing
 // fresh": the fact chain is the judgment's only data face.
@@ -290,7 +290,7 @@ func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome {
 		return TickOutcome{
 			Decision: TickDecision{
 				Disposition: TickNoNovelty,
-				Reason:      "no fact newer than the watermark carries a lineage that is not self-managed",
+				Reason:      "no fact newer than the watermark reads as new material under the freshness policy",
 			},
 			Scan:   scan,
 			Digest: digest,

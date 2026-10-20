@@ -609,28 +609,147 @@ func invariantCarries(msgs []model.Message, content string) bool {
 	return false
 }
 
+// invariantNoticeFeed is the notice read face of one session chain: the notice
+// facts the chain committed in chain order, the ended-material boundary the reads
+// start from, and the cursors the reads reached.
+type invariantNoticeFeed struct {
+	mu       sync.Mutex
+	boundary int
+	entries  []NoticeView
+	cursors  []int
+}
+
+// newInvariantNoticeFeed returns a chain carrying no notice and ending at the
+// given boundary.
+func newInvariantNoticeFeed(boundary int) *invariantNoticeFeed {
+	return &invariantNoticeFeed{boundary: boundary}
+}
+
+// NoticeBoundary reports the fixed ended-material boundary of this chain.
+func (f *invariantNoticeFeed) NoticeBoundary(RequestChain) (int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.boundary, true
+}
+
+// NoticesFrom reports the notice facts appended after the cursor under the given
+// identity prefix, beside the position the read reached.
+func (f *invariantNoticeFeed) NoticesFrom(_ RequestChain, prefix event.EventID, cursor int) ([]NoticeView, int, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(f.entries) {
+		cursor = len(f.entries)
+	}
+	f.cursors = append(f.cursors, cursor)
+	var out []NoticeView
+	for _, entry := range f.entries[cursor:] {
+		if strings.HasPrefix(string(entry.Key), string(prefix)) {
+			out = append(out, entry)
+		}
+	}
+	return out, len(f.entries), true
+}
+
+// append records one notice fact this chain committed.
+func (f *invariantNoticeFeed) append(view NoticeView) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries = append(f.entries, view)
+}
+
+// readCursors reports the cursors the reads of this chain started at.
+func (f *invariantNoticeFeed) readCursors() []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.cursors...)
+}
+
+// invariantCommitFace records the facts a loop commits and appends the material
+// of a committed notice to the chain beside it, so the chain a range reads is the
+// chain it committed.
+type invariantCommitFace struct {
+	mu     sync.Mutex
+	events []event.Event
+	feed   *invariantNoticeFeed
+}
+
+// commit records one committed fact and reports the identity it committed under.
+func (c *invariantCommitFace) commit(evt event.Event) event.EventID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if evt.Key == "" {
+		evt.Key = event.EventID(fmt.Sprintf("minted-%d", len(c.events)+1))
+	}
+	c.events = append(c.events, evt)
+	if c.feed != nil && evt.Type == event.TypeFeedback {
+		c.feed.append(NoticeView{Key: evt.Key, Text: evt.Message.Content})
+	}
+	return evt.Key
+}
+
+// list reports the facts committed so far.
+func (c *invariantCommitFace) list() []event.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]event.Event(nil), c.events...)
+}
+
 // TestBackflowNotificationLanes pins the lanes one notification of a call is admitted into.
-// - a progress notification enters that invocation's notification lane and answers no call
-// - the progress of a call is read by the next decision of that range as input material, and read once
-// - a settled notification still pairs its result with the call and keeps the notification lane empty
+// - a progress notification commits as a notice fact of its range before it is read, and answers no call
+// - the range reads the notice as a projection increment from the ended boundary, as input material, and reads it once
+// - a range beside no chain reads the cached notification once and settles nothing
+// - a settled notification still pairs its result with the call and parks no notice
 // - a notification that is neither progress nor terminal leaves the range exactly as it stands
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 func TestBackflowNotificationLanes(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("progress enters the range's next decision and answers no call", func(t *testing.T) {
+	t.Run("progress commits as a notice fact and enters the range's next decision", func(t *testing.T) {
 		behaviour := newInvariantLoopModel("answer-progress", nil)
 		loop, _, _ := invariantLoop(t, behaviour)
+		feed := newInvariantNoticeFeed(0)
+		commits := &invariantCommitFace{feed: feed}
+		loop.SetNoticeFeed(feed)
+		loop.SetFactCommit(commits.commit)
+		loop.intakeFor("invocation-progress").setAddress(invariantLoopAddress)
 		notice := task.Notice{TaskID: "task-progress", Round: 2, Kind: task.NoticeProgress, Seq: 0, Event: "fact-progress"}
 		loop.Backflow("invocation-progress", notice)
 
+		facts := commits.list()
+		if len(facts) != 1 {
+			t.Fatalf("committed facts = %d, want the one notice fact of the progress", len(facts))
+		}
+		fact := facts[0]
+		if fact.Type != event.TypeFeedback {
+			t.Fatalf("notice fact type = %q, want the feedback type of input material", fact.Type)
+		}
+		if fact.Key != NoticeFactKey("invocation-progress", notice) {
+			t.Fatalf("notice fact key = %q, want the stable identity of the notification", fact.Key)
+		}
+		if fact.InvocationID != "invocation-progress" || fact.TaskID != notice.TaskID || fact.InstanceID != "instance-a" {
+			t.Fatalf("notice fact = %+v, want it scoped to the range and the instance that admitted it", fact)
+		}
+		if fact.Message.Content != progressNoteOf(notice).Content || fact.Message.Role != model.RoleUser {
+			t.Fatalf("notice fact message = %+v, want the input material the range reads", fact.Message)
+		}
+		if fact.Owner != invariantLoopAddress || fact.Target != invariantLoopAddress || fact.Source != invariantLoopAddress {
+			t.Fatalf("notice fact addresses = (%+v, %+v, %+v), want the range address", fact.Owner, fact.Target, fact.Source)
+		}
+
 		in := loop.intakeFor("invocation-progress")
 		in.mu.Lock()
-		parked := len(in.arrived["task-progress"])
-		waiters := len(in.waiters["task-progress"])
+		parked := len(in.settled[notice.TaskID])
+		waiters := len(in.waiters[notice.TaskID])
+		cached := len(in.notices)
 		in.mu.Unlock()
 		if parked != 0 || waiters != 0 {
 			t.Fatalf("intake beside a progress notification = (%d parked, %d waits), want the settled wait left open", parked, waiters)
+		}
+		if cached != 1 {
+			t.Fatalf("notice cache = %d, want the one admission of the progress", cached)
 		}
 
 		turn, err := loop.Drive(ctx, Invocation{
@@ -656,24 +775,55 @@ func TestBackflowNotificationLanes(t *testing.T) {
 		if note.Role != model.RoleUser || note.ToolID != "" || note.ToolName != "" {
 			t.Fatalf("progress note = %+v, want input material that answers no call", note)
 		}
-		if notes := loop.progressNotes("invocation-progress"); len(notes) != 0 {
+		if cursors := feed.readCursors(); len(cursors) != 1 || cursors[0] != 0 {
+			t.Fatalf("notice reads = %v, want the one read from the ended boundary", cursors)
+		}
+		if notes := loop.progressNotes(Invocation{InvocationID: "invocation-progress", Address: invariantLoopAddress}); len(notes) != 0 {
 			t.Fatalf("progress read twice = %+v, want the notification reported once", notes)
 		}
 	})
 
+	t.Run("a range beside no chain reads the cached notification once", func(t *testing.T) {
+		loop, _, _ := invariantLoop(t, newInvariantLoopModel("answer-cache", nil))
+		notice := task.Notice{TaskID: "task-cache", Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "fact-cache"}
+		loop.Backflow("invocation-cache", notice)
+
+		in := loop.intakeFor("invocation-cache")
+		in.mu.Lock()
+		cached := len(in.notices)
+		key := event.EventID("")
+		if cached == 1 {
+			key = in.notices[0].key
+		}
+		in.mu.Unlock()
+		if cached != 1 || key != "" {
+			t.Fatalf("notice cache = (%d, %q), want the one cached admission beside no commit face", cached, key)
+		}
+		invocation := Invocation{InvocationID: "invocation-cache", Address: invariantLoopAddress}
+		notes := loop.progressNotes(invocation)
+		if len(notes) != 1 || notes[0].Content != progressNoteOf(notice).Content {
+			t.Fatalf("progress notes = %+v, want the cached report read once", notes)
+		}
+		if again := loop.progressNotes(invocation); len(again) != 0 {
+			t.Fatalf("progress read twice = %+v, want the notification reported once", again)
+		}
+	})
+
 	t.Run("a settled notification still pairs its result with the call", func(t *testing.T) {
-		behaviour := newInvariantLoopModel("answer-settled", nil)
-		loop, _, _ := invariantLoop(t, behaviour)
+		loop, _, _ := invariantLoop(t, newInvariantLoopModel("answer-settled", nil))
 		notice := task.Notice{TaskID: "task-settled", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "fact-settled"}
 		loop.Backflow("invocation-settled", notice)
 
 		in := loop.intakeFor("invocation-settled")
 		in.mu.Lock()
-		parked := len(in.arrived["task-settled"])
-		lane := len(in.notified)
+		parked := len(in.settled["task-settled"])
+		cached := len(in.notices)
 		in.mu.Unlock()
-		if parked != 1 || lane != 0 {
-			t.Fatalf("intake beside a settled notification = (%d parked, %d notified), want the paired result alone", parked, lane)
+		if parked != 1 || cached != 0 {
+			t.Fatalf("intake beside a settled notification = (%d parked, %d notices), want the paired result alone", parked, cached)
+		}
+		if item, ok := in.await(ctx, "task-settled"); !ok || item.fact != notice.Event {
+			t.Fatalf("await = (%+v, %v), want the settled result the call waits for", item, ok)
 		}
 	})
 
@@ -684,14 +834,15 @@ func TestBackflowNotificationLanes(t *testing.T) {
 
 		in := loop.intakeFor("invocation-accepted")
 		in.mu.Lock()
-		parked := len(in.arrived["task-accepted"])
+		parked := len(in.settled["task-accepted"])
 		waits := len(in.waiters["task-accepted"])
+		cached := len(in.notices)
 		in.mu.Unlock()
-		if parked != 0 || waits != 0 {
-			t.Fatalf("intake beside an accepted notification = (%d parked, %d waits), want the intake untouched", parked, waits)
+		if parked != 0 || waits != 0 || cached != 0 {
+			t.Fatalf("intake beside an accepted notification = (%d parked, %d waits, %d notices), want the intake untouched", parked, waits, cached)
 		}
-		if notes := loop.progressNotes("invocation-accepted"); len(notes) != 0 {
-			t.Fatalf("notification lane beside an accepted notification = %+v, want it empty", notes)
+		if notes := loop.progressNotes(Invocation{InvocationID: "invocation-accepted", Address: invariantLoopAddress}); len(notes) != 0 {
+			t.Fatalf("notification cache beside an accepted notification = %+v, want it empty", notes)
 		}
 
 		if _, err := loop.Drive(ctx, Invocation{

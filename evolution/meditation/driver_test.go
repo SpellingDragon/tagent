@@ -134,6 +134,24 @@ func TestTickDeliversNothingBesideAClosedGate(t *testing.T) {
 	}
 }
 
+// TestTickWithholdsTheOutputOfAnUnreadableInput pins the delivery judgment over a fired input the policy cannot read.
+// - the tick still reports the injection it made
+// - the delivery port is not called
+func TestTickWithholdsTheOutputOfAnUnreadableInput(t *testing.T) {
+	deliveries := &driverDeliveries{}
+	driver, err := NewDriver(driverPlan(), &driverGate{}, driverFreshFacts(), &driverUnstampedInput{}, deliveries.deliver)
+	if err != nil {
+		t.Fatalf("assemble the plan: %v", err)
+	}
+	outcome := driver.Tick(context.Background())
+	if outcome.Decision.Disposition != TickFired {
+		t.Fatalf("tick disposition = %q (%s), want %q", outcome.Decision.Disposition, outcome.Decision.Reason, TickFired)
+	}
+	if got := deliveries.count(); got != 0 {
+		t.Fatalf("deliveries = %d, want none beside an input the policy cannot read", got)
+	}
+}
+
 // TestStartTicksUntilStopped pins the loop's interval, delivery and Stop behavior.
 func TestStartTicksUntilStopped(t *testing.T) {
 	plan := driverPlan()
@@ -273,6 +291,17 @@ func (i *driverInput) count() int {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return i.calls
+}
+
+// driverUnstampedInput is the loop-session injection face of a driver whose committed
+// input carries no trigger source, so the delivery judgment cannot read it as visible.
+type driverUnstampedInput struct{}
+
+// InjectReflection drops the trigger source from the input it commits and reports a
+// consumed turn.
+func (*driverUnstampedInput) InjectReflection(_ context.Context, evt event.Event) (ReflectionReceipt, error) {
+	delete(evt.Meta, event.MetaKeyTriggerSource)
+	return ReflectionReceipt{Key: "reflection-key", Outcome: ReflectionConsumed, At: evt.Timestamp}, nil
 }
 
 // driverDeliveries records the calls the delivery port received.

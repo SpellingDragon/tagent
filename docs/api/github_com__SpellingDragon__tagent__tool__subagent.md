@@ -227,6 +227,14 @@ type Builder struct {
 	// Sessions is the session service a delegated turn runs on; nil gives every turn
 	// an in-memory session service of its own.
 	Sessions session.Service
+	// Facts reads the committed fact one handoff reference names, so the block a
+	// delegated turn receives carries the content of each ref under the projection
+	// budget instead of its bare identity. A builder beside no reader renders the
+	// identities alone, exactly as it did before the reader existed.
+	Facts FactReader
+	// RefBudget is the token budget the handoff refs render under; zero keeps the
+	// package default, the budget unit the request assembly packs under.
+	RefBudget int
 }
     Builder resolves one assembly and hands it to the tRPC agent builder.
     Every resolver is injected: this package holds no model registry, no skill
@@ -310,6 +318,12 @@ func (e *Error) Error() string
 
 func (e *Error) Unwrap() error
     Unwrap exposes the refusal kind to errors.Is.
+
+type FactReader func(ctx context.Context, id event.EventID) (event.Event, error)
+    FactReader reads the committed fact one handoff reference names. A run
+    answers it through its own committed-fact read face (Run.CommittedEvent),
+    so a ref renders the fact as it committed and never a reconstruction of it;
+    a read that refuses the identity renders as the missing reference it is.
 
 type ModelResolver func(ctx context.Context, name string) (trpcmodel.Model, error)
     ModelResolver resolves one model reference name into the model it names.

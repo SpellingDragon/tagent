@@ -218,7 +218,9 @@ func (d *DurableCommit) Commit(ctx context.Context, record task.CommitRecord) (t
 
 // Declare stores the admission material of one task — the task_spawned record —
 // beside the commit facts of the same log, so a restore rebuilds the task from
-// material the chain already carries. The declaration is idempotent for the
+// material the chain already carries. The trigger-source stamp of the admission
+// travels inside that material: a restore reads the stamp the admission
+// recorded instead of deriving one again. The declaration is idempotent for the
 // same content and refuses to replace stored material with other content.
 func (d *DurableCommit) Declare(ctx context.Context, taskID event.TaskID, spec task.Spec) error {
 	d.mu.Lock()

@@ -125,7 +125,8 @@ type Decision struct {
 // call is a wait and never a denial.
 func (d Decision) Refused() bool { return d.Denial != nil }
 
-// Governor renders the single pre-execution ruling for one tool call.
+// Governor is the call->ruling port's ruling face, and it renders the single
+// pre-execution ruling for one tool call over the grade a RiskAssessor rendered.
 //
 // The redline list (3 rules):
 // MUST render one ruling per call, over the one Before pass that call carries.
