@@ -20,6 +20,8 @@ var (
 
 	_ func(*SDKObserver, context.Context, event.Event) error = (*SDKObserver).Observe
 
+	_ func(*LogObserver, context.Context, event.Event) error = (*LogObserver).Observe
+
 	_ func(*CommitObserver, context.Context, event.EventID) error = (*CommitObserver).ObserveCommit
 )
 
@@ -39,11 +41,16 @@ var (
 
 	_ plugin.Observer           = (*SDKObserver)(nil)
 	_ plugin.PostCommitObserver = (*CommitObserver)(nil)
+	_ plugin.Observer           = (*LogObserver)(nil)
+	_ plugin.ObservationSink    = (*LogObserver)(nil)
 )
 
-// The unwired observer refuses by name rather than reporting a delivered
+// The unwired observers refuse by name rather than reporting a delivered
 // observation, so the refusal stays an error value.
-var _ error = ErrCommitObserverUnwired
+var (
+	_ error = ErrCommitObserverUnwired
+	_ error = ErrLogObserverUnwired
+)
 
 // The declared seal statuses must stay compile-time constants: a variable or a
 // computed value stops this block from compiling.

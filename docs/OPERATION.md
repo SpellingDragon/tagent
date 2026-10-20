@@ -191,7 +191,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 **D4 文档面规模。** 全仓 markdown 实测 1836 篇，其中 `openspec` 1074 篇（变更过程工件）、`examples` 586 篇（第二 module 自带）、`docs` 155 篇。**`docs` 面只有 155 篇**——外部风险评估里"1833 篇"的口径是全仓 markdown（当时 1833，本文落笔时 1836），不是 `docs`。分区对象因此只有 `docs` 这 155 篇，见 §八。
 
-**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。
+**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**监控面同在此登记、只登记不接线**：trpc `telemetry/{trace,metric,langfuse}` 插件挂到 `telemetry.SDKObserver` 的 tracer/meter 即得 OTel/Langfuse 导出，日志面由 `telemetry.LogObserver` 写 `trpc-agent-go/log.Logger`——复用框架面，不在仓库里自造第二套。
 
 ---
 

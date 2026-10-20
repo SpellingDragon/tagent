@@ -1,5 +1,16 @@
 package telemetry // import "github.com/SpellingDragon/tagent/telemetry"
 
+The log face of the observation bypass: the observer that renders each committed
+fact into one framework log line after the fact is durable. The level follows
+the fact type — a turn boundary is INFO and every per-fact detail is DEBUG —
+so the INFO stream stays bounded by the number of turns while a tool call,
+a delivery and a payload shape stay one line away.
+
+A line carries the fact identity, the address it belongs to, the tool name and
+a bounded payload shape; content is never rendered. A logger that fails is a
+missing line, never a blocked fact: the failure is recovered, the gap is retried
+at DEBUG, and the committed fact stays readable exactly as before.
+
 The OTel/audit face of the observation bypass: the layered SDK observation
 attempted for one committed fact, beside the audit record that layering leaves
 behind. The observer is a thin wrapper over the tracer and meter handles the
@@ -19,6 +30,11 @@ var ErrCommitObserverUnwired = errors.New("telemetry: the commit observer is not
     ErrCommitObserverUnwired reports a post-commit observation attempt on an
     observer whose lookup or sink was never wired: a gap by name, not a silent
     no-op that would read as a delivered observation.
+
+var ErrLogObserverUnwired = errors.New("telemetry: the log observer is not wired")
+    ErrLogObserverUnwired reports a post-commit observation attempt on a log
+    observer that carries no logger: a gap by name, not a silent no-op that
+    would read as a delivered line.
 
 FUNCTIONS
 
@@ -56,6 +72,39 @@ func (o *CommitObserver) ObserveCommit(ctx context.Context, id event.EventID) er
     observation sink. It runs only after the canonical commit of that fact;
     an identity with no committed fact behind it is refused as a gap and never
     observed as if it had committed.
+
+type LogObserver struct {
+	// Has unexported fields.
+}
+    LogObserver is the post-commit observer over the framework log.Logger:
+    one line per committed fact at the level that fact belongs to, so a turn
+    boundary is visible at INFO while every per-fact detail stays at DEBUG.
+    It reuses the framework logger instead of declaring a second logging face
+    beside it.
+
+    The redline list (4 rules): MUST run after the fact is durable, and never
+    before it. MUST NOT render fact content: identity, address, tool name and
+    a bounded payload shape only. MUST NOT hold back or reorder a committed
+    fact for a slow or failing logger. MUST NOT roll back the committed fact or
+    re-run the observed work to satisfy the log.
+
+func NewLogObserver(logger trpclog.Logger) *LogObserver
+    NewLogObserver wires one framework logger behind the post-commit log face.
+    A nil logger lands on the framework default, so an assembly that names no
+    logger observes through the same zap sink the framework logs to.
+
+func (o *LogObserver) Observe(_ context.Context, evt event.Event) (err error)
+    Observe renders one committed fact into its line. The level is chosen by
+    the fact's frozen type: a turn boundary is INFO and every per-fact detail is
+    DEBUG, so the INFO stream stays bounded by the number of turns. A fact that
+    carries no identity is a WARNING and is still not a refusal: it is a gap in
+    the observation record, and the fact behind it stays as committed.
+
+    A logger that fails is a missing line: the failure is recovered, the gap is
+    retried at DEBUG, and no error reaches the caller. The observation bypass
+    has no second channel for a log that cannot be written, and a formatting
+    failure is never a reason to touch the committed fact or re-run the observed
+    work.
 
 type Option func(*SDKObserver)
     Option configures one SDKObserver at assembly time.

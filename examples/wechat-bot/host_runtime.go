@@ -21,6 +21,7 @@ import (
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/telemetry"
 	"github.com/openai/openai-go/option"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -350,6 +351,7 @@ func assembleHostFrom(ctx context.Context, doc *hostDocument, gateway *approvalG
 	}
 	opts := []tagent.Option{
 		tagent.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
+		tagent.WithTelemetry(telemetry.NewLogObserver(log.Default)),
 	}
 	if gateway != nil && gateway.Enabled() {
 		policyOpts := []governance.PolicyOption{governance.WithApprovals(gateway.Manager())}
