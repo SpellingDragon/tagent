@@ -129,6 +129,7 @@ openspec/
 
 # 宿主运行时与会话路由：装配入口、会址解析与审批裁决通道，同样必须点名。
 !host_runtime.go
+!host_runtime_test.go
 !session_routing.go
 !approval_channel.go
 !main_test.go

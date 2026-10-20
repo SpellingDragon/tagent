@@ -382,7 +382,7 @@ next_steps() {
 
   ${C_BLU}说明${C_RST}
     • run.sh 启动时自动加载本目录 .env（无需手动 export）
-    • RL 训练模式：./run.sh rl（配 AREAL_API_KEY）+ 另一终端 ./run.sh areal
+    • RL 训练模式：./run.sh rl（当前不可用：rl 包已重构、tagent.rl.yaml 未跟上宿主文档 schema，待重接）
     • 容器部署（可选）：见 Dockerfile / docker-compose.yml（podman/docker 均兼容）
     • 重新配置：再次运行 ./wizard.sh（会备份旧 .env）
 EOF

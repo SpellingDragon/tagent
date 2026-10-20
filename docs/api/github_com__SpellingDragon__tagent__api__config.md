@@ -37,7 +37,31 @@ by name. The node types are syntax only — they name no declaration word — so
 decode.go maps this tree onto the vocabulary in config.go and this file never
 decides what a field means.
 
+The strict face for caller-owned document schemas: decode.go names one schema,
+the declaration vocabulary, while a host composes its own document (connection
+registry, governance section, application section) and owes its reader the same
+rejection. DecodeStrict applies this package's policy — every key the schema
+does not name is refused by source, line and field path — to the schema the
+caller's struct type states in its yaml tags, so one rejection vocabulary covers
+both kinds of document and no host spells its own.
+
+VARIABLES
+
+var ErrUnknownConfigKey = errors.New("document key outside the schema")
+    ErrUnknownConfigKey reports a document key the target schema does not name.
+    Errors wrapping it also carry the source, the line and the field path,
+    so a caller can tell a key outside the schema from a value of the wrong
+    shape with errors.Is alone.
+
 FUNCTIONS
+
+func DecodeStrict(source string, data []byte, v any) error
+    DecodeStrict decodes the document in data into v and refuses every mapping
+    key the type of v does not name. v must point at a struct whose yaml tags
+    state the schema; nested structs, maps and sequences are walked, so a host
+    document and its sections are checked to the same depth. The zero document
+    decodes into the zero value of v, and a value of the wrong shape is reported
+    by source and reason rather than by key.
 
 func Fingerprint(d Declaration) (string, error)
 

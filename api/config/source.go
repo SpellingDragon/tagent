@@ -263,14 +263,20 @@ type sourceEntry struct {
 	value *sourceNode
 }
 
-// decodeError names one rejected declaration input: the source it came from, the
-// line it sits on, the field path it was read at and the reason it was rejected.
+// decodeError names one rejected configuration input: the source it came from, the
+// line it sits on, the field path it was read at, the reason it was rejected and
+// the sentinel that classifies the rejection.
 type decodeError struct {
 	source string
 	line   int
 	field  string
 	reason string
+	cause  error
 }
+
+// Unwrap reports the sentinel that classifies the rejection, so a caller can
+// test errors.Is against it.
+func (e *decodeError) Unwrap() error { return e.cause }
 
 // Error renders the rejection as source, line, field path and reason.
 func (e *decodeError) Error() string {

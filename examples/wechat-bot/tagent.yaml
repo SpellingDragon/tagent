@@ -1,32 +1,24 @@
 # ============================================================================
 # tagent WeChat Bot 配置文件 (Single Source of Truth)
 # ============================================================================
-# 分层:tagent YAML(agent 定义) · providers(连接注册表) · ToolRef.Remote(A2A 连接)。
+# 解码纪律:loadHostDocument 走 api/config 的 strict 面(DecodeStrict)。
+#   **未知键拒启动**:任何 schema 未声明的键都会以「文件名:行号:字段路径: unknown field」
+#   拒绝启动,而不会被静默忽略。因此本文件只出现宿主真正读取的键。
+#   schema 见 host_runtime.go 的 hostDocument;未接线的原声明就地归档为注释,
+#   完整清单(键路径 + 接线所需)见 README「待接线清单」。新增键须先接 schema。
+#
+# 分层:tagent YAML(agent 定义) · providers(连接注册表)。
 # 敏感信息(API Key)一律经环境变量注入,不写此文件。
 #
 # 编排约定(消除冗余,语义等价):
-#   · 全局 provider/model 为默认值 —— agent 省略即回退全局(见 config.go resolveAgentModel),
+#   · 全局 provider/model 为默认值 —— agent 省略即回退全局(见 host_runtime.go modelName),
 #     仅 plan 覆盖 model。改全局默认即改全体,无需逐 agent 重复。
-#   · x-anchors 定义共享锚点(&),下方 *引用 —— 被 tagent 配置解析忽略(yaml.v3 非 strict),
-#     仅用于消除 engine/exec-monitor 的逐字重复,解析结果与展开写值逐字段等价。
-#
-# 平台子系统(治理/自进化/可靠性/语义召回)启用后的**行为详情**见:
-#   docs/wiki/platform/agent-behavior-matrix.md(分场景溯源代码) + platform-subsystems.md
 # ============================================================================
 
 # ===== 全局默认(agent 省略 provider/model 时回退此)=====
 provider: zhipu                                           # providers 注册表键(智谱 GLM,openai 兼容协议)
 model: glm-5.3-flash                                        # 主模型;plan 覆盖为 glm-5.3
-log_level: "info"                                            # debug 打印 LLM 明文,远端不宜;排障用 ./run.sh -d 或 LOG_LEVEL=debug
 request_timeout_seconds: 3600
-trajectory_dump: true                                        # 每次 LLM 调用记录 JSONL(SFT/RL 训练用)
-trajectory_dir: "data/trajectories"
-
-# agent 统一工作根:file tools 的 base_dir 与 exec 命令 cwd 的**共同基准**(二者恒一致 = 模型单一文件系统视图)。
-# 空(默认)= 继承进程工作目录(部署目录);设为项目 clone 根(如 /home/user/codes)→ agent 可操作该目录下所有
-# 仓库,而 tagent 自身配置/资源/数据路径不受影响(仍相对进程 cwd)。优先级:properties.base_dir/workspace > 此 > 进程 cwd。
-# 部署时**推荐用环境变量 TAGENT_WORKING_DIR 指定**(免改本文件、随 clone 位置灵活;见 .env.example + deploy/README.md)。
-# working_dir: /home/user/codes
 
 # ===== Provider 连接注册表 =====
 # provider 字段 = 协议实现(openai 兼容 / anthropic / gemini / ollama / hunyuan);国内模型多用 openai 兼容,以 api_endpoint 区分。
@@ -40,60 +32,15 @@ providers:
   # anthropic: { provider: anthropic, api_endpoint: "https://api.anthropic.com", api_key_env: "ANTHROPIC_API_KEY" }
   # gemini:    { provider: gemini, api_key_env: "GOOGLE_API_KEY" }
 
-# ===== MCP Servers(声明式;增删本段热生效 mtime 惰性同步,免重启,不动工具声明区→prefix-cache 稳定)=====
-mcp_servers:
-  web-search-prime:
-    transport: streamable-http                              # 归一化为 trpc "streamable"
-    url: https://open.bigmodel.cn/api/mcp/web_search_prime/mcp
-    api_key_env: ZAI_API_KEY                                # GLM Coding Plan 专属,复用同一把 key
-  zread:                                                    # URL 阅读器(docs.bigmodel.cn/cn/coding-plan/mcp/zread-mcp-server)
-    transport: streamable-http
-    url: https://open.bigmodel.cn/api/mcp/zread/mcp
-    api_key_env: ZAI_API_KEY                                # 同为 Coding Plan 配额,复用同一把 key
-
-# ===== 平台子系统(默认关闭=零行为变化;此处按远端常驻部署启用。行为详情见 agent-behavior-matrix.md)=====
-governance:                    # 治理闸:leaf 工具过闸 classify→critical批准→goal→预算→记账
+# ===== 治理闸(装配期恒挂 WithGovernance;此处开启审批面)=====
+# 行为详情见 docs/wiki/platform/agent-behavior-matrix.md 与 platform-subsystems.md。
+governance:
   enabled: true
-  enforcement: warn            # warn(记账放行,推荐起步) | strict(拒绝);critical 恒需人工批准(不受此放松)
-  dir: data/governance         # budget+approvals 持久化(重启不丢;空=纯内存)
-  budget_window_minutes: 60
-  max_high_risk: 20            # 窗口内 high 上限(per-agent 独立预算)
-  max_medium_risk: 200
-  # goal_required_for: []      # 留空=不启用 goal 门(goal_declare 工具未交付,见 gate.go A7)
-
-evolution:                     # git 原生自进化:文件即真源(热重载)+git 版本层+建议式评估
-  enabled: true                # 裁决:example 演示完整自迭代特性。⚠ 生产=独立部署仓;
-                               # 在源码仓内跑 bot,refine register 的改进 commit 会落入源码仓,自担
-  # protected_paths: ["resources/prompts/**", "skills/**", "scripts/**"]   # register 受控清单(默认即此三目录)
-  # judge_delay_seconds: 1800  # register 后评估延迟窗(0=立即;建议≥30m 收集 feedback 样本)
-  # judge_min_samples/judge_pass_threshold/judge_timeout_seconds 省略走默认(5 / 0.5 / 60s)
-
-reliability:                   # 常驻可靠性:不丢事件+退化可观测+重启稳定(per-agent 隔离;各 dir 空则回退内存/channel)
-  bus_spill_dir: data/reliability/bus             # 事件总线 channel 满溢出落盘(at-least-once)
-  mem_spill_dir: data/reliability/memspill        # StoreEvent 失败兜底,memory 恢复重放(幂等)
-  meditation_anchor_dir: data/reliability/anchors # 冥想锚点持久化(重启不误触发)
-  degradation_enabled: true                       # 五依赖(memory/disk/rustviking/model/mcp)退化-恢复状态机
-
-# ===== 共享锚点(被配置解析忽略;供下方 *引用,解析结果与逐字展开等价)=====
-x-anchors:
-  # 语义引擎:tagent/knowledge/recall 三 agent 共享 —— cacheKey(path|backend|model|dims)一致
-  # → namedEngines 同一实例,保跨 agent 召回一致。缺 ZAI_API_KEY 时优雅降级纯关键词(不阻断)。
-  # 512 维 = X2 实测决议(分离度≈1024 而成本减半)。融合:向量 topK ∪ 关键词 topK → RRF(k=60)。
-  engine: &shared_engine
-    backend: memory                                          # MVP 内存向量索引;localfile 时向量序列化入底层 KV + 启动重建
-    embedding: { provider: zhipu, model: embedding-3, api_key_env: ZAI_API_KEY, dimensions: 512 }
-    vector_top_k: 20
-    keyword_top_k: 20
-    rrf_k: 60
-  # exec 工具的 tmux 监控参数(tagent/action/meditator 共享)。
-  exec_monitor: &exec_monitor
-    interval: 3s
-    stable_duration: 30s
-    fake_dead_duration: 180s
+  enforcement: warn            # warn(放行) 是本宿主支持的另一档;strict 时追加 WithStrict——critical 恒需人工批准(不受此放松)
+  dir: data/governance         # 审批持久化目录(空=纯内存)
+  # approval_ttl_minutes: 30   # 审批有效期;缺省(0)时由 approval 包取自身默认
 
 # ===== Agent 配置 =====
-# thinking_enabled(GLM/Claude/Gemini honor;hy3 忽略) · reasoning_effort(hy3/o-series 思考开关) ·
-# reasoning_content_mode(keep_all / discard_previous 默认 / discard_all)。子 agent 运行参数在其自身定义处。
 entry: tagent
 prompt_dir: resources/prompts
 
@@ -103,225 +50,55 @@ agents:
     # provider/model 省略 → 回退全局(zhipu / glm-5.3-flash)
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
-    memory:
-      type: localfile
-      path: .wechat-config/data          # 共享持久存储(knowledge/recall 同 path = 同一 FileSegmentStore 实例)
-      engine: *shared_engine             # 语义召回(见 x-anchors)
-    max_tool_iterations: 300
-    max_tokens: 512000
-    temperature: 0.7
-    thinking_enabled: true
-    compress_threshold: 0.85
-    keep_recent_tasks: 1
-    task_terminal_ttl: "30m"             # 终态任务保留期 = resume 重入窗(plan 生命周期依赖,故调大;默认 2m)
-    task_default_ttl: "8h"               # 统一 TTL reaper 对无 `ttl` 入参任务的兜底绝对寿命(缺省 10min):到期经 owner Cancel → failed 终态 → 移出看板。无禁用哨兵、无按 mode 豁免——常驻/长任务须显式加大命令 ttl 或经 op=send/resume 续命(合并并删除旧 task_stale_after 观测态与 task_job_deadline 双墙)
-    compress:
-      summary_model: glm-5.3-flash      # L3 滚动综述 + 卡片浓缩(无模型/失败降级纯工程)
-      summary_provider: zhipu
-      summary_effort: "low"              # 摘要调用透传 reasoning_effort(压缩成本低优先级,框架 smart_compress 支持)
-      summary_max_tokens: 8192           # 摘要输出预算下限(推理模型耗思考链,不足会空 Content 塌缩)
-      summary_timeout_seconds: 600       # 2026-10-09: 40万token级综述 5s/120s 均三次 deadline exceeded, 放宽至 10min(ceiling 同步 120→600)
+    # 主动送达面:声明即授权(不声明的 agent 看不见 send);发送通路与会话解析复用宿主唯一实现。
     tools:
-      - agent: knowledge                 # 知识获取/翻译;event_keys 由 wrapper 从父 memStore 还原完整事件
-        description_file: knowledge_tool_desc.md
-        event_params: [event_keys]
-      - kind: tool                       # 统一召回入口(items 票据 / turn_key 因果链 / query 检索)
-        id: recall
-      - agent: plan                      # 工作计划管理(拆解/记账/归档审计,不代工)
-        description_file: plan_tool_desc.md
-        extra_params:
-          - { name: action, enum: [create, update, archive, progress], description: "操作类型" }
-          - { name: name, description: "计划名(kebab-case)；update/progress/archive 必填" }
-      # 冥想线常驻本进程的前提:装配只构造 entry 经工具图可达的 agent(常驻表 = 可达闭包)。
-      # 声明成 entry 的一个工具即入常驻表,后台反思循环由宿主 StartLoop 起;async: false 关掉
-      # 异步任务层,这条委派面只是寻址用途 —— 反思自己会触发,不需要 entry 主动调用它。
-      - agent: meditator                 # 旁路冥想线:后台反思 agent,自触发,不要在这里调用它
-        description: "旁路冥想线(后台反思循环自触发;本工具仅为其常驻寻址,正常对话无需调用)"
-        async: false
-      # File Tools(相对路径基准 = 进程 cwd,与 exec 一致 → 模型看到单一文件系统视图)
-      - { kind: tool, id: read_file }
-      - { kind: tool, id: list_file }
-      - { kind: tool, id: search_file }
-      - { kind: tool, id: search_content }
-      - { kind: tool, id: read_multiple_files }
-      - { kind: tool, id: save_file }
-      - { kind: tool, id: replace_content }
-      - kind: tool                       # exec:shell 异步执行(经 tmux)
-        id: exec
-        description_file: exec_tool_desc.md
-        properties:
-          monitor: *exec_monitor
-      # 主动送达面：非用户回合产出的用户向内容不会被自动送达，想说的话经 send 显式投递。
-      # 声明即授权（不声明的 agent 看不见它）；发送通路与会话解析复用宿主唯一实现。
       - { kind: tool, id: send }
-
-      # 远程 A2A 子 agent 示例:声明 remote.url 即可,tagent.go 自动建 A2AAgent + TransferStateKey
-      # - agent: remote-knowledge
-      #   description_file: knowledge_tool_desc.md
-      #   event_params: [event_keys]
-      #   remote: { url: "http://knowledge-service:8088" }
-
-    # 反思默认形态 = 旁路冥想线:业务 agent 不直接开冥想,反思由下方 meditator agent 承担
-    # (独立循环、保留 session meditation,不占业务上下文、内部叙述不进会话历史)。
-
-    # 这里保留键但关闭;确有"反思方需要直接看到业务当前上下文"的需求再把 enabled 打开
-    # (不写 observed_namespaces 即观察自身分区、反思落进业务 session)——同一机制的进阶用法。
-    meditation:
-      enabled: false
-      interval: "30m"
-
-      min_gap: "1h"
-      prompt_file: "meditation.md"
+    # 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
+    #   memory / compress / max_tool_iterations / max_tokens / temperature / thinking_enabled
+    #   compress_threshold / keep_recent_tasks / task_terminal_ttl / task_default_ttl / meditation
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:
     provider: deepseek
     model: deepseek-flash
-    reasoning_effort: max
     system_prompt:
       files: [knowledge_agent.md, knowledge_backend.md]
-    memory:
-      type: localfile
-      path: .wechat-config/data
-      read_namespaces: [tagent]          # 授权读主 agent 时间线(自身命名空间恒可读)
-      engine: *shared_engine
-    max_tool_iterations: 30
-    max_tokens: 256000
-    compress_threshold: 1
-    temperature: 0.3
-    thinking_enabled: true
-    tools:
-      - { kind: tool, id: skill_search }
-      - { kind: tool, id: skill_load }
-      - { kind: tool, id: read_file }    # 只读知识库(不扩权:无 list/search/exec/write)
-      - { kind: tool, id: mcp_discover }
-      - { kind: tool, id: mcp_call }     # 经网关直调 web-search-prime(实测工具名 web_search_prime)
-      - { kind: tool, id: duckduckgo_search }
-      - { kind: tool, id: memory_query }
+    # 待接线:memory / reasoning_effort / max_tool_iterations / max_tokens / compress_threshold
+    #         以及工具面(skill_*/mcp_*/duckduckgo_search/memory_query/read_file)
 
   # ---- Recall:记忆检索子 Agent ----
   recall:
     system_prompt:
       files: [recall_agent.md]
-    memory:
-      type: localfile
-      path: .wechat-config/data
-      read_namespaces: [tagent]
-      engine: *shared_engine             # recall_query 走 hybrid 融合(向量∪关键词 RRF)
-    max_tool_iterations: 5
-    max_tokens: 256000
-    compress_threshold: 1
-    reasoning_effort: "low"              # 检索/拼装类任务,低思考档
-    tools:
-      - { kind: tool, id: recall_query }
-      - { kind: tool, id: recall_get }
-      - { kind: tool, id: recall_recent }
-      - { kind: tool, id: recall_trace }
+    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / reasoning_effort
+    #         以及工具面(recall_query/recall_get/recall_recent/recall_trace)
 
   # ---- Action:执行中枢(调度 file/exec/mcp)----
   action:
     system_prompt:
       files: [action_agent.md]
-    memory:
-      type: memory
-    max_tool_iterations: 50
-    max_tokens: 256000
-    compress_threshold: 1
-    temperature: 0.3
-    thinking_enabled: true
-    reasoning_effort: "low"
-    tools:
-      - { kind: tool, id: read_file }
-      - { kind: tool, id: list_file }
-      - { kind: tool, id: search_file }
-      - { kind: tool, id: search_content }
-      - { kind: tool, id: read_multiple_files }
-      - { kind: tool, id: save_file }
-      - { kind: tool, id: replace_content }
-      - kind: tool
-        id: exec
-        description_file: exec_tool_desc.md
-        properties:
-          monitor: *exec_monitor
-      - { kind: tool, id: mcp_call }     # MCP 执行网关(发现经 knowledge mcp_discover)
+    # 待接线:memory / max_tool_iterations / max_tokens / compress_threshold / temperature /
+    #         thinking_enabled / reasoning_effort,以及 file 工具、exec、mcp_call
 
   # ---- Plan:工作计划管理子 Agent(openspec CLI,无通用 shell 逃逸面)----
   plan:
-    provider: zhipu                      # 显式覆盖:全局 provider 可被改动,wiring.go 空 provider 时按全局回退→模型会被发给错误端点→400,故 plan 恒显式声明
+    provider: zhipu                      # 显式覆盖:全局 provider 可被改动,wiring 空 provider 时按全局回退→模型会被发给错误端点→400,故 plan 恒显式声明
     model: glm-5.3                       # 覆盖全局 flash(plan 需更强推理)
-    thinking_enabled: true
     system_prompt:
       files: [plan_agent.md]
-    memory:
-      type: memory
-    max_tool_iterations: 50
-    max_tokens: 256000
-    compress_threshold: 1
-    temperature: 0.3
-    tools:
-      - kind: tool                       # spec:类型化计划管理(后端 openspec CLI,argv 直调,无 shell)
-        id: spec
-        properties: { bin: openspec }    # work_dir 缺省 = 进程 cwd(含 openspec/)
-      # 读全工程(做计划需看代码/文档)
-      - { kind: tool, id: read_file }
-      - { kind: tool, id: list_file }
-      - { kind: tool, id: search_file }
-      - { kind: tool, id: search_content }
-      - { kind: tool, id: read_multiple_files }
-      # 写类工具 base_dir 沙箱锁定 openspec/(上游 ToolSet 拒绝 ../ 与绝对路径逃逸)
-      - kind: tool
-        id: save_file
-        properties: { base_dir: openspec }
-      - kind: tool
-        id: replace_content
-        properties: { base_dir: openspec }
+    # 待接线:thinking_enabled / max_tool_iterations / max_tokens / compress_threshold / temperature,
+    #         以及 spec 工具与读/写 file 工具(base_dir 沙箱锁 openspec/)
 
   # ---- Meditator:旁路冥想线(独立反思主体,常驻第二条循环)----
-  # 与入口 tagent 的自察反思是同一条机制的两个观察面:这里显式观察业务分区,反思注入冥想线
-  # 自己的循环 session(宿主以保留名 "meditation" 起线,固定单线 —— 思路跨重启连续,增长由下方
-  # compress_threshold 折叠)。卡片落在冥想线自己的分区;回流经 deliver_to 白名单由宿主触发,
-  # 本示例只把产出记进日志,不灌回微信(内部叙述不外泄)。
   meditator:
     system_prompt:
       files: [meditator_agent.md]
-    memory:
-      type: localfile
-      path: .wechat-config/data          # 与 entry 同 type+path+指纹 = 同一 FileSegmentStore 实例;换 type 就是另一个 store,观察面读不到业务事实
-      read_namespaces: [tagent]          # 授权读业务分区(observed 里他人分区的前置授权)
-      engine: *shared_engine             # 与 entry/knowledge/recall 同一 cacheKey,共享同一引擎实例
-    max_tool_iterations: 30
-    max_tokens: 128000
-    temperature: 0.3
-    compress_threshold: 0.8              # 冥想线唯一增长阀:反思不换 session,长到阈值自行折叠(单压缩权自管)
+    # 主动送达面:反思结论里用户该知道的部分,经 send 显式投递(不配则模型不可见)。
     tools:
-      # 取证面:观察到的事件键要能回查原文(digest 给 [hex] 事件键,recall 走共享事实链 + 授权分区)
-      - kind: tool
-        id: recall
-      - { kind: tool, id: read_file }
-      - { kind: tool, id: list_file }
-      - { kind: tool, id: search_file }
-      - { kind: tool, id: search_content }
-      - { kind: tool, id: read_multiple_files }
-      # 产物面:脚本/skill/prompt 三类改进落盘(文件即真源,热重载直生效)。登记动作(refine)按
-      # 装配面只随入口 agent 挂入,冥想线写下的产物由入口自察反思线或人登记 —— 不是缺工具。
-      - { kind: tool, id: save_file }
-      - { kind: tool, id: replace_content }
-      - kind: tool
-        id: exec
-        description_file: exec_tool_desc.md
-        properties:
-          monitor: *exec_monitor
-      # 主动送达面：反思结论里用户该知道的部分，经 send 显式投递（不配则模型不可见）。
       - { kind: tool, id: send }
-
-    # 旁路冥想:观察面显式声明(须 ⊆ read_namespaces ∪ {自身}),水位后的非自管事件才开门
-    meditation:
-      enabled: true
-      interval: "1h"
-      min_gap: "2h"
-      prompt_file: "meditator.md"
-      observed_namespaces: [tagent]
-      deliver_to: [tagent]               # 回流白名单;空白名单拒绝一切投递,投递动作只走组合根投递面
+    # 待接线:memory(localfile 共享存储) / meditation(观察面与回流白名单) /
+    #         max_tool_iterations / max_tokens / temperature / compress_threshold,
+    #         以及 recall + file 工具 + exec
 
 # ===== 应用专属配置(各应用自行反序列化)=====
 app:
@@ -330,3 +107,4 @@ app:
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
     workspace_dir: ".tagent-workspace"   # 入站附件/长文本落盘(容器内 TAGENT_WECHAT_WORKSPACE_DIR 覆盖)
+    # approvers: ["wxid_owner"]          # critical 操作的消息批准白名单;空=消息批准关闭,只经 CLI 批准

@@ -1,254 +1,71 @@
 # ============================================================================
-# tagent WeChat Bot RL 模式配置文件
+# tagent WeChat Bot · RL rollout 参数基线
 # ============================================================================
+# 状态:RL 训练环路在本仓无实现——rl/ 包只保留 capture / export / reward,模型热换
+#   (SwappableModel)与 HTTP /task 面不在任何装配里,宿主 main.go 亦无 RL 分支,
+#   故 ./run.sh rl 入口已退役。本文件保留为**可装载的参数基线**:
+#   TAGENT_CONFIG=tagent.rl.yaml ./run.sh 可直接读它启动,重接线时以它为起点。
 #
-# 此配置用于与 AReaL 联合训练场景。与 tagent.yaml 的区别：
-#   - api_endpoint 指向 AReaL 的 OpenAI 兼容 proxy（捕获 logprobs + completion_ids）
-#   - api_key_env 使用 AREAL_API_KEY（AReaL proxy 的认证 key）
-#   - request_timeout_seconds 更长（RL rollout 需要更多时间）
+# 解码纪律:与 tagent.yaml 同一个 strict 面(未知键拒启动),故只写宿主 schema 读取的键;
+#   未接线键清单见 README「待接线清单」。
 #
-# 启动方式:
-#   TAGENT_CONFIG=tagent.rl.yaml AREAL_API_KEY=your-key ./run.sh
-#
+# 与 tagent.yaml 的差异仅三处:模型(glm-5,与训练侧一致) · 端点(本机 OpenAI 兼容
+#   proxy 占位,rollout 侧注入实际地址时经 TAGENT_API_ENDPOINT 覆盖 entry) · 超时
+#   (7200s,rollout 比对话长)。
 # ============================================================================
 
-# ===== 运行时配置 =====
-
-# LLM 模型 — 需与 AReaL 训练的模型一致
+provider: areal_proxy
 model: glm-5
-
-# LLM API 基础地址 — 初始值仅为占位符。
-# AReaL adapter 会通过 POST /task llm_base_url 字段动态传入实际 proxy URL
-# （AReaL proxy 端口是动态分配的，见 proxy_rollout_server.py find_free_ports）。
-# tagent 的 SwappableModel 会在收到 llm_base_url 后自动切换 LLM 端点。
-api_endpoint: "http://localhost:8000/v1"
-
-# API Key 环境变量名 — AReaL proxy 的认证 key
-api_key_env: "ZAI_API_KEY"
-
-# 日志级别
-log_level: "info"
-
-# 请求超时（秒）— RL rollout 可能需要更长时间
 request_timeout_seconds: 7200
 
-# 轨迹记录 — RL 模式也启用，记录所有经过 AReaL proxy 的 LLM 调用
-trajectory_dump: true
-trajectory_dir: "data/trajectories"
+# ===== Provider 连接注册表 =====
+providers:
+  areal_proxy: { provider: openai, api_endpoint: "http://localhost:8000/v1", api_key_env: "ZAI_API_KEY" }
+  zhipu:       { provider: openai, api_endpoint: "https://open.bigmodel.cn/api/coding/paas/v4", api_key_env: "ZAI_API_KEY" }
+  deepseek:    { provider: openai, api_endpoint: "https://api.deepseek.com/v1", api_key_env: "DEEPSEEK_API_KEY" }
 
-# ===== Agent 配置 =====
+# ===== 治理闸(rollout 期间照常记录 critical 操作)=====
+governance:
+  enabled: true
+  enforcement: warn
+  dir: data/governance
 
+# ===== Agent 配置(集合与 tagent.yaml 一致,仅模型/端点/超时长)=====
 entry: tagent
 prompt_dir: resources/prompts
 
 agents:
-  # ========================================================================
-  # 顶层 Agent
-  # ========================================================================
   tagent:
     system_prompt:
-      files:
-        - AGENTS.md
-        - SOUL.md
-        - USER.md
-        - TOOLS.md
-    memory:
-      type: localfile
-      path: .wechat-config/data
-    max_tool_iterations: 200
-    max_tokens: 8000
-    temperature: 0.7
-    compress_threshold: 0.8
+      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
     tools:
-      - agent: knowledge
-        description_file: knowledge_tool_desc.md
-        event_params: [event_keys]
+      - { kind: tool, id: send }
 
-      - agent: recall
-        description_file: recall_tool_desc.md
-        event_params: [event_keys]
-
-      # Action Agent: 执行中枢
-      - agent: action
-        description_file: action_tool_desc.md
-
-      # 冥想线常驻本进程的前提:装配只构造 entry 经工具图可达的 agent(常驻表 = 可达闭包)。
-      # 声明成 entry 的一个工具即入常驻表,后台反思循环由宿主 StartLoop 起。
-      - agent: meditator
-        description: "旁路冥想线(后台反思循环自触发;本工具仅为其常驻寻址,正常对话无需调用)"
-        async: false
-
-    # Meditation (空闲心跳)。观察面缺省=本 agent 自身分区(自察):不写 observed_namespaces 即回看
-    # 反思默认走旁路冥想线(meditator agent,meditation session);业务 agent 直配 meditation 为进阶
-    # 形态(反思将落进业务 session,共享其上下文)。
-    meditation:
-      enabled: false
-      interval: "30m"
-      min_gap: "2h"
-      prompt_file: "meditation.md"
-
-  # ========================================================================
-  # Knowledge Agent
-  # ========================================================================
   knowledge:
+    provider: deepseek
+    model: deepseek-flash
     system_prompt:
-      files:
-        - knowledge_agent.md
-    memory:
-      type: memory
-    max_tool_iterations: 5
-    max_tokens: 4096
-    temperature: 0.3
-    tools:
-      - kind: tool
-        id: skill_search
-      - kind: tool
-        id: skill_load
-      - kind: tool
-        id: mcp_discover
-      - kind: tool
-        id: web_search
-      - kind: tool
-        id: duckduckgo_search
-      - kind: tool
-        id: memory_query
+      files: [knowledge_agent.md, knowledge_backend.md]
 
-  # ========================================================================
-  # Recall Agent
-  # ========================================================================
   recall:
     system_prompt:
-      files:
-        - recall_agent.md
-    memory:
-      type: localfile
-      path: .wechat-config/data
-      read_namespaces:
-        - tagent
-    max_tool_iterations: 5
-    max_tokens: 4096
-    tools:
-      - kind: tool
-        id: recall_query
-      - kind: tool
-        id: recall_get
-      - kind: tool
-        id: recall_recent
-      - kind: tool
-        id: recall_trace
+      files: [recall_agent.md]
 
-  # ========================================================================
-  # Action Agent: 执行中枢
-  # 接收 tagent 的行为指令，调度 file/speak/draw 工具或直接 exec 执行
-  # ========================================================================
   action:
     system_prompt:
-      files:
-        - action_agent.md
-    memory:
-      type: memory
-    max_tool_iterations: 5
-    max_tokens: 4096
-    temperature: 0.3
-    tools:
-      # File Tools: 直接文件读写 (使用 trpc-agent-go 内置文件操作)
-      - kind: tool
-        id: read_file
-      - kind: tool
-        id: save_file
-      - kind: tool
-        id: list_file
-      - kind: tool
-        id: search_file
-      - kind: tool
-        id: search_content
-      - kind: tool
-        id: read_multiple_files
-      - kind: tool
-        id: replace_content
+      files: [action_agent.md]
 
-      - agent: speak
-        description_file: speak_tool_desc.md
-
-      - agent: draw
-        description_file: draw_tool_desc.md
-
-      - kind: tool
-        id: exec
-        description_file: exec_tool_desc.md
-
-  # ========================================================================
-  # Speak Agent: 语音/表达子 Agent (桩, 暂未启用)
-  # ========================================================================
-  speak:
+  plan:
+    provider: zhipu
+    model: glm-5.3
     system_prompt:
-      files:
-        - speak_agent.md
-    memory:
-      type: memory
-    max_tool_iterations: 3
-    max_tokens: 1024
-    temperature: 0.3
+      files: [plan_agent.md]
 
-  # ========================================================================
-  # Draw Agent: 图像生成子 Agent (桩, 暂未启用)
-  # ========================================================================
-  draw:
-    system_prompt:
-      files:
-        - draw_agent.md
-    memory:
-      type: memory
-    max_tool_iterations: 3
-    max_tokens: 1024
-    temperature: 0.3
-
-  # ========================================================================
-  # Meditator Agent: 旁路冥想线(独立反思主体,常驻第二条循环)
-  # 与入口 tagent 的自察反思是同一条机制的两个观察面:这里显式观察业务分区,
-  # 反思注入冥想线自己的循环 session(宿主以保留名 "meditation" 起线,固定单线)。
-  # ========================================================================
   meditator:
     system_prompt:
       files: [meditator_agent.md]
-    memory:
-      type: localfile
-      path: .wechat-config/data          # 与 entry 同 type+path+指纹 = 同一 FileSegmentStore 实例
-      read_namespaces:
-        - tagent                         # 授权读业务分区(observed 里他人分区的前置授权)
-    max_tool_iterations: 30
-    max_tokens: 4096
-    temperature: 0.3
-    compress_threshold: 0.8              # 冥想线唯一增长阀:反思不换 session,长到阈值自行折叠
     tools:
-      - kind: tool
-        id: recall
-      - kind: tool
-        id: read_file
-      - kind: tool
-        id: list_file
-      - kind: tool
-        id: search_file
-      - kind: tool
-        id: search_content
-      - kind: tool
-        id: read_multiple_files
-      - kind: tool
-        id: save_file
-      - kind: tool
-        id: replace_content
-      - kind: tool
-        id: exec
-        description_file: exec_tool_desc.md
-    meditation:
-      enabled: true
-      interval: "1h"
-      min_gap: "2h"
-      prompt_file: "meditator.md"
-      observed_namespaces:
-        - tagent                         # 旁路冥想:须 ⊆ read_namespaces ∪ {自身}
-      deliver_to:
-        - tagent                         # 回流白名单;空白名单拒绝一切投递
+      - { kind: tool, id: send }
 
 # ===== 应用专属配置 =====
 app:
@@ -256,3 +73,9 @@ app:
     config_dir: ".wechat-config"
     token_file: "token.json"
     context_token_dir: ".wechat-context-tokens"
+    workspace_dir: ".tagent-workspace"
+    # approvers: ["wxid_owner"]
+
+# 待接线(本宿主不读,启用前须先在 host_runtime.go 接 schema 与装配):
+#   memory / compress / meditation / max_tool_iterations / max_tokens / temperature /
+#   thinking_enabled / compress_threshold,以及全部非 send 工具与子 agent 委派。

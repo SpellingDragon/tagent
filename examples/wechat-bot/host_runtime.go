@@ -21,7 +21,6 @@ import (
 	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/openai/openai-go/option"
-	"gopkg.in/yaml.v3"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
@@ -92,17 +91,19 @@ type governanceEntry struct {
 	ApprovalTTLMinutes int    `yaml:"approval_ttl_minutes"`
 }
 
-// loadHostDocument reads the configuration source the host is started with. The
-// document keeps the sections this host wires; sections it does not wire stay in
-// the file and are reported at startup instead of being edited away.
+// loadHostDocument reads the configuration source the host is started with: the
+// document keeps the sections this host wires, and every key the schema below does
+// not name stops the startup instead of being read past. The rejection names the
+// source, the line and the field path, so a document and this schema cannot drift
+// apart unnoticed.
 func loadHostDocument(path string) (*hostDocument, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("wechat-bot: read %s: %w", path, err)
 	}
 	doc := &hostDocument{}
-	if err := yaml.Unmarshal(raw, doc); err != nil {
-		return nil, fmt.Errorf("wechat-bot: decode %s: %w", path, err)
+	if err := config.DecodeStrict(path, raw, doc); err != nil {
+		return nil, fmt.Errorf("wechat-bot: %w", err)
 	}
 	if doc.PromptDir == "" {
 		doc.PromptDir = "."

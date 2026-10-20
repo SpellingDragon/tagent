@@ -10,7 +10,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/wechat-bot .
 
 # ---------- 工具阶段：node 运行时 + openspec CLI ----------
 # plan 子 agent 的 spec 工具后端是 openspec（npm 包）；skills（url-fetcher 等）
-# 也需要 node。此处用官方 node 镜像安装 openspec，运行阶段只拷贝必要产物，
+# 也需要 node。两者当前均**未被本宿主接线**（工具面只接 send），保留供重接。
+# 此处用官方 node 镜像安装 openspec，运行阶段只拷贝必要产物，
 # 避免在最终镜像里保留 npm 缓存与构建工具。
 FROM node:22-bookworm-slim AS tooling
 RUN npm install -g @fission-ai/openspec --no-audit --no-fund \
@@ -24,8 +25,8 @@ RUN npm install -g @fission-ai/openspec --no-audit --no-fund \
 FROM debian:bookworm-slim
 
 # 运行时依赖：
-#   tmux            — action 工具的异步任务层
-#   curl            — 健康检查探针（GET /healthz）
+#   tmux            — 保留：exec 工具的异步任务层（本宿主未接线该工具）
+#   curl            — 保留供容器内探测（本宿主不装配 HTTP 面，无 /healthz 端点）
 #   libstdc++6/zlib1g — 拷贝来的 node 二进制所需运行时库
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl tmux libstdc++6 zlib1g \

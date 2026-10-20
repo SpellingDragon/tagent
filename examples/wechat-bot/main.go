@@ -402,8 +402,10 @@ func main() {
 	fmt.Println("Bot stopped gracefully.")
 }
 
-// reportUnwired states, at startup, the document sections and capabilities this
-// host assembles beside no implementation for.
+// reportUnwired states, at startup, the tool references this host assembles no
+// implementation for. Strict decoding bounds the keys a document may carry; this
+// report bounds the values: a tool reference the assembly contributes nothing for
+// is announced instead of silently resolved to nothing.
 func reportUnwired(doc *hostDocument) {
 	var items []string
 	for _, id := range doc.agentOrder() {
@@ -416,9 +418,6 @@ func reportUnwired(doc *hostDocument) {
 				items = append(items, fmt.Sprintf("agent %s: delegation to %q", id, ref.Agent))
 			}
 		}
-	}
-	for _, section := range []string{"memory", "compress", "evolution", "reliability", "mcp_servers"} {
-		items = append(items, "config section: "+section)
 	}
 	if len(items) == 0 {
 		return

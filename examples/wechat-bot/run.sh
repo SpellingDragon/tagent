@@ -15,12 +15,6 @@
 #   ./run.sh restart            重启 tagent
 #   ./run.sh status             查看状态
 #   ./run.sh log                查看 tagent 日志
-#   ./run.sh rl                 前台运行（RL 训练模式，自动使用 tagent.rl.yaml）
-#   ./run.sh rl-start           后台启动（RL 训练模式）
-#
-# RL 训练完整流程:
-#   Terminal 1: ./run.sh rl        (启动 tagent RL 模式)
-#   （rl 命令自动设置 TAGENT_CONFIG=tagent.rl.yaml + RL session 参数）
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,37 +63,33 @@ show_help() {
     status          查看机器人运行状态
     log             查看日志 (tail -f)
 
-    rl              前台运行 (RL 训练模式，自动使用 tagent.rl.yaml)
-    rl-start        后台启动 (RL 训练模式)
-    rl-stop         停止 RL 模式机器人 (同 stop)
-
 
 选项:
     -n, --name NAME     实例名称 (默认: default)
-    -d, --debug         开启 debug 日志 (等价于 LOG_LEVEL=debug)
-    --otlp ENDPOINT     启用 OTLP 追踪导出 (等价于 OTEL_EXPORTER_OTLP_ENDPOINT)
+    -d, --debug         保留开关（本示例不读 LOG_LEVEL：设了不改变日志级别）
+    --otlp ENDPOINT     保留开关（本示例不装载 OTLP exporter：设了无导出）
     -h, --help          显示帮助信息
 
 环境变量:
     ZAI_API_KEY              API 密钥 (默认配置 tagent.yaml 必需)
-    AREAL_API_KEY            AReaL proxy 认证 key (RL 配置 tagent.rl.yaml 必需)
-    TAGENT_CONFIG            配置文件路径 (默认: tagent.yaml; ./run.sh rl 自动设为 tagent.rl.yaml)
-    LOG_LEVEL                日志级别: debug/info/warn/error (默认: info)
-    TAGENT_HTTP_PORT         HTTPAPI 监听端口 (默认: 8089, 端点: /healthz /task)
-    TAGENT_API_ENDPOINT      LLM API 地址覆盖 (设置后 LLM 请求路由到指定地址)
-    TAGENT_USER_ID           持久事件循环用户 ID (默认: wechat-user)
-    TAGENT_SESSION_ID        持久事件循环会话 ID (默认: wechat-session)
-    OTEL_EXPORTER_OTLP_ENDPOINT  OTLP gRPC 端点 (可选)
+    DEEPSEEK_API_KEY         子 agent knowledge 的 provider 密钥 (tagent.yaml 引用即必需)
+    AREAL_API_KEY            AReaL proxy 认证 key (RL 参数基线 tagent.rl.yaml 声明)
+    TAGENT_CONFIG            配置文件路径 (默认: tagent.yaml; 任何严格 schema 文档均可装载)
+    TAGENT_API_ENDPOINT      LLM API 地址覆盖 (设置后 entry agent 的端点改指向该地址)
+    TAGENT_SESSION_ID        会址前缀标签 (默认: wechat-session, 拼作 <label>:<entry>:)
+    TAGENT_WECHAT_WORKSPACE_DIR  附件/长文本落盘根 (覆盖 app.wechat.workspace_dir)
     LOG_ARCHIVE_DIR          日志归档目录 (默认: logs/archive/)
     LOG_ARCHIVE_KEEP         归档保留份数 (默认: 50)
 
-典型 RL 训练流程:
+    以下变量当前**不被 wechat-bot 读取**（保留供未来接线，设了无效果）:
+    LOG_LEVEL  TAGENT_USER_ID  TAGENT_HTTP_PORT  OTEL_EXPORTER_OTLP_ENDPOINT
+    （本示例不装配 HTTP 服务面: 无 /healthz、无 /task；详见 README「装配面」）
 
-    # Terminal 1: 启动 tagent (RL 模式, 自动使用 tagent.rl.yaml)
-    AREAL_API_KEY=your-key ./run.sh rl
+RL 训练:
 
-
-    # 本地调试 (单 GPU, 无 torchrun):
+    ./run.sh rl 入口已退役:rl 包只保留 capture/export/reward,模型热换与 /task 的
+    宿主侧(HTTP 面)无实现,启动 RL 模式无从谈起。参数基线留在 tagent.rl.yaml
+    (严格 schema 文档,可直接 TAGENT_CONFIG=tagent.rl.yaml 装载),重接线时以它为起点。
 EOF
 }
 
@@ -215,8 +205,6 @@ check_api_key() {
             echo "  export $k=your_api_key_here"
             echo
         done
-        echo "RL 训练模式:"
-        echo "  KEY=your_key ./run.sh rl"
         exit 1
     fi
 }
@@ -256,36 +244,13 @@ show_systemd_guide() {
     4) 启动 + 开机自启:  sudo systemctl daemon-reload && sudo systemctl enable --now tagent-wechat
     5) 观测:             systemctl status tagent-wechat
                          journalctl -u tagent-wechat -f
-                         curl -fsS http://127.0.0.1:${TAGENT_HTTP_PORT}/healthz
+                         # 本示例不装配 HTTP 服务面：无 /healthz 可探，存活看 journalctl / PID 文件
 
   说明:systemd 直接管理二进制(Type=simple + Restart=always + SIGTERM 优雅关闭 +
        journald 收日志),安全加固(NoNewPrivileges/ProtectSystem=strict/ReadWritePaths
        白名单/资源上限)对标 docker-compose。数据目录(.wechat-config/data、data/*、
        workspace)须在 ReadWritePaths 内且属 tagent 用户。
 EOF
-}
-
-# ============================================================================
-# 设置 RL 训练模式环境变量
-# ============================================================================
-setup_rl_env() {
-    # 使用 RL 配置文件（除非用户已显式指定其他配置）
-    export TAGENT_CONFIG="${TAGENT_CONFIG:-tagent.rl.yaml}"
-
-    # RL 模式使用固定的 user/session ID
-    export TAGENT_USER_ID="${TAGENT_USER_ID:-rl-user}"
-    export TAGENT_SESSION_ID="${TAGENT_SESSION_ID:-rl-session}"
-
-    echo "=============================================="
-    echo "  RL 训练模式"
-    echo "=============================================="
-    echo "  配置:      $TAGENT_CONFIG"
-    echo "  User ID:   $TAGENT_USER_ID"
-    echo "  Session:   $TAGENT_SESSION_ID"
-    echo "  HTTPAPI:   http://localhost:${TAGENT_HTTP_PORT}"
-    echo "=============================================="
-    echo
-    echo
 }
 
 # ============================================================================
@@ -479,17 +444,9 @@ while [[ $# -gt 0 ]]; do
             COMMAND="$1"
             shift
             ;;
-        rl)
-            COMMAND="rl-fg"
-            shift
-            ;;
-        rl-start)
-            COMMAND="rl-start"
-            shift
-            ;;
-        rl-stop)
-            COMMAND="stop"
-            shift
+        rl|rl-start|rl-stop)
+            echo "错误: ./run.sh $1 已退役——rl 包无 HTTP 面实现，宿主无 RL 分支；参数基线见 tagent.rl.yaml" >&2
+            exit 1
             ;;
         -n|--name)
             INSTANCE_NAME="$2"
@@ -529,7 +486,5 @@ case "$COMMAND" in
     restart)      do_restart      ;;
     status)       do_status       ;;
     log)          do_log          ;;
-    rl-fg)        setup_rl_env; run_foreground ;;
-    rl-start)     setup_rl_env; do_start       ;;
     *)            run_foreground  ;;
 esac
