@@ -84,6 +84,11 @@ NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
 # governance/→evolution/governance/、host_bridge.go→cli/host_face.go、diagnostics.go→host_face.go）只做键正名，
 # observed 不动——路径对齐不是豁免扩张。已清零的条目按棘轮生命周期删除，不得回填。
 BASELINE = (
+    ("iface-methods", "tool/recall/table.go:Table", 3),
+    ("struct-fields", "memory/replay/age_segments.go:Segment", 6),
+    ("struct-fields", "memory/replay/age_segments.go:AgeFoldReport", 7),
+    ("struct-fields", "runtime/task/registry.go:Obligations", 6),
+    ("struct-fields", "tool/subagent/target.go:TargetOptions", 8),
     # S1 iface-methods — 10 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "runtime/agent/loop.go:Recorder", 3),

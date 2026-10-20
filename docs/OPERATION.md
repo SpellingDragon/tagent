@@ -232,7 +232,7 @@ defer clean(ctx)
 | 审批 | `evolution/governance/policy.go` 的 `riskCritical` | INFO 裁定、DEBUG 等待 | tool、digest、risk、rule、ruling、by 或 expires_ms | `tagent: approval` |
 | 持久化 | `runtime/state/durable.go` 的 `Commit`/`Declare`/`load` | ERROR 日志 | task、mutation、result（uncommitted/uncertain/undeclared） | `tagent: durable` |
 | 恢复与存储 tier | `run.go` 的 `Assemble` 与 `restoreChains` | INFO 折叠、WARN 非持久 tier、ERROR 中断 | tier、durable、chains、recovered、dropped、elapsed | `tagent: storage tier`、`tagent: restore` |
-| 环境块生成 | `run_request.go` 的 `environmentBlock` | DEBUG 日志 | reason、agent、tasks、omitted；进程计数 `tagent.EnvironmentBlockGenerations()` | `tagent: environment block generated` |
+| 环境块生成 | `request.go` 的 `environmentBlock` | DEBUG 日志 | reason、agent、tasks、omitted；进程计数 `tagent.EnvironmentBlockGenerations()` | `tagent: environment block generated` |
 
 - **级别纪律与旁路**：写盘失败、屏障失败、装载失败一律 ERROR（静默的语义改变必须显式）；非持久 tier 的"进程退出即失忆"是 WARN；审批的每次裁定 INFO，同一等待的重复判定留 DEBUG；其余逐事件 DEBUG。六个观察点的 logger 调用都在 `recover` 保护内，且先判 `log.Default` 非 nil——日志失败只丢一条行，不改判定、不改落定、不改恢复结果、不改请求装配。
 - **可复跑**：`go test ./memory ./runtime/agent ./evolution/governance ./runtime/state -run 'Observation' -count=1` 验五个机制各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（压缩溢出、委派受理与落定、重启折叠）读观测行；环境块计数锚 `go test ./tests/integration/host -run 'EnvironmentBlockGenerationIsObserved' -count=1`。

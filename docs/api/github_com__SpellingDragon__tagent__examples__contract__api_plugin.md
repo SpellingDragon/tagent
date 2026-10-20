@@ -17,6 +17,19 @@ func ExampleAuditSink()
     lands and the fact keeps its identity, while a record that does not land
     comes back as an error instead of being dropped quietly.
 
+func ExampleCompressTrigger()
+    ExampleCompressTrigger drives both outcomes of the compress-trigger face
+    through the pass: a face that answers starts the chain for the request as
+    filed, while a face that refuses refuses the pass by name, no later face
+    runs, and the request stays pending.
+
+func ExampleEnvironmentInject()
+    ExampleEnvironmentInject renders the environment blocks of one request
+    assembly: the multi-block face answers each block as its own product
+    in the declared order, the text it renders empty contributes no block,
+    the empty face beside it refuses nothing, and every block traces back to the
+    one request the pass was dispatched with.
+
 func ExampleFactLookup()
     ExampleFactLookup resolves one committed fact: the fact comes back as it
     committed, and an identity with no committed fact behind it is refused

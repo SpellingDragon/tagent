@@ -63,7 +63,7 @@
 1. **`Invocation.Ready []event.Event`** 是一次责任范围**独占**的输入。`Loop.Drive` 把它拼在会话历史之后交给 `aggregateReady`：事件的 `Message` 原样保留（多工具 assistant 消息与逐调用配对的工具消息不被拆开），只有自身没带角色的消息才用 `agent.RoleOf` 按类型补。
 2. **消费即一次决策**。模型产出的工具调用经受理路径变成**受理回执**与**结算观察**，两者在下一次决策前进入 transcript；当一次决策既没有回执也没有观察时，这一趟以终态收束并提交 transcript。
 3. **`Loop.Backflow(invocationID, notice)` 只驱动发起了该调用的那次 invocation 的下一次决策**，不驱动别的。它只接受 `settled` / `failed` / `cancelled` 三种终态：非终态通知没有可配对的结果，在这里被忽略，而不是被当作空结果。
-4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`run_fact.go`）。loop 自己不选传输、不猜目标。
+4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`facts.go`）。loop 自己不选传输、不猜目标。
 
 **自定义事件类型就是运行期消息**：`Ready` 里没有类型白名单，一个不在上表里的类型（例如宿主自己的 `meditation_tick`）照样被消费成它自己的那条消息、照样能调用模型与工具、照样经 `Backflow` 回填。唯一不许的是"消费了但什么都没产出还静默返回"：空结果必须以具名错误拒绝投递，而不是投一条空消息——对照用例 `tests/integration/execution/custom_event_loop_test.go` 用 `errCustomEventNoResult` 固定这条语义，S12 用同一消费链固定通知定向（`tests/integration/acceptance/scenario_s12_test.go`）。
 

@@ -34,4 +34,4 @@ graph LR
 ## F 收尾
 
 - [x] F1 契约零改动（指纹/golden 字节不变）＋F2 全量门禁＋F3 DoD
-- [ ] F4 archive（需明示）
+- [x] F4 archive（本次清理遗留＋归档明示）

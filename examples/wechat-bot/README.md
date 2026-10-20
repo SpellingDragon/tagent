@@ -138,7 +138,7 @@ graph LR
 
 ## RL 参数基线（入口已退役）
 
-`rl/` 包有 30 个文件，但组合根只消费 capture 侧（`rl.Recorder`/`rl.NewRecorderAdapter`/`rl.RequestSnapshot`/`rl.SnapshotPolicy`/`rl.VersionedName`，见 `run.go`/`run_request.go`）与 `rl.FeedbackAttribution`（`host_face.go`）；`sft`/`import`/`verifier`/`reward_ledger` 与 `export` 导出器在仓内无生产消费者（只有 contract/集成测试）。模型热换（`SwappableModel`）不在任何装配里，宿主 `main.go` 亦无 RL 分支（HTTP `/task` 面由宿主 `inject_face.go` 自带，不属 `rl/`），故 `./run.sh rl` 已退役（调用即具名拒绝，不静默退回生产配置）。
+`rl/` 包有 30 个文件，但组合根只消费 capture 侧（`rl.Recorder`/`rl.NewRecorderAdapter`/`rl.RequestSnapshot`/`rl.SnapshotPolicy`/`rl.VersionedName`，见 `run.go`/`request.go`）与 `rl.FeedbackAttribution`（`host_face.go`）；`sft`/`import`/`verifier`/`reward_ledger` 与 `export` 导出器在仓内无生产消费者（只有 contract/集成测试）。模型热换（`SwappableModel`）不在任何装配里，宿主 `main.go` 亦无 RL 分支（HTTP `/task` 面由宿主 `inject_face.go` 自带，不属 `rl/`），故 `./run.sh rl` 已退役（调用即具名拒绝，不静默退回生产配置）。
 `tagent.rl.yaml` 保留为**可装载的参数基线**（`TAGENT_CONFIG=tagent.rl.yaml ./run.sh` 可读），重接线时以它为起点。
 
 ## 深入阅读
