@@ -7,6 +7,17 @@ two loopback endpoints; the application fills the outbound message face,
 the approval face and the reflection delivery face through the options,
 and reads nothing else out of the document.
 
+The trajectory capture of a booted host: one account per assembled run.
+Boot opens the file writer under the storage tier's trajectory directory and one
+bounded sink over it, and the run fixes, admits and seals every turn through the
+scope below.
+
+The capture is one account however many turns it spans, while the execution
+loop seals the capture it holds at the end of every drive. The scope therefore
+keeps the loop's per-turn seal from closing the run-wide sink: a turn ends
+without ending the account, and Close seals the real capture once, after the run
+drained.
+
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
 host was started with. Every section reads the owner that already holds the fact
@@ -17,6 +28,28 @@ of the live scene.
 A face whose switch is off, or whose subsystem the assembly carries no wiring
 for, names that state in its reason instead of answering a zero reading that
 would pass for an idle subsystem.
+
+The model sampling of one declared agent: the temperature, thinking switch
+and reasoning effort a host document declares flow onto every request of that
+agent's model. The wrapper sits between the published binding and the model the
+provider registry built, so a parameter declared in the document reaches the
+provider even though the trpc model constructors accept no per-model sampling of
+their own.
+
+The wrapper fills a value only while the request itself names none:
+an undeclared parameter is never written as a zero, and a sampling a request
+already carries is never overridden.
+
+The configuration reload of a booted host: the document is read again, the
+declaration it carries is published through the one publication entry, and every
+agent whose model reference moved has the move judged as a model replacement
+fact on its own pipeline. The lease mounted on the agent runs the rebuild,
+publication and installation order, so a reload never installs a model outside
+the event-driven replacement path the run already owns.
+
+The document is the host's own dialect, so a reload reads it with the same
+strict decoder Boot reads it with; a document the decoder refuses changes
+nothing at all.
 
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the
@@ -128,6 +161,13 @@ var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitt
     ErrHostNoActiveSession reports a task request arriving before any user turn:
     the endpoint carries no session identity of its own, so it drives the one
     session the host admitted last.
+
+var ErrHostReloadStructural = errors.New("tagent: the reload changes the declared agent set")
+    ErrHostReloadStructural reports a reload that changes the entry agent or the
+    declared agent set. Boot wires the model leases, the reflection plan and the
+    contributed tool faces of the declared agents once, so a structural change
+    is refused by name instead of being half-applied; a host that needs another
+    organization is restarted with it.
 
 var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound message sender")
     ErrHostSenderMissing reports a host that grants the send tool or admits an
@@ -450,6 +490,14 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
     Invoke drives one invocation through the assembled run. An invocation at the
     user address of the entry agent delivers the fresh assistant output through
     the message sender; every other address is driven headless.
+
+func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
+    Reload reads the configuration source again, publishes the declaration
+    it carries, and files the model replacement of every agent whose model
+    reference moved. The publication is the one entry the run already owns;
+    the replacement facts are the same facts a declaration-driven change files,
+    so the lease mounted on each agent decides whether the new version takes
+    effect.
 
 func (h *Host) Run() *Run
     Run reports the assembled run the host drives.

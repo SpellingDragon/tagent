@@ -112,14 +112,15 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 	for id, native := range agents {
 		contributed := native
 		out[id] = supplier{
-			model: func(context.Context, config.AgentSpec) (model.Model, func(context.Context) error, error) {
+			model: func(_ context.Context, spec config.AgentSpec) (model.Model, func(context.Context) error, error) {
+				release := func(context.Context) error { return nil }
 				if held := r.leaseOf(id); held != nil {
-					return rl.NewLeaseModel(held.lease), func(context.Context) error { return nil }, nil
+					return withHostModelParams(rl.NewLeaseModel(held.lease), spec), release, nil
 				}
 				if contributed.Model == nil {
 					return nil, nil, fmt.Errorf("tagent: agent %q contributes no model", id)
 				}
-				return contributed.Model, func(context.Context) error { return nil }, nil
+				return withHostModelParams(contributed.Model, spec), release, nil
 			},
 			tools: func(ctx context.Context, spec config.AgentSpec) ([]trpctool.Tool, trpctool.ToolSet, func(context.Context) error, error) {
 				native := make([]trpctool.Tool, 0, len(contributed.Tools)+len(spec.Tools))

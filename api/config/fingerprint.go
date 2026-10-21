@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
@@ -68,6 +69,15 @@ type canonicalAgentCore struct {
 	CompressThreshold float64 `json:"compress_threshold,omitempty"`
 	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"`
 	EnvironmentBlock  bool    `json:"environment_block,omitempty"`
+	// Temperature, ThinkingEnabled and ReasoningEffort are the request sampling
+	// the agent declares beside MaxToolIterations, the tool-round bound. A nil
+	// pointer omits the key, so a declaration that names no sampling keeps the
+	// fingerprint the surface had before the sampling existed while a declared
+	// zero encodes as zero.
+	Temperature       *float64 `json:"temperature,omitempty"`
+	ThinkingEnabled   *bool    `json:"thinking_enabled,omitempty"`
+	ReasoningEffort   string   `json:"reasoning_effort,omitempty"`
+	MaxToolIterations int      `json:"max_tool_iterations,omitempty"`
 }
 
 // canonicalAgent is one agent spec in canonical field order: the core fields
@@ -199,6 +209,10 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 				CompressThreshold: canonicalFloat(a.CompressThreshold),
 				KeepRecentTasks:   a.KeepRecentTasks,
 				EnvironmentBlock:  a.EnvironmentBlock,
+				Temperature:       a.Temperature,
+				ThinkingEnabled:   a.ThinkingEnabled,
+				ReasoningEffort:   strings.TrimSpace(a.ReasoningEffort),
+				MaxToolIterations: a.MaxToolIterations,
 			},
 			Memory:     a.Memory.canonical(),
 			Meditation: a.Meditation.canonical(),

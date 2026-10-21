@@ -158,6 +158,7 @@ func agentsField(source string, e *sourceEntry) ([]AgentSpec, error) {
 var agentKeys = []string{
 	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
 	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks", "environment_block",
+	"temperature", "thinking_enabled", "reasoning_effort", "max_tool_iterations",
 	"memory", "meditation", "file", "exec",
 }
 
@@ -209,6 +210,18 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 		return nil, err
 	}
 	if a.EnvironmentBlock, err = boolField(source, joinField(path, "environment_block"), fields["environment_block"]); err != nil {
+		return nil, err
+	}
+	if a.Temperature, err = optionalFloatField(source, joinField(path, "temperature"), fields["temperature"]); err != nil {
+		return nil, err
+	}
+	if a.ThinkingEnabled, err = optionalBoolField(source, joinField(path, "thinking_enabled"), fields["thinking_enabled"]); err != nil {
+		return nil, err
+	}
+	if a.ReasoningEffort, err = stringField(source, joinField(path, "reasoning_effort"), fields["reasoning_effort"]); err != nil {
+		return nil, err
+	}
+	if a.MaxToolIterations, err = countField(source, joinField(path, "max_tool_iterations"), fields["max_tool_iterations"]); err != nil {
 		return nil, err
 	}
 	if a.Memory, err = memoryField(source, joinField(path, "memory"), fields["memory"]); err != nil {
@@ -412,6 +425,37 @@ func boolField(source, field string, e *sourceEntry) (bool, error) {
 		return false, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a boolean"}
 	}
 	return value, nil
+}
+
+// optionalFloatField reads one optional number field into a pointer: an absent
+// or null field declares no value and reads as nil, so a declared zero stays
+// distinct from a value the source never named.
+func optionalFloatField(source, field string, e *sourceEntry) (*float64, error) {
+	if isAbsent(e) {
+		return nil, nil
+	}
+	value, err := numberNode(source, field, e.value)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+// optionalBoolField reads one optional boolean field into a pointer: an absent
+// or null field declares no switch and reads as nil, so a declared false stays
+// distinct from a switch the source never named.
+func optionalBoolField(source, field string, e *sourceEntry) (*bool, error) {
+	if isAbsent(e) {
+		return nil, nil
+	}
+	if e.value.kind != sourceScalar {
+		return nil, &decodeError{source: source, line: nodeLine(e.value), field: field, reason: "expected a boolean"}
+	}
+	value, ok := e.value.scalar.(bool)
+	if !ok {
+		return nil, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a boolean"}
+	}
+	return &value, nil
 }
 
 // finalRoundField maps one watchdog budget mapping onto its declaration; an

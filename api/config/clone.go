@@ -60,7 +60,29 @@ func cloneAgentSpec(in AgentSpec) AgentSpec {
 	out.Meditation.ObservedNamespaces = cloneStrings(in.Meditation.ObservedNamespaces)
 	out.Meditation.DeliverTo = cloneStrings(in.Meditation.DeliverTo)
 	out.File.ReadRoots = cloneStrings(in.File.ReadRoots)
+	out.Temperature = cloneFloat64(in.Temperature)
+	out.ThinkingEnabled = cloneBool(in.ThinkingEnabled)
 	return out
+}
+
+// cloneFloat64 deep copies one optional number, so a mutation through the copy
+// never reaches the declaration it was cloned from.
+func cloneFloat64(in *float64) *float64 {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+// cloneBool deep copies one optional switch, so a mutation through the copy
+// never reaches the declaration it was cloned from.
+func cloneBool(in *bool) *bool {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 // cloneServerSpecs deep copies the declared MCP servers.

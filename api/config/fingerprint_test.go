@@ -329,6 +329,78 @@ agents:
 	}
 }
 
+// TestAgentSamplingDecodesFingerprintsAndClones pins one agent's sampling across its faces:
+//   - the four sampling keys decode into the values the source named
+//   - an omitted key keeps no value, so a declared zero stays distinct
+//   - naming any one sampling field moves the fingerprint
+//   - a clone owns its pointers, so mutating it moves neither original nor values
+//
+// 契约: docs/wiki/platform/org-hot-reload.md#fingerprint
+func TestAgentSamplingDecodesFingerprintsAndClones(t *testing.T) {
+	decl := loadConfigDeclaration(t, `entry: main
+agents:
+  - id: main
+    model: m1
+    temperature: 0
+    thinking_enabled: false
+    reasoning_effort: high
+    max_tool_iterations: 2
+`)
+	spec := decl.Agents[0]
+	if spec.Temperature == nil || *spec.Temperature != 0 {
+		t.Fatalf("decoded temperature = %v, want the declared zero", spec.Temperature)
+	}
+	if spec.ThinkingEnabled == nil || *spec.ThinkingEnabled {
+		t.Fatalf("decoded thinking switch = %v, want the declared false", spec.ThinkingEnabled)
+	}
+	if spec.ReasoningEffort != "high" {
+		t.Fatalf("decoded reasoning effort = %q, want %q", spec.ReasoningEffort, "high")
+	}
+	if spec.MaxToolIterations != 2 {
+		t.Fatalf("decoded max tool iterations = %d, want 2", spec.MaxToolIterations)
+	}
+
+	bare := loadConfigDeclaration(t, "entry: main\nagents:\n  - id: main\n    model: m1\n")
+	if bare.Agents[0].Temperature != nil || bare.Agents[0].ThinkingEnabled != nil {
+		t.Fatalf("omitted sampling decoded as (%v, %v), want no value", bare.Agents[0].Temperature, bare.Agents[0].ThinkingEnabled)
+	}
+	if bare.Agents[0].ReasoningEffort != "" || bare.Agents[0].MaxToolIterations != 0 {
+		t.Fatalf("omitted sampling decoded as (%q, %d), want no value", bare.Agents[0].ReasoningEffort, bare.Agents[0].MaxToolIterations)
+	}
+	barePrint := fingerprintOf(t, *bare)
+	if got := fingerprintOf(t, *decl); got == barePrint {
+		t.Fatalf("fingerprint with the declared sampling = %q, want a fingerprint the bare declaration does not share", got)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*AgentSpec)
+	}{
+		{name: "temperature", mutate: func(spec *AgentSpec) { zero := 0.0; spec.Temperature = &zero }},
+		{name: "thinking switch", mutate: func(spec *AgentSpec) { disabled := false; spec.ThinkingEnabled = &disabled }},
+		{name: "reasoning effort", mutate: func(spec *AgentSpec) { spec.ReasoningEffort = "high" }},
+		{name: "tool iteration bound", mutate: func(spec *AgentSpec) { spec.MaxToolIterations = 2 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			named := *bare.Clone()
+			tc.mutate(&named.Agents[0])
+			if got := fingerprintOf(t, named); got == barePrint {
+				t.Fatalf("fingerprint did not move when the declaration named %s: %q", tc.name, got)
+			}
+		})
+	}
+
+	clone := *decl.Clone()
+	*clone.Agents[0].Temperature = 0.75
+	*clone.Agents[0].ThinkingEnabled = true
+	if *decl.Agents[0].Temperature != 0 {
+		t.Fatalf("original temperature = %v, want the declared zero the clone never moved", *decl.Agents[0].Temperature)
+	}
+	if *decl.Agents[0].ThinkingEnabled {
+		t.Fatal("original thinking switch moved with the clone")
+	}
+}
+
 func loadConfigDeclaration(t *testing.T, body string) *Declaration {
 	t.Helper()
 	decl, err := decodeConfigFile(context.Background(), writeConfigSource(t, "org.yaml", body))

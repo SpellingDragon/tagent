@@ -93,6 +93,9 @@ agents:
       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
       - { kind: agent, agent: recall, event_params: [event_keys] }
       - { kind: agent, agent: plan, description_file: plan_tool_desc.md }
+    # 模型窗口:声明即注册会话投影——历史按窗口余量呈现,三龄段折叠随体积默认触发;
+    # compress_threshold(缺省0.8)/keep_recent_tasks(缺省2)不写即走默认。
+    max_tokens: 128000
     # 看门狗收尾轮(声明即 opt-in;不声明=无界,与未接此键时完全一致):
     # 第 24 个工具轮或跑满 3300 秒后,下一决策转为收尾轮——请求尾部追加收尾指令,
     # 该轮走 120 秒短超时,发起的工具调用一律不受理并配好回执,回答本轮已产出的东西。
@@ -115,9 +118,9 @@ agents:
         vector_top_k: 20
         keyword_top_k: 20
         rrf_k: 60
-    # 待接线(本宿主不读,启用前须先在 host.go 接 schema 与装配):
-    #   compress / max_tokens / temperature / thinking_enabled
-    #   compress_threshold / keep_recent_tasks / task_terminal_ttl / task_default_ttl
+    # 已接线的模型参数(不写走模型默认): temperature / thinking_enabled /
+    #   reasoning_effort / max_tool_iterations(映射看门狗轮数)
+    # 待接线: task_terminal_ttl / task_default_ttl
 
   # ---- Knowledge:知识获取 & 翻译子 Agent ----
   knowledge:

@@ -127,6 +127,22 @@ type AgentSpec struct {
 	// carries beside the open asynchronous task state. False keeps a request
 	// exactly as it stands without the block.
 	EnvironmentBlock bool
+	// Temperature is the sampling temperature every request of this agent
+	// carries. Nil declares no temperature, so the model default stands; a
+	// declared zero is the deterministic sampling zero names, which is why the
+	// field is a pointer instead of a value.
+	Temperature *float64
+	// ThinkingEnabled states whether the model's extended reasoning runs for
+	// every request of this agent. Nil declares no switch, so the model default
+	// stands; a declared false is the explicit off.
+	ThinkingEnabled *bool
+	// ReasoningEffort names the reasoning effort every request of this agent
+	// carries. Empty declares no effort, so the model default stands.
+	ReasoningEffort string
+	// MaxToolIterations bounds the tool-calling rounds one invocation of this
+	// agent may take. Zero declares no bound of its own, which leaves the
+	// watchdog budget of the final round section as the only round bound.
+	MaxToolIterations int
 
 	// Memory is the memory section this agent declares: the storage tier its
 	// facts persist through, the namespaces it may read across partitions and

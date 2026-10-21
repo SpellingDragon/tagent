@@ -34,6 +34,7 @@ import (
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/replay"
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -129,9 +130,20 @@ type Host struct {
 	entry  event.AgentID
 	sender MessageSender
 
+	// configPath is the source the host was booted from and the file a reload
+	// reads again; doc is the document last published, natives are the tool
+	// instances every declared agent was assembled with, models builds a model
+	// from the document in effect and capture is the run-wide trajectory.
+	configPath string
+	doc        *hostDocument
+	natives    map[event.AgentID]NativeAgent
+	models     *hostModelBuilder
+	capture    *rl.TrajectoryCapture
+
 	face       *hostFace
 	meditation *meditation.Driver
 
+	reloadMu    sync.Mutex
 	mu          sync.Mutex
 	lastAddr    event.Address
 	sent        map[event.Address]int
@@ -151,6 +163,7 @@ var (
 	_ func(*Host, context.Context) error                              = (*Host).Close
 	_ func(*Host) *Run                                                = (*Host).Run
 	_ func(*Host) string                                              = (*Host).FaceAddr
+	_ func(*Host, context.Context) (hostReloadReport, error)          = (*Host).Reload
 )
 
 // Boot reads one host document and returns the assembled host: the
@@ -201,15 +214,43 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	recallPort := NewRecallPort(embedder, relations)
 	ctx, cancel := context.WithCancel(context.Background())
 	meditationPort := &hostMeditationPort{plan: meditationPlan}
-	natives, err := doc.nativeAgents(ctx, cfg.hostSender, recallPort, meditationPlan, meditationPort)
+	client := &http.Client{Timeout: doc.requestTimeout()}
+	models := newHostModelBuilder(doc, client)
+	natives, err := doc.nativeAgents(ctx, client, cfg.hostSender, recallPort, meditationPlan, meditationPort)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	var capture *rl.TrajectoryCapture
+	if root := storageRootOf(plan); root != "" {
+		capture, err = openHostCapture(root)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	}
+	sealed := false
+	defer func() {
+		if !sealed && capture != nil {
+			sealHostCapture(capture)
+		}
+	}()
 	var driver *meditation.Driver
 	options := []Option{
 		WithGovernance(governanceOf(cfg.governance)),
 		WithTelemetry(telemetry.NewLogObserver(trpclog.Default)),
+	}
+	if capture != nil {
+		options = append(options, WithCapture(&hostRunCapture{trajectory: capture}))
+	}
+	for _, spec := range decl.Agents {
+		id := event.AgentID(spec.ID)
+		lease, err := rl.NewModelLease(natives[id].Model, doc.modelVersion(spec.ID))
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("tagent: attach the model lease of agent %q: %w", spec.ID, err)
+		}
+		options = append(options, WithModelLease(id, lease, WithLeaseRebuild(models.rebuild(id))))
 	}
 	if plan != nil {
 		options = append(options, WithMemoryPlan(plan))
@@ -255,6 +296,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		sender:     cfg.hostSender,
 		meditation: driver,
 		sent:       map[event.Address]int{},
+		configPath: configPath,
+		doc:        doc,
+		natives:    natives,
+		models:     models,
+		capture:    capture,
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -263,6 +309,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	face.start()
 	host.face = face
+	sealed = true
 	return host, nil
 }
 
@@ -388,6 +435,9 @@ func (h *Host) Close(ctx context.Context) error {
 	}
 	report, err := h.run.Close(ctx, agent.CloseRequest{})
 	if err != nil {
+		if sealErr := h.sealCapture(ctx); sealErr != nil {
+			assemblyWarn("tagent: the trajectory seal after a failed drain reported: %v", sealErr)
+		}
 		h.finishClose(first, err)
 		return err
 	}
@@ -397,8 +447,26 @@ func (h *Host) Close(ctx context.Context) error {
 	if err := h.run.CloseMCPServers(); err != nil && first == nil {
 		first = err
 	}
+	if err := h.sealCapture(ctx); err != nil && first == nil {
+		first = err
+	}
 	h.finishClose(first, nil)
 	return first
+}
+
+// sealCapture seals the run-wide trajectory once the run drained: the sink's
+// seal barries every record admitted before it, so the attempt file and its
+// manifest account every turn the run served. The seal runs under the host
+// close grace even beside a cancelled caller, because it is the one write that
+// must not be abandoned half-way.
+func (h *Host) sealCapture(ctx context.Context) error {
+	if h == nil || h.capture == nil {
+		return nil
+	}
+	sealCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hostShutdownGrace)
+	defer cancel()
+	_, err := h.capture.Seal(sealCtx)
+	return err
 }
 
 // finishClose records the result a repeated close reports.
@@ -552,6 +620,14 @@ type hostAgent struct {
 	Meditation   config.MeditationSpec `yaml:"meditation"`
 	File         config.FileSpec       `yaml:"file"`
 	Exec         config.ExecSpec       `yaml:"exec"`
+
+	Temperature       *float64 `yaml:"temperature"`
+	ThinkingEnabled   *bool    `yaml:"thinking_enabled"`
+	ReasoningEffort   string   `yaml:"reasoning_effort"`
+	MaxToolIterations int      `yaml:"max_tool_iterations"`
+	MaxTokens         int      `yaml:"max_tokens"`
+	CompressThreshold float64  `yaml:"compress_threshold"`
+	KeepRecentTasks   int      `yaml:"keep_recent_tasks"`
 }
 
 // hostPrompt is the prompt section of one agent: the declared files resolved
@@ -619,14 +695,25 @@ func (d *hostDocument) Declaration() (*config.Declaration, error) {
 func (d *hostDocument) mapDocument() (document.Document, error) {
 	agents := make(map[string]config.AgentSpec, len(d.Agents))
 	for id, entry := range d.Agents {
+		finalRound := entry.finalRound()
+		if finalRound.MaxRounds == 0 && entry.MaxToolIterations > 0 {
+			finalRound.MaxRounds = entry.MaxToolIterations
+		}
 		spec := config.AgentSpec{
-			ID:         id,
-			Model:      d.modelName(id),
-			FinalRound: entry.finalRound(),
-			Memory:     entry.Memory,
-			Meditation: entry.Meditation,
-			File:       entry.File,
-			Exec:       entry.Exec,
+			ID:                id,
+			Model:             d.modelName(id),
+			FinalRound:        finalRound,
+			Temperature:       entry.Temperature,
+			ThinkingEnabled:   entry.ThinkingEnabled,
+			ReasoningEffort:   entry.ReasoningEffort,
+			MaxToolIterations: entry.MaxToolIterations,
+			MaxTokens:         entry.MaxTokens,
+			CompressThreshold: entry.CompressThreshold,
+			KeepRecentTasks:   entry.KeepRecentTasks,
+			Memory:            entry.Memory,
+			Meditation:        entry.Meditation,
+			File:              entry.File,
+			Exec:              entry.Exec,
 		}
 		files, err := d.promptFiles(id)
 		if err != nil {
@@ -804,12 +891,11 @@ func (d *hostDocument) declaresTool(id, name string) bool {
 
 // nativeAgents constructs the live pieces every declared agent is assembled
 // with.
-func (d *hostDocument) nativeAgents(ctx context.Context, sender MessageSender, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) (map[event.AgentID]NativeAgent, error) {
+func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, sender MessageSender, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) (map[event.AgentID]NativeAgent, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: d.requestTimeout()}
 	out := make(map[event.AgentID]NativeAgent, len(decl.Agents))
 	for _, spec := range decl.Agents {
 		native, err := d.modelFor(spec.ID, client)
@@ -1024,14 +1110,28 @@ func (d *hostDocument) requestTimeout() time.Duration {
 	return 10 * time.Minute
 }
 
-// modelFor constructs the native model of one declared agent from its provider
-// entry. Chat telemetry stays on the entry agent's model only.
-func (d *hostDocument) modelFor(id string, client *http.Client) (trpcmodel.Model, error) {
-	entry := d.Agents[id]
-	providerName := strings.TrimSpace(entry.Provider)
+// modelRef reports the provider registry key and the model name one declared
+// agent resolves in this document, before either half is built into a model.
+func (d *hostDocument) modelRef(id string) (string, string) {
+	providerName := strings.TrimSpace(d.Agents[id].Provider)
 	if providerName == "" {
 		providerName = strings.TrimSpace(d.Provider)
 	}
+	return providerName, d.modelName(id)
+}
+
+// modelFor constructs the native model of one declared agent from its provider
+// entry. Chat telemetry stays on the entry agent's model only.
+func (d *hostDocument) modelFor(id string, client *http.Client) (trpcmodel.Model, error) {
+	providerName, modelName := d.modelRef(id)
+	return d.buildModel(id, providerName, modelName, client)
+}
+
+// buildModel constructs one native model from an explicit provider and model
+// name: the reentrant step both Boot and a lease rebuild run, so a model
+// replacement reads the very construction the first generation read.
+func (d *hostDocument) buildModel(id, providerName, modelName string, client *http.Client) (trpcmodel.Model, error) {
+	providerName = strings.TrimSpace(providerName)
 	provider, ok := d.Providers[providerName]
 	if !ok {
 		return nil, fmt.Errorf("tagent: the host document declares no provider %q", providerName)
@@ -1039,7 +1139,7 @@ func (d *hostDocument) modelFor(id string, client *http.Client) (trpcmodel.Model
 	if protocol := strings.TrimSpace(provider.Provider); protocol != "" && protocol != "openai" {
 		return nil, fmt.Errorf("tagent: provider %q runs protocol %q, which this host does not wire", providerName, protocol)
 	}
-	modelName := d.modelName(id)
+	modelName = strings.TrimSpace(modelName)
 	if modelName == "" {
 		return nil, fmt.Errorf("tagent: agent %q declares no model", id)
 	}
@@ -1396,8 +1496,10 @@ func (in hostInjection) userText() string {
 	return ""
 }
 
-// hostFace serves the host's two loopback endpoints: the liveness probe a
-// supervisor polls and the task endpoint an inbound channel posts to.
+// hostFace serves the host's three loopback endpoints: the liveness probe a
+// supervisor polls, the task endpoint an inbound channel posts to, and the
+// reload endpoint a supervisor posts to after it rewrites the configuration
+// source.
 type hostFace struct {
 	ctx      context.Context
 	host     *Host
@@ -1428,7 +1530,8 @@ func newHostFace(ctx context.Context, host *Host, token string) (*hostFace, erro
 }
 
 // Handler returns the endpoints of the face: GET /healthz answers the liveness
-// probe, and POST /task admits one injection.
+// probe, POST /task admits one injection, and POST /reload rereads the
+// configuration source and answers the model changes it judged.
 func (f *hostFace) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -1436,7 +1539,36 @@ func (f *hostFace) Handler() http.Handler {
 		io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("POST /task", f.inject)
+	mux.HandleFunc("POST /reload", f.reload)
 	return mux
+}
+
+// reload rereads the configuration source and answers the model changes the
+// reload judged. The endpoint authenticates exactly as the task endpoint does:
+// a configured credential must arrive as a bearer token, and a face beside no
+// credential admits the loopback peer only.
+func (f *hostFace) reload(w http.ResponseWriter, r *http.Request) {
+	if err := f.authorize(r); err != nil {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="tagent"`)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	report, err := f.host.Reload(f.ctx)
+	if err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, ErrHostClosed):
+			status = http.StatusServiceUnavailable
+		case errors.Is(err, ErrHostReloadStructural):
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(report); err != nil {
+		assemblyWarn("tagent: write the reload answer: %v", err)
+	}
 }
 
 // inject admits one injection and answers before its turn runs: the body's user
