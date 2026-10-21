@@ -57,6 +57,31 @@ var (
 // CompressRequestType is a frozen type word, not a computed value.
 const _ = CompressRequestType
 
+// The model replacement family keeps its declared shapes: the judgment a
+// producer files, its identity derivation and the event it commits as.
+var (
+	_ = ModelReplacement{ID: "", AgentID: "", FromVersion: "", ToVersion: "", Source: "", Result: "", At: time.Time{}}
+
+	_ Fact = ModelReplacement{}
+
+	_ func(AgentID, string, string, string, string) ModelReplacement = ModelReplacementFor
+
+	_ func(ModelReplacement, time.Time) Event = ModelReplacement.Event
+
+	_ func(ModelReplacement) string = ModelReplacement.FactKey
+)
+
+// The model replacement type, its source and result stamps and the metadata
+// keys it carries are frozen names, not computed values.
+const (
+	_ = ModelReplacementType
+	_ = ModelReplacementSourceConfig
+	_ = ModelReplacementResultRequested
+	_ = MetaKeyModelFromVersion
+	_ = MetaKeyModelToVersion
+	_ = MetaKeyModelReplacementResult
+)
+
 // The frozen type and metadata names must stay compile-time constants: a
 // variable or a computed value stops this block from compiling.
 const (

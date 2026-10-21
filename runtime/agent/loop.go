@@ -133,6 +133,35 @@ type Recorder interface {
 	RecordAttempt(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
 }
 
+// Capture is the narrow trajectory capture face this loop fixes and records
+// through beside the training record production face: the request view is
+// fixed before the request starts, every observed attempt is admitted under the
+// capture's own bound, and the turn seals what it held when it ends. The
+// observations cross as the loop observed them — the decision identity, the
+// request view material, the reduced outcome — and never as a record of another
+// package's shape, so the capture side attaches through this face with no
+// package edge into the execution core.
+//
+// The redline list (4 rules):
+// MUST fix the request view before the request starts and never rebuild it from the options of a finished call.
+// MUST admit every observed attempt beside the response that produced it and report a refused admission as a counted loss.
+// MUST seal the turn once its productions stopped and report the seal failure as a counted loss.
+// MUST NOT let a capture failure reach the model decision, and MUST NOT make admission wait on a writer.
+type Capture interface {
+	// Snapshot fixes the view one decision's request runs on before the request
+	// starts: the model name, the prompt version and the tools visible to it,
+	// beside the request as it stands. The request is observed, never edited.
+	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+	// Record admits one observed attempt beside the response that produced it:
+	// the outcome arrives reduced, and the record side shares that terminal
+	// rather than deriving a second one.
+	Record(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
+	// Seal closes the turn's capture and reports the manifest a real writer
+	// confirmed; a seal that found records in flight is a named failure, never a
+	// completed capture.
+	Seal(ctx context.Context) error
+}
+
 // Turn is the outcome one invocation's drive reports: the decisions it ran in
 // order and the terminal its latest decision reduced to.
 type Turn struct {
@@ -174,6 +203,7 @@ type Loop struct {
 	intakes   map[event.InvocationID]*intake
 	history   HistoryFace
 	recorder  Recorder
+	capture   Capture
 	commit    FactCommit
 	pipelines FactPipelines
 	notices   NoticeFeed
@@ -222,6 +252,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	}()
 	production := &inFlightProducer{}
 	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
+	defer l.sealCapture(ctx)
 	defer production.stop()
 	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
 	l.observeReady(ctx, inv)
@@ -468,6 +499,17 @@ func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt eve
 	return key
 }
 
+// CommitFactFor commits one fact on behalf of the named agent and runs the
+// After pass of that fact, and reports the identity the fact committed under.
+// It is the same commit the loop's own production points use, exposed so a
+// producer outside a dispatch — the configuration source judging a model
+// replacement — lands its fact in the one ledger and is observed through the
+// faces of that agent's published generation exactly as the loop's own facts
+// are. An empty identity reports a loop beside no commit face.
+func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID {
+	return l.commitFactKey(ctx, agentID, evt)
+}
+
 // afterPass runs the After pass of one committed fact through the pipeline of
 // the named agent, and records a refused assembly as a named gap beside that
 // fact: the fact stays committed exactly as it committed and the drive moves on.
@@ -499,6 +541,19 @@ func (l *Loop) SetRecorder(recorder Recorder) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.recorder = recorder
+}
+
+// SetCapture attaches the trajectory capture face this loop fixes each
+// decision's request view through, admits each observed attempt beside and
+// seals the turn through. A nil face captures nothing. The production points
+// call the face exactly as the recording face is called: a refused fix, record
+// or seal is a counted recording loss and never reaches the model decision, and
+// the setter is separate from the constructor so the declared construction
+// shape of the loop stays as it is.
+func (l *Loop) SetCapture(capture Capture) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.capture = capture
 }
 
 // SetFactCommit attaches the commit face the loop commits the facts it produces
@@ -598,6 +653,54 @@ func (l *Loop) fixRequestSnapshot(ctx context.Context, decisionID event.Decision
 	}
 	if err := face(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, binding, req); err != nil {
 		l.noteRecordingLoss("snapshot", string(decisionID), err)
+	}
+}
+
+// fixCapture fixes the request view of one decision through the attached
+// capture before that request starts, or fixes nothing while no capture is
+// attached. A fix the capture refused is counted as an explicit recording loss
+// beside its decision identity and never carried into the model decision.
+func (l *Loop) fixCapture(ctx context.Context, decisionID event.DecisionID, view modelView, req model.Request) {
+	l.mu.Lock()
+	capture := l.capture
+	l.mu.Unlock()
+	if capture == nil {
+		return
+	}
+	if err := capture.Snapshot(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, req); err != nil {
+		l.noteRecordingLoss("capture-snapshot", string(decisionID), err)
+	}
+}
+
+// recordCaptureAttempt admits one observed attempt through the attached capture
+// beside the response that produced it, or admits nothing while no capture is
+// attached. A refused admission is counted as an explicit recording loss beside
+// its attempt identity and never carried into the model decision.
+func (l *Loop) recordCaptureAttempt(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) {
+	l.mu.Lock()
+	capture := l.capture
+	l.mu.Unlock()
+	if capture == nil {
+		return
+	}
+	if err := capture.Record(ctx, attemptID, decisionID, episodeID, outcome); err != nil {
+		l.noteRecordingLoss("capture-attempt", string(attemptID), err)
+	}
+}
+
+// sealCapture seals the capture of the turn the drive served, or seals nothing
+// while no capture is attached. The seal runs once the drive's productions
+// stopped, so it accounts exactly what the turn admitted; a refused seal is
+// counted as an explicit recording loss and never as a completed capture.
+func (l *Loop) sealCapture(ctx context.Context) {
+	l.mu.Lock()
+	capture := l.capture
+	l.mu.Unlock()
+	if capture == nil {
+		return
+	}
+	if err := capture.Seal(ctx); err != nil {
+		l.noteRecordingLoss("capture-seal", "", err)
 	}
 }
 
@@ -807,6 +910,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	}
 	req := model.Request{Messages: messages, Tools: tools}
 	l.fixRequestSnapshot(ctx, decisionID, view, handle.Binding, req)
+	l.fixCapture(ctx, decisionID, view, req)
 
 	production := &inFlightProducer{}
 	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
@@ -1293,11 +1397,12 @@ func (l *Loop) recordEpisode(ctx context.Context, inv Invocation) {
 // - The attempt record is assembled on the record side from the outcome exactly as the reduction produced it: the terminal it records is the one the model reduction derived.
 // - A write the recorder refused is counted as an explicit recording loss beside its record identity and never dropped silently.
 func (l *Loop) recordDecisionAttempt(ctx context.Context, inv Invocation, decisionID event.DecisionID, attemptID event.AttemptID, inputs []event.EventID, view modelView, outcome model.Outcome) {
+	episodeID := episodeOfReady(inv.Ready)
+	l.recordCaptureAttempt(ctx, attemptID, decisionID, episodeID, outcome)
 	recorder := l.currentRecorder()
 	if recorder == nil {
 		return
 	}
-	episodeID := episodeOfReady(inv.Ready)
 	now := time.Now()
 	if err := recorder.RecordDecision(ctx, decisionID, inv.InvocationID, episodeID, inputs, view.modelName, view.promptVersion, view.visibleTools, now); err != nil {
 		l.noteRecordingLoss("decision", string(decisionID), err)

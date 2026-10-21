@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -82,19 +83,39 @@ var errAgentTargetUndeclared = errors.New("tagent: the agent reference names no 
 // so a cycle would never finish resolving.
 var errAgentReferenceCycle = errors.New("tagent: the agent reference closes a cycle")
 
+// leaseObserverOf reports the replacement consumer mounted for one agent, or
+// nil beside none. A typed nil observer is never returned as a non-nil
+// interface: the pipeline would otherwise carry a face that observes nothing
+// under a name the run never mounted.
+func (r *Run) leaseObserverOf(agentID event.AgentID) plugin.Instance {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	observer, mounted := r.leaseObservers[agentID]
+	if !mounted || observer == nil {
+		return nil
+	}
+	return observer
+}
+
 // suppliers adapts the contributed native pieces of every agent onto the
 // construction chain prepare drives: every native callable tool of every
 // family is registered through the task wrapper of this run before the binding
 // is published, so a call is admitted and settled through the task face and
 // its result backflows to the invocation that issued it. The contributed tools
 // are handed over native: the admission wrap happens once per family in the
-// registration step beside the file and skill families.
+// registration step beside the file and skill families. A leased agent's model
+// is the lease's stable handle: every request borrows the version in effect
+// when it begins, and an installed version serves the requests that begin after
+// it without a second binding generation.
 func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]NativeAgent) map[event.AgentID]supplier {
 	out := make(map[event.AgentID]supplier, len(agents))
 	for id, native := range agents {
 		contributed := native
 		out[id] = supplier{
 			model: func(context.Context, config.AgentSpec) (model.Model, func(context.Context) error, error) {
+				if held := r.leaseOf(id); held != nil {
+					return rl.NewLeaseModel(held.lease), func(context.Context) error { return nil }, nil
+				}
 				if contributed.Model == nil {
 					return nil, nil, fmt.Errorf("tagent: agent %q contributes no model", id)
 				}
@@ -123,6 +144,9 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 			plugins: func(_ context.Context, spec config.AgentSpec) ([]plugin.Instance, error) {
 				elements := append([]plugin.Instance(nil), contributed.Plugins...)
 				elements = append(elements, r.plugins...)
+				if observer := r.leaseObserverOf(event.AgentID(spec.ID)); observer != nil {
+					elements = append(elements, observer)
+				}
 				if spec.MaxTokens > 0 && r.ageFold != nil {
 					elements = append(elements, r.ageFold)
 				}

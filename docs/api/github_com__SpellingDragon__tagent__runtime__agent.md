@@ -175,6 +175,37 @@ type BoundaryView struct {
     An empty PromptVersion keeps the version the binding already carries:
     a binding that names no files fixes no content version of its own.
 
+type Capture interface {
+	// Snapshot fixes the view one decision's request runs on before the request
+	// starts: the model name, the prompt version and the tools visible to it,
+	// beside the request as it stands. The request is observed, never edited.
+	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+	// Record admits one observed attempt beside the response that produced it:
+	// the outcome arrives reduced, and the record side shares that terminal
+	// rather than deriving a second one.
+	Record(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
+	// Seal closes the turn's capture and reports the manifest a real writer
+	// confirmed; a seal that found records in flight is a named failure, never a
+	// completed capture.
+	Seal(ctx context.Context) error
+}
+    Capture is the narrow trajectory capture face this loop fixes and records
+    through beside the training record production face: the request view is
+    fixed before the request starts, every observed attempt is admitted under
+    the capture's own bound, and the turn seals what it held when it ends.
+    The observations cross as the loop observed them — the decision identity,
+    the request view material, the reduced outcome — and never as a record of
+    another package's shape, so the capture side attaches through this face with
+    no package edge into the execution core.
+
+    The redline list (4 rules): MUST fix the request view before the request
+    starts and never rebuild it from the options of a finished call. MUST admit
+    every observed attempt beside the response that produced it and report a
+    refused admission as a counted loss. MUST seal the turn once its productions
+    stopped and report the seal failure as a counted loss. MUST NOT let a
+    capture failure reach the model decision, and MUST NOT make admission wait
+    on a writer.
+
 type CloseRequest struct {
 	// Address is the address being closed; new input to it is refused first.
 	Address event.Address
@@ -585,6 +616,15 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
     fact runs beside the notification rather than under the cancellation of the
     caller that delivered it, because observation is a bypass.
 
+func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID
+    CommitFactFor commits one fact on behalf of the named agent and runs the
+    After pass of that fact, and reports the identity the fact committed under.
+    It is the same commit the loop's own production points use, exposed so a
+    producer outside a dispatch — the configuration source judging a model
+    replacement — lands its fact in the one ledger and is observed through the
+    faces of that agent's published generation exactly as the loop's own facts
+    are. An empty identity reports a loop beside no commit face.
+
 func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     Drive runs one invocation until its latest decision reaches a terminal that
     dispatches no tool: every decision aggregates the transcript the range has
@@ -615,6 +655,15 @@ func (l *Loop) RecordingLosses() []RecordingLoss
     not write, in arrival order, each beside its record identity and the named
     failure that stopped the write. The account is the explicit gap ledger of
     the run: nothing the recorder refused is silently forgotten here.
+
+func (l *Loop) SetCapture(capture Capture)
+    SetCapture attaches the trajectory capture face this loop fixes each
+    decision's request view through, admits each observed attempt beside and
+    seals the turn through. A nil face captures nothing. The production points
+    call the face exactly as the recording face is called: a refused fix, record
+    or seal is a counted recording loss and never reaches the model decision,
+    and the setter is separate from the constructor so the declared construction
+    shape of the loop stays as it is.
 
 func (l *Loop) SetFactCommit(commit FactCommit)
     SetFactCommit attaches the commit face the loop commits the facts it

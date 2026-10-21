@@ -165,10 +165,31 @@ type Run struct {
 	mcpBinder   *mcpgw.Binder
 	recorder    rl.Recorder
 	observer    plugin.Observer
-	presented   []view.Presentation
-	snapshots   []RequestSnapshotRecord
-	fixers      map[event.AgentID]*fileFixer
-	replays     map[event.SessionID]replayEntry
+	// leases holds the model leases the host attached per agent, in the shape
+	// the assembly mounted them with: the lease that serves the agent, the
+	// rebuild a replacement fact runs and the publication entry it installs
+	// the rebuilt model through.
+	leases map[event.AgentID]*leaseState
+	// pendingModels holds the models a publication contributed for a declared
+	// model change, so the replacement fact that publication judged has a
+	// rebuild source even when the host named no explicit one.
+	pendingModels map[event.AgentID]model.Model
+	// leaseObservers holds the replacement consumer mounted on each leased
+	// agent's pipeline: one fact->observation face per leased agent.
+	leaseObservers map[event.AgentID]*rl.LeaseObserver
+	// leasePublications records every version a lease installed through this
+	// run's default publication entry, in installation order.
+	leasePublications []rl.ModelIdentity
+	// leaseLosses records every declared model change whose replacement fact
+	// could not commit, so a failed judgment is readable beside the run.
+	leaseLosses []error
+	// capture is the trajectory capture this run fixes, admits and seals
+	// through, or nil beside no capture.
+	capture   rl.Capture
+	presented []view.Presentation
+	snapshots []RequestSnapshotRecord
+	fixers    map[event.AgentID]*fileFixer
+	replays   map[event.SessionID]replayEntry
 	// ageFold folds a session's projection once its replay fills the window the
 	// declaration gave it; it is mounted on every agent that declares a window.
 	ageFold *AgeFoldPlugin
@@ -207,23 +228,39 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	if err := cfg.resolveMemory(); err != nil {
 		return nil, err
 	}
+	for id, held := range cfg.leases {
+		if held.lease == nil {
+			return nil, fmt.Errorf("%w: agent %q", ErrModelLeaseMissing, id)
+		}
+		if !declaresAgent(decl, id) {
+			return nil, fmt.Errorf("%w: agent %q", ErrModelLeaseUndeclared, id)
+		}
+	}
 	r := &Run{
-		instance:    newInstanceID(),
-		bindings:    state.NewBindings(),
-		occupancy:   state.NewOccupancy(),
-		inspector:   inspectorSubject,
-		admission:   task.NewMemoryAdmission(),
-		sites:       map[event.Address]bool{},
-		facts:       map[event.EventID]event.Event{},
-		history:     map[event.Address][]model.Message{},
-		fixers:      map[event.AgentID]*fileFixer{},
-		replays:     map[event.SessionID]replayEntry{},
-		approver:    cfg.approver,
-		policy:      cfg.policy,
-		enforcement: cfg.enforcement,
-		recorder:    cfg.recorder,
-		observer:    cfg.observer,
-		execManager: cfg.execManager,
+		instance:       newInstanceID(),
+		bindings:       state.NewBindings(),
+		occupancy:      state.NewOccupancy(),
+		inspector:      inspectorSubject,
+		admission:      task.NewMemoryAdmission(),
+		sites:          map[event.Address]bool{},
+		facts:          map[event.EventID]event.Event{},
+		history:        map[event.Address][]model.Message{},
+		fixers:         map[event.AgentID]*fileFixer{},
+		replays:        map[event.SessionID]replayEntry{},
+		approver:       cfg.approver,
+		policy:         cfg.policy,
+		enforcement:    cfg.enforcement,
+		recorder:       cfg.recorder,
+		observer:       cfg.observer,
+		execManager:    cfg.execManager,
+		capture:        cfg.capture,
+		leases:         map[event.AgentID]*leaseState{},
+		pendingModels:  map[event.AgentID]model.Model{},
+		leaseObservers: map[event.AgentID]*rl.LeaseObserver{},
+	}
+	for id, held := range cfg.leases {
+		lease := held
+		r.leases[id] = &lease
 	}
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	if cfg.reflectionAnchors != "" {
@@ -286,6 +323,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.mcpServers = mcpgw.NewServerRegistry()
 	r.mcpGateways = mcpgw.NewGateways(r.mcpServers, mcpgw.NewRegistryDiscovery())
 	r.mcpBinder = mcpgw.NewBinder(r.mcpServers)
+	if err := r.mountLeaseObservers(); err != nil {
+		return nil, err
+	}
+	if err := r.mountCapture(); err != nil {
+		return nil, err
+	}
 	if _, err := r.Publish(ctx, decl, agents); err != nil {
 		return nil, err
 	}
@@ -353,6 +396,9 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 	if err != nil {
 		return state.PublishOutcome{}, err
 	}
+	r.mu.Lock()
+	previous := r.current
+	r.mu.Unlock()
 	outcome, err := r.publisher.Publish(ctx, cand)
 	if err == nil {
 		r.loop.SetFinalRound(finalRoundPolicy(decl))
@@ -362,6 +408,7 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 		if err := r.bindMCPServers(ctx, servers); err != nil {
 			return outcome, err
 		}
+		r.noteDeclaredModelChanges(ctx, previous, decl, agents)
 	}
 	return outcome, err
 }
@@ -635,6 +682,14 @@ type assemblyConfig struct {
 	// names. An option that states one of those faces directly keeps it, so a
 	// host that wires its own embedder is never overridden.
 	memory *MemoryPlan
+	// leases holds the model leases the host attached per agent: the lease
+	// that serves the agent beside the rebuild and the publication entry a
+	// replacement fact runs. A leased agent's binding carries the lease's
+	// stable model handle, so one rebuilt version serves the requests that
+	// begin after it was installed.
+	leases map[event.AgentID]leaseState
+	// capture is the trajectory capture the assembly attaches to the loop.
+	capture rl.Capture
 }
 
 // Option configures the formal assembly at construction. It is the assembly
@@ -1253,4 +1308,286 @@ func validateEngine(engine config.EngineSpec) error {
 		return fmt.Errorf("%w: %w", ErrMemoryEngine, err)
 	}
 	return nil
+}
+
+// ErrModelLeaseMissing and the lease wiring errors beside it name the way the
+// model replacement wiring was refused, so a host routes each by name instead
+// of matching on message text.
+var (
+	// ErrModelLeaseMissing reports a model lease option that names no lease: a
+	// version in effect is never invented by the assembly.
+	ErrModelLeaseMissing = errors.New("tagent: the model lease option names no lease")
+	// ErrModelLeaseUndeclared reports a model lease attached to an agent the
+	// declaration does not declare: the declaration is the authorization, so a
+	// lease beside no declared agent is refused rather than mounted unwired.
+	ErrModelLeaseUndeclared = errors.New("tagent: the model lease names an agent the declaration does not declare")
+	// ErrModelChangeOwnerMissing reports a model change naming an agent this
+	// run holds no lease for: no lease means no version to move, and the change
+	// is refused by name rather than committed against nobody.
+	ErrModelChangeOwnerMissing = errors.New("tagent: the model change names an agent this run holds no model lease for")
+	// ErrModelChangeTargetMissing reports a model change that names no target
+	// version: an unidentified version is never installed.
+	ErrModelChangeTargetMissing = errors.New("tagent: the model change names no target version")
+	// ErrModelChangeUncommitted reports a model change whose fact did not commit:
+	// the judgment reached no ledger, so no observation can read it back.
+	ErrModelChangeUncommitted = errors.New("tagent: the model change fact did not commit")
+	// ErrCaptureUnscoped reports a capture this assembly cannot scope to one
+	// request view: the loop hands a decision's view material per request, and a
+	// capture beside no scope would have to invent the view it fixes.
+	ErrCaptureUnscoped = errors.New("tagent: the capture cannot be scoped to one request view")
+)
+
+// leaseState is one agent's attached model lease at assembly: the lease that
+// serves the agent, the rebuild a replacement fact runs and the publication
+// entry the rebuilt model is installed through. A nil rebuild takes the model
+// the publication that judged the change contributed; a nil publish records the
+// installed identity beside the run and installs the version in the lease only.
+type leaseState struct {
+	lease   *rl.ModelLease
+	rebuild func(version string) (model.Model, error)
+	publish func(rl.ModelIdentity, model.Model) error
+}
+
+// ModelLeaseOption configures the model lease one agent is assembled with.
+type ModelLeaseOption func(*leaseState)
+
+// WithLeaseRebuild names the rebuild step a model replacement fact runs: the
+// step receives the version the fact asks for and answers the model that
+// version is installed as. A rebuild that fails installs no version, and the
+// lease keeps the version in effect.
+func WithLeaseRebuild(rebuild func(version string) (model.Model, error)) ModelLeaseOption {
+	return func(state *leaseState) { state.rebuild = rebuild }
+}
+
+// WithModelLease attaches the model lease of one agent to this assembly: the
+// agent's binding carries the lease's stable model handle instead of the model
+// the host contributed, every committed model replacement fact owned by the
+// agent is consumed by the lease observer mounted on its pipeline, and the
+// lease's rebuild-publication-installation order decides whether the requested
+// version takes effect. A rebuild and a publication entry are configured
+// through the model lease options; a replacement beside no rebuild takes the
+// model the publication that judged the change contributed.
+//
+// The lease agent must be declared by the assembly's declaration: the
+// declaration is the authorization, and a lease beside no declared agent is
+// refused by name.
+func WithModelLease(agentID event.AgentID, lease *rl.ModelLease, opts ...ModelLeaseOption) Option {
+	return func(c *assemblyConfig) {
+		if c.leases == nil {
+			c.leases = map[event.AgentID]leaseState{}
+		}
+		held := leaseState{lease: lease}
+		for _, opt := range opts {
+			opt(&held)
+		}
+		c.leases[agentID] = held
+	}
+}
+
+// WithCapture attaches the trajectory capture this assembly fixes each request
+// view through, admits each observed attempt through and seals each turn
+// through. The capture must be scoped, because the loop hands a decision's view
+// material per request and the capture fixes the snapshot against that view; a
+// capture beside no scope is refused by name at assembly.
+func WithCapture(capture rl.Capture) Option {
+	return func(c *assemblyConfig) { c.capture = capture }
+}
+
+// declaresAgent reports whether one declaration declares the named agent.
+func declaresAgent(decl *config.Declaration, agentID event.AgentID) bool {
+	for _, spec := range decl.Agents {
+		if event.AgentID(spec.ID) == agentID {
+			return true
+		}
+	}
+	return false
+}
+
+// leaseOf reports the lease state attached to one agent, or nil beside none.
+// The map is written once at assembly and never after, and the lock keeps a
+// concurrent publication from reading it mid-write.
+func (r *Run) leaseOf(agentID event.AgentID) *leaseState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.leases[agentID]
+}
+
+// mountLeaseObservers mounts the replacement consumer of every attached lease
+// on the agent's pipeline: one fact->observation face that reads a committed
+// model replacement fact back and applies it through the lease's own rebuild,
+// publication and installation order. A lease observer the run cannot build is
+// refused before the first publication, so a half-wired assembly is never
+// returned.
+func (r *Run) mountLeaseObservers() error {
+	for id, held := range r.leases {
+		observer, err := rl.NewLeaseObserver(id, held.lease, runFacts{run: r}, r.rebuildLeaseModel(id), r.publishLease(id))
+		if err != nil {
+			return fmt.Errorf("tagent: mount the model lease observer of agent %q: %w", id, err)
+		}
+		r.leaseObservers[id] = observer
+	}
+	return nil
+}
+
+// rebuildLeaseModel reports the rebuild step one agent's lease replacement
+// runs: the explicit rebuild the host named when it attached the lease, or the
+// model the publication that judged the change contributed. The pending model
+// is consumed once, so one contributed model installs one version and a second
+// replacement beside none is refused by name.
+func (r *Run) rebuildLeaseModel(agentID event.AgentID) func(version string) (model.Model, error) {
+	return func(version string) (model.Model, error) {
+		if held := r.leaseOf(agentID); held != nil && held.rebuild != nil {
+			return held.rebuild(version)
+		}
+		r.mu.Lock()
+		next, pending := r.pendingModels[agentID]
+		if pending {
+			delete(r.pendingModels, agentID)
+		}
+		r.mu.Unlock()
+		if !pending || next == nil {
+			return nil, fmt.Errorf("%w: no model is pending for agent %q version %q", rl.ErrLeaseRebuildFailed, agentID, version)
+		}
+		return next, nil
+	}
+}
+
+// publishLease reports the publication entry one agent's lease replacement
+// installs its rebuilt model through: the explicit entry the host named when it
+// attached the lease, or the default entry that records the installed identity
+// beside the run. The default entry installs nothing outside the lease, because
+// the binding already carries the lease's stable model handle and the version
+// in effect is what that handle borrows.
+func (r *Run) publishLease(agentID event.AgentID) func(rl.ModelIdentity, model.Model) error {
+	return func(identity rl.ModelIdentity, rebuilt model.Model) error {
+		if held := r.leaseOf(agentID); held != nil && held.publish != nil {
+			return held.publish(identity, rebuilt)
+		}
+		r.mu.Lock()
+		r.leasePublications = append(r.leasePublications, identity)
+		r.mu.Unlock()
+		return nil
+	}
+}
+
+// mountCapture attaches the trajectory capture to the loop: the run's capture
+// is scoped to one request view per decision and adapted onto the loop's narrow
+// capture face. A capture beside no scope is refused by name before the first
+// publication.
+func (r *Run) mountCapture() error {
+	if r.capture == nil {
+		return nil
+	}
+	scope, ok := r.capture.(rl.CaptureScope)
+	if !ok {
+		return fmt.Errorf("%w: %T", ErrCaptureUnscoped, r.capture)
+	}
+	adapter, err := rl.NewCaptureAdapter(scope)
+	if err != nil {
+		return err
+	}
+	r.loop.SetCapture(adapter)
+	return nil
+}
+
+// NoteModelChange files the judgment that one agent's model reference moves
+// from one version to another and commits it as a model replacement fact on the
+// agent's own pipeline, the explicit entry a host drives when its own
+// configuration source observed the change; a publication that moves an
+// agent's declared model reference files the same fact itself, with the
+// configuration source stamp. The lease mounted on the agent runs the rebuild,
+// publication and installation order and decides whether the version takes
+// effect.
+//
+// The identity of the committed fact is returned; a change this run cannot
+// file — no lease for the agent, no target version, no commit face — is refused
+// by name, and an empty from version is the version the lease holds.
+func (r *Run) NoteModelChange(agentID event.AgentID, from, to, source string) (event.EventID, error) {
+	return r.noteModelReplacement(context.Background(), agentID, from, to, source)
+}
+
+// noteModelReplacement is the one filing path of a model replacement judgment:
+// it resolves the lease of the owning agent, defaults the from version to the
+// version in effect and the source to the configuration source, and commits the
+// fact through the loop's commit face so the After pass of the owning agent's
+// pipeline observes it exactly as the loop's own facts are observed.
+func (r *Run) noteModelReplacement(ctx context.Context, agentID event.AgentID, from, to, source string) (event.EventID, error) {
+	held := r.leaseOf(agentID)
+	if held == nil || held.lease == nil {
+		return "", fmt.Errorf("%w: agent %q", ErrModelChangeOwnerMissing, agentID)
+	}
+	if to == "" {
+		return "", fmt.Errorf("%w: agent %q", ErrModelChangeTargetMissing, agentID)
+	}
+	if source == "" {
+		source = event.ModelReplacementSourceConfig
+	}
+	if from == "" {
+		from = held.lease.CurrentVersion()
+	}
+	fact := event.ModelReplacementFor(agentID, from, to, source, event.ModelReplacementResultRequested)
+	key := r.loop.CommitFactFor(ctx, agentID, fact.Event(time.Now().UTC()))
+	if key == "" {
+		return "", fmt.Errorf("%w: agent %q", ErrModelChangeUncommitted, agentID)
+	}
+	return key, nil
+}
+
+// noteDeclaredModelChanges files the replacement judgments one successful
+// publication implies: every leased agent whose declared model reference moved
+// since the generation in effect is judged once, from the version its lease
+// holds to the version the new reference names, with the configuration source
+// stamp. The model the publication contributed for the agent is kept as the
+// rebuild source when the host named no explicit one.
+//
+// The declared model reference is the configuration fingerprint of the model
+// dimension: a byte-identical reload publishes nothing and judges nothing, and
+// a changed reference is the change itself. A change whose fact cannot commit
+// is recorded beside the run rather than read as a replacement that happened.
+func (r *Run) noteDeclaredModelChanges(ctx context.Context, previous state.StatePlan, decl *config.Declaration, agents map[event.AgentID]NativeAgent) {
+	if previous.Plan.Declaration == nil || decl == nil {
+		return
+	}
+	before := make(map[event.AgentID]string, len(previous.Plan.Declaration.Agents))
+	for _, spec := range previous.Plan.Declaration.Agents {
+		before[event.AgentID(spec.ID)] = spec.Model
+	}
+	for _, spec := range decl.Agents {
+		id := event.AgentID(spec.ID)
+		if r.leaseOf(id) == nil || before[id] == spec.Model {
+			continue
+		}
+		target := rl.ParseModelIdentity(spec.Model).Version
+		if target == "" {
+			continue
+		}
+		if native, contributed := agents[id]; contributed && native.Model != nil {
+			r.mu.Lock()
+			r.pendingModels[id] = native.Model
+			r.mu.Unlock()
+		}
+		if _, err := r.noteModelReplacement(ctx, id, "", target, event.ModelReplacementSourceConfig); err != nil {
+			r.mu.Lock()
+			r.leaseLosses = append(r.leaseLosses, err)
+			r.mu.Unlock()
+		}
+	}
+}
+
+// LeasePublications reports the versions the model leases installed through
+// this run's default publication entry, in installation order, as a copy the
+// caller owns.
+func (r *Run) LeasePublications() []rl.ModelIdentity {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]rl.ModelIdentity(nil), r.leasePublications...)
+}
+
+// LeaseLosses reports the declared model changes whose replacement fact could
+// not commit, as a copy the caller owns: a judgment that reached no ledger is
+// named here rather than read as a replacement that happened.
+func (r *Run) LeaseLosses() []error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]error(nil), r.leaseLosses...)
 }

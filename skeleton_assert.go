@@ -5,6 +5,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
 	"github.com/SpellingDragon/tagent/memory/query"
@@ -39,6 +40,26 @@ var (
 	_ func(*Run, context.Context, InvokeRequest) (agent.Turn, error) = (*Run).Invoke
 
 	_ func(*Run, context.Context, *config.Declaration, map[event.AgentID]NativeAgent) (state.PublishOutcome, error) = (*Run).Publish
+)
+
+// The event-driven model replacement wiring keeps its declared shapes: the
+// lease attached per agent beside the rebuild a replacement fact runs, the
+// capture the loop is driven through, and the explicit filing entry a host
+// drives when its own configuration source observed a change.
+var (
+	_ func(event.AgentID, *rl.ModelLease, ...ModelLeaseOption) Option = WithModelLease
+
+	_ func(func(string) (model.Model, error)) ModelLeaseOption = WithLeaseRebuild
+
+	_ func(rl.Capture) Option = WithCapture
+
+	_ func(*Run, event.AgentID, string, string, string) (event.EventID, error) = (*Run).NoteModelChange
+
+	_ func(*Run) []rl.ModelIdentity = (*Run).LeasePublications
+
+	_ func(*Run) []error = (*Run).LeaseLosses
+
+	_ = leaseState{lease: nil, rebuild: nil, publish: nil}
 )
 
 // The public SDK entries the host drives the assembled runtime through keep

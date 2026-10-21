@@ -109,6 +109,19 @@ var (
     so a caller can route it by name.
 
 var (
+	// ErrExportReaderMissing reports an exporter built beside no fact reader: a
+	// chain is never invented for an export.
+	ErrExportReaderMissing = errors.New("rl: the chain exporter was built beside no fact reader")
+	// ErrExportLimit reports a negative sample limit: a negative bound is
+	// refused rather than read as unlimited.
+	ErrExportLimit = errors.New("rl: the chain export limit is negative")
+	// ErrSampleWriterMissing reports a sample write offered to no writer.
+	ErrSampleWriterMissing = errors.New("rl: the SFT sample writer is missing")
+)
+    ErrExportReaderMissing and the other named errors of the chain export:
+    each names the way an export was refused, so a caller routes it by name.
+
+var (
 	// ErrSchemaMissing reports a line that carries no schema version at all.
 	ErrSchemaMissing = errors.New("rl: the record line carries no schema version")
 	// ErrSchemaUnknown reports a line whose schema version this package does not
@@ -211,6 +224,37 @@ var ErrCaptureRefused = errors.New("rl: the capture refused the record at admiss
     that refused it and reported by name here, so a write the capture could not
     take reaches the caller's loss account instead of silence.
 
+var ErrCaptureSinkMissing = errors.New("rl: the trajectory capture was built beside no sink")
+    ErrCaptureSinkMissing reports a trajectory capture built beside no sink:
+    the bounded admission queue is the one write point of a capture, and a
+    capture beside none admits nothing.
+
+var ErrCaptureSnapshotMissing = errors.New("rl: the capture holds no snapshot behind the reference")
+    ErrCaptureSnapshotMissing reports a snapshot reference the capture holds no
+    snapshot behind: a reference is read back only when its content is held,
+    so a missing snapshot is named rather than answered empty.
+
+var ErrCaptureUnscoped = errors.New("rl: the capture cannot be scoped to one request view")
+    ErrCaptureUnscoped reports a capture the trajectory cannot scope to one
+    request view: a capture that cannot name the view of the decision it serves
+    cannot fix a snapshot for it.
+
+var ErrCaptureViewMissing = errors.New("rl: the capture is not scoped to one request view")
+    ErrCaptureViewMissing reports a snapshot asked of the capture itself rather
+    than of the scope that carries the view: a request is fixed against the view
+    of its own decision, and a viewless snapshot is refused by name instead of
+    fixed against an invented view.
+
+var ErrLeaseObserverLookupMissing = errors.New("rl: the model lease observer was built beside no fact lookup")
+    ErrLeaseObserverLookupMissing reports a lease observer built beside no
+    fact lookup: the observer reads the fact it applies back from the chain,
+    and an unreachable chain is refused rather than read as no replacement.
+
+var ErrLeaseStaleReplacement = errors.New("rl: the model replacement starts from a version the lease does not hold")
+    ErrLeaseStaleReplacement reports a replacement fact that starts from a
+    version the lease does not hold: a move judged against an older version is
+    refused by name rather than applied on top of the version in effect.
+
 var ErrLogprobsSourceMissing = errors.New("rl: the logprobs unsupported state carries no declaration source")
     ErrLogprobsSourceMissing reports an attempt carrying a LogprobsUnsupported
     state with no declaration named: an unsupported state rests on a provider
@@ -236,6 +280,12 @@ func MarshalLine(line Line) ([]byte, error)
 func MarshalSnapshot(snapshot RequestSnapshot) ([]byte, error)
     MarshalSnapshot encodes one safe snapshot for persistence.
 
+func NewCaptureAdapter(scope CaptureScope) (*CaptureAdapter, error)
+    NewCaptureAdapter wraps one scoped capture in the face the execution loop
+    attaches. A capture that cannot be scoped is refused by name: the loop hands
+    a request's view material per decision, and a capture beside no scope would
+    have to invent the view it fixes.
+
 func NewCaptureSink(id string, cfg SinkConfig, writer CaptureWriter) (*CaptureSink, error)
     NewCaptureSink returns the bounded admission queue of one capture, draining
     into writer. A missing capture id or writer is refused, and a negative bound
@@ -247,11 +297,23 @@ func NewFileCaptureWriter(dir string, maxOpenFiles int) (*FileCaptureWriter, err
     than obeyed, a negative bound is refused rather than read as unlimited,
     and no bound opens a second write point beside this one.
 
+func NewLeaseObserver(agent event.AgentID, lease *ModelLease, lookup plugin.FactLookup, rebuild func(version string) (model.Model, error), publish func(ModelIdentity, model.Model) error) (*LeaseObserver, error)
+    NewLeaseObserver returns the replacement consumer of one agent's lease:
+    the fact lookup that reads a committed replacement back, the rebuild that
+    produces the requested version and the publication entry that accepts the
+    rebuilt model beside the version in effect.
+
 func NewModelLease(initial model.Model, version string) (*ModelLease, error)
     NewModelLease returns the lease of one model reference, holding initial as
     the version named by version. An empty version is the unversioned model of a
     deployment that names no generation, and it is recorded unversioned rather
     than assumed to be a current version.
+
+func NewTrajectoryCapture(id string, sink *CaptureSink, policy SnapshotPolicy) (*TrajectoryCapture, error)
+    NewTrajectoryCapture returns the capture of one trajectory over its bounded
+    sink, under the projection policy its snapshots are taken with. A missing
+    capture identity or sink is refused by name: a capture seals the account of
+    the identity it belongs to and drains into exactly one write point.
 
 func ParseLine(data []byte) (Line, error)
     ParseLine decodes one versioned record line: it reads the declared schema
@@ -312,6 +374,11 @@ func VerifySnapshot(ref SnapshotRef, content []byte) error
     back under: an empty reference cannot read content back and is refused
     as unreadable, and content that does not match its digest is refused as a
     mismatch rather than read as the referenced snapshot.
+
+func WriteSamples(w io.Writer, samples []SFTSample) error
+    WriteSamples writes the sample rows as JSONL: one encoded sample per line,
+    in the order they were assembled. An empty sample set writes nothing,
+    and a write that fails is reported by name rather than counted as written.
 
 TYPES
 
@@ -408,6 +475,36 @@ type Capture interface {
     MUST NOT let admission wait on the caller or cross its bound. MUST NOT
     report a capture as complete while a record is in flight or no writer
     confirmed the seal.
+
+type CaptureAdapter struct {
+	// Has unexported fields.
+}
+    CaptureAdapter adapts one scoped capture onto the execution loop's narrow
+    capture face: the loop hands the scattered observations of a decision — the
+    request view material, the stored input events and the reduced outcome — and
+    the adapter assembles them into the fixed view, the scoped snapshot and the
+    attempt record the capture takes.
+
+    The adapter crosses built-in, event and model types only, so the capture
+    side attaches through the loop's face with no package edge into the
+    execution core. A record the capture refuses is returned as a named refusal,
+    which the loop counts as a recording loss and never carries into the model
+    decision.
+
+func (a *CaptureAdapter) Record(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
+    Record admits the attempt of one decision through the capture: the record is
+    assembled through the single observation face AttemptOf from the outcome the
+    model reduction produced, so the terminal it names is that reduction's own.
+
+func (a *CaptureAdapter) Seal(ctx context.Context) error
+    Seal closes the capture at the end of the turn it observed. The wait is
+    bounded: a writer that does not confirm in time leaves the sink's explicit
+    partial account, never a completed seal invented here.
+
+func (a *CaptureAdapter) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+    Snapshot fixes the view of one decision's request before the request starts
+    and keeps the scope that carries it, so the attempt of the same decision
+    records against the very view its request was fixed on.
 
 type CaptureAdmission struct {
 	// Admitted reports whether the record was admitted.
@@ -517,6 +614,21 @@ type CaptureManifest struct {
     reported no sync is partial as well — the seal covers what reached storage,
     never what was only written to.
 
+type CaptureScope interface {
+	Capture
+	// Scope returns the capture of one decision's request view.
+	Scope(view ModelViewRef, decisionID event.DecisionID) Capture
+}
+
+    CaptureScope scopes one capture to the request view of one decision:
+    the scope carries the view the request was declared against, fixes the
+    snapshot of that request and hands back the reference the decision records,
+    while records and the seal stay the capture's own.
+
+    The scope is what keeps the frozen Capture signature honest: Snapshot is
+    handed the request alone, so the view the request runs on is supplied by the
+    boundary that declares it and never reconstructed inside the capture.
+
 type CaptureSink struct {
 	// Has unexported fields.
 }
@@ -593,6 +705,36 @@ type CaptureWriter interface {
     actually wrote, in file name order. MUST report its own sync result at seal
     time. MUST NOT infer a sync result from record counts or file digests.
     MUST NOT satisfy a bound by removing or rotating what is already stored.
+
+type ChainExporter struct {
+	// Has unexported fields.
+}
+
+    ChainExporter assembles SFT sample rows from the fact chain of sessions:
+    one row per turn — the input the request presented (projection entry texts)
+    and the label the assistant produced. It reads the chain, derives nothing,
+    and never touches the production path.
+
+    The redline list (3 rules): MUST read the chain through the read-only fact
+    face and write nothing back. MUST pair one turn's input with the assistant
+    output of the same invocation. MUST NOT invent a sample for a turn that
+    presented no input or produced no assistant output. ChainExporter assembles
+    SFT sample rows from the fact chain of sessions. It holds the read-only
+    fact face and keeps no state of its own, so one exporter may export the same
+    chain again and again without moving it.
+
+func NewChainExporter(facts FactReader) *ChainExporter
+    NewChainExporter returns the exporter reading the chain through facts.
+
+func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSample, error)
+    Export assembles the SFT sample rows of the named sessions: it reads each
+    session's chain in commit order, groups the facts by episode, pairs the
+    input events with the assistant output events of the same invocation,
+    and emits one row per paired turn, in the order the turns first appeared.
+
+    A turn that presented no input or produced no assistant output is skipped
+    rather than filled with an invented side, and a fact carrying no invocation
+    is not paired at all. The limit bounds the rows emitted, never the pairing.
 
 type DecisionRecord struct {
 	// Schema is the record schema version the line was written with.
@@ -698,6 +840,34 @@ type EpisodeRecord struct {
     equality is forced. A record whose origin could not be read carries
     LineageUnknown with an empty ParentID instead of a guessed parent.
 
+type ExportOptions struct {
+	// SessionIDs names the sessions whose chains are read, in the order the
+	// export visits them. An empty list exports no sample.
+	SessionIDs []event.SessionID
+	// Limit bounds the number of sample rows written; zero leaves the export
+	// unbounded and a negative bound is refused.
+	Limit int
+}
+    ExportOptions narrows one export to the sessions it reads and the number of
+    rows it emits.
+
+    The session list is the export's whole read scope: an empty list exports
+    nothing rather than scanning every session the reader holds, and a repeated
+    session is read once.
+
+type FactReader interface {
+	// SessionFacts reports the facts one session committed, in commit order.
+	SessionFacts(addr event.Address) []event.Event
+}
+    FactReader is the read-only face of the fact chain the exporter consumes:
+    the facts one session committed, in the order they committed. The face
+    carries no write method at all, so an export can never move the chain it
+    reads.
+
+    The assembled runtime answers this face through its own session chain read
+    (Run.SessionFacts), which reports the facts as they committed rather than a
+    reconstruction of them.
+
 type FeedbackAttribution struct {
 	// Bound counts the submissions attributed to recorded evidence.
 	Bound int64 `json:"bound"`
@@ -738,6 +908,72 @@ func (w *FileCaptureWriter) Seal() ([]CaptureFileDigest, WriterSyncResult)
     written, in file name order so the same capture seals to the same account,
     and the sync result the writer observed. A sync that did not complete is
     reported with its reason and is never presented as a completed sync.
+
+type LeaseModel struct {
+	// Has unexported fields.
+}
+
+    LeaseModel is the model handle a binding installs for one leased model
+    reference: every call borrows the version in effect when the call begins and
+    delegates the whole stream to it. The handle is stable across replacements,
+    so the binding of a leased agent is published once and a replacement
+    installs the version a request that begins afterwards borrows without
+    republishing the generation.
+
+    A request already in flight keeps the version it began on: the borrowed
+    VersionedModel covers the whole returned stream, so a replacement never
+    swaps the model under a live request.
+
+func NewLeaseModel(lease *ModelLease) LeaseModel
+    NewLeaseModel returns the stable model handle of one lease: the handle a
+    leased agent's binding installs beside the lease it delegates to.
+
+func (m LeaseModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error)
+    GenerateContent borrows the version in effect when the call begins and
+    delegates the request to it under the version's own stream lease.
+
+func (m LeaseModel) GenerateContentIter(ctx context.Context, request *model.Request) (model.Seq[*model.Response], error)
+    GenerateContentIter borrows the version in effect when the call begins
+    and delegates the iterator to it, keeping the pinned version's iterator
+    capability rather than bridging it behind a channel.
+
+func (m LeaseModel) Info() model.Info
+    Info reports the descriptor of the version in effect: the model name of the
+    current identity beside the context window of the pinned instance. The name
+    stays the model name across versions; the version a response actually served
+    is declared on that response by the version handle.
+
+type LeaseObserver struct {
+	// Has unexported fields.
+}
+
+    LeaseObserver is the event-driven replacement consumer of one agent's model
+    lease. It observes the facts the agent's own pipeline commits, reads back
+    the one a commit identity names, and applies a model replacement fact to the
+    lease it serves: the rebuild, the publication and the installation run in
+    the lease's existing order, so a refused rebuild or a refused publication
+    installs no version and leaves the version in effect untouched.
+
+    The observer serves the fact-to-observation port exactly as the reflection
+    driver does: one committed fact in, one read-only observation out. A fact of
+    another type, or of another agent's ownership, is not the observation this
+    instance serves and is passed over.
+
+func (o *LeaseObserver) Name() string
+    Name reports the stable name of this plugin instance.
+
+func (o *LeaseObserver) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit reads the fact one commit wrote and applies a model
+    replacement fact owned by this observer's agent to the lease. A fact of
+    another type or another owner is passed over; a replacement whose start
+    version is not the version in effect is refused by name; and the replacement
+    itself is the lease's own rebuild, publication and installation, so a
+    refused step installs no version.
+
+func (o *LeaseObserver) Port() plugin.Port
+    Port reports the consumption the observer serves: one committed fact in,
+    one observation out. The observation is the replacement the fact applies to
+    the lease.
 
 type Line struct {
 	// Schema is the record schema version the line was written with.
@@ -1127,6 +1363,26 @@ func (s RequestSnapshot) Ref(snapshotID, readEntry string) (SnapshotRef, error)
     entry: the digest covers the exact bytes MarshalSnapshot writes, and a
     reader rechecks it against what it reads back.
 
+type SFTSample struct {
+	// SessionID names the session the turn's input committed on.
+	SessionID string `json:"session_id"`
+	// Turn is the one-based turn number inside the episode.
+	Turn int `json:"turn"`
+	// Input is the text the turn's own input events presented.
+	Input string `json:"input"`
+	// Label is the text the assistant output of the same invocation produced.
+	Label string `json:"label"`
+	// EpisodeID names the episode the turn belongs to; it is empty for a turn
+	// whose facts name no episode boundary.
+	EpisodeID string `json:"episode_id,omitempty"`
+}
+    SFTSample is one supervised fine-tuning row assembled from the chain:
+    the input one turn presented, the label the assistant produced for it,
+    and the episode and turn the row belongs to.
+
+    A row is one turn of one episode: the turn number starts at one inside each
+    episode, and the row names the session whose chain carried the input.
+
 type SchemaVersion string
     SchemaVersion names the record schema a line was written with. A reader
     selects its parse path from this value, and a version it does not recognise
@@ -1203,6 +1459,58 @@ type SnapshotRef struct {
     A reference to a snapshot that still carries a credential is not a safe
     reference, and a view whose snapshot cannot be read back is recorded as
     unreadable rather than re-derived from the options of a finished call.
+
+type TrajectoryCapture struct {
+	// Has unexported fields.
+}
+    TrajectoryCapture is the run-level capture of one trajectory: it keeps
+    the safe snapshots it fixed, admits every attempt it observes through one
+    bounded sink and seals that sink at the end of the turn it served.
+
+    The capture itself is not a request scope: a snapshot is fixed through the
+    scope of the decision whose request it is, so a view is never invented here.
+    Records and the seal are shared by every scope of the capture, because a
+    trajectory is one account however many decisions it spans.
+
+      - A request view is fixed before the request starts and is never rebuilt
+        from the options of a finished call.
+      - An attempt is admitted through the bounded sink and never waits on the
+        writer: a refused record is a named loss, not a blocked request.
+      - A capture seals at the end of the turn it observed and reports what the
+        writer actually confirmed.
+
+func (c *TrajectoryCapture) CaptureID() string
+    CaptureID reports the identity of the capture this trajectory seals under.
+
+func (c *TrajectoryCapture) Ledger() CaptureLedger
+    Ledger reports the loss account of the capture's sink.
+
+func (c *TrajectoryCapture) Record(ctx context.Context, attempt AttemptRecord) (CaptureAdmission, error)
+    Record admits one attempt through the capture's bounded sink: admission
+    never waits on the writer, and a record a bound refuses is reported with
+    that bound rather than dropped in silence.
+
+func (c *TrajectoryCapture) Scope(view ModelViewRef, decisionID event.DecisionID) Capture
+    Scope returns the capture of one decision's request view: the view the
+    request was declared against beside the decision whose request it is.
+
+func (c *TrajectoryCapture) Seal(ctx context.Context) (CaptureManifest, error)
+    Seal closes the capture through its sink and reports the manifest the writer
+    confirmed. A second seal returns the first manifest, so the seal of a turn
+    that was already sealed is never a second account.
+
+func (c *TrajectoryCapture) Snapshot(context.Context, model.Request) (ModelViewRef, error)
+    Snapshot refuses a snapshot asked of the capture itself: a view is fixed by
+    the scope of the decision that carries it.
+
+func (c *TrajectoryCapture) SnapshotOf(ref SnapshotRef) (RequestSnapshot, error)
+    SnapshotOf reads one fixed snapshot back through its reference: the content
+    is rechecked against the reference digest, so a snapshot that does not match
+    is refused as a mismatch rather than answered as the referenced one.
+
+func (c *TrajectoryCapture) SnapshotRefs() []SnapshotRef
+    SnapshotRefs reports the references of the snapshots this capture fixed,
+    in fix order, as a copy the caller owns.
 
 type VersionedModel struct {
 	// Has unexported fields.

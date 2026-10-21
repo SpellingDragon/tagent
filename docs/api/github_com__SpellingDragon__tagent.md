@@ -59,6 +59,33 @@ const DiagnosticSwitchEnv = "TAGENT_DIAGNOSTICS"
 
 VARIABLES
 
+var (
+	// ErrModelLeaseMissing reports a model lease option that names no lease: a
+	// version in effect is never invented by the assembly.
+	ErrModelLeaseMissing = errors.New("tagent: the model lease option names no lease")
+	// ErrModelLeaseUndeclared reports a model lease attached to an agent the
+	// declaration does not declare: the declaration is the authorization, so a
+	// lease beside no declared agent is refused rather than mounted unwired.
+	ErrModelLeaseUndeclared = errors.New("tagent: the model lease names an agent the declaration does not declare")
+	// ErrModelChangeOwnerMissing reports a model change naming an agent this
+	// run holds no lease for: no lease means no version to move, and the change
+	// is refused by name rather than committed against nobody.
+	ErrModelChangeOwnerMissing = errors.New("tagent: the model change names an agent this run holds no model lease for")
+	// ErrModelChangeTargetMissing reports a model change that names no target
+	// version: an unidentified version is never installed.
+	ErrModelChangeTargetMissing = errors.New("tagent: the model change names no target version")
+	// ErrModelChangeUncommitted reports a model change whose fact did not commit:
+	// the judgment reached no ledger, so no observation can read it back.
+	ErrModelChangeUncommitted = errors.New("tagent: the model change fact did not commit")
+	// ErrCaptureUnscoped reports a capture this assembly cannot scope to one
+	// request view: the loop hands a decision's view material per request, and a
+	// capture beside no scope would have to invent the view it fixes.
+	ErrCaptureUnscoped = errors.New("tagent: the capture cannot be scoped to one request view")
+)
+    ErrModelLeaseMissing and the lease wiring errors beside it name the way the
+    model replacement wiring was refused, so a host routes each by name instead
+    of matching on message text.
+
 var ErrCommittedFactMissing = errors.New("tagent: the committed fact is not held by this run")
     ErrCommittedFactMissing reports a fact identity this run holds neither in
     its live ledger nor in the storage tier it was assembled over.
@@ -510,6 +537,15 @@ type MessageSender interface {
     the host names. MUST NOT resolve a target from a most-recent session or from
     the body. MUST NOT report a refused delivery as a delivered one.
 
+type ModelLeaseOption func(*leaseState)
+    ModelLeaseOption configures the model lease one agent is assembled with.
+
+func WithLeaseRebuild(rebuild func(version string) (model.Model, error)) ModelLeaseOption
+    WithLeaseRebuild names the rebuild step a model replacement fact runs:
+    the step receives the version the fact asks for and answers the model that
+    version is installed as. A rebuild that fails installs no version, and the
+    lease keeps the version in effect.
+
 type NativeAgent struct {
 	// Model is the native model of the agent; a nil model refuses the assembly.
 	Model model.Model
@@ -542,6 +578,13 @@ func WithApprover(approve task.Approver) Option
     registration wrapper of this assembly is decided under. A policy attached
     through WithPolicy occupies this seat instead: the pre-execution ruling then
     comes from that policy alone and this approver is not consulted.
+
+func WithCapture(capture rl.Capture) Option
+    WithCapture attaches the trajectory capture this assembly fixes each request
+    view through, admits each observed attempt through and seals each turn
+    through. The capture must be scoped, because the loop hands a decision's
+    view material per request and the capture fixes the snapshot against that
+    view; a capture beside no scope is refused by name at assembly.
 
 func WithEmbedder(embedder memory.Embedder) Option
     WithEmbedder attaches the embedding binding the retrieval face of this
@@ -580,6 +623,20 @@ func WithMemoryPlan(plan *MemoryPlan) Option
     of this assembly run over the one binding it built. An assembly beside no
     plan keeps the faces its other options state, exactly as it did before the
     plan existed.
+
+func WithModelLease(agentID event.AgentID, lease *rl.ModelLease, opts ...ModelLeaseOption) Option
+    WithModelLease attaches the model lease of one agent to this assembly:
+    the agent's binding carries the lease's stable model handle instead of the
+    model the host contributed, every committed model replacement fact owned
+    by the agent is consumed by the lease observer mounted on its pipeline,
+    and the lease's rebuild-publication-installation order decides whether
+    the requested version takes effect. A rebuild and a publication entry are
+    configured through the model lease options; a replacement beside no rebuild
+    takes the model the publication that judged the change contributed.
+
+    The lease agent must be declared by the assembly's declaration: the
+    declaration is the authorization, and a lease beside no declared agent is
+    refused by name.
 
 func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option
     WithPlugins builds the run-level plugin instances every agent generation
@@ -837,6 +894,30 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     input into the range's own transcript and never batch two invocations of one
     session. MUST borrow the binding generation effective at each decision's own
     start. MUST NOT let an admission receipt stand for the result of the call.
+
+func (r *Run) LeaseLosses() []error
+    LeaseLosses reports the declared model changes whose replacement fact could
+    not commit, as a copy the caller owns: a judgment that reached no ledger is
+    named here rather than read as a replacement that happened.
+
+func (r *Run) LeasePublications() []rl.ModelIdentity
+    LeasePublications reports the versions the model leases installed through
+    this run's default publication entry, in installation order, as a copy the
+    caller owns.
+
+func (r *Run) NoteModelChange(agentID event.AgentID, from, to, source string) (event.EventID, error)
+    NoteModelChange files the judgment that one agent's model reference moves
+    from one version to another and commits it as a model replacement fact
+    on the agent's own pipeline, the explicit entry a host drives when its
+    own configuration source observed the change; a publication that moves
+    an agent's declared model reference files the same fact itself, with the
+    configuration source stamp. The lease mounted on the agent runs the rebuild,
+    publication and installation order and decides whether the version takes
+    effect.
+
+    The identity of the committed fact is returned; a change this run cannot
+    file — no lease for the agent, no target version, no commit face — is
+    refused by name, and an empty from version is the version the lease holds.
 
 func (r *Run) ObservationFacts() meditation.ObservedFacts
     ObservationFacts returns the read-only fact-chain face the scheduled

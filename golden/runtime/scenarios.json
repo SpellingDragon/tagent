@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "change": "runtime-rebuild",
-  "description": "runtime-rebuild 的 15 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID/时间/CallID。**关联/工件键（dict/list 值）同样由 runner 从正式 API 输出派生，不得照抄本档 expected 填报；`event_refs` 为 runner 自报，不构成真伪/来源认证。** S03 的 `model_message_roles` 为框架级 Role 序列，按产品真实 6 消息形态固定（assistant 携双 call＋2 条受理回执 `tool`＋2 条后台观察 `user`，即受理与观察分立；场景 call 数冻结为 2；供应商 role 映射待 G1，不在此冻结）；S07 只要求引用互不覆盖与内容相等，**不强制去重优化**；S08 的 `blocker_detail_rows[0]` 取自「通知欠给已关闭实例、未投递被保留」这一真实构造（**不是**存储降级）：`advancer` 取产品闭集词表 `executor`/`diagnosis`/`explicit-stop`/`notice-transport`（是「下一推进方类别」，不是任务 id），`blocker` 是 owner 原样记录的自由文本（**已知观测面欠账**：该自由文本仍落在身份轴，闭环需在产品侧给稳定 code 或把该字段降维，未在本轮改动）；S10 保留 `resource` scope 与真实 SFT 制品门，非空/形状对齐不预设具体批次或制品。**S03 的 `requested_calls`/`receipts`/`backgrounds` 与受理/后台有界内容标记取自隔离工具 fixture 的固定返回值（call→task 为 1:1，decision→call 为 **1:N**：一次决策的 assistant 消息可携带多个 call，故两条 receipt 同记 issuing decision `decision-a`；非观察器填充、不以生产串 ID 重命名为正确结果）；S10 的 capture/seal/export/sample/episode 为规范化工件关系记录并接真实 consumer 输入，labels/mask 以形状非空与值合法性断言（非仅字段存在）。这些格式只作观测规范化合同，不冻结产品 API/schema。**",
+  "description": "runtime-rebuild 的 15 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID/时间/CallID。**关联/工件键（dict/list 值）同样由 runner 从正式 API 输出派生，不得照抄本档 expected 填报；`event_refs` 为 runner 自报，不构成真伪/来源认证。** S03 的 `model_message_roles` 为框架级 Role 序列，按产品真实 6 消息形态固定（assistant 携双 call＋2 条受理回执 `tool`＋2 条后台观察 `user`，即受理与观察分立；场景 call 数冻结为 2；供应商 role 映射待 G1，不在此冻结）；S07 只要求引用互不覆盖与内容相等，**不强制去重优化**；S08 的 `blocker_detail_rows[0]` 取自「通知欠给已关闭实例、未投递被保留」这一真实构造（**不是**存储降级）：`advancer` 取产品闭集词表 `executor`/`diagnosis`/`explicit-stop`/`notice-transport`（是「下一推进方类别」，不是任务 id），`blocker` 是 owner 原样记录的自由文本（**已知观测面欠账**：该自由文本仍落在身份轴，闭环需在产品侧给稳定 code 或把该字段降维，未在本轮改动）；S10 保留 `resource` scope，观测改由 learning 包的真实生产路径自报：episode 跨 session 切分、capture 封印账（attempts.jsonl＋seal.json）与模型替换成功/失败生命周期；真实 SFT 批次与形状门不再由 S10 承担。**S03 的 `requested_calls`/`receipts`/`backgrounds` 与受理/后台有界内容标记取自隔离工具 fixture 的固定返回值（call→task 为 1:1，decision→call 为 **1:N**：一次决策的 assistant 消息可携带多个 call，故两条 receipt 同记 issuing decision `decision-a`；非观察器填充、不以生产串 ID 重命名为正确结果）；S10 的样本/capture/替换观测均为真实驱动自报：导出样本按 episode 分配轮次，capture 的 attempts.jsonl 与 seal 摘要逐字节对账，替换的成功安装与失败保留由安装版本与在途版本归属断言。这些格式只作观测规范化合同，不冻结产品 API/schema。**",
   "evidence_contract": {
     "note": "上游 scenario runner 的正式入口产物应满足下列字段；检查器只做明示校验，不把它当作防伪或加密证明——runner/source_fingerprint/execution 均由 runner 自报，不声称来源已认证。本块字段集与 check_runtime_evidence.py 的强制集自洽（声明少于强制即失败）。",
     "required_fields": [
@@ -42,7 +42,7 @@
     ],
     "label_semantics": {
       "deterministic": "不依赖外部真实资源（真实 SFT 制品/真实模型/MCP/A2A/embedding/微信/collector 等）的合同场景；09.1 确定性 runner 的责任集。",
-      "resource": "需外部真实资源与授权的合同场景；本波仅 S10（真实 SFT 批次/消费者 06.6 等），由 09.5 逐项启用门验收，未授权保持 remaining-required。"
+      "resource": "需外部真实资源与授权的合同场景；本波仅 S10（episode/capture/模型替换的真实链路），由 09.5 逐项启用门验收，未授权保持 remaining-required。"
     }
   },
   "scenarios": [
@@ -316,51 +316,26 @@
     },
     {
       "id": "S10",
-      "title": "episode 跨 session 与共享历史 split、真实 SFT 批次、反馈与模型替换",
+      "title": "episode 跨 session 切分、请求观测封印、模型替换生命周期",
       "task_ids": [
-        "06.5",
-        "06.6",
-        "06.7",
+        "06.1",
+        "06.3",
         "06.8"
       ],
-      "test_package": "tests/integration/acceptance",
-      "test_name": "TestScenario10EpisodeSplitAndModelReplacement",
+      "test_package": "tests/integration/learning",
+      "test_name": "TestScenario10EpisodeObservationAndReplacement",
       "status": "planned",
       "scope": "resource",
       "anchor_tests": [
-        "tests/integration/learning:TestSFTCleaningContract",
-        "tests/integration/learning:TestFeedbackHTTPContract",
-        "tests/integration/learning:TestModelReplacementLifecycle"
+        "tests/integration/learning:TestChainExporterProducesSamples",
+        "tests/integration/learning:TestScenario10EpisodeObservationAndReplacement"
       ],
       "observations": {
         "split_grouped_by_episode": true,
         "shared_ancestor_not_leaked": true,
-        "sft_samples_nonempty": true,
-        "sft_shape_aligned": true,
-        "sft_labels_shape_nonempty": true,
-        "sft_labels_values_well_formed": true,
-        "action_mask_shape_nonempty": true,
-        "action_mask_matches_labels": true,
-        "reward_versioned": true,
-        "pipeline_artifact_links": {
-          "capture": "capture-a",
-          "seal": "seal-a",
-          "export": "export-a",
-          "samples": [
-            {
-              "sample": "sample-a",
-              "episode": "episode-a",
-              "capture": "capture-a",
-              "export": "export-a",
-              "consumer_input": "consumer-input-a"
-            }
-          ]
-        },
-        "model_replacement_binding": {
-          "new_request": "new_binding",
-          "inflight_request": "previous_binding"
-        },
-        "model_replacement_publishes_on_success_only": true
+        "attempts_sealed": true,
+        "replacement_installs_on_success": true,
+        "replacement_keeps_old_on_failure": true
       }
     },
     {
