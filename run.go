@@ -142,6 +142,11 @@ type Run struct {
 	loop        *agent.Loop
 	sites       map[event.Address]bool
 	facts       map[event.EventID]event.Event
+	// factOrder keeps the commit order of the live facts, so a read of one
+	// session's chain answers in the order that chain was written.
+	factOrder []event.EventID
+	// plugins holds the run-level instances every agent generation carries.
+	plugins     []plugin.Instance
 	history     map[event.Address][]model.Message
 	factSeq     uint64
 	records     memoryPublications
@@ -223,6 +228,13 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			return nil, err
 		}
 		r.watermark = anchors
+	}
+	if cfg.plugins != nil {
+		instances, err := cfg.plugins(r)
+		if err != nil {
+			return nil, err
+		}
+		r.plugins = instances
 	}
 	r.authority = state.NewAuthority()
 	r.store = state.NewMemoryStore(r.authority)
@@ -590,14 +602,13 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 // contributed per agent through the NativeAgent map; these entries are the
 // shared dependencies of the whole run.
 type assemblyConfig struct {
-	hostSender    MessageSender
-	hostDeliverer DeliverFunc
-	governance    state.Governance
-	approver      task.Approver
-	policy        plugin.Governor
-	enforcement   governance.Enforcement
-	storage       *ledger.StorageConfig
-	embedder      memory.Embedder
+	hostSender  MessageSender
+	governance  state.Governance
+	approver    task.Approver
+	policy      plugin.Governor
+	enforcement governance.Enforcement
+	storage     *ledger.StorageConfig
+	embedder    memory.Embedder
 	// vectorTopK and keywordTopK bound the two retrieval legs; rrfK is the
 	// rank constant their fusion scores under. The zero value keeps the legs
 	// unbounded and the canonical constant, so an untuned assembly behaves
@@ -611,6 +622,10 @@ type assemblyConfig struct {
 	// reflectionAnchors is the anchor record path whose watermark the
 	// reflection face reports.
 	reflectionAnchors string
+	// plugins builds the run-level plugin instances every agent's binding
+	// generation carries: the event-driven faces that observe every commit of
+	// the run, whoever made it.
+	plugins func(*Run) ([]plugin.Instance, error)
 	// memory is the merged memory declaration the assembly opens: the storage
 	// tier, the embedding binding and the retrieval tuning the declaration
 	// names. An option that states one of those faces directly keeps it, so a
@@ -713,6 +728,16 @@ func WithReflectionAnchors(path string) Option {
 	return func(c *assemblyConfig) { c.reflectionAnchors = path }
 }
 
+// WithPlugins builds the run-level plugin instances every agent generation
+// carries: an event-driven face attached here observes every commit of the run,
+// whichever agent session committed it, exactly as a contributed instance
+// observes the commits of its own agent. The builder runs once, after the
+// watermark gate is established and before the first publication, and the
+// instances it answers are never replaced.
+func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option {
+	return func(c *assemblyConfig) { c.plugins = build }
+}
+
 // WithExecManager attaches the execution resource ledger this assembly acquires
 // through and explains its registered leases by: a declaration that grants the
 // exec face acquires through this ledger under the monitor rhythm its own
@@ -797,6 +822,95 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 		Ready:        []event.Event{evt},
 	})
 	return turn, key, err
+}
+
+// CommitToSession commits one event into the fact chain of an explicit address,
+// under a fresh invocation identity when the caller states none. It is the
+// cross-session write face a reflection turn delivers a summary through: the
+// event keeps the address it names, the commit is observed through the target
+// agent's own published pipeline exactly as any other commit of this run, and
+// an address the run cannot establish is refused by name.
+//
+// The commit is a write of this run, never a second store beside it: the fact
+// lands in the same live ledger, on the same durable log and in the same mapped
+// sequence as the target session's own input, so that session's next assembly
+// reads it like any other external input.
+func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
+	if err := r.establish(ctx, addr); err != nil {
+		return "", err
+	}
+	if evt.Type == "" {
+		return "", errors.New("tagent: the cross-session event carries no frozen type")
+	}
+	evt.Owner, evt.Source, evt.Target = addr, addr, addr
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now()
+	}
+	evt.InstanceID = r.instance
+	if evt.InvocationID == "" {
+		evt.InvocationID = event.InvocationID(fmt.Sprintf("%s#delivery-%s", addr.SessionID, r.mintEventID()))
+	}
+	key := r.commitFact(evt)
+	pipeline, err := r.factPipeline(addr.AgentID)
+	if err != nil {
+		return key, err
+	}
+	r.takePresentation(pipeline.After(ctx, key))
+	return key, nil
+}
+
+// ActiveSessions reports the complete addresses this run has established,
+// filtered by agent: the live bindings a cross-session delivery resolves
+// against, ordered by agent and session so the same scene always answers the
+// same list.
+func (r *Run) ActiveSessions(agentID event.AgentID) []event.Address {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]event.Address, 0, len(r.sites))
+	for addr := range r.sites {
+		if !addr.IsComplete() {
+			continue
+		}
+		if agentID != "" && addr.AgentID != agentID {
+			continue
+		}
+		out = append(out, addr)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AgentID != out[j].AgentID {
+			return out[i].AgentID < out[j].AgentID
+		}
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out
+}
+
+// SessionFacts reports the live facts of one session in the order they
+// committed: the chain one address wrote, as the run holds it. Only facts still
+// in the live ledger are answered; a chain restored from the durable tier is
+// read through the committed-event face instead.
+func (r *Run) SessionFacts(addr event.Address) []event.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]event.Event, 0, len(r.factOrder))
+	for _, key := range r.factOrder {
+		evt, held := r.facts[key]
+		if !held || sessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && agentOf(evt) != addr.AgentID {
+			continue
+		}
+		copied := evt
+		if evt.Meta != nil {
+			copied.Meta = make(map[string]string, len(evt.Meta))
+			for k, v := range evt.Meta {
+				copied.Meta[k] = v
+			}
+		}
+		out = append(out, copied)
+	}
+	return out
 }
 
 // ReflectionGate reports the watermark gate the reflection face of this run

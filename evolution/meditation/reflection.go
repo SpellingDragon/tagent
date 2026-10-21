@@ -230,6 +230,22 @@ func (r *Reflection) FreshSince(ctx context.Context, since time.Time) (bool, err
 	return scan.Verdict.Novelty, nil
 }
 
+// CommittedFact reads the fact one commit identity names through the observed
+// chain. It is the read the event-driven face starts from: the commit notice
+// carries an identity, and the fact itself is read back here.
+func (r *Reflection) CommittedFact(ctx context.Context, id event.EventID) (event.Event, error) {
+	if r.facts == nil {
+		return event.Event{}, ErrObservedFaceUnwired
+	}
+	return r.facts.CommittedFact(ctx, id)
+}
+
+// Watermark reports the execution watermark the gate holds, refusing by name
+// when no source is wired.
+func (r *Reflection) Watermark(ctx context.Context) (Watermark, error) {
+	return r.watermark(ctx)
+}
+
 // Pending reports the identity of the reflection input awaiting its outcome, if
 // one is pending.
 func (r *Reflection) Pending() (event.EventID, bool) {

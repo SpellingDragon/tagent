@@ -13,6 +13,10 @@ func ExampleDigest()
     ExampleDigest renders the summary of a face that holds more facts than the
     bound renders, so the count left out travels with the body.
 
+func ExampleEventSink()
+    ExampleEventSink commits one summary into the target session's chain and
+    reads back the identity the commit recorded.
+
 func ExampleObservedFacts()
     ExampleObservedFacts runs the conditional retrieval a reflection judgment
     runs: the newest references are hydrated one by one and the read stops at
@@ -22,6 +26,10 @@ func ExampleReflectionInput()
     ExampleReflectionInput injects one fired reflection and reports that only
     a consumed turn advances the watermark: a deferred turn leaves the input to
     the next tick.
+
+func ExampleSessionQuery()
+    ExampleSessionQuery resolves one declared target into its live sessions and
+    reports that an agent with no binding answers none.
 
 func ExampleWatermarkGate()
     ExampleWatermarkGate reads the watermark, advances it past a consumed turn

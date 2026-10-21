@@ -42,6 +42,7 @@ func (r *Run) commitFact(evt event.Event) event.EventID {
 	entry, mapped := mappedEntryOf(evt)
 	r.mu.Lock()
 	r.facts[evt.Key] = evt
+	r.factOrder = append(r.factOrder, evt.Key)
 	r.mu.Unlock()
 	if !mapped {
 		return evt.Key

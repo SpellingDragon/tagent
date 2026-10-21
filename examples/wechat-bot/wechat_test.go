@@ -997,7 +997,7 @@ func TestRegisteredHandlersDriveTheChannel(t *testing.T) {
 // TestHostDrivesSessionsAndTheActiveChannel 钉住会话隔离与唯一发送面。
 //
 //   - Internal notices wait for the session they name.
-//   - The one sender reaches only its own chat; a reflection fans out to the bound chats.
+//   - The one sender reaches only its own chat.
 func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
 	rig := newRoutingRig(t)
 	ctx := context.Background()
@@ -1056,17 +1056,6 @@ func TestHostDrivesSessionsAndTheActiveChannel(t *testing.T) {
 		t.Fatalf("the chat-a send leaked into chat-b: %+v", rig.out.recorded())
 	}
 
-	rig.host.sender.DeliverReflection(ctx, "meditation", []event.Address{{AgentID: "tagent"}}, "reflection")
-	for _, chat := range []string{"chat-a", "chat-b"} {
-		if !rig.out.has("text", chat, "reflection") {
-			t.Fatalf("reflection delivery = %+v, missing %s", rig.out.texts(), chat)
-		}
-	}
-	before := len(rig.out.texts())
-	rig.host.sender.DeliverReflection(ctx, "meditation", []event.Address{{AgentID: "quiet"}}, "nowhere")
-	if got := len(rig.out.texts()); got != before {
-		t.Fatalf("a reflection beside no bound chat delivered %d texts, want none", got-before)
-	}
 	if b == a {
 		t.Fatal("two chats collapsed onto one address")
 	}

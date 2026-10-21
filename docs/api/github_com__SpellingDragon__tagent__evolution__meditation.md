@@ -22,6 +22,18 @@ const (
 	// DefaultDigestFactLimit bounds how many hydrated facts one digest lists.
 	DefaultDigestFactLimit = 8
 )
+const DeliverSummaryContentMax = 8 * 1024
+    DeliverSummaryContentMax is the byte ceiling of one summary body.
+
+const DeliverSummarySummaryMax = 120
+    DeliverSummarySummaryMax is the rune ceiling of the stored event summary.
+
+const DeliverSummaryToolName = "deliver_summary"
+
+    DeliverSummaryToolName is the model-visible name of the cross-session write
+    face a reflection turn may call: one summary, delivered by the model's own
+    decision, never by the reflection mechanism in silence.
+
 const LineageReflection = "meditation"
 
     LineageReflection is the trigger-source stamp a reflection input carries:
@@ -157,6 +169,30 @@ type Anchors struct {
     and an entry this structure does not name is ignored when the record is read
     rather than refused.
 
+type DeliverSummaryTool struct {
+	// Has unexported fields.
+}
+    DeliverSummaryTool is the meditation session's cross-session write tool:
+    it delivers one summary to every active session of the declared deliver_to
+    agents.
+
+    Every refusal is answered as result text and the turn continues; an error is
+    reserved for an argument shape that is not JSON at all.
+
+func NewDeliverSummaryTool(targets []string, sink EventSink, sessions SessionQuery) *DeliverSummaryTool
+    NewDeliverSummaryTool assembles the cross-session write tool over the
+    declared target agents, the write face and the live-binding face.
+
+func (t *DeliverSummaryTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
+    Call delivers one summary to every active session of the declared targets.
+    Refusals — malformed fields, an empty or oversized body, an unwired write
+    face and a target with no bound session — are answered as result text,
+    so the reflection turn continues and the model sees why nothing was written.
+
+func (t *DeliverSummaryTool) Declaration() *trpctool.Declaration
+    Declaration reports the tool declaration: one content argument, delivered to
+    the sessions the declaration's deliver_to targets bind.
+
 type DeliveryPolicy struct{}
     DeliveryPolicy is the meditation domain's delivery policy: one fired
     reflection's own input in, whether its output may leave through the delivery
@@ -195,6 +231,68 @@ type DigestSummary struct {
 }
     DigestSummary is the rendered self-state summary together with the count of
     facts the render bound left out.
+
+type Driver struct {
+	// Has unexported fields.
+}
+
+    Driver is the event-driven face of one reflection loop: it observes the
+    facts the agent's own pipeline commits and runs a reflection pass only when
+    one of them names an interaction someone awaits and the rhythm has elapsed.
+
+    There is no ticker: a reflection is the answer to a new event, so a process
+    with nothing new never fires one. The interval is a floor between two fires,
+    never a clock that fires on its own.
+
+func NewDriver(reflection *Reflection, interval, minGap time.Duration) *Driver
+    NewDriver assembles the event-driven reflection face over one reflection
+    loop, the floor between two fires and the floor between two consumed
+    reflections.
+
+    The interval is measured from the last fire; the first fire is never
+    held back, so the first event of a process is answered at once,
+    and a non-positive interval disables that floor. The min gap stays the
+    reflection's own rhythm floor, read from the execution watermark, so a fired
+    but not yet consumed reflection is never re-fired early.
+
+func (d *Driver) Name() string
+    Name reports the stable name of this plugin instance.
+
+func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit reads the fact one commit wrote and advances the driver's
+    timer state when that fact names an interaction someone awaits.
+
+    The pass itself runs detached from the committing turn: a reflection spends
+    a model call, and a user turn never waits for it. A failed read is reported
+    and never rolls the commit back, and a stamp outside the host-facing
+    vocabulary leaves the timer untouched, so an agent's own reflection never
+    reflects again.
+
+func (d *Driver) Port() plugin.Port
+    Port reports the consumption the driver serves: one committed fact in, one
+    observation out. The observation is the reflection pass the fact may fire.
+
+func (d *Driver) SetObserver(observer func(TickOutcome))
+    SetObserver attaches the reading of each pass this driver runs. It is the
+    host's log face; a nil observer drops the readings.
+
+func (d *Driver) Stop()
+    Stop ends the driver: no further commit fires a pass, a pass in flight is
+    cancelled, and Stop waits for it to return. A repeated stop is a no-op.
+
+type EventSink interface {
+	// CommitToSession commits evt into the fact chain of addr.
+	CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error)
+}
+    EventSink is the cross-session write face of the runtime: one event
+    committed into the fact chain of the address it names, under a fresh
+    identity of its own.
+
+    It is the only way a reflection summary reaches another session: the tool
+    decides to write, the sink files the fact, and the target session's own next
+    assembly reads it like any other external input. 红线清单（2 条）： MUST commit
+    the event into the chain of the address it names. MUST NOT write into the
+    caller's chain or answer an identity the commit did not record.
 
 type FactAttribution struct {
 	// Lineage is the trigger-source stamp the fact carries; empty means the fact
@@ -328,6 +426,11 @@ func NewReflection(cfg ReflectionConfig, gate WatermarkGate, facts ObservedFacts
     declared observation face outside the authorized scope refuses the assembly
     by name.
 
+func (r *Reflection) CommittedFact(ctx context.Context, id event.EventID) (event.Event, error)
+    CommittedFact reads the fact one commit identity names through the observed
+    chain. It is the read the event-driven face starts from: the commit notice
+    carries an identity, and the fact itself is read back here.
+
 func (r *Reflection) DeferredCount() int
     DeferredCount reports how many reflections yielded since the last consumed
     one.
@@ -371,6 +474,10 @@ func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome
     A tick whose gate cannot be established reports TickClosed with the fact it
     could not establish and injects nothing; a tick that injected reports the
     input and settles the outcome the loop side handed back.
+
+func (r *Reflection) Watermark(ctx context.Context) (Watermark, error)
+    Watermark reports the execution watermark the gate holds, refusing by name
+    when no source is wired.
 
 type ReflectionCadence struct {
 	// Interval is the tick cadence, reported beside a pending input that has
@@ -578,6 +685,19 @@ type ScannedFact struct {
 }
     ScannedFact is one hydrated fact of a pass, kept in the deterministic order
     the pass read it.
+
+type SessionQuery interface {
+	// ActiveSessions returns the complete addresses of the sessions bound to
+	// agentID, in a deterministic order.
+	ActiveSessions(agentID event.AgentID) []event.Address
+}
+    SessionQuery is the live-binding face of the runtime: the sessions currently
+    bound to one agent. A summary is delivered to the sessions that exist,
+    and an agent with no bound session is a named refusal, never a silent skip.
+
+    红线清单（2 条）： MUST answer the complete addresses of the sessions actually bound
+    to the agent. MUST NOT invent a session or report an address the run has not
+    established.
 
 type TickDecision struct {
 	// Disposition is what this tick decided.

@@ -83,14 +83,16 @@ var ErrHostConfigMissing = errors.New("tagent: the host names no configuration p
     ErrHostConfigMissing reports a Boot call that names no configuration path:
     the host has no document to read, so no runtime is assembled.
 
-var ErrHostDelivererMissing = errors.New("tagent: the host enables meditation beside no reflection deliverer")
-    ErrHostDelivererMissing reports a document that enables meditation beside
-    no reflection deliverer: a fired reflection would have nowhere to go,
-    so the host is refused by name instead of running a silent loop.
-
 var ErrHostEmptyTask = errors.New("tagent: the task request carries no user message")
     ErrHostEmptyTask reports a task request whose messages carry no user
     content: a turn reads user input only, so the request is refused by name.
+
+var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
+    ErrHostMeditationToolMisplaced reports a document that grants the
+    cross-session write tool outside the meditation session, or grants the
+    send tool to the meditation session itself: the summary tool belongs to the
+    reflection turn alone, and send is a host channel face a reflection session
+    never carries.
 
 var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitted yet")
     ErrHostNoActiveSession reports a task request arriving before any user turn:
@@ -144,13 +146,6 @@ func EnvironmentBlockGenerations() int64
     boundary has rendered in this process so far.
 
 TYPES
-
-type DeliverFunc func(ctx context.Context, source string, targets []event.Address, content string)
-    DeliverFunc is the reflection delivery face the host hands a fired
-    reflection to: the source agent the reflection belongs to, the declared
-    target agents it flows back to and one body per call. A target is named by
-    its agent identity alone; the application resolves the sessions it has bound
-    to that agent.
 
 type DiagnosticFace struct {
 	// Subsystem names the face this reading belongs to.
@@ -371,10 +366,6 @@ type HostOption func(*assemblyConfig)
     assembly option, so the host protocol's option type is declared here rather
     than borrowed by alias.
 
-func WithDeliverer(deliver DeliverFunc) HostOption
-    WithDeliverer attaches the reflection delivery face of a document that
-    enables meditation.
-
 func WithSender(sender MessageSender) HostOption
     WithSender attaches the outbound message face every turn output of the host
     is delivered through.
@@ -524,6 +515,14 @@ func WithMemoryPlan(plan *MemoryPlan) Option
     plan keeps the faces its other options state, exactly as it did before the
     plan existed.
 
+func WithPlugins(build func(*Run) ([]plugin.Instance, error)) Option
+    WithPlugins builds the run-level plugin instances every agent generation
+    carries: an event-driven face attached here observes every commit of
+    the run, whichever agent session committed it, exactly as a contributed
+    instance observes the commits of its own agent. The builder runs once,
+    after the watermark gate is established and before the first publication,
+    and the instances it answers are never replaced.
+
 func WithPolicy(policy plugin.Governor) Option
     WithPolicy attaches the governance policy every call admitted through the
     registration wrapper of this assembly is ruled by: the ruling consumes the
@@ -666,6 +665,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     acquired. MUST NOT carry a stand-in governance in a formal assembly.
     MUST NOT return a half-assembled run beside a publication failure.
 
+func (r *Run) ActiveSessions(agentID event.AgentID) []event.Address
+    ActiveSessions reports the complete addresses this run has established,
+    filtered by agent: the live bindings a cross-session delivery resolves
+    against, ordered by agent and session so the same scene always answers the
+    same list.
+
 func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *replay.ReplayProjection) error
     AttachReplay registers the replayed projection of one session chain on this
     assembly: every request of that session carries the chain's budget assembly
@@ -705,6 +710,20 @@ func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
     commits no transcript here: that sequence carried every fact of the range
     as it committed, and the range reads back from it instead of from a second
     transcript of the same facts.
+
+func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error)
+    CommitToSession commits one event into the fact chain of an explicit
+    address, under a fresh invocation identity when the caller states none.
+    It is the cross-session write face a reflection turn delivers a summary
+    through: the event keeps the address it names, the commit is observed
+    through the target agent's own published pipeline exactly as any other
+    commit of this run, and an address the run cannot establish is refused by
+    name.
+
+    The commit is a write of this run, never a second store beside it: the fact
+    lands in the same live ledger, on the same durable log and in the same
+    mapped sequence as the target session's own input, so that session's next
+    assembly reads it like any other external input.
 
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error)
     CommittedEvent reports the fact an identity names: the live fact of this
@@ -832,6 +851,12 @@ func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     Writing a shared part would be a caller bug; the snapshots themselves
     were fixed before the call. The snapshots are read-out material beside the
     requests they were fixed for; reading them moves nothing.
+
+func (r *Run) SessionFacts(addr event.Address) []event.Event
+    SessionFacts reports the live facts of one session in the order they
+    committed: the chain one address wrote, as the run holds it. Only facts
+    still in the live ledger are answered; a chain restored from the durable
+    tier is read through the committed-event face instead.
 
 func (r *Run) SessionHistory(addr event.Address) []model.Message
     SessionHistory reports the transcript the named session accumulated across

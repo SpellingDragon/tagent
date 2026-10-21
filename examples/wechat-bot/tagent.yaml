@@ -215,19 +215,21 @@ agents:
   meditator:
     system_prompt:
       files: [meditator_agent.md]
-    # 主动送达面:反思结论里用户该知道的部分,经 send 显式投递(不配则模型不可见)。
+    # 跨会话写面:只有模型在反思回合内显式调用 deliver_summary 才落链;
+    # 目标=deliver_to 白名单里的活跃绑定会话,不声明则工具不可见,机制侧不代投。
     tools:
-      - { kind: tool, id: send }
+      - { kind: tool, id: deliver_summary }
     # 观察面:与 tagent 同一 tier;read_namespaces 授权它读业务分区,
     # meditation.observed_namespaces 再从中圈定真正反思的分区(越界拒启动)。
     memory:
       type: localfile
       path: .wechat-config/data
       read_namespaces: [tagent]
-    # 定时策展:enabled 即启动宿主 ticker(默认 30m),min_gap 是两次已消费反思的最小间隔;
+    # 事件驱动策展:enabled 即挂载冥想驱动——事实提交推进计时器,水位后有新素材且
+    # interval(默认 30m)期满、min_gap(两次已消费反思的最小间隔)满足才反思一轮;
     # prompt_file 是每次注入随摘要携带的静态提示(相对 prompt_dir);
-    # observed_namespaces 必须落在各自 read 授权内;deliver_to 是回流白名单——
-    # 本轮反思回合的 assistant 正文经宿主唯一发送通路投给这些 agent 已绑定的会话。
+    # observed_namespaces 必须落在各自 read 授权内;deliver_to 是 deliver_summary 的目标白名单——
+    # 工具一次调用给这些 agent 的每个活跃绑定会话各落一条 summary 事件;不调用则不投递。
     # 一个进程只驱动一条反思循环:第二个 enabled 的 agent 拒启动。
     meditation:
       enabled: true

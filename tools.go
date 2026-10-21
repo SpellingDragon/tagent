@@ -121,9 +121,10 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				return state.PromptSource{Files: spec.Files}, nil
 			},
 			plugins: func(context.Context, config.AgentSpec) ([]plugin.Instance, error) {
-				elements := contributed.Plugins
+				elements := append([]plugin.Instance(nil), contributed.Plugins...)
+				elements = append(elements, r.plugins...)
 				if r.observer != nil {
-					elements = append(append([]plugin.Instance(nil), contributed.Plugins...),
+					elements = append(elements,
 						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, r.observer)})
 				}
 				return elements, nil

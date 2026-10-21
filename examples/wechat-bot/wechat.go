@@ -351,10 +351,6 @@ type hostSender struct {
 	sends        atomic.Uint64
 }
 
-// reflectionLineage mirrors meditation.LineageReflection (the stamp reflection
-// bodies carry in logs and receipts) without a fourth tagent import.
-const reflectionLineage = "meditation"
-
 // Send implements tagent.MessageSender: one body to the address the turn carries.
 func (h *hostSender) Send(ctx context.Context, addr event.Address, content string) error {
 	return h.sendWithLineage(ctx, addr, sendToolLineage, content)
@@ -364,37 +360,6 @@ func (h *hostSender) Send(ctx context.Context, addr event.Address, content strin
 func (h *hostSender) sendWithLineage(ctx context.Context, addr event.Address, lineage, content string) error {
 	_, err := h.sendToUser(ctx, sendRequest{addr: addr, triggerSource: lineage, content: content})
 	return err
-}
-
-// DeliverReflection is the meditation delivery port: one reflection body to every
-// chat bound to the declared target agents.
-func (h *hostSender) DeliverReflection(ctx context.Context, source string, targets []event.Address, content string) {
-	delivered := 0
-	for _, target := range targets {
-		if _, ok := h.router.Target(target); ok {
-			if err := h.sendWithLineage(ctx, target, reflectionLineage, content); err != nil {
-				log.Warnf("[meditation] delivery to %s refused: %v", target.SessionID, err)
-				continue
-			}
-			delivered++
-			continue
-		}
-		addresses := h.router.BoundAddresses(target.AgentID)
-		if len(addresses) == 0 {
-			log.Warnf("[meditation] target %q holds no bound chat, the reflection is withheld", target.AgentID)
-			continue
-		}
-		for _, addr := range addresses {
-			if err := h.sendWithLineage(ctx, addr, reflectionLineage, content); err != nil {
-				log.Warnf("[meditation] delivery to %s refused: %v", addr.SessionID, err)
-				continue
-			}
-			delivered++
-		}
-	}
-	if delivered == 0 {
-		log.Warnf("[meditation] %s fired beside no deliverable chat, the result is withheld", source)
-	}
 }
 
 // sendToUser 把一次送达意图落成实际投递，返回实际送达目标的标签。
@@ -949,7 +914,6 @@ func newWechatApp(cfg wechatConfig, gateway *approvalGateway) (*wechatApp, error
 func (a *wechatApp) options() []tagent.HostOption {
 	options := []tagent.HostOption{
 		tagent.WithSender(a.host.sender),
-		tagent.WithDeliverer(a.host.sender.DeliverReflection),
 	}
 	if a.gateway.Enabled() {
 		options = append(options, tagent.WithApprover(approvalRuling(a.gateway)))

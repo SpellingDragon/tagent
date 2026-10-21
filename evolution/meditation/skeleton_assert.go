@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory"
+
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // The domain's judgments keep their declared shapes: one event in and one verdict
@@ -30,14 +33,16 @@ var (
 var (
 	_ func(ReflectionConfig, WatermarkGate, ObservedFacts, ReflectionInput) (*Reflection, error) = NewReflection
 
-	_ func(*Reflection, context.Context, time.Time) TickOutcome   = (*Reflection).Tick
-	_ func(*Reflection, context.Context, ReflectionReceipt) error = (*Reflection).NoteOutcome
-	_ func(*Reflection) []string                                  = (*Reflection).ObservedNamespaces
-	_ func(*Reflection) ReflectionScope                           = (*Reflection).Scope
-	_ func(*Reflection, context.Context, time.Time) (bool, error) = (*Reflection).FreshSince
-	_ func(*Reflection) (event.EventID, bool)                     = (*Reflection).Pending
-	_ func(*Reflection) int                                       = (*Reflection).DeferredCount
-	_ func(*Reflection) time.Time                                 = (*Reflection).LastDeferredAt
+	_ func(*Reflection, context.Context, time.Time) TickOutcome              = (*Reflection).Tick
+	_ func(*Reflection, context.Context, ReflectionReceipt) error            = (*Reflection).NoteOutcome
+	_ func(*Reflection) []string                                             = (*Reflection).ObservedNamespaces
+	_ func(*Reflection) ReflectionScope                                      = (*Reflection).Scope
+	_ func(*Reflection, context.Context, time.Time) (bool, error)            = (*Reflection).FreshSince
+	_ func(*Reflection) (event.EventID, bool)                                = (*Reflection).Pending
+	_ func(*Reflection) int                                                  = (*Reflection).DeferredCount
+	_ func(*Reflection) time.Time                                            = (*Reflection).LastDeferredAt
+	_ func(*Reflection, context.Context, event.EventID) (event.Event, error) = (*Reflection).CommittedFact
+	_ func(*Reflection, context.Context) (Watermark, error)                  = (*Reflection).Watermark
 
 	_ func(ReflectionInput, context.Context, event.Event) (ReflectionReceipt, error) = ReflectionInput.InjectReflection
 
@@ -146,4 +151,37 @@ var (
 	_ error = ErrAnchorStoreUnusable
 	_ error = ErrAnchorUnreadable
 	_ error = ErrWatermarkSourceUnwired
+)
+
+// The event-driven face keeps its declared shapes: one commit identity in, the
+// reflection pass it may fire out, beside the stop that ends the driver.
+var (
+	_ func(*Reflection, time.Duration, time.Duration) *Driver = NewDriver
+
+	_ func(*Driver) string                                = (*Driver).Name
+	_ func(*Driver) plugin.Port                           = (*Driver).Port
+	_ func(*Driver, context.Context, event.EventID) error = (*Driver).ObserveCommit
+	_ func(*Driver)                                       = (*Driver).Stop
+
+	_ plugin.Instance           = (*Driver)(nil)
+	_ plugin.PostCommitObserver = (*Driver)(nil)
+)
+
+// The cross-session write face keeps its declared shapes: one event committed
+// into the chain of an explicit address, the live bindings a target resolves
+// against, and the model-visible tool that decides to write.
+var (
+	_ func(EventSink, context.Context, event.Address, event.Event) (event.EventID, error) = EventSink.CommitToSession
+	_ func(SessionQuery, event.AgentID) []event.Address                                   = SessionQuery.ActiveSessions
+
+	_ func([]string, EventSink, SessionQuery) *DeliverSummaryTool = NewDeliverSummaryTool
+
+	_ func(*DeliverSummaryTool) *trpctool.Declaration                 = (*DeliverSummaryTool).Declaration
+	_ func(*DeliverSummaryTool, context.Context, []byte) (any, error) = (*DeliverSummaryTool).Call
+
+	_ trpctool.CallableTool = (*DeliverSummaryTool)(nil)
+
+	_ = DeliverSummaryContentMax
+	_ = DeliverSummarySummaryMax
+	_ = DeliverSummaryToolName
 )

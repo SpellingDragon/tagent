@@ -29,6 +29,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/document"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/evolution"
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
@@ -62,10 +63,12 @@ var ErrHostConfigMissing = errors.New("tagent: the host names no configuration p
 // would produce output nothing can deliver, so the run is refused by name.
 var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound message sender")
 
-// ErrHostDelivererMissing reports a document that enables meditation beside no
-// reflection deliverer: a fired reflection would have nowhere to go, so the
-// host is refused by name instead of running a silent loop.
-var ErrHostDelivererMissing = errors.New("tagent: the host enables meditation beside no reflection deliverer")
+// ErrHostMeditationToolMisplaced reports a document that grants the
+// cross-session write tool outside the meditation session, or grants the send
+// tool to the meditation session itself: the summary tool belongs to the
+// reflection turn alone, and send is a host channel face a reflection session
+// never carries.
+var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
 
 // ErrHostAddressMissing reports an invocation that names no complete session
 // address: the runtime is driven at an explicit address and never at a
@@ -103,13 +106,6 @@ type MessageSender interface {
 	Send(ctx context.Context, target event.Address, content string) error
 }
 
-// DeliverFunc is the reflection delivery face the host hands a fired
-// reflection to: the source agent the reflection belongs to, the declared
-// target agents it flows back to and one body per call. A target is named by
-// its agent identity alone; the application resolves the sessions it has bound
-// to that agent.
-type DeliverFunc func(ctx context.Context, source string, targets []event.Address, content string)
-
 // HostOption configures one Boot call. It is the host-facing name of the
 // assembly option, so the host protocol's option type is declared here rather
 // than borrowed by alias.
@@ -119,12 +115,6 @@ type HostOption func(*assemblyConfig)
 // is delivered through.
 func WithSender(sender MessageSender) HostOption {
 	return func(c *assemblyConfig) { c.hostSender = sender }
-}
-
-// WithDeliverer attaches the reflection delivery face of a document that
-// enables meditation.
-func WithDeliverer(deliver DeliverFunc) HostOption {
-	return func(c *assemblyConfig) { c.hostDeliverer = deliver }
 }
 
 // Host is the assembled runtime of one host document: the run the entry
@@ -140,7 +130,7 @@ type Host struct {
 	sender MessageSender
 
 	face       *hostFace
-	meditation *hostReflection
+	meditation *meditation.Driver
 
 	mu          sync.Mutex
 	lastAddr    event.Address
@@ -156,7 +146,6 @@ var (
 	_ func(string, ...HostOption) (*Host, error)                      = Boot
 	_ func(MessageSender) HostOption                                  = WithSender
 	_ func(task.Approver) HostOption                                  = WithApprover
-	_ func(DeliverFunc) HostOption                                    = WithDeliverer
 	_ func(state.Governance) HostOption                               = WithGovernance
 	_ func(*Host, context.Context, InvokeRequest) (agent.Turn, error) = (*Host).Invoke
 	_ func(*Host, context.Context) error                              = (*Host).Close
@@ -187,12 +176,19 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.hostSender == nil && doc.declaresSend() {
-		return nil, fmt.Errorf("%w: the document grants the %q tool", ErrHostSenderMissing, hostSendToolID)
-	}
 	plan, err := MemoryPlanOf(decl, doc.Storage.Type, doc.Storage.Root)
 	if err != nil {
 		return nil, err
+	}
+	meditationPlan, err := resolveHostMeditation(mapped, doc.PromptDir, storageRootOf(plan))
+	if err != nil {
+		return nil, err
+	}
+	if err := doc.validateMeditationTools(meditationPlan); err != nil {
+		return nil, err
+	}
+	if cfg.hostSender == nil && doc.declaresSendOutside(meditationAgentOf(meditationPlan)) {
+		return nil, fmt.Errorf("%w: the document grants the %q tool", ErrHostSenderMissing, hostSendToolID)
 	}
 	relations, err := openHostRelations(plan)
 	if err != nil {
@@ -204,20 +200,13 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	recallPort := NewRecallPort(embedder, relations)
 	ctx, cancel := context.WithCancel(context.Background())
-	natives, err := doc.nativeAgents(ctx, cfg.hostSender, recallPort)
+	meditationPort := &hostMeditationPort{plan: meditationPlan}
+	natives, err := doc.nativeAgents(ctx, cfg.hostSender, recallPort, meditationPlan, meditationPort)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	meditationPlan, err := resolveHostMeditation(mapped, doc.PromptDir, storageRootOf(plan))
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-	if meditationPlan != nil && cfg.hostDeliverer == nil {
-		cancel()
-		return nil, fmt.Errorf("%w: agent %q enables meditation", ErrHostDelivererMissing, meditationPlan.agent)
-	}
+	var driver *meditation.Driver
 	options := []Option{
 		WithGovernance(governanceOf(cfg.governance)),
 		WithTelemetry(telemetry.NewLogObserver(trpclog.Default)),
@@ -227,6 +216,26 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	if meditationPlan != nil {
 		options = append(options, WithReflectionAnchors(meditationPlan.anchors))
+		options = append(options, WithPlugins(func(run *Run) ([]plugin.Instance, error) {
+			gate := run.ReflectionGate()
+			if gate == nil {
+				return nil, fmt.Errorf("tagent: agent %q enables meditation beside no reflection anchor store", meditationPlan.agent)
+			}
+			reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
+				Loop:    meditation.ReflectionLoop{Agent: meditationPlan.agent, Session: meditationPlan.session},
+				Face:    meditation.ReflectionFace{ObservedNamespaces: meditationPlan.observed, ReadNamespaces: meditationPlan.reads},
+				Cadence: meditation.ReflectionCadence{Interval: meditationPlan.interval, MinGap: meditationPlan.minGap},
+				Prompt:  meditationPlan.prompt,
+			}, gate, run.ObservationFacts(), run.ReflectionInput())
+			if err != nil {
+				return nil, err
+			}
+			driver = meditation.NewDriver(reflection, meditationPlan.interval, meditationPlan.minGap)
+			driver.SetObserver(func(outcome meditation.TickOutcome) {
+				assemblyInfo("tagent: meditation driver of %s: %s (%s)", meditationPlan.agent, outcome.Decision.Disposition, outcome.Decision.Reason)
+			})
+			return []plugin.Instance{driver}, nil
+		}))
 	}
 	if cfg.approver != nil {
 		options = append(options, WithApprover(cfg.approver))
@@ -237,22 +246,15 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		return nil, err
 	}
 	recallPort.Bind(run)
+	meditationPort.Bind(run)
 	host := &Host{
-		ctx:    ctx,
-		cancel: cancel,
-		run:    run,
-		entry:  event.AgentID(decl.Entry),
-		sender: cfg.hostSender,
-		sent:   map[event.Address]int{},
-	}
-	if meditationPlan != nil {
-		driver, err := host.newReflection(meditationPlan, cfg.hostDeliverer)
-		if err != nil {
-			cancel()
-			return nil, host.abortBoot(err)
-		}
-		driver.start(ctx)
-		host.meditation = driver
+		ctx:        ctx,
+		cancel:     cancel,
+		run:        run,
+		entry:      event.AgentID(decl.Entry),
+		sender:     cfg.hostSender,
+		meditation: driver,
+		sent:       map[event.Address]int{},
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -305,7 +307,7 @@ func openHostRelations(plan *MemoryPlan) (*replay.MemoryRelations, error) {
 // abortBoot drains the run of a Boot call that failed after the assembly and
 // reports the failure it carries. The reflection driver is stopped first: it
 // starts before the endpoints, so a failure in that window must not leave a
-// tick landing on a run that is already draining.
+// reflection pass landing on a run that is already draining.
 func (h *Host) abortBoot(cause error) error {
 	if h.meditation != nil {
 		h.meditation.Stop()
@@ -690,6 +692,7 @@ func (d *hostDocument) toolRefs(id string) ([]config.ToolRef, error) {
 // the instances the host contributes beside the presets the core assembles.
 var hostToolIDs = append(append([]string{
 	hostSendToolID,
+	meditation.DeliverSummaryToolName,
 	recall.QueryToolName,
 	recall.GetToolName,
 	recall.RecentToolName,
@@ -747,14 +750,46 @@ func (d *hostDocument) modelName(id string) string {
 	return strings.TrimSpace(d.Model)
 }
 
-// declaresSend reports whether any agent section declares the send tool.
-func (d *hostDocument) declaresSend() bool {
+// declaresSendOutside reports whether an agent section other than except
+// declares the send tool. The meditation session never carries the host's
+// channel face, so its declaration neither needs nor demands a sender.
+func (d *hostDocument) declaresSendOutside(except string) bool {
 	for id := range d.Agents {
+		if except != "" && id == except {
+			continue
+		}
 		if d.declaresTool(id, hostSendToolID) {
 			return true
 		}
 	}
 	return false
+}
+
+// validateMeditationTools refuses a document that grants a meditation tool to
+// the wrong agent: deliver_summary belongs to the meditation session alone, and
+// the send tool is a host channel face the meditation session never carries.
+func (d *hostDocument) validateMeditationTools(plan *hostMeditationPlan) error {
+	session := meditationAgentOf(plan)
+	for id := range d.Agents {
+		if d.declaresTool(id, meditation.DeliverSummaryToolName) && id != session {
+			return fmt.Errorf("%w: agent %q declares %q, which only the meditation session carries",
+				ErrHostMeditationToolMisplaced, id, meditation.DeliverSummaryToolName)
+		}
+		if id == session && d.declaresTool(id, hostSendToolID) {
+			return fmt.Errorf("%w: the meditation session %q declares %q",
+				ErrHostMeditationToolMisplaced, id, hostSendToolID)
+		}
+	}
+	return nil
+}
+
+// meditationAgentOf reports the observing agent of one resolved plan, and an
+// empty name beside no plan.
+func meditationAgentOf(plan *hostMeditationPlan) string {
+	if plan == nil {
+		return ""
+	}
+	return plan.agent
 }
 
 // declaresTool reports whether one agent section declares one host tool.
@@ -769,7 +804,7 @@ func (d *hostDocument) declaresTool(id, name string) bool {
 
 // nativeAgents constructs the live pieces every declared agent is assembled
 // with.
-func (d *hostDocument) nativeAgents(ctx context.Context, sender MessageSender, recallPort *RecallPort) (map[event.AgentID]NativeAgent, error) {
+func (d *hostDocument) nativeAgents(ctx context.Context, sender MessageSender, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) (map[event.AgentID]NativeAgent, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
@@ -781,7 +816,7 @@ func (d *hostDocument) nativeAgents(ctx context.Context, sender MessageSender, r
 		if err != nil {
 			return nil, err
 		}
-		tools, err := d.toolsFor(ctx, spec.ID, sender, recallPort)
+		tools, err := d.toolsFor(ctx, spec.ID, sender, recallPort, meditationPlan, meditationPort)
 		if err != nil {
 			return nil, err
 		}
@@ -796,10 +831,13 @@ func (d *hostDocument) nativeAgents(ctx context.Context, sender MessageSender, r
 // and original store are wired to the port itself (it forwards to the faces Bind
 // attaches) and the relation ledger comes from the port's read face, so
 // recall_trace walks the host's parent chain.
-func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSender, recallPort *RecallPort) ([]trpctool.CallableTool, error) {
+func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSender, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
-	if d.declaresTool(id, hostSendToolID) {
+	if id != meditationAgentOf(meditationPlan) && d.declaresTool(id, hostSendToolID) {
 		available[hostSendToolID] = &hostSendTool{sender: sender}
+	}
+	if id == meditationAgentOf(meditationPlan) && d.declaresTool(id, meditation.DeliverSummaryToolName) {
+		available[meditation.DeliverSummaryToolName] = meditation.NewDeliverSummaryTool(meditationPlan.targets, meditationPort, meditationPort)
 	}
 	if d.declaresRecall(id) {
 		reads := recallPort.Reads()
@@ -1269,114 +1307,50 @@ func hostSessionPrefix(entry string) string {
 	return label + ":" + strings.TrimSpace(entry) + ":"
 }
 
-// hostReflection drives one declared reflection loop: each tick reads the
-// observed face through the reflection chain, injects the reflection input into
-// the observing agent's own loop session, and hands a fired reflection's output
-// to the delivery face.
-type hostReflection struct {
-	plan       *hostMeditationPlan
-	source     event.Address
-	targets    []event.Address
-	reflection *meditation.Reflection
-	host       *Host
-	deliver    DeliverFunc
-
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+// hostMeditationPort is the host's binding of the two faces a reflection turn
+// writes through: the cross-session sink a delivered summary commits into and
+// the live-session query it resolves its declared targets against.
+//
+// The port is built before the run and bound after Assemble, so the tool the
+// meditation session carries reads the live scene the run holds instead of a
+// copy made at construction. The meditation loop session is never a delivery
+// target: it is the observing session itself, not a binding of the agent.
+type hostMeditationPort struct {
+	plan *hostMeditationPlan
+	run  *Run
 }
 
-// newReflection builds the scheduled reflection of one resolved plan over the
-// run's own observation, input and watermark faces.
-func (h *Host) newReflection(plan *hostMeditationPlan, deliver DeliverFunc) (*hostReflection, error) {
-	gate := h.run.ReflectionGate()
-	if gate == nil {
-		return nil, fmt.Errorf("tagent: agent %q enables meditation beside no reflection anchor store", plan.agent)
+var (
+	_ meditation.EventSink    = (*hostMeditationPort)(nil)
+	_ meditation.SessionQuery = (*hostMeditationPort)(nil)
+)
+
+// Bind attaches the assembled run the port writes through.
+func (p *hostMeditationPort) Bind(run *Run) { p.run = run }
+
+// CommitToSession commits one delivered event into the chain of its address.
+func (p *hostMeditationPort) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
+	if p.run == nil {
+		return "", errors.New("tagent: the meditation port is bound to no run")
 	}
-	reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
-		Loop:    meditation.ReflectionLoop{Agent: plan.agent, Session: plan.session},
-		Face:    meditation.ReflectionFace{ObservedNamespaces: plan.observed, ReadNamespaces: plan.reads},
-		Cadence: meditation.ReflectionCadence{Interval: plan.interval, MinGap: plan.minGap},
-		Prompt:  plan.prompt,
-	}, gate, h.run.ObservationFacts(), h.run.ReflectionInput())
-	if err != nil {
-		return nil, err
-	}
-	source := event.Address{AgentID: event.AgentID(plan.agent), SessionID: event.SessionID(plan.session)}
-	targets := make([]event.Address, 0, len(plan.targets))
-	for _, name := range plan.targets {
-		targets = append(targets, event.Address{AgentID: event.AgentID(name)})
-	}
-	return &hostReflection{
-		plan:       plan,
-		source:     source,
-		targets:    targets,
-		reflection: reflection,
-		host:       h,
-		deliver:    deliver,
-	}, nil
+	return p.run.CommitToSession(ctx, addr, evt)
 }
 
-// start begins the tick loop: the first tick runs one interval after the start,
-// so a restart never fires a reflection the previous process just consumed.
-func (r *hostReflection) start(ctx context.Context) {
-	r.mu.Lock()
-	if r.cancel != nil {
-		r.mu.Unlock()
-		return
+// ActiveSessions reports the run's live bindings of one agent, without the
+// observing session of the reflection itself.
+func (p *hostMeditationPort) ActiveSessions(agentID event.AgentID) []event.Address {
+	if p.run == nil {
+		return nil
 	}
-	loopCtx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
-	r.cancel, r.done = cancel, done
-	r.mu.Unlock()
-	go r.run(loopCtx, done)
-}
-
-// run ticks the reflection loop until its context ends.
-func (r *hostReflection) run(ctx context.Context, done chan struct{}) {
-	defer close(done)
-	ticker := time.NewTicker(r.plan.interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			r.tick(ctx)
+	sessions := p.run.ActiveSessions(agentID)
+	out := make([]event.Address, 0, len(sessions))
+	for _, addr := range sessions {
+		if p.plan != nil && addr.AgentID == event.AgentID(p.plan.agent) && addr.SessionID == event.SessionID(p.plan.session) {
+			continue
 		}
+		out = append(out, addr)
 	}
-}
-
-// tick runs one scheduled reflection and, when it fired, hands what the
-// reflection turn produced to the delivery face.
-func (r *hostReflection) tick(ctx context.Context) {
-	outcome := r.reflection.Tick(ctx, time.Now())
-	if outcome.Decision.Disposition != meditation.TickFired {
-		assemblyInfo("tagent: meditation tick of %s: %s (%s)", r.plan.agent, outcome.Decision.Disposition, outcome.Decision.Reason)
-		return
-	}
-	delivery := meditation.DeliveryPolicy{}
-	if outcome.Injection == nil || !delivery.Deliverable(outcome.Injection.Event) {
-		assemblyInfo("tagent: meditation tick of %s withheld the reflection: no host-visible lineage", r.plan.agent)
-		return
-	}
-	assemblyInfo("tagent: meditation tick of %s fired reflection %s", r.plan.agent, outcome.Injection.Key)
-	for _, content := range r.host.freshAssistant(r.source) {
-		r.deliver(ctx, string(r.source.AgentID), r.targets, content)
-	}
-}
-
-// Stop ends the tick loop and waits for the tick in flight to return.
-func (r *hostReflection) Stop() {
-	r.mu.Lock()
-	cancel, done := r.cancel, r.done
-	r.cancel, r.done = nil, nil
-	r.mu.Unlock()
-	if cancel == nil {
-		return
-	}
-	cancel()
-	<-done
+	return out
 }
 
 const (
