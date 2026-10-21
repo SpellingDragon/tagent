@@ -32,6 +32,7 @@ const (
 // - the call that round issues executes nowhere, while the call of the round before it runs once
 // - a declaration naming no budget leaves the drive unbounded, so it ends on its own terminal
 // - a budget named as a count of seconds reaches the drive as the time budget it declares
+// - two agents close on the round budgets their own declarations name, each with its own instruction
 // 契约: docs/wiki/agent/event-flow.md#watchdog-final-round
 func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 	t.Run("a declared round budget closes the next decision", func(t *testing.T) {
@@ -69,6 +70,65 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		}
 		if got := tool.calls(); got != 1 {
 			t.Fatalf("tool executions = %d, want the closing round's call admitted nowhere", got)
+		}
+	})
+
+	t.Run("each agent closes on the round budget its own declaration names", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		tool := &convTool{name: budgetToolName, output: budgetToolOutput}
+		modelA := &convModel{name: "model-a", answer: alwaysToolTurn(tool)}
+		modelB := &convModel{name: "model-b", answer: alwaysToolTurn(tool)}
+		decl := &config.Declaration{
+			Entry: "agent-a",
+			Agents: []config.AgentSpec{
+				{
+					ID:         "agent-a",
+					Model:      "model-a",
+					Tools:      []config.ToolRef{{Name: budgetToolName}},
+					FinalRound: config.FinalRoundSpec{MaxRounds: 2, TimeoutSeconds: 5, Prompt: budgetPrompt},
+				},
+				{
+					ID:         "agent-b",
+					Model:      "model-b",
+					Tools:      []config.ToolRef{{Name: budgetToolName}},
+					FinalRound: config.FinalRoundSpec{MaxRounds: 1, TimeoutSeconds: 5, Prompt: "close agent b out"},
+				},
+			},
+		}
+		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+			"agent-a": {Model: modelA, Tools: []trpctool.CallableTool{tool}},
+			"agent-b": {Model: modelB, Tools: []trpctool.CallableTool{tool}},
+		}, tagent.WithGovernance(passPolicy{}))
+		if err != nil {
+			t.Fatalf("assemble the runtime: %v", err)
+		}
+		cases := []struct {
+			agent     event.AgentID
+			decisions int
+			prompt    string
+		}{
+			{agent: "agent-a", decisions: 3, prompt: budgetPrompt},
+			{agent: "agent-b", decisions: 2, prompt: "close agent b out"},
+		}
+		for _, tc := range cases {
+			turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+				InvocationID: event.InvocationID("inv-budget-" + string(tc.agent)),
+				Address:      event.Address{AgentID: tc.agent, SessionID: event.SessionID("session-budget-" + string(tc.agent))},
+				Input:        []model.Message{{Role: model.RoleUser, Content: "start"}},
+			})
+			if err != nil {
+				t.Fatalf("invoke %q under its declared budget: %v", tc.agent, err)
+			}
+			if turn.FinalRound != agent.FinalRoundRounds {
+				t.Fatalf("final round reason of %q = %q, want %q", tc.agent, turn.FinalRound, agent.FinalRoundRounds)
+			}
+			if len(turn.Decisions) != tc.decisions {
+				t.Fatalf("decisions of %q = %d, want %d beside its own round budget", tc.agent, len(turn.Decisions), tc.decisions)
+			}
+			if got := closingTail(t, turn); got != tc.prompt {
+				t.Fatalf("closing request of %q ends on %q, want %q", tc.agent, got, tc.prompt)
+			}
 		}
 	})
 

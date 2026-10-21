@@ -159,6 +159,98 @@ func TestFinalRoundClosingSemantics(t *testing.T) {
 	})
 }
 
+// TestSubAgentFinalRoundBounds drives three agents of one loop under their own watchdog budgets:
+// - a drive of an agent declaring a round budget of one runs one tool round beside its closing round
+// - a drive of an agent declaring a round budget of two runs two tool rounds beside its closing round
+// - a drive of an agent declaring no budget reads the loop's default
+// - every drive carries the closing instruction of the policy it ran under
+// 契约: docs/wiki/agent/event-flow.md#watchdog-final-round
+func TestSubAgentFinalRoundBounds(t *testing.T) {
+	script := newClosingRoundScript(
+		closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-a1", "echo-a")}},
+		closingRoundStep{answer: "a delivered"},
+		closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-b1", "echo-a")}},
+		closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-b2", "echo-a")}},
+		closingRoundStep{answer: "b delivered"},
+		closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-c1", "echo-a")}},
+		closingRoundStep{answer: "c delivered"},
+	)
+	loop, _ := finalRoundBoundsLoop(t, script)
+	loop.SetFinalRound(FinalRoundPolicy{MaxRounds: 1, Timeout: 5 * time.Second, Prompt: "close the default"})
+	loop.SetAgentFinalRound("agent-a", FinalRoundPolicy{MaxRounds: 1, Timeout: 5 * time.Second, Prompt: "close agent a"})
+	loop.SetAgentFinalRound("agent-b", FinalRoundPolicy{MaxRounds: 2, Timeout: 5 * time.Second, Prompt: "close agent b"})
+
+	cases := []struct {
+		agent     event.AgentID
+		decision  string
+		decisions int
+		closing   string
+	}{
+		{agent: "agent-a", decision: "a", decisions: 2, closing: "close agent a"},
+		{agent: "agent-b", decision: "b", decisions: 3, closing: "close agent b"},
+		{agent: "agent-c", decision: "c", decisions: 2, closing: "close the default"},
+	}
+	for _, tc := range cases {
+		turn, err := loop.Drive(context.Background(), finalRoundBoundsInvocation(tc.agent, tc.decision))
+		if err != nil {
+			t.Fatalf("drive of %q = %v, want the closing round delivered", tc.agent, err)
+		}
+		if turn.FinalRound != FinalRoundRounds {
+			t.Fatalf("final round reason of %q = %q, want %q beside its own spent round budget", tc.agent, turn.FinalRound, FinalRoundRounds)
+		}
+		if len(turn.Decisions) != tc.decisions {
+			t.Fatalf("decisions of %q = %d, want %d beside its own round budget", tc.agent, len(turn.Decisions), tc.decisions)
+		}
+		closing := turn.Decisions[len(turn.Decisions)-1].Request.Messages
+		if last := closing[len(closing)-1]; last.Role != model.RoleUser || last.Content != tc.closing {
+			t.Fatalf("closing instruction of %q = %+v, want %q", tc.agent, last, tc.closing)
+		}
+	}
+}
+
+// finalRoundBoundsInvocation returns one range of the named agent, in a session
+// of its own so the three drives never share a transcript.
+func finalRoundBoundsInvocation(agent event.AgentID, decision string) Invocation {
+	return Invocation{
+		InvocationID: event.InvocationID("invocation-" + decision),
+		Address:      event.Address{AgentID: agent, SessionID: event.SessionID("session-" + decision)},
+		Instance:     "instance-a",
+		Ready: []event.Event{{
+			Key:     event.EventID("event-" + decision),
+			Message: model.Message{Role: model.RoleUser, Content: "start"},
+		}},
+	}
+}
+
+// finalRoundBoundsLoop returns one loop over the three declared agents that
+// share the model given, beside the transcript face the drives commit into.
+func finalRoundBoundsLoop(t *testing.T, m model.Model) (*Loop, *invariantLoopHistory) {
+	t.Helper()
+	ids := []event.AgentID{"agent-a", "agent-b", "agent-c"}
+	declaration := &config.Declaration{Entry: "agent-a", Agents: make([]config.AgentSpec, 0, len(ids))}
+	held := make(map[event.AgentID]state.AgentBinding, len(ids))
+	for _, id := range ids {
+		declaration.Agents = append(declaration.Agents, config.AgentSpec{ID: string(id)})
+		held[id] = state.AgentBinding{Model: m, PromptSource: state.PromptSource{Version: "v1"}}
+	}
+	plan, err := state.NewStatePlan(
+		state.OrgPlan{Declaration: declaration, Fingerprint: "fp-bounds"},
+		held,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("build the binding plan of the per-agent closing-round loop: %v", err)
+	}
+	bindings := state.NewBindings()
+	if err := bindings.Hold(plan); err != nil {
+		t.Fatalf("hold the binding generation of the per-agent closing-round loop: %v", err)
+	}
+	loop := NewLoop(bindings, state.NewOccupancy(), "instance-a", nil)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	return loop, history
+}
+
 // closingRoundAddress is the session the closing-round drives run in.
 var closingRoundAddress = event.Address{AgentID: "agent-a", SessionID: "session-a"}
 

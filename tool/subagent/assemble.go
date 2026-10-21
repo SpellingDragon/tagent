@@ -77,6 +77,15 @@ func inherit(a *Assembly, parent *Assembly) {
 	if a.MCP == nil {
 		a.MCP = cloneStrings(parent.MCP)
 	}
+	if a.Temperature == nil {
+		a.Temperature = cloneFloat64(parent.Temperature)
+	}
+	if a.ThinkingEnabled == nil {
+		a.ThinkingEnabled = cloneBool(parent.ThinkingEnabled)
+	}
+	if a.ReasoningEffort == "" {
+		a.ReasoningEffort = parent.ReasoningEffort
+	}
 	if a.Instruction == "" {
 		a.Instruction = parent.Instruction
 	}

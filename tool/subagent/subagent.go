@@ -33,6 +33,17 @@ type Definition struct {
 	Tools []string
 	// MCP lists the MCP server names the sub-agent may use.
 	MCP []string
+	// Temperature is the sampling temperature every request of the sub-agent
+	// carries. Nil declares none, so the model default stands; a declared zero
+	// is the deterministic sampling zero names.
+	Temperature *float64
+	// ThinkingEnabled states whether the model's extended reasoning runs for
+	// every request of the sub-agent. Nil declares no switch, so the model
+	// default stands; a declared false is the explicit off.
+	ThinkingEnabled *bool
+	// ReasoningEffort names the reasoning effort every request of the sub-agent
+	// carries. Empty declares none, so the model default stands.
+	ReasoningEffort string
 	// promptText marks a Prompt the loader already resolved to text.
 	promptText bool
 }
@@ -140,6 +151,8 @@ func cloneDefinition(d *Definition) *Definition {
 	out.Skills = cloneStrings(d.Skills)
 	out.Tools = cloneStrings(d.Tools)
 	out.MCP = cloneStrings(d.MCP)
+	out.Temperature = cloneFloat64(d.Temperature)
+	out.ThinkingEnabled = cloneBool(d.ThinkingEnabled)
 	return &out
 }
 

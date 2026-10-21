@@ -587,16 +587,17 @@ type Loop struct {
     independent of the other's terminal. - This loop is the runtime's only
     tool-call loop: no framework Runner or LLMAgent drives a second loop
     beside it. The terminal of a decision is read from the reduction outcome
-    and never re-derived here: this file does not classify the six states and
-    does not judge the terminal on stream mechanics. - A decision borrows the
-    binding generation effective when it starts executing and keeps that handle
-    until the work it set in motion has ended, while a publication during
-    the decision never changes the generation it runs with. - A settled task
-    notification backflows to the invocation that issued the call and drives
-    that invocation's next decision, which borrows the generation effective
-    at its own start — never one chosen in advance. - The watchdog budget of a
-    drive is read at the boundary between its rounds: the round that boundary
-    finds the budget spent is the closing round, and the drive ends when that
+    and never re-derived here: this file does not classify the six states
+    and does not judge the terminal on stream mechanics. - A decision
+    borrows the binding generation effective when it starts executing and
+    keeps that handle until the work it set in motion has ended, while a
+    publication during the decision never changes the generation it runs with.
+    - A settled task notification backflows to the invocation that issued
+    the call and drives that invocation's next decision, which borrows the
+    generation effective at its own start — never one chosen in advance.
+    - The watchdog budget of a drive is read at the boundary between its rounds:
+    the round that boundary finds the budget spent is the closing round, and the
+    drive ends when that round returns. The budget is the one the drive's own
 
 func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.InstanceID, facts FactResolver) *Loop
     NewLoop returns the event loop over the state owner's borrowing face,
@@ -656,6 +657,18 @@ func (l *Loop) RecordingLosses() []RecordingLoss
     failure that stopped the write. The account is the explicit gap ledger of
     the run: nothing the recorder refused is silently forgotten here.
 
+func (l *Loop) SetAgentFinalRound(agent event.AgentID, policy FinalRoundPolicy)
+    SetAgentFinalRound attaches the watchdog budget the drives of one agent run
+    under: a drive whose address names this agent reads the policy set here,
+    and every other drive reads the loop's default. The budget is per agent,
+    so two agents of one declaration close their own drives on their own bounds.
+
+func (l *Loop) SetAgentFinalRounds(policies map[event.AgentID]FinalRoundPolicy)
+    SetAgentFinalRounds replaces the per-agent budgets of this loop with the
+    table given: an agent the table does not name reads the loop's default,
+    so a publication that drops a budget leaves no earlier entry behind.
+    A nil or empty table clears every per-agent entry.
+
 func (l *Loop) SetCapture(capture Capture)
     SetCapture attaches the trajectory capture face this loop fixes each
     decision's request view through, admits each observed attempt beside and
@@ -682,10 +695,10 @@ func (l *Loop) SetFactPipelines(pipelines FactPipelines)
     construction shape of the loop stays as it is.
 
 func (l *Loop) SetFinalRound(policy FinalRoundPolicy)
-    SetFinalRound attaches the watchdog budget the drives of this loop run
-    under. A zero policy keeps every drive unbounded. The setter is separate
-    from the constructor so the declared construction shape of the loop stays as
-    it is.
+    SetFinalRound attaches the watchdog budget the drives of this loop run under
+    while their agent declares none of its own. A zero policy keeps every drive
+    unbounded. The setter is separate from the constructor so the declared
+    construction shape of the loop stays as it is.
 
 func (l *Loop) SetHistory(face HistoryFace)
     SetHistory attaches the session transcript face this loop reads the shared

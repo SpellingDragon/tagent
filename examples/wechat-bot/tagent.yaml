@@ -128,21 +128,34 @@ agents:
     model: deepseek-flash
     system_prompt:
       files: [knowledge_agent.md, knowledge_backend.md]
+    # 思考参数:是否思考与强度按 agent 独立声明(请求级注入,未声明走模型默认)。
+    thinking_enabled: true
+    reasoning_effort: high
+    # 看门狗收尾轮:本 agent 自己的预算(声明即生效,不再只读 entry)。
+    final_round:
+      max_rounds: 5
+      timeout_seconds: 120
     # 知识面:skill_dirs 是技能仓根,read_root 限定 read_file 的沙箱根。
     # 三工具复用 trpc skill/file 面(skill_search/skill_load/read_file),不自行造轮。
     skill_dirs: [skills]
     read_root: .
+    # web 检索:经 MCP 网关调顶层 mcp_servers 的 web-search-prime(智谱搜索)。
     tools:
       - { kind: tool, id: skill_search }
       - { kind: tool, id: skill_load }
       - { kind: tool, id: read_file }
-    # 待接线:memory / reasoning_effort / max_tool_iterations / max_tokens / compress_threshold
-    #         以及 mcp_*/duckduckgo_search/memory_query
+      - { kind: tool, id: mcp_call }
+    # 待接线:memory / max_tokens / compress_threshold / memory_query
 
   # ---- Recall:记忆检索子 Agent ----
   recall:
     system_prompt:
-      files: [recall_agent.md]      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
+      files: [recall_agent.md]
+    # 检索求快:关闭思考,自设收尾预算。
+    thinking_enabled: false
+    final_round:
+      max_rounds: 5
+      timeout_seconds: 120      # 本目录自带(工具名按本部署的声明书写:recall_query/recall_get/recall_recent/recall_trace)
     # 记忆读面:声明即授权(不声明的 agent 看不见该工具);四工具经 tool/recall 装配,
     # 读面由宿主注入(hostRecallSeam):Searcher 走装配后的 Run.Recall,Table 走已提交
     # 存储的观察表,Originals 走 storage 的 scoped 原始层,Embedder 由宿主绑定,而 Trace
@@ -218,6 +231,8 @@ agents:
   meditator:
     system_prompt:
       files: [meditator_agent.md]
+    # 冥想自己的窗口:反思上下文同样按窗口管理。
+    max_tokens: 32000
     # 跨会话写面:只有模型在反思回合内显式调用 deliver_summary 才落链;
     # 目标=deliver_to 白名单里的活跃绑定会话,不声明则工具不可见,机制侧不代投。
     tools:

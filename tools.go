@@ -355,7 +355,7 @@ func (r *Run) surfaceBuilder(agents map[event.AgentID]NativeAgent, spec config.A
 			}
 			for _, candidate := range agents {
 				if candidate.Model != nil && candidate.Model.Info().Name == name {
-					return candidate.Model, nil
+					return delegatedModel(candidate.Model, name, spec), nil
 				}
 			}
 			return nil, fmt.Errorf("%w: %q", subagent.ErrModelUnresolved, name)
@@ -382,6 +382,18 @@ func (r *Run) surfaceBuilder(agents map[event.AgentID]NativeAgent, spec config.A
 		}
 	}
 	return builder
+}
+
+// delegatedModel wraps one resolved model with the sampling the authorizing
+// declaration names, when the model is the one that declaration names: a
+// delegated turn then carries the declared sampling exactly as a turn of the
+// agent itself does. A model the authorizing declaration does not name keeps its
+// own path, so the declared sampling never leaks onto another agent's model.
+func delegatedModel(candidate model.Model, name string, spec config.AgentSpec) model.Model {
+	if name != spec.Model {
+		return candidate
+	}
+	return withHostModelParams(candidate, spec)
 }
 
 // targetDescription is the declared purpose of one target tool: the agent's own
@@ -425,7 +437,7 @@ func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]Nativ
 			}
 			for _, candidate := range agents {
 				if candidate.Model != nil && candidate.Model.Info().Name == name {
-					return candidate.Model, nil
+					return delegatedModel(candidate.Model, name, spec), nil
 				}
 			}
 			return nil, fmt.Errorf("%w: %q", subagent.ErrModelUnresolved, name)

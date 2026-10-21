@@ -173,6 +173,13 @@ var (
 	// drive unbounded, and the reasons a closing round runs under are named.
 	_ func(*Loop, FinalRoundPolicy) = (*Loop).SetFinalRound
 
+	// The per-agent watchdog budget is attached through its own setter, so one
+	// drive reads the budget its own agent declares and every other drive reads
+	// the default above.
+	_ func(*Loop, event.AgentID, FinalRoundPolicy) = (*Loop).SetAgentFinalRound
+
+	_ func(*Loop, map[event.AgentID]FinalRoundPolicy) = (*Loop).SetAgentFinalRounds
+
 	_ = FinalRoundPolicy{MaxRounds: 0, Budget: 0, Timeout: 0, Prompt: ""}
 
 	_ FinalRoundReason = FinalRoundNone

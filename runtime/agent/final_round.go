@@ -3,6 +3,7 @@ package agent
 import (
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 )
 
@@ -64,19 +65,56 @@ type FinalRoundPolicy struct {
 	Prompt string
 }
 
-// SetFinalRound attaches the watchdog budget the drives of this loop run under.
-// A zero policy keeps every drive unbounded. The setter is separate from the
-// constructor so the declared construction shape of the loop stays as it is.
+// SetFinalRound attaches the watchdog budget the drives of this loop run under
+// while their agent declares none of its own. A zero policy keeps every drive
+// unbounded. The setter is separate from the constructor so the declared
+// construction shape of the loop stays as it is.
 func (l *Loop) SetFinalRound(policy FinalRoundPolicy) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.final = policy
 }
 
-// finalRound reports the watchdog budget the drives of this loop run under.
-func (l *Loop) finalRound() FinalRoundPolicy {
+// SetAgentFinalRound attaches the watchdog budget the drives of one agent run
+// under: a drive whose address names this agent reads the policy set here, and
+// every other drive reads the loop's default. The budget is per agent, so two
+// agents of one declaration close their own drives on their own bounds.
+func (l *Loop) SetAgentFinalRound(agent event.AgentID, policy FinalRoundPolicy) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.finals == nil {
+		l.finals = map[event.AgentID]FinalRoundPolicy{}
+	}
+	l.finals[agent] = policy
+}
+
+// SetAgentFinalRounds replaces the per-agent budgets of this loop with the
+// table given: an agent the table does not name reads the loop's default, so a
+// publication that drops a budget leaves no earlier entry behind. A nil or
+// empty table clears every per-agent entry.
+func (l *Loop) SetAgentFinalRounds(policies map[event.AgentID]FinalRoundPolicy) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(policies) == 0 {
+		l.finals = nil
+		return
+	}
+	finals := make(map[event.AgentID]FinalRoundPolicy, len(policies))
+	for agent, policy := range policies {
+		finals[agent] = policy
+	}
+	l.finals = finals
+}
+
+// finalRoundFor reports the watchdog budget the drives of one agent run under:
+// the policy the agent declares for itself, or the loop's default while it
+// declares none.
+func (l *Loop) finalRoundFor(agent event.AgentID) FinalRoundPolicy {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if policy, ok := l.finals[agent]; ok {
+		return policy
+	}
 	return l.final
 }
 

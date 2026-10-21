@@ -125,6 +125,7 @@ func (b Builder) Build(ctx context.Context, a *Assembly) (trpcagent.Agent, error
 	if err != nil {
 		return nil, err
 	}
+	model = withSampling(model, a.Definition)
 	opts := []llmagent.Option{
 		llmagent.WithModel(model),
 		llmagent.WithDescription(a.Description),

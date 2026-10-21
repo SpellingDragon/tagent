@@ -24,6 +24,16 @@ This file holds no retrieval of its own: the knowledge stack is the trpc one,
 the recall behaviour is the face the caller injects, and an unknown reference is
 left to the host-contributed tools instead of being refused.
 
+The sampling one sub-agent call names for the requests of its delegated turn:
+the temperature, thinking switch and reasoning effort the call declares flow
+onto every request that turn runs. The wrapper sits between the trpc agent
+builder and the model the assembly resolves, so a parameter declared at the
+call site reaches the provider even though the trpc model constructors accept no
+per-call sampling of their own.
+
+A parameter the call does not name is never written as a zero, and a value a
+request already carries is never overridden.
+
 Package subagent turns one sub-agent declaration - an agents file or explicit
 parameters - into the resolved assembly the trpc agent builder consumes.
 The package holds no live object: a refused declaration yields no assembly.
@@ -267,6 +277,17 @@ type Definition struct {
 	Tools []string
 	// MCP lists the MCP server names the sub-agent may use.
 	MCP []string
+	// Temperature is the sampling temperature every request of the sub-agent
+	// carries. Nil declares none, so the model default stands; a declared zero
+	// is the deterministic sampling zero names.
+	Temperature *float64
+	// ThinkingEnabled states whether the model's extended reasoning runs for
+	// every request of the sub-agent. Nil declares no switch, so the model
+	// default stands; a declared false is the explicit off.
+	ThinkingEnabled *bool
+	// ReasoningEffort names the reasoning effort every request of the sub-agent
+	// carries. Empty declares none, so the model default stands.
+	ReasoningEffort string
 
 	// Has unexported fields.
 }

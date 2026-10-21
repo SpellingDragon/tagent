@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -14,6 +15,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -49,7 +51,8 @@ func TestSubagentToolDeclaration(t *testing.T) {
 
 	t.Run("the input schema declares both sources", func(t *testing.T) {
 		schema := tool.Declaration().InputSchema
-		want := []string{"agents_file", "name", "description", "model", "prompt", "skills", "tools", "mcp", "input", "handoff"}
+		want := []string{"agents_file", "name", "description", "model", "prompt", "skills", "tools", "mcp",
+			"temperature", "thinking_enabled", "reasoning_effort", "input", "handoff"}
 		if len(schema.Properties) != len(want) {
 			t.Fatalf("schema properties = %d, want the %d declared arguments", len(schema.Properties), len(want))
 		}
@@ -61,6 +64,11 @@ func TestSubagentToolDeclaration(t *testing.T) {
 		for _, key := range []string{"skills", "tools", "mcp"} {
 			if schema.Properties[key].Type != "array" || schema.Properties[key].Items == nil {
 				t.Fatalf("schema argument %q = %+v, want a string array", key, schema.Properties[key])
+			}
+		}
+		for key, typ := range map[string]string{"temperature": "number", "thinking_enabled": "boolean", "reasoning_effort": "string"} {
+			if got := schema.Properties[key].Type; got != typ {
+				t.Fatalf("schema argument %q = %q, want the declared %q sampling", key, got, typ)
 			}
 		}
 		if schema.Properties["handoff"].Type != "object" {
@@ -101,7 +109,7 @@ func TestSubagentToolDeclaration(t *testing.T) {
 	t.Run("an argument the declaration does not name is refused", func(t *testing.T) {
 		delegation := &stubDelegation{}
 		tool := newToolForDeclarationTest(t, delegation)
-		out := callTool(t, tool, map[string]any{"name": "reviewer", "temperature": 0.2})
+		out := callTool(t, tool, map[string]any{"name": "reviewer", "max_tokens": 256})
 		requireDenial(t, out, ErrArguments)
 		if got := delegation.calls(); got != 0 {
 			t.Fatalf("delegations = %d, want no task from an undeclared argument", got)
@@ -192,6 +200,91 @@ func TestSubagentToolDeclaration(t *testing.T) {
 			t.Fatalf("terminals reported = %d, want none from a dedup admission", got)
 		}
 	})
+}
+
+// TestCallSubagentSamplingOverride drives the sampling a call names onto the delegated turn:
+// - the temperature, thinking switch and reasoning effort an explicit source names reach the request of the sub-agent's turn
+// - a call naming no sampling injects none of the three, so the model default stands
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestCallSubagentSamplingOverride(t *testing.T) {
+	t.Run("the sampling an explicit source names reaches the delegated request", func(t *testing.T) {
+		provider := &serveModel{name: "model-caller", answer: "review recorded"}
+		tool := newSamplingTool(t, &stubDelegation{}, provider)
+		out := callTool(t, tool, map[string]any{
+			"name":             "reviewer",
+			"prompt":           "review the change",
+			"temperature":      0.1,
+			"thinking_enabled": true,
+			"reasoning_effort": "low",
+		})
+		if _, ok := out.(task.AdmissionReceipt); !ok {
+			t.Fatalf("call result = %#v, want the admission receipt of the sampled call", out)
+		}
+		request := awaitSampledRequest(t, provider)
+		if request.Temperature == nil || *request.Temperature != 0.1 {
+			t.Fatalf("delegated request temperature = %v, want the 0.1 the call named", request.Temperature)
+		}
+		if request.ThinkingEnabled == nil || !*request.ThinkingEnabled {
+			t.Fatalf("delegated request thinking switch = %v, want the true the call named", request.ThinkingEnabled)
+		}
+		if request.ReasoningEffort == nil || *request.ReasoningEffort != "low" {
+			t.Fatalf("delegated request reasoning effort = %v, want the low the call named", request.ReasoningEffort)
+		}
+	})
+
+	t.Run("a call naming no sampling injects none", func(t *testing.T) {
+		provider := &serveModel{name: "model-caller", answer: "review recorded"}
+		tool := newSamplingTool(t, &stubDelegation{}, provider)
+		out := callTool(t, tool, map[string]any{"name": "reviewer", "prompt": "review the change"})
+		if _, ok := out.(task.AdmissionReceipt); !ok {
+			t.Fatalf("call result = %#v, want the admission receipt of the bare call", out)
+		}
+		request := awaitSampledRequest(t, provider)
+		if request.Temperature != nil {
+			t.Fatalf("delegated request temperature = %v, want no key beside a call naming none", *request.Temperature)
+		}
+		if request.ThinkingEnabled != nil {
+			t.Fatalf("delegated request thinking switch = %v, want no key beside a call naming none", *request.ThinkingEnabled)
+		}
+		if request.ReasoningEffort != nil {
+			t.Fatalf("delegated request reasoning effort = %v, want no key beside a call naming none", *request.ReasoningEffort)
+		}
+	})
+}
+
+// newSamplingTool returns the tool over one delegation stand-in, the model
+// stand-in its builder resolves and the real borrowing face of a held generation.
+func newSamplingTool(t *testing.T, delegation *stubDelegation, provider *serveModel) *Tool {
+	t.Helper()
+	bindings := state.NewBindings()
+	holdBinding(t, bindings, event.Address{AgentID: "agent-caller", SessionID: "session-caller"})
+	tool, err := NewTool(ToolOptions{
+		Parent: &Assembly{Definition: Definition{Description: "the caller", Model: "model-caller"}},
+		Builder: Builder{Model: func(context.Context, string) (trpcmodel.Model, error) {
+			return provider, nil
+		}},
+		Delegation: delegation,
+		Bindings:   bindings,
+	})
+	if err != nil {
+		t.Fatalf("construct the call_subagent tool: %v", err)
+	}
+	return tool
+}
+
+// awaitSampledRequest waits for the request of the delegated turn and reports it:
+// the turn runs beside the admission, so the check waits on the model it drives.
+func awaitSampledRequest(t *testing.T, provider *serveModel) trpcmodel.Request {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if requests := provider.recorded(); len(requests) > 0 {
+			return requests[0]
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the delegated turn issued no request before the deadline")
+	return trpcmodel.Request{}
 }
 
 // newToolForDeclarationTest returns the tool over one delegation stand-in and the real

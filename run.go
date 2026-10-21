@@ -402,6 +402,7 @@ func (r *Run) Publish(ctx context.Context, decl *config.Declaration, agents map[
 	outcome, err := r.publisher.Publish(ctx, cand)
 	if err == nil {
 		r.loop.SetFinalRound(finalRoundPolicy(decl))
+		r.loop.SetAgentFinalRounds(agentFinalRoundPolicies(decl))
 		r.mu.Lock()
 		r.current = cand.Plan
 		r.mu.Unlock()
@@ -461,11 +462,30 @@ func (r *Run) CloseMCPServers() error {
 }
 
 // finalRoundPolicy maps the watchdog budget a declaration names for its entry
-// agent onto the policy every drive of this run runs under. The closing round
-// stays opt-in: a declaration that names no budget yields the zero policy,
+// agent onto the default policy the drives of this run run under. The closing
+// round stays opt-in: a declaration that names no budget yields the zero policy,
 // which keeps every drive unbounded.
 func finalRoundPolicy(decl *config.Declaration) agent.FinalRoundPolicy {
-	spec := finalRoundSpecOf(decl)
+	return finalRoundPolicyOf(finalRoundSpecOf(decl))
+}
+
+// agentFinalRoundPolicies maps the watchdog budget every declared agent names
+// for itself onto the per-agent table of the loop: an agent that names no
+// budget carries no entry, so its drives read the entry agent's default.
+func agentFinalRoundPolicies(decl *config.Declaration) map[event.AgentID]agent.FinalRoundPolicy {
+	policies := make(map[event.AgentID]agent.FinalRoundPolicy, len(decl.Agents))
+	for _, spec := range decl.Agents {
+		if spec.FinalRound == (config.FinalRoundSpec{}) {
+			continue
+		}
+		policies[event.AgentID(spec.ID)] = finalRoundPolicyOf(spec.FinalRound)
+	}
+	return policies
+}
+
+// finalRoundPolicyOf maps one declared watchdog budget onto the policy the
+// drives of its own agent run under.
+func finalRoundPolicyOf(spec config.FinalRoundSpec) agent.FinalRoundPolicy {
 	return agent.FinalRoundPolicy{
 		MaxRounds: spec.MaxRounds,
 		Budget:    time.Duration(spec.BudgetSeconds * float64(time.Second)),

@@ -115,8 +115,9 @@ func (t *Tool) Declaration() *trpctool.Declaration {
 			"the receipt carries the task identity, and the progress and terminal of that task arrive as its notifications. " +
 			"exactly one assembly source is given, and a call naming both is refused: " +
 			"agents_file names a markdown agents file whose --- frontmatter declares name/description/model/prompt/skills/tools/mcp and whose body is the prompt, " +
-			"while the explicit source declares prompt/model/skills/tools/mcp (and name/description) directly; " +
-			"a field either source leaves undeclared inherits the caller's own value. " +
+			"while the explicit source declares prompt/model/skills/tools/mcp (and name/description) directly, " +
+			"beside the optional sampling of temperature/thinking_enabled/reasoning_effort that its model requests carry; " +
+			"a field either source leaves undeclared inherits the caller's own value, and sampling left undeclared is not injected at all. " +
 			"a call may declare a structured handoff beside the request: the intent it serves, the acceptance constraints its result is held to, " +
 			"the decisions it may not take on its own and the stored facts it starts from, while its grants are the tool, skill and MCP references the assembled sub-agent declares. " +
 			"every refusal - both sources at once, an unreadable file, a missing name, a model or a reference list that cannot be resolved, a refused delegation, " +
@@ -163,6 +164,18 @@ func (t *Tool) Declaration() *trpctool.Declaration {
 				"input": {
 					Type:        "string",
 					Description: "the request the delegated turn starts from; empty runs the assembled instruction alone",
+				},
+				"temperature": {
+					Type:        "number",
+					Description: "the sampling temperature the sub-agent's model requests carry; undeclared keeps the model default",
+				},
+				"thinking_enabled": {
+					Type:        "boolean",
+					Description: "whether extended reasoning runs for the sub-agent's model requests; undeclared keeps the model default",
+				},
+				"reasoning_effort": {
+					Type:        "string",
+					Description: "the reasoning effort the sub-agent's model requests carry; undeclared keeps the model default",
 				},
 				"handoff": handoffSchema(),
 			},
@@ -293,6 +306,12 @@ type callArgs struct {
 	Tools []string `json:"tools"`
 	// MCP lists the MCP server references of the explicit source.
 	MCP []string `json:"mcp"`
+	// Temperature is the sampling temperature the sub-agent's requests carry.
+	Temperature *float64 `json:"temperature"`
+	// ThinkingEnabled is the thinking switch the sub-agent's requests carry.
+	ThinkingEnabled *bool `json:"thinking_enabled"`
+	// ReasoningEffort is the reasoning effort the sub-agent's requests carry.
+	ReasoningEffort string `json:"reasoning_effort"`
 	// Input is the request the delegated turn starts from.
 	Input string `json:"input"`
 	// Handoff is the structured handoff the call declares beside that request; nil
@@ -302,16 +321,19 @@ type callArgs struct {
 
 // callArgFields is the closed argument key set the declaration names.
 var callArgFields = map[string]bool{
-	"agents_file": true,
-	"name":        true,
-	"description": true,
-	"model":       true,
-	"prompt":      true,
-	"skills":      true,
-	"tools":       true,
-	"mcp":         true,
-	"input":       true,
-	"handoff":     true,
+	"agents_file":      true,
+	"name":             true,
+	"description":      true,
+	"model":            true,
+	"prompt":           true,
+	"skills":           true,
+	"tools":            true,
+	"mcp":              true,
+	"temperature":      true,
+	"thinking_enabled": true,
+	"reasoning_effort": true,
+	"input":            true,
+	"handoff":          true,
 }
 
 // source names the assembly source one call carries: the agents file and the explicit
@@ -325,17 +347,21 @@ func (a callArgs) source() Source {
 // explicit reports the parameter set the call declares, or nil when it declares none.
 func (a callArgs) explicit() *Definition {
 	if a.Name == "" && a.Description == "" && a.Model == "" && a.Prompt == "" &&
-		a.Skills == nil && a.Tools == nil && a.MCP == nil {
+		a.Skills == nil && a.Tools == nil && a.MCP == nil &&
+		a.Temperature == nil && a.ThinkingEnabled == nil && a.ReasoningEffort == "" {
 		return nil
 	}
 	return &Definition{
-		Name:        a.Name,
-		Description: a.Description,
-		Model:       a.Model,
-		Prompt:      a.Prompt,
-		Skills:      a.Skills,
-		Tools:       a.Tools,
-		MCP:         a.MCP,
+		Name:            a.Name,
+		Description:     a.Description,
+		Model:           a.Model,
+		Prompt:          a.Prompt,
+		Skills:          a.Skills,
+		Tools:           a.Tools,
+		MCP:             a.MCP,
+		Temperature:     a.Temperature,
+		ThinkingEnabled: a.ThinkingEnabled,
+		ReasoningEffort: a.ReasoningEffort,
 	}
 }
 

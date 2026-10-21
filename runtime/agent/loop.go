@@ -190,7 +190,7 @@ type Turn struct {
 // - This loop is the runtime's only tool-call loop: no framework Runner or LLMAgent drives a second loop beside it. The terminal of a decision is read from the reduction outcome and never re-derived here: this file does not classify the six states and does not judge the terminal on stream mechanics.
 // - A decision borrows the binding generation effective when it starts executing and keeps that handle until the work it set in motion has ended, while a publication during the decision never changes the generation it runs with.
 // - A settled task notification backflows to the invocation that issued the call and drives that invocation's next decision, which borrows the generation effective at its own start — never one chosen in advance.
-// - The watchdog budget of a drive is read at the boundary between its rounds: the round that boundary finds the budget spent is the closing round, and the drive ends when that round returns.
+// - The watchdog budget of a drive is read at the boundary between its rounds: the round that boundary finds the budget spent is the closing round, and the drive ends when that round returns. The budget is the one the drive's own agent declares, and the loop's default while that agent declares none.
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 type Loop struct {
 	borrow   state.Borrow
@@ -212,6 +212,7 @@ type Loop struct {
 	snapshot  RequestSnapshotFace
 	watch     func(taskID event.TaskID, stopped func() bool) error
 	final     FinalRoundPolicy
+	finals    map[event.AgentID]FinalRoundPolicy
 	losses    []RecordingLoss
 }
 
@@ -264,7 +265,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	transcript := append(append([]model.Message(nil), history...), ready...)
 	l.recordEpisode(ctx, inv)
 	inputs := readyEventIDs(inv.Ready)
-	policy := l.finalRound()
+	policy := l.finalRoundFor(inv.Address.AgentID)
 	started := time.Now()
 	rounds := 0
 	for {
