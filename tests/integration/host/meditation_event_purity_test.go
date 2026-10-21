@@ -191,7 +191,7 @@ func newMeditationRig(t *testing.T, interval time.Duration, medAnswer func(*mode
 	decl := &config.Declaration{
 		Entry: "user-agent",
 		Agents: []config.AgentSpec{
-			{ID: "user-agent", Model: "model-user", ReplayBudget: 100},
+			{ID: "user-agent", Model: "model-user", MaxTokens: 100},
 			{ID: "meditator", Model: "model-meditator"},
 		},
 	}

@@ -3,14 +3,12 @@ package acceptance
 import (
 	"bytes"
 	"context"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/memory/replica"
 
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -18,16 +16,12 @@ import (
 // scenarioOriginalBody is the original text the reference drive commits.
 var scenarioOriginalBody = []byte("first line\nsecond line\n")
 
-// scenarioReplicaBody is the original text the replica drive materialises.
-var scenarioReplicaBody = []byte("replica body: exactly these bytes reach the replica and every segment of it")
-
-// TestScenario07ReplicaAndOwnerIsolation drives the original store, the replica materialiser and the projection presentation.
+// TestScenario07OwnerIsolation drives the original store and the projection presentation.
 // - two owners keep their own reference over identical bytes without overwriting one another, and one blob serves both
 // - the readback returns the committed bytes
-// - a reclaimed replica is written again from its original at the same stable path
 // - a projection entry carries the full original exactly when its recorded decision is a full-text one
 // 契约: docs/wiki/memory/memory-architecture.md#read-paths
-func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
+func TestScenario07OwnerIsolation(t *testing.T) {
 	ctx := context.Background()
 	scenario, err := ScenarioOf("S07")
 	if err != nil {
@@ -38,7 +32,6 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 
 	ownerA := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 	ownerB := event.Address{AgentID: "agent-b", SessionID: "session-b"}
-	scopeA := ledger.ReadScope{Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
 	refA := ledger.OriginalRef{Key: "result-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
 	refB := ledger.OriginalRef{Key: "result-a", Owner: ownerB, Format: "text/markdown", RetentionPolicy: "keep"}
 
@@ -68,39 +61,6 @@ func TestScenario07ReplicaAndOwnerIsolation(t *testing.T) {
 	observations["original_bytes_equal_readback"] = recalled.Outcome == ledger.RecallFound &&
 		bytes.Equal(recalled.Body, scenarioOriginalBody)
 	refs = append(refs, string(refA.Key))
-
-	root := t.TempDir()
-	if err := store.Put(ctx, ledger.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}, scenarioReplicaBody); err != nil {
-		t.Fatalf("put the replica original: %v", err)
-	}
-	replicaRef := ledger.OriginalRef{Key: "replica-a", Owner: ownerA, Format: "tool-output", RetentionPolicy: "keep"}
-	materializer, err := replica.NewMaterializer(root, store, scopeA)
-	if err != nil {
-		t.Fatalf("open the materializer: %v", err)
-	}
-	first, err := materializer.Materialize(ctx, replicaRef, "tool-shell")
-	if err != nil {
-		t.Fatalf("materialise the replica: %v", err)
-	}
-	cleaner, err := replica.NewReplicaCleaner(root)
-	if err != nil {
-		t.Fatalf("open the replica cleaner: %v", err)
-	}
-	if err := cleaner.CleanupStartup(ctx); err != nil {
-		t.Fatalf("reclaim the replica: %v", err)
-	}
-	reclaimed := false
-	if _, err := os.Lstat(first.Path); os.IsNotExist(err) {
-		reclaimed = true
-	}
-	again, err := materializer.Materialize(ctx, replicaRef, "tool-shell")
-	if err != nil {
-		t.Fatalf("materialise the replica again: %v", err)
-	}
-	rebuilt, err := os.ReadFile(again.Path)
-	observations["replica_materialized_after_cleanup"] = reclaimed && again.Path == first.Path &&
-		err == nil && bytes.Equal(rebuilt, scenarioReplicaBody)
-	refs = append(refs, string(replicaRef.Key))
 
 	small := replay.ProjectionEntry{Key: "entry-small", Type: event.TypeAgentOutput, Summary: "small", Content: "short body", Time: time.Unix(0, 0)}
 	largeBody := strings.Repeat("大结果正文。", 300)

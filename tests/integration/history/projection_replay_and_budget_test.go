@@ -388,7 +388,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID, SessionID: session.SessionID}, 100, proj); err != nil {
+		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID, SessionID: session.SessionID}, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
 			t.Fatalf("AttachReplay: %v", err)
 		}
 		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
@@ -423,7 +423,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if !sawInput || !sawPlan || !sawTool {
 			t.Fatalf("role mapping = input:%v plan:%v tool:%v, want the frozen types mapped onto user/assistant/tool", sawInput, sawPlan, sawTool)
 		}
-		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID}, 100, proj); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
+		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID}, tagent.FoldWindow{MaxTokens: 100}, proj); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
 			t.Fatalf("sessionless registration error = %v, want ErrRequestChainSessionRequired", err)
 		}
 	})

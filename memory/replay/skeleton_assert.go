@@ -86,6 +86,7 @@ var (
 
 	_ = DefaultAgeKeepRecent
 	_ = DefaultAgeVolumeThreshold
+	_ = BudgetCharsPerToken
 )
 
 // The projection replay keeps its declared shapes: the chain-isolated replay

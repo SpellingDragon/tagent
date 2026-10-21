@@ -50,9 +50,9 @@ func TestProjectionCarriesTheCommittedSequence(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:           "agent-a",
-			Model:        "model-a",
-			ReplayBudget: 100,
+			ID:        "agent-a",
+			Model:     "model-a",
+			MaxTokens: 100,
 		}},
 	}
 	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
@@ -167,7 +167,7 @@ func TestEnvironmentBlockClosesTheRequestAssembly(t *testing.T) {
 		Agents: []config.AgentSpec{{
 			ID:               "agent-a",
 			Model:            "model-a",
-			ReplayBudget:     100,
+			MaxTokens:        100,
 			EnvironmentBlock: true,
 		}},
 	}

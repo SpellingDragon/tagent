@@ -169,7 +169,10 @@ type Run struct {
 	snapshots   []RequestSnapshotRecord
 	fixers      map[event.AgentID]*fileFixer
 	replays     map[event.SessionID]replayEntry
-	closing     bool
+	// ageFold folds a session's projection once its replay fills the window the
+	// declaration gave it; it is mounted on every agent that declares a window.
+	ageFold *AgeFoldPlugin
+	closing bool
 }
 
 // Assemble builds the minimal public assembly of the runtime and publishes the
@@ -222,6 +225,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		observer:    cfg.observer,
 		execManager: cfg.execManager,
 	}
+	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
 	if cfg.reflectionAnchors != "" {
 		anchors, err := meditation.NewAnchorStore(cfg.reflectionAnchors)
 		if err != nil {

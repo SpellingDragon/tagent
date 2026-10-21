@@ -183,13 +183,11 @@ class PolicyTest(unittest.TestCase):
         self.assertNotIn("mcp", pats)
         self.assertNotIn("spec", pats)
 
-    def test_real_golden_replica_edge_allows_memory_event(self):
+    def test_real_golden_replica_package_is_removed(self):
+        # 副本层随 golden-integrity D3 硬删：注册表与依赖边都不得再出现它。
+        self.assertNotIn("memory/replica", patterns(self.policy))
         edges = {edge["from"]: edge for edge in self.policy["edges"]}
-        replica = edges["memory/replica"]
-        self.assertEqual(sorted(replica["allow"]), ["api/event", "memory", "memory/ledger"])
-        self.assertIn("runtime/state", replica["forbidden"])
-        self.assertIn("runtime/agent", replica["forbidden"])
-        self.assertNotIn("memory", replica["forbidden"])
+        self.assertNotIn("memory/replica", edges)
 
     def test_real_golden_storage_tiers_are_optional(self):
         by_pattern = {entry["pattern"]: entry for entry in self.policy["packages"]}

@@ -157,7 +157,7 @@ func agentsField(source string, e *sourceEntry) ([]AgentSpec, error) {
 // fields of AgentSpec.
 var agentKeys = []string{
 	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
-	"final_round", "replay_budget", "environment_block",
+	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks", "environment_block",
 	"memory", "meditation", "file", "exec",
 }
 
@@ -199,7 +199,13 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 	if a.FinalRound, err = finalRoundField(source, joinField(path, "final_round"), fields["final_round"]); err != nil {
 		return nil, err
 	}
-	if a.ReplayBudget, err = roundField(source, joinField(path, "replay_budget"), fields["replay_budget"]); err != nil {
+	if a.MaxTokens, err = countField(source, joinField(path, "max_tokens"), fields["max_tokens"]); err != nil {
+		return nil, err
+	}
+	if a.CompressThreshold, err = ratioField(source, joinField(path, "compress_threshold"), fields["compress_threshold"]); err != nil {
+		return nil, err
+	}
+	if a.KeepRecentTasks, err = countField(source, joinField(path, "keep_recent_tasks"), fields["keep_recent_tasks"]); err != nil {
 		return nil, err
 	}
 	if a.EnvironmentBlock, err = boolField(source, joinField(path, "environment_block"), fields["environment_block"]); err != nil {
@@ -454,6 +460,24 @@ func countField(source, field string, e *sourceEntry) (int, error) {
 		return 0, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a whole number"}
 	}
 	return int(value), nil
+}
+
+// ratioField reads one optional ratio in (0, 1]; an absent field reads as zero,
+// which the declaration layer reads as the default ratio, and a value outside
+// the interval is refused by name instead of degrading to a bound the
+// declaration can never mean.
+func ratioField(source, field string, e *sourceEntry) (float64, error) {
+	if isAbsent(e) {
+		return 0, nil
+	}
+	value, err := numberNode(source, field, e.value)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 || value > 1 {
+		return 0, &decodeError{source: source, line: entryLine(e), field: field, reason: "expected a ratio greater than zero and at most one"}
+	}
+	return value, nil
 }
 
 // durationField reads one optional duration written as a Go duration string;

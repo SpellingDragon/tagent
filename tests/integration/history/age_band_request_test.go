@@ -91,7 +91,7 @@ func ageBandRun(t *testing.T, projection *replay.ReplayProjection) (*tagent.Run,
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: ageChainKey.PartitionID, SessionID: ageChainKey.SessionID}, 1<<16, projection); err != nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: ageChainKey.PartitionID, SessionID: ageChainKey.SessionID}, tagent.FoldWindow{MaxTokens: 1 << 16}, projection); err != nil {
 		t.Fatalf("AttachReplay: %v", err)
 	}
 	return run, provider

@@ -11,7 +11,7 @@
 | 结算（settle） | 回放装配为"这一条该怎么呈现"做出的决定，按决定内容取身份留一条事实（`replay.settle`）：同一决定只落一条，预算跳过的条目不结算。任务状态里的 `settled` 是同名另一处用法，指任务已进入终态。 | 报销单：每笔决定留一张有编号的单据，重复提交不再生成第二张。 | `memory/replay/replay_settle.go`；族 6 |
 | 血统（lineage） | 一轮对话的触发来源戳（用户、冥想、http、回执…），按回合盖一次、回合进行中不改；投递侧据此决定这轮产出能不能直接送到用户。 | 快递面单上的寄件人：收件规则看寄件人，不看包裹里装了什么。 | `api/event/meta.go`（`trigger_source`）；`evolution/meditation/judgment.go`（`DeliverableLineage` 白名单）；`cli/host_face.go`（`DeliveryReceipt`） |
 | 义务（obligation） | 任务尚未兑现的承诺，按"在等什么"分类（等工具、等投递、已移交），带归属方与推进方；队列空不等于义务已清。 | 欠条：写下才算数，划掉要有回执。 | `runtime/task/registry.go`（`Obligations`）；`memory/query/reading.go`（`Reading.Obligations`） |
-| 退位（retire） | 一个部件或条目不再担任主职责，但记录保留、不删除也不改写：`SummaryPlugin` 退位为元数据标注、压缩请求被消费时 retire 一次、模型版本被换下后标记 retired 但仍服务已持有的流。 | 退居二线：岗位交出去，档案留在册。 | [memory-curation 契约](../openspec/specs/memory-curation/spec.md)；`memory/compress_filing.go`；`rl/replacement.go` |
+| 退位（retire） | 一个部件或条目不再担任主职责，但记录保留、不删除也不改写：`SummaryPlugin` 退位为元数据标注、压缩请求被消费时 retire 一次、模型版本被换下后标记 retired 但仍服务已持有的流。 | 退居二线：岗位交出去，档案留在册。 | [memory-curation 契约](../openspec/specs/memory-curation/spec.md)；`api/event/compress_request.go`；`rl/replacement.go` |
 
 ## 二、事实七族
 
@@ -25,7 +25,7 @@
 | 4 | 声明 | 一份组织声明：规范指纹定身份，同内容重载仍是同一身份。 | `api/config/fact.go` |
 | 5 | 引用票据 | 指向原文的票据：同一份原文可有多张票据，共用一个内容键。 | `memory/ledger/reference.go` |
 | 6 | 回放结算 | 一次呈现决定的留痕：同决定同身份，预算跳过的条目不落。 | `memory/replay/replay_settle.go` |
-| 7 | 压缩请求 | 一次"该压了"的判定：同判定同身份，消费后单次退位。 | `api/event/compress_request.go`；`memory/compress_filing.go` |
+| 7 | 压缩请求 | 一次"该压了"的判定：同判定同身份，消费后单次退位。 | `api/event/compress_request.go` |
 
 ## 三、读代码前的五个通用词
 

@@ -29,6 +29,11 @@ const (
 	// budgetCharsPerToken is the conservative character-to-token ratio the
 	// budget assembly packs a request under.
 	budgetCharsPerToken = 4
+	// BudgetCharsPerToken is that ratio, read by a consumer that measures a
+	// projection's rendered volume against a model window: the fold and the
+	// assembly convert at the one ratio, so they never disagree about how much
+	// window the material costs.
+	BudgetCharsPerToken = budgetCharsPerToken
 	// ticketPreviewBytes bounds the preview a ticket decision records and shows.
 	ticketPreviewBytes = 128
 	// recoveryHintBytes bounds the recovery hint entry text.

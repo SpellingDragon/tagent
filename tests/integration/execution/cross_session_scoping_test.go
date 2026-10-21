@@ -257,13 +257,13 @@ func TestCrossSessionContentIsRefused(t *testing.T) {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1}, 100, projection); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1}, tagent.FoldWindow{MaxTokens: 100}, projection); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
 		t.Fatalf("replay registration without a session = %v, want %v", err, agent.ErrRequestChainSessionRequired)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: "session-beta"}, 100, nil); err == nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: "session-beta"}, tagent.FoldWindow{MaxTokens: 100}, nil); err == nil {
 		t.Fatalf("replay registration without a projection = %v, want the named refusal", err)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: event.SessionID(alpha.SessionID)}, 100, projection); err != nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: event.SessionID(alpha.SessionID)}, tagent.FoldWindow{MaxTokens: 100}, projection); err != nil {
 		t.Fatalf("register the alpha chain: %v", err)
 	}
 

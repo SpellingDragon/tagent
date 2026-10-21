@@ -1,11 +1,11 @@
 // 契约: docs/wiki/memory/memory-architecture.md#overview
 //
 // Skeleton compile-time assertions for the read face of the memory package: the
-// delivery replay engine and the compress request filing seam. The storage
-// shapes are pinned beside their declarations in memory/ledger, the projection
-// shapes in memory/replay and the meditation
-// shapes in evolution/meditation; this file pins what this package itself
-// declares, so a renamed field or a widened signature stops it from compiling.
+// delivery replay engine. The storage shapes are pinned beside their
+// declarations in memory/ledger, the projection shapes in memory/replay and the
+// meditation shapes in evolution/meditation; this file pins what this package
+// itself declares, so a renamed field or a widened signature stops it from
+// compiling.
 package memory
 
 import (
@@ -51,13 +51,4 @@ var (
 
 	_ func() *Replay                                                                                    = NewReplay
 	_ func(*Replay, context.Context, []DeliveryRecord, OwnerLookup, DeliverySink) (ReplayReport, error) = (*Replay).Replay
-)
-
-// The compress request filing seam keeps its declared shape: who files one
-// judgment and what the filing answers. The fact itself is pinned beside its
-// declaration in the event package.
-var (
-	_ CompressRequestFiling = func(context.Context, event.CompressRequest) (event.CompressRequest, error) {
-		return event.CompressRequest{}, nil
-	}
 )

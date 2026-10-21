@@ -1,11 +1,5 @@
 package memory // import "github.com/SpellingDragon/tagent/memory"
 
-The filing seam of the compress request family: where the judgment that material
-is due for compression is filed, and the answer the filing gives.
-
-The fact itself — who judged, why, what was judged, and the identity the
-judgment is quoted by — is event vocabulary (event.CompressRequest).
-
 Package memory is the runtime's durable original-text layer: it names one stored
 original and the reference metadata that scopes it, commits those bytes and
 returns them byte for byte, and carries the ordered projection and the retention
@@ -47,11 +41,10 @@ owes, re-delivered at the owner the current orchestration binding resolves. The
 durable fact surface beside it lives with the storage tiers in memory/ledger.
 
 Skeleton compile-time assertions for the read face of the memory package: the
-delivery replay engine and the compress request filing seam. The storage shapes
-are pinned beside their declarations in memory/ledger, the projection shapes in
-memory/replay and the meditation shapes in evolution/meditation; this file pins
-what this package itself declares, so a renamed field or a widened signature
-stops it from compiling.
+delivery replay engine. The storage shapes are pinned beside their declarations
+in memory/ledger, the projection shapes in memory/replay and the meditation
+shapes in evolution/meditation; this file pins what this package itself
+declares, so a renamed field or a widened signature stops it from compiling.
 
 The observation table between the segment store and the query face: a committed
 event reaches the query face by being decoded and landed here first, and only
@@ -118,12 +111,6 @@ func PartitionsOf(id string, extra []string) []string
     recall tools of that agent are built over, so no call can widen it.
 
 TYPES
-
-type CompressRequestFiling func(ctx context.Context, request event.CompressRequest) (event.CompressRequest, error)
-    CompressRequestFiling files one compress request into the log its consumer
-    reads and answers the request as it stands on record, so a repeated judgment
-    keeps the identity and the filing moment of the first one. A filing that
-    fails is reported by name and a judgment is never dropped silently.
 
 type DeliveryRecord struct {
 	// TaskID is the task the notification belongs to.

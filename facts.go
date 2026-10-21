@@ -92,12 +92,13 @@ func sessionOf(evt event.Event) event.SessionID {
 }
 
 // attachDeclaredReplay opens the mapped sequence of a session whose agent
-// declares a replay budget: the first committed fact of that session registers
-// a fresh projection through AttachReplay, so every later consumption of the
-// chain assembles the sequence the commits record. A held registration is left
-// as it stands, and a session naming no budget maps onto no projection: its
-// commits record nothing beside the fact itself and a declaration that declares
-// no budget keeps the assembly as it stood.
+// declares a model window: the first committed fact of that session registers a
+// fresh projection through AttachReplay under the window the declaration names,
+// so every later consumption of the chain assembles the sequence the commits
+// record and the age fold measures it against the same window. A held
+// registration is left as it stands, and a session naming no window maps onto
+// no projection: its commits record nothing beside the fact itself and a
+// declaration that declares no window keeps the assembly as it stood.
 func (r *Run) attachDeclaredReplay(evt event.Event) {
 	session := sessionOf(evt)
 	if session == "" {
@@ -105,23 +106,39 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 	}
 	r.mu.Lock()
 	_, held := r.replays[session]
-	budget := 0
+	window := FoldWindow{}
 	if !held {
-		budget = specOfLocked(r.current.Plan.Declaration, agentOf(evt)).ReplayBudget
+		window = foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
 	}
 	r.mu.Unlock()
 	if held {
 		r.attachNoticeFeed()
 		return
 	}
-	if budget <= 0 {
+	if window.MaxTokens <= 0 {
 		return
 	}
-	err := r.AttachReplay(agent.RequestChain{SessionID: session}, budget, replay.NewReplayProjection())
+	err := r.AttachReplay(agent.RequestChain{SessionID: session}, window, replay.NewReplayProjection())
 	if err != nil {
 		return
 	}
 	r.attachNoticeFeed()
+}
+
+// ReplayEntries reports the projection entries one session chain registered for
+// replay, in canonical form, and whether the session registered one at all. The
+// read is the diagnostic face of the mapped sequence: the fold products a
+// commit-driven fold minted are entries of this projection, so this is how a
+// caller reads the sequence the request boundary presents without driving a
+// request.
+func (r *Run) ReplayEntries(session event.SessionID) ([]replay.ProjectionEntry, bool) {
+	r.mu.Lock()
+	held, carried := r.replays[session]
+	r.mu.Unlock()
+	if !carried {
+		return nil, false
+	}
+	return held.projection.Entries(), true
 }
 
 // noticeProjection is the incremental read face of the session chains' notice

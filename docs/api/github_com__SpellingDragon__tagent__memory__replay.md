@@ -102,6 +102,12 @@ const (
 	// assembly carries first after a cold-start replay, so the model is told the
 	// context it sees was rebuilt rather than silently presented.
 	ProjectionTypeRecoveryHint = "recovery_hint"
+
+	// BudgetCharsPerToken is that ratio, read by a consumer that measures a
+	// projection's rendered volume against a model window: the fold and the
+	// assembly convert at the one ratio, so they never disagree about how much
+	// window the material costs.
+	BudgetCharsPerToken = budgetCharsPerToken
 )
 const CompactionEventType = event.TypeContextCompress
     CompactionEventType names the frozen event type a compaction payload is

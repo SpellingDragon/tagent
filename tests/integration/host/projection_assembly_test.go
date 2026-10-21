@@ -49,7 +49,7 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 			Agents: []config.AgentSpec{{
 				ID:               "agent-a",
 				Model:            "model-a",
-				ReplayBudget:     assemblyBudget,
+				MaxTokens:        assemblyBudget,
 				EnvironmentBlock: true,
 			}},
 		}
@@ -176,9 +176,9 @@ func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
 	decl := &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
-			ID:           "agent-a",
-			Model:        "model-a",
-			ReplayBudget: assemblyBudget,
+			ID:        "agent-a",
+			Model:     "model-a",
+			MaxTokens: assemblyBudget,
 		}},
 	}
 	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
@@ -221,7 +221,7 @@ func assembleWithBudget(t *testing.T, session string, budget int) []model.Messag
 		Agents: []config.AgentSpec{{
 			ID:               "agent-a",
 			Model:            "model-a",
-			ReplayBudget:     budget,
+			MaxTokens:        budget,
 			EnvironmentBlock: true,
 		}},
 	}

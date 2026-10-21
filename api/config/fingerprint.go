@@ -59,12 +59,15 @@ type canonicalAgentCore struct {
 	Files      []canonicalFileRef   `json:"files"`
 	Params     map[string]float64   `json:"params"`
 	FinalRound *canonicalFinalRound `json:"final_round,omitempty"`
-	// ReplayBudget and EnvironmentBlock are the request-context switches of the
-	// agent: an agent that declares neither carries no entry of its own, so its
-	// canonical form names no switch and its fingerprint stays the one the
-	// declaration surface had before the switches existed.
-	ReplayBudget     int  `json:"replay_budget,omitempty"`
-	EnvironmentBlock bool `json:"environment_block,omitempty"`
+	// MaxTokens, CompressThreshold and KeepRecentTasks are the replay window of
+	// the agent beside EnvironmentBlock, the request-context switch: an agent
+	// that declares none of them carries no entry of its own, so its canonical
+	// form names no window and its fingerprint stays the one the declaration
+	// surface had before the window existed.
+	MaxTokens         int     `json:"max_tokens,omitempty"`
+	CompressThreshold float64 `json:"compress_threshold,omitempty"`
+	KeepRecentTasks   int     `json:"keep_recent_tasks,omitempty"`
+	EnvironmentBlock  bool    `json:"environment_block,omitempty"`
 }
 
 // canonicalAgent is one agent spec in canonical field order: the core fields
@@ -183,17 +186,19 @@ func canonicalAgents(in []AgentSpec) []canonicalAgent {
 	for _, a := range in {
 		out = append(out, canonicalAgent{
 			canonicalAgentCore: canonicalAgentCore{
-				ID:               a.ID,
-				ParentID:         a.ParentID,
-				Model:            a.Model,
-				Tools:            canonicalToolRefs(a.Tools),
-				Plugins:          canonicalStrings(a.Plugins),
-				TaskPolicy:       a.TaskPolicy,
-				Files:            canonicalFileRefs(a.Files),
-				Params:           canonicalFloatMap(a.Params),
-				FinalRound:       canonicalFinalRoundOf(a.FinalRound),
-				ReplayBudget:     a.ReplayBudget,
-				EnvironmentBlock: a.EnvironmentBlock,
+				ID:                a.ID,
+				ParentID:          a.ParentID,
+				Model:             a.Model,
+				Tools:             canonicalToolRefs(a.Tools),
+				Plugins:           canonicalStrings(a.Plugins),
+				TaskPolicy:        a.TaskPolicy,
+				Files:             canonicalFileRefs(a.Files),
+				Params:            canonicalFloatMap(a.Params),
+				FinalRound:        canonicalFinalRoundOf(a.FinalRound),
+				MaxTokens:         a.MaxTokens,
+				CompressThreshold: canonicalFloat(a.CompressThreshold),
+				KeepRecentTasks:   a.KeepRecentTasks,
+				EnvironmentBlock:  a.EnvironmentBlock,
 			},
 			Memory:     a.Memory.canonical(),
 			Meditation: a.Meditation.canonical(),

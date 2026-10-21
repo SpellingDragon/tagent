@@ -38,6 +38,18 @@ does not name is refused by source, line and field path — to the schema the
 caller's struct type states in its yaml tags, so one rejection vocabulary covers
 both kinds of document and no host spells its own.
 
+CONSTANTS
+
+const (
+	// DefaultCompressThreshold is the share of the model window the replayed
+	// projection may fill before the age fold runs, taken when a declaration
+	// names no threshold.
+	DefaultCompressThreshold = 0.8
+	// DefaultKeepRecentTasks is the number of recent task turns the age fold
+	// keeps whole, taken when a declaration names no count.
+	DefaultKeepRecentTasks = 2
+)
+
 VARIABLES
 
 var ErrUnknownConfigKey = errors.New("document key outside the schema")
@@ -96,12 +108,20 @@ type AgentSpec struct {
 	// under. Every field of the zero budget is zero, which places no bound on
 	// any invocation.
 	FinalRound FinalRoundSpec
-	// ReplayBudget is the token budget the mapped sequence of this agent's
-	// session chain is assembled under at every request boundary: the committed
-	// events of the chain are projected into the request context under it. Zero
-	// attaches no replay, so every request runs on its fixed files and
-	// transcript alone.
-	ReplayBudget int
+	// MaxTokens is the model window this agent's session chain is replayed
+	// into, in tokens. A positive window attaches the mapped sequence of the
+	// chain to every request boundary and bounds its assembly; zero attaches no
+	// replay, so every request runs on its fixed files and transcript alone.
+	MaxTokens int
+	// CompressThreshold is the share of that window the replayed projection may
+	// fill before the age fold runs, as a ratio of the window. Zero reads the
+	// declaration default of 0.8, so a declaration naming only max_tokens still
+	// folds before its replay overflows the window.
+	CompressThreshold float64
+	// KeepRecentTasks is the number of recent task turns the age fold keeps
+	// whole while it folds the older ones. Zero reads the declaration default
+	// of 2.
+	KeepRecentTasks int
 	// EnvironmentBlock states whether every request of this agent closes with
 	// the dynamic environment block: the tool, skill and MCP faces the request
 	// carries beside the open asynchronous task state. False keeps a request

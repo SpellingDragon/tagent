@@ -50,6 +50,9 @@ durable fact chain instead of restoring a body snapshot kept beside the facts.
 
 CONSTANTS
 
+const AgeFoldPluginName = "age-fold"
+    AgeFoldPluginName is the stable name the age fold plugin instance answers.
+
 const DiagnosticSwitchEnv = "TAGENT_DIAGNOSTICS"
     DiagnosticSwitchEnv names the environment variable the host reads the
     diagnostic switches from: a comma-separated list of subsystem names.
@@ -146,6 +149,46 @@ func EnvironmentBlockGenerations() int64
     boundary has rendered in this process so far.
 
 TYPES
+
+type AgeFoldPlugin struct {
+	// Has unexported fields.
+}
+    AgeFoldPlugin folds the projection of the session the committed fact belongs
+    to once its rendered volume passes the window threshold: the process detail
+    of the older task turns collapses into fold products and the middle band
+    into one history summary, so a long session replays into the window it
+    declared instead of over it.
+
+    The plugin is an instance of the material flow like any other: it reads
+    the fact material and answers an observation, so the pipeline dispatches
+    it beside the reflection driver and the commit that grew the projection
+    is the trigger. How material folds stays the projection's own rule — the
+    plugin judges nothing about it. Every judgment the fold answered is filed
+    as a compress request on the chain, so why material went is a fact like any
+    other.
+
+func NewAgeFoldPlugin(sessions SessionFolds) *AgeFoldPlugin
+    NewAgeFoldPlugin assembles the fold plugin over the session face of one run.
+    A nil face answers no session, so an assembly mounted beside none folds
+    nothing instead of failing on the first commit.
+
+func (p *AgeFoldPlugin) Name() string
+    Name reports the stable name of this plugin instance.
+
+func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit folds the projection of the session the committed fact belongs
+    to once that projection's rendered volume passes the window threshold,
+    and files the compression judgment of every product the fold minted.
+
+    The duty is read-only over the fact: a fact whose session registered no
+    projection, a session whose window names no positive token window and a
+    projection still inside its threshold each leave the commit as it stands.
+    A fold that ran rewrote the projection only, and a failed fold is reported
+    without rolling the commit back.
+
+func (p *AgeFoldPlugin) Port() plugin.Port
+    Port reports the consumption the plugin serves: one committed fact in,
+    one observation out. The observation is the fold the fact may trigger.
 
 type DiagnosticFace struct {
 	// Subsystem names the face this reading belongs to.
@@ -326,6 +369,29 @@ type DiagnosticWatermark struct {
     DiagnosticWatermark is the reflection watermark reading: the moment the last
     consumed reflection turn advanced it to, read from the anchor store that
     persists it.
+
+type FoldWindow struct {
+	// MaxTokens is the model window the chain is replayed into, in tokens.
+	MaxTokens int
+	// CompressThreshold is the share of that window the replayed projection may
+	// fill before the age fold runs.
+	CompressThreshold float64
+	// KeepRecentTasks is the number of recent task turns the age fold keeps whole.
+	KeepRecentTasks int
+}
+    FoldWindow is the replay window one session chain registered: the model
+    window the chain is replayed into, in tokens, and the fold settings the
+    declaration gave that window. The unset settings read their declaration
+    defaults when the window is normalized, so a declaration naming only
+    max_tokens folds under the default share of its own window.
+
+func (w FoldWindow) VolumeThresholdBytes() int
+    VolumeThresholdBytes reports the rendered volume a projection of this window
+    may carry before an age fold is due, in bytes: the share of the window the
+    declaration allows, converted at the one character-to-token ratio the budget
+    assembly packs requests under, so the fold fires where the assembly would
+    start degrading the projection rather than after it already had. A window
+    naming no tokens reports no threshold, and a fold read under it never fires.
 
 type Host struct {
 	// Has unexported fields.
@@ -671,15 +737,17 @@ func (r *Run) ActiveSessions(agentID event.AgentID) []event.Address
     against, ordered by agent and session so the same scene always answers the
     same list.
 
-func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *replay.ReplayProjection) error
+func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projection *replay.ReplayProjection) error
     AttachReplay registers the replayed projection of one session chain on this
-    assembly: every request of that session carries the chain's budget assembly
+    assembly: every request of that session carries the chain's window assembly
     in front of its transcript, mapped under the frozen event-type→role table.
     The entries a registration carries were replayed from the chain, so they
     are ended material and are presented at once; the facts the run commits
     from here on present themselves once their range ends. A chain that names
     no session is refused by name: assembling one would join every user of the
-    partition into one transcript.
+    partition into one transcript. A window of no tokens is refused the same
+    way: it bounds every request to an empty prefix and leaves the age fold no
+    share of a window to measure.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address and
@@ -843,6 +911,14 @@ func (r *Run) ReflectionInput() meditation.ReflectionInput
     as a fact of the observing agent's own partition, drives that agent's loop
     session with it and reports what became of the turn.
 
+func (r *Run) ReplayEntries(session event.SessionID) ([]replay.ProjectionEntry, bool)
+    ReplayEntries reports the projection entries one session chain registered
+    for replay, in canonical form, and whether the session registered one
+    at all. The read is the diagnostic face of the mapped sequence: the fold
+    products a commit-driven fold minted are entries of this projection, so this
+    is how a caller reads the sequence the request boundary presents without
+    driving a request.
+
 func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     RequestSnapshots reports the safe request snapshots this assembly fixed
     before its model calls, in call order, as a structural-layer copy the
@@ -866,3 +942,25 @@ func (r *Run) SessionHistory(addr event.Address) []model.Message
     This ledger is the read-out face of the execution scene the run holds, not a
     durability record: what a restarted process reads back is recovered from the
     durable fact chain by replay, so no body snapshot is kept beside the facts.
+
+type SessionFolds interface {
+	// SessionOf reports the session chain one committed fact belongs to.
+	SessionOf(ctx context.Context, id event.EventID) (event.SessionID, bool)
+	// ProjectionOf reports the projection one session registered for replay
+	// beside the window it was registered under.
+	ProjectionOf(ctx context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool)
+	// FileCompressRequest files one compression judgment the fold answered on the
+	// chain of the session whose material was judged.
+	FileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error
+}
+    SessionFolds is the session face the age fold plugin observes one commit
+    through: the session chain a committed fact belongs to, the projection and
+    the window that chain registered, and the filing of the compression judgment
+    the fold answered. The composition root implements the face over the live
+    ledger and the replay registrations of its run, so the plugin holds no chain
+    and no ledger of its own.
+
+    The redline list (3 rules): MUST answer a fact no session chain owns as
+    unowned. MUST answer the projection and the window the session registered,
+    never one the plugin invents. MUST NOT fold a session whose registered
+    window names no positive token window.

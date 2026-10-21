@@ -120,9 +120,12 @@ func (r *Run) suppliers(decl *config.Declaration, agents map[event.AgentID]Nativ
 				r.rememberFixer(event.AgentID(spec.ID), fixer)
 				return state.PromptSource{Files: spec.Files}, nil
 			},
-			plugins: func(context.Context, config.AgentSpec) ([]plugin.Instance, error) {
+			plugins: func(_ context.Context, spec config.AgentSpec) ([]plugin.Instance, error) {
 				elements := append([]plugin.Instance(nil), contributed.Plugins...)
 				elements = append(elements, r.plugins...)
+				if spec.MaxTokens > 0 && r.ageFold != nil {
+					elements = append(elements, r.ageFold)
+				}
 				if r.observer != nil {
 					elements = append(elements,
 						observePlugin{observer: telemetry.NewCommitObserver(runFacts{run: r}, r.observer)})

@@ -186,12 +186,6 @@
       "reason": "重放读出单元：投影、预算、settle 与冷启动重建（package-restructure 02.2）。读 ledger 事实与 event 身份，不反向依赖根 memory。"
     },
     {
-      "pattern": "memory/replica",
-      "role": "temp-replica",
-      "required": true,
-      "reason": "副本物化＝记忆域的机制子包：临时文件副本的建立、清理与原文重建（package-zero-debt 终审，自 workspace 迁入）。读 memory 的原文端口与 memory/ledger 的引用声明，只发事件、不持有事实真源。"
-    },
-    {
       "pattern": "evolution/meditation",
       "role": "self-improve",
       "required": true,
@@ -239,7 +233,6 @@
         "runtime/agent",
         "runtime/task",
         "memory",
-        "memory/replica",
         "memory/embedder",
         "api/plugin",
         "api/model",
@@ -268,7 +261,7 @@
         "cli"
       ],
       "forbidden": [],
-      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；memory/replica 随终审显式登记；governance/telemetry/task/approval 随 package-zero-debt 终审反转显式登记；cli 随终审第五弹显式登记）。"
+      "reason": "组合根是唯一装配与发布点，必须显式列出全部自有包（禁止用通配；event 亦显式，以便有新增时强制复核；view 自 fact-loop-convergence 03.3 起显式登记；memory/ledger、memory/replay、evolution/meditation 随 package-restructure 01.1/02.1/02.2 显式登记；governance/telemetry/task/approval 随 package-zero-debt 终审反转显式登记；cli 随终审第五弹显式登记）。"
     },
     {
       "from": "cli",
@@ -508,27 +501,12 @@
       "reason": "重放读出只读 ledger 事实与 event 身份；不依赖根 memory 的读出面，避免与根成环。"
     },
     {
-      "from": "memory/replica",
-      "allow": [
-        "memory",
-        "api/event",
-        "memory/ledger"
-      ],
-      "forbidden": [
-        "runtime/agent",
-        "runtime/state",
-        "api/plugin",
-        "rl",
-        "evolution"
-      ],
-      "reason": "副本是原文的临时物化，必须能读原文重建（副本依赖原文）：原文引用与存储端口直接引 memory/ledger 的声明，压缩请求事实引 event 词汇，请求日志引 memory；只发事件、不拥有事实真源，也不依赖执行器/状态容器与上层治理（由 workspace 迁入记忆域，依赖面与语义不变，package-zero-debt 终审）。"
-    },
-    {
       "from": "evolution/meditation",
       "allow": [
         "api/config",
         "api/event",
         "api/model",
+        "api/plugin",
         "memory",
         "memory/ledger",
         "memory/replay",
@@ -538,10 +516,9 @@
         "runtime/agent",
         "runtime/state",
         "runtime/task",
-        "api/plugin",
         "rl"
       ],
-      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读巩固唤醒的触发源戳；不依赖执行器/状态容器/训练。"
+      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读巩固唤醒的触发源戳；Driver 以 api/plugin 的插件端口入流（与提交后观测插件同模式），故 api/plugin 在允许面；不依赖执行器/状态容器/训练。"
     },
     {
       "from": "api/plugin",

@@ -232,7 +232,7 @@ defer clean(ctx)
 
 | 机制 | 观察点（源码） | 级别与载体 | 每次携带（有界） | 行首 |
 |---|---|---|---|---|
-| 压缩请求 | `memory/compress_filing.go` 的 `CompressRequestFiling` 接缝（写入点 `memory/replica/externalize.go` 的 `fileCompressRequest`） | 无专用日志；事实经 `telemetry.LogObserver` 的 DEBUG 通用行 | fact、type、task、payload 形状 | `tagent: fact` |
+| 压缩请求 | `api/event/compress_request.go` 的 `event.CompressRequest` 事实（由提交后观测插件发入事实链，无独立接缝文件） | 无专用日志；事实经 `telemetry.LogObserver` 的 DEBUG 通用行 | fact、type、task、payload 形状 | `tagent: fact` |
 | 委派 | `runtime/agent/delegate.go` 的 `Delegate`/`Complete`/`land` | DEBUG 受理与拒答、INFO 落定 | task、agent、call、status、elapsed | `tagent: delegation` |
 | 审批 | `evolution/governance/policy.go` 的 `riskCritical` | INFO 裁定、DEBUG 等待 | tool、digest、risk、rule、ruling、by 或 expires_ms | `tagent: approval` |
 | 持久化 | `runtime/state/durable.go` 的 `Commit`/`Declare`/`load` | ERROR 日志 | task、mutation、result（uncommitted/uncertain/undeclared） | `tagent: durable` |

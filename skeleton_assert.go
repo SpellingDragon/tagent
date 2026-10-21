@@ -8,6 +8,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -88,3 +89,25 @@ var _ agent.HistoryFace = (*Run)(nil)
 // the composition root is where both sides meet, so the snapshot the loop
 // fixes before its model calls is proven here.
 var _ agent.RequestSnapshotFace = (*Run)(nil).snapshotRequest
+
+// The age fold plugin of the request-context window is an instance of the
+// material flow beside the reflection driver: it serves the same
+// fact→observation port, observes every commit of the run, and reads the run's
+// own live ledger and replay registrations through its session face. The read
+// face of the projection the fold rewrites keeps its declared shape too.
+var (
+	_ plugin.Instance           = (*AgeFoldPlugin)(nil)
+	_ plugin.PostCommitObserver = (*AgeFoldPlugin)(nil)
+
+	_ func(SessionFolds) *AgeFoldPlugin = NewAgeFoldPlugin
+
+	_ func(*AgeFoldPlugin) string      = (*AgeFoldPlugin).Name
+	_ func(*AgeFoldPlugin) plugin.Port = (*AgeFoldPlugin).Port
+
+	_ string = AgeFoldPluginName
+
+	_                      = FoldWindow{MaxTokens: 0, CompressThreshold: 0, KeepRecentTasks: 0}
+	_ func(FoldWindow) int = FoldWindow.VolumeThresholdBytes
+
+	_ func(*Run, event.SessionID) ([]replay.ProjectionEntry, bool) = (*Run).ReplayEntries
+)

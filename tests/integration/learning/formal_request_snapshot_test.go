@@ -73,7 +73,7 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		}
 		run = assembled
 		chain := agent.RequestChain{PartitionID: 3, SessionID: event.SessionID("session-snapshot")}
-		if err := run.AttachReplay(chain, 100, proj); err != nil {
+		if err := run.AttachReplay(chain, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
 			t.Fatalf("AttachReplay: %v", err)
 		}
 		firstTurn := invokeSnapshot(t, ctx, run, "inv-snapshot-1", chain.SessionID, "first")

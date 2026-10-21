@@ -193,7 +193,7 @@ func TestRequestCarriesProjectedBudget(t *testing.T) {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	chain := agent.RequestChain{PartitionID: 7, SessionID: event.SessionID("session-projection")}
-	if err := run.AttachReplay(chain, 100, proj); err != nil {
+	if err := run.AttachReplay(chain, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
 		t.Fatalf("AttachReplay: %v", err)
 	}
 	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
@@ -367,7 +367,7 @@ func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	chain := agent.RequestChain{PartitionID: 7, SessionID: event.SessionID("session-layout")}
-	if err := run.AttachReplay(chain, 100, proj); err != nil {
+	if err := run.AttachReplay(chain, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
 		t.Fatalf("AttachReplay: %v", err)
 	}
 	if _, err := run.Invoke(ctx, tagent.InvokeRequest{

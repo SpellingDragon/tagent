@@ -172,7 +172,7 @@ func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*tag
 		Agents: []config.AgentSpec{{
 			ID:               "agent-a",
 			Model:            "model-a",
-			ReplayBudget:     1 << 16,
+			MaxTokens:        1 << 16,
 			EnvironmentBlock: true,
 			Files:            files,
 		}},
@@ -183,7 +183,7 @@ func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*tag
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: scenarioChainKey.PartitionID, SessionID: scenarioChainKey.SessionID}, 1<<16, projection); err != nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: scenarioChainKey.PartitionID, SessionID: scenarioChainKey.SessionID}, tagent.FoldWindow{MaxTokens: 1 << 16}, projection); err != nil {
 		t.Fatalf("attach the replayed projection: %v", err)
 	}
 	return run, provider, promptBody, skillBody

@@ -27,21 +27,23 @@ var (
 	}
 
 	_ = AgentSpec{
-		ID:               "",
-		ParentID:         "",
-		Model:            "",
-		Tools:            []ToolRef{},
-		Plugins:          []string{},
-		TaskPolicy:       "",
-		Files:            []FileRef{},
-		Params:           map[string]float64{},
-		FinalRound:       FinalRoundSpec{},
-		ReplayBudget:     0,
-		EnvironmentBlock: false,
-		Memory:           MemorySpec{},
-		Meditation:       MeditationSpec{},
-		File:             FileSpec{},
-		Exec:             ExecSpec{},
+		ID:                "",
+		ParentID:          "",
+		Model:             "",
+		Tools:             []ToolRef{},
+		Plugins:           []string{},
+		TaskPolicy:        "",
+		Files:             []FileRef{},
+		Params:            map[string]float64{},
+		FinalRound:        FinalRoundSpec{},
+		MaxTokens:         0,
+		CompressThreshold: 0,
+		KeepRecentTasks:   0,
+		EnvironmentBlock:  false,
+		Memory:            MemorySpec{},
+		Meditation:        MeditationSpec{},
+		File:              FileSpec{},
+		Exec:              ExecSpec{},
 	}
 
 	_ = MemorySpec{

@@ -228,28 +228,23 @@
     },
     {
       "id": "S07",
-      "title": "同正文跨 owner/format、预览恢复、清副本后准确召回",
+      "title": "同正文跨 owner/format 的引用隔离、同字节去重与投影呈现保真",
       "task_ids": [
         "03.1",
-        "03.4",
-        "03.6",
-        "03.7",
-        "03.8"
+        "03.4"
       ],
       "test_package": "tests/integration/acceptance",
-      "test_name": "TestScenario07ReplicaAndOwnerIsolation",
+      "test_name": "TestScenario07OwnerIsolation",
       "status": "planned",
       "scope": "deterministic",
       "anchor_tests": [
-        "tests/integration/history:TestOriginalReferenceIsolation",
-        "tests/integration/history:TestReplicaMaterialization"
+        "tests/integration/history:TestOriginalReferenceIsolation"
       ],
       "observations": {
         "distinct_owner_references": 2,
         "owner_references_nonoverwriting": true,
         "same_bytes_content_equal": true,
         "original_bytes_equal_readback": true,
-        "replica_materialized_after_cleanup": true,
         "presentation_full_text_iff_decision_full": true
       }
     },

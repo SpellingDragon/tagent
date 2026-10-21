@@ -222,36 +222,69 @@ func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (stat
 }
 
 // replayEntry is one session chain's mapped sequence registered for replay: the
-// projection itself beside the budget the request boundary assembles it under,
-// how many of its leading entries have ended — the material a request presents,
-// while the entries still in flight stay with the transcript that carries them —
-// and the invocation whose range those in-flight entries belong to.
+// projection itself beside the window the declaration replays it into, how many
+// of its leading entries have ended — the material a request presents, while the
+// entries still in flight stay with the transcript that carries them — and the
+// invocation whose range those in-flight entries belong to.
 type replayEntry struct {
 	projection      *replay.ReplayProjection
-	budget          int
+	window          FoldWindow
 	ended           int
 	rangeInvocation event.InvocationID
 }
 
 // AttachReplay registers the replayed projection of one session chain on this
-// assembly: every request of that session carries the chain's budget assembly
+// assembly: every request of that session carries the chain's window assembly
 // in front of its transcript, mapped under the frozen event-type→role table.
 // The entries a registration carries were replayed from the chain, so they are
 // ended material and are presented at once; the facts the run commits from here
 // on present themselves once their range ends.
 // A chain that names no session is refused by name: assembling one would join
-// every user of the partition into one transcript.
-func (r *Run) AttachReplay(chain agent.RequestChain, budget int, projection *replay.ReplayProjection) error {
+// every user of the partition into one transcript. A window of no tokens is
+// refused the same way: it bounds every request to an empty prefix and leaves
+// the age fold no share of a window to measure.
+func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projection *replay.ReplayProjection) error {
 	if chain.SessionID == "" {
 		return agent.ErrRequestChainSessionRequired
 	}
 	if projection == nil {
 		return errors.New("tagent: the replay registration carries no projection")
 	}
+	if window.MaxTokens <= 0 {
+		return errors.New("tagent: the replay registration carries no model window")
+	}
+	window = normalizeFoldWindow(window)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replays[chain.SessionID] = replayEntry{projection: projection, budget: budget, ended: projection.Len()}
+	r.replays[chain.SessionID] = replayEntry{projection: projection, window: window, ended: projection.Len()}
 	return nil
+}
+
+// normalizeFoldWindow fills the fold settings a declaration left unset: a
+// declaration naming only its model window folds under the default share of
+// that window and keeps the default recent turns, so the zero declaration
+// behaves as the default one. A ratio outside (0, 1] names no share the
+// declaration can mean, so it reads as the default share rather than degrading
+// to a bound.
+func normalizeFoldWindow(window FoldWindow) FoldWindow {
+	if window.CompressThreshold <= 0 || window.CompressThreshold > 1 {
+		window.CompressThreshold = config.DefaultCompressThreshold
+	}
+	if window.KeepRecentTasks <= 0 {
+		window.KeepRecentTasks = config.DefaultKeepRecentTasks
+	}
+	return window
+}
+
+// foldWindowOf reports the replay window one agent declaration names: the model
+// window it replays into beside the fold settings the declaration gave it, with
+// the unset settings read as their declaration defaults.
+func foldWindowOf(spec config.AgentSpec) FoldWindow {
+	return normalizeFoldWindow(FoldWindow{
+		MaxTokens:         spec.MaxTokens,
+		CompressThreshold: spec.CompressThreshold,
+		KeepRecentTasks:   spec.KeepRecentTasks,
+	})
 }
 
 // requestBoundary assembles the request-boundary material of one decision in
@@ -407,10 +440,10 @@ func (a *requestAssembly) loadedSkillBodies(context.Context) ([]model.Message, e
 }
 
 // projectedMainContext contributes the replayed projection of the session chain
-// as the main context of the request: the budget assembly of the registration
+// as the main context of the request: the window assembly of the registration
 // the chain fixed, bounded to the entries that already ended.
 func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
-	return projectedSegment(ctx, a.sequence.projection, a.sequence.budget, a.sequence.ended)
+	return projectedSegment(ctx, a.sequence.projection, a.sequence.window, a.sequence.ended)
 }
 
 // environmentSegment contributes the dynamic environment material of the
@@ -420,18 +453,20 @@ func (a *requestAssembly) environmentSegment(ctx context.Context) ([]model.Messa
 	return []model.Message{{Role: model.RoleSystem, Content: a.run.environmentBlock(ctx, a.boundary)}}, nil
 }
 
-// projectedSegment renders projected material under the budget assembly: the
+// projectedSegment renders projected material under the window assembly: the
 // leading prefix of the projection, mapped under the frozen event-type→role
 // table. It is the one entry the request side presents projected material
 // through — the main context of a request here, and the refs a delegated turn
 // starts from through the same AssembleBudgetPrefix rule — so both degrade
-// full→ticket→summary under one budget assembly and neither grows a budget
-// assembly of its own. A negative prefix assembles the whole projection.
-func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, budget, prefix int) ([]model.Message, error) {
+// full→ticket→summary under one window assembly and neither grows a budget
+// assembly of its own. The token budget is read off the one window the
+// registration carries, so the request side never receives a second budget the
+// registration does not know. A negative prefix assembles the whole projection.
+func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow, prefix int) ([]model.Message, error) {
 	if projection == nil {
 		return nil, nil
 	}
-	entries, err := projection.AssembleBudgetPrefix(ctx, budget, prefix)
+	entries, err := projection.AssembleBudgetPrefix(ctx, window.MaxTokens, prefix)
 	if err != nil {
 		return nil, err
 	}

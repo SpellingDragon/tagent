@@ -92,7 +92,7 @@ BASELINE = (
     ("struct-fields", "memory/replay/age_segments.go:AgeFoldReport", 7),
     ("struct-fields", "runtime/task/registry.go:Obligations", 6),
     ("struct-fields", "tool/subagent/target.go:TargetOptions", 8),
-    # S1 iface-methods — 10 项（observed=实测接口方法数）
+    # S1 iface-methods — 9 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "runtime/agent/loop.go:Recorder", 3),
     ("iface-methods", "rl/produce.go:Recorder", 3),
@@ -102,14 +102,13 @@ BASELINE = (
     ("iface-methods", "runtime/task/registry.go:Registry", 4),
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
     ("iface-methods", "tool/mcp/adapter.go:Registry", 5),
-    ("iface-methods", "memory/replica/cleaner.go:Cleaner", 5),
     # S2 struct-fields — 43 项（observed=实测导出字段数）
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 15f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/预算/请求开关）＋ memory/meditation/file/exec 四个域段平铺在同一格；段是声明字段，不是影子结构，拆开会让声明面重新长出机制层。
-    ("struct-fields", "api/config/config.go:AgentSpec", 15),
+    # AgentSpec 17f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget，回放预算由窗口推导。段是声明字段，不是影子结构，拆开会让声明面重新长出机制层。
+    ("struct-fields", "api/config/config.go:AgentSpec", 17),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
