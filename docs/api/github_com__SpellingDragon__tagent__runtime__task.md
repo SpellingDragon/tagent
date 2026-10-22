@@ -885,6 +885,12 @@ type Notice struct {
 	// notification's own identity stays TaskID+Round+Kind+Seq and the fact
 	// reference never replaces it.
 	Event event.EventID
+	// Text is the result material a terminal notification carries beside its
+	// identity: the body the settled call produced, bounded by the settle that
+	// carries it. It is not part of the notification identity — FactKey reads
+	// TaskID+Round+Kind+Seq alone — so a retry carrying the same body keeps the
+	// fact key of the first delivery.
+	Text string
 }
 
     Notice is the stable identity of one notification a task intends to deliver.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
@@ -37,6 +38,14 @@ import (
 // site its frozen routing names and reports the delivery-layer outcome. The
 // route is registered with the state owner first, so the acceptance lands in
 // the owner's own bookkeeping instead of a copy of it.
+//
+// A terminal notification is also the one fact the settle face of the host
+// reads: the delivery commits that fact beside the acceptance, so the turn that
+// nobody drives — the delegation settle whose admitting turn already ended —
+// always has a fact to fire on. The fact carries the terminal kind under the
+// settle-lineage meta key and is the only fact family that does, so a wrapped
+// tool's own settle, which the live invocation reads through its backflow,
+// never fires a second turn.
 func (r *Run) deliver(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	if err := r.store.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{
 		Target:         envelope.Target,
@@ -47,7 +56,72 @@ func (r *Run) deliver(ctx context.Context, envelope task.Envelope) (task.Deliver
 	if err := r.store.AcceptNotice(ctx, envelope.Notice); err != nil {
 		return task.DeliveryPending, err
 	}
+	r.observeSettleDelivery(ctx, envelope)
 	return task.DeliveryAccepted, nil
+}
+
+// observeSettleDelivery commits the delivery fact of one terminal notification
+// and runs its After pass, so the settle that no live invocation reads is
+// observed exactly as every other committed fact of this run is.
+//
+// The commit is best effort beside the acceptance: a run beside no published
+// pipeline still commits the fact and reports the missing face as a gap, and a
+// delivery that already landed the fact commits no second one.
+func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope) {
+	notice := envelope.Notice
+	switch notice.Kind {
+	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
+	default:
+		return
+	}
+	addr := envelope.Target
+	if !addr.IsComplete() {
+		return
+	}
+	fact := event.Event{
+		Key:       settleDeliveryKey(notice),
+		Type:      event.TypeTaskSettled,
+		Timestamp: time.Now(),
+		Meta: map[string]string{
+			event.MetaKeySettleTriggerSource: string(notice.Kind),
+			event.MetaKeyEventSummary:        string(notice.Kind),
+			event.MetaKeyNoticeKind:          string(notice.Kind),
+			event.MetaKeyTaskID:              string(notice.TaskID),
+		},
+		Message:    model.Message{Role: model.RoleUser, Content: settleNoticeText(notice)},
+		Owner:      addr,
+		Source:     addr,
+		Target:     addr,
+		TaskID:     notice.TaskID,
+		InstanceID: r.instance,
+	}
+	if frame, ok := task.CallFrameFrom(ctx); ok {
+		fact.InvocationID = frame.Identity.InvocationID
+	} else if r.delegations != nil {
+		if owner, ok := r.delegations.OwnerOf(notice.TaskID); ok {
+			fact.InvocationID = owner
+		}
+	}
+	r.mu.Lock()
+	_, held := r.facts[fact.Key]
+	r.mu.Unlock()
+	if held {
+		return
+	}
+	key := r.commitFact(fact)
+	pipeline, err := r.factPipeline(addr.AgentID)
+	if err != nil {
+		assemblyWarn("tagent: the settle of %s at %s committed beside no pipeline: %v", notice.TaskID, addr.AgentID, err)
+		return
+	}
+	r.takePresentation(pipeline.After(ctx, key))
+}
+
+// settleDeliveryKey reports the canonical identity the delivery fact of one
+// terminal notification commits under: a retried delivery keeps its identity,
+// so the chain carries one settle for one notification.
+func settleDeliveryKey(notice task.Notice) event.EventID {
+	return event.EventID(fmt.Sprintf("settle-%x", notice.FactKey()))
 }
 
 // RecallReads returns the recall read faces this run wires beside the retrieval

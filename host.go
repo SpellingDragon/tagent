@@ -142,14 +142,22 @@ type Host struct {
 
 	face       *hostFace
 	meditation *meditation.Driver
+	settle     *SettleDriver
 
-	reloadMu    sync.Mutex
-	mu          sync.Mutex
-	lastAddr    event.Address
-	invocations uint64
-	closed      bool
-	closeErr    error
+	reloadMu sync.Mutex
+	mu       sync.Mutex
+	lastAddr event.Address
+	// userAddresses remembers the entry address each user session was admitted
+	// at, so a terminal notice that lands after the turn ended still finds the
+	// explicit address its follow-up turn runs at.
+	userAddresses map[event.SessionID]event.Address
+	invocations   uint64
+	closed        bool
+	closeErr      error
 
+	// gates holds the one-slot gate of each session address: a channel, never a
+	// mutex, so a cancelled follow-up leaves the wait instead of outliving the
+	// stop that cancelled it.
 	gates sync.Map
 }
 
@@ -235,6 +243,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		}
 	}()
 	var driver *meditation.Driver
+	var settleDriver *SettleDriver
+	// host is assigned once the assembly returns; the settle face captures the
+	// variable, because the three faces it needs are the host's own memory and
+	// drive and are only called after Boot published it.
+	var host *Host
 	options := []Option{
 		WithGovernance(governanceOf(cfg.governance)),
 		WithTelemetry(telemetry.NewLogObserver(trpclog.Default)),
@@ -256,7 +269,10 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	if meditationPlan != nil {
 		options = append(options, WithReflectionAnchors(meditationPlan.anchors))
-		options = append(options, WithPlugins(func(run *Run) ([]plugin.Instance, error) {
+	}
+	options = append(options, WithPlugins(func(run *Run) ([]plugin.Instance, error) {
+		instances := make([]plugin.Instance, 0, 2)
+		if meditationPlan != nil {
 			gate := run.ReflectionGate()
 			if gate == nil {
 				return nil, fmt.Errorf("tagent: agent %q enables meditation beside no reflection anchor store", meditationPlan.agent)
@@ -274,11 +290,26 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 			driver.SetObserver(func(outcome meditation.TickOutcome) {
 				assemblyInfo("tagent: meditation driver of %s: %s (%s)", meditationPlan.agent, outcome.Decision.Disposition, outcome.Decision.Reason)
 			})
-			return []plugin.Instance{driver}, nil
-		}))
-	}
+			instances = append(instances, driver)
+		}
+		settleDriver = NewSettleDriver(
+			run.CommittedEvent,
+			func(session event.SessionID) (event.Address, bool) { return host.userAddressOf(session) },
+			func(ctx context.Context, addr event.Address, fact event.Event) error {
+				return host.fireNoticeTurn(ctx, addr, fact)
+			},
+		)
+		instances = append(instances, settleDriver)
+		return instances, nil
+	}))
 	if cfg.approver != nil {
 		options = append(options, WithApprover(cfg.approver))
+	}
+	if cfg.policy != nil {
+		options = append(options, WithPolicy(cfg.policy))
+	}
+	if cfg.enforcement != "" {
+		options = append(options, WithEnforcement(cfg.enforcement))
 	}
 	run, err := Assemble(ctx, decl, natives, options...)
 	if err != nil {
@@ -287,18 +318,20 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	recallPort.Bind(run)
 	meditationPort.Bind(run)
-	host := &Host{
-		ctx:        ctx,
-		cancel:     cancel,
-		run:        run,
-		entry:      event.AgentID(decl.Entry),
-		sender:     cfg.hostSender,
-		meditation: driver,
-		configPath: configPath,
-		doc:        doc,
-		natives:    natives,
-		models:     models,
-		capture:    capture,
+	host = &Host{
+		ctx:           ctx,
+		cancel:        cancel,
+		run:           run,
+		entry:         event.AgentID(decl.Entry),
+		sender:        cfg.hostSender,
+		meditation:    driver,
+		settle:        settleDriver,
+		configPath:    configPath,
+		doc:           doc,
+		natives:       natives,
+		models:        models,
+		capture:       capture,
+		userAddresses: map[event.SessionID]event.Address{},
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -354,6 +387,9 @@ func openHostRelations(plan *MemoryPlan) (*replay.MemoryRelations, error) {
 // starts before the endpoints, so a failure in that window must not leave a
 // reflection pass landing on a run that is already draining.
 func (h *Host) abortBoot(cause error) error {
+	if h.settle != nil {
+		h.settle.Stop()
+	}
 	if h.meditation != nil {
 		h.meditation.Stop()
 	}
@@ -392,8 +428,28 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	if req.InvocationID == "" {
 		req.InvocationID = h.nextInvocation(req.Address)
 	}
-	unlock := h.lockAddress(req.Address)
+	unlock, err := h.lockAddressContext(ctx, req.Address)
+	if err != nil {
+		return agent.Turn{}, err
+	}
 	defer unlock()
+	return h.driveLocked(ctx, req)
+}
+
+// driveLocked drives one invocation whose session gate the caller already
+// holds, so a user turn and an unattended follow-up turn of the same address
+// never run beside each other. The baseline of a user turn is read after the
+// gate is held and before the drive: the delivery of that turn reads exactly
+// the assistant bodies its own range committed past it.
+func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return agent.Turn{}, ErrHostClosed
+	}
+	user := req.Address.AgentID == h.entry
+	sender := h.sender
+	h.mu.Unlock()
 	var baseline int
 	if user {
 		h.rememberUserAddress(req.Address)
@@ -408,6 +464,77 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 		h.deliverFresh(ctx, req.Address, baseline, sender)
 	}
 	return turn, nil
+}
+
+// fireNoticeTurn drives one unattended follow-up turn at the user address a
+// terminal settle belongs to. The turn carries no input: the notice fact this
+// method commits under the follow-up's own invocation is the material the drive
+// reads at its head, because a range reads the notifications of its own
+// identity prefix. The turn is stamped "task" and holds the same address gate a
+// user turn holds, so the two never run beside each other.
+//
+// The fact it commits is a feedback fact, never a terminal settle with a settle
+// lineage, so the driver that fired this turn never fires on its output. The
+// assistant body the turn produces is delivered through the message sender by
+// the ordinary drive path, exactly as a user turn's output is.
+func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
+	if h == nil || h.run == nil {
+		return ErrHostClosed
+	}
+	if !addr.IsComplete() {
+		return fmt.Errorf("%w: agent=%q session=%q", ErrHostAddressMissing, addr.AgentID, addr.SessionID)
+	}
+	h.mu.Lock()
+	closed := h.closed
+	h.mu.Unlock()
+	if closed {
+		return ErrHostClosed
+	}
+	unlock, err := h.lockAddressContext(ctx, addr)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	invocationID := h.nextInvocation(addr)
+	kind := noticeKindOf(fact)
+	notice := task.Notice{TaskID: noticeTaskIDOf(fact), Kind: kind, Event: fact.Key}
+	material := strings.TrimSpace(fact.Message.Content)
+	if material == "" {
+		material = settleNoticeText(notice)
+	}
+	if _, err := h.run.CommitToSession(ctx, addr, event.Event{
+		Key:       agent.NoticeFactKey(invocationID, notice),
+		Type:      event.TypeFeedback,
+		Timestamp: time.Now(),
+		Meta: map[string]string{
+			event.MetaKeyTriggerSource: "task",
+			event.MetaKeyEventSummary:  string(kind),
+			event.MetaKeyNoticeKind:    string(kind),
+			event.MetaKeyTaskID:        string(notice.TaskID),
+		},
+		Message:      model.Message{Role: model.RoleUser, Content: material},
+		InvocationID: invocationID,
+		TaskID:       notice.TaskID,
+	}); err != nil {
+		return err
+	}
+	_, err = h.driveLocked(ctx, InvokeRequest{
+		InvocationID:  invocationID,
+		Address:       addr,
+		TriggerSource: "task",
+	})
+	return err
+}
+
+// settleNoticeText renders the input material one unattended settle reads as:
+// the task and the terminal it settled on beside the result body the
+// notification carries, as a user message of the follow-up range.
+func settleNoticeText(notice task.Notice) string {
+	text := fmt.Sprintf("tagent: task %s %s", notice.TaskID, notice.Kind)
+	if body := strings.TrimSpace(notice.Text); body != "" {
+		text += "\nresult:\n" + body
+	}
+	return text
 }
 
 // Close stops the endpoints and the reflection driver, drains the run and
@@ -426,6 +553,9 @@ func (h *Host) Close(ctx context.Context) error {
 	h.closed = true
 	h.mu.Unlock()
 	var first error
+	if h.settle != nil {
+		h.settle.Stop()
+	}
 	if h.meditation != nil {
 		h.meditation.Stop()
 	}
@@ -511,11 +641,29 @@ func (h *Host) nextInvocation(addr event.Address) event.InvocationID {
 }
 
 // rememberUserAddress records the user session the task face drives when the
-// next injection arrives.
+// next injection arrives, and keeps that session's own address for the
+// follow-up turn a terminal notice fires.
 func (h *Host) rememberUserAddress(addr event.Address) {
 	h.mu.Lock()
 	h.lastAddr = addr
+	if addr.SessionID != "" {
+		h.userAddresses[addr.SessionID] = addr
+	}
 	h.mu.Unlock()
+}
+
+// userAddressOf reports the user address the host remembered for one session:
+// the explicit address an unattended follow-up turn runs at. A session the host
+// never admitted answers no address, so a settle of a session no user drives
+// fires nothing.
+func (h *Host) userAddressOf(session event.SessionID) (event.Address, bool) {
+	if h == nil {
+		return event.Address{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	addr, ok := h.userAddresses[session]
+	return addr, ok && addr.IsComplete()
 }
 
 // userAddress reports the user session the host admitted last.
@@ -525,12 +673,32 @@ func (h *Host) userAddress() (event.Address, bool) {
 	return h.lastAddr, h.lastAddr.IsComplete()
 }
 
+// addressGate is the one-slot gate that serializes the drives of one session:
+// the token is held by the drive in flight, and a waiter parks on the channel
+// instead of a mutex, so a cancelled follow-up leaves the wait.
+type addressGate struct{ token chan struct{} }
+
 // lockAddress serializes the drives of one session.
 func (h *Host) lockAddress(addr event.Address) func() {
-	value, _ := h.gates.LoadOrStore(addr, &sync.Mutex{})
-	mu := value.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	unlock, err := h.lockAddressContext(context.Background(), addr)
+	if err != nil {
+		return func() {}
+	}
+	return unlock
+}
+
+// lockAddressContext serializes the drives of one session and leaves the wait
+// when the caller's context ends: the stop of the settle driver cancels the
+// follow-up waiting here, so a close never hangs on a gate a user turn holds.
+func (h *Host) lockAddressContext(ctx context.Context, addr event.Address) (func(), error) {
+	value, _ := h.gates.LoadOrStore(addr, &addressGate{token: make(chan struct{}, 1)})
+	gate := value.(*addressGate)
+	select {
+	case gate.token <- struct{}{}:
+		return func() { <-gate.token }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // deliverFresh delivers the assistant bodies the session's committed facts

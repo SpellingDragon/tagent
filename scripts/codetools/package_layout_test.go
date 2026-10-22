@@ -50,6 +50,22 @@ func TestPackageLayoutRejectsEachViolationShape(t *testing.T) {
 	}, got)
 }
 
+// TestPackageLayoutExemptsCrossCuttingSmokeFixtures 钉住 精确路径豁免镜像。
+// - 整机冒烟夹具没有可镜像的生产词干，按精确路径登记
+// - 同目录的孤儿测试仍报 test-mirror-missing（豁免没有扩成整目录）
+// 契约: docs/comment-gate-tooling.md#package-layout
+func TestPackageLayoutExemptsCrossCuttingSmokeFixtures(t *testing.T) {
+	got := rulesOf(layoutFiles(
+		"examples/wechat-bot/main.go",
+		"examples/wechat-bot/smoke_test.go",
+		"examples/wechat-bot/smoke_harness_test.go",
+		"examples/wechat-bot/smoke_data_test.go",
+		"examples/wechat-bot/smoke_errors_test.go",
+		"examples/wechat-bot/neighbour_test.go",
+	))
+	require.Equal(t, []string{"examples/wechat-bot/neighbour_test.go=test-mirror-missing"}, got)
+}
+
 // TestPackageLayoutPassesACleanTree 钉住 精确镜像、冻结变体后缀、正名骨架文件与豁免树都不误报。
 func TestPackageLayoutPassesACleanTree(t *testing.T) {
 	got := rulesOf(layoutFiles(

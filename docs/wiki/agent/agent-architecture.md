@@ -116,6 +116,14 @@
 - **产出落反思主体自己的分区**：经验卡片/综述是写进**自己**分区事实链的普通事件，不写 compaction 事件、不改任何被观察分区状态；回到业务线只经 `deliver_to` 白名单回流，目标侧上下文瘦身仍由它自己的阈值折叠承担——压缩权不可转移。三类产物（脚本/skill/prompt）与 `refine register` 登记义务对任何反思主体同样适用。
 - **投递缝与热更归属**：产出回流别起第二通道，裁决表见 [持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)；`observed_namespaces`/`deliver_to` 在构造期读取，随 meditation 块整体参与组织指纹，改即**换代**，见 [组织热更](../platform/org-hot-reload.md#fingerprint)。
 
+<a id="settle-driver"></a>
+
+**2.15 结算随动：SettleDriver**
+
+任务的终结通知（委派 settle、exec 完成、后台工具结果）在投递缝落链时提交一条带 `settle_trigger_source` 血缘的终结事实；`SettleDriver` 以 fact→observation 端口订阅它，经注入的用户地址记忆找到归属会话，异步驱动一个**空输入**随动回合（`trigger_source=task`），回合产出经普通投递缝交回 sender。触发面是闭表：通知词汇 accepted/progress/settled/failed/cancelled 中只有 settled/failed/cancelled 点火；活动回合经自身 backflow 读到的终结结算不带投递血缘，不重复点火。防循环靠语义而非黑名单：随动回合只产出普通 feedback 与 assistant 输出，永不产出带结算血缘的终结事实。随动回合与用户回合共用同一地址闸，绝不同址并行；`Close` 先停随动驱动并等待在飞回合返回。
+
+委派结果正文随通知同行：`tool/subagent` 的 serve 面把 builder 的 `TurnResult` 正文交给结算面（`CompleteWithResult`），通知的 `Text` 携带正文（8 KiB 上限，超限截断并标记），结算事实与随动回合的通知文本都渲染该正文，因此模型在随动回合读到 worker 的结果而不只是任务与终态。正文不属于通知身份（`FactKey` 仍读 TaskID+Round+Kind+Seq），重试保持同一幂等键。
+
 <a id="package-layout"></a>
 ## 三、包与文件结构
 

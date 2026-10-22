@@ -333,19 +333,33 @@ func segmentWithProduct(entries []ProjectionEntry, product ProjectionEntry) []Pr
 }
 
 // historySummaryOf folds the middle and oldest bands into the one history
-// summary the age axis reads them as.
+// summary the age axis reads them as. The content spells the one-line reads of
+// the turns it folded and carries no type label of its own: what kind of
+// product an entry is stays its Type, and a presentation that needs a label
+// renders it from there instead of the fold writing it into the material.
 func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
 	lines := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		lines = append(lines, entry.Type+": "+entry.Summary)
+		lines = append(lines, historySummaryLine(entry))
 	}
 	return ProjectionEntry{
 		Key:     ageKey("hist", entries),
 		Type:    ProjectionTypeHistorySummary,
 		Summary: "history summary",
-		Content: "history summary: " + strings.Join(lines, "; "),
+		Content: strings.Join(lines, "; "),
 		Time:    entries[0].Time,
 	}
+}
+
+// historySummaryLine renders the one-line read one folded entry contributes to
+// a history summary. A product of an earlier history fold is judged by its Type
+// and never by what its content happens to spell, and contributes the content
+// it recorded, so the original turns survive every later fold.
+func historySummaryLine(entry ProjectionEntry) string {
+	if entry.Type == ProjectionTypeHistorySummary && entry.Content != "" {
+		return entry.Content
+	}
+	return entry.Type + ": " + entry.Summary
 }
 
 // ageKey reports the content-addressed synthetic key one product is filed

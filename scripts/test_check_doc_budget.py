@@ -6,7 +6,8 @@
   * 负锚：超基线（篇数/行数分别）→ exit 1；--tighten 试图上调 → exit 1 且文件不动；
     0 篇 / 基线缺失 / 基线形状坏 → exit 1（不许空转判绿）；
   * 口径锚：gitignored 不入预算、未提交但未 ignore 的计入、非 markdown 不计、
-    末尾无换行的残行计一行；
+    末尾无换行的残行计一行；`openspec/changes/**`（活跃计划与归档）作为过程工件
+    不入预算，而 `openspec/specs/` 作为权威规格仍然计入；
   * 消费者锚：仓库基线文件与现树实测一致（基线=实测，不是抄来的数），
     scripts/lint.sh 把门接进了 comment policy 同一位置。
 """
@@ -158,6 +159,27 @@ class ScopeTest(FixtureCase):
         self.baseline(files=1, lines=1)
         code, out, _err = self.cli()
         self.assertEqual(code, 0, out)
+
+    def test_change_planning_docs_are_not_counted(self):
+        """变更计划与归档件是过程记录，由 check-openspec.sh 把关，不进长期文档预算。"""
+        self.write("a.md", "one\n")
+        self.write("openspec/changes/live/proposal.md", "plan\n" * 50)
+        self.write("openspec/changes/live/tasks.md", "tasks\n" * 50)
+        self.write("openspec/changes/archive/2026-01-01-old/tasks.md", "archive\n" * 50)
+        self.baseline(files=1, lines=1)
+        code, out, _err = self.cli()
+        self.assertEqual(code, 0, out)
+
+    def test_main_specs_stay_in_the_budget(self):
+        """过程工件退出预算不等于主规格退出：openspec/specs 是权威规格，仍要计入。"""
+        self.write("openspec/specs/x/spec.md", "spec\n")
+        self.baseline(files=1, lines=1)
+        code, out, _err = self.cli()
+        self.assertEqual(code, 0, out)
+        self.write("openspec/specs/x/extra.md", "more\n")
+        code, out, _err = self.cli()
+        self.assertEqual(code, 1, out)
+        self.assertIn("篇数", out)
 
     def test_non_markdown_files_are_not_counted(self):
         self.write("a.md", "one\n")

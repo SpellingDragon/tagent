@@ -64,6 +64,18 @@ assembly would, the tool calls are admitted through the task registration
 wrapper, and the terminal of every decision is reduced by the model package's
 single reduction entry.
 
+SettleDriver is the event-driven face of one unattended settle: it observes the
+delivery facts this run commits for a terminal task notification and drives one
+follow-up turn at the user session the task belongs to.
+
+The trigger surface is closed, and the anti-loop is semantic rather than a
+blacklist:
+
+- Only the terminal kinds settled, failed and cancelled fire; accepted and
+progress do not. - Only a delivery fact carries the settle-lineage meta key,
+so a backflow settle never fires. - The fired turn commits no settle fact with a
+lineage, so it can never fire itself again.
+
 Package tagent is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
 dependency-injection site of the process. Assemble is the sole assembly entry
@@ -201,6 +213,11 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
     the committed store, and a run whose facts live only in memory carries no
     such store, so the recall is refused by name instead of answered as an empty
     reference set that would read as "nothing was found".
+
+var ErrSettleDriverUnwired = errors.New("tagent: the settle driver is not wired")
+    ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
+    user-address memory or follow-up face was never wired: a gap by name instead
+    of a silent no-op that reads as a delivered turn.
 
 var ErrUnknownAgentReference = errors.New("tagent: the agent reference names no declared agent")
     ErrUnknownAgentReference reports an agent reference that names no declared
@@ -1093,3 +1110,42 @@ type SessionFolds interface {
     unowned. MUST answer the projection and the window the session registered,
     never one the plugin invents. MUST NOT fold a session whose registered
     window names no positive token window.
+
+type SettleDriver struct {
+	// Has unexported fields.
+}
+    SettleDriver is the fact->observation face of the one turn a terminal notice
+    fires at the session it belongs to. It reads the fact one commit identity
+    names, judges it against the terminal table above, and runs the injected
+    follow-up face when the owning session carries a remembered user address.
+
+func NewSettleDriver(
+	lookup func(context.Context, event.EventID) (event.Event, error),
+	userAddressOf func(event.SessionID) (event.Address, bool),
+	fire func(context.Context, event.Address, event.Event) error,
+) *SettleDriver
+    NewSettleDriver assembles the settle face over the fact lookup of one run,
+    the user-address memory of one host and the follow-up drive of that host.
+
+func (d *SettleDriver) Name() string
+    Name reports the stable name of this plugin instance.
+
+func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit reads the fact one commit wrote and fires the follow-up turn
+    the terminal notice asks for.
+
+    The turn itself runs detached from the committing delivery: a follow-up
+    spends a model turn, and the flush that delivered the notification never
+    waits for it. A fact that is not a terminal delivery fact, or whose session
+    carries no remembered user address, is ignored in silence: those are not
+    settles nobody drives, they are settles somebody already read or addresses
+    the host was never asked to turn. A failed read is reported back and never
+    rolls the committed fact back.
+
+func (d *SettleDriver) Port() plugin.Port
+    Port reports the consumption this driver serves: one committed fact in, one
+    observation out. The observation is the follow-up turn the fact may fire.
+
+func (d *SettleDriver) Stop()
+    Stop ends the driver: no further commit fires a turn, a turn in flight is
+    cancelled, and Stop waits for it to return. A repeated stop is a no-op.

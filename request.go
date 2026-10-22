@@ -476,9 +476,21 @@ func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, 
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, model.Message{Role: role, Content: entry.Content})
+		messages = append(messages, model.Message{Role: role, Content: presentedProjectionContent(entry)})
 	}
 	return messages, nil
+}
+
+// presentedProjectionContent renders one assembled entry as the message the
+// model reads. A product of the age fold speaks its one-line read ahead of the
+// content it folded, so the model sees what kind of material follows; the label
+// is composed here, from the entry's Summary, and never written into the product
+// the fold minted.
+func presentedProjectionContent(entry replay.ProjectionEntry) string {
+	if entry.Type == replay.ProjectionTypeHistorySummary && entry.Summary != "" {
+		return entry.Summary + ": " + entry.Content
+	}
+	return entry.Content
 }
 
 // environmentTaskLines bounds how many open obligations one environment block

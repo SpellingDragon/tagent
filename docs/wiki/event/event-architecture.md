@@ -138,7 +138,7 @@
 <a id="metadata-keys"></a>
 ### 5.1 键的归属与注入点
 
-事件元数据是**框架职责**：每个键在 `event` 包定义一次，注入点引用常量，消费方经 `ParseEventMeta` 解析而不直接读 `StateDelta` 原始串。键按来源分四类：
+事件元数据是**框架职责**：每个键在 `event` 包定义一次，注入点引用常量，消费方经 `ParseEventMeta` 解析而不直接读 `StateDelta` 原始串。键按来源分五类：
 
 | 类别 | 键 | 写入方 |
 |---|---|---|
@@ -146,6 +146,7 @@
 | 分发锚点 | `trigger_source` | 每回合由运行流程设在所有转发事件上，供消费方确定性分派；入库时另抄进 `FullEvent.Metadata`（`agent/context_manager.go`），于是它成为**跨重启、跨分区仍可读**的持久归因——宿主投递门与新鲜度判据都经 `event` 包的谓词从它派生，不自建清单（判据之家见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)、白名单见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)） |
 | 透传业务 | `meta_` 前缀（如 `meta_chat_id`） | 从 invocation 根元数据传播到投递出的事件 |
 | 调用关联 | `call_id`（`MetaKeyCallID`） | **写 = `MemoryPlugin`**（经组合根注入的 `CallIDResolver`，按事件自带的 SDK 响应 ID 精确命中才盖；未命中／空串／未装配一律不写，绝不取"最近一次调用"）；**读 = 离线训练导出**（从 `FullEvent.Metadata` 原样取用）。只进 `Metadata`，不进 `StateDelta`、不带 `meta_` 前缀，因此事件解析面不消费它 |
+| 通知亲缘 | `kind`（`MetaKeyNoticeKind`）、`task_id`（`MetaKeyTaskID`） | 通知落链面写：循环的通知事实、投递的结算事实与宿主的随动回合事实各写一份；消费方按键取通知类别与任务（`noticeKindOf`/`noticeTaskIDOf`），绝不解析正文 |
 
 归因与可观测键（`agent_name`、`bundle_id`、`rollout_id`、`trace_id`、`span_id`）写在 `FullEvent.Metadata` 上，使产出事件可回溯到生效版本。`trace_id`/`span_id` 与 turn span 同源，**但"三个投影共用一个锚点"只在配了 OTLP 端点时成立**：默认 noop provider 下这两个字段为空串，事件存储也没有按 metadata 过滤的查询面——跨投影的关联主路是 `parent_key`/`call_id` 的离线 join，不是 trace。
 

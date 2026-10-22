@@ -1,0 +1,180 @@
+//go:build smoke
+
+// smoke_data_test.go 是第二波冒烟的数据面：一条链路核对多轮对话落在会话链上的
+// 事实如何被 SFT 导出配对，另一条链路核对 call_subagent 显式源在宿主文档里的
+// 可达性。
+//
+// 运行: go test -tags smoke ./... -run TestLocalSmokeWave2Data -count=1 -timeout 15m -v
+//
+// 契约: docs/wiki/rl/rl-architecture.md#training-export
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/SpellingDragon/tagent"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/rl"
+)
+
+// smokeDataRounds 是导出对账驱动的轮数：落在 5-10 轮的窗口里，每轮一个唯一标记。
+const smokeDataRounds = 6
+
+// TestLocalSmokeWave2Data 是第二波数据面入口。
+// - chain export: the formal Run answers rl.FactReader, and every exported row pairs one round's input with its own output
+// - call_subagent: the host document has no explicit-source entry, so the gap is pinned by a named Boot refusal instead of test wiring
+// - chain export: an unnamed session exports no samples and reports no error
+func TestLocalSmokeWave2Data(t *testing.T) {
+	t.Run("chain exporter reconciles the user rounds", func(t *testing.T) {
+		cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
+		cfg.Doc = func(c *smokeConfig) string { return smokeDataDocument(c, nil) }
+		provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+		cfg.Endpoint = provider.endpoint()
+		cfg.write(t)
+		rig := bootSmokeRig(t, cfg, provider)
+
+		chat := smokeChats[0]
+		markers := make([]string, 0, smokeDataRounds)
+		for round := 1; round <= smokeDataRounds; round++ {
+			marker := fmt.Sprintf("SMOKE-R%d", 3000+round)
+			markers = append(markers, marker)
+			rig.drive(chat, marker+" plain question")
+			rig.waitText(chat, "answer "+marker, 30*time.Second)
+		}
+		addr := rig.addressOf(chat)
+
+		inputs := map[event.InvocationID]string{}
+		outputs := map[event.InvocationID]string{}
+		for _, fact := range rig.sessionFacts(chat) {
+			switch fact.Type {
+			case event.TypeExternalInput:
+				inputs[fact.InvocationID] = fact.Message.Content
+			case event.TypeAgentOutput:
+				outputs[fact.InvocationID] = fact.Message.Content
+			}
+		}
+		for _, marker := range markers {
+			var invocation event.InvocationID
+			for id, input := range inputs {
+				if strings.Contains(input, marker) {
+					invocation = id
+					break
+				}
+			}
+			if invocation == "" {
+				t.Fatalf("round %s committed no external input on %s", marker, addr.SessionID)
+			}
+			if want := "answer " + marker; outputs[invocation] != want {
+				t.Fatalf("round %s output = %q, want %q (invocation %s)",
+					marker, outputs[invocation], want, invocation)
+			}
+		}
+		t.Logf("[wave2-data] chain facts: %d external inputs, %d agent outputs, %d invocations",
+			len(inputs), len(outputs), len(inputs))
+
+		// 导出面可达：正式 Run 直接满足 FactReader，导出按 invocation 配对。
+		var reader rl.FactReader = rig.host.Run()
+		exporter := rl.NewChainExporter(reader)
+		samples, err := exporter.Export(context.Background(), rl.ExportOptions{
+			SessionIDs: []event.SessionID{addr.SessionID},
+		})
+		if err != nil {
+			t.Fatalf("export the live chain: %v", err)
+		}
+		if len(samples) != len(markers) {
+			t.Fatalf("exported %d samples, want %d: %+v", len(samples), len(markers), samples)
+		}
+		for i, sample := range samples {
+			marker := markers[i]
+			if sample.SessionID != string(addr.SessionID) {
+				t.Fatalf("sample %d session = %q, want %q", i, sample.SessionID, addr.SessionID)
+			}
+			if sample.Turn != i+1 {
+				t.Fatalf("sample %d turn = %d, want %d", i, sample.Turn, i+1)
+			}
+			if sample.Input != marker+" plain question" {
+				t.Fatalf("sample %d input = %q, want the round's own question", i, sample.Input)
+			}
+			if sample.Label != "answer "+marker {
+				t.Fatalf("sample %d label = %q, want the round's own answer", i, sample.Label)
+			}
+			if sample.EpisodeID != "" {
+				t.Fatalf("sample %d episode = %q, want empty: the wechat Drive path names no episode", i, sample.EpisodeID)
+			}
+		}
+
+		unread, err := exporter.Export(context.Background(), rl.ExportOptions{
+			SessionIDs: []event.SessionID{"smoke-data-unknown"},
+		})
+		if err != nil {
+			t.Fatalf("export an unknown session: %v", err)
+		}
+		if len(unread) != 0 {
+			t.Fatalf("unknown session exported %d samples, want none: %+v", len(unread), unread)
+		}
+
+		t.Logf("[wave2-data] negative anchor: unknown session exported %d samples", len(unread))
+		t.Logf("[wave2-data] %d rounds landed on %s and exported %d paired rows",
+			len(markers), addr.SessionID, len(samples))
+		t.Logf("[wave2-data] turn range = %d..%d, episode = %q",
+			samples[0].Turn, samples[len(samples)-1].Turn, samples[0].EpisodeID)
+		t.Logf("[wave2-data] GAP(episode): the wechat Drive path names no Episode, so EpisodeID is empty and Turn counts the whole session")
+	})
+
+	t.Run("call_subagent explicit source is not grantable by the host document", func(t *testing.T) {
+		cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
+		cfg.Doc = func(c *smokeConfig) string {
+			return smokeDataDocument(c, []string{"{ kind: tool, id: call_subagent }"})
+		}
+		cfg.write(t)
+
+		_, err := tagent.Boot(cfg.ConfigPath)
+		if !errors.Is(err, tagent.ErrUnknownHostTool) {
+			t.Fatalf("Boot error = %v, want ErrUnknownHostTool", err)
+		}
+		for _, want := range []string{"call_subagent", `"` + smokeSessionTag + `"`} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("Boot error %q does not name %s", err, want)
+			}
+		}
+		t.Logf("[wave2-data] GAP(call_subagent): the host document refuses the explicit-source tool: %v", err)
+		t.Logf("[wave2-data] GAP(call_subagent): host-layer H1b (preset→call_subagent) is the missing wiring; the positive journey stays blocked, not faked")
+	})
+}
+
+// smokeDataDocument 渲染数据面的最小宿主文档：一个入口 agent、可选工具面、
+// 本地 provider 与 localfile 存储。它不启用冥想，也不声明预置子 agent，
+// 所以会话链里只会有本轮自己提交的事实。
+func smokeDataDocument(c *smokeConfig, tools []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "entry: %s\n", smokeSessionTag)
+	b.WriteString("provider: local\n")
+	fmt.Fprintf(&b, "model: %s\n", c.Model)
+	fmt.Fprintf(&b, "prompt_dir: %s\n", c.PromptDir)
+	b.WriteString("request_timeout_seconds: 60\n")
+	fmt.Fprintf(&b, "providers:\n  local: { provider: openai, api_endpoint: %q, api_key_env: SMOKE_API_KEY }\n", c.Endpoint)
+	fmt.Fprintf(&b, "agents:\n  %s:\n    model: %s\n", smokeSessionTag, c.Model)
+	if len(tools) > 0 {
+		b.WriteString("    tools:\n")
+		for _, tool := range tools {
+			fmt.Fprintf(&b, "      - %s\n", tool)
+		}
+	}
+	b.WriteString("    max_tokens: 2000\n")
+	b.WriteString("    compress_threshold: 0.3\n")
+	b.WriteString("    keep_recent_tasks: 1\n")
+	b.WriteString("    max_tool_iterations: 3\n")
+	fmt.Fprintf(&b, "storage: { type: localfile, root: %s }\n", c.StorageRoot)
+	b.WriteString("app:\n  wechat:\n")
+	fmt.Fprintf(&b, "    config_dir: %s\n", c.ConfigDir)
+	fmt.Fprintf(&b, "    token_file: %s\n", filepath.Join(c.ConfigDir, "token.json"))
+	fmt.Fprintf(&b, "    context_token_dir: %s\n", c.ContextDir)
+	fmt.Fprintf(&b, "    workspace_dir: %s\n", c.WorkspaceDir)
+	return b.String()
+}

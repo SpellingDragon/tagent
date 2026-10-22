@@ -40,6 +40,18 @@ var mirrorVariantSuffixes = []string{"_real"}
 // can mirror a family member.
 var mirrorExemptTrees = []string{contractExamplesDir, "tests/integration/"}
 
+// mirrorExemptFiles are the cross-cutting fixtures that boot the whole example
+// application rather than guarding one file beside them: an end-to-end smoke
+// drives the assembled host, so no single production stem exists to mirror.
+// Exact paths keep the exemption from covering a neighbour that does have a
+// family; a renamed or copied fixture must be reviewed as a new entry.
+var mirrorExemptFiles = []string{
+	"examples/wechat-bot/smoke_test.go",
+	"examples/wechat-bot/smoke_harness_test.go",
+	"examples/wechat-bot/smoke_data_test.go",
+	"examples/wechat-bot/smoke_errors_test.go",
+}
+
 // layoutFile is one Go source the layout rules judge, as a repo-relative path.
 type layoutFile struct {
 	path string
@@ -136,6 +148,11 @@ func mirrorsProduction(family map[string]bool, stem string) bool {
 // exemptFromMirror reports whether the path lives in a tree that has no production
 // family to mirror.
 func exemptFromMirror(path string) bool {
+	for _, exact := range mirrorExemptFiles {
+		if path == exact {
+			return true
+		}
+	}
 	for _, prefix := range mirrorExemptTrees {
 		if strings.HasPrefix(path, prefix) {
 			return true

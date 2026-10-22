@@ -364,6 +364,17 @@ type RecallFunc func(ctx context.Context, q search.Query) (search.Result, error)
     the run's own recall over the committed store, never a retrieval of this
     package.
 
+type ResultDelegation interface {
+	// CompleteWithResult reports the terminal of one admitted call beside the result
+	// body the delegated turn produced.
+	CompleteWithResult(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID, text string) (task.Notice, error)
+}
+    ResultDelegation is the optional extension of the delegation face that
+    carries the settled result body into the terminal notification: a delegation
+    that implements it is asked for the body the delegated turn produced,
+    and one that does not is settled exactly as before. The body is what the
+    consumer of a task nobody drives reads.
+
 type SkillResolver func(ctx context.Context, names []string) (skill.Repository, error)
     SkillResolver resolves one skill reference list into the repository holding
     them.

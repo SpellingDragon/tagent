@@ -373,6 +373,10 @@
           [
             "observe-a",
             "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
           ]
         ],
         "parent_pipeline_matches_declaration": true,

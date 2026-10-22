@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # lint.sh — the repository's code-lint entry point, single place for:
 #   * the directory set the comment-policy baseline was generated over
-#   * formatting, build and vet
+#   * module checksums, formatting, build and vet (all three modules)
 #   * the comment-policy ratchet (no new violations beyond the recorded baseline)
 #   * the markdown document-budget ratchet (total docs may only shrink)
+#   * the checker selftests CI runs (runtime/concept/doc-budget/restart/race)
+#   * the runtime contracts CI runs (plan/architecture/concept/implementation)
+#   * the comment policy measured over product packages at zero findings
+#   * the OpenSpec strict spec-hygiene gate when the CLI is installed
 #
 # usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet]
 #   --strict           require zero findings (the converged end state, §D8)
@@ -46,15 +50,19 @@ if [ -z "$only" ] || [ "$only" = "fmt" ]; then
 fi
 
 if [ -z "$only" ] || [ "$only" = "build" ]; then
+  echo "lint: modules"
+  run go mod verify
   echo "lint: build"
   run go build ./...
   (cd examples/wechat-bot && go build ./...)
+  (cd examples/cli-host && go build ./...)
 fi
 
 if [ -z "$only" ] || [ "$only" = "vet" ]; then
   echo "lint: vet"
   run go vet ./...
   (cd examples/wechat-bot && go vet ./...)
+  (cd examples/cli-host && go vet ./...)
 fi
 
 if [ -z "$only" ] || [ "$only" = "policy" ]; then
@@ -72,7 +80,72 @@ if [ -z "$only" ] || [ "$only" = "policy" ]; then
   run python3 "${doc_args[@]}"
 fi
 
+# 检查器自测（CI 的 format-and-contract 与 validators 两个 job 跑的就是这些负例）：
+# 只打印规则却退出 0 的检查器、或某条规则变得不可达，先在这里红，而不是等到 CI。
+echo "lint: checker selftests"
+run python3 -m unittest discover -s scripts -p "test_check_runtime_*.py"
+run python3 scripts/test_check_concept_budget.py
+run python3 -m unittest discover -s scripts -p "test_check_doc_budget.py"
+run python3 scripts/test_verify_restart_prefix.py
+run bash scripts/test_race_check.sh
+
+# 运行时契约（CI 的 format-and-contract job）：计划/场景契约在无 task-graph 时
+# 没有判定对象，如实打印 skip；架构政策、概念预算与实现覆盖对现树恒判定。
+echo "lint: runtime plan contract"
+if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then
+  run python3 scripts/check_runtime_plan.py --change-dir openspec/changes/archive/2026-10-18-runtime-rebuild --json
+else
+  echo "  (no active task-graph.json; the plan contract gate has no object, skipped)"
+fi
+echo "lint: architecture policy"
+run python3 scripts/check_runtime_architecture.py --check-policy --json
+echo "lint: concept budget"
+run python3 scripts/check_concept_budget.py --json
+echo "lint: architecture implementation coverage"
+run python3 scripts/check_runtime_architecture.py --implementation --json
+echo "lint: scenarios contract"
+if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then
+  run python3 scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json
+else
+  echo "  (no active task-graph.json; the scenarios contract gate has no object, skipped)"
+fi
+
+# 产品包注释测量模式（CI 的 format-and-contract job）：棘轮之外的零容忍面。
+# 与 CI 同述：命中数必须可解析且为 0；解析不到数字按 unparsed 拒收，不静默放行。
+echo "lint: comment policy (product packages, zero findings)"
+product_policy_out="$(go run ./scripts/comment_policy -no-baseline *.go api runtime memory evolution telemetry rl tool internal cli 2>&1)"
+printf '%s\n' "$product_policy_out"
+product_policy_count="$(printf '%s\n' "$product_policy_out" | sed -n 's/^comment_policy: \([0-9][0-9]*\) finding(s).*/\1/p')"
+if [ "$product_policy_count" != "0" ]; then
+  echo "lint: comment_policy reported '${product_policy_count:-unparsed}' finding(s) over product packages" >&2
+  exit 1
+fi
+
+# OpenSpec 主规格 strict（CI 的 openspec job）。CLI 未安装时如实标注跳过——
+# 该 job 自己会装 CLI 并把门跑完，本地不把「没装工具」伪装成通过。
+if command -v openspec >/dev/null 2>&1; then
+  echo "lint: openspec strict (main specs)"
+  if ! bash scripts/check-openspec.sh; then
+    echo "lint: main specs are not strict-valid" >&2
+    exit 1
+  fi
+else
+  echo "lint: openspec CLI absent; the spec-hygiene gate is left to the CI openspec job"
+fi
+
 # 标识不承载迭代编号（specs/architecture-guardrails：测试标识不承载迭代编号）
+# Mechanical gate: the production chain parses no text prefixes off event
+# bodies - discrimination goes through event Type and Meta keys (event-typing).
+prefix_hits=$(grep -rEn "HasPrefix\(|TrimPrefix\(|strings\.Split\(" --include="*.go" . \
+  | grep -v "_test.go" | grep -v "/examples/" \
+  | grep -E "\.Content|\.Summary|Meta\[" || true)
+if [ -n "$prefix_hits" ]; then
+  echo "lint: text-prefix parsing on event bodies in production code:" >&2
+  printf '%s\n' "$prefix_hits" | sed 's/^/  /' >&2
+  exit 1
+fi
+echo "lint: event bodies carry no text-prefix parsing"
+
 if ! go run ./scripts/codetools name-check . examples/wechat-bot; then
   echo "lint: test identifiers carry batch/round numbering (rename them; keep domain vocabulary like Int64/L1/V2)"
   exit 1

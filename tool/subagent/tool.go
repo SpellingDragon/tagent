@@ -55,6 +55,16 @@ type Delegation interface {
 	Complete(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID) (task.Notice, error)
 }
 
+// ResultDelegation is the optional extension of the delegation face that carries the
+// settled result body into the terminal notification: a delegation that implements it
+// is asked for the body the delegated turn produced, and one that does not is settled
+// exactly as before. The body is what the consumer of a task nobody drives reads.
+type ResultDelegation interface {
+	// CompleteWithResult reports the terminal of one admitted call beside the result
+	// body the delegated turn produced.
+	CompleteWithResult(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID, text string) (task.Notice, error)
+}
+
 // ToolOptions is what the composition root fixes when it registers the tool: the parent
 // assembly inheritance reads, the builder the delegated turn runs on, the delegation face
 // the call is admitted through and the state owner's borrowing face.
@@ -259,7 +269,7 @@ func (d delegationFaces) admit(ctx context.Context, builder Builder, frame task.
 // refuses leaves the task where it is rather than inventing an outcome.
 func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID event.TaskID, assembly *Assembly, addr event.Address, input string, envelope *agent.HandoffEnvelope) {
 	status := task.StatusSettled
-	_, err := builder.Serve(ctx, assembly, Turn{
+	result, err := builder.Serve(ctx, assembly, Turn{
 		UserID:    string(addr.AgentID),
 		SessionID: string(addr.SessionID),
 		Input:     input,
@@ -267,6 +277,17 @@ func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID even
 	})
 	if err != nil {
 		status = task.StatusFailed
+	}
+	d.completeDelegation(ctx, taskID, status, result.Content)
+}
+
+// completeDelegation reports the terminal of one delegated turn beside the body it
+// produced: a delegation that carries result material is asked for it, and one that
+// does not is settled exactly as it was before the body travelled.
+func (d delegationFaces) completeDelegation(ctx context.Context, taskID event.TaskID, status task.Status, body string) {
+	if carrier, ok := d.delegation.(ResultDelegation); ok {
+		_, _ = carrier.CompleteWithResult(ctx, taskID, status, "", body)
+		return
 	}
 	_, _ = d.delegation.Complete(ctx, taskID, status, "")
 }

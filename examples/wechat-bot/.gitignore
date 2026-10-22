@@ -12,6 +12,10 @@
 !main.go
 !wechat.go
 !wechat_test.go
+!smoke_test.go
+!smoke_harness_test.go
+!smoke_wave2_test.go
+!smoke_errors_test.go
 !wechat_approval.go
 !wechat_files.go
 !wechat_notice.go
@@ -118,3 +122,5 @@ openspec/
 !skills/url-fetcher/url_fetcher.js
 !scripts/ima-note-upload.sh
 
+# B3 data-plane smoke source (whitelist mode: tracked file must be named explicitly).
+!smoke_data_test.go

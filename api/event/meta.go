@@ -30,9 +30,11 @@ const (
 )
 
 // MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
-// MetaKeyTriggerSource, MetaKeySettleTriggerSource and MetaKeyBundleID name the
-// frozen metadata keys: the event identity, its partition, its type and summary,
-// the trigger source, the settle trigger lineage and the bundle attribution.
+// MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
+// MetaKeyNoticeKind and MetaKeyTaskID name the frozen metadata keys: the event
+// identity, its partition, its type and summary, the trigger source, the settle
+// trigger lineage, the bundle attribution, the kind of the notification a notice
+// fact reports and the task it reports on.
 const (
 	MetaKeyEventKey            = "event_key"
 	MetaKeyPartitionID         = "partition_id"
@@ -41,6 +43,8 @@ const (
 	MetaKeyTriggerSource       = "trigger_source"
 	MetaKeySettleTriggerSource = "settle_trigger_source"
 	MetaKeyBundleID            = "bundle_id"
+	MetaKeyNoticeKind          = "kind"
+	MetaKeyTaskID              = "task_id"
 )
 
 // MetaPrefix marks a pass-through business metadata key: any key carrying this
@@ -66,6 +70,10 @@ type ParsedMeta struct {
 	SettleTriggerSource string
 	// BundleID is the bundle attribution of the event.
 	BundleID string
+	// NoticeKind is the kind of the notification a notice fact reports.
+	NoticeKind string
+	// TaskID is the task a notice fact reports on.
+	TaskID string
 	// PassThrough holds every MetaPrefix entry verbatim: such an entry is
 	// forwarded as it stands and is never read as a frozen business field.
 	PassThrough map[string]string
@@ -99,6 +107,10 @@ func ParseEventMeta(meta map[string]string) ParsedMeta {
 			parsed.SettleTriggerSource = value
 		case MetaKeyBundleID:
 			parsed.BundleID = value
+		case MetaKeyNoticeKind:
+			parsed.NoticeKind = value
+		case MetaKeyTaskID:
+			parsed.TaskID = value
 		default:
 			if strings.HasPrefix(key, MetaPrefix) {
 				parsed.PassThrough[key] = value

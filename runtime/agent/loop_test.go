@@ -735,6 +735,11 @@ func TestBackflowNotificationLanes(t *testing.T) {
 		if fact.Message.Content != progressNoteOf(notice).Content || fact.Message.Role != model.RoleUser {
 			t.Fatalf("notice fact message = %+v, want the input material the range reads", fact.Message)
 		}
+		if fact.Meta[event.MetaKeyEventSummary] != string(notice.Kind) ||
+			fact.Meta[event.MetaKeyNoticeKind] != string(notice.Kind) ||
+			fact.Meta[event.MetaKeyTaskID] != string(notice.TaskID) {
+			t.Fatalf("notice fact meta = %v, want the kind and the task as mechanical keys", fact.Meta)
+		}
 		if fact.Owner != invariantLoopAddress || fact.Target != invariantLoopAddress || fact.Source != invariantLoopAddress {
 			t.Fatalf("notice fact addresses = (%+v, %+v, %+v), want the range address", fact.Owner, fact.Target, fact.Source)
 		}

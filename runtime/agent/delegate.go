@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 
@@ -339,6 +340,42 @@ func (d *Delegator) Observe(_ context.Context, notice task.Notice) error {
 // is reported only once the task's obligations are cleared, so an obligation
 // still open keeps the delegation where it is and a later Reconcile lands it.
 func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID) (task.Notice, error) {
+	return d.complete(ctx, taskID, status, fact, "")
+}
+
+// CompleteWithResult settles one admitted delegation exactly as Complete does,
+// and carries the result body the settled call produced into the notification.
+// The body is what a consumer of a task nobody drives reads: the turn that
+// admitted the delegation has already ended, so the notification is the only
+// material left. The body is bounded, and it stays out of the notification
+// identity, so a retry of the same settle keeps its fact key.
+func (d *Delegator) CompleteWithResult(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID, text string) (task.Notice, error) {
+	return d.complete(ctx, taskID, status, fact, text)
+}
+
+// maxSettleNoticeText bounds the result body one settle notification carries,
+// in bytes: a settled call may produce far more than a notification should
+// carry, so the body is cut at the bound and marked as cut.
+const maxSettleNoticeText = 8 << 10
+
+// settleNoticeTextOf bounds the result body one settle notification carries and
+// marks a body cut at the bound, so a reader tells a short result from a
+// truncated one.
+func settleNoticeTextOf(text string) string {
+	if len(text) <= maxSettleNoticeText {
+		return text
+	}
+	cut := maxSettleNoticeText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "\n[truncated: the result body exceeds the notification bound]"
+}
+
+// complete is the shared body of Complete and CompleteWithResult: the terminal
+// status decides the notification kind, and the text is carried under the
+// notification identity exactly as the status and the fact reference are.
+func (d *Delegator) complete(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID, text string) (task.Notice, error) {
 	var kind task.NoticeKind
 	switch status {
 	case task.StatusSettled:
@@ -364,7 +401,7 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
 		delegateDebug("tagent: delegation refused result=terminal task=%s status=%s", taskID, delegationStatusName(standing))
 		return task.Notice{}, fmt.Errorf("%w: %s", ErrDelegationTerminal, taskID)
 	}
-	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact}
+	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact, Text: settleNoticeTextOf(text)}
 	envelope := task.Envelope{
 		Notice:         notice,
 		Target:         entry.record.Target,

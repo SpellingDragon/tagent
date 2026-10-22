@@ -368,10 +368,14 @@ func (l *Loop) admitNotice(invocationID event.InvocationID, notice task.Notice) 
 // carries names the work it reports and never replaces that identity.
 func (l *Loop) commitNotice(invocationID event.InvocationID, addr event.Address, notice task.Notice) event.EventID {
 	return l.commitFactKey(context.Background(), addr.AgentID, event.Event{
-		Key:          NoticeFactKey(invocationID, notice),
-		Type:         event.TypeFeedback,
-		Timestamp:    time.Now(),
-		Meta:         map[string]string{event.MetaKeyEventSummary: "tagent: " + string(notice.Kind) + " notice of " + string(notice.TaskID)},
+		Key:       NoticeFactKey(invocationID, notice),
+		Type:      event.TypeFeedback,
+		Timestamp: time.Now(),
+		Meta: map[string]string{
+			event.MetaKeyEventSummary: string(notice.Kind),
+			event.MetaKeyNoticeKind:   string(notice.Kind),
+			event.MetaKeyTaskID:       string(notice.TaskID),
+		},
 		Message:      progressNoteOf(notice),
 		Owner:        addr,
 		Source:       addr,

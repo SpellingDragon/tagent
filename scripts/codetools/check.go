@@ -1097,10 +1097,10 @@ func shortSHA(sha string) string {
 // test fixture that spells out the path pattern is not a citation, so the gate
 // does not report itself; everything else must state the contract in a long-lived
 // document instead of pointing at a process artifact.
-// The four python/yaml keys at the end are checkers and CI wiring that pass the
-// change directory under inspection as a literal argument: spelling the
-// inspected path is their calling shape, the same self-reference the earlier
-// keys carry, not a citation of a process artifact.
+// The python/yaml keys at the end are checkers, fixtures and baselines that name
+// the change tree as the object they inspect or exclude: spelling that path is
+// their calling shape, the same self-reference the earlier keys carry, not a
+// citation of a process artifact.
 var procRefSkip = map[string]bool{
 	"scripts/comment_policy/main.go":                true,
 	"scripts/comment_policy/main_test.go":           true,
@@ -1112,6 +1112,9 @@ var procRefSkip = map[string]bool{
 	"scripts/lint.sh":                               true,
 	"scripts/check_concept_budget.py":               true,
 	"scripts/check_runtime_plan.py":                 true,
+	"scripts/check_doc_budget.py":                   true,
+	"scripts/test_check_doc_budget.py":              true,
+	"scripts/doc_budget.json":                       true,
 	"scripts/test_check_runtime_workflow.py":        true,
 	".github/workflows/runtime-contracts.yml":       true,
 }

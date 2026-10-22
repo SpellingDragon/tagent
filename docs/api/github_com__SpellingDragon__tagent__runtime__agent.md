@@ -341,6 +341,14 @@ func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status ta
     so an obligation still open keeps the delegation where it is and a later
     Reconcile lands it.
 
+func (d *Delegator) CompleteWithResult(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID, text string) (task.Notice, error)
+    CompleteWithResult settles one admitted delegation exactly as Complete does,
+    and carries the result body the settled call produced into the notification.
+    The body is what a consumer of a task nobody drives reads: the turn that
+    admitted the delegation has already ended, so the notification is the only
+    material left. The body is bounded, and it stays out of the notification
+    identity, so a retry of the same settle keeps its fact key.
+
 func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.AdmissionReceipt, error)
     Delegate admits one delegated call as a task and returns its admission
     receipt. The call identity and the application-selected target are required;

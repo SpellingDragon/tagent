@@ -17,6 +17,10 @@
   * 不计生成物：`docs/api/` 是 `scripts/gen_godoc.sh` 从源码注释生成的，体量由生成器
     和包数决定（现有 48 篇/17805 行）；它的新鲜度已由 `gen_godoc.sh --check` 强制，
     拿它进预算只会让「新增一个 Go 包」逼作者删等量散文——那不是本门要拦的熵；
+  * 不计过程工件：`openspec/changes/**` 是变更期的计划件与归档件（活跃 change 与
+    archive 同属过程记录），其体量由变更自身的评审与 `scripts/check-openspec.sh`
+    把关；进预算则每开一个变更都要先删等量散文，归档还会把历史计划永久抬进基线，
+    与本门「长期文档只降不升」的口径相反。`openspec/specs/` 是权威规格，仍然计入；
   * 行数：换行符个数，末尾未终止的半行也算一行（`wc -l` 会漏掉它）；
   * 不跟随符号链接；索引里有、盘上缺失的路径不计入并 warn（tracked-hygiene 门负责那件事）。
 
@@ -28,11 +32,13 @@
     从机制上堵住「上调基线掩盖增长」这条最省事的作弊路径；
   * 扫描到 0 篇不判绿（扫描坏了/树是空的都不能冒充通过）。
 
-2026-10-19 实测：1150 篇 / 97916 行（`python3 scripts/check_doc_budget.py --json`，
-HEAD 7610629 之上的索引（含未提交的批内改动）；基线文件里的 measured_at /
-measured_on 是同一快照）。
-与 R-H 登记值 1855 篇 / 212905 行 的对账（登记值用 `find . -name '*.md'` 量，
-把不进仓库的东西和生成物也算进去了）：1855 = 1150（本门口径）+ 607（gitignored
+2026-10-19 实测（旧口径，含 `openspec/changes/**`）：1150 篇 / 97916 行（
+`python3 scripts/check_doc_budget.py --json`，HEAD 7610629 之上的索引（含未提交的批内
+改动）；基线文件里的 measured_at / measured_on 是同一快照）。2026-10-22 口径调整：
+`openspec/changes/**`（活跃计划件与归档件）退出预算，基线随之收紧到长期文档面的
+实测值 206 篇 / 21917 行——变更计划的体量不再需要用删散文来对冲。
+与 R-H 登记值 1855 篇 / 212905 行 的对账（旧口径；登记值用 `find . -name '*.md'` 量，
+把不进仓库的东西和生成物也算进去了）：1855 = 1150（旧口径）+ 607（gitignored
 本地物料）+ 48（`docs/api` 生成物）+ 21（node_modules 第三方包）+ 19（`.git/review-notes`
 草稿）+ 12（submodule 内容）− 2（本门落地时同批新增的归档 README 与 CONTRIBUTING.md）。
 行数同理：登记值与实测的 11.5 万行差额几乎全来自这 705 篇本地/生成/外部文件。
@@ -58,6 +64,8 @@ import runtime_checklib as lib
 DOC_SUFFIXES = (".md", ".markdown")
 # 生成物不进预算：体量与包数耦合，新鲜度由生成器自己的 --check 负责。
 GENERATED_DOC_PREFIXES = ("docs/api/",)
+# 过程工件不进预算：变更计划/归档件是 openspec change 的过程记录，不是长期文档面。
+PROCESS_DOC_PREFIXES = ("openspec/changes/",)
 DEFAULT_BASELINE = os.path.join("scripts", "doc_budget.json")
 SCHEMA_VERSION = 1
 METRICS = ("files", "lines")
@@ -99,7 +107,8 @@ def git_doc_paths(root):
     names = proc.stdout.decode("utf-8", "surrogateescape").split("\0")
     return sorted({name for name in names
                    if name and name.lower().endswith(DOC_SUFFIXES)
-                   and not name.startswith(GENERATED_DOC_PREFIXES)})
+                   and not name.startswith(GENERATED_DOC_PREFIXES)
+                   and not name.startswith(PROCESS_DOC_PREFIXES)})
 
 
 def scan(root):
@@ -262,7 +271,9 @@ def run(argv):
         report.extra["baseline_path"] = os.path.relpath(baseline_path, root).replace(os.sep, "/")
         report.extra["scope"] = ("git index: tracked + untracked-but-not-ignored "
                                  "*.md/*.markdown, excluding generated "
-                                 + ", ".join(GENERATED_DOC_PREFIXES))
+                                 + ", ".join(GENERATED_DOC_PREFIXES)
+                                 + " and change-scoped process records "
+                                 + ", ".join(PROCESS_DOC_PREFIXES))
         if unreadable:
             report.warn("{} indexed document(s) are missing on disk and were not counted "
                         "(tracked-hygiene owns that defect): {}{}".format(

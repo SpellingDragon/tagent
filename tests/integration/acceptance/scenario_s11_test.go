@@ -109,6 +109,10 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	declaredAfter := scenarioDeclaredPortOrder(declared, recorder.plugins(),
 		plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation},
 		plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView})
+	settleDeadline := time.Now().Add(5 * time.Second)
+	for len(recorder.afterGroups()) < len(parentRequests)+1 && time.Now().Before(settleDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	afterGroups := recorder.afterGroups()
 	observations["parent_pipeline_before_order"] = recorder.beforeOrder()
 	observations["parent_pipeline_after_order"] = afterGroups

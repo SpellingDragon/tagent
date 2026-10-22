@@ -142,6 +142,8 @@ func TestEventVocabularyInvariants(t *testing.T) {
 		{"MetaKeyTriggerSource", MetaKeyTriggerSource},
 		{"MetaKeySettleTriggerSource", MetaKeySettleTriggerSource},
 		{"MetaKeyBundleID", MetaKeyBundleID},
+		{"MetaKeyNoticeKind", MetaKeyNoticeKind},
+		{"MetaKeyTaskID", MetaKeyTaskID},
 	}
 
 	t.Run("event type names are non-empty and distinct", func(t *testing.T) {
@@ -185,6 +187,8 @@ func TestEventVocabularyInvariants(t *testing.T) {
 			MetaKeyTriggerSource:       "trigger",
 			MetaKeySettleTriggerSource: "settle",
 			MetaKeyBundleID:            "bundle",
+			MetaKeyNoticeKind:          "settled",
+			MetaKeyTaskID:              "task-1",
 			MetaPrefix + "tenant":      "tenant-1",
 			MetaPrefix + "trace":       "trace-1",
 			"business field":           "kept verbatim",
@@ -201,9 +205,11 @@ func TestEventVocabularyInvariants(t *testing.T) {
 				parsed.EventKey, parsed.PartitionID, parsed.EventType)
 		}
 		if parsed.EventSummary != "summary" || parsed.TriggerSource != "trigger" ||
-			parsed.SettleTriggerSource != "settle" || parsed.BundleID != "bundle" {
-			t.Fatalf("frozen descriptive entries = (%q, %q, %q, %q), want every named entry",
-				parsed.EventSummary, parsed.TriggerSource, parsed.SettleTriggerSource, parsed.BundleID)
+			parsed.SettleTriggerSource != "settle" || parsed.BundleID != "bundle" ||
+			parsed.NoticeKind != "settled" || parsed.TaskID != "task-1" {
+			t.Fatalf("frozen descriptive entries = (%q, %q, %q, %q, %q, %q), want every named entry",
+				parsed.EventSummary, parsed.TriggerSource, parsed.SettleTriggerSource, parsed.BundleID,
+				parsed.NoticeKind, parsed.TaskID)
 		}
 		if len(parsed.PassThrough) != 2 || parsed.PassThrough[MetaPrefix+"tenant"] != "tenant-1" ||
 			parsed.PassThrough[MetaPrefix+"trace"] != "trace-1" {
@@ -217,7 +223,8 @@ func TestEventVocabularyInvariants(t *testing.T) {
 		for key := range meta {
 			switch key {
 			case MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
-				MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID:
+				MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
+				MetaKeyNoticeKind, MetaKeyTaskID:
 				accounted++
 			}
 		}

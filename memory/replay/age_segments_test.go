@@ -377,3 +377,44 @@ func TestAgeFoldKeepsTheSegmentInProgressWhole(t *testing.T) {
 		}
 	}
 }
+
+// TestRefoldReadsTypeNotPrefix pins the judgment a later history fold reads a standing product by: its Type, never its text.
+//   - a standing history summary whose content carries no type label is still judged a product, and the turns it recorded survive
+//   - the summary a fold mints spells no type label of its own, so what kind of product it is stays its Type
+func TestRefoldReadsTypeNotPrefix(t *testing.T) {
+	ctx := context.Background()
+	const early = "EARLY-INPUT: the first turn of the session"
+	standing := ProjectionEntry{
+		Key:     "-hist-standing",
+		Type:    ProjectionTypeHistorySummary,
+		Summary: "history summary",
+		Content: "external_input: " + early + "; agent_output: the first answer",
+		Time:    ageBase,
+	}
+	entries := []ProjectionEntry{standing}
+	for step, seed := range []string{"t2", "t3", "t4"} {
+		entries = append(entries, ageTurn(seed, step, 1)...)
+	}
+	projection := ageProjection(t, entries)
+
+	report, err := projection.FoldByAge(ctx, AgeFoldPlan{KeepRecent: 1, VolumeThreshold: 600})
+	if err != nil {
+		t.Fatalf("FoldByAge: %v", err)
+	}
+	if !report.Triggered || len(report.Products) == 0 {
+		t.Fatalf("report = %+v, want the four turns to pass the volume threshold", report)
+	}
+	summary := report.Products[len(report.Products)-1]
+	if summary.Type != ProjectionTypeHistorySummary {
+		t.Fatalf("product = %+v, want the history summary of the older bands", summary)
+	}
+	if !strings.HasPrefix(summary.Content, "external_input: "+early) {
+		t.Fatalf("history summary content = %q, want the standing product's content read verbatim ahead of the folded lines", summary.Content)
+	}
+	if strings.Contains(summary.Content, "history summary") || strings.Contains(summary.Content, ProjectionTypeHistorySummary+": ") {
+		t.Fatalf("history summary content = %q, want no type label written into the material", summary.Content)
+	}
+	if !strings.Contains(summary.Content, "input t2") {
+		t.Fatalf("history summary content = %q, want the turn folded beside the standing product", summary.Content)
+	}
+}

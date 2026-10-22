@@ -34,7 +34,7 @@ func noticeFactOf(invocationID event.InvocationID, notice task.Notice, at time.T
 		Key:     agent.NoticeFactKey(invocationID, notice),
 		Chain:   noticeChainKey,
 		Type:    event.TypeFeedback,
-		Summary: "tagent: " + string(notice.Kind) + " notice of " + string(notice.TaskID),
+		Summary: string(notice.Kind),
 		Content: noticeTextOf(notice),
 		Time:    at,
 	}
@@ -83,7 +83,7 @@ func TestNoticeFactsSurviveTheChainRebuild(t *testing.T) {
 			if replayed[at].Key != key || replayed[at].Content != noticeTextOf(want) {
 				t.Fatalf("replayed notice %d = %+v, want the committed report back as it stood", at, replayed[at])
 			}
-			if replayed[at].Type != event.TypeFeedback || replayed[at].Summary == "" {
+			if replayed[at].Type != event.TypeFeedback || replayed[at].Summary != string(want.Kind) {
 				t.Fatalf("replayed notice %d = %+v, want the feedback type beside the stored summary", at, replayed[at])
 			}
 		}

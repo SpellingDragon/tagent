@@ -101,6 +101,8 @@ const (
 	_ = MetaKeyTriggerSource
 	_ = MetaKeySettleTriggerSource
 	_ = MetaKeyBundleID
+	_ = MetaKeyNoticeKind
+	_ = MetaKeyTaskID
 
 	_ = MetaPrefix
 )

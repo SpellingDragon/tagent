@@ -115,9 +115,13 @@ BASELINE = (
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
-    # 七个冻结键各自成一格，前缀透传与未建模条目必须原样留存（PassThrough/Unknown）——
-    # 字段即被解析元数据的原样形状，瘦身会丢掉“不丢条目”的保真承诺，故不瘦身。
-    ("struct-fields", "api/event/meta.go:ParsedMeta", 9),
+    # 九个冻结键各自成一格（另有 PassThrough/Unknown 原样留存）——字段即被解析元数据的
+    # 原样形状，瘦身会丢掉“不丢条目”的保真承诺，故不瘦身。typed-meta 收口新增
+    # kind/task_id 两个冻结键：通知类型与任务身份进机械字段，呈现层不再拼文本。
+    ("struct-fields", "api/event/meta.go:ParsedMeta", 11),
+    # runtime/task.Notice 6f：通知事实本体＝数据面，身份四格（TaskID/Round/Kind/Seq）
+    # 加事件引用与结果正文；正文是消费方读取的结算材料，FactKey 仍只认身份四格。
+    ("struct-fields", "runtime/task/registry.go:Notice", 6),
     # event.Event 16f（S2 类别豁免先例，具名）：事件事实本体＝数据面，16 个字段是事件
     # 身份/内容/归属/账目四块的数据语义（序列化保真面），不拆构造、不拆块；可读性由
     # api/event/types.go 的语义块文档分组承担。
@@ -167,7 +171,10 @@ BASELINE = (
     ("ctx-bare", "evolution/governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
-    # 红线均已落地，本表不再登记 S4 债务。
+    # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是
+    # 结算携带结果正文引入的可选拓展面，范例与红线随后续批次补齐；在此之前显式
+    # 计入债务，新增接口不因“尚未补范例”而免检。
+    ("contract-surface", "tool/subagent/tool.go:ResultDelegation", None),
 )
 # ---- Go 源码静态扫描（纯 stdlib；不做类型检查，见模块 docstring 的局限）----
 IFACE_DECL_RE = re.compile(r"^type\s+(?P<name>[A-Za-z_]\w*)\s+interface\s*\{", re.M)
