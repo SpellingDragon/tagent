@@ -1,67 +1,126 @@
 # tagent
 
-事件驱动的 agent 运行时：事件进入总线，由任务、模型与工具协作产出结果。Go 单仓（module `github.com/SpellingDragon/tagent`，稳定命名空间）；宿主示例（微信 bot 与 CLI host）位于独立 module，不反向依赖宿主代码。
+事件驱动的 agent 运行时：一切状态皆链上事实，一切行为皆事件响应。Go 单仓（`github.com/SpellingDragon/tagent`）；宿主示例（微信 bot 与 CLI host）位于独立 module。
 
-## 项目定位
+## 核心设计：三个挂点，一条链
 
-术语先查 [`docs/GLOSSARY.md`](docs/GLOSSARY.md)：一页把机制名（冥想／转世／结算／血统／义务／策展／退位）与事实七族对成通用词，本文不重复定义。
-
-- **事件是一等输入**：用户消息、任务结算、系统告警等都以事件进入，消费壳按事件类型路由。
-- **状态、历史、义务各有其主**：`state` 持生效绑定与领域现场，`memory` 持原文与投影写权威，`task` 持转移与通知义务，互不代管。
-- **组合根只装配**：根包 `tagent` 是把组织声明变成活动运行时的唯一装配点（`Assemble`），机制实现位于各领域包，根包不留第二份运行现场。
-- **运行时而非脚手架**：持久提交、跨重启恢复、投递回执、治理闸与观测是运行时组件。
-
-## 架构速览
-
-代码面收敛为六层：
-
-| 层 | 目录 | 职责 |
+| 挂点 | 语义 | 谁在用 |
 |---|---|---|
-| 词汇 | `api/event/` `api/model/` `api/config/` `api/document/` `api/plugin/` `api/view/` | 事件契约与元数据、模型抽象、声明式配置装载（严格解码）、宿主文档方言、插件阶段、呈现词汇 |
-| 核心 | `runtime/task/` `runtime/state/` `runtime/agent/` `memory/` | 任务生命周期、绑定与现场、事件循环、原文/投影与召回 |
-| 供面 | `tool/`（`exec/` `file/` `knowledge/` `mcp/` `recall/` `spec/` `subagent/`）、`rl/`、`evolution/`（`governance/` `meditation/`）、`telemetry/`、`memory/query/` | 工具与外部执行、训练数据侧、自进化、观测实现、只读查询 |
-| 组合根 | 根包（12 文件：`tagent.go` `run.go` `prepare.go` `read.go` `request.go` `invoke.go` `commit.go` `facts.go` `host.go` `host_face.go` `tools.go` `skeleton_assert.go`） | 装配、公共入口、宿主入口、诊断注入点 |
-| 宿主壳 | `cli/` | 命令面（`invoke`/`query`/`start`）与宿主转换面（`HostBridge`/回执/审批）；位于组合根之上（`cli`→根），运行时不反向依赖 |
-| 宿主 | `examples/wechat-bot/`、`examples/cli-host/`（各自独立 module） | 微信宿主：收发、去重、投递回执；CLI 宿主：命令面驱动已装配的 run。两者经 `replace` 指向本仓 |
+| **事件 x**（生产） | 不可变事实落链，带来源戳 | 渠道输入、工具调用、通知、冥想注入、模型替换、压缩请求 |
+| **插件 f(x)**（管线） | 请求路径上的可追溯映射 | 治理门（调用前判定）、呈现器、观测器 |
+| **消费 g(x)**（读链） | 一消费多事件，增量读 | 装配器、召回工具、冥想观察面、反思计时、训练导出 |
 
-`examples/contract/` 为各领域公共 API 的编译期契约示例。
+链是唯一真相：车道与投影都是缓存，崩溃后从链精确重建。
+
+### 事实提交后的统一分派
+
+响应事实提交的行为只有一个形态——`PostCommitObserver` 插件入流，装配处可见、独立文件、零埋点：
+
+```mermaid
+flowchart TB
+    UI["宿主渠道<br/>(微信 / CLI / HTTP)"] -->|"用户消息"| BOOT["tagent.Boot<br/>配置一条路装配"]
+    BOOT --> CHAIN[("会话链<br/>不可变事实")]
+
+    subgraph PIPE["pipeline.After —— 事实提交分派"]
+        direction LR
+        OBS["CommitObserver<br/>观测记录"]
+        MED["meditation.Driver<br/>反思计时"]
+        FOLD["AgeFoldPlugin<br/>三龄段压缩"]
+        LEASE["LeaseObserver<br/>模型热换"]
+    end
+
+    CHAIN --> PIPE
+    MED -->|"水位成熟"| REFLECT["反思回合<br/>独立会话"]
+    REFLECT -->|"deliver_summary<br/>模型显式决策"| CHAIN
+    LEASE -->|"replacement 事实"| SWAP["lease 换版本<br/>在途请求不换"]
+    FOLD -->|"体积超阈"| PROJ[("投影折叠<br/>中段/老段")]
+
+    subgraph READ["消费面 —— 增量读链"]
+        direction LR
+        ASM["装配器<br/>预算降级呈现"]
+        RCL["recall 工具<br/>语义检索"]
+        EXP["ChainExporter<br/>SFT 样本"]
+    end
+    CHAIN --> READ
+    PROJ --> ASM
+
+    classDef fact fill:#e8f4f8,stroke:#2196f3
+    classDef plugin fill:#fff3e0,stroke:#ff9800
+    classDef consumer fill:#e8f5e9,stroke:#4caf50
+    class CHAIN,PROJ fact
+    class OBS,MED,FOLD,LEASE,REFLECT,SWAP plugin
+    class ASM,RCL,EXP consumer
+```
+
+## 会话上下文：滚动边界＋三龄段折叠
+
+当前回合走 transcript（in-flight），新输入到达即成为历史（ended）由投影接管。投影体积达窗口阈值时自动折叠——过程细节塌缩、历史摘要置顶，原文永在链上可回捞：
+
+```mermaid
+flowchart LR
+    subgraph NEW["新段（窗口内）"]
+        T["transcript 原文"]
+    end
+    subgraph MID["中段产物"]
+        F["过程细节折叠<br/>(thinking/工具调用→一条)"]
+    end
+    subgraph OLD["老段摘要"]
+        H["历史摘要一条<br/>装配时置顶"]
+    end
+    T -->|"段龄出窗<br/>体积超阈"| F -->|"再折叠"| H
+    H --> ASM2["装配呈现<br/>Full→Ticket→Summary"]
+    F --> ASM2
+    T --> ASM2
+
+    classDef band fill:#f3e5f5,stroke:#9c27b0
+    classDef out fill:#e8f5e9,stroke:#4caf50
+    class T,F,H band
+    class ASM2 out
+```
+
+## 能力矩阵
+
+| 能力 | 机制 | 配置面 |
+|---|---|---|
+| **turnkey 装配** | `tagent.Boot(config)`——providers/工具面/存储/冥想/注入面一条路 | 宿主只填 Sender/Approver 端口 |
+| **模型热换** | `/reload` → replacement 事实 → lease（重建→发布→安装，失败不装） | 改 yaml 不重启 |
+| **上下文压缩** | 三龄段折叠（AgeFoldPlugin）＋预算降级两道防线 | `max_tokens`＋`compress_threshold`(0.8)＋`keep_recent_tasks`(2)，缺省全默认 |
+| **冥想反思** | 事件驱动计时＋水位门＋防循环闭表（自产戳不触发） | `meditation:` 段，deliver_to 白名单 |
+| **语义召回** | embedding 混合检索＋按 key 回捞＋血统追踪 | `memory.engine:` 段 |
+| **治理审批** | 调用门（风险分级/审批 Hold/TTL）＋发布门 | `governance:` 段，critical 恒审批 |
+| **委派** | 声明面子 agent＋`call_subagent` 运行时组装（双源＋采样参数） | agent 引用＋显式源 |
+| **per-agent 调优** | 思考开关/强度/温度/看门狗轮数各自独立 | 各 agent 段内声明 |
+| **训练数据** | Recorder 三类记录＋Capture 轨迹封印＋ChainExporter 导出 | 默认记录，零配置 |
+| **看门狗收口** | final_round：轮数/时长到限强制收尾轮 | 各 agent 自设，缺省无界 |
 
 ## 快速开始
 
-需要 Go 1.24.1 及以上（见 `go.mod`）。
+需要 Go 1.24.1+。
 
 ```bash
-go build ./...                          # 构建全部包（根 module）
+go build ./...                          # 构建全部包
 go test ./tests/integration/...         # 集成/契约测试
-bash scripts/lint.sh                    # 仓库门禁：格式、构建、vet、注释棘轮、文档引用、生成物同步
+bash scripts/lint.sh                    # 仓库门禁
 ```
 
-`docs/api/` 是生成物：改完源码注释后运行 `bash scripts/gen_godoc.sh` 重新生成，不要手改。
+`docs/api/` 是生成物：改完源码注释后 `bash scripts/gen_godoc.sh` 重新生成。
 
 ## 文档导航
 
 | 入口 | 内容 |
 |---|---|
-| [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照（一句话定义＋领域类比＋在哪看） |
-| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：由源码注释生成，`gen_godoc --check` 保证与码面同步 |
-| [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim）：机制背景，非当期码面事实 |
-| [`docs/notes/risk-remediation-plan.md`](docs/notes/risk-remediation-plan.md) | 当期风险处置计划（分片、验收通则） |
-| [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账：变更的 proposal/design/tasks 与波次记录 |
+| [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照 |
+| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | **扩展面**：18 个扩展模块的边界与契约 |
+| [`docs/OPERATION.md`](docs/OPERATION.md) | **运维**：观测/工具链/风险面 |
+| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：源码注释生成 |
+| [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim） |
+| [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账 |
 
-## 版本说明
+## 版本与依赖
 
-- 当前版本 **v0.3.0**，变更记录与升级注意事项见 `CHANGELOG.md`。
-- 配置装载是**严格 YAML/JSON**：未知键拒绝启动而非静默忽略（`api/config` 的 `unknown field` 判定）；升级前先核对配置键。
-
-## 依赖注记
-
-`trpc-agent-go` 目前指向 fork：
-
-```
-replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1
-```
-
-回正条件：上游 PR [#2637](https://github.com/trpc-group/trpc-agent-go/pull/2637) 合并后移除该 `replace`（`go.mod` 内有 `TODO(upstream)` 标记）。
+- **v0.3.0**，pre-release 姿态（无迁移承诺），见 `CHANGELOG.md`。
+- 配置装载是**严格解码**：未知键拒绝启动（`unknown field`）。
+- `trpc-agent-go` 指向 fork（`replace`，回正条件见 `go.mod` 的 `TODO(upstream)`）。
 
 ## 许可证
 
