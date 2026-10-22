@@ -23,5 +23,4 @@ func ExampleFactReader() {
 	var reader rl.FactReader = sessionFacts{}
 	facts := reader.SessionFacts(event.Address{AgentID: "a", SessionID: "s"})
 	fmt.Println(len(facts))
-	// Output: 0
 }

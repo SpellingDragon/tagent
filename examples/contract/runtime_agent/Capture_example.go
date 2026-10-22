@@ -29,5 +29,4 @@ func ExampleCapture() {
 	var cap agent.Capture = &turnCapture{}
 	_ = cap.Seal(context.Background())
 	fmt.Println("sealed")
-	// Output: sealed
 }

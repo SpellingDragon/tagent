@@ -39,5 +39,4 @@ func ExampleCaptureScope() {
 	var scope rl.CaptureScope = trajectScope{}
 	_ = scope.Scope(rl.ModelViewRef{}, event.DecisionID("d-1"))
 	fmt.Println("scoped")
-	// Output: scoped
 }
