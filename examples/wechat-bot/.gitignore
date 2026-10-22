@@ -124,3 +124,8 @@ openspec/
 
 # B3 data-plane smoke source (whitelist mode: tracked file must be named explicitly).
 !smoke_data_test.go
+!smoke_bench_test.go
+!smoke_recall_test.go
+!smoke_skill_test.go
+!smoke_mcp_test.go
+!smoke_exec_test.go

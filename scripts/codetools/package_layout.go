@@ -50,6 +50,11 @@ var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_harness_test.go",
 	"examples/wechat-bot/smoke_data_test.go",
 	"examples/wechat-bot/smoke_errors_test.go",
+	"examples/wechat-bot/smoke_bench_test.go",
+	"examples/wechat-bot/smoke_recall_test.go",
+	"examples/wechat-bot/smoke_skill_test.go",
+	"examples/wechat-bot/smoke_mcp_test.go",
+	"examples/wechat-bot/smoke_exec_test.go",
 }
 
 // layoutFile is one Go source the layout rules judge, as a repo-relative path.
