@@ -1124,7 +1124,16 @@ func procRefViolations(dir string) []string {
 	var out []string
 	root := filepath.Dir(dir)
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == "__pycache__" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) == ".pyc" {
 			return nil
 		}
 		rel, rerr := filepath.Rel(root, path)
@@ -1154,7 +1163,16 @@ func runProcRefs(args []string) int {
 	code := 0
 	for _, dir := range args {
 		_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || procRefSkip[filepath.ToSlash(path)] {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if d.Name() == "__pycache__" {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if filepath.Ext(path) == ".pyc" || procRefSkip[filepath.ToSlash(path)] {
 				return nil
 			}
 			raw, rerr := os.ReadFile(path)

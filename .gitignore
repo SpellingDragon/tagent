@@ -75,3 +75,5 @@ data/
 # 实现期过程快照（head 快照工具的输出，不入库）
 .wechat_head_snapshot.txt
 !examples/wechat-bot/scripts/ima-note-upload.sh
+
+__pycache__/
