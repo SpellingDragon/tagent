@@ -459,10 +459,12 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("outside its package start/end window", out)
 
     def test_package_terminal_moved_before_its_tests_is_rejected(self):
-        # The old success fixture did `rows.insert(1, rows.pop())`, moving the
-        # package pass ahead of its own tests; that MUST now be rejected.
+        # The first package terminal moves ahead of its own tests (its start
+        # stays active, the tests land after it); that MUST be rejected.
         rows = full_test_log(self.contract)
-        rows.insert(1, rows.pop())
+        packages = sorted({full_module_package(s) for s in self.contract["scenarios"]})
+        first_terminal = len(rows) - len(packages)
+        rows.insert(1, rows.pop(first_terminal))
         code, out, _ = self.verify(full_evidence(self.contract), rows)
         self.assertNotEqual(code, 0)
         self.assertIn("outside its package start/end window", out)
@@ -478,13 +480,16 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("still open", out)
 
     def test_multi_package_concurrency_is_valid(self):
-        real = full_module_package(self.contract["scenarios"][0])
+        packages = sorted({full_module_package(s) for s in self.contract["scenarios"]})
         other = MODULE + "/tests/integration/otherpkg"
-        rows = action_rows(real, "", ["start"]) + action_rows(other, "", ["start"])
+        rows = [row for pkg in packages for row in action_rows(pkg, "", ["start"])]
+        rows += action_rows(other, "", ["start"])
         for scenario in self.contract["scenarios"]:
-            rows += action_rows(real, scenario["test_name"], ["run", "pass"])
+            pkg = full_module_package(scenario)
+            rows += action_rows(pkg, scenario["test_name"], ["run", "pass"])
         rows += action_rows(other, "TestOtherPackageLifecycle", ["run", "pass"])
-        rows += action_rows(other, "", ["pass"]) + action_rows(real, "", ["pass"])
+        rows += action_rows(other, "", ["pass"])
+        rows += [row for pkg in packages for row in action_rows(pkg, "", ["pass"])]
         code, out, err = self.verify(full_evidence(self.contract), rows)
         self.assertEqual(code, 0, out + err)
 

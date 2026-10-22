@@ -244,6 +244,38 @@ EOF
 }
 
 # ============================================================================
+# 端口预清理：8089 被本 bot 旧进程占用则回收；被他人占用则拒启
+# ============================================================================
+claim_port() {
+    local pids
+    pids=$(lsof -ti :8089 2>/dev/null) || true
+    if [[ -z "$pids" ]]; then
+        return 0
+    fi
+    for pid in $pids; do
+        local name
+        name=$(basename "$(ps -p "$pid" -o comm= 2>/dev/null)") || name=""
+        if [[ "$name" == "wechat-bot" ]]; then
+            echo "端口 8089 被旧 bot 进程 (PID $pid) 占用，正在回收..."
+            kill "$pid" 2>/dev/null || true
+        else
+            echo "端口 8089 被其他进程占用 (PID $pid: ${name:-unknown})，拒绝启动。" >&2
+            exit 1
+        fi
+    done
+    local waited=0
+    while [[ -n "$(lsof -ti :8089 2>/dev/null)" && $waited -lt 5 ]]; do
+        sleep 1
+        ((waited++))
+    done
+    if [[ -n "$(lsof -ti :8089 2>/dev/null)" ]]; then
+        echo "端口 8089 回收超时，请手动处理 (lsof -i :8089)。" >&2
+        exit 1
+    fi
+    echo "端口已释放。"
+}
+
+# ============================================================================
 # 前台运行
 # ============================================================================
 run_foreground() {
@@ -258,6 +290,8 @@ run_foreground() {
 
     check_api_key
     ensure_binary
+
+    claim_port
     mkdir -p "$LOG_DIR"
     archive_log "$LOG_FILE"
 
@@ -278,6 +312,7 @@ do_start() {
 
     check_api_key
     ensure_binary
+    claim_port
 
     if is_running; then
         local pid=$(get_pid)

@@ -103,7 +103,6 @@ BASELINE = (
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
     ("iface-methods", "tool/mcp/adapter.go:Registry", 5),
     # S2 struct-fields — 43 项（observed=实测导出字段数）
-    ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "tool/subagent/subagent.go:Definition", 7),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
@@ -156,7 +155,6 @@ BASELINE = (
     ("struct-fields", "rl/sink.go:CaptureLedger", 8),
     ("struct-fields", "runtime/state/resources.go:SkillLoad", 6),
     ("struct-fields", "runtime/state/session.go:MailboxEntry", 6),
-    ("struct-fields", "runtime/task/spec.go:Spec", 9),
     ("struct-fields", "runtime/task/wrapper.go:Result", 6),
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。

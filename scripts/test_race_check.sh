@@ -80,7 +80,7 @@ $TAG_PATH
 run_case "mixed tagent+waived frames" 1 "$mix2" 1 "tagent-owned"
 
 # 11. REAL end-to-end: legal package passes.
-out=$(bash "$SCRIPT" ./event 2>&1)
+out=$(bash "$SCRIPT" ./api/event 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && grep -q "OK" <<<"$out"; then
 	echo "PASS: real run legal package (./event)"
