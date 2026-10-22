@@ -626,8 +626,11 @@ type CaptureScope interface {
     while records and the seal stay the capture's own.
 
     The scope is what keeps the frozen Capture signature honest: Snapshot is
-    handed the request alone, so the view the request runs on is supplied by the
-    boundary that declares it and never reconstructed inside the capture.
+    handed the request alone, so the view the request runs on is supplied by
+    the boundary that declares it and never reconstructed inside the capture.
+    The redline list (2 rules): MUST scope one capture per decision view,
+    never share a scope across decisions. MUST NOT reconstruct a view inside the
+    capture: the boundary declares it.
 
 type CaptureSink struct {
 	// Has unexported fields.
@@ -866,7 +869,9 @@ type FactReader interface {
 
     The assembled runtime answers this face through its own session chain read
     (Run.SessionFacts), which reports the facts as they committed rather than a
-    reconstruction of them.
+    reconstruction of them. The redline list (2 rules): MUST report the facts as
+    they committed, in commit order. MUST NOT reconstruct or re-classify a fact
+    on the way out.
 
 type FeedbackAttribution struct {
 	// Bound counts the submissions attributed to recorded evidence.

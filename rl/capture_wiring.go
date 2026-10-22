@@ -44,6 +44,9 @@ var ErrCaptureSinkMissing = errors.New("rl: the trajectory capture was built bes
 // The scope is what keeps the frozen Capture signature honest: Snapshot is
 // handed the request alone, so the view the request runs on is supplied by the
 // boundary that declares it and never reconstructed inside the capture.
+// The redline list (2 rules):
+// MUST scope one capture per decision view, never share a scope across decisions.
+// MUST NOT reconstruct a view inside the capture: the boundary declares it.
 type CaptureScope interface {
 	Capture
 	// Scope returns the capture of one decision's request view.

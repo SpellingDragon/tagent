@@ -18,6 +18,9 @@ import (
 // The assembled runtime answers this face through its own session chain read
 // (Run.SessionFacts), which reports the facts as they committed rather than a
 // reconstruction of them.
+// The redline list (2 rules):
+// MUST report the facts as they committed, in commit order.
+// MUST NOT reconstruct or re-classify a fact on the way out.
 type FactReader interface {
 	// SessionFacts reports the facts one session committed, in commit order.
 	SessionFacts(addr event.Address) []event.Event

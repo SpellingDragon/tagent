@@ -1,5 +1,7 @@
 package agentexample // import "github.com/SpellingDragon/tagent/examples/contract/runtime_agent"
 
+Package agentexample shows the loop-side capture port.
+
 Package agentexample shows the notice feed the loop reads.
 
 Package agentexample holds the canonical example of every execution face
@@ -12,6 +14,9 @@ FUNCTIONS
 func ExampleAgent()
     ExampleAgent drives one invocation through the three faces of its execution:
     the decision entry, the delegation it admits and the close that ends it.
+
+func ExampleCapture()
+    ExampleCapture demonstrates the three points one turn fires.
 
 func ExampleDelegationTasks()
     ExampleDelegationTasks admits one delegated call, settles it beside its
