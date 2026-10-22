@@ -600,6 +600,18 @@ func newInstanceID() event.InstanceID {
 	return event.InstanceID(hex.EncodeToString(buf[:]))
 }
 
+// assemblyDebug renders one line of the assembly face at DEBUG: the delivery
+// diagnoses a turn that ended without a deliverable body. The line names the
+// session, so an operator reading the log can tell a silent turn from a broken
+// delivery path without sampling the process.
+func assemblyDebug(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Debugf(format, args...)
+}
+
 // assemblyInfo renders one line of the assembly face at INFO: the storage tier
 // the assembly opened and what the fold of the durable chains recovered from it.
 // One assembly writes one line per event, so the INFO stream is bounded by the

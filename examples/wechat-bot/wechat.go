@@ -86,6 +86,15 @@ func longTextViaContextToken(bot *wechat.Bot) longTextFunc {
 	}
 }
 
+// slogLevel reports the slog level TAGENT_LOG_LEVEL names: debug turns both the
+// app logger and the framework logger to debug, anything else stays at info.
+func slogLevel() slog.Level {
+	if os.Getenv("TAGENT_LOG_LEVEL") == "debug" {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
 // WechatAppConfig is the WeChat-specific application section of the document.
 type WechatAppConfig struct {
 	ConfigDir       string   `yaml:"config_dir" json:"config_dir"`
@@ -766,7 +775,11 @@ func sessionPrefixOf(entry string) string {
 // newWechatBot builds the channel instance of this process: the file cursor and
 // token stores live beside the configured config directory.
 func newWechatBot(cfg WechatAppConfig) *wechat.Bot {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slogLevel()}))
+	if os.Getenv("TAGENT_LOG_LEVEL") == "debug" {
+		log.SetLevel(log.LevelDebug)
+		logger.Info("log level: debug (TAGENT_LOG_LEVEL=debug)")
+	}
 	cursorStore := wechat.NewFileCursorStore(filepath.Join(cfg.ConfigDir, "cursor.txt"))
 	return wechat.NewBot(
 		wechat.WithLogger(logger),

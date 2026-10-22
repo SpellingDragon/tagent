@@ -146,7 +146,6 @@ type Host struct {
 	reloadMu    sync.Mutex
 	mu          sync.Mutex
 	lastAddr    event.Address
-	sent        map[event.Address]int
 	invocations uint64
 	closed      bool
 	closeErr    error
@@ -295,7 +294,6 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		entry:      event.AgentID(decl.Entry),
 		sender:     cfg.hostSender,
 		meditation: driver,
-		sent:       map[event.Address]int{},
 		configPath: configPath,
 		doc:        doc,
 		natives:    natives,
@@ -396,15 +394,18 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	}
 	unlock := h.lockAddress(req.Address)
 	defer unlock()
+	var baseline int
 	if user {
 		h.rememberUserAddress(req.Address)
+		baseline = len(h.run.SessionFacts(req.Address))
 	}
 	turn, err := h.run.Invoke(ctx, req)
 	if err != nil {
+		assemblyWarn("tagent: the invocation %s of %s ended by error: %v", req.InvocationID, req.Address.SessionID, err)
 		return turn, err
 	}
 	if user {
-		h.deliverFresh(ctx, req.Address, sender)
+		h.deliverFresh(ctx, req.Address, baseline, sender)
 	}
 	return turn, nil
 }
@@ -532,33 +533,36 @@ func (h *Host) lockAddress(addr event.Address) func() {
 	return mu.Unlock
 }
 
-// deliverFresh delivers the assistant messages the session accumulated since
-// the previous delivery through the sender.
-func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender MessageSender) {
+// deliverFresh delivers the assistant bodies the session's committed facts
+// carry past the invocation baseline through the sender. A session the chain
+// maps onto a projection commits no transcript history, so the facts are the
+// one read face both session kinds share.
+func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender) {
 	if sender == nil {
 		return
 	}
-	for _, content := range h.freshAssistant(addr) {
+	contents := freshAssistantOf(h.run.SessionFacts(addr), baseline)
+	if len(contents) == 0 {
+		assemblyDebug("tagent: the invocation of %s produced no deliverable assistant body", addr.SessionID)
+		return
+	}
+	for _, content := range contents {
 		if err := sender.Send(ctx, addr, content); err != nil {
 			assemblyWarn("tagent: the host delivery to %s was refused: %v", addr.SessionID, err)
 		}
 	}
 }
 
-// freshAssistant reports the assistant contents of one session since the
-// previous read and records the read position, so a reply never repeats a body
-// an earlier delivery already carried.
-func (h *Host) freshAssistant(addr event.Address) []string {
-	history := h.run.SessionHistory(addr)
-	h.mu.Lock()
-	from := h.sent[addr]
-	if from > len(history) {
-		from = len(history)
+// freshAssistantOf reports the plain assistant bodies one session's committed
+// facts carry past the baseline: the bodies the invocation that just ended
+// produced, and nothing an earlier delivery already carried.
+func freshAssistantOf(facts []event.Event, baseline int) []string {
+	if baseline > len(facts) {
+		baseline = len(facts)
 	}
-	h.sent[addr] = len(history)
-	h.mu.Unlock()
-	contents := make([]string, 0, len(history)-from)
-	for _, msg := range history[from:] {
+	contents := make([]string, 0, 4)
+	for _, evt := range facts[baseline:] {
+		msg := evt.Message
 		if msg.Role != model.RoleAssistant || len(msg.ToolCalls) > 0 {
 			continue
 		}
