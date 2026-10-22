@@ -598,16 +598,16 @@
       "allow": [
         "api/event",
         "api/model",
-        "memory"
+        "memory",
+        "api/plugin"
       ],
       "forbidden": [
         "runtime/agent",
         "runtime/state",
-        "api/plugin",
         "evolution",
         "."
       ],
-      "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。"
+      "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。; LeaseObserver implements plugin.Instance to consume model.replacement facts through the pipeline - the same PostCommitObserver pattern as the meditation driver and the age fold"
     },
     {
       "from": "evolution",
