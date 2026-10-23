@@ -270,6 +270,9 @@ func TestRiskRulesAbsentKeepsTheSendFace(t *testing.T) {
 //
 // 契约: docs/wiki/tool/tool-architecture.md#action-tool
 func TestExecFaceWiredFromDocument(t *testing.T) {
+	if !tagentexec.IsTmuxAvailable() {
+		t.Skip("tmux is not available on this runner")
+	}
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")

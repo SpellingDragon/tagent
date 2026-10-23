@@ -364,7 +364,7 @@ func containsName(names []string, name string) bool {
 // tmuxServerAbsent reports whether err is the tmux verdict that no server is
 // running, which leaves every session of it absent.
 func tmuxServerAbsent(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no server running")
+	return err != nil && (strings.Contains(err.Error(), "no server running") || strings.Contains(err.Error(), "No such file or directory"))
 }
 
 // sleepContext waits for one cadence and reports whether the wait finished
