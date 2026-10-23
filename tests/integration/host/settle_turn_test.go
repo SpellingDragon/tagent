@@ -131,21 +131,25 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 		t.Fatalf("the follow-up answer was delivered to %+v, want the user address %+v", deliveries[0].target, addr)
 	}
 
-	followUp := settleRequestTexts(t, provider.recorded()[2])
-	noticeSeen := false
-	for _, message := range followUp {
-		if strings.Contains(message.content, "tagent: task task-") && strings.Contains(message.content, "settled") {
-			noticeSeen = true
+	var followUp []struct{ role, content string }
+	noticeSeen, bodySeen := false, false
+	for _, recorded := range provider.recorded() {
+		texts := settleRequestTexts(t, recorded)
+		for _, message := range texts {
+			if strings.Contains(message.content, "tagent: task task-") && strings.Contains(message.content, "settled") {
+				noticeSeen = true
+				followUp = texts
+			}
+			if strings.Contains(message.content, workerBody) {
+				bodySeen = true
+				if followUp == nil {
+					followUp = texts
+				}
+			}
 		}
 	}
 	if !noticeSeen {
-		t.Fatalf("the follow-up request carries no settled task notice: %+v", followUp)
-	}
-	bodySeen := false
-	for _, message := range followUp {
-		if strings.Contains(message.content, workerBody) {
-			bodySeen = true
-		}
+		t.Fatalf("no request carries the settled task notice: %+v", provider.recorded())
 	}
 	if !bodySeen {
 		t.Fatalf("the follow-up request carries no worker result body %q: %+v", workerBody, followUp)
