@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/SpellingDragon/tagent/api/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/tool/knowledge"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
@@ -420,23 +422,147 @@ func (a *requestAssembly) fixedFiles(ctx context.Context) ([]model.Message, erro
 	return messages, nil
 }
 
-// loadedSkillBodies contributes the skill bodies already loaded on the
-// binding's tool resources: skill-name order, once each, and never a body the
-// fixed files already carry. It runs after the fixed-file segment, so the names
-// that segment read are exactly the ones it skips.
+// loadedSkillBodies contributes the skill bodies a load already fixed for the
+// request: the bodies the binding's tool resources fixed on the declared skill
+// files, beside the bodies the agent's skill_dirs load tool published through
+// its sink. Skill-name order, once each, and never a body the fixed files
+// already carry. It runs after the fixed-file segment, so the names that
+// segment read are exactly the ones it skips. The two sources meet here and
+// nowhere else: a declared skill file keeps its request-boundary fixed view on
+// the binding, while a skill_dirs load has no such file declaration to fix a
+// view on and publishes through the sink instead.
 func (a *requestAssembly) loadedSkillBodies(context.Context) ([]model.Message, error) {
+	bodies := map[string]string{}
+	hold := func(name, body string) {
+		if name == "" || body == "" || a.fixedSkills[name] {
+			return
+		}
+		if _, held := bodies[name]; held {
+			return
+		}
+		bodies[name] = body
+	}
 	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
 	if !ok {
 		return nil, nil
 	}
-	var messages []model.Message
 	for _, load := range resources.SkillLoads() {
-		if !load.Loaded || a.fixedSkills[load.Skill] {
+		if !load.Loaded {
 			continue
 		}
-		messages = append(messages, model.Message{Role: model.RoleSystem, Content: load.Body})
+		hold(load.Skill, load.Body)
+	}
+	if carriesContributedLoad(resources) {
+		for _, load := range skillLoadsOf(a.boundary.Agent) {
+			hold(load.Name, load.Body)
+		}
+	}
+	names := make([]string, 0, len(bodies))
+	for name := range bodies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	messages := make([]model.Message, 0, len(names))
+	for _, name := range names {
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: bodies[name]})
 	}
 	return messages, nil
+}
+
+// carriesContributedLoad reports whether one binding carries the contributed
+// skill load tool: the knowledge surface the host contributes answers under the
+// function family, while the load tool of the declared skill files answers under
+// the skill family. Only the contributed one publishes skill_dirs bodies: a
+// declaration reloaded without the knowledge face keeps no way to load a body,
+// so the bodies a retired surface published never leak into the requests of the
+// generation after it, and the declared skill files keep their own recorded
+// source.
+func carriesContributedLoad(resources *state.ToolResources) bool {
+	for _, record := range resources.Resources() {
+		if record.Kind == state.ToolKindFunction && record.Name == knowledge.SkillLoadToolName {
+			return true
+		}
+	}
+	return false
+}
+
+// skillLoadRegistry holds the skill_dirs bodies the load tools published, one
+// ledger per agent: the sink a host mounts on an agent's knowledge surface
+// writes into that agent's ledger, and the request boundary of the same agent
+// reads the bodies back through the agent identity it assembles for. The
+// ledger is per agent rather than per run because the sink is mounted while the
+// agent's tools are constructed, before the run exists; the agent identity is
+// the one fact both sides already carry.
+type skillLoadRegistry struct {
+	mu      sync.Mutex
+	ledgers map[event.AgentID]*skillLoadLedger
+}
+
+// skillLoadLedger is one agent's published skill bodies: the latest body of
+// every skill its load tool answered, in the order the loads published them.
+type skillLoadLedger struct {
+	mu     sync.Mutex
+	order  []string
+	bodies map[string]string
+}
+
+// skillLoads is the process-wide registry the sink factory mounts ledgers on
+// and the request boundary reads them from.
+var skillLoads = &skillLoadRegistry{ledgers: map[event.AgentID]*skillLoadLedger{}}
+
+// NewSkillLoadSink mounts a fresh loaded-skill ledger on one agent and answers
+// the sink that agent's knowledge surface publishes loaded bodies to. The host
+// mounts one sink per knowledge surface it constructs, so a surface rebuilt on
+// reload replaces its agent's ledger instead of inheriting the bodies the
+// previous generation loaded. The request boundary of the agent reads the
+// ledger back through the agent identity, so the bodies a load published enter
+// the next request of that agent and no other. A host that mounts no sink
+// keeps the load's name-level answer exactly as before.
+func NewSkillLoadSink(agent event.AgentID) knowledge.LoadSink {
+	ledger := &skillLoadLedger{bodies: map[string]string{}}
+	skillLoads.mu.Lock()
+	skillLoads.ledgers[agent] = ledger
+	skillLoads.mu.Unlock()
+	return ledger.loaded
+}
+
+// loaded records one skill body the load tool published: the latest body of a
+// skill replaces the previous one, and the first publish keeps its place in the
+// load order. An empty name or body records nothing.
+func (l *skillLoadLedger) loaded(name, body string) {
+	if name == "" || body == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, held := l.bodies[name]; !held {
+		l.order = append(l.order, name)
+	}
+	l.bodies[name] = body
+}
+
+// loads reports the bodies this ledger holds, in publish order.
+func (l *skillLoadLedger) loads() []knowledge.LoadedSkill {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]knowledge.LoadedSkill, 0, len(l.order))
+	for _, name := range l.order {
+		out = append(out, knowledge.LoadedSkill{Name: name, Body: l.bodies[name]})
+	}
+	return out
+}
+
+// skillLoadsOf reports the skill_dirs bodies the agent's load tool published,
+// in publish order. An agent beside no mounted sink reports none, so a
+// deployment that wires no knowledge surface keeps its request shape.
+func skillLoadsOf(agent event.AgentID) []knowledge.LoadedSkill {
+	skillLoads.mu.Lock()
+	ledger := skillLoads.ledgers[agent]
+	skillLoads.mu.Unlock()
+	if ledger == nil {
+		return nil
+	}
+	return ledger.loads()
 }
 
 // projectedMainContext contributes the replayed projection of the session chain

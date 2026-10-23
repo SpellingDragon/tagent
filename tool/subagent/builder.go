@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -60,6 +61,11 @@ type Builder struct {
 	// RefBudget is the token budget the handoff refs render under; zero keeps the
 	// package default, the budget unit the request assembly packs under.
 	RefBudget int
+	// Capture is the trajectory capture the delegated turn records its model
+	// calls through: every call of the turn is fixed and admitted under one scope
+	// of the request view it runs on, and the turn seals the capture when it ends.
+	// Nil keeps every call of the delegated path uncaptured.
+	Capture rl.CaptureScope
 }
 
 // ErrAssemblyMissing reports a build or a turn asked for without an assembly.
@@ -125,6 +131,7 @@ func (b Builder) Build(ctx context.Context, a *Assembly) (trpcagent.Agent, error
 	if err != nil {
 		return nil, err
 	}
+	model = withCapture(model, a.Name, b.Capture)
 	model = withSampling(model, a.Definition)
 	opts := []llmagent.Option{
 		llmagent.WithModel(model),
@@ -163,6 +170,7 @@ func (b Builder) Serve(ctx context.Context, a *Assembly, turn Turn) (TurnResult,
 	if err != nil {
 		return TurnResult{}, err
 	}
+	defer b.sealCapture(ctx)
 	opts := make([]runner.Option, 0, 1)
 	if b.Sessions != nil {
 		opts = append(opts, runner.WithSessionService(b.Sessions))
@@ -178,6 +186,16 @@ func (b Builder) Serve(ctx context.Context, a *Assembly, turn Turn) (TurnResult,
 		return TurnResult{}, err
 	}
 	return reduce(ctx, events)
+}
+
+// sealCapture seals the capture of the delegated turn this builder served, or
+// seals nothing while the builder carries none. A refused seal is a counted loss
+// at the capture and never reaches the turn's outcome.
+func (b Builder) sealCapture(ctx context.Context) {
+	if b.Capture == nil {
+		return
+	}
+	_, _ = b.Capture.Seal(ctx)
 }
 
 // reduce drains one turn's stream into its single outcome: the assistant text the turn

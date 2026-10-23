@@ -46,6 +46,7 @@ const (
 // - the entry declaration carries skill_search and skill_load over the deployment's skill repository
 // - the search answer reaches the next decision with the name and description the repository holds
 // - the load answer reaches the next decision and names the skill the search selected
+// - the next request after the load carries the skill body the repository holds, and no request before it does
 // - an unknown skill name is refused by name and the turn still delivers its answer
 func TestLocalSmokeWave2Skill(t *testing.T) {
 	t.Run("search answers the shortlist and the load names the skill back", smokeSkillSearchThenLoad)
@@ -101,13 +102,19 @@ func smokeSkillSearchThenLoad(t *testing.T) {
 	if !strings.Contains(load.Content, "loaded: "+smokeSkillAlpha) {
 		t.Fatalf("the load answer %q does not name the selected skill", load.Content)
 	}
-	if strings.Contains(load.Content, smokeSkillAlphaBody) {
-		t.Fatalf("the load answer %q carries the skill body; the load tool answers the name only", load.Content)
+	if !strings.Contains(requests[2].text(), smokeSkillAlphaBody) {
+		t.Fatalf("the decision after the load carries no %q; the loaded body never reached the next request:\n%s",
+			smokeSkillAlphaBody, smokeSkillDigest(requests))
+	}
+	for i := 0; i < 2; i++ {
+		if strings.Contains(requests[i].text(), smokeSkillAlphaBody) {
+			t.Fatalf("decision %d carries %q before any load was accepted", i+1, smokeSkillAlphaBody)
+		}
 	}
 
 	t.Logf("[wave2-skill] search answer = %s", search.Content)
 	t.Logf("[wave2-skill] load answer = %q", load.Content)
-	t.Logf("[wave2-skill] GAP(body): the load answer names the skill only; the body stays behind the load tool")
+	t.Logf("[wave2-skill] loaded body reached the next request: %t", strings.Contains(requests[2].text(), smokeSkillAlphaBody))
 }
 
 // smokeSkillUnknownName 让脚本模型载入技能仓里不存在的名字：工具结果按名拒绝，

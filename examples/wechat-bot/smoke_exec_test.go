@@ -1,9 +1,10 @@
 //go:build smoke
 
-// smoke_exec_test.go 是第二波冒烟的执行面：exec_run 在宿主未接执行资源管理器时以
-// 具名失败进回复（负锚，接线后同分支转正向），final_round 在轮数耗尽后把第 3 个
-// 决策转 closing round——send 被拒回执进 transcript、收尾正文终止回合。台架复用
-// smoke_harness_test.go 的真实装配，脚本日程与断言留在本文件。
+// smoke_exec_test.go 是第二波冒烟的执行面：宿主文档声明 exec 后 Boot 自己装配
+// tmux Executor 与执行资源管理器，exec_run 真跑命令并把命令输出带回下一轮决策；
+// final_round 在轮数耗尽后把第 3 个决策转 closing round——send 被拒回执进
+// transcript、收尾正文终止回合。台架复用 smoke_harness_test.go 的真实装配，脚本
+// 日程与断言留在本文件。
 //
 // 契约: docs/wiki/agent/event-flow.md#watchdog-final-round
 package main
@@ -11,6 +12,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,8 +32,6 @@ const (
 
 	// smokeExecBody 是 exec_run 打算跑出的命令正文：它只有真的执行了才会出现。
 	smokeExecBody = "smoke-exec-ok"
-	// smokeExecResource 是 exec_run 声明的执行资源 key。
-	smokeExecResource = "smoke-exec"
 
 	// smokeExecMaxRounds 与 smokeExecClosingSeconds 是 entry 声明的看门狗预算。
 	smokeExecMaxRounds      = 2
@@ -43,18 +43,24 @@ const (
 	smokeExecRefusal = "this call was not admitted"
 )
 
+// smokeExecResource 是 exec_run 声明的执行资源 key：tmux 会话活在测试进程之外，
+// each process takes a unique key, so a rerun never meets a stale session.
+var smokeExecResource = fmt.Sprintf("smoke-exec-%d", time.Now().UnixNano())
+
 // TestLocalSmokeWave2Exec 是第二波冒烟的执行面入口。
 func TestLocalSmokeWave2Exec(t *testing.T) {
-	t.Logf("[wave2-exec] tmux available=%t; the wechat host wires no execution resource manager",
-		tagentexec.IsTmuxAvailable())
+	if !tagentexec.IsTmuxAvailable() {
+		t.Skip("tmux is not on PATH, so Boot refuses the declared exec face by name")
+	}
+	t.Logf("[wave2-exec] tmux available=%t; the host document declares the exec face Boot wires", true)
 	t.Run("exec face is granted and its refusal is named", smokeExecRun)
 	t.Run("watchdog closing round refuses the third send call", smokeExecWatchdogRefusal)
 	t.Run("watchdog closing round delivers its closing body", smokeExecWatchdogClosing)
 }
 
-// smokeExecRun 驱动一次 exec_run：模型先答工具调用，再按回执收尾。宿主接线后
-// 回执携带命令正文，本分支断言结果正文进回复；当前宿主未接线，回执是具名失败，
-// 断言拒绝正文进回复且命令正文不出现（GAP 如实记录）。
+// smokeExecRun 驱动一次 exec_run：模型先答工具调用，再按回执收尾。Boot 按声明
+// 自动接上 tmux Executor，回执因此携带命令正文；断言正文进入下一轮决策，并随
+// 收尾回答投递到用户。
 func smokeExecRun(t *testing.T) {
 	logs := installSmokeLog(t)
 	provider, rig := smokeExecBoot(t)
@@ -73,24 +79,17 @@ func smokeExecRun(t *testing.T) {
 		t.Fatalf("exec_run arguments = %q, want the %q body", args, smokeExecBody)
 	}
 	receipt := strings.TrimSpace(smokeLastContent(requests[1].Messages))
-	switch {
-	case strings.Contains(receipt, smokeExecBody):
-		t.Logf("[wave2-exec] exec face executed: %q", receipt)
-		rig.waitText(chat, "exec-ok "+smokeExecTurn, 60*time.Second)
-		if got := smokeExecTextCount(rig, chat, smokeExecBody); got == 0 {
-			t.Fatalf("the exec result %q entered no delivered reply", smokeExecBody)
-		}
-	case strings.Contains(receipt, tagentexec.ErrUnwired.Error()):
-		t.Logf("[wave2-exec] GAP(exec): the wechat host wires no execution resource manager, so exec_run was refused by name: %q", receipt)
-		rig.waitText(chat, "exec-gap "+smokeExecTurn, 60*time.Second)
-		if got := smokeExecTextCount(rig, chat, tagentexec.ErrUnwired.Error()); got == 0 {
-			t.Fatalf("the exec refusal entered no delivered reply")
-		}
-		if got := smokeExecTextCount(rig, chat, smokeExecBody); got != 0 {
-			t.Fatalf("the unwired exec face delivered the command body %q %d time(s), want none", smokeExecBody, got)
-		}
-	default:
-		t.Fatalf("exec_run receipt = %q, want the command body or the named %q refusal", receipt, tagentexec.ErrUnwired.Error())
+	if !strings.Contains(receipt, "executed tmux/"+smokeExecResource) || !strings.Contains(receipt, smokeExecBody) {
+		t.Fatalf("exec_run receipt = %q, want the executed resource tmux/%s carrying the %q command body",
+			receipt, smokeExecResource, smokeExecBody)
+	}
+	t.Logf("[wave2-exec] exec face executed: %q", receipt)
+	rig.waitText(chat, "exec-ok "+smokeExecTurn, 60*time.Second)
+	if got := smokeExecTextCount(rig, chat, smokeExecBody); got == 0 {
+		t.Fatalf("the exec result %q entered no delivered reply", smokeExecBody)
+	}
+	if got := smokeExecTextCount(rig, chat, tagentexec.ErrUnwired.Error()); got != 0 {
+		t.Fatalf("the wired exec face delivered the %q refusal %d time(s), want none", tagentexec.ErrUnwired.Error(), got)
 	}
 	if got := logs.count("terminal=failed"); got != 0 {
 		t.Fatalf("the exec turn left %d terminal=failed line(s), want none", got)
@@ -98,7 +97,8 @@ func smokeExecRun(t *testing.T) {
 }
 
 // smokeExecWatchdogRefusal 让模型在 closing round 里再答一次 send：该调用不被
-// 受理，回执写进会话 transcript，审批面只登记前两轮的两次扣留。
+// 受理，回执写进会话 transcript；前两轮的两次扣留参数相同，按 tool+digest 复用
+// 同一条审批登记。
 func smokeExecWatchdogRefusal(t *testing.T) {
 	installSmokeLog(t)
 	provider, rig := smokeExecBoot(t)
@@ -124,14 +124,14 @@ func smokeExecWatchdogRefusal(t *testing.T) {
 			len(history), history, rig.recentRequests(6))
 	}
 
-	if after := len(rig.gateway.Manager().Pending()); after != before+2 {
-		t.Fatalf("pending approvals %d -> %d, want exactly the two ordinary rounds held and the closing call admitted nowhere", before, after)
+	if after := len(rig.gateway.Manager().Pending()); after != before+1 {
+		t.Fatalf("pending approvals %d -> %d, want the two ordinary rounds to reuse one registration and the closing call to add none", before, after)
 	}
 	if got := len(smokeExecRequests(provider, smokeExecWatchdogTurn)); got != 3 {
 		t.Fatalf("the closing round drove a further decision: model requests = %d, want the drive to end there", got)
 	}
-	t.Logf("[wave2-exec] watchdog closing round: request 3 carries the closing instruction, the third send call was refused (%q), pending approvals %d -> %d",
-		smokeExecRefusal, before, before+2)
+	t.Logf("[wave2-exec] watchdog closing round: request 3 carries the closing instruction, the third send call was refused (%q), pending approvals %d -> %d (two holds, one digest)",
+		smokeExecRefusal, before, before+1)
 }
 
 // smokeExecWatchdogClosing 让模型在 closing round 直接交正文：回合以收尾正文
@@ -154,20 +154,23 @@ func smokeExecWatchdogClosing(t *testing.T) {
 	if got := len(smokeExecRequests(provider, smokeExecClosingTurn)); got != 3 {
 		t.Fatalf("the closing turn drove %d model request(s) after its closing answer, want the drive to end there", got)
 	}
-	if after := len(rig.gateway.Manager().Pending()); after != before+2 {
-		t.Fatalf("pending approvals %d -> %d, want exactly the two ordinary rounds held and the closing answer admitting nothing", before, after)
+	if after := len(rig.gateway.Manager().Pending()); after != before+1 {
+		t.Fatalf("pending approvals %d -> %d, want the two ordinary rounds to reuse one registration and the closing answer to add none", before, after)
 	}
 	if got := smokeExecTextCount(rig, chat, smokeExecRefusal); got != 0 {
 		t.Fatalf("the closing answer carried %d refusal receipt(s), want none", got)
 	}
-	t.Logf("[wave2-exec] watchdog closing round delivered %q; pending approvals %d -> %d",
-		"closing summary "+smokeExecClosingTurn, before, before+2)
+	t.Logf("[wave2-exec] watchdog closing round delivered %q; pending approvals %d -> %d (two holds, one digest)",
+		"closing summary "+smokeExecClosingTurn, before, before+1)
 }
 
 // smokeExecBoot 装配一台执行面宿主：entry 声明 exec 与 final_round，治理开启，
 // 模型与出站都指向本地替身。
 func smokeExecBoot(t *testing.T) (*smokeProvider, *smokeRig) {
 	t.Helper()
+	t.Cleanup(func() {
+		_ = osexec.Command("tmux", "kill-session", "-t", smokeExecResource).Run()
+	})
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
@@ -199,6 +202,8 @@ governance:
   enforcement: normal
   dir: %s
   approval_ttl_minutes: 30
+  risk_rules:
+    - { tool: send, level: critical }
 app:
   wechat:
     config_dir: %s
@@ -232,9 +237,6 @@ func smokeExecScript(w http.ResponseWriter, _ int, modelName string, messages []
 		switch {
 		case strings.Contains(end, smokeExecBody):
 			fmt.Fprint(w, smokeAnswerBody("exec-ok "+marker+": "+end))
-			return true
-		case strings.Contains(end, tagentexec.ErrUnwired.Error()):
-			fmt.Fprint(w, smokeAnswerBody("exec-gap "+marker+": "+end))
 			return true
 		}
 		if smokeEndedWithTool(messages) {

@@ -47,6 +47,21 @@ func New(ctx context.Context, opts Options) ([]trpctool.CallableTool, error)
 
 TYPES
 
+type LoadSink func(name, body string)
+    LoadSink receives every skill body a load tool loads: the name the call
+    answered beside the body fixed with it, in load order. A surface assembled
+    beside no sink loads without publishing its bodies, so the request boundary
+    has nothing to inject.
+
+type LoadedSkill struct {
+	// Name is the skill name the load was asked for.
+	Name string
+	// Body is the body the load fixed at that boundary.
+	Body string
+}
+    LoadedSkill is one skill body a load tool fixed at a request boundary:
+    the name the load answered beside the body fixed with it.
+
 type Options struct {
 	// Skills is the deployment's skill repository; a surface beside none
 	// refuses the two skill tools by name.
@@ -54,6 +69,11 @@ type Options struct {
 	// ReadRoot is the directory every file read is confined to; a surface
 	// beside none refuses the read by name.
 	ReadRoot string
+	// Sink receives the body of every skill the load tool loads. The host
+	// mounts the request-side ledger here; nil publishes no body, so a load
+	// answers its name-level receipt exactly as before.
+	Sink LoadSink
 }
     Options fixes the faces one knowledge surface is assembled over: the skill
-    repository the deployment holds and the root the file read is confined to.
+    repository the deployment holds, the root the file read is confined to and
+    the sink the load publishes its bodies to.

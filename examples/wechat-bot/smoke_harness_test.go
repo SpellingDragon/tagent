@@ -28,11 +28,8 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
-	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -183,6 +180,8 @@ governance:
   enforcement: normal
   dir: %s
   approval_ttl_minutes: 30
+  risk_rules:
+    - { tool: send, level: critical }
 app:
   wechat:
     config_dir: %s
@@ -459,36 +458,6 @@ func smokeToolCallBody(id, name, args string) string {
 		`,"arguments":` + encode(args) + `}}]},"finish_reason":"tool_calls"}]}`
 }
 
-// smokeGovernor 是审批接缝：生产装配里没有任何风险面给 pass.Risk 定级，默认档
-// 因而永不 Hold。台架只把 send 的等级抬到 critical，判定仍由同一份治理策略
-// （governance.Open + WithApprovals）给出；Hold 时补上生产缺失的那一步——
-// 把请求登记进审批管理器，审批面才有话可下发。
-type smokeGovernor struct {
-	inner   plugin.Governor
-	manager *approval.ApprovalManager
-}
-
-// Judge 实现 plugin.Governor。
-func (g smokeGovernor) Judge(pass plugin.CallPass) (plugin.Decision, error) {
-	escalated := false
-	if pass.Final.Function.Name == sendToolID {
-		pass.Risk = plugin.RiskCritical
-		escalated = true
-	}
-	decision, err := g.inner.Judge(pass)
-	if err != nil || !escalated {
-		return decision, err
-	}
-	if decision.Disposition == plugin.DispositionHold {
-		id := task.NewApprovalID()
-		if _, reqErr := g.manager.Request(context.Background(), id, pass.Final.Function.Name,
-			[]byte(pass.Final.Function.Arguments), plugin.RiskCritical, decision.Rule, decision.Reason); reqErr != nil {
-			return decision, reqErr
-		}
-	}
-	return decision, nil
-}
-
 // smokeRig 是一台已装配的微信宿主：真实应用侧组件 + 真实 Host + 替身通道。
 type smokeRig struct {
 	t        *testing.T
@@ -533,9 +502,7 @@ func bootSmokeRigWith(t *testing.T, cfg *smokeConfig, provider *smokeProvider, g
 		t.Fatalf("assemble the wechat application: %v", err)
 	}
 	channel := newFakeChannel()
-	policy := governance.Open(governance.WithApprovals(gateway.Manager()))
-	options := append(app.options(),
-		tagent.WithPolicy(smokeGovernor{inner: policy, manager: gateway.Manager()}))
+	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
 	host, err := tagent.Boot(cfg.ConfigPath, options...)
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
@@ -590,9 +557,7 @@ func (r *smokeRig) reboot() {
 	if err != nil {
 		r.t.Fatalf("assemble the wechat application on reboot: %v", err)
 	}
-	policy := governance.Open(governance.WithApprovals(gateway.Manager()))
-	options := append(app.options(),
-		tagent.WithPolicy(smokeGovernor{inner: policy, manager: gateway.Manager()}))
+	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
 	host, err := tagent.Boot(r.cfg.ConfigPath, options...)
 	if err != nil {
 		r.t.Fatalf("boot the host on reboot: %v", err)

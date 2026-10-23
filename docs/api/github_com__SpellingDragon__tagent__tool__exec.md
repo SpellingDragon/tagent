@@ -307,6 +307,29 @@ func WithClock(now func() time.Time) ManagerOption
 func WithDefaultTTL(ttl time.Duration) ManagerOption
     WithDefaultTTL sets the floor lease of an acquisition that declares no TTL.
 
+type Monitor struct {
+	// Has unexported fields.
+}
+    Monitor reads the silence of monitored executions through the executor
+    behind them: one poll captures the recorded frame, probes the execution and
+    classifies the quiet it has stood in against the monitor rhythm. A caller
+    polls each execution at the interval of its rhythm.
+
+func NewMonitor(executor Executor, rhythm MonitorConfig) *Monitor
+    NewMonitor returns the monitor of the executions behind one executor,
+    judging silence under the given rhythm. A rhythm field the caller leaves at
+    zero takes the default of that field.
+
+func (m *Monitor) Poll(ctx context.Context, key ResourceKey) (MonitorStatus, error)
+    Poll observes one execution once and reports the silence classification of
+    that observation. The first poll anchors the observed frame; a frame that
+    changed since the previous poll resets the silence. A stopped execution is
+    never suspect.
+
+func (m *Monitor) Status(key ResourceKey) (MonitorStatus, bool)
+    Status reports the last classification of one execution and whether it was
+    observed at all.
+
 type MonitorConfig struct {
 	// Interval is the base polling rhythm of the monitor.
 	Interval time.Duration
@@ -340,6 +363,23 @@ func MonitorConfigWith(base MonitorConfig, values map[string]any) (MonitorConfig
     the base rhythm its caller declares: a key the map does not name keeps the
     base of that generation, and a key it names replaces exactly that one field.
 
+type MonitorStatus string
+    MonitorStatus is the silence classification of one monitored execution:
+    the watch a fresh frame is held under, the stable a quiet frame reaches at
+    the stable threshold, and the suspect a live but silent execution reaches at
+    its fake-dead threshold.
+
+const (
+	// MonitorWatch is the state of an execution whose observed frame has not
+	// stood quiet for the stable threshold.
+	MonitorWatch MonitorStatus = "watch"
+	// MonitorStable is the state of an execution whose observed frame has stood
+	// quiet for the stable threshold. A stopped execution's final frame is stable.
+	MonitorStable MonitorStatus = "stable"
+	// MonitorSuspect is the state of a live execution whose observed frame has
+	// stood quiet for the fake-dead threshold.
+	MonitorSuspect MonitorStatus = "suspect"
+)
 type ProbeResult struct {
 	// State is the state this probe observed.
 	State ProbeState
@@ -499,3 +539,40 @@ type SweepReport struct {
 	Evidence ReleaseEvidence
 }
     SweepReport is what one sweep observed for one expired resource.
+
+type TmuxExecutor struct {
+	// Has unexported fields.
+}
+    TmuxExecutor is the Executor over real tmux sessions: every resource key
+    names one tmux session, the command of a declaration runs inside that
+    session, and the pane is kept after its command exits so the recorded output
+    and exit status stay observable until the resource is stopped.
+
+func NewTmuxExecutor() (*TmuxExecutor, error)
+    NewTmuxExecutor returns the executor over the tmux sessions of this system.
+    A system whose PATH carries no tmux binary is refused by name, so no
+    executor exists that cannot start a session. The availability verdict is the
+    real PATH probe of IsTmuxAvailable.
+
+func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, error)
+    Capture returns the frame tmux records for key: the pane's history and its
+    visible rows, read as one frame so a later read never replaces the output an
+    earlier read observed.
+
+func (e *TmuxExecutor) Probe(ctx context.Context, key ResourceKey) (ProbeResult, error)
+    Probe reports the state one probe observed for key: a key absent from the
+    session list is dead, a key whose pane ended is dead, and a probe that could
+    not read the session list or the pane reports unknown rather than death.
+
+func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceKey, error)
+    Start creates the session the declaration's resource key names and runs
+    its command inside it, with the pane kept after the command exits. The call
+    answers once the new session has produced its first frame, or once the
+    bounded observation window passed without one. A key whose session already
+    runs is refused instead of opened a second time.
+
+func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error)
+    Stop ends the session behind key and reports what was observed: a pane that
+    already ended answers its recorded exit status, a live pane is killed and
+    the stop is confirmed by the session leaving the list, and an exit status
+    the stop could not observe is reported as -1 rather than as a clean exit.

@@ -88,8 +88,8 @@ type smokeObservation struct {
 	RecoveredTasks  int
 	HistoryRestored bool
 	RestartRequests int
-	// WorkerRequests / RestartWorkerRequests 记子 agent 的模型调用数，用来
-	// 说明 trajectory 少掉的正是委派子 agent 的调用。
+	// WorkerRequests / RestartWorkerRequests 记子 agent 的模型调用数：委派调用
+	// 与入口调用一样入册，对账用它核对 worker 调用没有缺口。
 	WorkerRequests        int
 	RestartWorkerRequests int
 	CloseErr              error
@@ -626,7 +626,8 @@ func smokeRequestsFor(provider *smokeProvider, model string) int {
 
 // runSmokeTrajectoryCheck 收尾关闭宿主并核对轨迹：attempts.jsonl 的行数对模型
 // 调用数，seal.json 的清单对最后一次装配的请求数。
-// - delegated worker calls do not enter the trajectory, so the reconciliation expects one missing row per worker call
+// - every model call the provider served enters attempts.jsonl, delegated worker calls included
+// - the seal accounts for every call of the last boot, entry and delegated alike
 func runSmokeTrajectoryCheck(t *testing.T, rig *smokeRig, cfg *smokeConfig, provider *smokeProvider, obs *smokeObservation) {
 	t.Helper()
 	obs.CloseErr = rig.close()
@@ -652,19 +653,18 @@ func runSmokeTrajectoryCheck(t *testing.T, rig *smokeRig, cfg *smokeConfig, prov
 		t.Fatalf("the trajectory capture dropped %d record(s)", seal.Dropped)
 	}
 	total := provider.count()
-	expected := total - obs.WorkerRequests
-	if delta := trajectory.Records - expected; delta < -1 || delta > 1 {
-		t.Fatalf("attempts.jsonl = %d lines against %d captured-eligible model calls (delta=%d, worker calls=%d)\nattempt heads:\n%s\nrequests:\n%s",
-			trajectory.Records, expected, delta, obs.WorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	if got := trajectory.Records; got != total {
+		t.Fatalf("attempts.jsonl = %d lines against %d model calls (worker calls=%d): every call, entry or delegated, must enter the trajectory\nattempt heads:\n%s\nrequests:\n%s",
+			got, total, obs.WorkerRequests, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
 	}
 	lastBoot := total - obs.RestartRequests
 	lastBootWorker := obs.WorkerRequests - obs.RestartWorkerRequests
-	if got := int(seal.Records); got != lastBoot-lastBootWorker {
-		t.Fatalf("seal records = %d against the %d captured-eligible model calls of the last boot (%d total, %d worker)\nattempt heads:\n%s\nrequests:\n%s",
-			got, lastBoot-lastBootWorker, lastBoot, lastBootWorker, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
+	if got := int(seal.Records); got != lastBoot {
+		t.Fatalf("seal records = %d against the %d model calls of the last boot (%d total, %d worker calls): the seal must account for every call of its boot\nattempt heads:\n%s\nrequests:\n%s",
+			got, lastBoot, total, lastBootWorker, strings.Join(trajectory.Heads, "\n"), smokeRequestHeads(provider))
 	}
-	t.Logf("[matrix 12] trajectory reconciled: attempts=%d entry-calls=%d sub-agent-calls=%d seal-records=%d last-boot-entry-calls=%d files=%d sealed=%t",
-		trajectory.Records, expected, obs.WorkerRequests, seal.Records, lastBoot-lastBootWorker, len(seal.Files), seal.Sealed)
+	t.Logf("[matrix 12] trajectory reconciled: attempts=%d model-calls=%d entry-calls=%d sub-agent-calls=%d seal-records=%d last-boot-calls=%d files=%d sealed=%t",
+		trajectory.Records, total, total-obs.WorkerRequests, obs.WorkerRequests, seal.Records, lastBoot, len(seal.Files), seal.Sealed)
 }
 
 // smokeUserTurnsMatching 报告最后一条用户消息恰为该文本的模型请求数。

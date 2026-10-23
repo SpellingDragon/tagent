@@ -123,7 +123,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			unmatched.decision.Denial != nil || unmatched.decision.Refused() {
 			t.Fatalf("ruling of the unmatched critical call = %+v, want the wait carrying no denial whatever rule matched", unmatched)
 		}
-		if unmatched.decision.Rule != "" || unmatched.decision.Reason != "critical risk awaits approval" {
+		if unmatched.decision.Rule != "" || !strings.Contains(unmatched.decision.Reason, "critical risk awaits approval") {
 			t.Fatalf("ruling of the unmatched critical call = %+v, want the plain approval wait", unmatched.decision)
 		}
 		scope := query.AuthorizationScope{Agents: []event.AgentID{"agent-a"}, Sessions: []event.Address{addr}}

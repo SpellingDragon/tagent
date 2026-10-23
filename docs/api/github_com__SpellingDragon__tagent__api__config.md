@@ -388,6 +388,20 @@ type MonitorSpec struct {
     run must stay unchanged to count as stable and the span after which a silent
     run is suspected dead. Every zero field takes the runtime default.
 
+type TelemetrySpec struct {
+	// OTelEnabled attaches the layered OTel observation face beside the audit
+	// record; false keeps the log observer.
+	OTelEnabled bool `yaml:"otel_enabled"`
+	// Endpoint is the OTLP collector endpoint (host:port) the trace and metric
+	// layers export through; empty keeps the framework handles in effect.
+	Endpoint string `yaml:"endpoint"`
+}
+    TelemetrySpec is the observation face a host document declares: the switch
+    every committed fact is observed under and the OTLP endpoint the observation
+    layers export through. Both keys are optional: the zero section keeps the
+    log face the host carries by default, and an endpoint beside the switch off
+    is refused by the reader instead of being read past.
+
 type ToolRef struct {
 	// Name is the referenced name as written in the declaration.
 	Name string

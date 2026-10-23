@@ -43,6 +43,8 @@ var (
 
 	_ func(...RiskRule) PolicyOption = WithRules
 
+	_ func(...ToolRiskRule) PolicyOption = WithRiskRules
+
 	_ func(plugin.RiskLevel) PolicyOption = WithDefaultRisk
 
 	_ func(*approval.ApprovalManager) PolicyOption = WithApprovals
@@ -58,6 +60,7 @@ var (
 	_ = Open(
 		WithStrict(),
 		WithRules(RiskRule{}),
+		WithRiskRules(ToolRiskRule{Tool: "send", Level: plugin.RiskLow}),
 		WithDefaultRisk(plugin.RiskLow),
 		WithApprovals(nil),
 		WithGoals(nil),
@@ -71,6 +74,16 @@ var (
 		MinRisk: "",
 		Match:   nil,
 		Reason:  "",
+	}
+
+	_ = ToolRiskRule{
+		Tool:   "",
+		Prefix: false,
+		Level:  "",
+	}
+
+	_ = RiskRules{
+		{Tool: "", Prefix: false, Level: ""},
 	}
 
 	_ = RiskContext{

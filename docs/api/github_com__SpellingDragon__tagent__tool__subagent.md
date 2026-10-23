@@ -11,6 +11,14 @@ turn of the agent that builder returns. The provider, the stream and the tool
 protocol stay the tRPC agent's own: this file resolves the reference names an
 assembly carries and drains the events of one turn.
 
+The delegated turn runs on the model its builder assembles, so the model calls
+of that turn happen below the assembly and never pass the run's execution loop.
+A builder carrying the run's trajectory capture hands every one of those calls
+to the same account the entry turns are captured on: the request view is fixed
+before the call starts, the response the call produced is admitted as one
+attempt beside it, and the delegated turn seals what it captured when it ends.
+A builder beside no capture hands the model on as it stands.
+
 The structured handoff one call_subagent call declares beside its
 natural-language request: the fields the call names, the grants the assembled
 sub-agent actually holds, and the envelope the delegated turn receives.
@@ -245,6 +253,11 @@ type Builder struct {
 	// RefBudget is the token budget the handoff refs render under; zero keeps the
 	// package default, the budget unit the request assembly packs under.
 	RefBudget int
+	// Capture is the trajectory capture the delegated turn records its model
+	// calls through: every call of the turn is fixed and admitted under one scope
+	// of the request view it runs on, and the turn seals the capture when it ends.
+	// Nil keeps every call of the delegated path uncaptured.
+	Capture rl.CaptureScope
 }
     Builder resolves one assembly and hands it to the tRPC agent builder.
     Every resolver is injected: this package holds no model registry, no skill

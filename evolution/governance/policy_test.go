@@ -3,6 +3,8 @@ package governance
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -466,4 +468,92 @@ type misdeclaredPolicy struct{ *Policy }
 // Port reports a port the embedded policy does not implement.
 func (misdeclaredPolicy) Port() plugin.Port {
 	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+}
+
+// TestHoldRegistersApprovalRequest pins the registration a critical hold leaves on the approval book, over the real manager and a persisted request directory.
+// - a critical call the declared table grades registers exactly one pending request under its tool and argument digest
+// - the hold receipt names the registered request, and the request file is written under that identity
+// - a repeated judgment keeps the one request, and the approved request releases the held call
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestHoldRegistersApprovalRequest(t *testing.T) {
+	dir := t.TempDir()
+	manager := approval.NewApprovalManager(dir, time.Hour)
+	policy := Open(
+		WithApprovals(manager),
+		WithRiskRules(ToolRiskRule{Tool: "send", Level: plugin.RiskCritical}),
+	)
+	call := invariantRulingCall("call-hold", "send")
+
+	ruling, err := policy.Judge(plugin.CallPass{Final: call})
+	if err != nil {
+		t.Fatalf("judge the critical call: %v", err)
+	}
+	if ruling.Disposition != plugin.DispositionHold || ruling.Refused() {
+		t.Fatalf("ruling = %+v, want a hold that is a wait and never a denial", ruling)
+	}
+
+	pending := manager.Pending()
+	if len(pending) != 1 {
+		t.Fatalf("pending approvals = %d (%+v), want the held call registered exactly once", len(pending), pending)
+	}
+	registered := pending[0]
+	if registered.ToolName != call.Function.Name {
+		t.Fatalf("request tool = %q, want %q", registered.ToolName, call.Function.Name)
+	}
+	if registered.ArgsDigest != approval.ArgsDigest(call.Function.Arguments) {
+		t.Fatalf("request digest = %q, want the digest of the held arguments", registered.ArgsDigest)
+	}
+	if registered.Status != approval.ApprovalPending {
+		t.Fatalf("request status = %q, want %q", registered.Status, approval.ApprovalPending)
+	}
+	if !strings.Contains(ruling.Reason, registered.ID) {
+		t.Fatalf("hold reason = %q, want the registered request %q named", ruling.Reason, registered.ID)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "approvals", registered.ID+".json")); statErr != nil {
+		t.Fatalf("request file = %v, want the request persisted under its identity", statErr)
+	}
+
+	if _, err := policy.Judge(plugin.CallPass{Final: call}); err != nil {
+		t.Fatalf("judge the held call again: %v", err)
+	}
+	if got := len(manager.Pending()); got != 1 {
+		t.Fatalf("pending approvals after a repeated judgment = %d, want the one registered request", got)
+	}
+
+	if _, err := manager.Decide(registered.ID, approval.ApprovalApproved, "operator"); err != nil {
+		t.Fatalf("approve the registered request: %v", err)
+	}
+	approved, err := policy.Judge(plugin.CallPass{Final: call})
+	if err != nil {
+		t.Fatalf("judge the approved call: %v", err)
+	}
+	if approved.Refused() || approved.Disposition != plugin.DispositionRecord {
+		t.Fatalf("approved ruling = %+v, want the held call released for execution", approved)
+	}
+	if got := len(manager.Pending()); got != 0 {
+		t.Fatalf("pending approvals after the approval = %d, want none", got)
+	}
+}
+
+// TestNoChannelStillRefuses pins the negative anchor of the declared risk face.
+// - a critical rule beside no approval channel is refused by name and told apart from a hold
+// - the existing no-channel semantics never regress
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
+func TestNoChannelStillRefuses(t *testing.T) {
+	policy := Open(WithRiskRules(ToolRiskRule{Tool: "send", Level: plugin.RiskCritical}))
+	ruling, err := policy.Judge(plugin.CallPass{Final: invariantRulingCall("call-hold", "send")})
+	if err != nil {
+		t.Fatalf("judge the unapprovable call: %v", err)
+	}
+	if !ruling.Refused() || ruling.Denial == nil {
+		t.Fatalf("ruling = %+v, want a terminal refusal", ruling)
+	}
+	if ruling.Disposition == plugin.DispositionHold {
+		t.Fatalf("disposition = %q, want the refusal told apart from a hold", ruling.Disposition)
+	}
+	if !strings.Contains(ruling.Reason, "no approval channel") {
+		t.Fatalf("reason = %q, want the missing approval channel named", ruling.Reason)
+	}
 }

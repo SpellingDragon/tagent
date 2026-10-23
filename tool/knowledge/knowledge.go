@@ -52,8 +52,24 @@ var ErrReadRootMissing = errors.New("knowledge: the deployment wires no read roo
 // tool, so the declared name would answer nothing.
 var ErrFileToolMissing = errors.New("knowledge: the file tool set carries no read file tool")
 
+// LoadedSkill is one skill body a load tool fixed at a request boundary: the
+// name the load answered beside the body fixed with it.
+type LoadedSkill struct {
+	// Name is the skill name the load was asked for.
+	Name string
+	// Body is the body the load fixed at that boundary.
+	Body string
+}
+
+// LoadSink receives every skill body a load tool loads: the name the call
+// answered beside the body fixed with it, in load order. A surface assembled
+// beside no sink loads without publishing its bodies, so the request boundary
+// has nothing to inject.
+type LoadSink func(name, body string)
+
 // Options fixes the faces one knowledge surface is assembled over: the skill
-// repository the deployment holds and the root the file read is confined to.
+// repository the deployment holds, the root the file read is confined to and
+// the sink the load publishes its bodies to.
 type Options struct {
 	// Skills is the deployment's skill repository; a surface beside none
 	// refuses the two skill tools by name.
@@ -61,6 +77,10 @@ type Options struct {
 	// ReadRoot is the directory every file read is confined to; a surface
 	// beside none refuses the read by name.
 	ReadRoot string
+	// Sink receives the body of every skill the load tool loads. The host
+	// mounts the request-side ledger here; nil publishes no body, so a load
+	// answers its name-level receipt exactly as before.
+	Sink LoadSink
 }
 
 // New returns the knowledge surface over the faces the caller fixes, in a fixed
@@ -73,7 +93,11 @@ func New(ctx context.Context, opts Options) ([]trpctool.CallableTool, error) {
 	out := make([]trpctool.CallableTool, 0, 3)
 	if opts.Skills != nil {
 		out = append(out, &skillSearchTool{skills: opts.Skills})
-		out = append(out, toolskill.NewLoadTool(opts.Skills))
+		out = append(out, &skillLoadTool{
+			inner:  toolskill.NewLoadTool(opts.Skills),
+			skills: opts.Skills,
+			sink:   opts.Sink,
+		})
 	}
 	if strings.TrimSpace(opts.ReadRoot) != "" {
 		read, err := readFileTool(ctx, opts.ReadRoot)
@@ -113,6 +137,50 @@ func readFileTool(ctx context.Context, root string) (trpctool.CallableTool, erro
 		return callable, nil
 	}
 	return nil, fmt.Errorf("%w: %q", ErrFileToolMissing, ReadFileToolName)
+}
+
+// skillLoadTool is the load face of one skill repository: the framework load
+// tool beside the body read that publishes what the load fixed. The framework
+// tool keeps its declaration and its "loaded: <name>" answer; this wrapper adds
+// only the body the request boundary injects into the next request.
+type skillLoadTool struct {
+	inner  *toolskill.LoadTool
+	skills skill.Repository
+	sink   LoadSink
+}
+
+// The load tool satisfies the native callable tool port.
+var _ trpctool.CallableTool = (*skillLoadTool)(nil)
+
+// Declaration reports the framework load declaration unchanged.
+func (t *skillLoadTool) Declaration() *trpctool.Declaration {
+	return t.inner.Declaration()
+}
+
+// Call answers the load the framework tool answers and publishes the body it
+// fixed. The answer text stays exactly the framework "loaded: <name>" answer:
+// the body never travels through the result, it travels through the sink the
+// request boundary reads. A name the repository does not hold is refused by the
+// framework tool's own words, and no body is published.
+func (t *skillLoadTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	var in struct {
+		Skill string `json:"skill"`
+	}
+	if err := json.Unmarshal(jsonArgs, &in); err != nil || in.Skill == "" {
+		return t.inner.Call(ctx, jsonArgs)
+	}
+	got, err := skill.GetForContext(ctx, t.skills, in.Skill)
+	if err != nil {
+		return t.inner.Call(ctx, jsonArgs)
+	}
+	answer, err := t.inner.Call(ctx, jsonArgs)
+	if err != nil {
+		return answer, err
+	}
+	if t.sink != nil {
+		t.sink(in.Skill, got.Body)
+	}
+	return answer, nil
 }
 
 // searchArgs is the declared argument shape of one skill search.

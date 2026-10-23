@@ -239,6 +239,20 @@ type MonitorSpec struct {
 	FakeDeadDuration time.Duration `yaml:"fake_dead_duration"`
 }
 
+// TelemetrySpec is the observation face a host document declares: the switch
+// every committed fact is observed under and the OTLP endpoint the observation
+// layers export through. Both keys are optional: the zero section keeps the
+// log face the host carries by default, and an endpoint beside the switch off
+// is refused by the reader instead of being read past.
+type TelemetrySpec struct {
+	// OTelEnabled attaches the layered OTel observation face beside the audit
+	// record; false keeps the log observer.
+	OTelEnabled bool `yaml:"otel_enabled"`
+	// Endpoint is the OTLP collector endpoint (host:port) the trace and metric
+	// layers export through; empty keeps the framework handles in effect.
+	Endpoint string `yaml:"endpoint"`
+}
+
 // MCPServerSpec is one MCP server the declaration binds: the transport, the
 // endpoint and the environment variable holding the call key.
 type MCPServerSpec struct {

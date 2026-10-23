@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/config"
@@ -31,6 +32,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/replay"
@@ -52,6 +54,8 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
+	fmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
+	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -107,6 +111,35 @@ type MessageSender interface {
 	Send(ctx context.Context, target event.Address, content string) error
 }
 
+// hostDeliveryMeter wraps the outbound face of the host and counts the bodies it
+// accepted. Every delivery of the host reaches the face through this meter — the
+// answer of a user turn and the body a declared send tool delivers alike — so
+// the counter face publishes one number for the messages the deployment really
+// sent. A refused body never moves the counter.
+type hostDeliveryMeter struct {
+	sender   MessageSender
+	accepted atomic.Uint64
+}
+
+// Send delivers one body through the wrapped face and counts the accepted
+// delivery.
+func (m *hostDeliveryMeter) Send(ctx context.Context, target event.Address, content string) error {
+	if err := m.sender.Send(ctx, target, content); err != nil {
+		return err
+	}
+	m.accepted.Add(1)
+	return nil
+}
+
+// acceptedCount reports the bodies the face accepted so far; a host beside no
+// sender reads no delivery.
+func (m *hostDeliveryMeter) acceptedCount() uint64 {
+	if m == nil {
+		return 0
+	}
+	return m.accepted.Load()
+}
+
 // HostOption configures one Boot call. It is the host-facing name of the
 // assembly option, so the host protocol's option type is declared here rather
 // than borrowed by alias.
@@ -129,6 +162,9 @@ type Host struct {
 	run    *Run
 	entry  event.AgentID
 	sender MessageSender
+	// deliveries counts every body the outbound face accepted, whether the host
+	// delivered a turn answer or a declared send tool delivered its own body.
+	deliveries *hostDeliveryMeter
 
 	// configPath is the source the host was booted from and the file a reload
 	// reads again; doc is the document last published, natives are the tool
@@ -143,6 +179,9 @@ type Host struct {
 	face       *hostFace
 	meditation *meditation.Driver
 	settle     *SettleDriver
+	// telemetryStop shuts the observation pipeline the document declared down;
+	// it is nil beside the log face and beside a document that starts none.
+	telemetryStop func(context.Context) error
 
 	reloadMu sync.Mutex
 	mu       sync.Mutex
@@ -210,6 +249,13 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if cfg.hostSender == nil && doc.declaresSendOutside(meditationAgentOf(meditationPlan)) {
 		return nil, fmt.Errorf("%w: the document grants the %q tool", ErrHostSenderMissing, hostSendToolID)
 	}
+	// The one outbound face of the document is wrapped before the tools are
+	// assembled, so the counter face and every delivery path read the same book.
+	var deliveryMeter *hostDeliveryMeter
+	if cfg.hostSender != nil {
+		deliveryMeter = &hostDeliveryMeter{sender: cfg.hostSender}
+		cfg.hostSender = deliveryMeter
+	}
 	relations, err := openHostRelations(plan)
 	if err != nil {
 		return nil, err
@@ -237,9 +283,16 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		}
 	}
 	sealed := false
+	var stopTelemetry func(context.Context) error
 	defer func() {
-		if !sealed && capture != nil {
+		if sealed {
+			return
+		}
+		if capture != nil {
 			sealHostCapture(capture)
+		}
+		if stopTelemetry != nil {
+			_ = stopTelemetry(context.Background())
 		}
 	}()
 	var driver *meditation.Driver
@@ -248,9 +301,38 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	// variable, because the three faces it needs are the host's own memory and
 	// drive and are only called after Boot published it.
 	var host *Host
+	observer, telemetryStop, err := hostTelemetryObserver(ctx, doc.Telemetry)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	stopTelemetry = telemetryStop
 	options := []Option{
 		WithGovernance(governanceOf(cfg.governance)),
-		WithTelemetry(telemetry.NewLogObserver(trpclog.Default)),
+		WithTelemetry(observer),
+	}
+	if declaresExecFace(decl) {
+		executor, err := tagentexec.NewTmuxExecutor()
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("tagent: an agent declares the %q face: %w", tagentexec.PresetName, err)
+		}
+		options = append(options, WithExecManager(tagentexec.NewManager(executor)))
+	}
+	riskRules, err := doc.riskRules()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if len(riskRules) > 0 {
+		if cfg.policy != nil {
+			cancel()
+			return nil, fmt.Errorf("tagent: the document declares governance risk rules beside a policy attached through WithPolicy")
+		}
+		options = append(options, WithPolicy(governance.Open(
+			governance.WithRiskRules(riskRules...),
+			governance.WithApprovals(cfg.approvals),
+		)))
 	}
 	if capture != nil {
 		options = append(options, WithCapture(&hostRunCapture{trajectory: capture}))
@@ -324,6 +406,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		run:           run,
 		entry:         event.AgentID(decl.Entry),
 		sender:        cfg.hostSender,
+		deliveries:    deliveryMeter,
 		meditation:    driver,
 		settle:        settleDriver,
 		configPath:    configPath,
@@ -331,6 +414,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		natives:       natives,
 		models:        models,
 		capture:       capture,
+		telemetryStop: telemetryStop,
 		userAddresses: map[event.SessionID]event.Address{},
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
@@ -352,6 +436,77 @@ func governanceOf(governance state.Governance) state.Governance {
 		return governance
 	}
 	return evolution.NewPolicy(evolution.NewStructuralGate())
+}
+
+// hostTelemetryMeter is the instrumentation scope the SDK observer records its
+// committed-fact counter under: the scope telemetry.SDKObserver declares, so a
+// provider this host starts exports exactly the counter the observer writes.
+const hostTelemetryMeter = "tagent/telemetry"
+
+// hostTelemetryObserver opens the observation face one host document declares:
+// the log observer beside no OTel switch, and the layered SDK observer beside
+// it. A declared endpoint starts the framework trace and metric pipelines the
+// layers export through, and the returned stop func shuts them down in the
+// reverse order. An endpoint beside the switch off is refused instead of being
+// read past, and so is an endpoint carrying a URL where the exporters expect a
+// host:port pair.
+func hostTelemetryObserver(ctx context.Context, spec config.TelemetrySpec) (plugin.Observer, func(context.Context) error, error) {
+	endpoint := strings.TrimSpace(spec.Endpoint)
+	if !spec.OTelEnabled {
+		if endpoint != "" {
+			return nil, nil, fmt.Errorf("tagent: telemetry.endpoint %q is declared beside otel_enabled: false", endpoint)
+		}
+		return telemetry.NewLogObserver(trpclog.Default), nil, nil
+	}
+	options := make([]telemetry.Option, 0, 1)
+	stops := make([]func(context.Context) error, 0, 2)
+	if endpoint != "" {
+		if strings.Contains(endpoint, "://") {
+			return nil, nil, fmt.Errorf("tagent: telemetry.endpoint %q names a URL, want host:port", endpoint)
+		}
+		stopTrace, err := ftrace.Start(ctx, ftrace.WithEndpoint(endpoint))
+		if err != nil {
+			return nil, nil, fmt.Errorf("tagent: start the trace pipeline at %s: %w", endpoint, err)
+		}
+		stops = append(stops, func(context.Context) error { return stopTrace() })
+		provider, err := fmetric.NewMeterProvider(ctx, fmetric.WithEndpoint(endpoint))
+		if err != nil {
+			for _, stop := range stops {
+				_ = stop(context.Background())
+			}
+			return nil, nil, fmt.Errorf("tagent: start the metric pipeline at %s: %w", endpoint, err)
+		}
+		stops = append(stops, provider.Shutdown)
+		options = append(options, telemetry.WithMeter(provider.Meter(hostTelemetryMeter)))
+	}
+	observer, err := telemetry.NewSDKObserver(nil, options...)
+	if err != nil {
+		for _, stop := range stops {
+			_ = stop(context.Background())
+		}
+		return nil, nil, err
+	}
+	stop := func(ctx context.Context) error {
+		failures := make([]error, 0, len(stops))
+		for i := len(stops) - 1; i >= 0; i-- {
+			failures = append(failures, stops[i](ctx))
+		}
+		return errors.Join(failures...)
+	}
+	return observer, stop, nil
+}
+
+// declaresExecFace reports whether any agent section of the declaration grants
+// the execution face.
+func declaresExecFace(decl *config.Declaration) bool {
+	for _, spec := range decl.Agents {
+		for _, ref := range spec.Tools {
+			if ref.Name == tagentexec.PresetName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // storageRootOf reports the root of the storage tier the plan opens, and an
@@ -399,8 +554,23 @@ func (h *Host) abortBoot(cause error) error {
 		_, _ = h.run.Close(closeCtx, agent.CloseRequest{})
 		_ = h.run.CloseMCPServers()
 	}
+	_ = h.stopTelemetry(closeCtx)
 	h.cancel()
 	return cause
+}
+
+// stopTelemetry shuts the observation pipeline the document started down, once:
+// the trace and metric exporters are flushed under the close grace, and a
+// second close finds nothing to stop.
+func (h *Host) stopTelemetry(ctx context.Context) error {
+	if h == nil || h.telemetryStop == nil {
+		return nil
+	}
+	stop := h.telemetryStop
+	h.telemetryStop = nil
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), hostShutdownGrace)
+	defer cancel()
+	return stop(stopCtx)
 }
 
 // Invoke drives one invocation through the assembled run. An invocation at the
@@ -581,6 +751,9 @@ func (h *Host) Close(ctx context.Context) error {
 	if err := h.sealCapture(ctx); err != nil && first == nil {
 		first = err
 	}
+	if err := h.stopTelemetry(ctx); err != nil && first == nil {
+		first = err
+	}
 	h.finishClose(first, nil)
 	return first
 }
@@ -758,6 +931,7 @@ type hostDocument struct {
 	MCPServers     map[string]config.MCPServerSpec `yaml:"mcp_servers"`
 	Governance     map[string]any                  `yaml:"governance"`
 	App            map[string]any                  `yaml:"app"`
+	Telemetry      config.TelemetrySpec            `yaml:"telemetry"`
 
 	once      sync.Once
 	mapped    document.Document
@@ -854,13 +1028,19 @@ func (d *hostDocument) document() (document.Document, error) {
 	return d.mapped, d.mappedErr
 }
 
-// Declaration returns the organization declaration the host assembles.
+// Declaration returns the organization declaration the host assembles. The
+// telemetry section stays the host's own dialect: the core reads no observation
+// concept out of the declaration, so the section never enters it.
 func (d *hostDocument) Declaration() (*config.Declaration, error) {
 	mapped, err := d.document()
 	if err != nil {
 		return nil, err
 	}
-	return mapped.Declaration()
+	decl, err := mapped.Declaration()
+	if err != nil {
+		return nil, err
+	}
+	return decl, nil
 }
 
 // mapDocument builds the declaration-shaped document of the host.
@@ -961,6 +1141,7 @@ var hostToolIDs = append(append([]string{
 	spec.ToolName,
 }, tagentfile.Names()...),
 	tagentexec.PresetName,
+	subagent.CallSubagentRef,
 	mcpgw.ToolNameMCPCall,
 	mcpgw.ToolNameMCPDiscover,
 )
@@ -1049,6 +1230,63 @@ func meditationAgentOf(plan *hostMeditationPlan) string {
 		return ""
 	}
 	return plan.agent
+}
+
+// riskRules reads the declared risk table of the governance section: the
+// ordered entries the boot opens its policy over. A section beside no table
+// declares no rule, so a document that never named one keeps the behavior it
+// had. Every entry names a tool (or a prefix) and one declared grade; a key, a
+// value or a grade the table does not name is refused at boot instead of being
+// read past.
+func (d *hostDocument) riskRules() ([]governance.ToolRiskRule, error) {
+	raw, held := d.Governance["risk_rules"]
+	if !held || raw == nil {
+		return nil, nil
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("tagent: governance risk_rules is not a list")
+	}
+	rules := make([]governance.ToolRiskRule, 0, len(entries))
+	for i, entry := range entries {
+		fields, ok := entry.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("tagent: governance risk_rules[%d] is not a mapping", i)
+		}
+		var rule governance.ToolRiskRule
+		for key, value := range fields {
+			switch key {
+			case "tool":
+				text, ok := value.(string)
+				if !ok {
+					return nil, fmt.Errorf("tagent: governance risk_rules[%d].tool is not a string", i)
+				}
+				rule.Tool = strings.TrimSpace(text)
+			case "prefix":
+				flag, ok := value.(bool)
+				if !ok {
+					return nil, fmt.Errorf("tagent: governance risk_rules[%d].prefix is not a bool", i)
+				}
+				rule.Prefix = flag
+			case "level":
+				text, ok := value.(string)
+				if !ok {
+					return nil, fmt.Errorf("tagent: governance risk_rules[%d].level is not a string", i)
+				}
+				rule.Level = plugin.RiskLevel(strings.TrimSpace(text))
+			default:
+				return nil, fmt.Errorf("tagent: governance risk_rules[%d] names the unknown key %q", i, key)
+			}
+		}
+		if rule.Tool == "" {
+			return nil, fmt.Errorf("tagent: governance risk_rules[%d] names no tool", i)
+		}
+		if rule.Level.Rank() == 0 {
+			return nil, fmt.Errorf("tagent: governance risk_rules[%d] (%s) carries the unknown risk grade %q", i, rule.Tool, rule.Level)
+		}
+		rules = append(rules, rule)
+	}
+	return rules, nil
 }
 
 // declaresTool reports whether one agent section declares one host tool.
@@ -1240,9 +1478,14 @@ func (d *hostDocument) declaresKnowledge(id string) bool {
 }
 
 // knowledgeTools constructs the knowledge surface of one declared agent: its
-// skill roots and the read root its file reads are confined to.
+// skill roots, the read root its file reads are confined to and the ledger the
+// loaded bodies publish to, so the request boundary carries a loaded body into
+// that agent's next request instead of answering a name alone.
 func (d *hostDocument) knowledgeTools(ctx context.Context, id string) ([]trpctool.CallableTool, error) {
-	opts := knowledge.Options{ReadRoot: d.readRoot(id)}
+	opts := knowledge.Options{
+		ReadRoot: d.readRoot(id),
+		Sink:     NewSkillLoadSink(event.AgentID(id)),
+	}
 	if roots := d.skillRoots(id); len(roots) > 0 {
 		repository, err := skill.NewFSRepository(roots...)
 		if err != nil {
@@ -1701,15 +1944,51 @@ func newHostFace(ctx context.Context, host *Host, token string) (*hostFace, erro
 	return face, nil
 }
 
+// metrics answers the counter face of the host in the Prometheus text format:
+// the admitted turns, the committed facts and the accepted deliveries, written
+// by hand so the endpoint carries no client library of its own. The endpoint
+// sits in the health family: it is reachable on the loopback listener beside
+// the liveness probe and asks for no credential, because it exposes counts and
+// never message content.
+func (f *hostFace) metrics(w http.ResponseWriter, _ *http.Request) {
+	turns, facts, deliveries := f.host.counters()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprint(w, "# HELP tagent_turns_total Invocations admitted by this host.\n")
+	fmt.Fprint(w, "# TYPE tagent_turns_total counter\n")
+	fmt.Fprintf(w, "tagent_turns_total %d\n", turns)
+	fmt.Fprint(w, "# HELP tagent_facts_total Committed facts held by this run.\n")
+	fmt.Fprint(w, "# TYPE tagent_facts_total counter\n")
+	fmt.Fprintf(w, "tagent_facts_total %d\n", facts)
+	fmt.Fprint(w, "# HELP tagent_deliveries_total Messages accepted by the delivery face.\n")
+	fmt.Fprint(w, "# TYPE tagent_deliveries_total counter\n")
+	fmt.Fprintf(w, "tagent_deliveries_total %d\n", deliveries)
+}
+
+// counters reads the counter faces the metrics endpoint publishes: the
+// invocations admitted by this host, the facts the run holds and the
+// notifications its delivery face accepted.
+func (h *Host) counters() (uint64, int, uint64) {
+	h.mu.Lock()
+	turns := h.invocations
+	h.mu.Unlock()
+	facts := 0
+	if h.run != nil {
+		facts = h.run.CommittedFacts()
+	}
+	return turns, facts, h.deliveries.acceptedCount()
+}
+
 // Handler returns the endpoints of the face: GET /healthz answers the liveness
-// probe, POST /task admits one injection, and POST /reload rereads the
-// configuration source and answers the model changes it judged.
+// probe, GET /metrics answers the counters, POST /task admits one injection,
+// and POST /reload rereads the configuration source and answers the model
+// changes it judged.
 func (f *hostFace) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, "ok")
 	})
+	mux.HandleFunc("GET /metrics", f.metrics)
 	mux.HandleFunc("POST /task", f.inject)
 	mux.HandleFunc("POST /reload", f.reload)
 	return mux

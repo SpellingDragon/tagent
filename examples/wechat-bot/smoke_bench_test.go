@@ -22,7 +22,6 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -250,9 +249,7 @@ func bootBenchRig(b *testing.B, maxTokens int) *benchRig {
 		b.Fatalf("assemble the wechat application: %v", err)
 	}
 	channel := newBenchChannel()
-	policy := governance.Open(governance.WithApprovals(gateway.Manager()))
-	options := append(app.options(),
-		tagent.WithPolicy(smokeGovernor{inner: policy, manager: gateway.Manager()}))
+	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
 	host, err := tagent.Boot(cfg.ConfigPath, options...)
 	if err != nil {
 		b.Fatalf("boot the host: %v", err)

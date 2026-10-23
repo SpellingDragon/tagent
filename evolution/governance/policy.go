@@ -2,6 +2,8 @@ package governance
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -83,8 +85,9 @@ func CallPassFrom(ctx context.Context) (plugin.CallPass, bool) {
 }
 
 // Policy is the pre-execution enforcement policy of the governance gate: the
-// warn/strict grade, the violation rules, and the goal, budget and approval
-// gates beside the ledger every ruling leaves its governance double on.
+// warn/strict grade, the violation rules, the declared risk table, and the goal,
+// budget and approval gates beside the ledger every ruling leaves its governance
+// double on.
 //
 // The gate carries no configuration field of its own: Open starts it and every
 // gate is added by the option that names it. Policy renders the single
@@ -97,6 +100,7 @@ type Policy struct {
 	enabled     bool
 	enforcement Enforcement
 	rules       []RiskRule
+	riskRules   RiskRules
 	defaultRisk plugin.RiskLevel
 	approvals   *approval.ApprovalManager
 	goals       *GoalRegistry
@@ -124,6 +128,7 @@ type PolicyOption func(*Policy)
 // option names one gate, so a caller states the gates the run really carries:
 //
 //   - WithRules and WithApprovals are the violation rules and the approval channel
+//   - WithRiskRules is the declared risk table an ungraded pass is ruled at
 //   - WithGoals and WithGoalRequired are the goal gate and the sources it covers
 //   - WithBudget and WithLedger are the budget window and the governance double
 //   - WithDefaultRisk and WithStrict are the fallback grade and the refusing grade
@@ -152,8 +157,9 @@ func WithRules(rules ...RiskRule) PolicyOption {
 	return func(p *Policy) { p.rules = append([]RiskRule(nil), rules...) }
 }
 
-// WithDefaultRisk sets the conservative grade the ruling falls back to when the
-// one Before pass carries none. An empty value reads as RiskMedium.
+// WithDefaultRisk sets the conservative grade the ruling falls back to when
+// neither the one Before pass nor the declared risk table names a grade. An
+// empty value reads as RiskMedium.
 func WithDefaultRisk(level plugin.RiskLevel) PolicyOption {
 	return func(p *Policy) { p.defaultRisk = level }
 }
@@ -313,7 +319,11 @@ func (p *Policy) Judge(pass plugin.CallPass) (plugin.Decision, error) {
 // record decides whether the held call may proceed on this very argument
 // digest, and everything else waits. A held call is a wait and is never
 // reported as a denial; a denied or approved-and-retried call past its validity
-// never proceeds on the old request.
+// never proceeds on the old request. A held call whose tool and arguments name
+// no request registers one before the hold returns, so the approval book always
+// names the call the gate parked; the receipt carries that request identity, and
+// a registration the manager could not persist leaves the hold standing beside
+// the named failure.
 //
 // Every ruling the approval record answers is observed beside this gate: an
 // approved, a denied, an expired and an unapprovable call each write one INFO
@@ -356,6 +366,17 @@ func (p *Policy) riskCritical(call *trpcmodel.ToolCall, grade plugin.RiskLevel, 
 		wait := "critical risk awaits approval"
 		if reason != "" {
 			wait = reason + "; " + wait
+		}
+		var registerErr error
+		if req == nil {
+			req, registerErr = p.approvals.Request(context.Background(), newApprovalRequestID(),
+				call.Function.Name, call.Function.Arguments, grade, ruleID, wait)
+		}
+		if req != nil && req.Status != approval.ApprovalExpired {
+			wait = fmt.Sprintf("%s (approval request %s)", wait, req.ID)
+		}
+		if registerErr != nil {
+			wait = fmt.Sprintf("%s; the approval request could not be persisted: %s", wait, registerErr)
 		}
 		p.record(SubtypeApproval, call, grade, ruleID, wait)
 		switch {
@@ -406,16 +427,35 @@ func approvalDebug(format string, args ...any) {
 }
 
 // gradeOf reports the risk grade the ruling is rendered at: the grade the one
-// Before pass carries on its own, or the conservative fallback when the pass
-// carries none. The grade is read, never rendered a second time.
+// Before pass carries on its own, or the grade the declared risk table renders
+// for the final call, or the conservative fallback when neither names one. The
+// grade is read, never rendered a second time; the table is the default risk
+// face and never overrides a grade a wired face already rendered.
 func (p *Policy) gradeOf(pass plugin.CallPass) plugin.RiskLevel {
 	if pass.Risk != "" {
 		return pass.Risk
 	}
-	if p != nil && p.defaultRisk != "" {
-		return p.defaultRisk
+	if p != nil {
+		if level, ok := p.riskRules.grade(pass.Final.Function.Name); ok {
+			return level
+		}
+		if p.defaultRisk != "" {
+			return p.defaultRisk
+		}
 	}
 	return plugin.RiskMedium
+}
+
+// newApprovalRequestID issues the identity of one approval request the gate
+// registers at a hold: "approval-" beside the lowercase hex of 16 random bytes.
+// The identity resolves the request across the hold and every later ruling, so
+// the native call identity is not a substitute.
+func newApprovalRequestID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		panic("governance: crypto/rand failed to issue an approval request identity: " + err.Error())
+	}
+	return "approval-" + hex.EncodeToString(raw[:])
 }
 
 // dispositionFor reports the run disposition of one grade: the risk grades map

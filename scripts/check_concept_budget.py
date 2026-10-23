@@ -90,7 +90,7 @@ BASELINE = (
     ("struct-fields", "api/event/model_replacement.go:ModelReplacement", 7),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
     ("struct-fields", "runtime/task/spec.go:Spec", 9),
-    ("struct-fields", "tool/subagent/builder.go:Builder", 7),
+    ("struct-fields", "tool/subagent/builder.go:Builder", 8),
     ("iface-methods", "tool/recall/table.go:Table", 3),
     ("struct-fields", "memory/replay/age_segments.go:Segment", 6),
     ("struct-fields", "memory/replay/age_segments.go:AgeFoldReport", 7),

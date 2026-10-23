@@ -828,9 +828,6 @@ func TestApprovalRuling(t *testing.T) {
 	if err != nil || held.Kind != task.RulingHold {
 		t.Fatalf("critical ruling = (%+v,%v), want a hold", held, err)
 	}
-	if _, err := gateway.Manager().Request(ctx, "approval-1", "exec", args, plugin.RiskCritical, "critical", "held"); err != nil {
-		t.Fatalf("register the held call: %v", err)
-	}
 	if _, _, err := gateway.Resolve("boss", "approve "+shortDigest(approval.ArgsDigest(args))); err != nil {
 		t.Fatalf("approve the held call: %v", err)
 	}

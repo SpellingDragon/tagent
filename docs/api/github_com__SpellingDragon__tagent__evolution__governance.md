@@ -318,9 +318,10 @@ type GovernanceEventLog interface {
 type Policy struct {
 	// Has unexported fields.
 }
-    Policy is the pre-execution enforcement policy of the governance gate: the
-    warn/strict grade, the violation rules, and the goal, budget and approval
-    gates beside the ledger every ruling leaves its governance double on.
+    Policy is the pre-execution enforcement policy of the governance gate:
+    the warn/strict grade, the violation rules, the declared risk table, and the
+    goal, budget and approval gates beside the ledger every ruling leaves its
+    governance double on.
 
     The gate carries no configuration field of its own: Open starts it and
     every gate is added by the option that names it. Policy renders the single
@@ -334,6 +335,7 @@ func Open(opts ...PolicyOption) *Policy
 
       - WithRules and WithApprovals are the violation rules and the approval
         channel
+      - WithRiskRules is the declared risk table an ungraded pass is ruled at
       - WithGoals and WithGoalRequired are the goal gate and the sources it
         covers
       - WithBudget and WithLedger are the budget window and the governance
@@ -391,7 +393,8 @@ func WithBudget(budget *BudgetManager) PolicyOption
 
 func WithDefaultRisk(level plugin.RiskLevel) PolicyOption
     WithDefaultRisk sets the conservative grade the ruling falls back to when
-    the one Before pass carries none. An empty value reads as RiskMedium.
+    neither the one Before pass nor the declared risk table names a grade.
+    An empty value reads as RiskMedium.
 
 func WithGoalRequired(sources ...string) PolicyOption
     WithGoalRequired names the trigger sources an operation must hang on an
@@ -408,6 +411,12 @@ func WithLedger(ledger *DenialLedger) PolicyOption
     WithLedger attaches the governance ledger every refusal and every recorded
     execution leaves its governance double on. A gate beside no ledger keeps
     ruling and drops the records.
+
+func WithRiskRules(rules ...ToolRiskRule) PolicyOption
+    WithRiskRules attaches the declared risk table the policy grades with
+    when the one Before pass carries no grade. The entries are validated at
+    construction: an empty tool name or an unknown grade refuses the policy by
+    panicking, so a table that could grade nothing never starts as a gate.
 
 func WithRules(rules ...RiskRule) PolicyOption
     WithRules attaches the data-driven violation rules, read in order; the first
@@ -448,3 +457,27 @@ type RiskRule struct {
     the one Before pass carried — and fires as a violation at the minimum grade
     it declares; it never renders a grade of its own, so no second risk face
     ever runs. The first fired rule is the violation the ruling reads.
+
+type RiskRules []ToolRiskRule
+    RiskRules is the declared risk table: the ordered entries one policy grades
+    tool calls with. The table is the default risk assessment — it renders a
+    grade only when the one Before pass carries none — and the selection prefers
+    an exact tool name over the longest matching prefix, then the policy's
+    default grade.
+
+type ToolRiskRule struct {
+	// Tool is the tool name, or the tool-name prefix when Prefix is set.
+	Tool string
+	// Prefix reports whether Tool names a prefix instead of an exact name.
+	Prefix bool
+	// Level is the grade the assessment renders for a matched tool.
+	Level plugin.RiskLevel
+}
+    ToolRiskRule is one entry of the declared risk table: a tool name or a
+    tool-name prefix beside the grade the default risk assessment renders for
+    it. The entry is plain configuration — a name, the prefix marker and a level
+    — and carries no match function of its own.
+
+    A rule whose Prefix is set matches every tool whose name starts with the
+    rule's Tool prefix, and a trailing "*" in Tool marks that prefix explicitly;
+    a rule without Prefix matches the tool name exactly.

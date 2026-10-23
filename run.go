@@ -39,6 +39,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/runtime/task/approval"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -185,11 +186,12 @@ type Run struct {
 	leaseLosses []error
 	// capture is the trajectory capture this run fixes, admits and seals
 	// through, or nil beside no capture.
-	capture   rl.Capture
-	presented []view.Presentation
-	snapshots []RequestSnapshotRecord
-	fixers    map[event.AgentID]*fileFixer
-	replays   map[event.SessionID]replayEntry
+	capture      rl.Capture
+	captureScope rl.CaptureScope
+	presented    []view.Presentation
+	snapshots    []RequestSnapshotRecord
+	fixers       map[event.AgentID]*fileFixer
+	replays      map[event.SessionID]replayEntry
 	// ageFold folds a session's projection once its replay fills the window the
 	// declaration gave it; it is mounted on every agent that declares a window.
 	ageFold *AgeFoldPlugin
@@ -685,10 +687,14 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 // contributed per agent through the NativeAgent map; these entries are the
 // shared dependencies of the whole run.
 type assemblyConfig struct {
-	hostSender  MessageSender
-	governance  state.Governance
-	approver    task.Approver
-	policy      plugin.Governor
+	hostSender MessageSender
+	governance state.Governance
+	approver   task.Approver
+	policy     plugin.Governor
+	// approvals is the approval book the host opens the declared risk table
+	// over: the policy that grades the document's risk_rules registers the
+	// held call there, so an external approver rules the very request.
+	approvals   *approval.ApprovalManager
 	enforcement governance.Enforcement
 	storage     *ledger.StorageConfig
 	embedder    memory.Embedder
@@ -742,6 +748,16 @@ func WithGovernance(governance state.Governance) Option {
 // comes from that policy alone and this approver is not consulted.
 func WithApprover(approve task.Approver) Option {
 	return func(c *assemblyConfig) { c.approver = approve }
+}
+
+// WithApprovals attaches the approval book a host document's risk table grades
+// through: a document that declares risk_rules is opened as a policy over this
+// book, so a call at the critical grade registers one approval request and
+// parks in the approval wait, and the book stays the one external approvers
+// rule through. An assembly beside no book keeps the named refusal of the
+// critical grade instead of parking anything.
+func WithApprovals(approvals *approval.ApprovalManager) Option {
+	return func(c *assemblyConfig) { c.approvals = approvals }
 }
 
 // WithPolicy attaches the governance policy every call admitted through the
@@ -1002,6 +1018,14 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event {
 		out = append(out, copied)
 	}
 	return out
+}
+
+// CommittedFacts reports how many live facts this run holds: the counter the
+// metrics endpoint reports beside the turns and deliveries of the host.
+func (r *Run) CommittedFacts() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.facts)
 }
 
 // ReflectionGate reports the watermark gate the reflection face of this run
@@ -1519,6 +1543,7 @@ func (r *Run) mountCapture() error {
 		return err
 	}
 	r.loop.SetCapture(adapter)
+	r.captureScope = scope
 	return nil
 }
 

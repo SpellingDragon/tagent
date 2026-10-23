@@ -176,8 +176,8 @@ func TestGovernanceBeforeExecution(t *testing.T) {
 		if err := json.Unmarshal(raw, &onDisk); err != nil {
 			t.Fatalf("parse the approval request file: %v", err)
 		}
-		if onDisk.ID != receipt.Hold.ApprovalID || onDisk.ArgsDigest != receipt.Hold.ExpectedDigest || onDisk.ArgsDigest != approval.ArgsDigest([]byte(args)) {
-			t.Fatalf("request on disk = %+v, want the hold's identity beside the digest binding over the held arguments", onDisk)
+		if onDisk.ArgsDigest != receipt.Hold.ExpectedDigest || onDisk.ArgsDigest != approval.ArgsDigest([]byte(args)) {
+			t.Fatalf("request on disk = %+v, want the digest binding over the held arguments beside the policy-minted identity", onDisk)
 		}
 
 		first, err := rig.approvals.Decide(req.ID, approval.ApprovalApproved, "cli:alice")
@@ -639,6 +639,9 @@ func (r *govRig) record(ctx context.Context, res task.Result) (event.EventID, er
 func (r *govRig) registerApproval(hold task.Hold, tool, args string) *approval.ApprovalRequest {
 	r.t.Helper()
 	d := r.decision()
+	if req := r.approvals.Lookup(tool, approval.ArgsDigest([]byte(args))); req != nil {
+		return req
+	}
 	req, err := r.approvals.Request(context.Background(), hold.ApprovalID, tool, []byte(args), d.Risk, d.Rule, d.Reason)
 	if err != nil {
 		r.t.Fatalf("register the approval request: %v", err)

@@ -702,9 +702,10 @@
         "memory/replay",
         "runtime/state",
         "runtime/task",
-        "memory/embedder"
+        "memory/embedder",
+        "rl"
       ],
-      "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖；handoff refs 与请求侧共用 memory/replay 的 AssembleBudgetPrefix 预算装配，事实文本按 api/model 的消息面读出（material-flow P3/P6）。"
+      "reason": "装配器只读声明/状态/事件词汇并把调用交回既有委派面，不向核心包反向依赖；handoff refs 与请求侧共用 memory/replay 的 AssembleBudgetPrefix 预算装配，事实文本按 api/model 的消息面读出（material-flow P3/P6）。; Builder.Capture wraps the worker model with the run capture scope so delegated attempts enter the same trajectory"
     },
     {
       "from": "tool/recall",

@@ -185,7 +185,8 @@ func smokeErrorsReloadRefused(t *testing.T) {
 }
 
 // smokeErrorsApprovalExpired 用配置面的最小有效期加可推进时钟：扣留的请求过期后
-// 不能被补批，模型重试同一调用时仍被扣留并登记新请求。
+// 不能被补批；模型重试同一调用时仍被扣留——过期请求仍是该 tool+digest 的最新
+// identity, so the gate registers nothing new and the book holds no pending.
 func smokeErrorsApprovalExpired(t *testing.T) {
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
@@ -241,17 +242,14 @@ func smokeErrorsApprovalExpired(t *testing.T) {
 		t.Fatalf("held acknowledgements = %d, want exactly two", got)
 	}
 	renewed := rig.gateway.Manager().Pending()
-	if len(renewed) != 1 {
-		t.Fatalf("pending requests after the retry = %d, want one", len(renewed))
+	if len(renewed) != 0 {
+		t.Fatalf("pending requests after the retry = %d, want none: the expired request still names the digest", len(renewed))
 	}
-	if renewed[0].ID == pending.ID {
-		t.Fatalf("the retry reused the expired approval identity %s", pending.ID)
+	if latest := rig.gateway.Manager().Lookup(sendToolID, pending.ArgsDigest); latest == nil || latest.ID != pending.ID {
+		t.Fatalf("lookup after the retry = %+v, want the expired request %s still naming the digest", latest, pending.ID)
 	}
-	if renewed[0].ArgsDigest != pending.ArgsDigest {
-		t.Fatalf("retry digest = %s, want the held digest %s", renewed[0].ArgsDigest, pending.ArgsDigest)
-	}
-	if renewed[0].CreatedMs != clock.Now().UnixMilli() {
-		t.Fatalf("renewed request created at %d ms, want the advanced clock %d", renewed[0].CreatedMs, clock.Now().UnixMilli())
+	if clock.Now().UnixMilli() <= pending.ExpiresMs {
+		t.Fatalf("the retry happened at %d ms, want after the expiry %d", clock.Now().UnixMilli(), pending.ExpiresMs)
 	}
 	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker); got != 0 {
 		t.Fatalf("the held call delivered its body %d time(s), want none", got)
@@ -265,14 +263,14 @@ func smokeErrorsApprovalExpired(t *testing.T) {
 
 	rig.drive(chat, smokeErrorsAfterApprovalTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeErrorsAfterApprovalTurn, 60*time.Second)
-	if got := len(rig.gateway.Manager().Pending()); got != 1 {
-		t.Fatalf("pending requests after the recovery turn = %d, want the retried request still held", got)
+	if got := len(rig.gateway.Manager().Pending()); got != 0 {
+		t.Fatalf("pending requests after the recovery turn = %d, want the retried call still held beside no pending", got)
 	}
 	if err := rig.healthz(); err != nil {
 		t.Fatalf("health after the expired approval: %v", err)
 	}
-	t.Logf("[wave2-errors] approval %s expired at %d ms; the retry stayed held as %s",
-		pending.ID, pending.ExpiresMs, renewed[0].ID)
+	t.Logf("[wave2-errors] approval %s expired at %d ms; the retry stayed held, the expired request still names the digest and no pending was registered",
+		pending.ID, pending.ExpiresMs)
 }
 
 // smokeErrorsShortTTLDocument 把宿主文档的审批有效期改到最小分钟值。

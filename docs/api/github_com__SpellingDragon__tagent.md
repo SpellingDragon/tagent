@@ -232,6 +232,16 @@ func EnvironmentBlockGenerations() int64
     EnvironmentBlockGenerations reports how many environment blocks the request
     boundary has rendered in this process so far.
 
+func NewSkillLoadSink(agent event.AgentID) knowledge.LoadSink
+    NewSkillLoadSink mounts a fresh loaded-skill ledger on one agent and answers
+    the sink that agent's knowledge surface publishes loaded bodies to. The host
+    mounts one sink per knowledge surface it constructs, so a surface rebuilt
+    on reload replaces its agent's ledger instead of inheriting the bodies the
+    previous generation loaded. The request boundary of the agent reads the
+    ledger back through the agent identity, so the bodies a load published enter
+    the next request of that agent and no other. A host that mounts no sink
+    keeps the load's name-level answer exactly as before.
+
 TYPES
 
 type AgeFoldPlugin struct {
@@ -638,6 +648,14 @@ type Option = HostOption
     name of the host option: one config struct, so the manual and the host entry
     accept the same constructors.
 
+func WithApprovals(approvals *approval.ApprovalManager) Option
+    WithApprovals attaches the approval book a host document's risk table grades
+    through: a document that declares risk_rules is opened as a policy over this
+    book, so a call at the critical grade registers one approval request and
+    parks in the approval wait, and the book stays the one external approvers
+    rule through. An assembly beside no book keeps the named refusal of the
+    critical grade instead of parking anything.
+
 func WithApprover(approve task.Approver) Option
     WithApprover attaches the approval ruling every call admitted through the
     registration wrapper of this assembly is decided under. A policy attached
@@ -921,6 +939,10 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
     committed. A committed body carries the light fields and no trigger source,
     so a fact restored from the tier carries the lineage its bytes carry and
     never an invented one.
+
+func (r *Run) CommittedFacts() int
+    CommittedFacts reports how many live facts this run holds: the counter the
+    metrics endpoint reports beside the turns and deliveries of the host.
 
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
     Diagnostics reads every diagnostic face of this run under the caller's

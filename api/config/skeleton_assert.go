@@ -26,6 +26,11 @@ var (
 		Raw:      map[string]any{},
 	}
 
+	_ = TelemetrySpec{
+		OTelEnabled: false,
+		Endpoint:    "",
+	}
+
 	_ = AgentSpec{
 		ID:                "",
 		ParentID:          "",
