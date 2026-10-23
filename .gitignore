@@ -67,7 +67,13 @@ data/
 
 # 就地构建的门禁二进制（门禁一律经 go run 调用，不入库）
 /codetools
+/comment_policy
 
 # 认知资产漂移审计快照（cognitive-asset-guard D1，运行期产物不入库）
 .tagent/
+
+# 实现期过程快照（head 快照工具的输出，不入库）
+.wechat_head_snapshot.txt
 !examples/wechat-bot/scripts/ima-note-upload.sh
+
+__pycache__/

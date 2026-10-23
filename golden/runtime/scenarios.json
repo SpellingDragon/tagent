@@ -1,0 +1,499 @@
+{
+  "schema_version": 1,
+  "change": "runtime-rebuild",
+  "description": "runtime-rebuild 的 15 个金样场景合同（来自 plan §9）。本文件是“期望值合同”，不是运行证据：真实观测由未来任务 09.1 的 scenario runner 产出，再经 check_runtime_evidence --evidence/--test-log 对照。断言是具体可比值（布尔/数字/消息角色序列/身份关系字典），不硬编码随机 ID/时间/CallID。**关联/工件键（dict/list 值）同样由 runner 从正式 API 输出派生，不得照抄本档 expected 填报；`event_refs` 为 runner 自报，不构成真伪/来源认证。** S03 的 `model_message_roles` 为框架级 Role 序列，按产品真实 6 消息形态固定（assistant 携双 call＋2 条受理回执 `tool`＋2 条后台观察 `user`，即受理与观察分立；场景 call 数冻结为 2；供应商 role 映射待 G1，不在此冻结）；S07 只要求引用互不覆盖与内容相等，**不强制去重优化**；S08 的 `blocker_detail_rows[0]` 取自「通知欠给已关闭实例、未投递被保留」这一真实构造（**不是**存储降级）：`advancer` 取产品闭集词表 `executor`/`diagnosis`/`explicit-stop`/`notice-transport`（是「下一推进方类别」，不是任务 id），`blocker` 是 owner 原样记录的自由文本（**已知观测面欠账**：该自由文本仍落在身份轴，闭环需在产品侧给稳定 code 或把该字段降维，未在本轮改动）；S10 保留 `resource` scope，观测改由 learning 包的真实生产路径自报：episode 跨 session 切分、capture 封印账（attempts.jsonl＋seal.json）与模型替换成功/失败生命周期；真实 SFT 批次与形状门不再由 S10 承担。**S03 的 `requested_calls`/`receipts`/`backgrounds` 与受理/后台有界内容标记取自隔离工具 fixture 的固定返回值（call→task 为 1:1，decision→call 为 **1:N**：一次决策的 assistant 消息可携带多个 call，故两条 receipt 同记 issuing decision `decision-a`；非观察器填充、不以生产串 ID 重命名为正确结果）；S10 的样本/capture/替换观测均为真实驱动自报：导出样本按 episode 分配轮次，capture 的 attempts.jsonl 与 seal 摘要逐字节对账，替换的成功安装与失败保留由安装版本与在途版本归属断言。这些格式只作观测规范化合同，不冻结产品 API/schema。**",
+  "evidence_contract": {
+    "note": "上游 scenario runner 的正式入口产物应满足下列字段；检查器只做明示校验，不把它当作防伪或加密证明——runner/source_fingerprint/execution 均由 runner 自报，不声称来源已认证。本块字段集与 check_runtime_evidence.py 的强制集自洽（声明少于强制即失败）。",
+    "required_fields": [
+      "schema_version",
+      "runner",
+      "execution",
+      "source_fingerprint",
+      "test_log_ref",
+      "records"
+    ],
+    "record_fields": [
+      "scenario_id",
+      "test_package",
+      "test_name",
+      "event_refs",
+      "observations"
+    ],
+    "source_fingerprint_fields": [
+      "module_path",
+      "revision",
+      "content_hash"
+    ],
+    "execution_fields": [
+      "run_id",
+      "command",
+      "platform",
+      "exit_code"
+    ],
+    "exit_code_semantics": "execution.exit_code 必须是成功整数 0；非 0（含 bool）判失败，不被后续 pass 覆盖。test_log_ref 必须解析到与 --test-log 同一文件（realpath 相等），指向别的日志判失败。",
+    "selection_semantics": "每个场景 runner 单次运行该场景用例 = -count=1（固定场景 case，每个 (包,用例) 有且仅有一次 run）；与之分开，叶任务回归日志用 -count=10（用途不同，不混算）。",
+    "sequence_semantics": "逐条 record 的 test_package/test_name 必须与合同逐字一致；test-log 允许合法并行（run→pause→cont→pass），但每个 (包,用例) 必须有终止事件、子测试不得 skip/fail、包级唯一 start/pass、无包级 fail。"
+  },
+  "scopes": {
+    "note": "验收集登记（唯一、全 15 场景各归一标签）。check_runtime_evidence.py 默认 --scope complete（严格，全 15 必验）；--scope deterministic 只验确定性标签场景并输出 scope 与 remaining_required（把资源场景列为显式欠账，不报全通过，也不得用合成资源用例凑数）。合同始终含全 15 场景。",
+    "labels": [
+      "deterministic",
+      "resource"
+    ],
+    "label_semantics": {
+      "deterministic": "不依赖外部真实资源（真实 SFT 制品/真实模型/MCP/A2A/embedding/微信/collector 等）的合同场景；09.1 确定性 runner 的责任集。",
+      "resource": "需外部真实资源与授权的合同场景；本波仅 S10（episode/capture/模型替换的真实链路），由 09.5 逐项启用门验收，未授权保持 remaining-required。"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "S01",
+      "title": "双 agent 组织发布：同内容、过期候选、失败回收、在途旧插件绑定",
+      "task_ids": [
+        "01.4",
+        "01.5"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario01OrganizationPublication",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/state:TestGenerationPublication"
+      ],
+      "observations": {
+        "published_generation_count": 1,
+        "same_content_no_republish": true,
+        "stale_candidate_rejected": true,
+        "candidate_failure_released_resources": true,
+        "inflight_request_generation": "previous"
+      }
+    },
+    {
+      "id": "S02",
+      "title": "同 session 双 invocation：独立决策、取消不连坐、工具与反馈归属明确",
+      "task_ids": [
+        "02.5",
+        "02.7"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario02DualInvocationIsolation",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/execution:TestNativeConversationRoundTrip"
+      ],
+      "observations": {
+        "decisions_per_session": 2,
+        "shared_session_history": true,
+        "cancel_isolation": true,
+        "tool_call_owner_distinct": true,
+        "feedback_owner_distinct": true
+      }
+    },
+    {
+      "id": "S03",
+      "title": "原生工具 Receipt/后台结果：受理回执与后台观察分立，模型第二轮确实收到配对与真实正文",
+      "task_ids": [
+        "02.3"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario03ToolReceiptAndBackground",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/execution:TestNativeToolAdmission"
+      ],
+      "observations": {
+        "receipts_per_call": 1,
+        "receipt_before_terminal": true,
+        "background_result_in_next_model_view": true,
+        "native_call_id_preserved": true,
+        "model_message_roles": [
+          "user",
+          "assistant",
+          "tool",
+          "tool",
+          "user",
+          "user"
+        ],
+        "requested_calls": [
+          "call-a",
+          "call-b"
+        ],
+        "receipts": [
+          {
+            "call": "call-a",
+            "task": "task-a",
+            "decision": "decision-a"
+          },
+          {
+            "call": "call-b",
+            "task": "task-b",
+            "decision": "decision-a"
+          }
+        ],
+        "backgrounds": [
+          {
+            "call": "call-a",
+            "marker": "bg-a"
+          },
+          {
+            "call": "call-b",
+            "marker": "bg-b"
+          }
+        ],
+        "captured_content_markers": {
+          "receipt_message": "receipt-marker-a",
+          "background_original": "background-marker-a"
+        },
+        "links_are_event_derived_one_to_one": true,
+        "multi_tool_call_boundary_preserved": true,
+        "request_standin_strictly_validated": true
+      }
+    },
+    {
+      "id": "S04",
+      "title": "插件一次授权、最终参数执行、拒绝零副作用、提交后呈现",
+      "task_ids": [
+        "02.6",
+        "04.5"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario04PluginPhaseAndGovernance",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/execution:TestPluginPhaseOrdering",
+        "tests/integration/capabilities:TestGovernanceBeforeExecution"
+      ],
+      "observations": {
+        "pre_execution_policy_runs": 1,
+        "final_params_executed": true,
+        "denied_tool_side_effects": 0,
+        "post_commit_presentation_preserves_fact": true
+      }
+    },
+    {
+      "id": "S05",
+      "title": "关闭/Handoff/同名重建：旧通知不串新实例，已开始通知不改投，未停止不伪完成",
+      "task_ids": [
+        "02.8",
+        "02.9"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario05CloseHandoffReincarnation",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/execution:TestHandoffFutureNotifications",
+        "tests/integration/execution:TestCloseDrainsObligations"
+      ],
+      "observations": {
+        "started_notice_target_fixed": true,
+        "future_notice_target_new_instance": true,
+        "old_notice_delivered_to_new_instance": false,
+        "drain_phases": {
+          "before_all_stopped": false,
+          "after_all_stopped": true
+        },
+        "notice_identity_fields": {
+          "task": true,
+          "round": true,
+          "category": true,
+          "sequence": true
+        }
+      }
+    },
+    {
+      "id": "S06",
+      "title": "真实 Manager 持久提交与失败重放：accepted/settled 不冲突，重复提交不冒充已交付",
+      "task_ids": [
+        "02.2",
+        "03.3"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario06DurableCommitAndReplay",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/history:TestDurableTaskRoundTrip"
+      ],
+      "observations": {
+        "accepted_settled_conflict": false,
+        "duplicate_submit_returns_existing": true,
+        "duplicate_reported_as_delivered": false,
+        "replay_of_unconfirmed_delivery": true,
+        "roundtrip_survives_restart": true
+      }
+    },
+    {
+      "id": "S07",
+      "title": "同正文跨 owner/format 的引用隔离、同字节去重与投影呈现保真",
+      "task_ids": [
+        "03.1",
+        "03.4"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario07OwnerIsolation",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/history:TestOriginalReferenceIsolation"
+      ],
+      "observations": {
+        "distinct_owner_references": 2,
+        "owner_references_nonoverwriting": true,
+        "same_bytes_content_equal": true,
+        "original_bytes_equal_readback": true,
+        "presentation_full_text_iff_decision_full": true
+      }
+    },
+    {
+      "id": "S08",
+      "title": "OTel 关闭时 Query 权限、快照、分页、订阅断档与阻塞解释（阻塞场景=通知欠给已关闭实例，未投递被保留）",
+      "task_ids": [
+        "05.1",
+        "05.2",
+        "05.3",
+        "05.4"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario08QueryWithoutOtel",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/inspection:TestQueryAuthorizationAndCursor",
+        "tests/integration/inspection:TestObservationDoesNotOwnState"
+      ],
+      "observations": {
+        "query_ok_with_otel_disabled": true,
+        "cursor_revision_bound": true,
+        "expired_window_explained": true,
+        "subscription_overflow_reset_explained": true,
+        "statistics_derived_from_detail": true,
+        "authorization_filtered_detail_normalized": true,
+        "derived_counts": {
+          "configured": 2,
+          "resident": 2,
+          "busy": 1,
+          "blocked": 1
+        },
+        "blockers_with_next_advancer": 1,
+        "blocker_detail_rows": [
+          {
+            "object": "task-a",
+            "owner": "session-a",
+            "blocker": "task: the receiving instance is closed and its undelivered notifications are retained",
+            "advancer": "notice-transport"
+          }
+        ],
+        "blocker_statistic_matches_detail": true
+      }
+    },
+    {
+      "id": "S09",
+      "title": "capture 脱敏、attempt 失败、usage 尾包、关闭准入、无 seal 及 tokenizer 能力 absent（未验证不得声称 real/deterministic）",
+      "task_ids": [
+        "06.2",
+        "06.3"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario09CaptureFidelityAndSeal",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/learning:TestCaptureFidelityAndRedaction",
+        "tests/integration/learning:TestCaptureAdmissionAndSeal"
+      ],
+      "observations": {
+        "credential_redacted": true,
+        "failed_attempt_observable": true,
+        "usage_tail_recorded": true,
+        "admission_closed_then_drained": true,
+        "crash_without_seal_claims_complete": false,
+        "tokenizer_capability": "absent"
+      }
+    },
+    {
+      "id": "S10",
+      "title": "episode 跨 session 切分、请求观测封印、模型替换生命周期",
+      "task_ids": [
+        "06.1",
+        "06.3",
+        "06.8"
+      ],
+      "test_package": "tests/integration/learning",
+      "test_name": "TestScenario10EpisodeObservationAndReplacement",
+      "status": "planned",
+      "scope": "resource",
+      "anchor_tests": [
+        "tests/integration/learning:TestChainExporterProducesSamples",
+        "tests/integration/learning:TestScenario10EpisodeObservationAndReplacement"
+      ],
+      "observations": {
+        "split_grouped_by_episode": true,
+        "shared_ancestor_not_leaked": true,
+        "attempts_sealed": true,
+        "replacement_installs_on_success": true,
+        "replacement_keeps_old_on_failure": true
+      }
+    },
+    {
+      "id": "S11",
+      "title": "config 驱动子 agent 与父 pipeline：子 agent 绑定按自身模型/提示文件/工具装配，父 pipeline 按声明序执行，子 agent 调用=task 受理并回读回执；子工具表=装配声明面（内置文件工具不自动继承）",
+      "task_ids": [
+        "03.3"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario11ConfigDrivenSubagentAndPipeline",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tool/subagent:TestAssembledAgentServes",
+        "tests/integration/config:TestPresetToolsAssemble"
+      ],
+      "observations": {
+        "parent_pipeline_before_order": [
+          "transform-a",
+          "transform-b"
+        ],
+        "parent_pipeline_after_order": [
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ],
+          [
+            "observe-a",
+            "presenter-b"
+          ]
+        ],
+        "parent_pipeline_matches_declaration": true,
+        "parent_instruction_from_declared_file": true,
+        "subagent_call_admits_task": true,
+        "child_agent_model_requests": 1,
+        "child_agent_runs_declared_model": true,
+        "child_agent_prompt_from_own_file": true,
+        "child_agent_tool_names": [
+          "echo-child"
+        ],
+        "child_agent_declares_own_tool": true
+      }
+    },
+    {
+      "id": "S12",
+      "title": "call_subagent 双装配源：agents 文件与显式参数各一次受理即返，终结通知定向发送者且身份保真，双源同给具名拒零任务",
+      "task_ids": [
+        "03.4"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario12SubagentSourcesAndNotice",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/execution:TestSubagentCallAdmitsTask",
+        "tool/subagent:TestSubagentToolDeclaration"
+      ],
+      "observations": {
+        "agents_file_receipt_before_terminal": true,
+        "explicit_receipt_before_terminal": true,
+        "terminal_notice_targets_issuer": true,
+        "notice_identity_fields": {
+          "task": true,
+          "round": true,
+          "category": true,
+          "sequence": true
+        },
+        "agents_file_source_assembled": true,
+        "explicit_source_assembled": true,
+        "both_sources_refused_by_name": true,
+        "both_sources_admitted_tasks": 0
+      }
+    },
+    {
+      "id": "S13",
+      "title": "上下文闭集：静态头（prompt/skill 结构序）→折叠摘要→投影→环境块→transcript（W1.3 布局），每个消息恰属一部件且五部件齐全",
+      "task_ids": [
+        "03.4",
+        "02.5"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario13ContextClosedSet",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "tests/integration/host:TestEnvironmentBlockNamesTheAvailableFaces",
+        "tests/integration/history:TestAgeBandsReachTheRequest"
+      ],
+      "observations": {
+        "static_head_order": [
+          "prompt",
+          "skill"
+        ],
+        "folded_summary_leads_projection": true,
+        "environment_block_before_transcript": true,
+        "part_count_closed": 5
+      }
+    },
+    {
+      "id": "S14",
+      "title": "三龄段：段龄折叠产出（新→中一段进程折、中+老→老一份历史摘要）且摘要领投影；阈值不达整投影原样未动",
+      "task_ids": [
+        "03.4"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario14AgeBandProducts",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "memory/replay:TestAgeFoldFoldsTheNewBandIntoOneProduct",
+        "memory/replay:TestAgeFoldFoldsTheOlderBandsIntoOneHistorySummary",
+        "memory/replay:TestAgeFoldWaitsForTheVolumeThreshold"
+      ],
+      "observations": {
+        "age_fold_products": {
+          "segment_fold": 1,
+          "history_summary": 1
+        },
+        "history_summary_leads": true,
+        "under_threshold_untouched": true
+      }
+    },
+    {
+      "id": "S15",
+      "title": "task 逻辑状态：静默逐级识别 watch→stable→suspect（每级报一次）＋progress 回调抵达下一次决策且不答调用",
+      "task_ids": [
+        "02.2",
+        "02.5"
+      ],
+      "test_package": "tests/integration/acceptance",
+      "test_name": "TestScenario15TaskLogicalStatus",
+      "status": "planned",
+      "scope": "deterministic",
+      "anchor_tests": [
+        "runtime/task:TestLogicalStatusRecognition",
+        "runtime/agent:TestBackflowNotificationLanes",
+        "tests/integration/execution:TestProgressNotificationReachesTheAgent"
+      ],
+      "observations": {
+        "logical_status_ladder": [
+          "watch",
+          "stable",
+          "suspect"
+        ],
+        "progress_reaches_decision": true
+      }
+    }
+  ]
+}

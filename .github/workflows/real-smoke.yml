@@ -1,0 +1,254 @@
+# real-smoke — nightly real-provider smoke: the only workflow that calls a real
+# LLM/embedding endpoint. runtime-contracts.yml stays credential-free; its
+# real-acceptance job exercises structure/evidence, never a provider.
+#
+# Triggers: schedule (nightly) and workflow_dispatch only. It is deliberately
+# absent from push/pull_request, so it can never become a per-PR gate.
+#
+# Credentials: two independent families, both optional:
+#   llm-judge (evolution.ModelJudge over an OpenAI-compatible endpoint):
+#     TAGENT_REAL_JUDGE_BASE_URL / TAGENT_REAL_JUDGE_API_KEY / TAGENT_REAL_JUDGE_MODEL
+#   embedding (memory recall over an OpenAI-compatible embedding endpoint):
+#     TAGENT_REAL_EMBEDDING_BASE_URL / TAGENT_REAL_EMBEDDING_API_KEY / TAGENT_REAL_EMBEDDING_MODEL
+# The three values of one family are stored as repository secrets so a family is
+# provisioned atomically; the base URL is not secret itself but rides with its key.
+#
+# Skip semantics (R24 three states, the same convention as tests/integration):
+#   * family absent (0 of 3)     -> the family job stays skipped; credential-gate
+#     writes a notice and a run-summary row that says SKIPPED. A skipped job is
+#     never reported as a real pass, and no step sets continue-on-error. Only the
+#     credential-gate job itself is green (GitHub cannot skip a job from inside a
+#     step); read the skipped family jobs and the summary, never the run badge,
+#     as the real signal of a credential-less night.
+#   * family half set (1-2 of 3) -> fatal, named on the spot: a half gate is less
+#     honest than no gate.
+#   * family fully set (3 of 3)  -> the family job runs, and a SKIP line inside it
+#     is itself a failure (a provisioned gate may not skip).
+#
+# Model version record: each running family job writes the exact configured model
+# identifier (the model/version that was exercised), the endpoint host, the commit
+# SHA, the run id and the UTC timestamp to $GITHUB_STEP_SUMMARY and to
+# real-smoke/<family>-model-version.txt, uploaded as a run artifact. API keys are
+# never printed; only the model identifier and the endpoint host are recorded.
+name: real-smoke
+
+on:
+  schedule:
+    # 18:17 UTC daily; off the top of the hour avoids the scheduler's busiest minute.
+    - cron: "17 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One real run at a time: a second tick must not race the first against the same
+# provider quota.
+concurrency:
+  group: real-smoke
+  cancel-in-progress: false
+
+jobs:
+  credential-gate:
+    name: credential-gate (skip is explicit, never a pass)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      judge: ${{ steps.classify.outputs.judge }}
+      embedding: ${{ steps.classify.outputs.embedding }}
+    env:
+      TAGENT_REAL_JUDGE_BASE_URL: ${{ secrets.TAGENT_REAL_JUDGE_BASE_URL }}
+      TAGENT_REAL_JUDGE_API_KEY: ${{ secrets.TAGENT_REAL_JUDGE_API_KEY }}
+      TAGENT_REAL_JUDGE_MODEL: ${{ secrets.TAGENT_REAL_JUDGE_MODEL }}
+      TAGENT_REAL_EMBEDDING_BASE_URL: ${{ secrets.TAGENT_REAL_EMBEDDING_BASE_URL }}
+      TAGENT_REAL_EMBEDDING_API_KEY: ${{ secrets.TAGENT_REAL_EMBEDDING_API_KEY }}
+      TAGENT_REAL_EMBEDDING_MODEL: ${{ secrets.TAGENT_REAL_EMBEDDING_MODEL }}
+    steps:
+      - name: Classify credential families (0 = skip, 1-2 = fatal, 3 = run)
+        id: classify
+        run: |
+          set -euo pipefail
+
+          present() {
+            local count=0
+            for name in "$@"; do
+              if [ -n "${!name:-}" ]; then count=$((count + 1)); fi
+            done
+            printf '%s' "$count"
+          }
+
+          judge_count="$(present TAGENT_REAL_JUDGE_BASE_URL TAGENT_REAL_JUDGE_API_KEY TAGENT_REAL_JUDGE_MODEL)"
+          embedding_count="$(present TAGENT_REAL_EMBEDDING_BASE_URL TAGENT_REAL_EMBEDDING_API_KEY TAGENT_REAL_EMBEDDING_MODEL)"
+
+          judge=false
+          case "$judge_count" in
+            0) ;;
+            3) judge=true ;;
+            *)
+              echo "::error title=half-configured real judge gate::${judge_count} of 3 llm-judge values are set; a partial gate is refused instead of silently skipped"
+              exit 1
+              ;;
+          esac
+
+          embedding=false
+          case "$embedding_count" in
+            0) ;;
+            3) embedding=true ;;
+            *)
+              echo "::error title=half-configured real embedding gate::${embedding_count} of 3 embedding values are set; a partial gate is refused instead of silently skipped"
+              exit 1
+              ;;
+          esac
+
+          echo "judge=$judge" >> "$GITHUB_OUTPUT"
+          echo "embedding=$embedding" >> "$GITHUB_OUTPUT"
+
+          if [ "$judge" = false ] && [ "$embedding" = false ]; then
+            echo "::notice title=real-smoke skipped::no credential family is provisioned, so no real provider is exercised in this run"
+            {
+              echo "### real-smoke: SKIPPED (no credentials provisioned)"
+              echo ""
+              echo "This run did **not** exercise a real provider. The family jobs stay **skipped**,"
+              echo "so no job claims a real pass; this gate job is green only because it classified the gate."
+              echo "Provision either family as repository secrets to enable it:"
+              echo ""
+              echo "- llm-judge: \`TAGENT_REAL_JUDGE_BASE_URL\`, \`TAGENT_REAL_JUDGE_API_KEY\`, \`TAGENT_REAL_JUDGE_MODEL\`"
+              echo "- embedding: \`TAGENT_REAL_EMBEDDING_BASE_URL\`, \`TAGENT_REAL_EMBEDDING_API_KEY\`, \`TAGENT_REAL_EMBEDDING_MODEL\`"
+              echo ""
+              echo "A family with only 1-2 of its 3 values is a fatal half configuration, not a skip."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  real-smoke-judge:
+    name: real-smoke (llm-judge)
+    needs: credential-gate
+    if: ${{ needs.credential-gate.outputs.judge == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TAGENT_REAL_JUDGE_BASE_URL: ${{ secrets.TAGENT_REAL_JUDGE_BASE_URL }}
+      TAGENT_REAL_JUDGE_API_KEY: ${{ secrets.TAGENT_REAL_JUDGE_API_KEY }}
+      TAGENT_REAL_JUDGE_MODEL: ${{ secrets.TAGENT_REAL_JUDGE_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # Written before the test so the model version survives a failing run.
+      - name: Record model version (run summary + artifact)
+        run: |
+          set -euo pipefail
+          : "${TAGENT_REAL_JUDGE_MODEL:?the llm-judge model identifier is required once the family is provisioned}"
+          host="${TAGENT_REAL_JUDGE_BASE_URL#*://}"
+          host="${host%%/*}"
+          stamp="$(date -u +%FT%TZ)"
+          mkdir -p real-smoke
+          {
+            echo "family=llm-judge"
+            echo "model_identifier=${TAGENT_REAL_JUDGE_MODEL}"
+            echo "endpoint_host=${host}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "date_utc=${stamp}"
+          } > real-smoke/judge-model-version.txt
+          {
+            echo "### real-smoke model version — llm-judge"
+            echo ""
+            echo "| model identifier | endpoint host | commit | run | date (UTC) |"
+            echo "|---|---|---|---|---|"
+            echo "| \`${TAGENT_REAL_JUDGE_MODEL}\` | \`${host}\` | \`${GITHUB_SHA}\` | [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) | ${stamp} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Real judge artifact (a provisioned gate may not skip)
+        run: |
+          set -euo pipefail
+          go test ./tests/integration/evolution/ -run '^TestRealLLMJudgeArtifact$' -count=1 -v | tee judge.log
+          if grep -q -- '--- SKIP' judge.log; then
+            echo "::error::TestRealLLMJudgeArtifact skipped although the llm-judge gate is fully provisioned; a skip here would be a fake green"
+            exit 1
+          fi
+          if ! grep -q -- '--- PASS: TestRealLLMJudgeArtifact' judge.log; then
+            echo "::error::TestRealLLMJudgeArtifact produced no PASS line; the -run regex may have matched nothing"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-smoke-judge-model-version
+          path: real-smoke/judge-model-version.txt
+          if-no-files-found: error
+
+  real-smoke-embedding:
+    name: real-smoke (embedding recall)
+    needs: credential-gate
+    if: ${{ needs.credential-gate.outputs.embedding == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAGENT_REAL_EMBEDDING_BASE_URL: ${{ secrets.TAGENT_REAL_EMBEDDING_BASE_URL }}
+      TAGENT_REAL_EMBEDDING_API_KEY: ${{ secrets.TAGENT_REAL_EMBEDDING_API_KEY }}
+      TAGENT_REAL_EMBEDDING_MODEL: ${{ secrets.TAGENT_REAL_EMBEDDING_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      # Written before the test so the model version survives a failing run.
+      - name: Record model version (run summary + artifact)
+        run: |
+          set -euo pipefail
+          : "${TAGENT_REAL_EMBEDDING_MODEL:?the embedding model identifier is required once the family is provisioned}"
+          host="${TAGENT_REAL_EMBEDDING_BASE_URL#*://}"
+          host="${host%%/*}"
+          stamp="$(date -u +%FT%TZ)"
+          mkdir -p real-smoke
+          {
+            echo "family=embedding"
+            echo "model_identifier=${TAGENT_REAL_EMBEDDING_MODEL}"
+            echo "endpoint_host=${host}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "date_utc=${stamp}"
+          } > real-smoke/embedding-model-version.txt
+          {
+            echo "### real-smoke model version — embedding"
+            echo ""
+            echo "| model identifier | endpoint host | commit | run | date (UTC) |"
+            echo "|---|---|---|---|---|"
+            echo "| \`${TAGENT_REAL_EMBEDDING_MODEL}\` | \`${host}\` | \`${GITHUB_SHA}\` | [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) | ${stamp} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The deterministic subtests pass without credentials, so the top-level PASS
+      # line alone proves nothing. A provisioned gate must show neither a SKIP
+      # line nor the "not provisioned" message, and both real paths must PASS.
+      - name: Real embedding recall (a provisioned gate may not skip)
+        run: |
+          set -euo pipefail
+          go test ./tests/integration/capabilities/ \
+            -run '^(TestSearchRecallsFromRealStore|TestRecallEvaluation)$' -count=1 -v | tee embedding.log
+          if grep -q -- '--- SKIP' embedding.log; then
+            grep -- '--- SKIP' embedding.log
+            echo "::error::a real embedding subtest skipped although the gate is fully provisioned; the deterministic stand-in must not be reported as the real path"
+            exit 1
+          fi
+          if grep -q 'not provisioned' embedding.log; then
+            echo "::error::the run says the real embedding endpoint is not provisioned although the gate is fully provisioned"
+            exit 1
+          fi
+          for test in TestSearchRecallsFromRealStore TestRecallEvaluation; do
+            if ! grep -q -- "--- PASS: ${test}" embedding.log; then
+              echo "::error::${test} produced no PASS line; the -run regex may have matched nothing"
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-smoke-embedding-model-version
+          path: real-smoke/embedding-model-version.txt
+          if-no-files-found: error

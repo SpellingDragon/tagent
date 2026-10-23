@@ -19,12 +19,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth 2 gives the commit-scope lint stage a parent to diff against:
+      # fetch-depth 0 keeps every citation-introducing commit reachable for the
+      # doc-refs citation-level anchors, and still gives commit-scope a parent:
       # the default shallow checkout grafts HEAD into a parentless commit, where
       # `git show --name-only` lists the whole tree.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -52,9 +53,9 @@ jobs:
       - name: Test (short)
         run: go test ./... -short -count=1
 
-      # Second module (resident-remaining-hardening 3.5): examples/wechat-bot is
-      # an independent module with no go.work, so the root `./...` never reaches
-      # it. Build/vet/test it explicitly or its regressions ship silently.
+      # Separate modules: examples/wechat-bot and examples/cli-host are
+      # independent modules with no go.work, so the root `./...` never reaches
+      # them. Build/vet/test each explicitly or its regressions ship silently.
       - name: Build (bot module)
         working-directory: examples/wechat-bot
         run: go build ./...
@@ -67,13 +68,27 @@ jobs:
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
 
-      # Root package at the scheduling floor: with one P, a witness cannot be
-      # satisfied by whichever round happens to arrive first, so the attribution
-      # discipline of the in-flight/pinned-hop assertions is actually exercised.
-      # Admitted after three consecutive green local runs plus 75 targeted runs
-      # under GOMAXPROCS=1.
-      - name: Test (root package at the scheduling floor)
-        run: GOMAXPROCS=1 go test . -short -count=1
+      # Third module: examples/cli-host is likewise independent (no go.work), so
+      # the root `./...` never reaches it either.
+      - name: Build (cli-host module)
+        working-directory: examples/cli-host
+        run: go build ./...
+
+      - name: Vet (cli-host module)
+        working-directory: examples/cli-host
+        run: go vet ./...
+
+      - name: Test (cli-host module, short)
+        working-directory: examples/cli-host
+        run: go test ./... -short -count=1
+
+      # Scheduling floor: the attribution witnesses (delegation completion,
+      # handoff future notifications, receipt/background separation) live in
+      # tests/integration/execution; "which round happened to arrive first may
+      # not satisfy the witness" is exactly what one P exercises. GOMAXPROCS=1
+      # fixes the round order (~2.5s).
+      - name: Test (execution witnesses at the scheduling floor)
+        run: GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1
 
       # Comment whitelist, enforced as a ratchet: a batch may lower the per-rule
       # totals in scripts/comment_policy/baseline.json but never raise one. Slots are
@@ -104,10 +119,9 @@ jobs:
       # offending frame matches a registered upstream signature AND there is
       # no plain (non-race) failure. A green-looking race log from a failed
       # command (compile error / bad package / timeout) can never be reported
-      # as success. Package set widened to the memory SUBpackages, plugin, and
-      # rl (was: top-level memory only, no plugin/rl).
-      - name: Race (root + memory subpkgs + agent + evolution + event + tools + plugin + rl)
-        run: ./scripts/race_check.sh . ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
+      # as success. Package set covers the memory SUBpackages, api/plugin, and rl.
+      - name: Race (root + memory subpkgs + runtime/agent + evolution + api/event + tool + api/plugin + rl)
+        run: ./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the

@@ -1,0 +1,188 @@
+// 契约: docs/wiki/tool/tool-architecture.md#tmux-monitor
+package exec
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestTmuxExecutorRunsCommand pins the life of one real tmux execution.
+// - start runs echo smoke-exec-marker inside a session of its own
+// - capture answers the marker, the first poll watches, and quiet reaches stable
+// - stop is confirmed and the session is observed dead afterwards
+func TestTmuxExecutorRunsCommand(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	executor, err := NewTmuxExecutor()
+	if err != nil {
+		t.Fatalf("executor construction = %v, want a tmux executor", err)
+	}
+	ctx := context.Background()
+	key := tmuxTestKey()
+	decl := ExecutionDecl{Command: "echo", Args: []string{"smoke-exec-marker"}, Resource: key}
+	if _, err := executor.Start(ctx, decl); err != nil {
+		t.Fatalf("start = %v", err)
+	}
+	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
+
+	frame, err := executor.Capture(ctx, key)
+	if err != nil {
+		t.Fatalf("capture = %v", err)
+	}
+	if !strings.Contains(string(frame), "smoke-exec-marker") {
+		t.Fatalf("captured frame = %q, want smoke-exec-marker", frame)
+	}
+
+	monitor := NewMonitor(executor, MonitorConfig{
+		Interval:         100 * time.Millisecond,
+		StableDuration:   300 * time.Millisecond,
+		FakeDeadDuration: 5 * time.Second,
+	})
+	first, err := monitor.Poll(ctx, key)
+	if err != nil {
+		t.Fatalf("first poll = %v", err)
+	}
+	if first != MonitorWatch {
+		t.Fatalf("first poll = %q, want %q", first, MonitorWatch)
+	}
+	waitForMonitorStatus(t, monitor, key, MonitorStable, 3*time.Second)
+
+	evidence, err := executor.Stop(ctx, key)
+	if err != nil {
+		t.Fatalf("stop = %v", err)
+	}
+	if !evidence.Confirmed {
+		t.Fatalf("stop evidence = %+v, want a confirmed stop", evidence)
+	}
+	probe, err := executor.Probe(ctx, key)
+	if err != nil {
+		t.Fatalf("probe after stop = %v", err)
+	}
+	if probe.State != ProbeDead {
+		t.Fatalf("probe after stop = %v, want %v", probe.State, ProbeDead)
+	}
+}
+
+// TestMonitorSuspectAfterQuiet pins the fake-dead classification of one live session.
+// - a session running sleep records no frame, so the first poll only watches
+// - quiet past the fake-dead threshold of its rhythm is reported as suspect
+func TestMonitorSuspectAfterQuiet(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	executor, err := NewTmuxExecutor()
+	if err != nil {
+		t.Fatalf("executor construction = %v, want a tmux executor", err)
+	}
+	ctx := context.Background()
+	key := tmuxTestKey()
+	decl := ExecutionDecl{Command: "sleep", Args: []string{"5"}, Resource: key}
+	if _, err := executor.Start(ctx, decl); err != nil {
+		t.Fatalf("start = %v", err)
+	}
+	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
+
+	monitor := NewMonitor(executor, MonitorConfig{
+		Interval:         100 * time.Millisecond,
+		StableDuration:   250 * time.Millisecond,
+		FakeDeadDuration: 500 * time.Millisecond,
+	})
+	first, err := monitor.Poll(ctx, key)
+	if err != nil {
+		t.Fatalf("first poll = %v", err)
+	}
+	if first != MonitorWatch {
+		t.Fatalf("first poll = %q, want %q", first, MonitorWatch)
+	}
+	waitForMonitorStatus(t, monitor, key, MonitorSuspect, 3*time.Second)
+}
+
+// TestExecWithoutTmuxNamesRefusal pins the construction refusal of a system without tmux.
+// - an injected availability probe answers no tmux and the construction names ErrTmuxUnavailable
+// - a PATH carrying no tmux binary refuses the same way, without panicking
+func TestExecWithoutTmuxNamesRefusal(t *testing.T) {
+	t.Run("injected probe", func(t *testing.T) {
+		executor, err := newTmuxExecutor(func() bool { return false })
+		if executor != nil {
+			t.Fatalf("executor = %+v, want none", executor)
+		}
+		if !errors.Is(err, ErrTmuxUnavailable) {
+			t.Fatalf("construction = %v, want ErrTmuxUnavailable", err)
+		}
+	})
+	t.Run("path without tmux", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		executor, err := NewTmuxExecutor()
+		if executor != nil {
+			t.Fatalf("executor = %+v, want none", executor)
+		}
+		if !errors.Is(err, ErrTmuxUnavailable) {
+			t.Fatalf("construction = %v, want ErrTmuxUnavailable", err)
+		}
+	})
+}
+
+// TestRunToolExecutesThroughTmuxExecutor pins the tool face over the real tmux executor.
+// - exec_run acquires one session and runs the command the arguments declare
+// - the answer carries the marker the captured frame holds
+func TestRunToolExecutesThroughTmuxExecutor(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	executor, err := NewTmuxExecutor()
+	if err != nil {
+		t.Fatalf("executor construction = %v", err)
+	}
+	manager := NewManager(executor)
+	key := tmuxTestKey()
+	t.Cleanup(func() { _, _ = manager.Release(context.Background(), key) })
+	args, err := json.Marshal(map[string]any{
+		"command":  "echo",
+		"args":     []string{"smoke-exec-marker"},
+		"kind":     KindTmux,
+		"resource": key.Key,
+	})
+	if err != nil {
+		t.Fatalf("arguments = %v", err)
+	}
+	answer, err := NewRunTool(manager).Call(context.Background(), args)
+	if err != nil {
+		t.Fatalf("exec_run = %v", err)
+	}
+	if !strings.Contains(fmt.Sprint(answer), "smoke-exec-marker") {
+		t.Fatalf("exec_run answer = %q, want smoke-exec-marker", answer)
+	}
+}
+
+// tmuxTestKey returns a tmux resource key whose session name belongs to this
+// test run.
+func tmuxTestKey() ResourceKey {
+	return ResourceKey{Kind: KindTmux, Key: fmt.Sprintf("tagent-test-%d", time.Now().UnixNano())}
+}
+
+// waitForMonitorStatus polls one execution until the wanted classification or
+// the deadline.
+func waitForMonitorStatus(t *testing.T, monitor *Monitor, key ResourceKey, want MonitorStatus, timeout time.Duration) MonitorStatus {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last MonitorStatus
+	for time.Now().Before(deadline) {
+		status, err := monitor.Poll(context.Background(), key)
+		if err != nil {
+			t.Fatalf("monitor poll = %v", err)
+		}
+		last = status
+		if status == want {
+			return status
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("monitor status = %q after %s, want %q", last, timeout, want)
+	return last
+}

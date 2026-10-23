@@ -1,0 +1,66 @@
+# orchestration Specification
+
+## Purpose
+TBD - created by archiving change simplify-prototype-event-pipeline. Update Purpose after archive.
+## Requirements
+### Requirement: 隔离并发与新语义优先
+编排 SHALL 使用 runtime-rebuild 的新任务及依赖，不继承旧勾选或恢复已删除源码。派发原子 MUST 是就绪叶任务集合；同树并发须满足 W_A∩W_B、W_A∩R_B、W_B∩R_A 均为空，测试包全部源文件纳入读取闭包。波次只用于汇报，解锁以实际前置集成和设计闸成立为准，不等待整域。
+
+#### Scenario: 文件不同但验证闭包冲突
+- **WHEN** 两单写不同文件但一单写入另一单测试所编译的包
+- **THEN** 编排者合单、串行或隔离工作树，合入后重新集成验证；不得以追加兼容放行
+
+#### Scenario: 释放资源后存在就绪叶任务
+- **WHEN** 一单交回资源且等待表中的叶任务前置和授权齐备
+- **THEN** 编排者重新计算触碰集并补派该叶任务，不等待其域内其它阻塞项
+
+### Requirement: 只有集成路径作为行为证据
+产品行为验收 SHALL 经正式根包入口、state、原生模型和工具、任务提交及实际消费者产生观测。确定性点名用例 MUST 有真实 run/pass；零匹配、子测试 Skip、包级失败及缺终局不得被退出码零或人工 PASS 覆盖。检查器合成 fixture 仅证明检查器，不是产品证据。MUST NOT 为新规划删除旧测试；适用测试迁移须先取得授权。
+
+#### Scenario: 检查器自测通过但没有产品运行
+- **WHEN** 规划、政策和金样合同及负控检查通过
+- **THEN** 只报告规划与检查资产有效，产品任务保持未完成，G1 签名探针及 G2 设计推演/设计验收不冒称通过（产品观测属 09 证据，**不属 G2**）
+
+#### Scenario: 原生工具往返
+- **WHEN** 正式入口完成受理及后台结果回流
+- **THEN** 严格协议服务核对第二轮实际 Request 中的消息配对、一次 Receipt 和真实正文，不以忽略输入的常量 final 作为闭环
+
+### Requirement: 设计闸与授权分离
+实施 MUST 先通过 G0 现场/资源盘点、G1 共享责任和原生接口探针、G2 正常/失败/并发/重启推演、G3 单级精确文件授权。设计合同先于消费者实现；无真实消费者的签名不得预建。重大方向变更 MUST 阻塞受影响单并交用户裁定。
+
+#### Scenario: 规划已齐但签名未验证
+- **WHEN** OpenSpec 报告四件套齐全而共享提交或绑定接口仍未编译取证
+- **THEN** 设计待核与实施就绪分别登记，不自动执行 apply；本轮只允许规划和检查资产
+
+### Requirement: 关键契约三层守护
+golden/runtime 下的架构与场景合同 MUST 由集成者单写。修改 SHALL 同步能力 delta、消费者任务和负控，合并时核对合同差异，收尾再次按基线核查；不得复制期望充当运行观测或提高 baseline 掩盖失败。
+
+#### Scenario: 新增未登记子包或金样错值
+- **WHEN** 出现未登记第一方子包、越界依赖或运行观测值不同
+- **THEN** 对应检查器返回非零且具名定位，格式检查不得替代此结果
+
+### Requirement: 编排凭据与资源台账
+ORCHESTRATION.md SHALL 按结论、编排四问、明细、台账四层组织；每单保存前置、精确写集、读闭包、资源锁和等待者、命令原始退出码及产物。完成前 MUST 核查勾选真实性、产物、数字来源和遗漏。真实资源 SHALL 逐项核对启用门、授权、预算和实际非空调用；未启用可 Skip，必验项不得以 Skip 结项。
+
+#### Scenario: SFT 或微信未授权
+- **WHEN** tokenizer/制品或真实测试接收者尚未获得授权
+- **THEN** 对应实际消费或发送任务保持阻塞，独立确定性任务可继续，不打印凭据或自动安装依赖
+
+#### Scenario: 收尾仍有真实路径欠账
+- **WHEN** 09.1 确定性场景已通过但 09.5 的必验资源项未完成
+- **THEN** 顶层 DoD 保持未完成，不归档，不称正式版交付；归档须另行授权并标准同步嵌套 delta
+
+### Requirement: 两阶段交付与骨架评审门
+交付 SHALL 分两阶段。阶段一 = 24 个骨架叶任务（编号 `NN.P0.M`）**仅含**数据/接口定义与 CI 合规注释文档，stub 方法体**仅**返回哨兵错误 `errors.New("phase 2: not implemented")`（无返回值方法仅 `// TODO(phase2)` 空体）、**禁止 panic**，**零业务逻辑**；阶段二 = 既有 65 个实施叶任务（`NN.M`）。阶段二 MUST 以骨架评审门 `00.P0.3`（全部域 P0 done 且评审通过）为前置；该前置 MUST 落为 `task-graph.json` 硬边并由规划检查器拒收缺边。
+
+#### Scenario: 骨架含业务逻辑或 panic
+- **WHEN** 某 `NN.P0.M` 任务含业务逻辑、`panic` 占位或非哨兵错误
+- **THEN** 骨架评审门 `00.P0.3` 拒收，阶段二不解锁，该任务退回重写
+
+#### Scenario: 00.P0.3 未 done 即派发 NN.M
+- **WHEN** 骨架评审门 `00.P0.3` 尚未 done 而编排尝试派发任一 `NN.M`
+- **THEN** 判定为编排违规（`task-graph.json` 硬边要求 `NN.M` 含前置 `00.P0.3`，`check_runtime_plan.py` 对缺边拒收并返回非零）
+
+#### Scenario: 域 P0 申报 done
+- **WHEN** 某域 P0 任务申报 `done`
+- **THEN** MUST 附 `go build ./...`、`go vet ./...`、`gofmt -l <包>`（空输出）的**原始退出码**与每包 `skeleton_assert.go` 编译断言证据；无证据不得勾选

@@ -1,0 +1,11 @@
+## ADDED Requirements
+### Requirement: 事件驱动任务
+工具与子agent SHALL 作为所属agent任务执行。模型先发ToolCall事件，核心消费后调用TaskManager；完成事件到达即可驱动模型，核心不等待其他任务。已经同时到达的一批输入与结果可以合并为一次模型调用。
+#### Scenario: 慢任务期间
+- **WHEN** 慢任务仍在执行且新输入或快任务结果到达
+- **THEN** agent继续消费并调用模型，不等待慢任务
+### Requirement: 归属与恢复
+任务 SHALL 携带OwnerID/TaskID，状态转换发回所属队列；unknown任务可通过同ID完成接缝接收重挂结果，不自动重执行。
+#### Scenario: 子agent任务
+- **WHEN** 父agent发起agent类型工具调用
+- **THEN** 子通过相同循环处理，结果作为父任务变化回流父队列

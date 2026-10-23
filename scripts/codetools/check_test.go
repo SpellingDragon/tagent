@@ -4,6 +4,7 @@ package main
 import (
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -590,6 +591,160 @@ func TestDocRefsDetectsDanglingFileCitations(t *testing.T) {
 	got := docDanglingRefs(doc, dir)
 	require.Equal(t, []string{"agent/gone_test.go"}, got,
 		"only path-like citations that no longer exist may be reported")
+}
+
+// commitTree stages the whole tree of dir and commits it, returning the new commit id.
+// The identity and signing flags are inline so the fixture never depends on the runner's
+// git config, which a test host may not have.
+func commitTree(t *testing.T, dir, message string) string {
+	t.Helper()
+	run := func(args ...string) string {
+		base := []string{"-C", dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com",
+			"-c", "commit.gpgsign=false"}
+		out, err := exec.Command("git", append(base, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-q")
+	run("add", "-A")
+	run("commit", "-q", "-m", message)
+	return run("rev-parse", "HEAD")
+}
+
+// TestDocRefsAnchorsCitationAtDocumentSnapshot pins the historical-snapshot basis.
+// - A wiki page declares what existed when it was written: a later rename must not read as corruption.
+// - The citation is measured at the commit that introduced it, never at today's tree, so that commit is the proof.
+func TestDocRefsAnchorsCitationAtDocumentSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n"), 0o644))
+	sha := commitTree(t, dir, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agent", "gone.go")))
+
+	report := scanDocRefs(doc, dir)
+	require.Empty(t, report.Dangling, "a renamed-away file is not corruption of a historical snapshot")
+	require.Equal(t, []string{"agent/gone.go"}, report.Anchored)
+	require.True(t, report.Historical, "docs/wiki is the declared historical root")
+	require.Equal(t, sha, report.Anchors["agent/gone.go"], "the basis must be the citing line's commit, reproducibly")
+}
+
+// TestDocRefsAnchorsPerCitationNotPerDocument pins why the basis follows the citation line.
+// - A banner commit moves the page's last commit without touching the sentence; re-dating the citation to it would red every tagged page.
+func TestDocRefsAnchorsPerCitationNotPerDocument(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n"), 0o644))
+	intro := commitTree(t, dir, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agent", "gone.go")))
+	require.NoError(t, os.WriteFile(doc, []byte("> 本文是历史快照，对写作当时的实现取证。\n\n佐证：`agent/gone.go`\n"), 0o644))
+	banner := commitTree(t, dir, "banner: mark the page historical")
+	require.NotEqual(t, intro, banner, "the fixture needs a second commit touching only the page")
+
+	report := scanDocRefs(doc, dir)
+	require.Empty(t, report.Dangling, "a banner commit must not re-date citations it never touched")
+	require.Equal(t, []string{"agent/gone.go"}, report.Anchored)
+	require.Equal(t, intro, report.Anchors["agent/gone.go"],
+		"the basis is the citing line's commit, not the document's last commit")
+}
+
+// TestDocRefsRedatesCitationWhenItsLineIsRewritten pins that the basis follows the words.
+// - A commit that rewrites the citing sentence re-dates it, so anchoring never outlives the sentence that earned it.
+func TestDocRefsRedatesCitationWhenItsLineIsRewritten(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n"), 0o644))
+	commitTree(t, dir, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agent", "gone.go")))
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：随后已废弃，原为 `agent/gone.go`\n"), 0o644))
+	commitTree(t, dir, "rewrite the sentence")
+
+	report := scanDocRefs(doc, dir)
+	require.Equal(t, []string{"agent/gone.go"}, report.Dangling,
+		"a rewritten sentence is anchored at the rewrite, where the file is already gone")
+	require.Empty(t, report.Anchored)
+}
+
+// TestDocRefsRefusesAnchorForEditedDocument pins that anchoring is a snapshot privilege, not a blanket exemption.
+// - A page carrying uncommitted words was never reviewed against any tree, so its citations must resolve today.
+func TestDocRefsRefusesAnchorForEditedDocument(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n"), 0o644))
+	commitTree(t, dir, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agent", "gone.go")))
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/gone.go`\n新增一句未提交的断言。\n"), 0o644))
+
+	report := scanDocRefs(doc, dir)
+	require.Equal(t, []string{"agent/gone.go"}, report.Dangling,
+		"an edited document has no snapshot basis, so the dangling citation stays reported")
+	require.Empty(t, report.Anchored)
+}
+
+// TestDocRefsReportsCitationMissingFromEveryBasis pins the negative control: a path that resolves nowhere still fails.
+// - A cleared gate must not be a vacuous one, so the unresolvable citation is the witness that the scan ran.
+func TestDocRefsReportsCitationMissingFromEveryBasis(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/never.go` 与 `memory/never.go`\n"), 0o644))
+	commitTree(t, dir, "wiki page")
+
+	report := scanDocRefs(doc, dir)
+	require.Equal(t, []string{"agent/never.go", "memory/never.go"}, report.Dangling,
+		"a citation that existed in no commit stays a failure")
+	require.Empty(t, report.Anchored)
+}
+
+// TestDocRefsReportsCitationMissingAtItsIntroducingCommit pins the negative control for reference anchoring.
+// - Provenance is checked rather than assumed: a later commit touching the page may not launder a citation absent at the introducing commit.
+func TestDocRefsReportsCitationMissingAtItsIntroducingCommit(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "docs", "wiki"), 0o755))
+	doc := filepath.Join(dir, "docs", "wiki", "a.md")
+	require.NoError(t, os.WriteFile(doc, []byte("佐证：`agent/ghost.go`\n"), 0o644))
+	commitTree(t, dir, "wiki page")
+	require.NoError(t, os.WriteFile(doc, []byte("> 本文是历史快照。\n\n佐证：`agent/ghost.go`\n"), 0o644))
+	commitTree(t, dir, "banner: mark the page historical")
+
+	report := scanDocRefs(doc, dir)
+	require.Equal(t, []string{"agent/ghost.go"}, report.Dangling,
+		"a target absent from the introducing commit is dangling however often the page is touched")
+	require.Empty(t, report.Anchored)
+}
+
+// TestDocRefsFailsClosedOnTruncatedHistory pins that missing provenance never becomes a pass.
+// - A shallow clone's graft point is not the introducing commit, so its tree cannot prove the citation.
+// - The gate must stay red on the citation rather than anchor it on whatever history happens to be fetched.
+func TestDocRefsFailsClosedOnTruncatedHistory(t *testing.T) {
+	src := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "docs", "wiki"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "agent"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "agent", "gone.go"), []byte("package pkg\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "docs", "wiki", "a.md"), []byte("佐证：`agent/gone.go`\n"), 0o644))
+	commitTree(t, src, "wiki page")
+	require.NoError(t, os.Remove(filepath.Join(src, "agent", "gone.go")))
+	commitTree(t, src, "drop the file")
+	clone := filepath.Join(t.TempDir(), "shallow")
+	out, err := exec.Command("git", "clone", "--quiet", "--depth", "1", "file://"+src, clone).CombinedOutput()
+	require.NoError(t, err, string(out))
+	require.True(t, shallowRepository(clone), "the fixture must be a truncated clone")
+
+	report := scanDocRefs(filepath.Join(clone, "docs", "wiki", "a.md"), clone)
+	require.Equal(t, []string{"agent/gone.go"}, report.Dangling,
+		"an unprovable citation stays a failure; truncated history is not an exemption")
+	require.Empty(t, report.Anchored)
 }
 
 // TestProcRefsIgnoresScannerSelfReferences pins both sides of the process-reference rule.

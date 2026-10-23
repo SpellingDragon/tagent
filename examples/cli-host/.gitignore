@@ -1,0 +1,2 @@
+# The command's build output (go build ./... writes it beside the package).
+/tagent-cli-host

@@ -21,7 +21,7 @@
 # Removal condition: upgrade trpc-agent-go past the upstream fix, delete the
 # signature AND the per-test skips, rerun `go test ./agent/... -race`.
 #
-# Usage: ./scripts/race_check.sh [packages...]   (default: ./agent/... ./plugin/ ./event/)
+# Usage: ./scripts/race_check.sh [packages...]   (default: the ci.yml race set)
 # Test hook: RACE_CHECK_CLASSIFY_ONLY=1 RACE_CHECK_FAKE_EXIT=<n> feeds stdin
 # to the classifier without running go test (used by scripts/test_race_check.sh).
 set -uo pipefail
@@ -105,7 +105,7 @@ race_check_classify() {
 
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
-	pkgs=(./agent/... ./plugin/ ./event/)
+	pkgs=(. ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/)
 fi
 
 if [ -n "${RACE_CHECK_CLASSIFY_ONLY:-}" ]; then

@@ -1,3 +1,5 @@
+> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](wiki/README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+
 # 升级 / 回滚演练 Runbook (resident-remaining-hardening 4.6 · 8.4)
 
 > 面向运维的耐久输入（inbox-v1）升级/回滚手册。每条给出：运维**可观测到的真实错误串/符号**、
