@@ -692,6 +692,7 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		InvocationID:  invocationID,
 		Address:       addr,
 		TriggerSource: "task",
+		Input:         []model.Message{{Role: model.RoleUser, Content: material}},
 	})
 	return err
 }
