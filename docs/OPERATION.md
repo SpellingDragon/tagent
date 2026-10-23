@@ -19,7 +19,7 @@
 | 工具 | 本文实测版本 | 用途 | 缺失时的行为 |
 |---|---|---|---|
 | Go | 本地 `go1.27.1`；`go.mod` 声明 `go 1.24.1`；CI 用 `1.24` | 构建、测试、门禁 | 硬需求，无回退 |
-| tmux | 本机在 PATH 内（`command -v tmux` 可解析） | exec 工具面与异步任务层测试 | 相关用例 `t.Skip`（CI 显式安装以保住信号） |
+| tmux | 本机在 PATH 内（`command -v tmux` 可解析） | exec 执行面（TmuxExecutor 三态监控） | 相关用例 `t.Skip`（CI 显式安装以保住信号） |
 | python3 | CI 用 `3.11` | 校验器自测（validators job） | 只影响该 job，不影响 `lint.sh` |
 | node + openspec CLI | CI 装 `@fission-ai/openspec@1.2.0` | spec 卫生门 | `check-openspec.sh` 找不到 CLI 直接 `exit 2` |
 | 模块代理网络 | — | 拉依赖（含仓库 pin 的 fork tag） | 冷启动构建失败；`go mod verify` 会先报校验和 |

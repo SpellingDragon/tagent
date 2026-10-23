@@ -27,6 +27,7 @@ flowchart TB
         MED["meditation.Driver<br/>反思计时"]
         FOLD["AgeFoldPlugin<br/>三龄段压缩"]
         LEASE["LeaseObserver<br/>模型热换"]
+        SETTLE["SettleDriver<br/>终结通知转轮"]
     end
 
     CHAIN --> PIPE
@@ -48,7 +49,7 @@ flowchart TB
     classDef plugin fill:#fff3e0,stroke:#ff9800
     classDef consumer fill:#e8f5e9,stroke:#4caf50
     class CHAIN,PROJ fact
-    class OBS,MED,FOLD,LEASE,REFLECT,SWAP plugin
+    class OBS,MED,FOLD,LEASE,SETTLE,REFLECT,SWAP plugin
     class ASM,RCL,EXP consumer
 ```
 
@@ -88,10 +89,14 @@ flowchart LR
 | **冥想反思** | 事件驱动计时＋水位门＋防循环闭表（自产戳不触发） | `meditation:` 段，deliver_to 白名单 |
 | **语义召回** | embedding 混合检索＋按 key 回捞＋血统追踪 | `memory.engine:` 段 |
 | **治理审批** | 调用门（风险分级/审批 Hold/TTL）＋发布门 | `governance:` 段，critical 恒审批 |
-| **委派** | 声明面子 agent＋`call_subagent` 运行时组装（双源＋采样参数） | agent 引用＋显式源 |
+| **委派** | 声明面子 agent＋`call_subagent` 运行时组装（双源＋采样参数）＋settle 随动送达 | agent 引用＋显式源 |
 | **per-agent 调优** | 思考开关/强度/温度/看门狗轮数各自独立 | 各 agent 段内声明 |
-| **训练数据** | Recorder 三类记录＋Capture 轨迹封印＋ChainExporter 导出 | 默认记录，零配置 |
+| **命令执行** | tmux Executor＋三态监控（watch→stable→suspect），声明即接线 | `{ kind: tool, id: exec }` |
+| **审批闭环** | critical 自动 Hold→登记审批簿→微信下发→批准放行；声明式风险规则 | `governance.risk_rules` |
+| **技能正文** | skill_load 后正文经系统段进下一轮请求 | `skill_dirs` |
+| **训练数据** | Recorder＋Capture 轨迹（含委派 worker 全入册）＋ChainExporter 导出 | 默认记录，零配置 |
 | **看门狗收口** | final_round：轮数/时长到限强制收尾轮 | 各 agent 自设，缺省无界 |
+| **可观测** | `GET /metrics`（Prometheus 计数）＋`telemetry.otel_enabled` OTel 开关 | `telemetry:` 段 |
 
 ## 快速开始
 
@@ -101,6 +106,15 @@ flowchart LR
 go build ./...                          # 构建全部包
 go test ./tests/integration/...         # 集成/契约测试
 bash scripts/lint.sh                    # 仓库门禁
+bash scripts/preflight.sh               # 提交前全量预检（lint+golden+双模块测试+冒烟）
+```
+
+**本地冒烟**（全 mock 资源，纯 CPU/IO——1,142 回合/s）：
+
+```bash
+cd examples/wechat-bot
+go test -tags smoke ./... -run TestLocalSmoke -count=1 -timeout 30m -v
+go test -tags smoke -bench Benchmark -benchtime 30x -run '^$' ./...
 ```
 
 `docs/api/` 是生成物：改完源码注释后 `bash scripts/gen_godoc.sh` 重新生成。

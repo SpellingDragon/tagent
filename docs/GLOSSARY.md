@@ -40,3 +40,6 @@
 ## 四、新增词的判据
 
 机制名就是学习成本。判据一句话：**一句话说不清（且不含本页未出现的词）就不加词，把它写成既有能力的字段**——完整判据见 [CONTRIBUTING](../CONTRIBUTING.md)「七、文档要求」。自检形式：把这句定义念给没参与讨论的人，他能复述，才写进文档。
+| 终结转轮 | settle-driver：任务终结事实主动驱动随动回合——委派结果不经用户第二句即送达 | host.go SettleDriver |
+| 风险规则 | risk_rules：声明式工具风险分级（精确名/前缀→级），critical 自动 Hold 并登记审批簿 | governance.risk_rules |
+| 轨迹封印 | trajectory capture：全部模型调用（含委派 worker）入 attempts.jsonl 并 Seal 对账 | rl/capture_wiring |

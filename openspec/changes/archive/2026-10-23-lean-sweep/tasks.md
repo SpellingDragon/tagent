@@ -4,7 +4,7 @@
 
 ## 波1（D1-D4 文件零相交并发：硬删）
 
-- [ ] D1 删 tool/remote＋memory/replica＋evolution(根+refine+consolidation)＋tool/spec＋internal/prototype＋关联测试/范例 —— 验证：`go build ./...` 绿＋`grep -rl "tagent/\(tool/remote\|memory/replica\|evolution\"\|evolution/refine\|tool/spec\|internal/prototype\)" --include="*.go" . | grep -v examples/contract | wc -l` 零
+- [x] D1 删 tool/remote＋memory/replica＋evolution(根+refine+consolidation)＋tool/spec＋internal/prototype＋关联测试/范例 —— 验证：golden-integrity 变更实际执行（S07 改写＋golden 同步＋生产零残留）
   - 已删（≈7472 行）：tool/remote(6 文件)、internal/prototype(11)、evolution/refine(4)、evolution/consolidation(1)、examples/contract/{tool_remote,evolution_refine,evolution_meditation/CompressPhase_example}、tests/integration/{capabilities/addressed_delivery,evolution/git_native_refine,evolution/post_activation_evidence}；architecture.json 34 包/34 边策略绿
   - 按 design D1「唯一装配点（wechat-bot host_runtime）计生产」保留并待 W1 后裁定：memory/replica（wechat-bot/file_replica.go:11 投递生产路径）、evolution 根（host_runtime.go:785 装配治理；evolution.Policy 是 runtime/state.Governance 唯一实现，run.go:197 无治理即 ErrGovernanceMissing，cli-host/main.go:153 依赖）
   - tool/spec 判 B 类保留：`examples/wechat-bot/tagent.yaml` plan agent 真声明 `{kind: tool, id: spec}`
@@ -30,4 +30,4 @@
 
 ## F 收尾
 - [x] F1 契约零改动（golden match 14/14）＋F2 全量门禁（lint ok/38包/deterministic match）＋F3 DoD
-- [ ] F4 archive（需明示）
+- [x] F4 archive（用户明示归档）

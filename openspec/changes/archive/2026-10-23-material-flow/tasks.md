@@ -19,4 +19,4 @@
 
 - [x] P8 golden/S4/EXTENSIONS/lint 收口 —— 验证：golden match＋lint ok
 - [x] F1 契约零改动（golden match）＋F2 全量门禁（lint ok/40包）＋F3 DoD
-- [ ] F4 archive（需明示）
+- [x] F4 archive（用户明示归档）
