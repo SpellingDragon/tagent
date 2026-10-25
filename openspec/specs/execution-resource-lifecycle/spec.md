@@ -56,7 +56,7 @@
 
 ### Requirement: 返回后持续跟踪并经既有通知链产生后续事件
 
-工具调用返回后，系统 SHALL 继续跟踪外部执行资源，并在状态变化（稳定、退出、释放、可疑）时产生后续事件；这些事件 SHALL 复用既有通知消费链（sink/Backflow）驱动原 invocation 的后续处理，MUST NOT 新建第二套执行资源状态仓或第二套通知身份。租约续期 MUST NOT 随工具调用返回而终止，SHALL 持续到资源释放、显式取消或具名未确认。下一轮 decision SHALL 能读取到该执行状态并据此推进。
+工具调用返回后，系统 SHALL 继续跟踪外部执行资源，并在状态变化（稳定、退出、释放、可疑）时产生后续事件；这些事件 SHALL 复用既有通知消费链（sink/Backflow）落为可审计事实并供正式查询面读取，MUST NOT 新建第二套执行资源状态仓或第二套通知身份。租约续期 MUST NOT 随工具调用返回而终止，SHALL 持续到资源释放、显式取消或具名未确认。中间态（稳定、可疑、退出）MUST NOT 驱动 follow-up 回合，MUST NOT 进入下一轮 decision 的模型请求。
 
 #### Scenario: 续租不随调用返回终止
 
@@ -68,16 +68,16 @@
 
 - **WHEN** 调用返回后外部进程状态发生变化（稳定、退出、释放或可疑）
 - **THEN** 系统 SHALL 产生后续通知事件
-- **AND** 该事件 SHALL 经既有通知消费链被消费
+- **AND** 该事件 SHALL 经既有通知消费链落为审计事实，MUST NOT 驱动 follow-up 回合或进入模型请求
 
 ### Requirement: 生产生命周期挂钩触达执行资源
 
-生产生命周期入口 SHALL 经与查询面同一 `Manager` 触达外部执行资源：生产 Sweep 与宿主关闭（`Host.Close`）MUST 释放或具名保留仍在受管的 exec 资源，修复关闭后资源泄漏；MUST NOT 只清理测试显式持有的资源而遗漏生产路径。状态变化 SHALL 能被原 invocation 的下一轮 decision 读取并据此推进，MUST NOT 依赖测试旁路注入。
+生产生命周期入口 SHALL 经与查询面同一 `Manager` 触达外部执行资源：生产 Sweep 与宿主关闭（`Host.Close`）MUST 释放或具名保留仍在受管的 exec 资源，修复关闭后资源泄漏；MUST NOT 只清理测试显式持有的资源而遗漏生产路径。状态变化 SHALL 作为可审计事实供正式查询面读取，MUST NOT 依赖测试旁路注入，MUST NOT 驱动 follow-up 回合或进入模型请求。
 
-#### Scenario: 下一轮消费执行状态
+#### Scenario: 状态变化只落审计事实
 
 - **WHEN** 外部执行状态变化后原 invocation 进入下一轮 decision
-- **THEN** 下一轮 SHALL 能读取该执行状态并据此推进
+- **THEN** 下一轮模型请求 MUST NOT 携带执行状态材料，该状态 SHALL 只作为审计事实可查
 - **AND** MUST NOT 依赖测试旁路注入
 
 #### Scenario: Host.Close 释放执行资源
@@ -88,7 +88,7 @@
 
 ### Requirement: 重启后接管或具名未确认
 
-进程重启后，系统 SHALL 对外部执行资源执行接管（Adopt）或给出具名未确认状态；MUST NOT 静默丢弃仍在运行的资源，MUST NOT 在未确认时宣称资源已停止。接管结果 SHALL 可被下一轮 decision 读取。
+进程重启后，系统 SHALL 对外部执行资源执行接管（Adopt）或给出具名未确认状态；MUST NOT 静默丢弃仍在运行的资源，MUST NOT 在未确认时宣称资源已停止。接管结果 SHALL 可经正式查询面读取。
 
 #### Scenario: 重启接管或具名未确认
 

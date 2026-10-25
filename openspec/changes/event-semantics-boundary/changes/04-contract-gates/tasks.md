@@ -86,3 +86,13 @@
 ### §6 证据路径
 
 `/tmp/event-semantics-boundary/04.1/{spec-strict.json,delta-strict.json}`、`/tmp/event-semantics-boundary/04.2/{progress.json,s15.json,contract-v1.json,contract-v2.json,backflow.log,backflow-v.log}`、`/tmp/event-semantics-boundary/04.3/{symptom.json,workflow.log,evidence.log}`、`/tmp/event-semantics-boundary/04.lint.log`、`/tmp/event-semantics-boundary/04.policy.log`；回滚克隆 `/tmp/tagent-pre-injection-49fd79f`。
+
+## 补差回写：exec 中间态静默（2026-10-26）
+
+本节记录本轮补差对 04 域契约面的增量；4.1/4.2/4.3 三叶不重开，原证据保留为当时快照。
+
+- **4.1 增量**：主规格「循环面的模型感知边界」在原有三场景后新增第四场景「exec 中间态不构成模型材料、不驱动回合」；主规格 scenario 72→73（`grep -c '^#### Scenario:' openspec/specs/persistent-event-loop/spec.md`）。为守 doc budget（基线 22220、slack 0，`--tighten` 拒绝上调），同块合并等量列表项并去掉新场景标题后的空行，主规格净 -1 行；`python3 scripts/check_doc_budget.py --tighten` 将 baseline.lines 22220→22219。复跑：`openspec validate persistent-event-loop --strict --json` exit=0；`python3 scripts/check_doc_budget.py --json` → `documents=197, lines=22219, slack.lines=0`。
+- **4.2 增量**：`TestEventIntegrityExecStateEvents` 的两个子测试断言反向为静默语义，但**子测试名与 `consumer_anchor` 保持冻结合同原名**（`state_change_emits_followup_notice` / `next_turn_consumes_exec_state`），因为归档 `task-graph.json` 与 v2 合同双向互校；改名需要同批改归档图，本轮不做。`golden/runtime/event_integrity_scenarios.json` 因此 `git diff` 为零；负面后果（名字与新语义不一致）在测试 doc 里明写。
+- **4.3 增量**：G4 `TestLocalSmokeSymptomExecStateSilent` 进入 `^TestLocalSmokeSymptom` 前缀选择器；`scripts/test_check_runtime_workflow.py` 的 `SYMPTOM_PARENTS` 由 3 个锚扩为 4 个（含 G4），`ci.yml` 的 job 注释/step 名由“three”改为四锚表述。没有新增 job、没有放宽 no-skip-hatch 断言。
+- **能力规格同步**：`openspec/specs/execution-resource-lifecycle/spec.md` 中与“中间态驱动回合/进入下一轮 decision”冲突的条款改为“审计事实/正式查询面读取、不驱动回合、不进模型请求”；`下一轮消费执行状态` 场景改名为 `状态变化只落审计事实`。该文件不在本轮派发白名单，属必要同步（否则主规格与能力规格互斥），+6/-6 行、总行数不变。
+- **验证**：G1/G2/G3/G4 四父测试 + 8 子测试全 PASS（`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -v` exit=0）；`go test ./runtime/agent/ ./tests/integration/host/ ./tests/integration/execution/ -count=1` exit=0；`go build ./...`/三模块 vet exit=0；`bash scripts/lint.sh` exit=0。

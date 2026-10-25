@@ -84,3 +84,36 @@ P-01 批准（01.3 含 progress 读路径）；P-02 批准（示例层罐头文�
 - `target.go` 的同类承诺按 N1 同面一并修：它不是 `tool.go:125` 的字面位置，但同为模型面描述且含旧承诺，不修则 grep 仍命中。
 - `changes/03-tool-schema/design.md` 的 D1/D2/D3 随枚举裁定同步（旧文写「不把空串加进 Enum」），避免设计与实现再次矛盾。
 - `plan_agent.md:54` 的 `resume_task`、`plan_tool_desc.md` 的现有表述均未改：前者是 plan 后端操作名，后者「terminal notification of the admitted task」与现状一致；若前者确为陈旧入口，另案处理。
+
+## exec 中间态根因与修法（2026-10-26 补差）
+
+### 根因（真机 10-26 00:48）
+
+- `host.go:740 observeExecState` 对 `StateStable`/`StateSuspect`/`StateExited` 三态各构造 `execStateText(evt)` 材料，写成 `TypeFeedback + MetaKeyNoticeKind=NoticeProgress + MetaKeyTaskID + Role=user` 的 fact，并 `fireNoticeTurn` 驱动模型回合。
+- `runtime/agent/loop.go` 的 `pipelineProgress` 只跳过 `Round>0`；该 fact 无 Round → 材料进入下一请求。真机表现为模型被持续叫醒并播报“剩余后台项…仍在”。
+
+### 修法
+
+- `observeExecState` 重写：三态不 `fireNoticeTurn`、不写 notice-kind fact、`Message.Content` 为空；只 `CommitToSession` 落 `exec-state: <phase>` 的无载荷 feedback 审计事实（`meta_resource`/`meta_phase`，confirmed 另带 `meta_exit_code`），保留一条 `assemblyDebug`；拒绝提交只记 warning，不重试、不驱动回合。
+- `execStateText` 删除。全仓引用面：`grep -rn 'execStateText' --include='*.go' .` exit=1（无命中）；查询面/看板没有该符号消费者，故不存在“静默破坏查询面”。
+- `runtime/agent/loop.go` 两处注释改为当前事实：progress 判据是分类守卫，exec 不再是 producer；逻辑未改。
+- 反向改 `TestEventIntegrityExecStateEvents`（不删不 skip）：三态后 provider 请求数与 outbound 均不增；三态各一条无载荷审计事实；下一请求不含 `reports state`/`exec-state: ` 材料。子测试名与 `consumer_anchor` 保持冻结合同原名（`state_change_emits_followup_notice` / `next_turn_consumes_exec_state`），因为归档 `task-graph.json` 与 v2 合同双向互校；改名需同批改归档图，本轮不做，测试 doc 已明写名字与新语义不一致。
+- 新增 G4 `TestLocalSmokeSymptomExecStateSilent`：`rig.drive` 真实 boot 入站；正锚 `three_states_leave_no_turn`（三态各观察后 `requests=2`、`outbound=1` 不变），负锚 `state_still_recorded`（三条审计事实仍落盘、正文为空、无通知分类/任务号），消费者锚 `Host.Invoke → exec_run → observeExecState → CommitToSession`。
+
+### 契约与预算
+
+- 04 域 delta 的「循环面的模型感知边界」新增第四场景「exec 中间态不构成模型材料、不驱动回合」；主规格同步，scenario 72→73。
+- doc budget 基线 22220、slack 0，`--tighten` 拒绝上调：同块合并等量列表项并去掉新场景标题后的空行，主规格净 -1 行；`--tighten` 将 baseline.lines 锁到 22219。
+- `golden/runtime/event_integrity_scenarios.json` 保持零 diff；归档 `task-graph.json` 未改。
+- `openspec/specs/execution-resource-lifecycle/spec.md` 的冲突条款同步改为“审计事实/正式查询面读取、不驱动回合、不进模型请求”，`下一轮消费执行状态` 场景改名 `状态变化只落审计事实`（+6/-6，总行数不变）。
+- `scripts/test_check_runtime_workflow.py` 的 `SYMPTOM_PARENTS` 扩为四锚，`ci.yml` 注释/step 名同步；没有新增 job、没有放宽 no-skip-hatch 断言。
+
+### 验证（原始退出码）
+
+- 集成：`go test ./tests/integration/execution/ -run '^TestEventIntegrityExecStateEvents$' -count=1 -race -json` → exit=0；6 子测试全 pass、0 fail。
+- G4：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomExecStateSilent$' -count=1 -race -json` → exit=0；`three_states_leave_no_turn` 与 `state_still_recorded` 均 pass。
+- 四症状：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -v` → exit=0；4 父测试 + 8 子测试全 PASS。
+- 包测：`go test ./runtime/agent/ ./tests/integration/host/ ./tests/integration/execution/ -count=1` → exit=0（三包 ok）。
+- 构建/静态：`go build ./...`、根/微信/cli-host 三模块 `go vet ./...` 全 exit=0。
+- 全量门：`bash scripts/lint.sh` → exit=0（`lint: ok`）；doc budget 197 篇/22219 行、slack 0。
+- 规格：`openspec validate persistent-event-loop --strict --json` → exit=0；scenario 计数 73。

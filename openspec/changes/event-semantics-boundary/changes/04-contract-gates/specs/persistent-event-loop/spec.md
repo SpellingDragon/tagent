@@ -27,3 +27,10 @@ progress 通知 SHALL 只作为其 range 的事实落链（通知身份与稳定
 - **THEN** 用户 SHALL 收到恰好一条告知，其正文携带**原始错误信息**，由 sender 直投而非模型生成
 - **AND** 同一事实 SHALL 落 fact 供审计，失败原因 SHALL 出现在日志中
 - **AND** 成功回合 MUST NOT 出现该告知
+
+#### Scenario: exec 中间态不构成模型材料、不驱动回合
+
+- **WHEN** 执行资源管理器在调用返回后观察到一个执行资源的中间态（stable、suspect 或 exited）
+- **THEN** 该观察 MUST NOT 驱动任何 follow-up 回合，模型请求数 MUST NOT 因此增加
+- **AND** 该观察 SHALL 只落无载荷审计事实（无消息正文、无通知分类与任务号），MUST NOT 作为说话素材
+- **AND** 该 range 下一次 decision 的模型请求 MUST NOT 含执行状态材料
