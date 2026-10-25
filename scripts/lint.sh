@@ -6,12 +6,15 @@
 #   * the markdown document-budget ratchet (total docs may only shrink)
 #   * the checker selftests CI runs (runtime/concept/doc-budget/restart/race)
 #   * the runtime contracts CI runs (plan/architecture/concept/implementation)
+#   * the frozen event-ownership direct-call gate (event_ownership in golden)
 #   * the comment policy measured over product packages at zero findings
 #   * the OpenSpec strict spec-hygiene gate when the CLI is installed
 #
-# usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet]
+# usage: lint.sh [--strict] [--update-baseline] [--only policy|fmt|build|vet|contracts]
 #   --strict           require zero findings (the converged end state, §D8)
 #   --update-baseline  rewrite the baseline after a batch lowered counts
+#   --only contracts   skip the Go fmt/build/vet/policy blocks; the checker selftests,
+#                      the runtime contracts below and the tail gates still run
 #
 # CI runs this script; a batch author runs the same command, so "it passed
 # locally" and "CI is green" cannot mean different things.
@@ -91,9 +94,18 @@ run bash scripts/test_race_check.sh
 
 # 运行时契约（CI 的 format-and-contract job）：计划/场景契约在无 task-graph 时
 # 没有判定对象，如实打印 skip；架构政策、概念预算与实现覆盖对现树恒判定。
+#
+# 活动 graph 是 openspec/changes/*/task-graph.json（单层通配，归档在
+# openspec/changes/archive/ 下，不匹配）。有活动 graph 时计划门必须检查活动
+# 变更本身——检查固定的归档路径是对象错位。无活动 graph 时保持旧行为（skip）。
+shopt -s nullglob
+active_graphs=(openspec/changes/*/task-graph.json)
+shopt -u nullglob
 echo "lint: runtime plan contract"
-if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then
-  run python3 scripts/check_runtime_plan.py --change-dir openspec/changes/archive/2026-10-18-runtime-rebuild --json
+if [ "${#active_graphs[@]}" -gt 0 ]; then
+  for active_graph in "${active_graphs[@]}"; do
+    run python3 scripts/check_runtime_plan.py --change-dir "$(dirname "$active_graph")" --json
+  done
 else
   echo "  (no active task-graph.json; the plan contract gate has no object, skipped)"
 fi
@@ -103,9 +115,26 @@ echo "lint: concept budget"
 run python3 scripts/check_concept_budget.py --json
 echo "lint: architecture implementation coverage"
 run python3 scripts/check_runtime_architecture.py --implementation --json
+echo "lint: event ownership (frozen direct-call surface)"
+if ! go run ./scripts/codetools event-ownership --check; then
+  echo "lint: a frozen owner makes a forbidden/unregistered direct call, or a frozen symbol cannot be resolved"
+  exit 1
+fi
 echo "lint: scenarios contract"
-if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then
+if [ "${#active_graphs[@]}" -gt 0 ]; then
+  # v1 金样的判定对象是归档的 runtime-rebuild graph（其 task_ids 属于该变更），
+  # 不能把活动 graph 塞给 v1 规则；活动 graph 的 v2 合同在下面单独检查。
   run python3 scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json
+  event_graph=""
+  for active_graph in "${active_graphs[@]}"; do
+    if grep -q '"domain_profile"[[:space:]]*:[[:space:]]*"event-integrity"' "$active_graph"; then
+      event_graph="$active_graph"
+    fi
+  done
+  if [ -n "$event_graph" ]; then
+    echo "lint: event scenarios contract"
+    run python3 scripts/check_runtime_evidence.py --check-contract --contract golden/runtime/event_integrity_scenarios.json --plan-graph "$event_graph" --json
+  fi
 else
   echo "  (no active task-graph.json; the scenarios contract gate has no object, skipped)"
 fi

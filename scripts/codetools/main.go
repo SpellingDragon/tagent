@@ -19,7 +19,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: codetools <strip|decls|comment-check|merge-check|map-lint|name-check|doc-refs|proc-refs|tracked-hygiene|package-layout|dotted-refs|commit-scope> ...")
+		fmt.Fprintln(os.Stderr, "usage: codetools <strip|decls|comment-check|merge-check|map-lint|name-check|doc-refs|proc-refs|tracked-hygiene|package-layout|dotted-refs|commit-scope|event-ownership> ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -43,6 +43,8 @@ func main() {
 		os.Exit(runDottedRefs(os.Args[2:]))
 	case "commit-scope":
 		os.Exit(runCommitScope(os.Args[2:]))
+	case "event-ownership":
+		os.Exit(runEventOwnership(os.Args[2:]))
 	}
 	var fail int
 	switch os.Args[1] {

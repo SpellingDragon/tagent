@@ -33,6 +33,7 @@ type Driver struct {
 	mu        sync.Mutex
 	lastFired time.Time
 	firing    bool
+	retained  bool
 	stopped   bool
 	wg        sync.WaitGroup
 
@@ -107,7 +108,12 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error {
 
 	now := time.Now()
 	d.mu.Lock()
-	if d.stopped || d.firing {
+	if d.stopped {
+		d.mu.Unlock()
+		return nil
+	}
+	if d.firing {
+		d.retained = true
 		d.mu.Unlock()
 		return nil
 	}
@@ -123,14 +129,19 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error {
 	return nil
 }
 
-// fire runs one reflection pass for a matured event and settles the driver's
-// firing state. The pass outlives the committing turn but not the driver: a stop
+// fire runs the reflection passes one firing episode owes and settles the
+// driver's firing state. An observation that lands while a pass is in flight is
+// retained for the evaluation that settles it, so a busy driver never drops a
+// commit; the episode outlives the committing turn but not the driver: a stop
 // cancels it, and Stop waits for it to return.
 func (d *Driver) fire(ctx context.Context) {
 	defer d.wg.Done()
 	defer func() {
 		d.mu.Lock()
-		d.firing = false
+		if d.stopped {
+			d.firing = false
+			d.retained = false
+		}
 		d.mu.Unlock()
 	}()
 
@@ -144,6 +155,27 @@ func (d *Driver) fire(ctx context.Context) {
 	stop := context.AfterFunc(d.stopCtx, cancel)
 	defer stop()
 
+	for {
+		d.pass(ctx)
+		wait, again := d.rearm()
+		if !again {
+			return
+		}
+		if wait <= 0 {
+			continue
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
+}
+
+// pass runs one reflection pass and reports the reading to the host observer.
+func (d *Driver) pass(ctx context.Context) {
 	if d.minGap > 0 {
 		if watermark, err := d.reflection.Watermark(ctx); err == nil {
 			if !watermark.Moment.IsZero() && time.Since(watermark.Moment) < d.minGap {
@@ -163,6 +195,25 @@ func (d *Driver) fire(ctx context.Context) {
 		d.mu.Unlock()
 	}
 	d.notify(outcome)
+}
+
+// rearm settles one pass: it releases the firing state when no observation was
+// retained during the pass, and otherwise keeps the episode open and reports how
+// long the rhythm floor still holds the retained evaluation back.
+func (d *Driver) rearm() (time.Duration, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped || !d.retained {
+		d.firing = false
+		return 0, false
+	}
+	d.retained = false
+	if d.interval > 0 && !d.lastFired.IsZero() {
+		if wait := d.interval - time.Since(d.lastFired); wait > 0 {
+			return wait, true
+		}
+	}
+	return 0, true
 }
 
 // live reports whether the driver still accepts commits.

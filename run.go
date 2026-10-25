@@ -35,6 +35,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -147,9 +148,16 @@ type Run struct {
 	// session's chain answers in the order that chain was written.
 	factOrder []event.EventID
 	// plugins holds the run-level instances every agent generation carries.
-	plugins     []plugin.Instance
-	history     map[event.Address][]model.Message
-	factSeq     uint64
+	plugins []plugin.Instance
+	history map[event.Address][]model.Message
+	factSeq uint64
+	// landing serializes the sequence slot of one partition beside the segment
+	// commit that takes it, so two facts committed at once never claim one slot.
+	landing sync.Mutex
+	// landedSeq holds the last sequence slot each partition committed: it is
+	// seeded from the events the tier already published, so a fact committed
+	// after a restart takes the slot after the last committed one.
+	landedSeq   map[int]int64
 	records     memoryPublications
 	approver    task.Approver
 	policy      plugin.Governor
@@ -249,6 +257,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		history:        map[event.Address][]model.Message{},
 		fixers:         map[event.AgentID]*fileFixer{},
 		replays:        map[event.SessionID]replayEntry{},
+		landedSeq:      map[int]int64{},
 		approver:       cfg.approver,
 		policy:         cfg.policy,
 		enforcement:    cfg.enforcement,
@@ -280,7 +289,6 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.plugins = instances
 	}
 	r.authority = state.NewAuthority()
-	r.store = state.NewMemoryStore(r.authority)
 	var durable *state.DurableCommit
 	var tier *ledger.Tier
 	if cfg.storage != nil {
@@ -302,6 +310,11 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		r.commit = &runCommit{inner: durable, held: map[event.TaskID]bool{}}
 	} else {
 		r.commit = &runCommit{inner: task.NewMemoryCommit(nil), held: map[event.TaskID]bool{}}
+	}
+	if durable != nil {
+		r.store = state.NewMemoryStore(r.authority, durable)
+	} else {
+		r.store = state.NewMemoryStore(r.authority)
 	}
 	r.registry = task.NewMemoryRegistry(r.commit, r.admission)
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
@@ -355,10 +368,18 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		if err != nil {
 			return nil, err
 		}
+		landed, err := seedLandedSeq(ctx, tier)
+		if err != nil {
+			return nil, err
+		}
+		if err := r.seedReplay(ctx, tier); err != nil {
+			return nil, err
+		}
 		r.mu.Lock()
 		r.retrieval = supply
 		r.tier = tier
 		r.observed = observed
+		r.landedSeq = landed
 		r.mu.Unlock()
 	}
 	r.mu.Lock()
@@ -857,6 +878,39 @@ func WithExecManager(manager *tagentexec.Manager) Option {
 	return func(c *assemblyConfig) { c.execManager = manager }
 }
 
+// ExecState reports the retained state of one execution resource the ledger of
+// this run holds: the lease deadline, the renewals observed after the acquiring
+// call returned and the stop the resource was last seen under. The read is the
+// diagnostic face of the same ledger the exec face acquires through, so it
+// moves nothing; a run assembled beside no ledger refuses the read by name
+// instead of answering an empty state.
+func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, error) {
+	if r == nil || r.execManager == nil {
+		return tagentexec.Explanation{}, tagentexec.ErrUnwired
+	}
+	return r.execManager.Explain(key)
+}
+
+// execOwner reports the responsibility range one execution call belongs to: the
+// explicit address the call frame carries and the task identity the task face
+// registered for that call's identity. A call beside no frame, an incomplete
+// address or an identity the admission never registered answers false, so the
+// resource is still tracked but its lifecycle events drive no follow-up turn.
+func (r *Run) execOwner(ctx context.Context) (tagentexec.Owner, bool) {
+	if r == nil || r.admission == nil {
+		return tagentexec.Owner{}, false
+	}
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok || !frame.Address.IsComplete() {
+		return tagentexec.Owner{}, false
+	}
+	taskID, ok := r.admission.Lookup(frame.Identity.DedupKey())
+	if !ok || taskID == "" {
+		return tagentexec.Owner{}, false
+	}
+	return tagentexec.Owner{Address: frame.Address, TaskID: taskID}, true
+}
+
 // ErrObservationUnwired reports an observation read attempted on a run
 // assembled beside no storage tier: the face is refused by name rather than
 // answered as an empty chain.
@@ -920,7 +974,10 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 	}
 	evt.InvocationID = invocationID
 	evt.InstanceID = r.instance
-	key := r.commitFact(evt)
+	key, err := r.commitFactChecked(ctx, evt)
+	if err != nil {
+		return agent.Turn{}, "", fmt.Errorf("tagent: commit the injected event: %w", err)
+	}
 	evt.Key = key
 	turn, err := r.loop.Drive(ctx, agent.Invocation{
 		InvocationID: invocationID,
@@ -957,7 +1014,10 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
 	if evt.InvocationID == "" {
 		evt.InvocationID = event.InvocationID(fmt.Sprintf("%s#delivery-%s", addr.SessionID, r.mintEventID()))
 	}
-	key := r.commitFact(evt)
+	key, err := r.commitFactChecked(ctx, evt)
+	if err != nil {
+		return "", fmt.Errorf("tagent: commit the cross-session event: %w", err)
+	}
 	pipeline, err := r.factPipeline(addr.AgentID)
 	if err != nil {
 		return key, err
@@ -1130,6 +1190,118 @@ func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryE
 		}
 	}
 	return observed, nil
+}
+
+// seedReplay registers the mapped sequence every session chain already
+// committed, so a restarted run presents the material the tier holds to its
+// next request instead of reading a transcript no process carries any more.
+// The whole registered sequence reads as ended material: a cold start has no
+// range in flight, and the next committed input opens the first one, which
+// moves the boundary without dropping a restored entry. A session whose
+// declaration names no model window keeps no registration, matching the live
+// attach path, and a body the schema cannot decode fails the boot instead of
+// silently dropping the material the tier holds.
+func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
+	events, err := tier.Segments.Events(ctx)
+	if err != nil {
+		return err
+	}
+	type sessionSeed struct {
+		projection *replay.ReplayProjection
+		window     FoldWindow
+	}
+	seeds := map[event.SessionID]*sessionSeed{}
+	var order []event.SessionID
+	for _, stored := range events {
+		body, err := memory.DecodeEventBody(stored.Body)
+		if err != nil {
+			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
+		}
+		meta := map[string]string{}
+		if body.Summary != "" {
+			meta[event.MetaKeyEventSummary] = body.Summary
+		}
+		evt := event.Event{
+			Key:       stored.Key,
+			Type:      body.Type,
+			Timestamp: time.UnixMilli(body.Timestamp),
+			Meta:      meta,
+			Message:   model.Message{Content: body.Content},
+			Owner:     body.Owner,
+		}
+		session := sessionOf(evt)
+		if session == "" {
+			continue
+		}
+		entry, ok := mappedEntryOf(evt)
+		if !ok {
+			continue
+		}
+		seed, held := seeds[session]
+		if !held {
+			r.mu.Lock()
+			window := foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
+			r.mu.Unlock()
+			seed = &sessionSeed{projection: replay.NewReplayProjection(), window: window}
+			seeds[session] = seed
+			order = append(order, session)
+		}
+		seed.projection.Append(ctx, entry)
+		if err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {
+			return err
+		}
+	}
+	for _, session := range order {
+		seed := seeds[session]
+		if seed.window.MaxTokens <= 0 {
+			continue
+		}
+		if err := r.AttachReplay(agent.RequestChain{SessionID: session}, seed.window, seed.projection); err != nil {
+			return err
+		}
+	}
+	if len(order) > 0 {
+		r.attachNoticeFeed()
+	}
+	return nil
+}
+
+// restoreFoldForm folds one replayed projection at the commit boundaries the
+// chain recorded, exactly as the age fold plugin judges every live commit: the
+// registered sequence then carries the fold form the process left instead of the
+// raw sequence the fold had already consumed, so the first request after the
+// restart reads the same summary the live process read. The fold is
+// projection-derived: every judgment it re-derives is already a compress request
+// on the chain, so the restore files nothing back and writes no fact of its own.
+// A window naming no positive token window folds nothing, matching the live
+// registration, and a fold refused by the context fails the boot instead of
+// silently leaving the material at one shape the chain never had.
+func restoreFoldForm(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) error {
+	if projection == nil || window.MaxTokens <= 0 {
+		return nil
+	}
+	_, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{
+		KeepRecent:      window.KeepRecentTasks,
+		VolumeThreshold: window.VolumeThresholdBytes(),
+	})
+	return err
+}
+
+// seedLandedSeq reports the last sequence slot every partition already
+// committed, so the landing path of a restarted run continues the positions the
+// tier holds instead of claiming one of them again.
+func seedLandedSeq(ctx context.Context, tier *ledger.Tier) (map[int]int64, error) {
+	events, err := tier.Segments.Events(ctx)
+	if err != nil {
+		return nil, err
+	}
+	landed := map[int]int64{}
+	for _, stored := range events {
+		if stored.Seq > landed[stored.PartitionID] {
+			landed[stored.PartitionID] = stored.Seq
+		}
+	}
+	return landed, nil
 }
 
 // eventRecordOf projects one committed fact onto the query record the

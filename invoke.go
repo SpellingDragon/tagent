@@ -3,6 +3,7 @@ package tagent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -55,7 +56,11 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 		if req.TriggerSource != "" {
 			evt.Meta = map[string]string{event.MetaKeyTriggerSource: req.TriggerSource}
 		}
-		evt.Key = r.commitFact(evt)
+		key, err := r.commitFactChecked(ctx, evt)
+		if err != nil {
+			return agent.Turn{}, fmt.Errorf("tagent: commit the input fact: %w", err)
+		}
+		evt.Key = key
 		ready = append(ready, evt)
 	}
 	inv := agent.Invocation{

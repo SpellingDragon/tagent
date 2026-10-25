@@ -766,24 +766,31 @@ func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) err
 
 type NoticeFeed interface {
 	// NoticeBoundary reports the position the ended material of the named chain
-	// ends at and whether that chain carries a projection at all.
+	// ends at, resolved from the fact identity the boundary records, and whether
+	// that chain carries a projection at all.
 	NoticeBoundary(chain RequestChain) (int, bool)
-	// NoticesFrom reports the notification facts of the named chain appended
-	// after cursor under the given identity prefix, in chain order, beside the
-	// position the read reached and whether the chain carries a projection.
+	// NoticesFrom reports the notification facts of the named chain from cursor
+	// on under the given identity prefix, in chain order, beside the end the read
+	// reached and whether the chain carries a projection. The cursor is resolved
+	// against the sequence as it stands at the read; it is never a position the
+	// caller may keep across a fold rewrite.
 	NoticesFrom(chain RequestChain, prefix event.EventID, cursor int) ([]NoticeView, int, bool)
 }
     NoticeFeed is the incremental read face of a session chain's notification
-    facts: the boundary the ended material ends at and the entries appended
-    after a read cursor. A notification is a fact of the chain, so a drive
-    reads the notices of its range as a projection increment rather than from
-    a lane of its own; a chain beside no projection says so and the loop reads
-    the cache it keeps beside the commit instead. The face crosses built-in and
-    event types only, so the composition root attaches it with no package edge
-    into the projection layer.
+    facts: the boundary the ended material ends at and the notices the chain
+    carries from that boundary on. A notification is a fact of the chain,
+    so a drive reads the notices of its range as a projection increment rather
+    than from a lane of its own; a chain beside no projection says so and the
+    loop reads the cache it keeps beside the commit instead. The face crosses
+    built-in and event types only, so the composition root attaches it with no
+    package edge into the projection layer.
 
-    The redline list (3 rules): MUST report the ended-material boundary and
-    the entries appended after the cursor, in chain order. MUST report a chain
+    - The boundary is re-resolved by identity each drive, not a kept position:
+    a fold rewrite moves the sequence; remembered identities report each notice
+    once.
+
+    The redline list (3 rules): MUST report the ended-material boundary and the
+    notices the chain carries from it on, in chain order. MUST report a chain
     that carries no projection as carrying none, never as an empty projection.
     MUST NOT answer an entry outside the identity prefix it was handed.
 

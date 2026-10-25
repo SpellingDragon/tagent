@@ -65,12 +65,13 @@ type acceptedNotice struct {
 // registration names. The memory carrier keeps the business contract of a
 // durable one and promises no recovery of its own.
 type MemoryStore struct {
-	mu         sync.Mutex
-	authority  *Authority
-	sites      map[siteKey]*site
-	current    map[event.Address]event.InstanceID
-	deliveries map[event.TaskID]task.HandoffTarget
-	accepted   map[noticeKey]acceptedNotice
+	mu           sync.Mutex
+	authority    *Authority
+	sites        map[siteKey]*site
+	current      map[event.Address]event.InstanceID
+	deliveries   map[event.TaskID]task.HandoffTarget
+	accepted     map[noticeKey]acceptedNotice
+	consumptions consumptionRecorder
 }
 
 // MemoryStore satisfies the Store face.
@@ -78,15 +79,22 @@ var _ Store = (*MemoryStore)(nil)
 
 // NewMemoryStore returns an empty in-memory state store that checks reads
 // against the given authority. An authority that is not present refuses every
-// read.
-func NewMemoryStore(authority *Authority) *MemoryStore {
-	return &MemoryStore{
+// read. A consumption recorder, when one is supplied, receives the receipt of
+// every completed logical consumption behind its own sync barrier before the
+// mailbox confirms the entry; a store beside none keeps the consumption in its
+// own bookkeeping alone.
+func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *MemoryStore {
+	store := &MemoryStore{
 		authority:  authority,
 		sites:      map[siteKey]*site{},
 		current:    map[event.Address]event.InstanceID{},
 		deliveries: map[event.TaskID]task.HandoffTarget{},
 		accepted:   map[noticeKey]acceptedNotice{},
 	}
+	if len(consumptions) > 0 && consumptions[0] != nil {
+		store.consumptions = consumptions[0]
+	}
+	return store
 }
 
 // Establish implements Store.Establish. One explicit address and instance names

@@ -8,11 +8,13 @@ plumbing, not product proof; every test then mutates exactly one thing so the
 checker has to reject it.
 """
 import copy
+import hashlib
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -575,6 +577,858 @@ class EvidenceTest(unittest.TestCase):
         code, out, _ = run_checker("--contract", str(path), "--check-contract", "--json")
         self.assertNotEqual(code, 0)
         self.assertIn("must be unique", out)
+
+
+REAL_EVENT_CONTRACT = REPO / "golden" / "runtime" / "event_integrity_scenarios.json"
+
+
+def load_event_contract():
+    return json.loads(REAL_EVENT_CONTRACT.read_text(encoding="utf-8"))
+
+
+def event_tests(contract, scope):
+    return [test for test in contract["tests"] if test["scope"] == scope]
+
+
+def event_full_package(module_path, test_package):
+    """The full package path `go test -json` reports for a contract package."""
+    rel = test_package[2:] if test_package.startswith("./") else test_package
+    return module_path if rel == "." else module_path + "/" + rel
+
+
+def event_row(package, test, action):
+    return {"Time": "2026-01-01T00:00:00Z", "Action": action,
+            "Package": package, "Test": test, "Output": ""}
+
+
+def event_log(contract, tests):
+    """A legal multi-module `go test -json` stream for the selected tests.
+
+    One window per package, subtests nested between their parent's run and pass,
+    exactly as the real tool emits them.
+    """
+    packages = {}
+    for test in tests:
+        package = event_full_package(test["module_path"], test["test_package"])
+        packages.setdefault(package, []).append(test)
+    rows = []
+    for package in sorted(packages):
+        rows.append(event_row(package, "", "start"))
+        for test in packages[package]:
+            name = test["test_name"]
+            rows.append(event_row(package, name, "run"))
+            for subtest in test["subtests"]:
+                anchor = name + "/" + subtest["name"]
+                rows.append(event_row(package, anchor, "run"))
+                rows.append(event_row(package, anchor, "pass"))
+            rows.append(event_row(package, name, "pass"))
+        rows.append(event_row(package, "", "pass"))
+    return rows
+
+
+def event_fingerprints(scope):
+    """The modules one scope actually drives, one digest per module.
+
+    The runner fingerprints the groups a scope selects: event-short drives the
+    root, the CLI host and the smoke module, event-long drives the smoke module
+    alone. The shared module must carry the same digest in both lists; the
+    modules only one scope covers are a scope difference, not baseline drift.
+    """
+    shared = {"module_path": "wechat-bot", "dir": "examples/wechat-bot",
+              "revision": "0" * 40, "content_hash": "sha256:" + "2" * 64}
+    if scope == "event-long":
+        return [shared]
+    return [
+        {"module_path": MODULE, "dir": ".", "revision": "0" * 40,
+         "content_hash": "sha256:" + "1" * 64},
+        shared,
+        {"module_path": "tagent-cli-host", "dir": "examples/cli-host", "revision": "0" * 40,
+         "content_hash": "sha256:" + "3" * 64},
+    ]
+
+
+def event_digest(path):
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def mutation_evidence():
+    return {
+        "schema_version": 2,
+        "profile": "event-integrity",
+        "control_tree_green": True,
+        "mutations": [
+            {"id": "M01", "status": "killed", "expect_assertion": "TestAlpha/positive",
+             "assertion_hit": True},
+            {"id": "M02", "status": "killed", "expect_assertion": "TestBeta/negative",
+             "assertion_hit": True},
+        ],
+        "not_evidence_backed": [],
+    }
+
+
+class EventContractTest(unittest.TestCase):
+    """Selftests for the schema-v2 event-integrity scenario contract.
+
+    The real contract is the fixture. Every negative case mutates an in-memory
+    copy and writes it to a temp file; the checked-in asset is never touched.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def write(self, name, payload):
+        path = self.root / name
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def contract_check(self, contract):
+        path = self.write("event-contract.json", contract)
+        return run_checker("--contract", str(path), "--check-contract", "--json")
+
+    def event_graph(self):
+        path = (REPO / "openspec" / "changes" / "archive"
+                / "2026-10-25-event-consumption-integrity" / "task-graph.json")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def contract_check_with_graph(self, contract, graph, *extra):
+        contract_path = self.write("event-contract.json", contract)
+        graph_path = self.write("event-graph.json", graph)
+        return run_checker("--contract", str(contract_path), "--check-contract",
+                           "--plan-graph", str(graph_path), "--json", *extra)
+
+    def write_projection_source(self, anchors):
+        """A minimal source tree whose only event parent is the projection test."""
+        root = self.root / "repo"
+        path = root / "tests" / "integration" / "history" / "event_integrity_test.go"
+        lines = ["package history", "",
+                 "func TestEventIntegrityProjection(t *testing.T) {"]
+        for name in anchors:
+            lines.append('\tt.Run("{}", func(t *testing.T) {{}})'.format(name))
+        lines.append("}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return root
+
+    def test_every_leaf_is_covered_by_test_or_non_product_evidence(self):
+        code, out, err = run_checker("--contract", str(REAL_EVENT_CONTRACT),
+                                     "--check-contract", "--json")
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertEqual(counts["event_leaves_total"], 42)
+        self.assertEqual(counts["event_leaves_product"], 29)
+        self.assertEqual(counts["event_leaves_non_product"], 13)
+        self.assertEqual(counts["event_leaves_covered"], 42)
+        self.assertEqual(payload["extra"]["leaf_coverage_gaps"], [])
+
+        # Dropping one non-product mapping leaves 04.5 covered by nothing.
+        contract = load_event_contract()
+        contract["non_product_leaves"] = [entry for entry in contract["non_product_leaves"]
+                                          if entry["leaf"] != "04.5"]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("non_product_leaves: missing graph non-product leaf 04.5", out)
+        self.assertIn("task-graph leaf 04.5 is covered by neither", out)
+
+    def test_anchor_selectors_exist(self):
+        # 04.5 派单正锚名（与台账正锚同体，避免两份实现）。
+        self.test_anchor_selectors_exist_in_test_files()
+
+    def test_anchor_selectors_exist_in_test_files(self):
+        anchors = ["small_window_fold_and_restore", "unconsumed_not_lost",
+                   "rebuild_does_not_refold", "fold_product_no_self_trigger",
+                   "actual_request_assembly", "rebuild_refolds_from_wal",
+                   "notice_visible_under_fold"]
+        root = self.write_projection_source(anchors)
+        code, out, err = self.contract_check_with_graph(
+            load_event_contract(), self.event_graph(), "--repo-root", str(root))
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["event_anchor_selectors_checked"], 1)
+        self.assertEqual(payload["counts"]["event_anchor_selector_mismatches"], 0)
+        self.assertEqual(payload["extra"]["selector_checked"],
+                         ["02.3/TestEventIntegrityProjection"])
+        # All G4/EVID-04 anchors now land in the source; none stays pending.
+        self.assertEqual(payload["counts"]["event_pending_anchors"], 0)
+        self.assertEqual(payload["extra"]["pending_anchors"], [])
+
+        # A selector that selects nothing is a hole even when the parent exists.
+        contract = load_event_contract()
+        test = next(item for item in contract["tests"]
+                    if item["id"] == "02.3/TestEventIntegrityProjection")
+        test["selector"] = "^TestEventIntegrityProjectionLater$"
+        code, out, _ = self.contract_check_with_graph(
+            contract, self.event_graph(), "--repo-root", str(root))
+        self.assertNotEqual(code, 0)
+        self.assertIn("does not select the declared test", out)
+
+    def test_renamed_leaf_fails(self):
+        graph = self.event_graph()
+        for leaf in graph["leaves"]:
+            if leaf["id"] == "02.3":
+                leaf["id"] = "02.9"
+        for entry in graph["test_registry"]:
+            if entry["leaf"] == "02.3":
+                entry["leaf"] = "02.9"
+        code, out, _ = self.contract_check_with_graph(load_event_contract(), graph)
+        self.assertNotEqual(code, 0)
+        self.assertIn("leaf '02.3' does not match task-graph '02.9'", out)
+
+    def test_missing_leaf_fails(self):
+        graph = self.event_graph()
+        graph["leaves"] = [leaf for leaf in graph["leaves"] if leaf["id"] != "02.3"]
+        code, out, _ = self.contract_check_with_graph(load_event_contract(), graph)
+        self.assertNotEqual(code, 0)
+        self.assertIn("test_registry 02.3/TestEventIntegrityProjection references leaf 02.3 "
+                      "that is not declared", out)
+
+    def test_missing_mandatory_subtest_fails(self):
+        contract = load_event_contract()
+        test = next(item for item in contract["tests"]
+                    if item["id"] == "02.3/TestEventIntegrityProjection")
+        test["subtests"] = [subtest for subtest in test["subtests"]
+                            if subtest["name"] != "small_window_fold_and_restore"]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("listed by task-graph but missing from event contract", out)
+
+    def test_missing_non_product_mapping_fails(self):
+        contract = load_event_contract()
+        contract["non_product_leaves"] = [entry for entry in contract["non_product_leaves"]
+                                          if entry["leaf"] != "00.1"]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("non_product_leaves: missing graph non-product leaf 00.1", out)
+
+    def test_missing_negative_anchor_fails(self):
+        contract = load_event_contract()
+        test = next(item for item in contract["tests"]
+                    if item["id"] == "01.1/TestEventIntegrityNoticeIdentity")
+        test["subtests"] = [subtest for subtest in test["subtests"]
+                            if "negative" not in subtest["roles"]]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("no negative subtest", out)
+
+    def test_empty_selector_fails(self):
+        contract = load_event_contract()
+        contract["tests"][0]["selector"] = ""
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("empty selector", out)
+
+    def test_event_contract_matches_graph_registry_and_sources(self):
+        code, out, err = run_checker("--contract", str(REAL_EVENT_CONTRACT),
+                                     "--check-contract", "--json")
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertTrue(payload["ok"])
+        counts = payload["counts"]
+        self.assertEqual(counts["event_tests_total"], 29)
+        self.assertEqual(counts["event_diagnostic_tests"], 1)
+        self.assertEqual(counts["event_product_green_tests"], 28)
+        self.assertEqual(counts["event_subtests_unique"], 143)
+        self.assertEqual(counts["event_green_subtests"], 139)
+        self.assertEqual(counts["event_diagnostic_subtests"], 4)
+        self.assertEqual(counts["event_families_covered"], 8)
+        self.assertEqual(counts["event_non_product_leaves"], 13)
+        self.assertEqual(counts["event_whole_chain_entries"], 10)
+        self.assertEqual(counts["event_matrix_inputs_total"], 7200)
+        self.assertEqual(counts["event_matrix_restarts_total"], 720)
+        self.assertEqual(counts["event_scope_event_short_parents"], 28)
+        self.assertEqual(counts["event_scope_event_short_anchors"], 140)
+        self.assertEqual(counts["event_scope_event_long_parents"], 1)
+        self.assertEqual(counts["event_scope_event_long_anchors"], 3)
+        # Source discovery grows as the 00—03 leaves land their tests; the exact
+        # split is transient, while the checker cross-aligns every discovered
+        # parent/subtest with the frozen contract on each run.
+        self.assertGreaterEqual(counts["event_source_discovered_tests"], 4)
+        self.assertGreaterEqual(counts["event_source_discovered_subtests"], 19)
+        self.assertEqual(counts["event_source_discovered_tests"]
+                         + counts["event_source_pending_tests"], 29)
+        # The superseded control monolith was removed from the tree by the
+        # 03.4—03.8 split; the graph still declares it as retained source-only,
+        # so the gate lists it as absent instead of pretending the declaration
+        # matches the tree.  The off-contract calibration test is present.
+        self.assertEqual(counts["event_source_only_tests"], 2)
+        self.assertEqual(counts["event_source_source_only_discovered_tests"], 1)
+        self.assertEqual(counts["event_source_only_absent_tests"], 1)
+        self.assertEqual(payload["extra"]["source_only_discovered"],
+                         ["TestEventIntegrityLongRunCalibration"])
+        self.assertEqual(payload["extra"]["source_only_absent"],
+                         ["TestEventIntegrityControls"])
+        # Mapping gate: every leaf is covered, every selector resolves, and the
+        # one anchor a leaf hard gate names stays pending instead of vanishing.
+        self.assertEqual(counts["event_leaves_total"], 42)
+        self.assertEqual(counts["event_leaves_covered"], 42)
+        self.assertEqual(payload["extra"]["leaf_coverage_gaps"], [])
+        # 源码落地是持续波次：只固定“已检查 + 待发现 = 全部 29 父”这一不变量，
+        # 不把某一时点的发现数写成硬编码（01.8/01.9 已落地，01.10a/01.10b 待落地）。
+        self.assertGreaterEqual(counts["event_anchor_selectors_checked"], 26)
+        self.assertEqual(
+            counts["event_anchor_selectors_checked"]
+            + counts["event_anchor_selectors_pending"], counts["event_tests_total"])
+        self.assertEqual(counts["event_anchor_selector_mismatches"], 0)
+        # G4/EVID-04 锚均已落地源码，无 pending；compaction_event_writer 已按用户裁定换为 rebuild_refolds_from_wal。
+        self.assertEqual(counts["event_pending_anchors"], 0)
+        self.assertEqual(payload["extra"]["pending_anchors"], [])
+        # 01.2/01.3 的补差锚已随既有实施波次落入源码（父测试也已 discovered），
+        # 不再计入 pending；其门控仍在 graph 内，源码回归缺失时 checker 会重新红。
+        self.assertNotIn(
+            "TestEventIntegrityConsumptionRecovery/handover_before_confirmation",
+            payload["extra"]["pending_anchors"])
+        self.assertNotIn(
+            "TestEventIntegrityTaskContinuation/notice_input_without_projection",
+            payload["extra"]["pending_anchors"])
+        self.assertIn(
+            "TestEventIntegrityConsumptionRecovery", payload["extra"]["source_discovered"])
+        self.assertIn(
+            "TestEventIntegrityTaskContinuation", payload["extra"]["source_discovered"])
+        # The already-landed parents must be discovered (guards a broken scanner),
+        # and their parent names must match the frozen contract.
+        discovered = payload["extra"]["source_discovered"]
+        for parent in ("TestEventIntegrityReproduction", "TestEventIntegrityNoticeIdentity",
+                       "TestEventIntegrityMeditationSchedule", "TestEventIntegrityHarness"):
+            self.assertIn(parent, discovered)
+        self.assertIsNone(payload["productVerified"])
+        # The contract mirrors the graph registry; the graph is the only source.
+        graph = json.loads((REPO / "openspec" / "changes" / "archive"
+                            / "2026-10-25-event-consumption-integrity"
+                            / "task-graph.json").read_text(encoding="utf-8"))
+        registry_ids = {entry["contract_id"] for entry in graph["test_registry"]}
+        contract_ids = {test["id"] for test in load_event_contract()["tests"]}
+        self.assertEqual(contract_ids, registry_ids)
+
+    def test_whole_chain_entries_are_aggregate_only(self):
+        contract = load_event_contract()
+        self.assertEqual(len(contract["whole_chain"]), 10)
+        self.assertEqual([entry["id"] for entry in contract["whole_chain"]],
+                         ["EI%02d" % number for number in range(1, 11)])
+        for entry in contract["whole_chain"]:
+            self.assertIs(entry["aggregate_only"], True)
+        contract["whole_chain"][0]["aggregate_only"] = False
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("aggregate_only must be true", out)
+
+    def test_event_contract_dual_role_consumer_is_accepted(self):
+        # 01.3 has no standalone consumer row in the graph; one positive row may
+        # carry positive+consumer and own the anchor. No second entity is created.
+        contract = load_event_contract()
+        test = next(item for item in contract["tests"]
+                    if item["id"] == "01.3/TestEventIntegrityTaskContinuation")
+        previous = next(item for item in test["subtests"]
+                        if item["name"] == test["consumer_anchor"])
+        previous["roles"] = ["positive"]
+        anchor = "late_notice_not_dropped"
+        row = next(item for item in test["subtests"] if item["name"] == anchor)
+        self.assertEqual(row["roles"], ["positive"])
+        row["roles"] = ["positive", "consumer"]
+        test["consumer_anchor"] = anchor
+        code, out, err = self.contract_check(contract)
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["event_dual_role_subtests"], 11)
+        self.assertEqual(payload["counts"]["event_subtests_unique"], 143)
+
+    def test_event_contract_rejects_reviving_superseded_source_only_test(self):
+        contract = load_event_contract()
+        monolith = copy.deepcopy(next(item for item in contract["tests"]
+                                      if item["id"] == "03.9/TestEventIntegrityRestart"))
+        monolith.update({
+            "id": "03.3/TestEventIntegrityControls",
+            "leaf": "03.3",
+            "test_name": "TestEventIntegrityControls",
+            "selector": "^TestEventIntegrityControls$",
+        })
+        contract["tests"].append(monolith)
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("source-only test TestEventIntegrityControls must not also be registered",
+                      out)
+
+    def test_event_contract_missing_family_is_rejected(self):
+        contract = load_event_contract()
+        contract["families"] = [entry for entry in contract["families"]
+                                 if entry["id"] != "E8"]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("families must declare exactly E1—E8", out)
+
+    def test_event_contract_missing_negative_anchor_is_rejected(self):
+        contract = load_event_contract()
+        test = next(item for item in contract["tests"]
+                    if item["id"] == "01.1/TestEventIntegrityNoticeIdentity")
+        test["subtests"] = [item for item in test["subtests"]
+                            if "negative" not in item["roles"]]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("no negative subtest", out)
+
+    def test_event_contract_duplicate_test_or_subtest_is_rejected(self):
+        base = load_event_contract()
+
+        duplicate_test = copy.deepcopy(base)
+        duplicate_test["tests"].append(copy.deepcopy(duplicate_test["tests"][0]))
+        code, out, _ = self.contract_check(duplicate_test)
+        self.assertNotEqual(code, 0)
+        self.assertIn("duplicate test id", out)
+
+        duplicate_subtest = copy.deepcopy(base)
+        test = next(item for item in duplicate_subtest["tests"]
+                    if item["id"] == "01.1/TestEventIntegrityNoticeIdentity")
+        test["subtests"].append(copy.deepcopy(test["subtests"][0]))
+        code, out, _ = self.contract_check(duplicate_subtest)
+        self.assertNotEqual(code, 0)
+        self.assertIn("duplicate subtest entity registration", out)
+        self.assertIn("same (parent,name) key", out)
+
+        # A single row carrying multiple legal roles is one entity, not a duplicate.
+        self.assertEqual(self.contract_check(base)[0], 0)
+
+    def test_event_contract_empty_selector_is_rejected(self):
+        contract = load_event_contract()
+        contract["tests"][0]["selector"] = ""
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("empty selector", out)
+
+    def test_event_contract_deleting_graph_entry_is_rejected(self):
+        contract = load_event_contract()
+        contract["tests"] = [item for item in contract["tests"]
+                             if item["id"] != "02.7/TestEventIntegrityCapture"]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("graph test 02.7/TestEventIntegrityCapture is missing from event contract",
+                      out)
+
+    def test_event_contract_matrix_shrink_is_rejected(self):
+        contract = load_event_contract()
+        contract["matrix"]["seeds"] = [1, 7]
+        code, out, _ = self.contract_check(contract)
+        self.assertNotEqual(code, 0)
+        self.assertIn("matrix.seeds must stay at", out)
+
+
+class EventFixture:
+    """Schema-v2 evidence fixtures.  Logs are synthetic JSONL; Go is never run.
+
+    The real golden contract is the fixture so the checked-in asset stays
+    guarded, while every negative case mutates exactly one thing.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.contract = load_event_contract()
+        self.digest = event_digest(REAL_EVENT_CONTRACT)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def evidence(self, scope, tests=None, run_id=None, repeat_index=1, repeat_total=None,
+                 seed=None, window=None):
+        tests = tests if tests is not None else event_tests(self.contract, scope)
+        if repeat_total is None:
+            repeat_total = next(entry["repeat"] for entry in self.contract["scopes"]
+                                if entry["name"] == scope)
+        return {
+            "schema_version": 2,
+            "profile": "event-integrity",
+            "run_id": run_id or str(uuid.uuid4()),
+            "scope": scope,
+            "repeat_index": repeat_index,
+            "repeat_total": repeat_total,
+            "contract_digest": self.digest,
+            "test_ids": [test["id"] for test in tests],
+            "module_fingerprints": event_fingerprints(scope),
+            "run_config": {
+                "seed": seed,
+                "window": window,
+                "tags": sorted({tag for test in tests for tag in test.get("tags") or []}),
+                "race": True,
+            },
+            "go_test_exit_code": 0,
+            "test_log": "",
+            "test_log_sha256": "",
+            "subtests": [{"test_id": test["id"], "name": subtest["name"],
+                          "status": "pass"}
+                         for test in tests for subtest in test["subtests"]],
+            "verdict": "match",
+        }
+
+    def write_run(self, directory, evidence, rows=None, log_from=None):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        if log_from is None:
+            log_path = directory / "test-log.jsonl"
+            log_path.write_text("".join(json.dumps(row) + "\n" for row in rows),
+                                encoding="utf-8")
+        else:
+            log_path = Path(log_from)
+        evidence = copy.deepcopy(evidence)
+        evidence["test_log"] = str(log_path)
+        evidence["test_log_sha256"] = event_digest(log_path)
+        path = directory / "evidence.json"
+        path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
+
+    def verify(self, evidence, rows, *extra):
+        path = self.write_run(self.root / "run", evidence, rows)
+        return run_checker("--contract", str(REAL_EVENT_CONTRACT), "--evidence", str(path),
+                           "--json", *extra)
+
+    def write_bundle(self, name, short_count=10, combos=None, mutation=True,
+                     short_hook=None, long_hook=None):
+        bundle = self.root / name
+        bundle.mkdir(parents=True, exist_ok=True)
+        short_tests = event_tests(self.contract, "event-short")
+        long_tests = event_tests(self.contract, "event-long")
+        short_log = event_log(self.contract, short_tests)
+        long_log = event_log(self.contract, long_tests)
+        if combos is None:
+            combos = [(seed, window) for seed in (1, 7, 42) for window in (256, 32768)]
+        for index in range(1, short_count + 1):
+            evidence = self.evidence("event-short", short_tests, repeat_index=index,
+                                     repeat_total=10)
+            if short_hook:
+                evidence = short_hook(index, evidence)
+            self.write_run(bundle / "short-{}".format(index), evidence, short_log)
+        for seed, window in combos:
+            evidence = self.evidence("event-long", long_tests, repeat_index=1,
+                                     repeat_total=1, seed=seed, window=window)
+            if long_hook:
+                evidence = long_hook(seed, window, evidence)
+            self.write_run(bundle / "long-{}-{}".format(seed, window), evidence, long_log)
+        if mutation:
+            mutations = bundle / "mutations"
+            mutations.mkdir()
+            (mutations / "evidence.json").write_text(
+                json.dumps(mutation_evidence(), ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        return bundle
+
+    def check_bundle(self, bundle):
+        return run_checker("--contract", str(REAL_EVENT_CONTRACT), "--bundle", str(bundle),
+                           "--json")
+
+
+class EventEvidenceTest(EventFixture, unittest.TestCase):
+    """One schema-v2 evidence file against its contract, log and anchors.
+
+    The v1 negatives below keep their v1 fixtures; the same names in this class
+    assert the v2 envelope (UUID run ids, log digests, anchor verdicts).
+    """
+
+    def test_v2_short_round_evidence_is_accepted(self):
+        tests = event_tests(self.contract, "event-short")
+        code, out, err = self.verify(self.evidence("event-short", tests),
+                                     event_log(self.contract, tests))
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["event_tests_checked"], 28)
+        self.assertEqual(payload["counts"]["event_anchors_checked"], 140)
+        self.assertEqual(payload["extra"]["repeat_index"], 1)
+        self.assertEqual(payload["extra"]["repeat_total"], 10)
+        self.assertIsNone(payload["productVerified"])
+
+    def test_v2_long_round_evidence_is_accepted(self):
+        tests = event_tests(self.contract, "event-long")
+        code, out, err = self.verify(self.evidence("event-long", tests, seed=7, window=256),
+                                     event_log(self.contract, tests))
+        self.assertEqual(code, 0, out + err)
+
+    def test_skipped_subtest_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        rows = event_log(self.contract, tests)
+        anchor = tests[0]["test_name"] + "/" + tests[0]["subtests"][0]["name"]
+        for row in rows:
+            if row["Test"] == anchor and row["Action"] == "pass":
+                row["Action"] = "skip"
+                break
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0)
+        self.assertIn("was skipped", out)
+
+    def test_missing_package_terminal_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        rows = event_log(self.contract, tests)
+        self.assertEqual(rows[-1]["Test"], "")
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows[:-1])
+        self.assertNotEqual(code, 0)
+        self.assertIn("missing terminal", out)
+
+    def test_failed_process_exit_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["go_test_exit_code"] = 1
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("go_test_exit_code", out)
+
+    def test_missing_run_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        name = test["test_name"]
+        package = event_full_package(test["module_path"], test["test_package"])
+        rows = [row for row in event_log(self.contract, tests)
+                if not (row["Package"] == package
+                        and (row["Test"] == name or row["Test"].startswith(name + "/")))]
+        terminal = next(index for index, row in enumerate(rows)
+                        if row["Package"] == package and row["Test"] == ""
+                        and row["Action"] == "pass")
+        rows.insert(terminal, event_row(package, name, "pass"))
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0)
+        self.assertIn("no run+pass", out)
+
+    def test_fabricated_record_is_rejected(self):
+        # The evidence claims a passing round; the log shows that case never ran.
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        name = test["test_name"]
+        package = event_full_package(test["module_path"], test["test_package"])
+        rows = [row for row in event_log(self.contract, tests)
+                if not (row["Package"] == package
+                        and (row["Test"] == name or row["Test"].startswith(name + "/")))]
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0)
+        self.assertIn("no run/pass in test-log", out)
+        self.assertIn("zero match", out)
+
+    def test_duplicate_run_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        name = test["test_name"]
+        package = event_full_package(test["module_path"], test["test_package"])
+        rows = event_log(self.contract, tests)
+        passed = next(index for index, row in enumerate(rows)
+                      if row["Package"] == package and row["Test"] == name
+                      and row["Action"] == "pass")
+        rows.insert(passed + 1, event_row(package, name, "run"))
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0)
+        self.assertIn("duplicate run", out)
+
+    def test_post_hoc_pass_cannot_cover_a_failing_run(self):
+        tests = event_tests(self.contract, "event-short")
+        test = tests[0]
+        name = test["test_name"]
+        package = event_full_package(test["module_path"], test["test_package"])
+        rows = event_log(self.contract, tests)
+        for row in rows:
+            if (row["Package"] == package and row["Test"] == name
+                    and row["Action"] == "pass"):
+                row["Action"] = "fail"
+                break
+        terminal = next(index for index, row in enumerate(rows)
+                        if row["Package"] == package and row["Test"] == ""
+                        and row["Action"] == "pass")
+        rows[terminal:terminal] = [event_row(package, name, "run"),
+                                   event_row(package, name, "pass")]
+        code, out, _ = self.verify(self.evidence("event-short", tests), rows)
+        self.assertNotEqual(code, 0)
+        self.assertIn("recorded fail", out)
+
+    def test_missing_mandatory_anchor_verdict_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        evidence["subtests"].pop()
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("missing verdict for mandatory anchor", out)
+
+    def test_off_matrix_seed_window_is_rejected(self):
+        tests = event_tests(self.contract, "event-long")
+        evidence = self.evidence("event-long", tests, seed=1, window=512)
+        code, out, _ = self.verify(evidence, event_log(self.contract, tests))
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a contract matrix combination", out)
+
+    def test_replaced_test_log_is_rejected(self):
+        tests = event_tests(self.contract, "event-short")
+        evidence = self.evidence("event-short", tests)
+        path = self.write_run(self.root / "run", evidence, event_log(self.contract, tests))
+        log = path.parent / "test-log.jsonl"
+        log.write_text(log.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        code, out, _ = run_checker("--contract", str(REAL_EVENT_CONTRACT),
+                                   "--evidence", str(path), "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("test_log_sha256 does not match", out)
+
+
+class EventBundleTest(EventFixture, unittest.TestCase):
+    """`--bundle` summary mode: ten short rounds, six long combos, one mutation report."""
+
+    def test_bundle_accepts_ten_short_six_long_one_mutation(self):
+        bundle = self.write_bundle("complete")
+        code, out, err = self.check_bundle(bundle)
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        self.assertEqual(payload["counts"]["bundle_short_evidence"], 10)
+        self.assertEqual(payload["counts"]["bundle_long_evidence"], 6)
+        self.assertEqual(payload["counts"]["bundle_mutation_evidence"], 1)
+        summary = payload["extra"]["bundle"]
+        self.assertEqual(len(summary["short_run_ids"]), 10)
+        self.assertEqual(summary["long_combos"],
+                         [[1, 256], [1, 32768], [7, 256], [7, 32768], [42, 256], [42, 32768]])
+        self.assertEqual(len(summary["test_ids"]), 28)
+        self.assertIsNone(payload["productVerified"])
+
+    def test_scope_specific_module_sets_are_not_baseline_drift(self):
+        # The runner fingerprints only the groups a scope selects, so a legal
+        # bundle carries different module sets per scope. The gate must accept
+        # that difference instead of demanding identical fingerprint lists.
+        bundle = self.write_bundle("scope-specific-modules")
+        short = json.loads((bundle / "short-1" / "evidence.json").read_text(encoding="utf-8"))
+        long_evidence = json.loads((bundle / "long-1-256" / "evidence.json").read_text(
+            encoding="utf-8"))
+        self.assertEqual(len(short["module_fingerprints"]), 3)
+        self.assertEqual([entry["module_path"] for entry in long_evidence["module_fingerprints"]],
+                         ["wechat-bot"])
+        code, out, err = self.check_bundle(bundle)
+        self.assertEqual(code, 0, out + err)
+
+        # The shared module is the one place both scopes can contradict each
+        # other: a different digest on the smoke module is drift, not scope.
+        long_evidence["module_fingerprints"][0]["content_hash"] = "sha256:" + "9" * 64
+        (bundle / "long-1-256" / "evidence.json").write_text(
+            json.dumps(long_evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("different baseline content digest", out)
+        self.assertIn("wechat-bot", out)
+
+        # A different revision for the shared module tells the same story.
+        bundle = self.write_bundle("scope-specific-revision")
+        path = bundle / "long-1-256" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["module_fingerprints"][0]["revision"] = "f" * 40
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("different baseline revision", out)
+        self.assertIn("wechat-bot", out)
+
+    def test_nine_of_ten_runs_fail(self):
+        bundle = self.write_bundle("nine-of-ten", short_count=9)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("exactly 10 event-short evidence file(s), found 9", out)
+        self.assertIn("repeat_index coverage", out)
+
+    def test_five_of_six_combos_fail(self):
+        combos = [(1, 256), (1, 32768), (7, 256), (7, 32768), (42, 256)]
+        bundle = self.write_bundle("five-of-six", combos=combos)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("exactly 6 event-long evidence file(s) (one per matrix combination), found 5",
+                      out)
+        self.assertIn("missing event-long matrix combination(s)", out)
+        self.assertIn("(42, 32768)", out)
+
+    def test_empty_bundle_directory_fails(self):
+        empty = self.root / "empty"
+        empty.mkdir()
+        code, out, _ = self.check_bundle(empty)
+        self.assertNotEqual(code, 0)
+        self.assertIn("holds no evidence.json", out)
+
+    def test_reused_run_id_fails(self):
+        # One execution credential cannot stand for two independent rounds.
+        shared = str(uuid.uuid4())
+
+        def reuse(index, evidence):
+            if index in (1, 2):
+                evidence["run_id"] = shared
+            return evidence
+
+        bundle = self.write_bundle("reused-run-id", short_hook=reuse)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("bundle reuses run_id", out)
+
+    def test_execution_credential_impersonation_fails(self):
+        # Positive control: one round legally carries all 27 cases of the scope.
+        baseline = self.write_bundle("baseline")
+        code, out, err = self.check_bundle(baseline)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(len(json.loads(out)["extra"]["bundle"]["test_ids"]), 28)
+
+        # One run_id cannot stand for two independent rounds.
+        shared = str(uuid.uuid4())
+
+        def reuse_run_id(index, evidence):
+            if index in (1, 2):
+                evidence["run_id"] = shared
+            return evidence
+
+        bundle = self.write_bundle("impersonate-run", short_hook=reuse_run_id)
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("reuses run_id", out)
+
+        # Reusing the same test log is the same forged credential.
+        bundle = self.write_bundle("impersonate-log")
+        first = json.loads((bundle / "short-1" / "evidence.json").read_text(encoding="utf-8"))
+        second_path = bundle / "short-2" / "evidence.json"
+        second = json.loads(second_path.read_text(encoding="utf-8"))
+        second["test_log"] = first["test_log"]
+        second["test_log_sha256"] = first["test_log_sha256"]
+        second_path.write_text(json.dumps(second, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("reuses the test log", out)
+
+        # A short round cannot borrow a long matrix combination's credential.
+        bundle = self.write_bundle("impersonate-cross-scope")
+        short_path = bundle / "short-1" / "evidence.json"
+        long_path = bundle / "long-1-256" / "evidence.json"
+        short = json.loads(short_path.read_text(encoding="utf-8"))
+        long_evidence = json.loads(long_path.read_text(encoding="utf-8"))
+        short["run_id"] = long_evidence["run_id"]
+        short_path.write_text(json.dumps(short, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("reuses run_id", out)
+
+    def test_mixed_baseline_digest_or_fingerprint_fails(self):
+        bundle = self.write_bundle("mixed-digest")
+        path = bundle / "short-3" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["contract_digest"] = "sha256:" + "9" * 64
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("mixes contract digests", out)
+
+        bundle = self.write_bundle("mixed-fingerprint")
+        path = bundle / "short-3" / "evidence.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["module_fingerprints"][0]["content_hash"] = "sha256:" + "9" * 64
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("different baseline content digest", out)
+
+    def test_mutation_evidence_structure_is_enforced(self):
+        bundle = self.write_bundle("mutations-survived", mutation=False)
+        payload = mutation_evidence()
+        payload["mutations"][0]["status"] = "survived"
+        payload["not_evidence_backed"] = ["candidate-01"]
+        directory = bundle / "mutations"
+        directory.mkdir()
+        (directory / "evidence.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        code, out, _ = self.check_bundle(bundle)
+        self.assertNotEqual(code, 0)
+        self.assertIn("is not 'killed'", out)
+        self.assertIn("not_evidence_backed must be empty", out)
 
 
 if __name__ == "__main__":

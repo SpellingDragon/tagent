@@ -179,6 +179,14 @@ type Host struct {
 	face       *hostFace
 	meditation *meditation.Driver
 	settle     *SettleDriver
+	// execManager is the execution resource ledger the declared exec face
+	// acquires through; the host is the production consumer of its lifecycle:
+	// the manager observes state changes after a call returned, and the host
+	// releases every held resource when it closes.
+	execManager *tagentexec.Manager
+	// execWG counts the follow-up turns one execution state event drives, so a
+	// close waits for them before it drains the run.
+	execWG sync.WaitGroup
 	// telemetryStop shuts the observation pipeline the document declared down;
 	// it is nil beside the log face and beside a document that starts none.
 	telemetryStop func(context.Context) error
@@ -299,8 +307,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	var settleDriver *SettleDriver
 	// host is assigned once the assembly returns; the settle face captures the
 	// variable, because the three faces it needs are the host's own memory and
-	// drive and are only called after Boot published it.
+	// drive and are only called after Boot published it. The execution ledger is
+	// created before the assembly and observes state through the same variable,
+	// because a resource can only be acquired once the host drives a call.
 	var host *Host
+	var execManager *tagentexec.Manager
 	observer, telemetryStop, err := hostTelemetryObserver(ctx, doc.Telemetry)
 	if err != nil {
 		cancel()
@@ -317,7 +328,12 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 			cancel()
 			return nil, fmt.Errorf("tagent: an agent declares the %q face: %w", tagentexec.PresetName, err)
 		}
-		options = append(options, WithExecManager(tagentexec.NewManager(executor)))
+		execManager = tagentexec.NewManager(executor, tagentexec.WithStateObserver(func(evt tagentexec.StateEvent) {
+			if host != nil {
+				host.observeExecState(evt)
+			}
+		}))
+		options = append(options, WithExecManager(execManager))
 	}
 	riskRules, err := doc.riskRules()
 	if err != nil {
@@ -409,6 +425,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		deliveries:    deliveryMeter,
 		meditation:    driver,
 		settle:        settleDriver,
+		execManager:   execManager,
 		configPath:    configPath,
 		doc:           doc,
 		natives:       natives,
@@ -692,7 +709,6 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		InvocationID:  invocationID,
 		Address:       addr,
 		TriggerSource: "task",
-		Input:         []model.Message{{Role: model.RoleUser, Content: material}},
 	})
 	return err
 }
@@ -704,6 +720,81 @@ func settleNoticeText(notice task.Notice) string {
 	text := fmt.Sprintf("tagent: task %s %s", notice.TaskID, notice.Kind)
 	if body := strings.TrimSpace(notice.Text); body != "" {
 		text += "\nresult:\n" + body
+	}
+	return text
+}
+
+// observeExecState hands one lifecycle event of an execution resource to the
+// notification chain: an event whose acquiring call named a complete range
+// drives one unattended follow-up turn at that address through the same
+// fireNoticeTurn entry a terminal settle uses, so the next decision of the range
+// reads the state as a notification instead of polling the ledger. Stable,
+// suspect and exited observations are consumed this way; a release or a
+// retention stays on the explicit answer of the call that released or retained
+// the resource, so one action never produces two consumption paths.
+//
+// The observer is a bypass of the manager: it is called outside the manager's
+// lock, it drops every event once the host closed, and it never changes whether
+// the resource stays held.
+func (h *Host) observeExecState(evt tagentexec.StateEvent) {
+	if h == nil || h.run == nil {
+		return
+	}
+	if !evt.Owner.Address.IsComplete() || evt.Owner.TaskID == "" {
+		return
+	}
+	switch evt.Phase {
+	case tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited:
+	default:
+		return
+	}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	h.execWG.Add(1)
+	h.mu.Unlock()
+	material := execStateText(evt)
+	go func() {
+		defer h.execWG.Done()
+		ctx, cancel := context.WithTimeout(h.ctx, hostShutdownGrace)
+		defer cancel()
+		fact := event.Event{
+			Type: event.TypeFeedback,
+			Meta: map[string]string{
+				event.MetaKeyTriggerSource: "task",
+				event.MetaKeyEventSummary:  string(task.NoticeProgress),
+				event.MetaKeyNoticeKind:    string(task.NoticeProgress),
+				event.MetaKeyTaskID:        string(evt.Owner.TaskID),
+			},
+			Message: model.Message{Role: model.RoleUser, Content: material},
+			TaskID:  evt.Owner.TaskID,
+		}
+		if err := h.fireNoticeTurn(ctx, evt.Owner.Address, fact); err != nil && !errors.Is(err, ErrHostClosed) {
+			assemblyWarn("tagent: the execution state turn of %s reported: %v", evt.Resource, err)
+		}
+	}()
+}
+
+// execStateText renders the input material one execution lifecycle event reads
+// as: the resource, the observed phase and the evidence behind it, as a user
+// message of the follow-up range. The text reports the observation alone, so a
+// quiet frame is never rendered as a success and an unobserved ending is never
+// rendered as one.
+func execStateText(evt tagentexec.StateEvent) string {
+	text := fmt.Sprintf("tagent: execution resource %s reports state %s", evt.Resource, evt.Phase)
+	switch evt.Phase {
+	case tagentexec.StateExited:
+		text += fmt.Sprintf(": exit code %d", evt.ExitCode)
+	case tagentexec.StateRetained:
+		if detail := strings.TrimSpace(evt.Detail); detail != "" {
+			text += ": the resource stays held: " + detail
+		}
+	default:
+		if detail := strings.TrimSpace(evt.Detail); detail != "" {
+			text += ": " + detail
+		}
 	}
 	return text
 }
@@ -735,6 +826,15 @@ func (h *Host) Close(ctx context.Context) error {
 			first = err
 		}
 	}
+	if h.execManager != nil {
+		for _, report := range h.execManager.Close(ctx) {
+			if report.Evidence.Released {
+				continue
+			}
+			assemblyWarn("tagent: the execution resource %s stays held after close: %s", report.Key, report.Evidence.Reason)
+		}
+	}
+	h.execWG.Wait()
 	report, err := h.run.Close(ctx, agent.CloseRequest{})
 	if err != nil {
 		if sealErr := h.sealCapture(ctx); sealErr != nil {

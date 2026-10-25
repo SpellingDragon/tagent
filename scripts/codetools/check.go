@@ -1112,6 +1112,7 @@ var procRefSkip = map[string]bool{
 	"scripts/lint.sh":                               true,
 	"scripts/check_concept_budget.py":               true,
 	"scripts/check_runtime_plan.py":                 true,
+	"scripts/check_event_integrity_mutations.py":    true,
 	"scripts/check_doc_budget.py":                   true,
 	"scripts/test_check_doc_budget.py":              true,
 	"scripts/doc_budget.json":                       true,

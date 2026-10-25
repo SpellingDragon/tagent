@@ -65,25 +65,30 @@ type NoticeView struct {
 }
 
 // NoticeFeed is the incremental read face of a session chain's notification
-// facts: the boundary the ended material ends at and the entries appended after
-// a read cursor. A notification is a fact of the chain, so a drive reads the
-// notices of its range as a projection increment rather than from a lane of its
-// own; a chain beside no projection says so and the loop reads the cache it
-// keeps beside the commit instead. The face crosses built-in and event types
-// only, so the composition root attaches it with no package edge into the
-// projection layer.
+// facts: the boundary the ended material ends at and the notices the chain
+// carries from that boundary on. A notification is a fact of the chain, so a
+// drive reads the notices of its range as a projection increment rather than
+// from a lane of its own; a chain beside no projection says so and the loop
+// reads the cache it keeps beside the commit instead. The face crosses built-in
+// and event types only, so the composition root attaches it with no package edge
+// into the projection layer.
+//
+// - The boundary is re-resolved by identity each drive, not a kept position: a fold rewrite moves the sequence; remembered identities report each notice once.
 //
 // The redline list (3 rules):
-// MUST report the ended-material boundary and the entries appended after the cursor, in chain order.
+// MUST report the ended-material boundary and the notices the chain carries from it on, in chain order.
 // MUST report a chain that carries no projection as carrying none, never as an empty projection.
 // MUST NOT answer an entry outside the identity prefix it was handed.
 type NoticeFeed interface {
 	// NoticeBoundary reports the position the ended material of the named chain
-	// ends at and whether that chain carries a projection at all.
+	// ends at, resolved from the fact identity the boundary records, and whether
+	// that chain carries a projection at all.
 	NoticeBoundary(chain RequestChain) (int, bool)
-	// NoticesFrom reports the notification facts of the named chain appended
-	// after cursor under the given identity prefix, in chain order, beside the
-	// position the read reached and whether the chain carries a projection.
+	// NoticesFrom reports the notification facts of the named chain from cursor
+	// on under the given identity prefix, in chain order, beside the end the read
+	// reached and whether the chain carries a projection. The cursor is resolved
+	// against the sequence as it stands at the read; it is never a position the
+	// caller may keep across a fold rewrite.
 	NoticesFrom(chain RequestChain, prefix event.EventID, cursor int) ([]NoticeView, int, bool)
 }
 
@@ -1105,8 +1110,6 @@ type intake struct {
 	waiters map[event.TaskID][]chan delivered
 	settled map[event.TaskID][]delivered
 	notices []noticeEntry
-	cursor  int
-	seeded  bool
 	read    map[event.EventID]bool
 }
 
@@ -1191,30 +1194,24 @@ func (in *intake) takeNotices() []noticeEntry {
 // progressNotes reads the progress notifications of one invocation as the input
 // material the next decision of its range carries: one user message per report,
 // none of them answering a call. A notification is a fact of the chain, so a
-// read beside a chain is a projection increment from the cursor the range
-// reached: the first read seeds that cursor at the ended-material boundary of
-// the session — the material the range already reads through its transcript —
-// and every later read takes the facts appended after it, so each report reaches
-// one decision and no earlier report is replayed. A notification the chain
-// already carried is never reported a second time, and a range beside no chain
-// reads the cache the intake kept beside the commit.
+// read beside a chain is a projection increment from the ended-material boundary
+// of the session — the material the range already reads through its transcript
+// — and every drive re-resolves that boundary from the fact identity the chain
+// records instead of keeping the position an earlier read reached: the age fold
+// rewrites the sequence the commits record, so a kept position names other
+// material after a rewrite or falls past the shortened sequence, and the
+// notification appended after the boundary is skipped unseen. The identities a
+// read reported are the state this range keeps, so reading from the boundary
+// again reports each report once and no earlier report is replayed. A
+// notification the chain already carried is never reported a second time, and a
+// range beside no chain reads the cache the intake kept beside the commit.
 func (l *Loop) progressNotes(inv Invocation) []model.Message {
 	in := l.intakeFor(inv.InvocationID)
 	var views []NoticeView
 	if feed := l.noticeReader(); feed != nil {
 		chain := RequestChain{SessionID: inv.Address.SessionID}
 		if boundary, held := feed.NoticeBoundary(chain); held {
-			in.mu.Lock()
-			if !in.seeded {
-				in.cursor = boundary
-				in.seeded = true
-			}
-			cursor := in.cursor
-			in.mu.Unlock()
-			notices, reached, _ := feed.NoticesFrom(chain, NoticeFactPrefix(inv.InvocationID), cursor)
-			in.mu.Lock()
-			in.cursor = reached
-			in.mu.Unlock()
+			notices, _, _ := feed.NoticesFrom(chain, NoticeFactPrefix(inv.InvocationID), boundary)
 			views = append(views, notices...)
 		}
 	}

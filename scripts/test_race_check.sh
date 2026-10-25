@@ -2,8 +2,8 @@
 # test_race_check.sh — negative + positive tests for race_check.sh v2
 # (resident-readiness-plan 1.2/1.3).
 #
-# Cases 1–10 exercise the classifier via RACE_CHECK_CLASSIFY_ONLY (fast,
-# deterministic, no real go test); cases 11–12 are real end-to-end runs
+# Cases 1–13 exercise the classifier via RACE_CHECK_CLASSIFY_ONLY (fast,
+# deterministic, no real go test); cases 14–15 are real end-to-end runs
 # (legal package → OK; illegal package → non-zero — the old script's
 # false-green scenario). Run: bash scripts/test_race_check.sh  (all pass → 0)
 set -u
@@ -36,6 +36,13 @@ UP_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-agent-go@v1.10.0/sess
 TAG_FRAME='  github.com/SpellingDragon/tagent/agent.(*ContextManager).persistBusEvent(...)'
 TAG_PATH='      /repo/agent/context_manager.go:802 +0x9c'
 OTHER_UP='  trpc.group/trpc-go/trpc-agent-go@v1.9.0/model/stream.go:40 (...)' # upstream, NOT in waiver list
+# U5 — trpc-mcp-go v0.0.10 streamable client transport. The transport symbol
+# never carries its file name, so the symbol line and the path line each need
+# their own signature (a single-path signature left the symbol line unmatched).
+MCP_FRAME='  trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).setSessionID()'
+MCP_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-mcp-go@v0.0.10/streamable_client.go:467 +0x414'
+MCP_SERVER_FRAME='  trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPServer).handlePost(...)'  # server side, NOT waived
+MCP_SERVER_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-mcp-go@v0.0.10/streamable_server.go:207 +0x1c'
 
 # 1. Clean pass.
 run_case "clean pass" 0 "ok  \tgithub.com/SpellingDragon/tagent/event\t0.4s" 0 "OK"
@@ -79,7 +86,19 @@ $TAG_PATH
 --- FAIL: TestRacy2 (0.02s)"
 run_case "mixed tagent+waived frames" 1 "$mix2" 1 "tagent-owned"
 
-# 11. REAL end-to-end: legal package passes.
+# 11. U5 registered upstream race (trpc-mcp-go streamable client) → waived.
+run_case "waived trpc-mcp-go streamable client race" 1 "$(race_out "$MCP_FRAME" "$MCP_PATH")" 0 "WAIVED"
+
+# 12. U5 waived race PLUS a plain failure → waivers must not mask it.
+mcp_mixed="$(race_out "$MCP_FRAME" "$MCP_PATH")
+--- FAIL: TestPlainAssertion (0.01s)"
+run_case "waived trpc-mcp-go race + plain failure" 1 "$mcp_mixed" 1 "plain (non-race) failure"
+
+# 13. trpc-mcp-go frame OUTSIDE the transport/file waiver (server side) → red.
+# Proves the signature waives the streamable client transport, not the module.
+run_case "trpc-mcp-go server frame still unregistered" 1 "$(race_out "$MCP_SERVER_FRAME" "$MCP_SERVER_PATH")" 1 "NOT covered by the registered waiver"
+
+# 14. REAL end-to-end: legal package passes.
 out=$(bash "$SCRIPT" ./api/event 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ] && grep -q "OK" <<<"$out"; then
@@ -90,7 +109,7 @@ else
 	FAILS=$((FAILS + 1))
 fi
 
-# 12. REAL end-to-end: illegal package must be non-zero (old false green).
+# 15. REAL end-to-end: illegal package must be non-zero (old false green).
 out=$(bash "$SCRIPT" ./definitely-nonexistent-audit-package 2>&1)
 rc=$?
 if [ "$rc" -ne 0 ]; then

@@ -2,8 +2,9 @@
 """Selftests for check_runtime_architecture.py — no real `go list` is executed.
 
 Implementation-mode tests inject a captured `go list -deps -json` stream via
---go-list-json inside a tempfile repo root, so the suite never builds or lists
-the real product tree.
+--go-list-json AND a captured event-ownership report via --event-ownership-json
+inside a tempfile repo root, so the suite neither builds nor lists the real
+product tree and never runs the Go gate against a tree it did not describe.
 """
 import copy
 import json
@@ -36,6 +37,44 @@ def patterns(policy):
 
 def import_path(pattern):
     return MODULE if pattern == "." else "{}/{}".format(MODULE, pattern)
+
+
+def ownership_report(policy, **overrides):
+    """A structurally complete event-ownership report; overrides drive negatives."""
+    table = policy["event_ownership"]
+    payload = {
+        "ok": True,
+        "module": MODULE,
+        "golden": "golden/runtime/architecture.json",
+        "counts": {
+            "owners": len(table["owners"]),
+            "symbols": len(table["symbols"]),
+            "packages_scanned": 31,
+            "candidates": 47,
+            "direct_calls": 20,
+            "allowed": 14,
+            "forbidden": 0,
+            "unregistered": 0,
+            "unowned": 0,
+            "ambiguous": 0,
+            "uncovered": 1,
+            "same_name_non_target": 29,
+        },
+        "violations": [],
+        "uncovered": [{
+            "file": "run.go",
+            "line": 307,
+            "caller": "Assemble",
+            "name": "deliver",
+            "symbol": "host.deliver",
+            "reason": "method value of a frozen symbol is passed on as a callback; "
+                      "the call happens inside the port",
+        }],
+        "non_target": [],
+        "notes": [],
+    }
+    payload.update(overrides)
+    return payload
 
 
 def go_list_stream(policy, omit=(), extra_imports=None):
@@ -214,6 +253,82 @@ class PolicyTest(unittest.TestCase):
         self.assertNotIn("forbidden_substrings", external)
         self.assertTrue(external["known_prefixes"])
 
+    def test_real_golden_event_ownership_is_frozen(self):
+        table = self.policy["event_ownership"]
+        owners = {owner["id"]: owner for owner in table["owners"]}
+        for owner in ("runtime/task", "runtime/state", "runtime/agent", "facts", "host"):
+            self.assertIn(owner, owners)
+        symbols = {symbol["id"]: symbol for symbol in table["symbols"]}
+        for symbol in ("notice.issue", "mailbox.accept-notice", "mailbox.claim",
+                       "mailbox.consume", "host.deliver"):
+            self.assertIn(symbol, symbols)
+        allowed_somewhere = set()
+        for owner in owners.values():
+            allowed_somewhere.update(owner["allowed"])
+        self.assertEqual(set(symbols), allowed_somewhere,
+                         "every frozen symbol needs at least one legal caller")
+
+    def test_event_ownership_missing_table_is_rejected(self):
+        policy = copy.deepcopy(self.policy)
+        del policy["event_ownership"]
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("event_ownership table is missing", out)
+
+    def test_event_ownership_unknown_symbol_reference_is_rejected(self):
+        policy = copy.deepcopy(self.policy)
+        host = next(owner for owner in policy["event_ownership"]["owners"]
+                    if owner["id"] == "host")
+        host["allowed"].append("notice.ghost")
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("references undeclared symbol", out)
+
+    def test_event_ownership_allow_forbid_overlap_is_rejected(self):
+        policy = copy.deepcopy(self.policy)
+        host = next(owner for owner in policy["event_ownership"]["owners"]
+                    if owner["id"] == "host")
+        host["allowed"].append("mailbox.claim")
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("both allows and forbids", out)
+
+    def test_event_ownership_package_overlap_needs_exact_files(self):
+        policy = copy.deepcopy(self.policy)
+        policy["event_ownership"]["owners"].append({
+            "id": "shadow",
+            "packages": ["."],
+            "allowed": ["host.deliver"],
+            "forbidden": [],
+            "reason": "a package-wide claim beside file-scoped owners",
+        })
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("without an exact file list", out)
+
+    def test_event_ownership_file_scope_rejects_wildcard(self):
+        policy = copy.deepcopy(self.policy)
+        host = next(owner for owner in policy["event_ownership"]["owners"]
+                    if owner["id"] == "host")
+        host["files"][0] = "host*.go"
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("exact *.go base name", out)
+
+    def test_event_ownership_unknown_role_is_rejected(self):
+        policy = copy.deepcopy(self.policy)
+        policy["event_ownership"]["symbols"][0]["role"] = "second-state-store"
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("unknown role", out)
+
+    def test_event_ownership_unregistered_symbol_package_is_rejected(self):
+        policy = copy.deepcopy(self.policy)
+        policy["event_ownership"]["symbols"][0]["pkg"] = "runtime/ghost"
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("not a registered package", out)
+
 
 class ImplementationTest(unittest.TestCase):
     def setUp(self):
@@ -229,16 +344,23 @@ class ImplementationTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def inject(self, text):
-        path = self.root / "go-list.json"
+    def inject(self, text, name="go-list.json"):
+        path = self.root / name
         path.write_text(text, encoding="utf-8")
         return path
 
-    def run_impl(self, text):
+    def inject_ownership(self, payload):
+        text = payload if isinstance(payload, str) else json.dumps(
+            payload, ensure_ascii=False, indent=2)
+        return self.inject(text, name="event-ownership.json")
+
+    def run_impl(self, text, ownership=None):
         injected = self.inject(text)
+        ownership_path = self.inject_ownership(
+            ownership if ownership is not None else ownership_report(self.policy))
         return run_checker("--golden", str(self.policy_path), "--implementation",
                            "--repo-root", str(self.repo), "--go-list-json", str(injected),
-                           "--json")
+                           "--event-ownership-json", str(ownership_path), "--json")
 
     def test_full_tree_passes(self):
         code, out, err = self.run_impl(go_list_stream(self.policy))
@@ -247,8 +369,62 @@ class ImplementationTest(unittest.TestCase):
         self.assertEqual(payload["counts"]["in_scope_packages"],
                          len(patterns(self.policy)))
         self.assertEqual(payload["counts"]["missing_required_packages"], 0)
+        self.assertEqual(payload["counts"]["event_ownership_allowed"], 14)
+        self.assertEqual(payload["counts"]["event_ownership_uncovered"], 1)
         self.assertIsNone(payload["productVerified"])
         self.assertTrue(any("injected" in note for note in payload["notes"]))
+        self.assertTrue(any("never counted as covered" in note
+                            for note in payload["notes"]))
+
+    def test_event_ownership_failure_is_rejected(self):
+        ownership = ownership_report(self.policy, ok=False)
+        ownership["counts"]["forbidden"] = 1
+        ownership["violations"] = [{
+            "file": "run.go", "line": 9, "caller": "Assemble",
+            "symbol": "mailbox.claim", "owner": "host", "rule": "forbidden",
+            "detail": "host may not claim a notification",
+        }]
+        code, out, _ = self.run_impl(go_list_stream(self.policy), ownership)
+        self.assertNotEqual(code, 0)
+        self.assertIn("event-ownership forbidden", out)
+        self.assertIn("mailbox.claim", out)
+
+    def test_event_ownership_vacuous_report_is_rejected(self):
+        ownership = ownership_report(self.policy)
+        ownership["counts"]["allowed"] = 0
+        code, out, _ = self.run_impl(go_list_stream(self.policy), ownership)
+        self.assertNotEqual(code, 0)
+        self.assertIn("vacuous", out)
+
+    def test_event_ownership_uncovered_count_must_match_list(self):
+        ownership = ownership_report(self.policy)
+        ownership["counts"]["uncovered"] = 3
+        code, out, _ = self.run_impl(go_list_stream(self.policy), ownership)
+        self.assertNotEqual(code, 0)
+        self.assertIn("disagrees with 1 listed uncovered site", out)
+
+    def test_event_ownership_ok_with_violations_is_rejected(self):
+        ownership = ownership_report(self.policy)
+        ownership["violations"] = [{
+            "file": "run.go", "line": 9, "symbol": "mailbox.claim",
+            "owner": "host", "rule": "forbidden", "detail": "x",
+        }]
+        code, out, _ = self.run_impl(go_list_stream(self.policy), ownership)
+        self.assertNotEqual(code, 0)
+        self.assertIn("claims ok while recording violations", out)
+
+    def test_unparseable_event_ownership_report_is_rejected(self):
+        code, out, _ = self.run_impl(go_list_stream(self.policy), "{not json at all")
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot parse injected event-ownership report", out)
+
+    def test_go_list_injection_requires_ownership_injection(self):
+        injected = self.inject(go_list_stream(self.policy))
+        code, out, _ = run_checker("--golden", str(self.policy_path), "--implementation",
+                                   "--repo-root", str(self.repo),
+                                   "--go-list-json", str(injected), "--json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("needs --event-ownership-json", out)
 
     def test_unknown_package_is_rejected(self):
         text = go_list_stream(self.policy, extra_imports=None)

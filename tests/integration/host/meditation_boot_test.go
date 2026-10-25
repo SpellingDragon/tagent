@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,9 +119,138 @@ func writeMeditationHostDocument(t *testing.T, root string, userTools, meditatio
 	return configPath
 }
 
-// recordingSender is the outbound message stand-in of the smoke check: it
-// accepts every body and records nothing.
-type recordingSender struct{}
+// recordingSender is the outbound message stand-in of the boot checks: it
+// accepts every body and records the address, the body and the result of each
+// action it answered. The zero value accepts and records nothing, so the checks
+// that only need a sender keep using it as a value; newRecordingSender carries
+// the ledger a check reads back.
+type recordingSender struct {
+	ledger *senderLedger
+}
 
-// Send accepts one body.
-func (recordingSender) Send(context.Context, event.Address, string) error { return nil }
+// Send accepts one body and records the action beside its result.
+func (s recordingSender) Send(ctx context.Context, target event.Address, body string) error {
+	if s.ledger == nil {
+		return nil
+	}
+	return s.ledger.record(ctx, target, body)
+}
+
+// actions reports the actions the sender answered in delivery order, as a copy
+// the caller owns.
+func (s recordingSender) actions() []senderAction {
+	if s.ledger == nil {
+		return nil
+	}
+	return s.ledger.actionsRecorded()
+}
+
+// bodies reports the recorded bodies in delivery order, as a copy the caller
+// owns.
+func (s recordingSender) bodies() []string {
+	recorded := s.actions()
+	out := make([]string, 0, len(recorded))
+	for _, action := range recorded {
+		out = append(out, action.body)
+	}
+	return out
+}
+
+// newRecordingSender returns the stand-in beside the ledger it records into.
+func newRecordingSender() recordingSender {
+	return recordingSender{ledger: &senderLedger{}}
+}
+
+// newGatedRecordingSender returns the stand-in beside the gate that parks every
+// outbound action until the check releases it, so a check reads a tool on the
+// outbound face before it returns to the model.
+func newGatedRecordingSender() (recordingSender, *senderGate) {
+	gate := newSenderGate()
+	return recordingSender{ledger: &senderLedger{gate: gate}}, gate
+}
+
+// senderLedger records the actions one sender answered.
+type senderLedger struct {
+	mu      sync.Mutex
+	actions []senderAction
+	gate    *senderGate
+}
+
+// senderAction is one outbound action: the address it was addressed to, the
+// body it carried and the result the sender answered. pending marks an action
+// the sender is still holding, so its confirmation reads as unconfirmed.
+type senderAction struct {
+	target  event.Address
+	body    string
+	pending bool
+	result  error
+}
+
+// confirmed reports whether the sender really answered this action: the action
+// returned and the result carried no refusal.
+func (a senderAction) confirmed() bool { return !a.pending && a.result == nil }
+
+// record appends one action, parks it beside the gate when the check declared
+// one, and answers with the result the action settled on.
+func (l *senderLedger) record(ctx context.Context, target event.Address, body string) error {
+	l.mu.Lock()
+	index := len(l.actions)
+	l.actions = append(l.actions, senderAction{target: target, body: body, pending: true})
+	gate := l.gate
+	l.mu.Unlock()
+	if gate != nil {
+		gate.arrive()
+		select {
+		case <-gate.release:
+		case <-ctx.Done():
+			l.resolve(index, ctx.Err())
+			return ctx.Err()
+		}
+	}
+	l.resolve(index, nil)
+	return nil
+}
+
+// resolve records the result one action settled on.
+func (l *senderLedger) resolve(index int, result error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.actions[index].pending = false
+	l.actions[index].result = result
+}
+
+// actionsRecorded reports the recorded actions in delivery order, as a copy
+// the caller owns.
+func (l *senderLedger) actionsRecorded() []senderAction {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]senderAction(nil), l.actions...)
+}
+
+// senderGate parks every outbound action until the check releases it.
+type senderGate struct {
+	arrivals chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+// newSenderGate returns the gate beside its arrival and release channels.
+func newSenderGate() *senderGate {
+	return &senderGate{arrivals: make(chan struct{}, 8), release: make(chan struct{})}
+}
+
+// arrive reports one action waiting at the gate.
+func (g *senderGate) arrive() { g.arrivals <- struct{}{} }
+
+// wait waits until one action reached the gate.
+func (g *senderGate) wait(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-g.arrivals:
+	case <-time.After(60 * time.Second):
+		t.Fatalf("no outbound action reached the gate while waiting for %s", what)
+	}
+}
+
+// releaseAll lets every parked action answer.
+func (g *senderGate) releaseAll() { g.once.Do(func() { close(g.release) }) }

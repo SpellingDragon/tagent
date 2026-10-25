@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -855,6 +856,263 @@ func TestApprovalRuling(t *testing.T) {
 	if _, err := ruling(ctx, "exec", args); err == nil {
 		t.Fatal("a call beside no Before pass was ruled instead of refused closed")
 	}
+}
+
+// TestEventIntegrityApprovalWeChat pins the wechat approval face at the leaf boundary:
+// - the reply grammar in both spellings and the request fanout to every bound approver
+// - the three named refusals (ambiguous prefix, unknown digest, non-approver)
+// - the consumer entry runApprovalCLI writing the ruling back into the response file the governance gate reads through Lookup
+func TestEventIntegrityApprovalWeChat(t *testing.T) {
+	ctx := context.Background()
+
+	readStored := func(t *testing.T, dir, id string) approval.ApprovalRequest {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(dir, "approvals", id+".json"))
+		if err != nil {
+			t.Fatalf("read the response file of %s: %v", id, err)
+		}
+		var stored approval.ApprovalRequest
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			t.Fatalf("decode the response file of %s: %v", id, err)
+		}
+		return stored
+	}
+
+	requirePending := func(t *testing.T, dir, id string) {
+		t.Helper()
+		if stored := readStored(t, dir, id); stored.Status != approval.ApprovalPending || stored.DecidedBy != "" {
+			t.Fatalf("request %s after a refusal = (%s by %q), want pending and undecided", id, stored.Status, stored.DecidedBy)
+		}
+	}
+
+	t.Run("parse_approve_reject", func(t *testing.T) {
+		dir := t.TempDir()
+		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss"})
+		gateway.SetSender(&mockOutbound{})
+
+		cases := []struct {
+			id   string
+			args string
+			verb string
+			want approval.ApprovalStatus
+		}{
+			{"req-approve", `{"cmd":"ls"}`, "approve", approval.ApprovalApproved},
+			{"req-reject", `{"cmd":"rm -rf /"}`, "reject", approval.ApprovalDenied},
+			{"req-approve-zh", `{"cmd":"pwd"}`, "批准", approval.ApprovalApproved},
+			{"req-reject-zh", `{"cmd":"id"}`, "拒绝", approval.ApprovalDenied},
+		}
+		for _, tc := range cases {
+			args := []byte(tc.args)
+			req, err := gateway.Manager().Request(ctx, tc.id, "exec", args, plugin.RiskCritical, "critical", "held")
+			if err != nil {
+				t.Fatalf("register %s: %v", tc.id, err)
+			}
+			handled, reply, err := gateway.Resolve("boss", tc.verb+" "+shortDigest(req.ArgsDigest))
+			if !handled || err != nil {
+				t.Fatalf("%s ruling on %s = (%v,%v), want it handled and applied", tc.verb, tc.id, handled, err)
+			}
+			if !strings.Contains(reply, tc.id) || !strings.Contains(reply, string(tc.want)) {
+				t.Fatalf("%s ruling reply = %q, want the request id and status %s", tc.verb, reply, tc.want)
+			}
+			if ruled := gateway.Manager().Lookup("exec", approval.ArgsDigest(args)); ruled == nil || ruled.ID != tc.id || ruled.Status != tc.want {
+				t.Fatalf("lookup after %q = %+v, want %s in status %s", tc.verb, ruled, tc.id, tc.want)
+			}
+			if stored := readStored(t, dir, tc.id); stored.Status != tc.want || stored.DecidedBy != "wechat:boss" {
+				t.Fatalf("response file of %s = (%s by %q), want %s by wechat:boss", tc.id, stored.Status, stored.DecidedBy, tc.want)
+			}
+		}
+	})
+
+	t.Run("approval_request_fanout", func(t *testing.T) {
+		dir := t.TempDir()
+		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss", "ops"})
+		out := &mockOutbound{}
+		gateway.SetSender(out)
+
+		req, err := gateway.Manager().Request(ctx, "req-fanout", "exec", []byte(`{"cmd":"pwd"}`), plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register the fanout request: %v", err)
+		}
+		texts := out.texts()
+		if len(texts) != 2 {
+			t.Fatalf("approval fanout = %+v, want one text per bound approver", texts)
+		}
+		for i, want := range []string{"boss", "ops"} {
+			if texts[i].Target != want {
+				t.Fatalf("fanout text %d went to %q, want %q", i, texts[i].Target, want)
+			}
+			if !strings.Contains(texts[i].Body, shortDigest(req.ArgsDigest)) || !strings.Contains(texts[i].Body, "exec") {
+				t.Fatalf("fanout text %d = %q, want digest and tool", i, texts[i].Body)
+			}
+		}
+		for _, event := range out.recorded() {
+			if event.Target != "boss" && event.Target != "ops" {
+				t.Fatalf("approval outbound reached %q, want only the bound approvers", event.Target)
+			}
+		}
+	})
+
+	t.Run("ambiguous_prefix_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss"})
+		gateway.SetSender(&mockOutbound{})
+
+		args := []byte(`{"cmd":"rm"}`)
+		for _, id := range []string{"req-twin-1", "req-twin-2"} {
+			if _, err := gateway.Manager().Request(ctx, id, "exec", args, plugin.RiskCritical, "critical", "held"); err != nil {
+				t.Fatalf("register %s: %v", id, err)
+			}
+		}
+		handled, reply, err := gateway.Resolve("boss", "approve "+shortDigest(approval.ArgsDigest(args)))
+		if !handled || !errors.Is(err, ErrApprovalAmbiguous) {
+			t.Fatalf("an ambiguous prefix = (%v,%v), want ErrApprovalAmbiguous", handled, err)
+		}
+		if !strings.Contains(reply, "审批失败") {
+			t.Fatalf("ambiguous refusal reply = %q, want the named refusal text", reply)
+		}
+		if pending := gateway.Manager().Pending(); len(pending) != 2 {
+			t.Fatalf("pending after the ambiguous refusal = %d, want both requests untouched", len(pending))
+		}
+		requirePending(t, dir, "req-twin-1")
+		requirePending(t, dir, "req-twin-2")
+	})
+
+	t.Run("unknown_digest_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss"})
+		gateway.SetSender(&mockOutbound{})
+
+		args := []byte(`{"cmd":"whoami"}`)
+		req, err := gateway.Manager().Request(ctx, "req-known", "exec", args, plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register the known request: %v", err)
+		}
+		for _, verb := range []string{"approve", "reject"} {
+			handled, reply, err := gateway.Resolve("boss", verb+" deadbeef")
+			if !handled || !errors.Is(err, approval.ErrApprovalNotFound) {
+				t.Fatalf("%s over an unknown digest = (%v,%v), want ErrApprovalNotFound", verb, handled, err)
+			}
+			if !strings.Contains(reply, "审批失败") {
+				t.Fatalf("unknown digest refusal reply = %q, want the named refusal text", reply)
+			}
+		}
+		if pending := gateway.Manager().Pending(); len(pending) != 1 || pending[0].ID != req.ID {
+			t.Fatalf("pending after the unknown ruling = %+v, want %s untouched", pending, req.ID)
+		}
+		if ruled := gateway.Manager().Lookup("exec", approval.ArgsDigest(args)); ruled == nil || ruled.Status != approval.ApprovalPending {
+			t.Fatalf("lookup after the unknown ruling = %+v, want the known request still pending", ruled)
+		}
+		requirePending(t, dir, req.ID)
+		entries, err := os.ReadDir(filepath.Join(dir, "approvals"))
+		if err != nil {
+			t.Fatalf("read the approvals directory: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Fatalf("response files after the unknown ruling = %d, want only the known request", len(entries))
+		}
+	})
+
+	t.Run("non_approver_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss"})
+		out := &mockOutbound{}
+		gateway.SetSender(out)
+
+		args := []byte(`{"cmd":"uname -a"}`)
+		req, err := gateway.Manager().Request(ctx, "req-held", "exec", args, plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register the held request: %v", err)
+		}
+		delivered := len(out.texts())
+		handled, reply, err := gateway.Resolve("stranger", "approve "+shortDigest(req.ArgsDigest))
+		if !handled || !errors.Is(err, ErrApprovalNotApprover) {
+			t.Fatalf("a ruling outside the whitelist = (%v,%v), want ErrApprovalNotApprover", handled, err)
+		}
+		if !strings.Contains(reply, "没有审批权限") {
+			t.Fatalf("non-approver refusal reply = %q, want the named refusal text", reply)
+		}
+		if texts := out.texts(); len(texts) != delivered {
+			t.Fatalf("outbound after the non-approver reply = %d texts, want only the %d delivery text(s)", len(texts), delivered)
+		}
+		for _, event := range out.recorded() {
+			if event.Target != "boss" {
+				t.Fatalf("approval outbound reached %q, want only the bound approver", event.Target)
+			}
+		}
+		if pending := gateway.Manager().Pending(); len(pending) != 1 || pending[0].ID != req.ID {
+			t.Fatalf("pending after the non-approver reply = %+v, want %s untouched", pending, req.ID)
+		}
+		requirePending(t, dir, req.ID)
+
+		silent := newApprovalGateway(governanceEntry{Enabled: true, Dir: t.TempDir()}, nil)
+		silent.SetSender(&mockOutbound{})
+		silentReq, err := silent.Manager().Request(ctx, "req-silent-held", "exec", []byte(`{"cmd":"date"}`), plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register beside no approver: %v", err)
+		}
+		if handled, _, err := silent.Resolve("boss", "approve "+shortDigest(silentReq.ArgsDigest)); !handled || !errors.Is(err, ErrApprovalNotApprover) {
+			t.Fatalf("a ruling beside no approver = (%v,%v), want ErrApprovalNotApprover", handled, err)
+		}
+		if pending := silent.Manager().Pending(); len(pending) != 1 {
+			t.Fatalf("pending beside no approver = %d, want the request untouched", len(pending))
+		}
+	})
+
+	t.Run("wechat_cli_entry", func(t *testing.T) {
+		dir := t.TempDir()
+		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir, ApprovalTTLMinutes: 30}, []string{"boss"})
+		out := &mockOutbound{}
+		gateway.SetSender(out)
+
+		args := []byte(`{"cmd":"ls"}`)
+		req, err := gateway.Manager().Request(ctx, "req-wechat", "exec", args, plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register the wechat request: %v", err)
+		}
+		if texts := out.texts(); len(texts) != 1 || texts[0].Target != "boss" || !strings.Contains(texts[0].Body, shortDigest(req.ArgsDigest)) {
+			t.Fatalf("approval announcement = %+v, want the digest over the approver chat", texts)
+		}
+
+		if handled, _, err := gateway.Resolve("boss", "approve "+shortDigest(req.ArgsDigest)); !handled || err != nil {
+			t.Fatalf("the wechat ruling = (%v,%v), want it applied", handled, err)
+		}
+		if stored := readStored(t, dir, req.ID); stored.Status != approval.ApprovalApproved || stored.DecidedBy != "wechat:boss" {
+			t.Fatalf("wechat response file = (%s by %q), want approved by wechat:boss", stored.Status, stored.DecidedBy)
+		}
+		if ruled := gateway.Manager().Lookup("exec", approval.ArgsDigest(args)); ruled == nil || ruled.ID != req.ID || ruled.Status != approval.ApprovalApproved {
+			t.Fatalf("lookup after the wechat ruling = %+v, want %s approved", ruled, req.ID)
+		}
+
+		cliArgs := []byte(`{"cmd":"date"}`)
+		cliReq, err := gateway.Manager().Request(ctx, "req-cli-approve", "exec", cliArgs, plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register the CLI request: %v", err)
+		}
+		if handled, code := runApprovalCLI(gateway, []string{"approve", shortDigest(cliReq.ArgsDigest)}); !handled || code != 0 {
+			t.Fatalf("approve CLI entry = (%v,%d), want it applied", handled, code)
+		}
+		if stored := readStored(t, dir, cliReq.ID); stored.Status != approval.ApprovalApproved || stored.DecidedBy != "wechat:cli" {
+			t.Fatalf("CLI response file = (%s by %q), want approved by wechat:cli", stored.Status, stored.DecidedBy)
+		}
+		if ruled := gateway.Manager().Lookup("exec", approval.ArgsDigest(cliArgs)); ruled == nil || ruled.ID != cliReq.ID || ruled.Status != approval.ApprovalApproved {
+			t.Fatalf("lookup after the approve CLI entry = %+v, want %s approved", ruled, cliReq.ID)
+		}
+
+		rejectArgs := []byte(`{"cmd":"rm -rf /"}`)
+		rejectReq, err := gateway.Manager().Request(ctx, "req-cli-reject", "exec", rejectArgs, plugin.RiskCritical, "critical", "held")
+		if err != nil {
+			t.Fatalf("register the CLI rejection: %v", err)
+		}
+		if handled, code := runApprovalCLI(gateway, []string{"reject", shortDigest(rejectReq.ArgsDigest)}); !handled || code != 0 {
+			t.Fatalf("reject CLI entry = (%v,%d), want it applied", handled, code)
+		}
+		if stored := readStored(t, dir, rejectReq.ID); stored.Status != approval.ApprovalDenied || stored.DecidedBy != "wechat:cli" {
+			t.Fatalf("CLI rejection file = (%s by %q), want denied by wechat:cli", stored.Status, stored.DecidedBy)
+		}
+		if ruled := gateway.Manager().Lookup("exec", approval.ArgsDigest(rejectArgs)); ruled == nil || ruled.ID != rejectReq.ID || ruled.Status != approval.ApprovalDenied {
+			t.Fatalf("lookup after the reject CLI entry = %+v, want %s denied", ruled, rejectReq.ID)
+		}
+	})
 }
 
 func TestReincarnationNotice(t *testing.T) {

@@ -36,6 +36,14 @@ var (
 	ErrClaimSettled = errors.New("state: the mailbox entry is already consumed")
 )
 
+// consumptionRecorder is the optional durable face of a mailbox: it stores the
+// receipt of one completed logical consumption behind its own sync barrier. A
+// store beside no durable log holds no recorder, so the mailbox keeps the only
+// record of the consumption there.
+type consumptionRecorder interface {
+	recordConsumption(ctx context.Context, notice task.Notice) error
+}
+
 // noticeKey is the stable identity of one notification: the task, the execution
 // round, the category and the sequence number inside the category.
 type noticeKey struct {
@@ -214,6 +222,11 @@ func (m *MemoryStore) Consume(ctx context.Context, addr event.Address, instance 
 	}
 	if entry.Claim != ClaimClaimed {
 		return ErrNotClaimed
+	}
+	if m.consumptions != nil {
+		if err := m.consumptions.recordConsumption(ctx, entry.Notice); err != nil {
+			return err
+		}
 	}
 	entry.Claim = ClaimConsumed
 	entry.Receipt = ConsumeReceipt{Completed: true}

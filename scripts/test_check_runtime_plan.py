@@ -6,6 +6,8 @@ a TemporaryDirectory and runs the checker as a subprocess so the process exit
 code (not just the printed text) is part of the assertion.
 """
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -203,6 +205,122 @@ ORCHESTRATION = """# runtime-rebuild 编排文档
 
 - 每轮推进记录。
 """
+
+
+# 六域 event-integrity 图的 fixture：叶数/域分布与真实变更一致（38 叶），
+# 依赖只保留每域链式最小图——判定的是 profile 规则，不是复制真实图。
+EVENT_DOMAIN_SPEC = (
+    ("00-contract-evidence", 4),
+    ("01-runtime-consumption", 7),
+    ("02-event-consumers", 7),
+    ("03-formal-simulation", 11),
+    ("04-regression-gates", 5),
+    ("05-mr-integration", 4),
+)
+EVENT_PRODUCT_IDS = ({"00.2"}
+                     | {"01.{}".format(index) for index in range(1, 8)}
+                     | {"02.{}".format(index) for index in range(1, 8)}
+                     | {"03.{}".format(index) for index in range(1, 10)}
+                     | {"03.11"})
+# 与真实变更当前台账一致：02.3 受 G4 阻塞，其余为未开始的叶。
+EVENT_UNCHECKED = {"02.3", "03.11", "04.2", "04.5", "05.1", "05.2", "05.3", "05.4"}
+
+
+class EventProfileFixture:
+    """A six-domain / 38-leaf graph that exercises the event domain_profile path."""
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.change = (self.root / "openspec" / "changes" / "event-consumption-integrity")
+        self.main_specs = self.root / "openspec" / "specs"
+
+    def leaves(self):
+        leaves = []
+        for domain, count in EVENT_DOMAIN_SPEC:
+            prefix = domain.split("-", 1)[0]
+            ids = ["{}.{}".format(prefix, index) for index in range(1, count + 1)]
+            for index, leaf_id in enumerate(ids):
+                leaves.append({
+                    "id": leaf_id,
+                    "domain": domain,
+                    "kind": "product" if leaf_id in EVENT_PRODUCT_IDS else "non_product",
+                    # 不写字面 change 根路径：scripts 下的过程工件引用门按子串扫描。
+                    "task_file": "/".join(["openspec", "changes", "event-consumption-integrity",
+                                            "changes", domain, "tasks.md"]),
+                    "depends_on": [ids[index - 1]] if index else [],
+                    "verify_after": [ids[index - 1]] if index else [],
+                    "tests": [],
+                    "verification": {"commands": ["go test ./... -json"]},
+                    "status": "planned",
+                })
+        return leaves
+
+    def graph(self):
+        leaves = self.leaves()
+        nodes = [leaf["id"] + suffix for leaf in leaves
+                 for suffix in ("/ready", "/verified")]
+        # 展开图边：每叶 ready→verified 一条，加上 depends_on 与 verify_after。
+        edges = len(leaves) + sum(len(leaf["depends_on"]) + len(leaf["verify_after"])
+                                  for leaf in leaves)
+        return {
+            "schema_version": 1,
+            "change": "event-consumption-integrity",
+            "domain_profile": "event-integrity",
+            "scope": "whole-change-planning-materialization",
+            "counts": {
+                "leaves_total": len(leaves),
+                "leaves_by_domain": {domain: count for domain, count in EVENT_DOMAIN_SPEC},
+                "leaves_by_kind": {"product": len(EVENT_PRODUCT_IDS),
+                                   "non_product": len(leaves) - len(EVENT_PRODUCT_IDS)},
+            },
+            "phase_graph": {
+                "nodes_total": len(nodes),
+                "edges_total": edges,
+                "acyclic": True,
+                "topological_order": nodes,
+            },
+            "leaves": leaves,
+        }
+
+    def build(self):
+        caps = [domain for domain, _count in EVENT_DOMAIN_SPEC]
+        proposal = ["## Why", "fixture", "", "## Capabilities", "",
+                    "### Modified Capabilities", ""]
+        proposal += ["- `{}`：六域 fixture。".format(cap) for cap in caps + ["orchestration"]]
+        write(self.change / "proposal.md", "\n".join(proposal) + "\n")
+        write(self.change / "design.md", "## Decisions\n\n- D1 fixture\n")
+        write(self.change / "coverage.md", "| 叶 | 测试 | 证据 |\n| --- | --- | --- |\n"
+              "| 00.1 | — | 文档 |\n")
+        write(self.change / "tasks.md", "## 编排\n\n- [ ] 六域 fixture\n")
+        write(self.change / "ORCHESTRATION.md", ORCHESTRATION)
+        write(self.change / "specs" / "orchestration" / "spec.md",
+              GOOD_SPEC.format(cap="orchestration"))
+        for domain, count in EVENT_DOMAIN_SPEC:
+            base = self.change / "changes" / domain
+            write(base / "proposal.md", "## 边界\n\n能力 `{}` 已声明。\n".format(domain))
+            write(base / "design.md", "## 设计\n\nfixture\n")
+            prefix = domain.split("-", 1)[0]
+            lines = ["## 叶任务", ""]
+            for index in range(1, count + 1):
+                leaf_id = "{}.{}".format(prefix, index)
+                mark = " " if leaf_id in EVENT_UNCHECKED else "x"
+                lines.append("- [{}] {} fixture leaf —— 验证：go test ./... -json".format(
+                    mark, leaf_id))
+            write(base / "tasks.md", "\n".join(lines) + "\n")
+            write(base / "specs" / domain / "spec.md", GOOD_SPEC.format(cap=domain))
+        write(self.change / "task-graph.json", json.dumps(
+            self.graph(), ensure_ascii=False, indent=2) + "\n")
+        write(self.main_specs / "orchestration" / "spec.md",
+              "# orchestration Specification\n\n## Purpose\n\nfixture purpose long enough.\n\n"
+              "## Requirements\n\n### Requirement: 编排基线\n系统 SHALL 成立。\n\n"
+              "#### Scenario: 基线\n- **WHEN** x\n- **THEN** y\n")
+
+    def load_graph(self):
+        return json.loads((self.change / "task-graph.json").read_text(encoding="utf-8"))
+
+    def save_graph(self, graph):
+        (self.change / "task-graph.json").write_text(
+            json.dumps(graph, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def run_checker(*args):
@@ -600,6 +718,193 @@ class PlanCheckerTest(unittest.TestCase):
         code, out, _ = self.check()
         self.assertNotEqual(code, 0)
         self.assertIn("skeleton task so its phase must be", out)
+
+
+class EventProfileTest(unittest.TestCase):
+    """domain_profile=event-integrity：六域 / 38 叶 / 76 节点规则。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.fixture = EventProfileFixture(self._tmp.name)
+        self.fixture.build()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def check(self, *args):
+        return run_checker("--change-dir", str(self.fixture.change), "--json", *args)
+
+    def remove_box(self, leaf_id):
+        for domain, _count in EVENT_DOMAIN_SPEC:
+            path = self.fixture.change / "changes" / domain / "tasks.md"
+            lines = path.read_text(encoding="utf-8").splitlines()
+            kept = [line for line in lines
+                    if not line.startswith("- [ ] " + leaf_id + " ")
+                    and not line.startswith("- [x] " + leaf_id + " ")]
+            if kept != lines:
+                path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+                return
+        self.fail("leaf {} has no checkbox to remove".format(leaf_id))
+
+    def test_domain_profile_accepts_six_domains_and_38_leaves(self):
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertEqual(counts["graph_leaves"], 38)
+        self.assertEqual(counts["graph_leaf_ids_unique"], 38)
+        self.assertEqual(counts["domains_with_spec"], 6)
+        self.assertEqual(counts["phase_nodes"], 76)
+        self.assertEqual(counts["phase_acyclic"], 1)
+        self.assertEqual(payload["extra"]["leaves_by_domain"],
+                         {domain: count for domain, count in EVENT_DOMAIN_SPEC})
+
+        # 域归属不是装饰：把叶挪到十域旧名必须红，而不是被 profile 静默接受。
+        graph = self.fixture.load_graph()
+        for leaf in graph["leaves"]:
+            if leaf["id"] == "00.1":
+                leaf["domain"] = "00-foundation"
+        self.fixture.save_graph(graph)
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("is not one of the six event domains", out)
+
+    def test_every_leaf_is_covered(self):
+        code, out, err = self.check()
+        self.assertEqual(code, 0, out + err)
+        payload = json.loads(out)
+        counts = payload["counts"]
+        self.assertEqual(counts["checkboxes"], 38)
+        self.assertEqual(counts["leaves_checked"], 30)
+        self.assertEqual(counts["leaves_unchecked"], 8)
+        self.assertEqual(payload["extra"]["unchecked_leaf_ids"], sorted(EVENT_UNCHECKED))
+
+        # 删一个叶 checkbox：叶失去执行记录入口，必须点名缺哪个叶。
+        self.remove_box("03.11")
+        code, out, _ = self.check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("leaf 03.11 has no checkbox", out)
+
+    def test_legacy_ten_domain_rules_are_not_relaxed(self):
+        legacy = Fixture(Path(self._tmp.name) / "legacy")
+        legacy.build()
+
+        def legacy_check(*args):
+            return run_checker("--change-dir", str(legacy.change), "--json", *args)
+
+        code, out, err = legacy_check()
+        self.assertEqual(code, 0, out + err)
+
+        # 旧图没有 planning-only scope：勾选但没有 done 证据，旧规则一个字符不放宽。
+        path = legacy.change / "changes" / "02-execution" / "tasks.md"
+        path.write_text(path.read_text(encoding="utf-8").replace(
+            "- [ ] 02.3", "- [x] 02.3", 1), encoding="utf-8")
+        code, out, _ = legacy_check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("completion without evidence", out)
+
+        # 在旧十域图上盖 event-integrity 印章也不能换轨成更松的规则。
+        graph = legacy.load_graph()
+        graph["domain_profile"] = "event-integrity"
+        legacy.save_graph(graph)
+        code, out, _ = legacy_check()
+        self.assertNotEqual(code, 0)
+        self.assertIn("task-graph leaves must be a non-empty list", out)
+
+
+PLAN_WRAPPER = '''#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(HERE, "plan_invocations.log"), "a", encoding="utf-8") as handle:
+    print(" ".join(sys.argv[1:]), file=handle)
+sys.exit(subprocess.call(
+    [sys.executable, os.path.join(HERE, "real_check_runtime_plan.py")] + sys.argv[1:]))
+'''
+PY_STUB = "import sys\n\nsys.exit(0)\n"
+SH_STUB = "#!/usr/bin/env bash\nexit 0\n"
+GO_STUB = '''#!/usr/bin/env bash
+for arg in "$@"; do
+  if [ "$arg" = "./scripts/comment_policy" ]; then
+    echo "comment_policy: 0 finding(s)."
+    exit 0
+  fi
+done
+exit 0
+'''
+
+
+class LintObjectSelectionTest(unittest.TestCase):
+    """lint.sh 的计划门必须检查活动 graph，而不是固定归档路径。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = Fixture(self.root)
+        self.fixture.build()
+        archive = self.root / "openspec" / "changes" / "archive" / "2026-10-18-runtime-rebuild"
+        shutil.copytree(str(self.fixture.change), str(archive))
+
+        scripts = self.root / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(SCRIPTS / "lint.sh"), str(scripts / "lint.sh"))
+        shutil.copy2(str(CHECKER), str(scripts / "real_check_runtime_plan.py"))
+        shutil.copy2(str(SCRIPTS / "runtime_checklib.py"),
+                     str(scripts / "runtime_checklib.py"))
+        write(scripts / "check_runtime_plan.py", PLAN_WRAPPER)
+        for name in ("check_runtime_evidence.py", "check_runtime_architecture.py",
+                     "check_concept_budget.py", "test_check_concept_budget.py",
+                     "test_verify_restart_prefix.py"):
+            write(scripts / name, PY_STUB)
+        for name in ("gen_godoc.sh", "test_race_check.sh", "test_check_package_layout.sh"):
+            write(scripts / name, SH_STUB)
+
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        tools = {"python3": sys.executable, "bash": shutil.which("bash"),
+                 "grep": shutil.which("grep"), "sed": shutil.which("sed"),
+                 "tr": shutil.which("tr"), "dirname": shutil.which("dirname")}
+        for name, target in tools.items():
+            self.assertIsNotNone(target, name)
+            os.symlink(target, str(self.bin / name))
+        write(self.bin / "go", GO_STUB)
+        os.chmod(str(self.bin / "go"), 0o755)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def run_lint(self):
+        env = dict(os.environ)
+        # 只保留测试 bin：openspec 因此不可见，tail 的 spec-hygiene 门如实跳过。
+        env["PATH"] = str(self.bin)
+        env.pop("PYTHONPATH", None)
+        return subprocess.run(["bash", "scripts/lint.sh", "--only", "contracts"],
+                              cwd=str(self.root), env=env, capture_output=True, text=True)
+
+    def test_active_graph_is_checked_not_archive(self):
+        proc = self.run_lint()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("lint: runtime plan contract", proc.stdout)
+        self.assertNotIn("no active task-graph.json", proc.stdout)
+        log = self.root / "scripts" / "plan_invocations.log"
+        lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1, proc.stdout)
+        expected = "--change-dir " + "/".join(["openspec", "changes", "runtime-rebuild"])
+        self.assertIn(expected, lines[0])
+        self.assertNotIn("archive", lines[0])
+
+    def test_archive_graph_object_mismatch_fails(self):
+        # 旧固定对象（归档路径）在新命名下本身就不自洽：图声明 change=runtime-rebuild，
+        # 目录名带日期前缀。规则不放宽，因此直接跑真实检查器必须红。
+        proc = subprocess.run(
+            [sys.executable, "scripts/real_check_runtime_plan.py",
+             "--change-dir", "/".join(["openspec", "changes", "archive",
+                                        "2026-10-18-runtime-rebuild"]),
+             "--json"], cwd=str(self.root), capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("task-graph change", proc.stdout)
 
 
 if __name__ == "__main__":

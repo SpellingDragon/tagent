@@ -106,8 +106,10 @@ flowchart LR
 go build ./...                          # 构建全部包
 go test ./tests/integration/...         # 集成/契约测试
 bash scripts/lint.sh                    # 仓库门禁
-bash scripts/preflight.sh               # 提交前全量预检（lint+golden+双模块测试+冒烟）
+bash scripts/preflight.sh               # 提交前全量预检（lint+golden+双模块测试+冒烟+事件门三档）
 ```
+
+事件完整性门（每 MR 三档：`event-integrity-short` 十次独立、`event-integrity-long` 六组合 7200 输入/720 重启、`event-integrity-mutations` 冻结变异）与 `event-integrity-required` 汇总**已落地**（本地门与 workflow 自测通过；远端 required 待 F4 授权），判据与 L1/L2/L3 边界见 [`docs/OPERATION.md`](docs/OPERATION.md#event-gates)。
 
 **本地冒烟**（全 mock 资源，纯 CPU/IO——1,142 回合/s）：
 
@@ -117,16 +119,14 @@ go test -tags smoke ./... -run TestLocalSmoke -count=1 -timeout 30m -v
 go test -tags smoke -bench Benchmark -benchtime 30x -run '^$' ./...
 ```
 
-`docs/api/` 是生成物：改完源码注释后 `bash scripts/gen_godoc.sh` 重新生成。
-
 ## 文档导航
 
 | 入口 | 内容 |
 |---|---|
 | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照 |
 | [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | **扩展面**：18 个扩展模块的边界与契约 |
-| [`docs/OPERATION.md`](docs/OPERATION.md) | **运维**：观测/工具链/风险面 |
-| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：源码注释生成 |
+| [`docs/OPERATION.md`](docs/OPERATION.md) | **运维/门禁**：观测/工具链/风险面/事件门 |
+| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：源码注释生成（改注释后 `bash scripts/gen_godoc.sh` 重生成，禁止手改） |
 | [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim） |
 | [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账 |
 

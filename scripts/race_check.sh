@@ -9,17 +9,24 @@
 #     printed "OK" for `race_check.sh ./no-such-package`).
 #   - "no DATA RACE text" alone is NOT success.
 #   - Upstream-race waivers apply ONLY when ALL of: the run failed; every
-#     DATA RACE report's top offending frame is inside trpc-agent-go; the
-#     frame matches the registered waiver list below; and the run contains
-#     no plain (non-race) failures.
+#     DATA RACE report's top offending frame is inside a registered upstream
+#     module (trpc-agent-go, trpc-mcp-go); the frame matches the registered
+#     waiver list below; and the run contains no plain (non-race) failures.
 #
-# Registered upstream waivers — LEDGER 红色耦合台账, trpc-agent-go v1.10.0:
-#   U2  runner steer-queue close vs event consume (invocation/steer frames)
-#   U3  inmemory session service hook chain (session.go:122 stack family)
+# Registered upstream waivers — LEDGER 红色耦合台账:
+#   U2  runner steer-queue close vs event consume (invocation/steer frames),
+#       trpc-agent-go v1.10.0
+#   U3  inmemory session service hook chain (session.go:122 stack family),
+#       trpc-agent-go v1.10.0
+#   U5  streamable HTTP client transport fields — concurrent send vs the GET
+#       SSE goroutine (streamable_client.go family), trpc-mcp-go v0.0.10;
+#       both the symbol line and the file path line need a signature, since
+#       the transport symbol never carries its file name.
 #   C3  timing flakiness is NOT waived here — those tests skip via the
 #       agent/race_enabled_test.go build-tag mechanism instead.
-# Removal condition: upgrade trpc-agent-go past the upstream fix, delete the
-# signature AND the per-test skips, rerun `go test ./agent/... -race`.
+# Removal condition: upgrade past the upstream fix (trpc-agent-go, or
+# trpc-mcp-go for U5), delete the signature AND the per-test skips, rerun
+# `go test ./agent/... -race` (and the MCP face test for U5).
 #
 # Usage: ./scripts/race_check.sh [packages...]   (default: the ci.yml race set)
 # Test hook: RACE_CHECK_CLASSIFY_ONLY=1 RACE_CHECK_FAKE_EXIT=<n> feeds stdin
@@ -33,6 +40,9 @@ RACE_WAIVER_SIGNATURES=(
 	'trpc-agent-go.*invocation'
 	'trpc-agent-go/session.*inmemory'
 	'trpc-agent-go.*session/session\.go'
+	# U5 — trpc-mcp-go v0.0.10 streamable client transport.
+	'trpc-mcp-go.*streamableHTTPClientTransport'
+	'trpc-mcp-go.*streamable_client\.go'
 )
 
 # classify <go-test-exit-code> — reads the FULL go-test output on stdin.
@@ -98,7 +108,7 @@ race_check_classify() {
 		echo "race_check: FAIL — ${fails} failing test(s) vs ${races} race report(s): at least one plain (non-race) failure; upstream waivers do not apply."
 		return 1
 	fi
-	echo "race_check: WAIVED — ${races} race(s), all top frames match registered upstream waivers (LEDGER U2/U3, trpc-agent-go v1.10.0). Track for upstream fix:"
+	echo "race_check: WAIVED — ${races} race(s), all top frames match registered upstream waivers (LEDGER U2/U3/U5: trpc-agent-go v1.10.0, trpc-mcp-go v0.0.10). Track for upstream fix:"
 	printf '%s\n' "$topframes" | sed 's/^/            /'
 	return 0
 }

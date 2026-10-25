@@ -33,6 +33,11 @@ type Manager struct {
 	reused      int
 	released    int
 	escalations int
+	// observer is the optional lifecycle observer of this manager and the only
+	// thing that starts the post-return tracker; closing reports that the
+	// manager close began, so no tracker starts behind it.
+	observer StateObserver
+	closing  bool
 }
 
 // DefaultLeaseTTL is the floor lease of an execution resource whose caller
@@ -78,12 +83,26 @@ type heldResource struct {
 	escalations int
 	lastStop    *StopEvidence
 	obligations []string
+	// ttl is the lease span the acquisition declared; the tracker renews by
+	// it so the lease belongs to the tracked resource, not to the call.
+	ttl time.Duration
+	// owner is the responsibility range the acquiring call named, so a
+	// lifecycle event answers where it belongs after the call returned.
+	owner Owner
+	// stop and done are the tracker of the resource: stop closes its wait and
+	// done closes when it returned. Both are nil beside no tracker.
+	stop chan struct{}
+	done chan struct{}
 }
 
 // Acquisition configures one acquisition at its call.
 type Acquisition struct {
 	ttl    time.Duration
 	rhythm MonitorConfig
+	// declared reports that the caller stated a lease, so a reuse of an
+	// already held resource never shrinks a lease this call did not name.
+	declared bool
+	owner    Owner
 }
 
 // AcquireOption configures one acquisition at its call.
@@ -92,7 +111,10 @@ type AcquireOption func(*Acquisition)
 // WithTTL sets the lease of one acquisition. A zero TTL takes the manager
 // floor, and a negative TTL is refused.
 func WithTTL(ttl time.Duration) AcquireOption {
-	return func(a *Acquisition) { a.ttl = ttl }
+	return func(a *Acquisition) {
+		a.ttl = ttl
+		a.declared = true
+	}
 }
 
 // WithMonitorConfig binds the monitor rhythm to the generation one acquisition
@@ -176,6 +198,10 @@ func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...Acqui
 			return ResourceKey{}, fmt.Errorf("%w: %s", ErrResourceHeld, decl.Resource)
 		}
 		m.reused++
+		if acq.declared {
+			held.ttl = acq.ttl
+		}
+		held.owner = acq.owner
 		return decl.Resource, nil
 	}
 	if !m.available(decl.Resource) {
@@ -190,6 +216,8 @@ func (m *Manager) Acquire(ctx context.Context, decl ExecutionDecl, opts ...Acqui
 		rhythm:      acq.rhythm,
 		deadline:    m.now().Add(acq.ttl),
 		obligations: []string{"the execution outcome is unsettled"},
+		ttl:         acq.ttl,
+		owner:       acq.owner,
 	}
 	m.acquired++
 	return key, nil
@@ -227,6 +255,8 @@ func (m *Manager) Adopt(ctx context.Context, key ResourceKey, opts ...AcquireOpt
 		deadline:    m.now().Add(acq.ttl),
 		adopted:     true,
 		obligations: []string{"the reattached execution outcome is unsettled"},
+		ttl:         acq.ttl,
+		owner:       acq.owner,
 	}
 	m.adopted++
 	return nil
@@ -312,12 +342,20 @@ func (m *Manager) Capture(ctx context.Context, key ResourceKey) ([]byte, error) 
 // own context, so a caller context already cancelled neither stops nor frees
 // anything.
 func (m *Manager) Release(ctx context.Context, key ResourceKey) (ReleaseEvidence, error) {
-	m.mu.Lock()
-	_, ok := m.resources[key]
-	m.mu.Unlock()
-	if !ok {
+	owner, held := m.stopTracking(key)
+	if !held {
 		return ReleaseEvidence{Resource: key}, fmt.Errorf("%w: %s", ErrResourceUnknown, key)
 	}
+	evidence, err := m.release(ctx, key)
+	m.reportRelease(key, owner, evidence, err)
+	return evidence, err
+}
+
+// release performs the stop and, beside a confirmed stop, the freeing of one
+// held resource, without touching the tracker and without reporting the
+// outcome: it is the shared middle of the explicit release and of the tracker
+// that observed the ending itself.
+func (m *Manager) release(ctx context.Context, key ResourceKey) (ReleaseEvidence, error) {
 	stop, err := m.backend.Stop(context.WithoutCancel(ctx), key)
 	evidence := ReleaseEvidence{Resource: key, Stop: stop}
 	if err != nil {
@@ -340,6 +378,39 @@ func (m *Manager) Release(ctx context.Context, key ResourceKey) (ReleaseEvidence
 	return evidence, nil
 }
 
+// reportRelease hands the outcome of one release to the lifecycle observer: a
+// freed resource reports its ending beside the observed exit status, and a
+// resource that stayed held reports the reason it stayed held instead of an
+// ending. A key another writer already freed reports nothing, because no stop
+// of this writer produced it.
+func (m *Manager) reportRelease(key ResourceKey, owner Owner, evidence ReleaseEvidence, err error) {
+	if err != nil && errors.Is(err, ErrResourceUnknown) {
+		return
+	}
+	if evidence.Released {
+		m.emit(StateEvent{
+			Resource:  key,
+			Phase:     StateReleased,
+			ExitCode:  evidence.Stop.ExitCode,
+			Confirmed: true,
+			Released:  true,
+			Owner:     owner,
+		})
+		return
+	}
+	reason := evidence.Reason
+	if reason == "" && err != nil {
+		reason = err.Error()
+	}
+	m.emit(StateEvent{
+		Resource:  key,
+		Phase:     StateRetained,
+		Confirmed: evidence.Stop.Confirmed,
+		Detail:    reason,
+		Owner:     owner,
+	})
+}
+
 // noteStop records the stop observation one retained resource was last seen
 // under, so an Explain names what kept the resource held.
 func (m *Manager) noteStop(key ResourceKey, stop StopEvidence) {
@@ -349,6 +420,58 @@ func (m *Manager) noteStop(key ResourceKey, stop StopEvidence) {
 		observed := stop
 		res.lastStop = &observed
 	}
+}
+
+// Close ends the life of one manager: every post-return tracker of it stops and
+// is joined, the expired leases are settled through the sweep of this manager,
+// and every resource still held is released through the executor. A resource
+// whose stop stays unconfirmed stays held and is reported by name, so the close
+// never announces an ending it did not observe. A repeated close reports nil and
+// releases nothing a second time; the manager is final once it closed.
+func (m *Manager) Close(ctx context.Context) []SweepReport {
+	m.mu.Lock()
+	if m.closing {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closing = true
+	var waits []chan struct{}
+	for _, res := range m.resources {
+		if res.stop != nil {
+			close(res.stop)
+			res.stop = nil
+			waits = append(waits, res.done)
+		}
+	}
+	m.mu.Unlock()
+	for _, done := range waits {
+		<-done
+	}
+	reports := m.Sweep(ctx)
+	attempted := make(map[ResourceKey]bool, len(reports))
+	for _, report := range reports {
+		attempted[report.Key] = true
+	}
+	m.mu.Lock()
+	remaining := make([]ResourceKey, 0, len(m.resources))
+	for key := range m.resources {
+		if !attempted[key] {
+			remaining = append(remaining, key)
+		}
+	}
+	m.mu.Unlock()
+	sort.Slice(remaining, func(i, j int) bool { return remaining[i].String() < remaining[j].String() })
+	for _, key := range remaining {
+		evidence, err := m.Release(ctx, key)
+		if err != nil {
+			if errors.Is(err, ErrResourceUnknown) {
+				continue
+			}
+			evidence.Reason = err.Error()
+		}
+		reports = append(reports, SweepReport{Key: key, Evidence: evidence})
+	}
+	return reports
 }
 
 // SweepReport is what one sweep observed for one expired resource.

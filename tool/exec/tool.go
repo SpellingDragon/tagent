@@ -27,6 +27,10 @@ var ErrUnwired = errors.New("exec: the deployment wires no execution resource ma
 type RunTool struct {
 	manager *Manager
 	monitor MonitorConfig
+	// owner resolves the responsibility range the call belongs to, so the
+	// resource it acquires is tracked for the range that named it after the
+	// call returned.
+	owner OwnerResolver
 }
 
 // ReleaseTool is the callable tool face of one explicit release: it stops the
@@ -46,6 +50,15 @@ type RunToolOption func(*RunTool)
 // under this rhythm instead of the framework default.
 func WithRunMonitor(rhythm MonitorConfig) RunToolOption {
 	return func(t *RunTool) { t.monitor = rhythm }
+}
+
+// WithRunOwner binds the resolver that reports the responsibility range one
+// execution call belongs to. The root assembly supplies it from the call frame
+// and the task admission it already holds, so this package never imports the
+// task or agent owners. A tool beside no resolver tracks its resources without
+// an owner, and the events of those resources drive no follow-up turn.
+func WithRunOwner(resolve OwnerResolver) RunToolOption {
+	return func(t *RunTool) { t.owner = resolve }
 }
 
 // NewRunTool returns the run tool over the given execution resource manager and
@@ -70,9 +83,12 @@ const PresetName = "exec"
 // NewPreset returns the tools one declared execution face grants, in the order
 // the request carries them: the run tool under the monitor rhythm the
 // declaration fixes beside the explicit release tool. A preset built beside no
-// manager still builds; each call answers ErrUnwired.
-func NewPreset(manager *Manager, rhythm MonitorConfig) []trpctool.Tool {
-	return []trpctool.Tool{NewRunTool(manager, WithRunMonitor(rhythm)), NewReleaseTool(manager)}
+// manager still builds; each call answers ErrUnwired. The options configure the
+// run tool of the preset, so an assembly that resolves the responsibility range
+// of a call passes its resolver here.
+func NewPreset(manager *Manager, rhythm MonitorConfig, opts ...RunToolOption) []trpctool.Tool {
+	run := NewRunTool(manager, append([]RunToolOption{WithRunMonitor(rhythm)}, opts...)...)
+	return []trpctool.Tool{run, NewReleaseTool(manager)}
 }
 
 // runArgs is the argument set of one execution run. A key outside this set —
@@ -159,6 +175,11 @@ func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		return nil, err
 	}
 	options := []AcquireOption{WithMonitorConfig(rhythm)}
+	if t.owner != nil {
+		if owner, ok := t.owner(ctx); ok {
+			options = append(options, withOwner(owner))
+		}
+	}
 	var lease time.Duration
 	if args.TTL != "" {
 		parsed, err := time.ParseDuration(args.TTL)
@@ -178,6 +199,7 @@ func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	t.manager.watch(key)
 	return fmt.Sprintf("executed %s: %s", key, output), nil
 }
 

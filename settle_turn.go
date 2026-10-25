@@ -7,9 +7,10 @@
 // The trigger surface is closed, and the anti-loop is semantic rather than a
 // blacklist:
 //
-// - Only the terminal kinds settled, failed and cancelled fire; accepted and progress do not.
-// - Only a delivery fact carries the settle-lineage meta key, so a backflow settle never fires.
-// - The fired turn commits no settle fact with a lineage, so it can never fire itself again.
+//   - Only the terminal kinds settled, failed and cancelled fire; accepted and progress do not.
+//   - Only a delivery fact carries the settle-lineage meta key, so a backflow settle never fires.
+//   - The fired turn commits no settle fact with a lineage, so it can never fire itself again.
+//   - A notice that arrives while a follow-up is in flight is retained, in arrival order, and re-evaluated when that turn ends: it is never dropped.
 package tagent
 
 import (
@@ -58,6 +59,15 @@ func noticeTaskIDOf(fact event.Event) event.TaskID {
 // of a silent no-op that reads as a delivered turn.
 var ErrSettleDriverUnwired = errors.New("tagent: the settle driver is not wired")
 
+// settleNotice is one observation this driver owes a turn: the address the
+// follow-up runs at beside the fact that asked for it. A notice retained while
+// a turn is in flight keeps its fact, so the turn that re-evaluates it reads the
+// very fact the delivery committed instead of a reconstruction of it.
+type settleNotice struct {
+	addr event.Address
+	fact event.Event
+}
+
 // SettleDriver is the fact->observation face of the one turn a terminal notice
 // fires at the session it belongs to. It reads the fact one commit identity
 // names, judges it against the terminal table above, and runs the injected
@@ -82,7 +92,11 @@ type SettleDriver struct {
 	mu      sync.Mutex
 	firing  bool
 	stopped bool
-	wg      sync.WaitGroup
+	// retained holds the notices that arrived while a follow-up was in flight,
+	// in arrival order: the rearm after that turn takes the next one, so a
+	// notice is deferred by a turn and never lost to one.
+	retained []settleNotice
+	wg       sync.WaitGroup
 }
 
 var (
@@ -121,11 +135,13 @@ func (d *SettleDriver) Port() plugin.Port {
 //
 // The turn itself runs detached from the committing delivery: a follow-up
 // spends a model turn, and the flush that delivered the notification never waits
-// for it. A fact that is not a terminal delivery fact, or whose session carries
-// no remembered user address, is ignored in silence: those are not settles
-// nobody drives, they are settles somebody already read or addresses the host
-// was never asked to turn. A failed read is reported back and never rolls the
-// committed fact back.
+// for it. A notice that arrives while a turn is in flight joins the driver's
+// retained queue and is re-evaluated as soon as that turn ends, so the busy
+// window defers the turn instead of dropping the notice. A fact that is not a
+// terminal delivery fact, or whose session carries no remembered user address,
+// is ignored in silence: those are not settles nobody drives, they are settles
+// somebody already read or addresses the host was never asked to turn. A failed
+// read is reported back and never rolls the committed fact back.
 func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if d == nil || !d.live() {
 		return nil
@@ -147,9 +163,15 @@ func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) erro
 	if !ok || !addr.IsComplete() {
 		return nil
 	}
+	notice := settleNotice{addr: addr, fact: fact}
 
 	d.mu.Lock()
-	if d.stopped || d.firing {
+	if d.stopped {
+		d.mu.Unlock()
+		return nil
+	}
+	if d.firing {
+		d.retained = append(d.retained, notice)
 		d.mu.Unlock()
 		return nil
 	}
@@ -157,34 +179,63 @@ func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) erro
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	go d.fireFact(ctx, addr, fact)
+	go d.fireFact(ctx, notice)
 	return nil
 }
 
-// fireFact runs one follow-up turn for a settled notice and settles the driver's
-// firing state. The turn outlives the delivery that observed it but not the
-// driver: a stop cancels it, and Stop waits for it to return.
-func (d *SettleDriver) fireFact(ctx context.Context, addr event.Address, fact event.Event) {
+// fireFact runs the follow-up turns this driver owes, one after another, and
+// settles the driver's firing state when the queue runs dry. A turn outlives
+// the delivery that observed it but not the driver: a stop cancels it, and Stop
+// waits for it to return. Every turn after the first is one the rearm took from
+// the retained queue, so a notice that arrived while a turn was in flight is
+// re-evaluated here instead of being dropped by it.
+func (d *SettleDriver) fireFact(ctx context.Context, first settleNotice) {
 	defer d.wg.Done()
-	defer func() {
-		d.mu.Lock()
-		d.firing = false
-		d.mu.Unlock()
-	}()
 
 	if ctx != nil {
 		ctx = context.WithoutCancel(ctx)
 	} else {
 		ctx = context.Background()
 	}
+	for notice := first; ; {
+		d.fireOne(ctx, notice)
+		next, again := d.rearm()
+		if !again {
+			return
+		}
+		notice = next
+	}
+}
+
+// fireOne drives one follow-up turn under its own cancellation: a stop ends the
+// turn in flight, and the next retained notice is only taken after this one
+// returned.
+func (d *SettleDriver) fireOne(ctx context.Context, notice settleNotice) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(d.stopCtx, cancel)
 	defer stop()
 
-	if err := d.fire(ctx, addr, fact); err != nil {
-		assemblyWarn("tagent: the settle follow-up of %s ended by error: %v", addr.SessionID, err)
+	if err := d.fire(ctx, notice.addr, notice.fact); err != nil {
+		assemblyWarn("tagent: the settle follow-up of %s ended by error: %v", notice.addr.SessionID, err)
 	}
+}
+
+// rearm reports the next retained notice of this driver, and whether one is
+// owed at all. The queue is drained in arrival order; a stop or an empty queue
+// ends the firing and clears what a stop left behind, so the driver rests until
+// the next commit.
+func (d *SettleDriver) rearm() (settleNotice, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.stopped || len(d.retained) == 0 {
+		d.firing = false
+		d.retained = nil
+		return settleNotice{}, false
+	}
+	next := d.retained[0]
+	d.retained = d.retained[1:]
+	return next, true
 }
 
 // live reports whether the driver still accepts commits.
@@ -206,6 +257,7 @@ func (d *SettleDriver) Stop() {
 		return
 	}
 	d.stopped = true
+	d.retained = nil
 	d.mu.Unlock()
 	d.stopCancel()
 	d.wg.Wait()

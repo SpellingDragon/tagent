@@ -46,7 +46,7 @@
 | Observer | `plugin.AuditRecord`（Fact＋Attempts） | 不入族：观测证据，只引事实身份 |
 | Exporter | `rl.SampleLine`（`Provenance.ExportID` 为快照身份，`Fact.EventKey` 引用源事实） | `rl` 制品事实（导出快照）；源事实仍属 `event` 族 |
 
-一句话裁定：只有导出的封印快照是制品事实，其余五面的产物是读视图、投递状态、发布台账、结算读数或观测证据，都不新登记族——新族只在本表第二节登记。
+一句话裁定：只有导出的封印快照是制品事实，其余五面的产物是读视图、投递状态、发布台账、结算读数或观测证据，都不新登记族——新族只在本表第二节登记。**门禁裁决也不是事实**：事件门的 killed/uncovered、required 汇总与 L1/L2/L3 证据是门禁证据（只引事实身份、不入链、无 `FactKey`），口径见 [`docs/OPERATION.md`](OPERATION.md#event-gates)。
 
 <a id="reduction-criteria"></a>
 ## 三、化归判据：新增能力先过三问

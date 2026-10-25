@@ -17,6 +17,7 @@ unit is allowed to claim a product PASS.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -32,7 +33,7 @@ PHASES = ("design", "skeleton", "tooling", "implementation", "acceptance")
 # Leaf-task ids come in two shapes: the 65 stage-two tasks `NN.M` and the 24
 # stage-one skeleton tasks `NN.P0.M` (total 89).
 TASK_ID_RE = re.compile(r"^\d{2}\.(?:P0\.\d+|\d+)$")
-CHECKBOX_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s+(?P<id>\d{2}\.(?:P0\.\d+|\d+))\b")
+CHECKBOX_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s+(?P<id>\d{2}\.(?:P0\.\d+|\d+[a-z]?))\b")
 REQUIREMENT_RE = re.compile(r"^###\s+Requirement:\s*(?P<title>.+?)\s*$")
 SCENARIO_RE = re.compile(r"^####\s+Scenario:\s*(?P<title>.+?)\s*$")
 DELTA_KIND_RE = re.compile(
@@ -99,6 +100,24 @@ def load_jsonl_objects(path):
             )
         rows.append(value)
     return rows
+
+
+def sha256_file(path):
+    """Digest one file's bytes as `sha256:<64 hex>`.
+
+    Shared by the runner and the evidence checker so the contract digest, the
+    test-log digest and the module content hashes all use one byte-for-byte
+    definition.  An unreadable file is a fatal input problem, never a digest of
+    whatever happened to be readable.
+    """
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise CheckFailure("cannot read {}: {}".format(path, exc))
+    return "sha256:" + digest.hexdigest()
 
 
 def check_completion_evidence(report, where, evidence):

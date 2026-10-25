@@ -8,6 +8,13 @@ The tmux mechanism itself stays outside this package. How a session is started,
 watched, re-attached and killed belongs to the executor behind the Executor port
 declared in stop.go.
 
+The state face of the execution resource manager: the responsibility range a
+resource is tracked for, the lifecycle events the manager observes after a call
+returned, and the optional observer that hands those events to the runtime.
+The face stays inside this package's own vocabulary: the root assembly supplies
+an OwnerResolver instead of the package importing the task or agent owners,
+so the dependency edge of the golden architecture holds.
+
 CONSTANTS
 
 const DefaultLeaseTTL = 30 * time.Minute
@@ -78,11 +85,13 @@ func IsTmuxAvailable() bool
     verdict comes from a real PATH lookup at every call, so a deployment without
     tmux reads as unavailable and no construction can stand in for the probe.
 
-func NewPreset(manager *Manager, rhythm MonitorConfig) []trpctool.Tool
+func NewPreset(manager *Manager, rhythm MonitorConfig, opts ...RunToolOption) []trpctool.Tool
     NewPreset returns the tools one declared execution face grants, in the
     order the request carries them: the run tool under the monitor rhythm the
     declaration fixes beside the explicit release tool. A preset built beside no
-    manager still builds; each call answers ErrUnwired.
+    manager still builds; each call answers ErrUnwired. The options configure
+    the run tool of the preset, so an assembly that resolves the responsibility
+    range of a call passes its resolver here.
 
 TYPES
 
@@ -251,6 +260,15 @@ func (m *Manager) Adopted() int
 func (m *Manager) Capture(ctx context.Context, key ResourceKey) ([]byte, error)
     Capture returns the output the executor recorded for one held resource.
 
+func (m *Manager) Close(ctx context.Context) []SweepReport
+    Close ends the life of one manager: every post-return tracker of it stops
+    and is joined, the expired leases are settled through the sweep of this
+    manager, and every resource still held is released through the executor.
+    A resource whose stop stays unconfirmed stays held and is reported by name,
+    so the close never announces an ending it did not observe. A repeated close
+    reports nil and releases nothing a second time; the manager is final once it
+    closed.
+
 func (m *Manager) Escalated() int
     Escalated reports how many diagnosis escalations undecidable probes raised.
 
@@ -306,6 +324,12 @@ func WithClock(now func() time.Time) ManagerOption
 
 func WithDefaultTTL(ttl time.Duration) ManagerOption
     WithDefaultTTL sets the floor lease of an acquisition that declares no TTL.
+
+func WithStateObserver(observer StateObserver) ManagerOption
+    WithStateObserver attaches the lifecycle observer of one manager. Only a
+    manager carrying an observer starts the post-return tracker; a manager
+    beside none keeps the call-scoped renewal and the query face of the resource
+    exactly as they were.
 
 type Monitor struct {
 	// Has unexported fields.
@@ -380,6 +404,23 @@ const (
 	// stood quiet for the fake-dead threshold.
 	MonitorSuspect MonitorStatus = "suspect"
 )
+type Owner struct {
+	// Address is the agent session address the acquiring call belongs to.
+	Address event.Address
+	// TaskID is the task identity the acquiring call was admitted under.
+	TaskID event.TaskID
+}
+    Owner is the responsibility range one execution resource is tracked for:
+    the explicit address a lifecycle event is delivered to and the task identity
+    of the call that acquired the resource. It is a plain value, so the root
+    assembly resolves it from the call frame it already holds without this
+    package depending on the task owner.
+
+type OwnerResolver func(context.Context) (Owner, bool)
+    OwnerResolver reports the responsibility range one execution call belongs to
+    at the moment the call runs. A call beside no resolvable frame answers false
+    and is tracked without an owner.
+
 type ProbeResult struct {
 	// State is the state this probe observed.
 	State ProbeState
@@ -509,6 +550,72 @@ func WithRunMonitor(rhythm MonitorConfig) RunToolOption
     acquisition the tool opens: a call that names no monitor key of its own runs
     under this rhythm instead of the framework default.
 
+func WithRunOwner(resolve OwnerResolver) RunToolOption
+    WithRunOwner binds the resolver that reports the responsibility range one
+    execution call belongs to. The root assembly supplies it from the call frame
+    and the task admission it already holds, so this package never imports the
+    task or agent owners. A tool beside no resolver tracks its resources without
+    an owner, and the events of those resources drive no follow-up turn.
+
+type StateEvent struct {
+	// Resource is the resource the observation belongs to.
+	Resource ResourceKey
+	// Phase is the lifecycle observation this event reports.
+	Phase StatePhase
+	// ExitCode is the exit status observed beside a confirmed stop. It is
+	// meaningful only where Confirmed reports an observed ending.
+	ExitCode int
+	// Confirmed reports whether the stop behind this event was observed.
+	Confirmed bool
+	// Released reports whether the resource was freed by this event.
+	Released bool
+	// Detail carries the observation behind a retained or suspect event.
+	Detail string
+	// Owner is the responsibility range the resource is tracked for.
+	Owner Owner
+	// At is the observation time of the event.
+	At time.Time
+}
+    StateEvent is one lifecycle observation of a held execution resource:
+    what was observed, the evidence behind it, and the range it is tracked for.
+    The payload carries what the observer needs to render the state; it never
+    rewrites the resource's obligations.
+
+    The redline list (3 rules): MUST keep an unconfirmed stop visible beside
+    the reason it stayed held. MUST report an exit code only beside an observed
+    stop. MUST NOT report stable or a partial frame as success or completion.
+
+type StateObserver func(StateEvent)
+    StateObserver receives every lifecycle event of the resources one manager
+    holds. The observer is a bypass: it is called outside the manager's lock and
+    its failure never changes whether a resource stays held or is freed, so a
+    slow or panicking observer cannot turn an ending into a leak or a leak into
+    an ending. An observer MUST NOT call back into the manager synchronously.
+
+type StatePhase string
+    StatePhase is the lifecycle a held execution resource reached after the call
+    that acquired it returned. The phases are observations of the resource,
+    never verdicts on the work the command was asked to do: stable is not
+    success and a partial frame is not completion.
+
+const (
+	// StateStable reports an alive resource whose observed frame stood quiet for
+	// the stable threshold. It says nothing about the outcome of the command.
+	StateStable StatePhase = "stable"
+	// StateSuspect reports a live resource whose frame stayed quiet past the
+	// fake-dead threshold, or a probe that could not decide. It is a diagnosis
+	// escalation, never a death decision.
+	StateSuspect StatePhase = "suspect"
+	// StateExited reports a resource observed dead and freed beside a confirmed
+	// stop; ExitCode carries the observed exit status.
+	StateExited StatePhase = "exited"
+	// StateReleased reports a resource freed by an explicit release beside a
+	// confirmed stop.
+	StateReleased StatePhase = "released"
+	// StateRetained reports a resource whose stop stayed unconfirmed: it is
+	// still held, and the event names why instead of claiming an ending.
+	StateRetained StatePhase = "retained"
+)
 type StopEvidence struct {
 	// Resource is the resource identity this evidence was observed for.
 	Resource ResourceKey

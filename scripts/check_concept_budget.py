@@ -167,6 +167,10 @@ BASELINE = (
     # 04.2 执行资源解释（引入叶）：租约/续期/停滞/义务的只读投影，字段即
     # Manager.Explain 的回复本体，拆块即解释面需要二次装配。
     ("struct-fields", "tool/exec/exec.go:Explanation", 10),
+    # 01.10b 执行状态事件（引入叶，S2 类别豁免，同 event.Event 16f 先例）：观察本体＝
+    # 数据面，资源键/相位/退出码/确认/释放/细节/归属/时刻八格是一次生命周期快照的语义
+    # 本体，收窄字段等于拆数据面，消费方须把同一观察二次归并。
+    ("struct-fields", "tool/exec/state.go:StateEvent", 8),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
     ("ctx-bare", "evolution/governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道

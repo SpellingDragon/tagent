@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -64,6 +66,13 @@ type DeliverSummaryTool struct {
 	targets  []string
 	sink     EventSink
 	sessions SessionQuery
+
+	// mu guards receipts, the receipts one action identity already answered.
+	// A replay of the same identity returns that receipt and writes nothing
+	// again; the dedup reads the identity the call frame carries, never the
+	// content or a time window.
+	mu       sync.Mutex
+	receipts map[task.DedupKey]string
 }
 
 var _ trpctool.CallableTool = (*DeliverSummaryTool)(nil)
@@ -81,6 +90,7 @@ func NewDeliverSummaryTool(targets []string, sink EventSink, sessions SessionQue
 		targets:  append([]string(nil), targets...),
 		sink:     sink,
 		sessions: sessions,
+		receipts: make(map[task.DedupKey]string),
 	}
 }
 
@@ -129,46 +139,96 @@ func (t *DeliverSummaryTool) Call(ctx context.Context, jsonArgs []byte) (any, er
 		return denied("the cross-session write face is not wired"), nil
 	}
 
-	addresses := t.addresses()
-	if len(addresses) == 0 {
-		return denied("no bound target sessions"), nil
-	}
-	now := time.Now()
-	summary := deliverSummaryLine(args.Content)
-	failed := 0
-	var firstErr error
-	for _, addr := range addresses {
-		evt := event.Event{
-			Type:      event.TypeExternalInput,
-			Timestamp: now,
-			Meta: map[string]string{
-				event.MetaKeyTriggerSource: LineageReflection,
-				event.MetaKeyEventSummary:  summary,
-			},
-			Message: model.Message{Role: model.RoleUser, Content: args.Content},
-			Owner:   addr,
-			Source:  addr,
-			Target:  addr,
-		}
-		if _, err := t.sink.CommitToSession(ctx, addr, evt); err != nil {
-			failed++
-			if firstErr == nil {
-				firstErr = err
-			}
+	key, replay := deliverActionKey(ctx)
+	if replay {
+		if receipt, seen := t.receiptOf(key); seen {
+			return receipt, nil
 		}
 	}
-	if failed > 0 {
-		return denied(fmt.Sprintf("%d of %d deliveries failed: %v", failed, len(addresses), firstErr)), nil
+	receipt := t.deliver(ctx, args.Content)
+	if replay {
+		t.recordReceipt(key, receipt)
 	}
-	return fmt.Sprintf("[deliver_summary_ok] delivered to %d session(s)", len(addresses)), nil
+	return receipt, nil
 }
 
-// addresses resolves the declared targets into the live sessions they bind,
-// deduplicated and kept in target-declaration order.
-func (t *DeliverSummaryTool) addresses() []event.Address {
-	seen := make(map[event.Address]struct{})
-	var out []event.Address
+// deliver writes one summary to every live session of the declared targets and
+// reports the coverage per target: a success names every target beside its
+// committed session count, and a target whose loop is not running is refused by
+// name instead of being folded into a bare success.
+func (t *DeliverSummaryTool) deliver(ctx context.Context, content string) string {
+	groups := t.targetSessions()
+	total := 0
+	for _, group := range groups {
+		total += len(group.addresses)
+	}
+	if total == 0 {
+		return denied("no bound target sessions")
+	}
+	now := time.Now()
+	summary := deliverSummaryLine(content)
+	failed := 0
+	var firstErr error
+	covered := make([]string, 0, len(groups))
+	var uncovered []string
+	for _, group := range groups {
+		if len(group.addresses) == 0 {
+			uncovered = append(uncovered, group.target)
+			continue
+		}
+		committed := 0
+		for _, addr := range group.addresses {
+			evt := event.Event{
+				Type:      event.TypeExternalInput,
+				Timestamp: now,
+				Meta: map[string]string{
+					event.MetaKeyTriggerSource: LineageReflection,
+					event.MetaKeyEventSummary:  summary,
+				},
+				Message: model.Message{Role: model.RoleUser, Content: content},
+				Owner:   addr,
+				Source:  addr,
+				Target:  addr,
+			}
+			if _, err := t.sink.CommitToSession(ctx, addr, evt); err != nil {
+				failed++
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			committed++
+		}
+		covered = append(covered, fmt.Sprintf("%s: %d/%d sessions committed", group.target, committed, len(group.addresses)))
+	}
+	if failed > 0 {
+		reason := fmt.Sprintf("%d of %d deliveries failed: %v", failed, total, firstErr)
+		if len(uncovered) > 0 {
+			reason += "; " + uncoveredRefusal(uncovered)
+		}
+		if len(covered) > 0 {
+			reason += "; covered " + strings.Join(covered, ", ")
+		}
+		return denied(reason)
+	}
+	if len(uncovered) > 0 {
+		reason := uncoveredRefusal(uncovered)
+		if len(covered) > 0 {
+			reason += "; covered " + strings.Join(covered, ", ")
+		}
+		return denied(reason)
+	}
+	return fmt.Sprintf("[deliver_summary_ok] delivered to %d session(s) across %d target(s): %s",
+		total, len(covered), strings.Join(covered, ", "))
+}
+
+// targetSessions resolves the declared targets into the live sessions they
+// bind, deduplicated inside one target and kept in target-declaration order.
+func (t *DeliverSummaryTool) targetSessions() []targetSessions {
+	out := make([]targetSessions, 0, len(t.targets))
 	for _, target := range t.targets {
+		seen := make(map[event.Address]struct{})
+		addresses := make([]event.Address, 0)
 		for _, addr := range t.sessions.ActiveSessions(event.AgentID(target)) {
 			if !addr.IsComplete() {
 				continue
@@ -177,10 +237,57 @@ func (t *DeliverSummaryTool) addresses() []event.Address {
 				continue
 			}
 			seen[addr] = struct{}{}
-			out = append(out, addr)
+			addresses = append(addresses, addr)
 		}
+		out = append(out, targetSessions{target: target, addresses: addresses})
 	}
 	return out
+}
+
+// targetSessions is one declared target beside the live sessions it binds.
+type targetSessions struct {
+	target    string
+	addresses []event.Address
+}
+
+// uncoveredRefusal names the targets whose loop is not running, so the caller
+// reads which declared target the delivery could not reach.
+func uncoveredRefusal(targets []string) string {
+	quoted := make([]string, 0, len(targets))
+	for _, target := range targets {
+		quoted = append(quoted, `"`+target+`"`)
+	}
+	return "no live session for target " + strings.Join(quoted, ", ")
+}
+
+// deliverActionKey reports the action identity the call frame carries, and
+// whether one is set. A call driven beside no frame has no action identity to
+// deduplicate against.
+func deliverActionKey(ctx context.Context) (task.DedupKey, bool) {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return "", false
+	}
+	return frame.Identity.DedupKey(), true
+}
+
+// receiptOf reports the receipt one action identity already answered.
+func (t *DeliverSummaryTool) receiptOf(key task.DedupKey) (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	receipt, ok := t.receipts[key]
+	return receipt, ok
+}
+
+// recordReceipt pins the receipt of one action identity, so a replay answers
+// the same text without writing again.
+func (t *DeliverSummaryTool) recordReceipt(key task.DedupKey, receipt string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.receipts == nil {
+		t.receipts = make(map[task.DedupKey]string)
+	}
+	t.receipts[key] = receipt
 }
 
 // denied renders one refusal as result text.

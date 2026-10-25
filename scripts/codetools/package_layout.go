@@ -40,11 +40,12 @@ var mirrorVariantSuffixes = []string{"_real"}
 // can mirror a family member.
 var mirrorExemptTrees = []string{contractExamplesDir, "tests/integration/"}
 
-// mirrorExemptFiles are the cross-cutting fixtures that boot the whole example
-// application rather than guarding one file beside them: an end-to-end smoke
-// drives the assembled host, so no single production stem exists to mirror.
-// Exact paths keep the exemption from covering a neighbour that does have a
-// family; a renamed or copied fixture must be reviewed as a new entry.
+// mirrorExemptFiles are the cross-cutting proofs whose subject is an assembled
+// face rather than one file beside them: an end-to-end smoke drives the whole
+// example host, and a lifecycle proof drives the query faces of one package
+// across its exec/state/monitor files, so no single production stem exists to
+// mirror. Exact paths keep the exemption from covering a neighbour that does
+// have a family; a renamed or copied fixture must be reviewed as a new entry.
 var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_test.go",
 	"examples/wechat-bot/smoke_harness_test.go",
@@ -55,6 +56,7 @@ var mirrorExemptFiles = []string{
 	"examples/wechat-bot/smoke_skill_test.go",
 	"examples/wechat-bot/smoke_mcp_test.go",
 	"examples/wechat-bot/smoke_exec_test.go",
+	"tool/exec/event_integrity_test.go",
 }
 
 // layoutFile is one Go source the layout rules judge, as a repo-relative path.

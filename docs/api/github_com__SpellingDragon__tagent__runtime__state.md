@@ -305,11 +305,12 @@ func MigrateArchive(ctx context.Context, root string, tasks ArchiveTaskWriter, o
     verbatim.
 
 func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error)
-    NewDurableCommit returns a durable commit carrier over one fact log and
-    loads every fact the log already holds, so a second process over the same
-    log sees exactly the facts the first one committed. uncertain, when it is
-    not nil, marks matching commit attempts as uncertain, so all three commit
-    outcomes stay observable.
+    NewDurableCommit returns a durable commit carrier over one fact log
+    and loads every fact and consumption receipt the log already holds,
+    so a second process over the same log sees exactly the facts the first one
+    committed and owes no delivery for a notice that process already consumed.
+    uncertain, when it is not nil, marks matching commit attempts as uncertain,
+    so all three commit outcomes stay observable.
 
 func NewStatePlan(plan OrgPlan, agents map[event.AgentID]AgentBinding, leases []LeaseRef) (StatePlan, error)
     NewStatePlan instantiates the candidate StatePlan of one configuration
@@ -797,7 +798,9 @@ type DurableCommit struct {
     the fact already stored and records no second one — and never advances a
     delivery state, because an idempotent hit reports a stored fact and not a
     delivered notification. Only an explicit acceptance by the target moves a
-    delivery, through Accept.
+    delivery, through Accept. The carrier also keeps the receipt of each logical
+    consumption a notification completed, so a carrier opened over the same log
+    owes no delivery for a notice the log confirms as consumed.
 
     The carrier holds no wrapper, binding or lease: the log it stores through is
     supplied at construction and nothing an earlier run captured is revived.
@@ -837,7 +840,9 @@ func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
 func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error)
     Records returns the durable fact chain of one task as restore links, in
     commit order: the admission link carries the stored task_spawned material,
-    every later link carries its fact alone.
+    every later link carries its fact alone. A notification whose consumption
+    receipt the log holds is left out of the outbox of its link, so a rebuild
+    opens no delivery obligation for a notice already confirmed as consumed.
 
 func (d *DurableCommit) Revision(taskID event.TaskID) int64
     Revision returns the revision the task is at after the records stored for
@@ -1037,10 +1042,13 @@ type MemoryStore struct {
     registration names. The memory carrier keeps the business contract of a
     durable one and promises no recovery of its own.
 
-func NewMemoryStore(authority *Authority) *MemoryStore
+func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *MemoryStore
     NewMemoryStore returns an empty in-memory state store that checks reads
     against the given authority. An authority that is not present refuses every
-    read.
+    read. A consumption recorder, when one is supplied, receives the receipt of
+    every completed logical consumption behind its own sync barrier before the
+    mailbox confirms the entry; a store beside none keeps the consumption in its
+    own bookkeeping alone.
 
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error
 

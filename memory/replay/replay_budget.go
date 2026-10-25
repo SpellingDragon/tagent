@@ -14,6 +14,7 @@ import (
 	"errors"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,13 @@ const (
 	BudgetCharsPerToken = budgetCharsPerToken
 	// ticketPreviewBytes bounds the preview a ticket decision records and shows.
 	ticketPreviewBytes = 128
+	// noticeCardChars bounds the identity card a request presents for a notice
+	// the budget cannot carry in any fuller form: the notice's status, the head
+	// of its material and the ticket that reaches the full original.
+	noticeCardChars = 300
+	// noticeStatusChars bounds the status a notice card names, so a long stored
+	// summary never eats the room the identity and the ticket need.
+	noticeStatusChars = 60
 	// recoveryHintBytes bounds the recovery hint entry text.
 	recoveryHintBytes = 200
 )
@@ -116,7 +124,9 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 // summary until the budget is met, settling on the decision it recorded as one
 // replay-settle fact. An entry that fits none of them is skipped without a
 // record and without a settle fact, so a later assembly under a larger budget
-// can still present it in full.
+// can still present it in full — except a notice entry, which the budget may
+// shorten to its identity card but never drop: a notice the model never read is
+// an event the model never saw arrive.
 //
 // The source facts are read and never written: the assembly files settle facts
 // on the projection's own settle account, so the fact chain it replayed is
@@ -201,8 +211,46 @@ func (p *ReplayProjection) assembleBudgetLocked(budget, prefix int) []Projection
 			used += len(entry.Summary)
 			continue
 		}
+		if entry.Type != event.TypeFeedback {
+			continue
+		}
+		card := noticeCard(entry, original)
+		if entry.Key != "" {
+			p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationSummary, Preview: card})
+		}
+		shown := entry
+		shown.Content = card
+		out = append(out, shown)
+		used += len(card)
 	}
 	return out
+}
+
+// noticeCard renders the least a request may present for a notice the budget
+// cannot carry in any fuller form: the notice's status, the head of its material
+// and the ticket that reaches the full original. The notice fact family commits
+// as a feedback fact (the progress and settled reports of a call, and the
+// execution-state reports of the host), so a feedback entry is identity-bearing
+// material: the model must be able to tell that it arrived and what it reported,
+// and budget pressure may shorten it but never drop it from the prefix the way
+// it drops a plain entry. The ticket is reserved before the head is cut, so the
+// identity reaches its original even when the bound leaves the head no room.
+func noticeCard(entry ProjectionEntry, original string) string {
+	status := boundedText(entry.Summary, noticeStatusChars)
+	if status == "" {
+		status = "notice"
+	}
+	head := original
+	if at := strings.IndexByte(head, '\n'); at >= 0 {
+		head = head[:at]
+	}
+	prefix := "[notice " + status + "] "
+	ticket := ticketText(entry.Key)
+	room := noticeCardChars - len(prefix) - len(ticket) - 2
+	if room < 0 {
+		room = 0
+	}
+	return prefix + boundedText(head, room) + " " + ticket
 }
 
 // RecordDecision records the presentation decision of one entry and reshapes

@@ -109,6 +109,9 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 		return
 	}
 	key := r.commitFact(fact)
+	if key == "" {
+		return
+	}
 	pipeline, err := r.factPipeline(addr.AgentID)
 	if err != nil {
 		assemblyWarn("tagent: the settle of %s at %s committed beside no pipeline: %v", notice.TaskID, addr.AgentID, err)
@@ -263,7 +266,7 @@ func (r *Run) presetTools(ctx context.Context, decl *config.Declaration, agents 
 			delegate = true
 			continue
 		case tagentexec.PresetName:
-			faces = append(faces, tagentexec.NewPreset(r.execManager, monitorConfigOf(spec))...)
+			faces = append(faces, tagentexec.NewPreset(r.execManager, monitorConfigOf(spec), tagentexec.WithRunOwner(r.execOwner))...)
 			continue
 		case mcpgw.ToolNameMCPCall, mcpgw.ToolNameMCPDiscover:
 			if r.mcpGateways == nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -39,14 +40,16 @@ type FactLog interface {
 	Sync(ctx context.Context) error
 }
 
-// factPrefix and specPrefix locate the two durable record kinds the carrier
-// keeps on one log: the commit facts and the admission material of their tasks.
-// Both reuse the existing persistent identity material (the task_spawned and
-// the settle records), so the durable commit adds no new orchestration
-// persistence format and needs no other database.
+// factPrefix, specPrefix and consumePrefix locate the three durable record kinds
+// the carrier keeps on one log: the commit facts, the admission material of their
+// tasks, and the receipt of each logical consumption a notification completed.
+// Each reuses the existing persistent identity material (the task_spawned record,
+// the settle records and the notice identity), so the durable commit needs no
+// other database and no second consumption state.
 const (
-	factPrefix = "tagent/task/v1/fact:"
-	specPrefix = "tagent/task/v1/spec:"
+	factPrefix    = "tagent/task/v1/fact:"
+	specPrefix    = "tagent/task/v1/spec:"
+	consumePrefix = "tagent/task/v1/consume:"
 )
 
 // mutationKey is the idempotency identity of one mutation: the task it changes
@@ -54,6 +57,18 @@ const (
 type mutationKey struct {
 	task     event.TaskID
 	mutation task.MutationID
+}
+
+// consumeRecord is the durable receipt of one completed logical consumption: the
+// four-part notice identity it confirms beside the committed fact the notice
+// points at. The identity alone decides which notice the receipt is about; the
+// event reference stays content beside it.
+type consumeRecord struct {
+	TaskID event.TaskID    `json:"task_id"`
+	Round  int64           `json:"round"`
+	Kind   task.NoticeKind `json:"kind"`
+	Seq    int64           `json:"seq"`
+	Event  event.EventID   `json:"event,omitempty"`
 }
 
 // ErrNoticeNotOwed reports an acceptance of a notification the carrier holds no
@@ -71,7 +86,9 @@ var ErrSpecConflict = errors.New("state: the task's admission material is alread
 // the fact already stored and records no second one — and never advances a
 // delivery state, because an idempotent hit reports a stored fact and not a
 // delivered notification. Only an explicit acceptance by the target moves a
-// delivery, through Accept.
+// delivery, through Accept. The carrier also keeps the receipt of each logical
+// consumption a notification completed, so a carrier opened over the same log
+// owes no delivery for a notice the log confirms as consumed.
 //
 // The carrier holds no wrapper, binding or lease: the log it stores through is
 // supplied at construction and nothing an earlier run captured is revived.
@@ -84,16 +101,18 @@ type DurableCommit struct {
 	specs     map[event.TaskID]task.Spec
 	mutations map[mutationKey]task.CommitRecord
 	owed      map[noticeKey]task.OutboxNotice
+	consumed  map[noticeKey]struct{}
 }
 
 // DurableCommit satisfies the task commit port.
 var _ task.Commit = (*DurableCommit)(nil)
 
 // NewDurableCommit returns a durable commit carrier over one fact log and
-// loads every fact the log already holds, so a second process over the same log
-// sees exactly the facts the first one committed. uncertain, when it is not
-// nil, marks matching commit attempts as uncertain, so all three commit
-// outcomes stay observable.
+// loads every fact and consumption receipt the log already holds, so a second
+// process over the same log sees exactly the facts the first one committed and
+// owes no delivery for a notice that process already consumed. uncertain, when
+// it is not nil, marks matching commit attempts as uncertain, so all three
+// commit outcomes stay observable.
 func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommit, error) {
 	d := &DurableCommit{
 		log:       log,
@@ -103,6 +122,7 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 		specs:     map[event.TaskID]task.Spec{},
 		mutations: map[mutationKey]task.CommitRecord{},
 		owed:      map[noticeKey]task.OutboxNotice{},
+		consumed:  map[noticeKey]struct{}{},
 	}
 	if err := d.load(context.Background()); err != nil {
 		durableError("tagent: durable commit load failed err=%v", err)
@@ -112,9 +132,11 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 }
 
 // load folds every record the log already holds back into the carrier's tables.
-// A committed notification is loaded owed and pending again: the storage layer
-// never records an acceptance, so only the target's explicit acceptance moves
-// one and an unconfirmed delivery is replayed rather than trusted.
+// A committed notification is loaded owed and pending again unless the log holds
+// the receipt of its logical consumption: the storage layer records no
+// acceptance, so only the target's explicit acceptance moves one and an
+// unconfirmed delivery is replayed rather than trusted, while a consumption the
+// log confirms is never owed a second time.
 func (d *DurableCommit) load(ctx context.Context) error {
 	specs, err := d.log.Scan(ctx, specPrefix)
 	if err != nil {
@@ -126,6 +148,18 @@ func (d *DurableCommit) load(ctx context.Context) error {
 			return err
 		}
 		d.specs[event.TaskID(key[len(specPrefix):])] = spec
+	}
+	receipts, err := d.log.Scan(ctx, consumePrefix)
+	if err != nil {
+		return err
+	}
+	for _, body := range receipts {
+		var receipt consumeRecord
+		if err := json.Unmarshal(body, &receipt); err != nil {
+			return err
+		}
+		d.consumed[noticeKey{task: receipt.TaskID, round: receipt.Round,
+			kind: receipt.Kind, seq: receipt.Seq}] = struct{}{}
 	}
 	facts, err := d.log.Scan(ctx, factPrefix)
 	if err != nil {
@@ -150,6 +184,9 @@ func (d *DurableCommit) load(ctx context.Context) error {
 				d.revisions[taskID] = revision
 			}
 			for _, envelope := range record.Outbox {
+				if _, consumed := d.consumed[noticeKeyOf(envelope.Notice)]; consumed {
+					continue
+				}
 				d.owed[noticeKey{task: envelope.Notice.TaskID, round: envelope.Notice.Round,
 					kind: envelope.Notice.Kind, seq: envelope.Notice.Seq}] = task.OutboxNotice{
 					Notice:   envelope,
@@ -158,6 +195,48 @@ func (d *DurableCommit) load(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
+}
+
+// recordConsumption stores the receipt of one completed logical consumption
+// behind the sync barrier, so a carrier opened over the same log reads that
+// notice as consumed and owes it no delivery. The receipt is keyed by the
+// notice's four-part identity: a repeated receipt of the same identity stages no
+// second pair and reports success. A receipt whose barrier did not complete
+// reports the write failure and confirms nothing, so the caller keeps the
+// notice owed rather than closing it on an unconfirmed write.
+func (d *DurableCommit) recordConsumption(ctx context.Context, notice task.Notice) error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if notice.TaskID == "" {
+		return ErrNoticeIdentityMissing
+	}
+	key := noticeKeyOf(notice)
+	if _, done := d.consumed[key]; done {
+		return nil
+	}
+	body, err := json.Marshal(consumeRecord{TaskID: notice.TaskID, Round: notice.Round,
+		Kind: notice.Kind, Seq: notice.Seq, Event: notice.Event})
+	if err != nil {
+		durableError("tagent: durable consumption encode failed task=%s notice=%s err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	if err := d.log.Put(ctx, consumeKey(notice), body); err != nil {
+		durableError("tagent: durable consumption write failed task=%s notice=%s result=unconsumed err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	if err := d.log.Sync(ctx); err != nil {
+		durableError("tagent: durable consumption barrier failed task=%s notice=%s result=unconsumed err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	d.consumed[key] = struct{}{}
+	delete(d.owed, key)
 	return nil
 }
 
@@ -316,7 +395,9 @@ func (d *DurableCommit) TaskIDs() []event.TaskID {
 
 // Records returns the durable fact chain of one task as restore links, in
 // commit order: the admission link carries the stored task_spawned material,
-// every later link carries its fact alone.
+// every later link carries its fact alone. A notification whose consumption
+// receipt the log holds is left out of the outbox of its link, so a rebuild
+// opens no delivery obligation for a notice already confirmed as consumed.
 func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -326,13 +407,36 @@ func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]tas
 	records := d.facts[taskID]
 	chain := make([]task.TaskRecord, 0, len(records))
 	for i, fact := range records {
-		link := task.TaskRecord{Fact: fact}
+		link := task.TaskRecord{Fact: d.unowedLocked(fact)}
 		if i == 0 {
 			link.Spec = d.specs[taskID]
 		}
 		chain = append(chain, link)
 	}
 	return chain, nil
+}
+
+// unowedLocked returns one stored fact as a restore link: the notifications of
+// its outbox whose consumption receipt the log holds are left out, so a rebuild
+// opens no obligation for them. The stored record itself keeps the outbox it
+// committed, so a repeated commit compares against the content the transition
+// carried.
+func (d *DurableCommit) unowedLocked(fact task.CommitRecord) task.CommitRecord {
+	if len(fact.Outbox) == 0 {
+		return fact
+	}
+	outbox := make([]task.Envelope, 0, len(fact.Outbox))
+	for _, envelope := range fact.Outbox {
+		if _, consumed := d.consumed[noticeKeyOf(envelope.Notice)]; consumed {
+			continue
+		}
+		outbox = append(outbox, envelope)
+	}
+	if len(outbox) == len(fact.Outbox) {
+		return fact
+	}
+	fact.Outbox = outbox
+	return fact
 }
 
 // sameRecord reports whether a stored record and a repeated one carry the same
@@ -362,6 +466,13 @@ func equalOutbox(left, right []task.Envelope) bool {
 // mutation identity it carries.
 func factKey(taskID event.TaskID, mutation task.MutationID) string {
 	return factPrefix + string(taskID) + "\x00" + string(mutation)
+}
+
+// consumeKey locates the consumption receipt of one notification on the log by
+// the four parts of the notice identity it confirms.
+func consumeKey(notice task.Notice) string {
+	return consumePrefix + string(notice.TaskID) + "\x00" + strconv.FormatInt(notice.Round, 10) +
+		"\x00" + string(notice.Kind) + "\x00" + strconv.FormatInt(notice.Seq, 10)
 }
 
 // durableError renders one line of the persistence face at ERROR: a write, a

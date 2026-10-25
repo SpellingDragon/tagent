@@ -77,6 +77,7 @@ CI 与本地的命令逐字相同。分阶段：
 | `build` / `vet` | 根 + `examples/wechat-bot` 各一遍；`examples/cli-host` 由 `ci.yml` 的 Build/Vet/Test (cli-host module) 覆盖 | 编译或静态检查失败 |
 | `policy` | 注释策略**棘轮**（只许降不许升，按规则计数） | 新增了规则外注释 |
 | `doc budget` | markdown 总量**棘轮**（`scripts/doc_budget.json`，只降不升） | 文档总量超基线 |
+| `event-ownership` | 冻结归属表（`golden/runtime/architecture.json`）按 `go/types` 核对 owner 的直接调用点；方法值/反射等解析不到的记 uncovered、不折算 | 事件归属结论出现未登记漂移 |
 | `name-check` | 测试标识不得承载迭代编号 | 标识里带了批次/轮次号 |
 | `doc-refs` | markdown 引用的文件必须存在（历史树按快照锚定） | 文档引用了已删除/改名的文件 |
 | `gen_godoc --check` | `docs/api` 必须与源码注释同步 | 生成面过期 |
@@ -111,12 +112,7 @@ bash scripts/test_race_check.sh                       # race 门分类器的自�
 
 实测（2026-10-21）：`check-openspec.sh` exit 0，`Totals: 124 passed, 4 failed (128 items)`（4 个 failed 均为活跃 change，主规格全绿）；`gen_godoc --check` exit 0（`68 packages`）；`proc-refs`/`tracked-hygiene`/`dotted-refs` 均 exit 0。
 
-批次作业时另有两个证明工具（不属常规门）：
-
-```bash
-bash scripts/check_comment_only.sh <baseline-ref> <paths...>   # 证明这批只动了注释
-bash scripts/check_test_merge.sh <baseline-ref> <dir>          # 证明测试合并没有丢用例/断言
-```
+批次作业时另有两个证明工具（不属常规门）：`bash scripts/check_comment_only.sh <baseline-ref> <paths...>` 证明这批只动了注释，`bash scripts/check_test_merge.sh <baseline-ref> <dir>` 证明测试合并没有丢用例/断言。
 
 ### 5.3 两个"本地红但代码没问题"的已知形态
 
@@ -124,12 +120,16 @@ bash scripts/check_test_merge.sh <baseline-ref> <dir>          # 证明测试合
 
 **(a) `docs/wiki` 有未提交编辑时，`doc-refs` 会集体报 dangling。** 该门对历史文档按其**快照提交**锚定引用，但前提是文档相对该提交无本地改动（`git diff --quiet <sha> -- <doc>` 失败即放弃锚定，退回按今天的树判定）。所以一批未提交的 wiki 编辑会把原本全部锚定的历史引用当场变成 dangling。
 
-> 实测（2026-10-18）：同一天，干净 HEAD 克隆里 `doc-refs` 是绿的（`doc-refs: 43 citation(s) resolve at their document's snapshot commit (41 inside historical roots, 2 outside)`）；而带 27 篇未提交 wiki/操作文档编辑的工作树里，同样是那 43 条引用全部报 `DANGLING-DOC-REF`。引用本身没坏，是锚定基准暂时失效。
->
-> 单文件因果验证（同一克隆）：给 `docs/wiki/tool/tool-architecture.md` 追加一个空行，该篇的 7 条引用立刻转为 dangling（锚定计数 43 → 36，门 exit 1）；`git checkout` 还原即恢复绿。改动内容无关，**"相对快照提交有本地改动"本身就足以取消锚定**。
-> 处置：文档批次**先落盘再跑该门**；需要当场判真伪时按文件单独跑——`go run ./scripts/codetools doc-refs <单个文件>` 只判该文件的引用。注意 `lint.sh --only <阶段>` 跳不过这道门（九个文档/脚本门始终会跑），没有任何开关能把它绕过。不要为了绿去改引用路径——那会把历史快照改成对今天码面的断言，等于销毁分区语义（见 §八）。
+> 实测（2026-10-18）：同一天，干净 HEAD 克隆里 `doc-refs` 是绿的（`doc-refs: 43 citation(s) resolve at their document's snapshot commit (41 inside historical roots, 2 outside)`）；而带 27 篇未提交 wiki/操作文档编辑的工作树里，同样是那 43 条引用全部报 `DANGLING-DOC-REF`——引用本身没坏，是锚定基准暂时失效。单文件因果验证（同一克隆）：给 `docs/wiki/tool/tool-architecture.md` 追加一个空行，该篇的 7 条引用立刻转为 dangling（锚定计数 43 → 36，门 exit 1），`git checkout` 还原即恢复绿；改动内容无关，**"相对快照提交有本地改动"本身就足以取消锚定**。
+> 处置：文档批次**先落盘再跑该门**；需要当场判真伪时按文件单独跑——`go run ./scripts/codetools doc-refs <单个文件>` 只判该文件的引用。`lint.sh --only <阶段>` 跳不过这道门（九个文档/脚本门始终会跑），不要为了绿去改引用路径——那会把历史快照改成对今天码面的断言，等于销毁分区语义（见 §八）。
 
 **(b) 示例 module 的红与根 module 无关。** 根 `./...` 不含 `examples/wechat-bot` 与 `examples/cli-host`。wechat-bot 的 `build`/`vet`/`test` 在 `lint.sh` 内各有一遍；两者在 CI 的 test job 里都单列三步。任何"根全绿"的结论都不覆盖它们。
+
+<a id="event-gates"></a>
+### 5.4 事件门：每 MR 三档 + required 汇总（已落地，远端 required 待 F4）
+**四个 job 与 artifact 同名**：`event-integrity-short` 跑 `python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10`——十次独立 runner 进程、十份日志、逐轮 UUID run-id（`repeat_index=1..10`），不用 `-count` 放大、不跑 `--test-id` 子集；`event-integrity-long` 用 matrix `seed [1,7,42] × window [256,32768]`、`fail-fast: false`，每片 `--scope event-long --seed <s> --window <w> --repeat 1`，**单片 1200 输入/120 重启、六片合计 7200/720（单片不得写成 7200/720）**；`event-integrity-mutations` 跑 `python3 scripts/check_event_integrity_mutations.py --all --json`，只启用已证实的冻结变异；`event-integrity-required` 用 `if: always()` + `needs` 三个生产 job，经 `env` 传上游结果并逐个 `test "$X_RESULT" = "success"`（`cancelled`/`failure`/`skipped` 一律失败），再以 `python3 scripts/check_runtime_evidence.py --bundle <目录> --contract golden/runtime/event_integrity_scenarios.json --json` 汇总。required 只是新增事件三档的汇总检查，不替代 `test`/`race`/`validators`/`openspec`/`soak`，旧检查名继续保留。事件合同是 `golden/runtime/event_integrity_scenarios.json`（profile `event-integrity`）；旧 deterministic 图与旧合同不被当作已支持事件语义。**状态：已落地（L1）**——`ci.yml` 与 `scripts/preflight.sh` 已由 `CiWorkflowTest` 结构验收，并以真实 17 份证据（6 long + 10 short + 1 mutation）跑通 bundle 门；远端 required 生效属 L2/F4，未授权，保持待验。
+
+**判据与证据边界**：killed = 控制树先绿、变异进程非零退出，且失败输出命中该变异登记的具名业务断言（`expect_assertion`）；uncovered = 没有具名断言命中（编译失败、超时、零测试命中、无该断言的 panic、测试照绿都算），进入 uncovered 并让门失败；新增缺陷必须登记进冻结清单，不得用 `--mutation` 子集绕过。L1 本地 = `bash scripts/preflight.sh` 默认跑 short 十轮、long 六组合与 mutations；`--skip-smoke` 只跳微信 smoke，事件三段照跑并打印"不具备完整 MR 等价证据"，退出码不变；`--test-id` 或单 scope 子集不是 MR 等价。L2 远端 = required 经分支保护生效（未授权，保持待验）；L3 = 72h 长跑与真实服务面（未授权，保持待验）。失败处置：按 artifact 名取证据（`event-integrity-short`、`event-integrity-long-seed-<s>-window-<w>`、`event-integrity-mutations`、`event-integrity-required`），用 run-id 区分独立轮次与分片，不重跑覆盖先前的 fail；required 红先看是哪个上游 job 红。
 
 ---
 

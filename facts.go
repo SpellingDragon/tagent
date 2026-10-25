@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -35,9 +38,31 @@ const mappedSummaryRunes = 120
 // - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive and the settled delivery all land here.
 // - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
 // - A committed fact enters the mapped sequence of its own session chain right after it lands, so every consumption of that chain assembles the sequence the commits recorded.
+//
+// The identity is empty beside a commit that did not land: a caller that reads
+// the fact back by the reported identity never reads a fact the storage tier
+// refused, and the failure is reported beside the run instead of answered as a
+// commitment.
 func (r *Run) commitFact(evt event.Event) event.EventID {
+	key, err := r.commitFactChecked(context.Background(), evt)
+	if err != nil {
+		assemblyWarn("tagent: the fact was not committed err=%v", err)
+		return ""
+	}
+	return key
+}
+
+// commitFactChecked commits one fact into the storage tier before it enters the
+// live ledger, and reports the failure of that commit to the caller: a caller
+// told the fact committed holds a fact a later process reads back, and a caller
+// told it failed holds no live copy of it, so no path reports success over a
+// fact the tier refused.
+func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
+	}
+	if err := r.persistFact(ctx, evt); err != nil {
+		return "", err
 	}
 	entry, mapped := mappedEntryOf(evt)
 	r.mu.Lock()
@@ -45,24 +70,99 @@ func (r *Run) commitFact(evt event.Event) event.EventID {
 	r.factOrder = append(r.factOrder, evt.Key)
 	r.mu.Unlock()
 	if !mapped {
-		return evt.Key
+		return evt.Key, nil
 	}
 	r.attachDeclaredReplay(evt)
 	r.recordMapped(evt, entry)
-	return evt.Key
+	return evt.Key, nil
+}
+
+// persistFact writes one fact of this run to the storage tier it declares: the
+// body commits byte for byte as the original the recall face reads back, the
+// record commits behind the segment barrier under the next sequence slot of the
+// fact's partition, and the observation table and the vector pipeline learn the
+// event so the same process recalls what it just committed.
+// - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable carrier to write.
+// - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
+// - An event the tier already published is not committed twice, so a retry of one fact keeps one record.
+// - Landing the query record and submitting the vector generation are consequences of a commit that already landed; their failure is reported and never rolls the fact back.
+func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
+	r.mu.Lock()
+	tier := r.tier
+	supply := r.retrieval
+	r.mu.Unlock()
+	if tier == nil || evt.Owner.AgentID == "" {
+		return nil
+	}
+	body, err := memory.BodyFromEvent(evt, "text/plain", "keep")
+	if err != nil {
+		return err
+	}
+	encoded, err := body.Encode()
+	if err != nil {
+		return err
+	}
+	if _, held, err := tier.Segments.GetEvent(ctx, evt.Key); err != nil {
+		return err
+	} else if held {
+		return nil
+	}
+	if err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {
+		return err
+	}
+	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
+	window := evt.Timestamp.UnixMilli()
+	if window < 0 {
+		return fmt.Errorf("tagent: the fact %s carries no event time", evt.Key)
+	}
+	r.landing.Lock()
+	seq := r.landedSeq[partition] + 1
+	err = tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+		PartitionID: partition,
+		WindowTS:    window,
+		Seq:         seq,
+		EventKey:    evt.Key,
+		EventTime:   window,
+		Body:        encoded,
+	})
+	if err == nil {
+		r.landedSeq[partition] = seq
+	}
+	r.landing.Unlock()
+	if errors.Is(err, ledger.ErrContentConflict) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if supply == nil {
+		return nil
+	}
+	stored := ledger.StoredEvent{Key: evt.Key, PartitionID: partition, WindowTS: window, Seq: seq, Body: encoded}
+	if err := supply.source.LandEvent(ctx, stored); err != nil {
+		assemblyWarn("tagent: the committed fact %s is not landed in the query table err=%v", evt.Key, err)
+	}
+	if supply.seam != nil {
+		text := body.Content
+		if text == "" {
+			text = body.Summary
+		}
+		supply.seam.Submit(evt.Key, text)
+	}
+	return nil
 }
 
 // recordMapped appends one mapped entry to the sequence of its session and
 // moves the boundary between the material that ended and the material still in
-// flight: a new range is admitted by an external input under an invocation of
-// its own, and that first fact is where everything the earlier ranges committed
-// becomes ended material the next request presents while the transcript stops
-// carrying it. Facts of the range in flight — the reasoning, the calls, the
-// output of a round and the notice of a call it admitted — stay behind that
-// boundary, because the transcript of the drive carries them. A notice fact is a
-// mapped fact like any other, so a notification enters the chain's projection as
-// it commits and the range reads it back as a projection increment instead of
-// from a lane of its own.
+// flight: a new range is admitted by the input material that starts it under an
+// invocation of its own, and that first fact is where everything the earlier
+// ranges committed becomes ended material the next request presents while the
+// transcript stops carrying it. Facts of the range in flight — the reasoning,
+// the calls, the output of a round and the notice of a call it admitted — stay
+// behind that boundary, because the transcript of the drive carries them. A
+// notice fact is a mapped fact like any other, so a notification enters the
+// chain's projection as it commits and the range reads it back as a projection
+// increment instead of from a lane of its own.
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -70,13 +170,27 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	if !carried {
 		return
 	}
-	position := held.projection.Len()
 	held.projection.Append(context.Background(), entry)
-	if evt.Type == event.TypeExternalInput && held.rangeInvocation != "" && held.rangeInvocation != evt.InvocationID {
-		held.ended = position
+	if admitsRange(evt) && held.rangeInvocation != evt.InvocationID {
+		held.endedAt = evt.Key
 	}
 	held.rangeInvocation = evt.InvocationID
 	r.replays[sessionOf(evt)] = held
+}
+
+// admitsRange reports whether one committed fact starts a range: the ready
+// input an invocation aggregates, and the notice fact an unattended follow-up
+// turn commits as the material its drive reads at the head. Every other fact —
+// the reasoning, the calls and the output of a round, and the progress notice a
+// running call admits — belongs to the range already in flight and never moves
+// the boundary. The notice fact is recognised by the trigger source its
+// committing path stamps, so a progress notice of the same type under the same
+// range is never mistaken for the start of another one.
+func admitsRange(evt event.Event) bool {
+	if evt.Type == event.TypeExternalInput {
+		return true
+	}
+	return evt.Type == event.TypeFeedback && evt.Meta[event.MetaKeyTriggerSource] == "task"
 }
 
 // sessionOf reports the session chain one committed fact belongs to: the session
@@ -99,6 +213,11 @@ func sessionOf(evt event.Event) event.SessionID {
 // registration is left as it stands, and a session naming no window maps onto
 // no projection: its commits record nothing beside the fact itself and a
 // declaration that declares no window keeps the assembly as it stood.
+// A chain beside no projection still reads its notice facts: the notice read
+// face attaches for it too and answers from the committed facts of the session,
+// so the material of a notification reaches the follow-up decision whether or
+// not the declaration registered a mapped sequence. The face is one read of one
+// truth — the fact chain — and never a second input lane beside it.
 func (r *Run) attachDeclaredReplay(evt event.Event) {
 	session := sessionOf(evt)
 	if session == "" {
@@ -116,6 +235,7 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 		return
 	}
 	if window.MaxTokens <= 0 {
+		r.attachNoticeFeed()
 		return
 	}
 	err := r.AttachReplay(agent.RequestChain{SessionID: session}, window, replay.NewReplayProjection())
@@ -143,46 +263,66 @@ func (r *Run) ReplayEntries(session event.SessionID) ([]replay.ProjectionEntry, 
 
 // noticeProjection is the incremental read face of the session chains' notice
 // facts: the mapped sequence the commits of this run record, read from the
-// ended-material boundary of the chain. The face is attached to the loop beside
-// the mapped sequence of a session, so a range reads the notifications of its
-// own call as a projection increment and the fact chain stays the only truth of
-// what a notification is — a restarted process reads the same facts back.
+// ended-material boundary of the chain, and the committed facts of the session
+// themselves for a chain that registered no mapped sequence. The face is
+// attached to the loop beside the first mapped fact of a session, so a range
+// reads the notifications of its own call as a projection increment — or, beside
+// no projection, as the fact it committed — and the fact chain stays the only
+// truth of what a notification is: a restarted process reads the same facts
+// back.
 //
 // The redline list (3 rules):
-// MUST answer a chain that carries no projection as carrying none.
+// MUST answer a chain with a registered projection from that projection alone, and a chain without one from the committed facts of that session alone.
 // MUST report only the facts under the identity prefix it was handed.
-// MUST NOT write the projection it reads: the read is a read.
+// MUST NOT write the projection or the ledger it reads: the read is a read.
 type noticeProjection struct{ run *Run }
 
 // The face satisfies the incremental notice read the loop drives.
 var _ agent.NoticeFeed = noticeProjection{}
 
 // NoticeBoundary reports the position the ended material of the named chain ends
-// at, and whether that chain carries a projection at all: the material before it
-// is the material a request presents, so a notice committed before it has
-// already reached the range and is never reported again.
+// at, and whether that chain has a read face at all: the material before it is
+// the material a request presents, so a notice committed before it has already
+// reached the range and is never reported again. The position is resolved from
+// the fact identity the boundary records on every read, never stored: the age
+// fold rewrites the sequence the commits record, so a kept position would name
+// other material after the rewrite. A chain beside no projection reads its
+// notice facts from the committed facts of the session, and no fact has reached
+// a request through a transcript an earlier drive committed without being that
+// transcript itself, so its sequence starts at the beginning.
 func (p noticeProjection) NoticeBoundary(chain agent.RequestChain) (int, bool) {
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
 	held, carried := p.run.replays[chain.SessionID]
 	if !carried || held.projection == nil {
-		return 0, false
+		return 0, true
 	}
-	return held.ended, true
+	return held.endedPrefix(), true
 }
 
-// NoticesFrom reports the notice facts of the named chain appended after cursor
+// NoticesFrom reports the notice facts of the named chain from the cursor on
 // under the given identity prefix, in chain order, beside the position the read
-// reached and whether the chain carries a projection. A fact outside the prefix
-// is never reported, so one range reads the notices of its own call alone.
+// reached and whether the chain has a read face. A chain beside no projection
+// reads the feedback facts its session committed, in commit order; a chain
+// beside a projection reads the mapped sequence it recorded. The cursor is
+// resolved against that sequence as it stands at the read: a position the
+// caller kept across a fold rewrite names other material, or falls past the
+// shortened sequence, so it re-anchors at the ended-material boundary — the
+// position the chain resolves from the fact identity it records — instead of
+// reading past the rewrite. A fact outside the prefix is never reported, so one
+// range reads the notices of its own call alone.
 func (p noticeProjection) NoticesFrom(chain agent.RequestChain, prefix event.EventID, cursor int) ([]agent.NoticeView, int, bool) {
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
 	held, carried := p.run.replays[chain.SessionID]
 	if !carried || held.projection == nil {
-		return nil, cursor, false
+		return p.run.noticesOfLocked(chain.SessionID, prefix, cursor)
 	}
 	entries := held.projection.Entries()
+	boundary := held.endedPrefix()
+	if cursor < boundary || cursor > len(entries) {
+		cursor = boundary
+	}
 	if cursor < 0 {
 		cursor = 0
 	}
@@ -202,6 +342,37 @@ func (p noticeProjection) NoticesFrom(chain agent.RequestChain, prefix event.Eve
 		views = append(views, agent.NoticeView{Key: entry.Key, Text: text})
 	}
 	return views, len(entries), true
+}
+
+// noticesOfLocked reports the feedback facts one session committed, in commit
+// order, as the notice sequence of a chain beside no projection: the cursor of
+// that read is a position in this sequence, and the identity prefix selects the
+// notice facts of one range inside it. The read is taken under the run lock the
+// caller already holds and returns views the caller owns.
+func (r *Run) noticesOfLocked(session event.SessionID, prefix event.EventID, cursor int) ([]agent.NoticeView, int, bool) {
+	notices := make([]event.Event, 0, len(r.factOrder))
+	for _, key := range r.factOrder {
+		evt, kept := r.facts[key]
+		if !kept || evt.Type != event.TypeFeedback || sessionOf(evt) != session {
+			continue
+		}
+		notices = append(notices, evt)
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(notices) {
+		cursor = len(notices)
+	}
+	var views []agent.NoticeView
+	for at := cursor; at < len(notices); at++ {
+		evt := notices[at]
+		if !strings.HasPrefix(string(evt.Key), string(prefix)) {
+			continue
+		}
+		views = append(views, agent.NoticeView{Key: evt.Key, Text: evt.Message.Content})
+	}
+	return views, len(notices), true
 }
 
 // attachNoticeFeed points the loop at the incremental read face of this run's
@@ -318,7 +489,11 @@ func (r *Run) record(ctx context.Context, result task.Result) (event.EventID, er
 			evt.CallID = frame.Identity.CallID
 		}
 	}
-	return r.commitFact(evt), nil
+	key, err := r.commitFactChecked(ctx, evt)
+	if err != nil {
+		return "", fmt.Errorf("tagent: commit the recorded result: %w", err)
+	}
+	return key, nil
 }
 
 // factPipeline assembles the After pass pipeline of one agent from the binding
@@ -338,53 +513,61 @@ func (r *Run) factPipeline(agentID event.AgentID) (plugin.Pipeline, error) {
 }
 
 // sink admits one notification of a settled call into the mailbox of its
-// target beside the three mailbox time points of that admission — acceptance,
-// claim and completed consumption recorded in the state owner's own
-// bookkeeping — and only then hands the settled result back into the intake of
-// the invocation that issued the call. The backflow drives that invocation's
-// next decision and never reaches a neighbour, and a notice the mailbox refused
-// to book is not handed on as a silently accepted one.
+// target beside the mailbox time points that precede the handover — the
+// delivery route, the acceptance and the claim of the executor — hands the
+// settled result back into the intake of the invocation that issued the call,
+// and only then records the completed consumption. The order is the invariant a
+// restart reads: a notification whose consumption receipt the log holds is no
+// longer owed, so the receipt MUST follow the handover, and a stop between the
+// two leaves the notification owed and the restart hands the same result over
+// again. The backflow drives that invocation's next decision and never reaches a
+// neighbour, and a notice the mailbox refused to book is neither handed on nor
+// confirmed.
 func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	frame, ok := task.CallFrameFrom(ctx)
 	if !ok {
 		return task.ErrCallFrameMissing
 	}
-	if err := r.bookNotice(ctx, frame, notice); err != nil {
+	seq, err := r.bookNotice(ctx, frame, notice)
+	if err != nil {
 		return err
 	}
 	r.loop.Backflow(frame.Identity.InvocationID, notice)
-	return nil
+	return r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)
 }
 
-// bookNotice records the three mailbox time points of one settled notification
-// in the state owner's own bookkeeping: the delivery route of the task is
-// registered beside the call frame the notification belongs to, the notice is
-// accepted into the mailbox of its target site, and the accepted input is
-// claimed and consumed by the executor that hands it on. The acceptance is
+// bookNotice records the mailbox time points of one settled notification that
+// precede its handover in the state owner's own bookkeeping: the delivery route
+// of the task is registered beside the call frame the notification belongs to,
+// the notice is accepted into the mailbox of its target site, and the accepted
+// input is claimed by the executor that hands it on. The acceptance is
 // idempotent by the notification's stable identity, so a delivery the manager
-// already accepted records no second fact here.
-func (r *Run) bookNotice(ctx context.Context, frame task.CallFrame, notice task.Notice) error {
+// already accepted records no second fact here. The completed consumption is
+// recorded by the caller after the handover, never here: a claim is not a
+// confirmation, and a receipt written before the handover would drop an
+// undelivered notification from the chain the restart rebuilds.
+func (r *Run) bookNotice(ctx context.Context, frame task.CallFrame, notice task.Notice) (state.AcceptSeq, error) {
 	if err := r.store.TrackDelivery(ctx, notice.TaskID, task.HandoffTarget{
 		Target:         frame.Address,
 		TargetInstance: frame.Identity.InstanceID,
 	}); err != nil {
-		return err
+		return 0, err
 	}
 	if err := r.store.AcceptNotice(ctx, notice); err != nil {
-		return err
+		return 0, err
 	}
 	site, err := r.store.Site(ctx, r.inspector, frame.Address, frame.Identity.InstanceID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	seq, ok := mailboxSeqOf(site, notice)
 	if !ok {
-		return state.ErrEntryUnknown
+		return 0, state.ErrEntryUnknown
 	}
 	if err := r.store.Claim(ctx, frame.Address, frame.Identity.InstanceID, seq); err != nil {
-		return err
+		return 0, err
 	}
-	return r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)
+	return seq, nil
 }
 
 // mailboxSeqOf reports the acceptance sequence the mailbox of the site assigned

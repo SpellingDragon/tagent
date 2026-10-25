@@ -510,15 +510,15 @@
         "memory",
         "memory/ledger",
         "memory/replay",
-        "api/document"
+        "api/document",
+        "runtime/task"
       ],
       "forbidden": [
         "runtime/agent",
         "runtime/state",
-        "runtime/task",
         "rl"
       ],
-      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读巩固唤醒的触发源戳；Driver 以 api/plugin 的插件端口入流（与提交后观测插件同模式），故 api/plugin 在允许面；不依赖执行器/状态容器/训练。"
+      "reason": "冥想消费 event 的压缩请求词汇、memory 的请求日志与 replay 的 folding 载荷，保留与守卫类型直接引 memory/ledger 的声明（不复制语义、不经根转发）；反思回路按 model 的面重建自己的循环会话输入，观察面读巩固唤醒的触发源戳；Driver 以 api/plugin 的插件端口入流（与提交后观测插件同模式），故 api/plugin 在允许面；deliver 工具的回执按 task.CallFrame 构造动作身份（event-consumption-integrity 02.2 replay_identity 锚，G2/G9 裁定落地），类型级依赖 runtime/task 在允许面；不依赖执行器/状态容器/训练。"
     },
     {
       "from": "api/plugin",
@@ -739,5 +739,307 @@
       "gopkg.in/yaml.v3"
     ],
     "reason": "直接复用锁定 tRPC-Agent-Go（core fork v1.11.2-tagent.1 / provider v1.10.0）与原生 OTel。known_prefixes 仅用于分类记录，未知外部依赖只告警不阻断；不得按第三方包名子串猜“镜像/影子类型”（已移除 forbidden_substrings 启发式）——“出现一个依赖”不等于“未授权的 go.mod 写入”。禁止项只认 edges 上显式登记的一方差包路径。"
+  },
+  "event_ownership": {
+    "schema_version": 1,
+    "frozen_by": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json",
+    "statement": "通知身份（TaskID/Round/Kind/Seq）只由 runtime/task 层生产，别处不得另铸；邮箱三个时点（受理/领取/消费）只由 runtime/state 的邮箱实现，由 facts 随动消费者在一处记账，宿主不复制第二份消费状态；宿主只登记路由、受理通知并提交终态交付事实。本表冻结的是可解析的直接调用点，不声称可静态识别任意“第二状态仓”语义；未登记或解析不到的调用点一律报出，不静默放行。",
+    "symbols": [
+      {
+        "id": "notice.issue",
+        "pkg": "runtime/task",
+        "receivers": [
+          "MemoryRegistry"
+        ],
+        "method": "IssueNotice",
+        "role": "notice-identity-production",
+        "reason": "通知身份的唯一铸造口（NoticeSequencer/MemoryRegistry）；wrapper 固定 Seq:0 的既有观察见 00.1 E2 待验项，本表不改实现。"
+      },
+      {
+        "id": "notice.advance",
+        "pkg": "runtime/task",
+        "receivers": [
+          "MemoryRegistry"
+        ],
+        "method": "Advance",
+        "role": "notice-identity-production",
+        "reason": "状态迁移与其待发通知在同一提交里落地：这是 task 层交付通知的唯一提交面。"
+      },
+      {
+        "id": "notice.execute",
+        "pkg": "runtime/task",
+        "receivers": [
+          "Wrapper"
+        ],
+        "method": "execute",
+        "role": "notice-identity-production",
+        "reason": "工具结果在这里构造 Notice 并交注入的 mailbox 端口，是通知体的生产点。"
+      },
+      {
+        "id": "mailbox.track-delivery",
+        "pkg": "runtime/state",
+        "receivers": [
+          "MemoryStore"
+        ],
+        "method": "TrackDelivery",
+        "role": "delivery-route",
+        "reason": "登记任务通知的未来路由；投递面与邮箱共有，但只写路由、不写消费状态。"
+      },
+      {
+        "id": "mailbox.accept-notice",
+        "pkg": "runtime/state",
+        "receivers": [
+          "MemoryStore",
+          "Store"
+        ],
+        "method": "AcceptNotice",
+        "role": "mailbox-time-point",
+        "reason": "受理按身份幂等：投递面与随动消费者都可受理，二者都落 state 自己的账；受理不等于消费完成。"
+      },
+      {
+        "id": "mailbox.claim",
+        "pkg": "runtime/state",
+        "receivers": [
+          "MemoryStore"
+        ],
+        "method": "Claim",
+        "role": "mailbox-time-point",
+        "reason": "领取是逻辑消费的第一步，只允许邮箱实现与随动消费者调用；领取不得提前确认。"
+      },
+      {
+        "id": "mailbox.consume",
+        "pkg": "runtime/state",
+        "receivers": [
+          "MemoryStore"
+        ],
+        "method": "Consume",
+        "role": "mailbox-time-point",
+        "reason": "消费完成并写 ConsumeReceipt；宿主不得代为确认，已确认不得重做。"
+      },
+      {
+        "id": "mailbox.reclaim",
+        "pkg": "runtime/state",
+        "receivers": [
+          "MemoryStore"
+        ],
+        "method": "Reclaim",
+        "role": "mailbox-time-point",
+        "reason": "未消费项重领属于恢复扫描，不是随动消费路径；恢复接线若要消费此口，须先由编排者扩充本表。"
+      },
+      {
+        "id": "consume.feed-boundary",
+        "pkg": "runtime/agent",
+        "receivers": [
+          "NoticeFeed"
+        ],
+        "method": "NoticeBoundary",
+        "role": "logical-consumption-read",
+        "reason": "通知投影的只读边界：读的只是已提交事实，不得成为第二份事实账。"
+      },
+      {
+        "id": "consume.feed-notices-from",
+        "pkg": "runtime/agent",
+        "receivers": [
+          "NoticeFeed"
+        ],
+        "method": "NoticesFrom",
+        "role": "logical-consumption-read",
+        "reason": "通知投影的只读增量读，按身份前缀只报本调用自己的通知。"
+      },
+      {
+        "id": "consume.backflow",
+        "pkg": "runtime/agent",
+        "receivers": [
+          "Loop"
+        ],
+        "method": "Backflow",
+        "role": "logical-consumption-read",
+        "reason": "把已记账的通知回灌发起 invocation 的下一决策，不改投邻居会话。"
+      },
+      {
+        "id": "consume.sink",
+        "pkg": ".",
+        "receivers": [
+          "Run"
+        ],
+        "method": "sink",
+        "role": "logical-consumption-booking",
+        "reason": "任务通知进入随动 intake 的唯一入口（作为回调交给 task.Wrapper 的 mailbox 端口）。"
+      },
+      {
+        "id": "consume.book-notice",
+        "pkg": ".",
+        "receivers": [
+          "Run"
+        ],
+        "method": "bookNotice",
+        "role": "logical-consumption-booking",
+        "reason": "受理/领取/消费三时点在同一处记账后再回灌：逻辑消费的唯一记账点。"
+      },
+      {
+        "id": "host.deliver",
+        "pkg": ".",
+        "receivers": [
+          "Run"
+        ],
+        "method": "deliver",
+        "role": "delivery",
+        "reason": "manager 交给宿主的投递口：登记路由、受理通知并提交终态交付事实，不代签消费。"
+      }
+    ],
+    "owners": [
+      {
+        "id": "runtime/task",
+        "packages": [
+          "runtime/task"
+        ],
+        "allowed": [
+          "notice.issue",
+          "notice.advance",
+          "notice.execute"
+        ],
+        "forbidden": [
+          "mailbox.track-delivery",
+          "mailbox.accept-notice",
+          "mailbox.claim",
+          "mailbox.consume",
+          "mailbox.reclaim",
+          "consume.sink",
+          "consume.book-notice",
+          "host.deliver"
+        ],
+        "reason": "通知身份与 outbox 提交由 task 层生产；通知经注入的 mailbox 端口交出，生产者不自行领取、消费或投递。"
+      },
+      {
+        "id": "runtime/state",
+        "packages": [
+          "runtime/state"
+        ],
+        "allowed": [
+          "mailbox.track-delivery",
+          "mailbox.accept-notice",
+          "mailbox.claim",
+          "mailbox.consume",
+          "mailbox.reclaim"
+        ],
+        "forbidden": [
+          "notice.issue",
+          "notice.advance",
+          "notice.execute",
+          "consume.feed-boundary",
+          "consume.feed-notices-from",
+          "consume.backflow",
+          "host.deliver"
+        ],
+        "reason": "邮箱只实现受理/领取/消费/重领四个时点；它不铸造通知身份、不读自己的投影、不驱动回合。"
+      },
+      {
+        "id": "runtime/agent",
+        "packages": [
+          "runtime/agent"
+        ],
+        "allowed": [
+          "consume.feed-boundary",
+          "consume.feed-notices-from"
+        ],
+        "forbidden": [
+          "mailbox.track-delivery",
+          "mailbox.accept-notice",
+          "mailbox.claim",
+          "mailbox.consume",
+          "mailbox.reclaim",
+          "notice.issue",
+          "notice.execute",
+          "host.deliver"
+        ],
+        "reason": "执行器只读通知投影；它不经邮箱做第二份消费记账，也不代 task 层提交状态迁移。"
+      },
+      {
+        "id": "facts",
+        "packages": [
+          "."
+        ],
+        "files": [
+          "facts.go"
+        ],
+        "allowed": [
+          "mailbox.track-delivery",
+          "mailbox.accept-notice",
+          "mailbox.claim",
+          "mailbox.consume",
+          "consume.sink",
+          "consume.book-notice",
+          "consume.backflow"
+        ],
+        "forbidden": [
+          "mailbox.reclaim",
+          "notice.issue",
+          "notice.advance",
+          "notice.execute",
+          "host.deliver"
+        ],
+        "reason": "随动消费者在同一处完成受理/领取/消费并回灌；它不铸造身份、不重领、不替宿主投递。"
+      },
+      {
+        "id": "host",
+        "packages": [
+          "."
+        ],
+        "files": [
+          "age_fold.go",
+          "host.go",
+          "host_capture.go",
+          "host_face.go",
+          "host_model.go",
+          "host_reload.go",
+          "invoke.go",
+          "prepare.go",
+          "read.go",
+          "request.go",
+          "run.go",
+          "settle_turn.go",
+          "tagent.go",
+          "tools.go"
+        ],
+        "allowed": [
+          "mailbox.track-delivery",
+          "mailbox.accept-notice",
+          "host.deliver"
+        ],
+        "forbidden": [
+          "mailbox.claim",
+          "mailbox.consume",
+          "mailbox.reclaim",
+          "notice.issue",
+          "notice.advance",
+          "notice.execute",
+          "consume.sink",
+          "consume.book-notice"
+        ],
+        "reason": "宿主只登记路由、受理通知并提交终态交付事实；领取与消费属于随动消费者，宿主不复制第二份消费状态。"
+      },
+      {
+        "id": "assembly-commit",
+        "packages": [
+          "."
+        ],
+        "files": [
+          "commit.go"
+        ],
+        "allowed": [
+          "notice.advance"
+        ],
+        "forbidden": [
+          "mailbox.track-delivery",
+          "mailbox.accept-notice",
+          "mailbox.claim",
+          "mailbox.consume",
+          "mailbox.reclaim",
+          "notice.issue",
+          "notice.execute"
+        ],
+        "reason": "组合根的提交面只把 task.Manager 注入的状态迁移转交 MemoryRegistry.Advance；它不另写通知身份，也不碰邮箱。"
+      }
+    ]
   }
 }

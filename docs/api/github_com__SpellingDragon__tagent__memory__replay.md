@@ -539,11 +539,13 @@ func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]Pr
     token budget and returns the entries the request is assembled from, recovery
     hint first when one applies. A recorded decision is followed unconditionally
     — the view a replay reproduces never drifts with the remaining budget —
-    while an unrecorded entry degrades from the full text to a ticket and then
-    to the summary until the budget is met, settling on the decision it recorded
-    as one replay-settle fact. An entry that fits none of them is skipped
-    without a record and without a settle fact, so a later assembly under a
-    larger budget can still present it in full.
+    while an unrecorded entry degrades from the full text to a ticket and
+    then to the summary until the budget is met, settling on the decision it
+    recorded as one replay-settle fact. An entry that fits none of them is
+    skipped without a record and without a settle fact, so a later assembly
+    under a larger budget can still present it in full — except a notice entry,
+    which the budget may shorten to its identity card but never drop: a notice
+    the model never read is an event the model never saw arrive.
 
     The source facts are read and never written: the assembly files settle facts
     on the projection's own settle account, so the fact chain it replayed is

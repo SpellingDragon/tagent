@@ -23,6 +23,14 @@
     MODIFIED/REMOVED 的要求必须在主 spec 中唯一存在（重复=ambiguity），
     ADDED 不得与主 spec 撞名（应为 MODIFIED），且能力有声明。
 
+profile 分流（04.5）：task-graph.json 顶层 `domain_profile` 声明本图用哪套规则。
+  * 无 `domain_profile`（旧十域 runtime-rebuild 图）→ 原有规则逐字保留：固定十域、
+    123 叶编号、阶段门、十域 tasks.md 与 spec、120 能力映射，一概不放宽；
+  * `domain_profile=event-integrity` → 六域规则：叶数/范围/阶段门从 graph 读取
+    （不在 profile 复制对象状态），校验六域 id 覆盖、域归属、counts 自洽、
+    depends_on/verify_after 无重复/未知/自环、76 节点展开图 Kahn 无环、
+    tasks.md checkbox 与 graph 状态双向一致；旧十域常量仍保留并继续对旧图生效。
+
 本检查只读规划文件，绝不修改任何 md/json。输出里 productVerified 恒为 null：
 格式通过不代表产品成立。本检查只判 delta 结构，不声称 120 主规格的全部语义
 （约 601 条 Requirement）已逐条判定；能力单写责任登记在 coverage.md 的登记表
@@ -113,6 +121,23 @@ RUN_ANCHOR_RE = re.compile(r"-run[= ]+['\"^]*(?P<name>Test[A-Za-z0-9_]+)")
 BARE_TEST_NAME_RE = re.compile(r"\b(?P<name>Test[A-Z][A-Za-z0-9_]*)\b")
 TEST_FUNC_RE = re.compile(r"^func (?P<name>Test[A-Za-z0-9_]+)\(", re.M)
 
+# 04.5：变更在图里声明 profile，检查器按 profile 选规则集。旧图没有该字段，
+# 因此旧规则集（十域常量）是默认路径，不因新增 profile 而放宽一个字符。
+EVENT_PROFILE = "event-integrity"
+EVENT_DOMAINS = (
+    "00-contract-evidence",
+    "01-runtime-consumption",
+    "02-event-consumers",
+    "03-formal-simulation",
+    "04-regression-gates",
+    "05-mr-integration",
+)
+EVENT_LEAF_ID_RE = re.compile(r"^(?P<prefix>\d{2})\.(?P<index>\d+)(?P<suffix>[a-z]?)$")
+EVENT_LEAF_KINDS = ("product", "non_product")
+# 声明为该 scope 的图是“规划物化”，叶 status 记规划态，与 tasks.md 的执行勾选分开。
+# 该声明不放宽任一强方向：done 必须勾选并带证据，blocked 不得勾选。
+PLANNING_ONLY_SCOPES = ("whole-change-planning-materialization",)
+
 
 def expected_ids():
     """全部批准叶任务编号：65 实施（NN.M）＋24 骨架（NN.P0.M）＋13 概念收敛（SLIM_IDS）= 102。"""
@@ -137,7 +162,8 @@ def parse_args(argv):
     parser.add_argument(
         "--change-dir",
         default=os.path.join("openspec", "changes", "runtime-rebuild"),
-        help="待检查的 change 目录（默认 openspec/changes/archive/2026-10-18-runtime-rebuild）",
+        help="待检查的 change 目录（默认 openspec/changes/archive/2026-10-18-runtime-rebuild）；"
+             "规则集由该目录 task-graph.json 的 domain_profile 决定，缺省走旧十域规则",
     )
     parser.add_argument(
         "--plan-graph",
@@ -377,7 +403,7 @@ def check_dependency_graph(report, tasks):
     return adjacency
 
 
-def check_artifacts(report, change_dir):
+def check_artifacts(report, change_dir, domains=DOMAINS):
     for name in TOP_LEVEL_FILES:
         if not os.path.isfile(os.path.join(change_dir, name)):
             report.error("change root missing {}".format(name))
@@ -385,7 +411,7 @@ def check_artifacts(report, change_dir):
     if [cap for cap, _ in top_specs] != ["orchestration"]:
         report.error("top-level specs must contain only orchestration")
     found_domains = 0
-    for domain in DOMAINS:
+    for domain in domains:
         base = os.path.join(change_dir, "changes", domain)
         if not os.path.isdir(base):
             report.error("domain dir missing: changes/{}".format(domain))
@@ -612,11 +638,11 @@ def declaration_texts(change_dir, domain):
     return texts
 
 
-def check_specs(report, change_dir, main_root):
+def check_specs(report, change_dir, main_root, domains=DOMAINS):
     spec_units = []
     for cap, path in glob_specs(os.path.join(change_dir, "specs")):
         spec_units.append((cap, path, None, "specs/{}".format(cap)))
-    for domain in DOMAINS:
+    for domain in domains:
         for cap, path in glob_specs(os.path.join(change_dir, "changes", domain, "specs")):
             spec_units.append((cap, path, domain, "changes/{}/specs/{}".format(domain, cap)))
     report.count("spec_files", len(spec_units))
@@ -698,6 +724,322 @@ def check_coverage(report, change_dir, main_root):
     report.count("covered_main_capabilities", len(names))
 
 
+def kahn_order(nodes, adjacency):
+    """Kahn 拓扑排序；返回入序节点（长度不足即展开图有环）。"""
+    indegree = {node: 0 for node in nodes}
+    for node in nodes:
+        for nxt in adjacency.get(node, ()):
+            indegree[nxt] = indegree.get(nxt, 0) + 1
+    ready = [node for node in nodes if indegree[node] == 0]
+    order = []
+    while ready:
+        node = ready.pop()
+        order.append(node)
+        for nxt in adjacency.get(node, ()):
+            indegree[nxt] -= 1
+            if indegree[nxt] == 0:
+                ready.append(nxt)
+    return order
+
+
+def check_event_graph(report, graph, change_name):
+    """六域 event-integrity 图：叶/域/kind/依赖/verify_after 的形状与自洽。
+
+    叶数、域分布与阶段数一律从 graph 自身读取，再从 tasks.md 反向核对；
+    profile 不复制对象状态，因此“删一叶”只能在 counts/tasks.md 两侧同时
+    留下可判定的差异，而不是被一个手写常量静默放过。
+    """
+    if graph.get("schema_version") != 1:
+        report.error("task-graph schema_version must be 1, got {!r}".format(
+            graph.get("schema_version")))
+    if graph.get("change") != change_name:
+        report.error("task-graph change {!r} != change dir name {!r}".format(
+            graph.get("change"), change_name))
+    if graph.get("domain_profile") != EVENT_PROFILE:
+        report.error("event profile requires domain_profile {!r}, got {!r}".format(
+            EVENT_PROFILE, graph.get("domain_profile")))
+    leaves = graph.get("leaves")
+    if not isinstance(leaves, list) or not leaves:
+        report.error("task-graph leaves must be a non-empty list")
+        return []
+    rows = []
+    for position, leaf in enumerate(leaves):
+        where = "leaves[{}]".format(position)
+        if not isinstance(leaf, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        leaf_id = leaf.get("id")
+        if not isinstance(leaf_id, str) or not EVENT_LEAF_ID_RE.match(leaf_id):
+            report.error("{} has invalid id {!r}".format(where, leaf_id))
+            continue
+        where = "leaf {}".format(leaf_id)
+        domain = leaf.get("domain")
+        if domain not in EVENT_DOMAINS:
+            report.error("{} domain {!r} is not one of the six event domains".format(
+                where, domain))
+        elif not domain.startswith(leaf_id.split(".", 1)[0] + "-"):
+            report.error("{} belongs to prefix {} but domain is {!r}".format(
+                where, leaf_id.split(".", 1)[0], domain))
+        kind = leaf.get("kind")
+        if kind not in EVENT_LEAF_KINDS:
+            report.error("{} kind {!r} not in {}".format(where, kind, EVENT_LEAF_KINDS))
+        depends_on = leaf.get("depends_on")
+        if not isinstance(depends_on, list) or any(
+                not isinstance(dep, str) for dep in depends_on):
+            report.error("{} depends_on must be a list of leaf-id strings".format(where))
+            depends_on = []
+        verify_after = leaf.get("verify_after")
+        if not isinstance(verify_after, list) or any(
+                not isinstance(dep, str) for dep in verify_after):
+            report.error("{} verify_after must be a list of leaf-id strings".format(where))
+            verify_after = []
+        status = leaf.get("status")
+        if status not in STATUSES:
+            report.error("{} status {!r} not in {}".format(where, status, STATUSES))
+        elif status == "done":
+            check_done_evidence(report, where, leaf.get("evidence"))
+        verification = leaf.get("verification")
+        if not isinstance(verification, dict):
+            report.error("{} verification must be an object".format(where))
+        else:
+            commands = verification.get("commands")
+            if (not isinstance(commands, list) or not commands
+                    or any(not isinstance(item, str) or not item.strip()
+                           for item in commands)):
+                report.error("{} verification.commands must be a non-empty string list".format(
+                    where))
+        task_file = leaf.get("task_file")
+        if not isinstance(task_file, str) or not task_file.strip():
+            report.error("{} task_file must be a non-empty string".format(where))
+        elif not isinstance(domain, str) or not task_file.endswith(
+                "changes/{}/tasks.md".format(domain)):
+            report.error("{} task_file {!r} does not point at changes/{}/tasks.md".format(
+                where, task_file, domain))
+        rows.append({"id": leaf_id, "domain": domain, "kind": kind,
+                     "depends_on": depends_on, "verify_after": verify_after,
+                     "status": status})
+    ids = [row["id"] for row in rows]
+    duplicates = sorted({leaf_id for leaf_id in ids if ids.count(leaf_id) > 1})
+    for leaf_id in duplicates:
+        report.error("duplicate leaf id in graph: {}".format(leaf_id))
+    known = set(ids)
+    for row in rows:
+        where = "leaf {}".format(row["id"])
+        if len(row["depends_on"]) != len(set(row["depends_on"])):
+            report.error("{} has duplicate depends_on".format(where))
+        if len(row["verify_after"]) != len(set(row["verify_after"])):
+            report.error("{} has duplicate verify_after".format(where))
+        for field in ("depends_on", "verify_after"):
+            for dep in row[field]:
+                if dep == row["id"]:
+                    report.error("{} {} contains itself".format(where, field))
+                elif dep not in known:
+                    report.error("{} {} has unknown leaf {}".format(where, field, dep))
+    # 六域齐全且分布与 counts 一致。
+    actual_by_domain = {}
+    for row in rows:
+        actual_by_domain[row["domain"]] = actual_by_domain.get(row["domain"], 0) + 1
+    for domain in EVENT_DOMAINS:
+        if not actual_by_domain.get(domain):
+            report.error("event domain {} has no leaf in task-graph".format(domain))
+    for domain in sorted(set(actual_by_domain) - set(EVENT_DOMAINS)):
+        report.error("task-graph leaf domain {!r} is not a declared event domain".format(domain))
+    counts = graph.get("counts") if isinstance(graph.get("counts"), dict) else {}
+    if counts.get("leaves_total") != len(rows):
+        report.error("task-graph counts.leaves_total={} does not match the leaf list length {}".format(
+            counts.get("leaves_total"), len(rows)))
+    declared_by_domain = counts.get("leaves_by_domain")
+    if not isinstance(declared_by_domain, dict):
+        report.error("task-graph counts.leaves_by_domain must be an object")
+    else:
+        for domain in sorted(set(declared_by_domain) | set(actual_by_domain)):
+            if declared_by_domain.get(domain) != actual_by_domain.get(domain):
+                report.error("counts.leaves_by_domain[{!r}]={} does not match the derived {}".format(
+                    domain, declared_by_domain.get(domain), actual_by_domain.get(domain)))
+    declared_by_kind = counts.get("leaves_by_kind")
+    if isinstance(declared_by_kind, dict):
+        actual_by_kind = {}
+        for row in rows:
+            actual_by_kind[row["kind"]] = actual_by_kind.get(row["kind"], 0) + 1
+        for kind in sorted(set(declared_by_kind) | set(actual_by_kind)):
+            if declared_by_kind.get(kind) != actual_by_kind.get(kind):
+                report.error("counts.leaves_by_kind[{!r}]={} does not match the derived {}".format(
+                    kind, declared_by_kind.get(kind), actual_by_kind.get(kind)))
+    report.count("graph_leaves", len(ids))
+    report.count("graph_leaf_ids_unique", len(set(ids)))
+    report.count("graph_edges", sum(len(row["depends_on"]) for row in rows))
+    report.count("graph_verify_after_edges", sum(len(row["verify_after"]) for row in rows))
+    report.extra["leaves_by_domain"] = {domain: actual_by_domain.get(domain, 0)
+                                        for domain in EVENT_DOMAINS}
+    return rows
+
+
+def check_event_phase_graph(report, graph, rows):
+    """单一展开图（每叶 ready/verified）必须整体无环，且与声明计数一致。"""
+    nodes = []
+    for row in rows:
+        nodes.append(row["id"] + "/ready")
+        nodes.append(row["id"] + "/verified")
+    known = {row["id"] for row in rows}
+    adjacency = {node: [] for node in nodes}
+    for row in rows:
+        leaf_id = row["id"]
+        adjacency[leaf_id + "/ready"] = [dep + "/ready" for dep in row["depends_on"]
+                                         if dep in known]
+        adjacency[leaf_id + "/verified"] = [leaf_id + "/ready"] + [
+            dep + "/verified" for dep in row["verify_after"] if dep in known]
+    edges = sum(len(successors) for successors in adjacency.values())
+    order = kahn_order(nodes, adjacency)
+    if len(order) != len(nodes):
+        report.error("event phase graph has a cycle: only {}/{} nodes sort; schedule is not acyclic"
+                     .format(len(order), len(nodes)))
+    declared = graph.get("phase_graph")
+    if isinstance(declared, dict):
+        if declared.get("nodes_total") != len(nodes):
+            report.error("phase_graph.nodes_total={} does not match the derived {}".format(
+                declared.get("nodes_total"), len(nodes)))
+        if declared.get("edges_total") != edges:
+            report.error("phase_graph.edges_total={} does not match the derived {}".format(
+                declared.get("edges_total"), edges))
+        if declared.get("acyclic") is not True:
+            report.error("phase_graph.acyclic must be true (a cached false is not evidence)")
+        declared_order = declared.get("topological_order")
+        if isinstance(declared_order, list) and len(declared_order) != len(nodes):
+            report.error("phase_graph.topological_order holds {} nodes, expected {}".format(
+                len(declared_order), len(nodes)))
+        elif declared_order is not None and not isinstance(declared_order, list):
+            report.error("phase_graph.topological_order must be a list when present")
+    report.count("phase_nodes", len(nodes))
+    report.count("phase_edges", edges)
+    report.count("phase_acyclic", 1 if len(order) == len(nodes) else 0)
+    return len(order) == len(nodes)
+
+
+def check_event_checkboxes(report, change_dir, rows, graph):
+    """tasks.md 叶 checkbox 与 graph 叶双向一致。
+
+    graph 声明 scope=whole-change-planning-materialization 时，叶 status 是规划态
+    （planned=图未记录完成），tasks.md 勾选是执行记录，两者分开。该分开只解除
+    “planned ↔ 未勾选”的强制，不放宽 done/blocked 两个强方向：
+      * done 必须勾选，且必须携带 run_id/commands/exit_codes/artifact_paths；
+      * blocked 不得勾选；
+      * 非规划态图仍按旧规则要求勾选必有 done 背书。
+    未勾选叶逐一列入 extra，不以总数掩盖具体 id。
+    """
+    by_id = {row["id"]: row for row in rows}
+    planning_only = graph.get("scope") in PLANNING_ONLY_SCOPES
+    md_marks = {}
+    for domain in EVENT_DOMAINS:
+        path = os.path.join(change_dir, "changes", domain, "tasks.md")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                lines = handle.read().splitlines()
+        except OSError as exc:
+            report.error("cannot read {}: {}".format(path, exc))
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            match = lib.CHECKBOX_RE.match(line)
+            if not match:
+                continue
+            leaf_id = match.group("id")
+            site = "changes/{}/tasks.md:{}".format(domain, lineno)
+            if leaf_id in md_marks:
+                report.error("duplicate checkbox {} at {} (already at {})".format(
+                    leaf_id, site, md_marks[leaf_id][0]))
+                continue
+            md_marks[leaf_id] = (site, match.group("mark").lower() == "x")
+            row = by_id.get(leaf_id)
+            if row is None:
+                report.error("checkbox {} in changes/{}/tasks.md is not a task-graph leaf".format(
+                    leaf_id, domain))
+            elif row["domain"] != domain:
+                report.error("checkbox {} in changes/{}/tasks.md belongs to {}".format(
+                    leaf_id, domain, row["domain"]))
+    for leaf_id in sorted(set(by_id) - set(md_marks)):
+        report.error("leaf {} has no checkbox in any domain tasks.md".format(leaf_id))
+    for leaf_id in sorted(set(md_marks) - set(by_id)):
+        report.error("checkbox {} has no leaf in task-graph".format(leaf_id))
+    checked = []
+    unchecked = []
+    for leaf_id, (_site, ticked) in sorted(md_marks.items()):
+        row = by_id.get(leaf_id)
+        if row is None:
+            continue
+        if ticked:
+            checked.append(leaf_id)
+        else:
+            unchecked.append(leaf_id)
+        status = row["status"]
+        if status == "done" and not ticked:
+            report.error("leaf {} is 'done' in task-graph but the leaf checkbox is unchecked".format(
+                leaf_id))
+        elif status == "blocked" and ticked:
+            report.error("leaf {} is 'blocked' in task-graph but its checkbox is ticked".format(
+                leaf_id))
+        elif ticked and status != "done" and not planning_only:
+            report.error("leaf {} is checked but task-graph status is {!r} "
+                         "(completion without evidence)".format(leaf_id, status))
+    report.count("checkboxes", len(md_marks))
+    report.count("leaves_checked", len(checked))
+    report.count("leaves_unchecked", len(unchecked))
+    report.count("leaves_graph_done", sum(1 for row in rows if row["status"] == "done"))
+    report.extra["checked_leaf_ids"] = sorted(checked)
+    report.extra["unchecked_leaf_ids"] = sorted(unchecked)
+    report.extra["leaf_status_semantics"] = (
+        "planning-only scope: graph status is the planning state, the tasks.md checkbox is the "
+        "execution record; done/blocked stay hard" if planning_only else
+        "strict: a ticked leaf must be 'done' in task-graph with evidence")
+    if unchecked:
+        report.note("{} leaf/leaves remain unchecked: {}".format(
+            len(unchecked), ", ".join(sorted(unchecked))))
+    return planning_only
+
+
+def check_event_coverage_doc(report, change_dir):
+    """event 图的 coverage.md 是说明/映射文档（非旧十域能力表），只判存在与非空。"""
+    path = os.path.join(change_dir, "coverage.md")
+    if not os.path.isfile(path):
+        report.error("coverage.md missing (event graph leaf/test/scenario mapping)")
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        report.error("cannot read {}: {}".format(path, exc))
+        return
+    if not text.strip():
+        report.error("coverage.md is empty")
+
+
+def run_event_profile(report, graph, change_dir, change_name, main_root, as_json):
+    rows = check_event_graph(report, graph, change_name)
+    check_event_phase_graph(report, graph, rows)
+    check_artifacts(report, change_dir, EVENT_DOMAINS)
+    check_orchestration(report, change_dir)
+    check_event_checkboxes(report, change_dir, rows, graph)
+    check_specs(report, change_dir, main_root, EVENT_DOMAINS)
+    check_event_coverage_doc(report, change_dir)
+    report.note("domain_profile {!r}: leaf counts/ranges are read from the graph and cross-checked "
+                "against the six domain tasks.md files; the legacy ten-domain constants are "
+                "neither used nor relaxed on this path".format(EVENT_PROFILE))
+    return report.emit(as_json)
+
+
+def run_legacy_profile(report, graph, change_dir, change_name, args, main_root):
+    tasks = check_graph_shape(report, graph, change_name)
+    check_dependency_graph(report, tasks)
+    raw_tasks = graph.get("tasks") if isinstance(graph.get("tasks"), list) else []
+    check_completion_test_anchors(report, raw_tasks, index_repo_test_funcs(args.repo_root))
+    check_artifacts(report, change_dir)
+    check_orchestration(report, change_dir)
+    collect_checkbox_ids(report, change_dir, {t["id"]: t.get("status") for t in tasks})
+    check_specs(report, change_dir, main_root)
+    check_coverage(report, change_dir, main_root)
+    return report.emit(args.json)
+
+
 def run(argv):
     args = parse_args(argv)
     change_dir = os.path.abspath(args.change_dir)
@@ -716,16 +1058,14 @@ def run(argv):
     except lib.CheckFailure as exc:
         report.error(str(exc))
         return report.emit(args.json)
-    tasks = check_graph_shape(report, graph, change_name)
-    check_dependency_graph(report, tasks)
-    raw_tasks = graph.get("tasks") if isinstance(graph.get("tasks"), list) else []
-    check_completion_test_anchors(report, raw_tasks, index_repo_test_funcs(args.repo_root))
-    check_artifacts(report, change_dir)
-    check_orchestration(report, change_dir)
-    collect_checkbox_ids(report, change_dir, {t["id"]: t.get("status") for t in tasks})
-    check_specs(report, change_dir, main_root)
-    check_coverage(report, change_dir, main_root)
-    return report.emit(args.json)
+    profile = graph.get("domain_profile")
+    if profile in (None, ""):
+        return run_legacy_profile(report, graph, change_dir, change_name, args, main_root)
+    if profile != EVENT_PROFILE:
+        report.error("unknown domain_profile {!r}; supported profiles are the legacy "
+                     "ten-domain graph (no field) and {!r}".format(profile, EVENT_PROFILE))
+        return report.emit(args.json)
+    return run_event_profile(report, graph, change_dir, change_name, main_root, args.json)
 
 
 if __name__ == "__main__":

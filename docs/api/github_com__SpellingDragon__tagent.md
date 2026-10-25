@@ -71,10 +71,14 @@ follow-up turn at the user session the task belongs to.
 The trigger surface is closed, and the anti-loop is semantic rather than a
 blacklist:
 
-- Only the terminal kinds settled, failed and cancelled fire; accepted and
-progress do not. - Only a delivery fact carries the settle-lineage meta key,
-so a backflow settle never fires. - The fired turn commits no settle fact with a
-lineage, so it can never fire itself again.
+  - Only the terminal kinds settled, failed and cancelled fire; accepted and
+    progress do not.
+  - Only a delivery fact carries the settle-lineage meta key, so a backflow
+    settle never fires.
+  - The fired turn commits no settle fact with a lineage, so it can never fire
+    itself again.
+  - A notice that arrives while a follow-up is in flight is retained, in arrival
+    order, and re-evaluated when that turn ends: it is never dropped.
 
 Package tagent is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
@@ -956,6 +960,14 @@ func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches
     face is closed. A face the assembly carries no wiring for names that state
     in its reason instead of failing the whole read.
 
+func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, error)
+    ExecState reports the retained state of one execution resource the ledger
+    of this run holds: the lease deadline, the renewals observed after the
+    acquiring call returned and the stop the resource was last seen under.
+    The read is the diagnostic face of the same ledger the exec face acquires
+    through, so it moves nothing; a run assembled beside no ledger refuses the
+    read by name instead of answering an empty state.
+
 func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error)
     InjectEvent commits one explicit input event of the named responsibility
     range and drives the loop session of its address with it, exactly as the
@@ -1158,11 +1170,14 @@ func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) erro
 
     The turn itself runs detached from the committing delivery: a follow-up
     spends a model turn, and the flush that delivered the notification never
-    waits for it. A fact that is not a terminal delivery fact, or whose session
-    carries no remembered user address, is ignored in silence: those are not
-    settles nobody drives, they are settles somebody already read or addresses
-    the host was never asked to turn. A failed read is reported back and never
-    rolls the committed fact back.
+    waits for it. A notice that arrives while a turn is in flight joins the
+    driver's retained queue and is re-evaluated as soon as that turn ends,
+    so the busy window defers the turn instead of dropping the notice. A fact
+    that is not a terminal delivery fact, or whose session carries no remembered
+    user address, is ignored in silence: those are not settles nobody drives,
+    they are settles somebody already read or addresses the host was never asked
+    to turn. A failed read is reported back and never rolls the committed fact
+    back.
 
 func (d *SettleDriver) Port() plugin.Port
     Port reports the consumption this driver serves: one committed fact in, one

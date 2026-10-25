@@ -14,7 +14,13 @@
 依赖只做**报告**（不在 known_prefixes 时告警）：“出现一个依赖”不等于“未授权的
 go.mod 写入”，二者不是同一事实。
 
---go-list-json PATH 用一份已捕获的 go list 输出替代真实执行，仅供自测注入；
+--implementation 另跑 `codetools event-ownership --check`：按 golden 的
+event_ownership 冻结表核对 owner 的可解析直接调用面。该门只认 go/types 解析出的
+对象身份（声明包 + 接收者类型 + 方法名），不做名字模糊匹配；方法值/反射/解析不到
+的调用点记为 uncovered 并如实列出，绝不折算成已覆盖。它证明的是“调用面符合冻结
+政策”，不是“第二份消费状态不存在”。
+
+--go-list-json / --event-ownership-json 用已捕获的输出替代真实执行，仅供自测注入；
 默认在真实 repo 上执行，绝不用注入结果冒充实跑。任何模式下 productVerified
 恒为 null：结构覆盖通过不等于产品成立；当前缺包/缺依赖必须如实报红。
 """
@@ -32,6 +38,23 @@ import runtime_checklib as lib
 EXACT_PATTERN_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 ANCHORED_RE = re.compile(r"^\^.*\$$")
 
+# The closed role vocabulary of the frozen event-ownership table. A new role is a
+# policy change and must be written down here first, never invented in golden.
+OWNERSHIP_ROLES = frozenset({
+    "notice-identity-production",
+    "delivery-route",
+    "mailbox-time-point",
+    "logical-consumption-read",
+    "logical-consumption-booking",
+    "delivery",
+})
+EXACT_GO_FILE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\.go$")
+OWNERSHIP_COUNT_KEYS = (
+    "owners", "symbols", "packages_scanned", "candidates", "direct_calls",
+    "allowed", "forbidden", "unregistered", "unowned", "ambiguous",
+    "uncovered", "same_name_non_target",
+)
+
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -43,6 +66,8 @@ def parse_args(argv):
                         help="运行 go list 做真实结构覆盖（默认模式）")
     parser.add_argument("--go-list-json", default=None,
                         help="已捕获的 `go list -deps -json ./...` 输出；仅自测注入用")
+    parser.add_argument("--event-ownership-json", default=None,
+                        help="已捕获的 codetools event-ownership --json 报告；仅自测注入用")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -138,6 +163,158 @@ def expand_selectors(report, where, source, selectors, known, forbid=False):
     return resolved
 
 
+def non_empty_string(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def validate_event_ownership(report, policy, registry):
+    """Validate the frozen direct-call ownership table.
+
+    The table is the only place that says which layer may call which frozen
+    symbol. Its absence is an error, not a note: a missing table would make the
+    direct-call gate disappear while the package policy still passed. Structural
+    validity is checked here; the allowed/forbidden/uncovered verdict comes from
+    the Go gate that reads the same table.
+    """
+    table = policy.get("event_ownership")
+    if not isinstance(table, dict):
+        report.error("architecture event_ownership table is missing: the direct-call "
+                     "ownership gate would silently disappear")
+        return
+    if table.get("schema_version") != 1:
+        report.error("event_ownership schema_version must be 1, got {!r}".format(
+            table.get("schema_version")))
+    for field in ("frozen_by", "statement"):
+        if not non_empty_string(table.get(field)):
+            report.error("event_ownership.{} must be a non-empty string".format(field))
+    symbols = table.get("symbols")
+    owners = table.get("owners")
+    if not isinstance(symbols, list) or not symbols:
+        report.error("event_ownership.symbols must be a non-empty list")
+        symbols = []
+    if not isinstance(owners, list) or not owners:
+        report.error("event_ownership.owners must be a non-empty list")
+        owners = []
+    symbol_ids = {}
+    for index, symbol in enumerate(symbols):
+        where = "event_ownership.symbols[{}]".format(index)
+        if not isinstance(symbol, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        symbol_id = symbol.get("id")
+        if not non_empty_string(symbol_id):
+            report.error("{} id must be a non-empty string".format(where))
+            continue
+        where = "event_ownership.symbol {!r}".format(symbol_id)
+        if symbol_id in symbol_ids:
+            report.error("{}: duplicate symbol id".format(where))
+            continue
+        symbol_ids[symbol_id] = symbol
+        if symbol.get("pkg") not in registry:
+            report.error("{}: pkg {!r} is not a registered package".format(
+                where, symbol.get("pkg")))
+        func_name = symbol.get("func")
+        method_name = symbol.get("method")
+        if bool(func_name) == bool(method_name):
+            report.error("{}: exactly one of func/method must be named".format(where))
+        if func_name and "receivers" in symbol:
+            report.error("{}: a package-level func cannot declare receivers".format(where))
+        if method_name:
+            receivers = symbol.get("receivers")
+            if (not isinstance(receivers, list) or not receivers
+                    or any(not non_empty_string(receiver) for receiver in receivers)):
+                report.error("{}: a method needs a non-empty receivers list".format(where))
+        if symbol.get("role") not in OWNERSHIP_ROLES:
+            report.error("{}: unknown role {!r} (known: {})".format(
+                where, symbol.get("role"), ", ".join(sorted(OWNERSHIP_ROLES))))
+        if not non_empty_string(symbol.get("reason")):
+            report.error("{}: every frozen symbol needs a written reason".format(where))
+    owner_ids = {}
+    owner_files = {}
+    for index, owner in enumerate(owners):
+        where = "event_ownership.owners[{}]".format(index)
+        if not isinstance(owner, dict):
+            report.error("{} must be an object".format(where))
+            continue
+        owner_id = owner.get("id")
+        if not non_empty_string(owner_id):
+            report.error("{} id must be a non-empty string".format(where))
+            continue
+        where = "event_ownership.owner {!r}".format(owner_id)
+        if owner_id in owner_ids:
+            report.error("{}: duplicate owner id".format(where))
+            continue
+        owner_ids[owner_id] = owner
+        packages = owner.get("packages")
+        if (not isinstance(packages, list) or not packages
+                or any(pkg not in registry for pkg in packages)):
+            report.error("{}: packages must be a non-empty list of registered packages".format(where))
+            packages = []
+        files = owner.get("files")
+        if files is None:
+            owner_files[owner_id] = None
+        elif not isinstance(files, list) or not files:
+            report.error("{}: files must be a non-empty exact file list when present".format(where))
+            owner_files[owner_id] = set()
+        else:
+            if any(not EXACT_GO_FILE_RE.match(name) for name in files):
+                report.error("{}: every file must be an exact *.go base name (no wildcards): {}".format(
+                    where, files))
+            if len(set(files)) != len(files):
+                report.error("{}: duplicate file in the exact file list".format(where))
+            owner_files[owner_id] = set(files)
+        allowed = owner.get("allowed")
+        forbidden = owner.get("forbidden", [])
+        if not isinstance(allowed, list) or not isinstance(forbidden, list):
+            report.error("{}: allowed/forbidden must be lists".format(where))
+            continue
+        for field, ids in (("allowed", allowed), ("forbidden", forbidden)):
+            unknown = sorted({symbol for symbol in ids if symbol not in symbol_ids})
+            if unknown:
+                report.error("{}: {} references undeclared symbol(s) {}".format(
+                    where, field, unknown))
+        overlap = sorted(set(allowed) & set(forbidden))
+        if overlap:
+            report.error("{}: both allows and forbids {}".format(where, overlap))
+        if len(set(allowed)) != len(allowed) or len(set(forbidden)) != len(forbidden):
+            report.error("{}: duplicate symbol entry in allowed/forbidden".format(where))
+        if not non_empty_string(owner.get("reason")):
+            report.error("{}: every owner needs a written reason".format(where))
+    # One package may be split between owners only when the split is spelled out
+    # as disjoint exact files: a package-wide claim beside a file-restricted one
+    # would make the verdict depend on scan order.
+    for pkg in sorted(registry):
+        claimants = [owner_id for owner_id, owner in owner_ids.items()
+                     if pkg in (owner.get("packages") or [])]
+        if len(claimants) < 2:
+            continue
+        for owner_id in claimants:
+            if owner_files.get(owner_id) is None:
+                report.error("event_ownership: owner {!r} claims package {!r} without an "
+                             "exact file list while {} other owner(s) also claim it; "
+                             "overlapping owners need disjoint exact files".format(
+                                 owner_id, pkg, len(claimants) - 1))
+        for left in range(len(claimants)):
+            for right in range(left + 1, len(claimants)):
+                left_files = owner_files.get(claimants[left])
+                right_files = owner_files.get(claimants[right])
+                if not left_files or not right_files:
+                    continue
+                shared = sorted(left_files & right_files)
+                if shared:
+                    report.error("event_ownership: owners {!r} and {!r} both claim files {}".format(
+                        claimants[left], claimants[right], shared))
+    allowed_somewhere = set()
+    for owner in owner_ids.values():
+        allowed_somewhere.update(owner.get("allowed") or [])
+    orphaned = sorted(set(symbol_ids) - allowed_somewhere)
+    if orphaned:
+        report.error("event_ownership: symbol(s) {} are allowed by no owner; a frozen "
+                     "symbol with no legal caller is a contradiction".format(orphaned))
+    report.count("event_ownership_owners", len(owner_ids))
+    report.count("event_ownership_symbols", len(symbol_ids))
+
+
 def load_policy(report, golden_path):
     policy = lib.load_json_object(golden_path)
     if policy.get("schema_version") != 1:
@@ -231,7 +408,9 @@ def load_policy(report, golden_path):
         if pattern not in root_allow:
             report.error("composition root does not list package {!r}".format(pattern))
     report.count("policy_edges", len(seen_edges))
-    return policy, registry, adjacency
+    errors_before = len(report.errors)
+    validate_event_ownership(report, policy, registry)
+    return policy, registry, adjacency, len(report.errors) == errors_before
 
 
 def parse_go_list_stream(text):
@@ -281,7 +460,121 @@ def in_scope(rel, exclude_names):
     return True
 
 
-def check_implementation(report, policy, registry, adjacency, repo_root, injected_path):
+def obtain_event_ownership(report, repo_root, golden_path, injected_path):
+    """Obtain the event-ownership report from the real Go gate or an injected file.
+
+    Injection exists only for selftests, exactly like --go-list-json: a captured
+    result never masquerades as a repository run, and the note says which one it is.
+    """
+    if injected_path:
+        try:
+            with open(injected_path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError as exc:
+            return None, "cannot read injected event-ownership report {}: {}".format(
+                injected_path, exc)
+        report.note("event-ownership source: injected file {} (readonly derivation, "
+                    "NOT a repository run)".format(injected_path))
+        try:
+            return json.loads(text), None
+        except ValueError as exc:
+            return None, "cannot parse injected event-ownership report: {}".format(exc)
+    command = ["go", "run", "./scripts/codetools", "event-ownership", "--check",
+               "--repo-root", repo_root, "--golden", golden_path, "--json"]
+    try:
+        proc = subprocess.run(command, cwd=repo_root, capture_output=True, text=True,
+                              timeout=900)
+    except OSError as exc:
+        return None, "cannot execute the event-ownership gate: {}".format(exc)
+    except subprocess.TimeoutExpired:
+        return None, "event-ownership gate timed out"
+    if proc.returncode != 0:
+        report.note("event-ownership source: real repository execution (exit {})".format(
+            proc.returncode))
+        # The gate prints its report even when it fails; parse it so violations are
+        # named instead of only the exit code. An unparseable body is the fallback.
+        try:
+            return json.loads(proc.stdout), None
+        except ValueError:
+            tail = (proc.stderr or "").strip().splitlines()
+            tail = " | ".join(tail[-6:]) if tail else "(no stderr)"
+            return None, "event-ownership gate failed with exit {}: {}".format(
+                proc.returncode, tail)
+    report.note("event-ownership source: real repository execution (exit 0)")
+    try:
+        return json.loads(proc.stdout), None
+    except ValueError as exc:
+        return None, "cannot parse event-ownership output: {}".format(exc)
+
+
+def check_event_ownership(report, payload):
+    """Fold the gate report into this checker without upgrading its verdict.
+
+    A structural pass is counted as coverage of the frozen call surface only. An
+    uncovered call site is reported with file/line/caller/reason and is never
+    added to any covered count: this gate cannot prove that a second consumption
+    state does not exist through method values, reflection or an untyped edge.
+    """
+    if not isinstance(payload, dict):
+        report.error("event-ownership report must be a JSON object")
+        return
+    counts = payload.get("counts")
+    if not isinstance(counts, dict) or not counts:
+        report.error("event-ownership report carries no counts object")
+        counts = {}
+    for key in OWNERSHIP_COUNT_KEYS if counts else ():
+        value = counts.get(key)
+        if type(value) is not int or value < 0:
+            report.error("event-ownership counts.{} must be a non-negative integer, "
+                         "got {!r}".format(key, value))
+            continue
+        report.count("event_ownership_" + key, value)
+    violations = payload.get("violations")
+    if not isinstance(violations, list):
+        report.error("event-ownership report violations must be a list")
+        violations = []
+    for finding in violations:
+        if not isinstance(finding, dict):
+            report.error("event-ownership violation entry must be an object: {!r}".format(finding))
+            continue
+        report.error("event-ownership {} {}:{} {} owner={}: {}".format(
+            finding.get("rule"), finding.get("file"), finding.get("line"),
+            finding.get("symbol"), finding.get("owner"), finding.get("detail")))
+    uncovered = payload.get("uncovered")
+    if not isinstance(uncovered, list):
+        report.error("event-ownership report uncovered must be a list")
+        uncovered = []
+    for entry in uncovered:
+        if (not isinstance(entry, dict) or not non_empty_string(entry.get("file"))
+                or type(entry.get("line")) is not int
+                or not non_empty_string(entry.get("reason"))):
+            report.error("event-ownership uncovered entry needs file/line/reason: {!r}".format(entry))
+            continue
+        report.note("event-ownership uncovered {}:{} {} {} — {} "
+                    "(reported, never counted as covered)".format(
+                        entry["file"], entry["line"], entry.get("caller", "-"),
+                        entry.get("name", "-"), entry["reason"]))
+    if type(counts.get("uncovered")) is int and counts["uncovered"] != len(uncovered):
+        report.error("event-ownership counts.uncovered={} disagrees with {} listed "
+                     "uncovered site(s)".format(counts["uncovered"], len(uncovered)))
+    if not isinstance(payload.get("ok"), bool):
+        report.error("event-ownership report ok must be a boolean")
+    elif payload["ok"] is True:
+        if violations:
+            report.error("event-ownership report claims ok while recording violations")
+    elif not violations:
+        notes = payload.get("notes")
+        if isinstance(notes, list) and notes:
+            for note in notes:
+                report.error("event-ownership: {}".format(note))
+        else:
+            report.error("event-ownership gate did not pass and gave no reason")
+    if counts and counts.get("allowed") == 0:
+        report.error("event-ownership counted no allowed direct call: the gate is vacuous")
+
+
+def check_implementation(report, policy, registry, adjacency, repo_root, injected_path,
+                         golden_path, ownership_injected, ownership_ok):
     module_path = policy.get("module_path") or lib.MODULE_PATH
     scope = policy.get("scope") or {}
     exclude_names = set(scope.get("exclude_dir_names") or [])
@@ -372,6 +665,13 @@ def check_implementation(report, policy, registry, adjacency, repo_root, injecte
                                 "(reported, not blocked)".format(imported, rel))
     report.count("edge_violations", edge_violations)
     report.count("external_imports", external_imports)
+    if ownership_ok:
+        payload, failure = obtain_event_ownership(report, repo_root, golden_path,
+                                                  ownership_injected)
+        if failure:
+            report.error(failure)
+        else:
+            check_event_ownership(report, payload)
 
 
 def run(argv):
@@ -379,13 +679,16 @@ def run(argv):
     if args.check_policy and args.implementation:
         sys.stderr.write("--check-policy and --implementation are mutually exclusive\n")
         return 2
+    if args.check_policy and args.event_ownership_json:
+        sys.stderr.write("--event-ownership-json is only meaningful with --implementation\n")
+        return 2
     report = lib.Report("check_runtime_architecture")
     golden_path = os.path.abspath(args.golden)
     if not os.path.isfile(golden_path):
         report.error("architecture golden not found: {}".format(golden_path))
         return report.emit(args.json)
     try:
-        policy, registry, adjacency = load_policy(report, golden_path)
+        policy, registry, adjacency, ownership_ok = load_policy(report, golden_path)
     except lib.CheckFailure as exc:
         report.error(str(exc))
         return report.emit(args.json)
@@ -396,7 +699,13 @@ def run(argv):
         if not os.path.isdir(repo_root):
             report.error("repo root not found: {}".format(repo_root))
             return report.emit(args.json)
-        check_implementation(report, policy, registry, adjacency, repo_root, args.go_list_json)
+        if args.go_list_json and not args.event_ownership_json:
+            report.error("--go-list-json injection also needs --event-ownership-json: both "
+                         "structural gates read the same tree, and running one against a "
+                         "different tree than the other would be a false pass")
+            return report.emit(args.json)
+        check_implementation(report, policy, registry, adjacency, repo_root, args.go_list_json,
+                             golden_path, args.event_ownership_json, ownership_ok)
     report.note("structural coverage: {} (format/policy valid never implies product green)".format(
         "OK" if report.ok else "FAILED"))
     return report.emit(args.json)

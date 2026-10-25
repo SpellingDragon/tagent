@@ -229,10 +229,38 @@ func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (stat
 // entries still in flight stay with the transcript that carries them — and the
 // invocation whose range those in-flight entries belong to.
 type replayEntry struct {
-	projection      *replay.ReplayProjection
-	window          FoldWindow
-	ended           int
+	projection *replay.ReplayProjection
+	window     FoldWindow
+	// endedAt names the first entry of the range in flight: everything before
+	// it is the ended material a request presents. The boundary is recorded by
+	// identity, never by position, because the age fold rewrites the sequence
+	// the commits record — a position read after a fold names other material,
+	// or falls past the shortened sequence and silently moves the in-flight
+	// notice into the budgeted prefix. An empty identity names a chain with no
+	// range in flight, so every entry is ended material.
+	endedAt         event.EventID
 	rangeInvocation event.InvocationID
+}
+
+// endedPrefix reports the position the ended material of the registered sequence
+// ends at, resolved against the sequence as it stands now: the position of the
+// entry the boundary names by identity. A boundary naming no entry — a chain
+// that admitted no range yet, or one whose opening entry a fold has already
+// consumed — reports the end of the sequence, so every entry is ended material
+// and none of the range in flight is presented twice.
+func (h replayEntry) endedPrefix() int {
+	if h.projection == nil {
+		return 0
+	}
+	if h.endedAt == "" {
+		return h.projection.Len()
+	}
+	for at, entry := range h.projection.Entries() {
+		if entry.Key == h.endedAt {
+			return at
+		}
+	}
+	return h.projection.Len()
 }
 
 // AttachReplay registers the replayed projection of one session chain on this
@@ -258,7 +286,7 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
 	window = normalizeFoldWindow(window)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replays[chain.SessionID] = replayEntry{projection: projection, window: window, ended: projection.Len()}
+	r.replays[chain.SessionID] = replayEntry{projection: projection, window: window}
 	return nil
 }
 
@@ -569,7 +597,7 @@ func skillLoadsOf(agent event.AgentID) []knowledge.LoadedSkill {
 // as the main context of the request: the window assembly of the registration
 // the chain fixed, bounded to the entries that already ended.
 func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
-	return projectedSegment(ctx, a.sequence.projection, a.sequence.window, a.sequence.ended)
+	return projectedSegment(ctx, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
 }
 
 // environmentSegment contributes the dynamic environment material of the
