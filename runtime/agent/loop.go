@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -244,7 +245,8 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // - The settled result facts one decision paired are the stored input the next decision reduces.
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
 // - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
-// - A progress notification of the range's own call is read at each round head as a projection increment of the session chain — the chain is the truth of the notification — and a range beside no chain reads the cache kept beside its commit.
+// - A progress notification of the range's own call commits as a fact of its chain and enters no round head: the report is audit and projection material, never input a decision speaks from.
+// - A terminal notification of the range's own call enters the round head as input material: a settle, a failure or a cancellation is what an unattended follow-up turn speaks from, and the progress reports beside it are skipped by their own category.
 // - A drive whose budget is spent runs one closing round and ends there: the closing round delivers what the range already produced, its transcript is committed the same way, and the obligation it opens is none.
 // - The drive is observed as one consumer run: its start and its end are DEBUG lines carrying identities, counts and the terminal, never transcript content.
 func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error) {
@@ -274,7 +276,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	started := time.Now()
 	rounds := 0
 	for {
-		transcript = append(transcript, l.progressNotes(inv)...)
+		transcript = append(transcript, l.terminalNotes(inv)...)
 		round := closingRound(policy, rounds, time.Since(started))
 		decision, outcome, receipts, observations, facts, decideErr := l.decide(ctx, inv, transcript, inputs, round)
 		if decideErr != nil {
@@ -320,15 +322,14 @@ func consumerDebug(format string, args ...any) {
 
 // Backflow admits one notification of a call into the range of the invocation
 // that issued that call, so it drives that range's next decision and no other. A
-// progress notification commits as a notice fact of that range before it is
-// read: the chain is the truth of the notification, so the range reads it back
-// as a projection increment, and a loop beside no chain reads the cache it kept
-// beside the commit. A non-terminal notification that is not progress carries no
-// result to pair and is ignored here. The settled delivery commits as the
-// delivery fact of the range before it is handed on, so the delivery boundary of
-// a call is observed as the fact it is; the After pass of that fact runs beside
-// the notification rather than under the cancellation of the caller that
-// delivered it, because observation is a bypass.
+// progress notification commits as a notice fact of that range and nothing
+// more: the chain is the truth of the report, and a report of the pipeline's
+// own rounds is never material a decision reads. A non-terminal notification
+// that is not progress carries no result to pair and is ignored here. The
+// settled delivery commits as the delivery fact of the range before it is handed
+// on, so the delivery boundary of a call is observed as the fact it is; the
+// After pass of that fact runs beside the notification rather than under the
+// cancellation of the caller that delivered it, because observation is a bypass.
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
 	case task.NoticeProgress:
@@ -350,27 +351,26 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 }
 
 // admitNotice admits one progress notification as a notice fact of the range
-// that issued the call, then parks the notification in the intake of that range:
-// the fact is committed first, so the material the range reads is the fact the
-// chain carries, and the parked copy is the cache a read beside no chain falls
-// back to. The range reads each notification once either way.
+// that issued the call, and parks nothing beside it: the fact is the audit and
+// projection record of the report, and a progress report is never input
+// material of a decision — the model is told what the user asked, never what the
+// task pipeline is doing in its rounds.
 func (l *Loop) admitNotice(invocationID event.InvocationID, notice task.Notice) {
 	in := l.intakeFor(invocationID)
-	key := event.EventID("")
 	if addr := in.rangeAddress(); addr.IsComplete() {
-		key = l.commitNotice(invocationID, addr, notice)
+		l.commitNotice(invocationID, addr, notice)
 	}
-	in.notify(noticeEntry{key: key, notice: notice})
 }
 
 // commitNotice commits one progress notification as the notice fact of its
-// range: the stable identity of the notification beside the input material it
-// reads as, owned by the range address and scoped to the invocation that issued
-// the call. The notice is committed as user input material of the range — a face
-// of the request, never an answer to the call — and the fact enters the mapped
-// sequence of the session chain like every other committed fact of the range.
-// The notification's own four-tuple stays its identity: the fact reference it
-// carries names the work it reports and never replaces that identity.
+// range: the stable identity of the notification beside the material it
+// records, owned by the range address and scoped to the invocation that issued
+// the call. The fact enters the mapped sequence of the session chain like every
+// other committed fact of the range, and it answers no call: the report of
+// in-flight work is audit and projection material, never an answer to the call
+// and never input a decision speaks from. The notification's own four-tuple
+// stays its identity: the fact reference it carries names the work it reports
+// and never replaces that identity.
 func (l *Loop) commitNotice(invocationID event.InvocationID, addr event.Address, notice task.Notice) event.EventID {
 	return l.commitFactKey(context.Background(), addr.AgentID, event.Event{
 		Key:       NoticeFactKey(invocationID, notice),
@@ -1168,9 +1168,11 @@ func (in *intake) deliver(taskID event.TaskID, item delivered) {
 	in.settled[taskID] = append(in.settled[taskID], item)
 }
 
-// notify parks one admitted progress notification in the cache of the intake,
-// where a read beside no chain falls back to it: the progress of a call answers
-// no call, so it neither fills a wait nor parks a result.
+// notify parks one admitted progress notification in the cache of the intake.
+// The loop admits a progress report as its fact alone and parks nothing beside
+// it: the report answers no call, and no decision of a range reads this cache,
+// so the parked face stays beside the fact it projects instead of model
+// material.
 func (in *intake) notify(entry noticeEntry) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
@@ -1178,8 +1180,8 @@ func (in *intake) notify(entry noticeEntry) {
 }
 
 // takeNotices hands on the parked notifications the range has not read yet and
-// leaves the cache empty, so the progress of a call reaches exactly one decision
-// of its range there.
+// leaves the cache empty. No decision of a range reads it: a progress report
+// reaches its range as the fact it committed, never as model material.
 func (in *intake) takeNotices() []noticeEntry {
 	in.mu.Lock()
 	defer in.mu.Unlock()
@@ -1191,32 +1193,39 @@ func (in *intake) takeNotices() []noticeEntry {
 	return taken
 }
 
-// progressNotes reads the progress notifications of one invocation as the input
-// material the next decision of its range carries: one user message per report,
-// none of them answering a call. A notification is a fact of the chain, so a
-// read beside a chain is a projection increment from the ended-material boundary
-// of the session — the material the range already reads through its transcript
-// — and every drive re-resolves that boundary from the fact identity the chain
-// records instead of keeping the position an earlier read reached: the age fold
-// rewrites the sequence the commits record, so a kept position names other
-// material after a rewrite or falls past the shortened sequence, and the
-// notification appended after the boundary is skipped unseen. The identities a
-// read reported are the state this range keeps, so reading from the boundary
-// again reports each report once and no earlier report is replayed. A
-// notification the chain already carried is never reported a second time, and a
-// range beside no chain reads the cache the intake kept beside the commit.
-func (l *Loop) progressNotes(inv Invocation) []model.Message {
+// terminalNotes reads the terminal notifications of one invocation as input
+// material, one user message per notification: a settle, failure or
+// cancellation of the range's own call is the material an unattended follow-up
+// turn speaks from, so the drive reads it beside the transcript. A progress
+// report of the pipeline's own rounds is never material a decision speaks from:
+// the report is a fact of the chain the audit and the projection read, so this
+// read skips it. The progress category alone does not name that report — an
+// execution-resource observation commits its unattended material under the same
+// category, so it never fires a settle — hence the skip keys on the round the
+// notice carries rather than on the category (see pipelineProgress).
+// A notification is a fact of the chain, so a read beside a chain is a
+// projection increment from the ended-material boundary of the session; every
+// read re-resolves that boundary from the fact identity the chain records
+// instead of keeping the position an earlier read reached: the age fold rewrites
+// the sequence the commits record, so a kept position names other material after
+// a rewrite or falls past the shortened sequence. The identities a read reported
+// are the state this range keeps, so reading from the boundary again reports
+// each notification once.
+func (l *Loop) terminalNotes(inv Invocation) []model.Message {
 	in := l.intakeFor(inv.InvocationID)
+	prefix := NoticeFactPrefix(inv.InvocationID)
 	var views []NoticeView
 	if feed := l.noticeReader(); feed != nil {
 		chain := RequestChain{SessionID: inv.Address.SessionID}
 		if boundary, held := feed.NoticeBoundary(chain); held {
-			notices, _, _ := feed.NoticesFrom(chain, NoticeFactPrefix(inv.InvocationID), boundary)
-			views = append(views, notices...)
+			notices, _, _ := feed.NoticesFrom(chain, prefix, boundary)
+			for _, view := range notices {
+				if pipelineProgress(view.Key, prefix) {
+					continue
+				}
+				views = append(views, view)
+			}
 		}
-	}
-	for _, entry := range in.takeNotices() {
-		views = append(views, NoticeView{Key: entry.key, Text: noticeText(entry.notice)})
 	}
 	if len(views) == 0 {
 		return nil
@@ -1234,6 +1243,57 @@ func (l *Loop) progressNotes(inv Invocation) []model.Message {
 		notes = append(notes, model.Message{Role: model.RoleUser, Content: view.Text})
 	}
 	return notes
+}
+
+// noticeFields decodes the canonical identity one notice fact was committed
+// under: NoticeFactKey spells the range prefix beside the hex of the notice's
+// own four-tuple (task:round:kind:seq), so the identity is recovered from the
+// key rather than guessed from the material the notice reads as.
+func noticeFields(key event.EventID, prefix event.EventID) ([]string, bool) {
+	spelled := string(key)
+	if !strings.HasPrefix(spelled, string(prefix)) {
+		return nil, false
+	}
+	raw, err := hex.DecodeString(spelled[len(prefix):])
+	if err != nil {
+		return nil, false
+	}
+	fields := strings.SplitN(string(raw), ":", 4)
+	if len(fields) < 3 {
+		return nil, false
+	}
+	return fields, true
+}
+
+// noticeKindOf reports the category one notice fact was committed under, read
+// from the canonical identity it carries rather than guessed from the material
+// the notice reads as.
+func noticeKindOf(key event.EventID, prefix event.EventID) task.NoticeKind {
+	fields, ok := noticeFields(key, prefix)
+	if !ok {
+		return ""
+	}
+	return task.NoticeKind(fields[2])
+}
+
+// pipelineProgress reports whether one notice fact is a progress report of the
+// task pipeline's own rounds: the category says so and the notice names the
+// execution round it reports in. A fact of the progress category that names no
+// round is not that report: the unattended material of an execution-resource
+// observation is committed under the same category so it never fires a settle,
+// it reports a resource state instead of a pipeline round, and it is the
+// material its own follow-up turn speaks from. A malformed round keeps the
+// material: dropping a notice is louder than reading one.
+func pipelineProgress(key event.EventID, prefix event.EventID) bool {
+	if noticeKindOf(key, prefix) != task.NoticeProgress {
+		return false
+	}
+	fields, ok := noticeFields(key, prefix)
+	if !ok {
+		return false
+	}
+	round, err := strconv.ParseInt(fields[1], 10, 64)
+	return err == nil && round > 0
 }
 
 // noticeText renders the input material one progress notification reads as: the

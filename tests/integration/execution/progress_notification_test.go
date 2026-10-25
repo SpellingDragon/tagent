@@ -15,8 +15,8 @@ import (
 const progressNoteFragment = "reports progress in round"
 
 // TestProgressNotificationReachesTheAgent drives one progress notification through the delivery face of the host loop.
-// - a progress notification handed to the mailbox enters the next decision of the invocation that issued the call
-// - the notification answers no call: the decision that reads it holds no tool message under the task
+// - a progress notification handed to the mailbox enters no decision of the invocation that issued the call
+// - the notification answers no call: the decision holds no tool message under the task
 // - a notification that is not progress carries nothing into the decision
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 func TestProgressNotificationReachesTheAgent(t *testing.T) {
@@ -26,8 +26,8 @@ func TestProgressNotificationReachesTheAgent(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		provider := &customEventModel{name: "model-host", answer: func(req *model.Request) *model.Response {
-			if !progressCarried(req.Messages, progressNoteFragment) {
-				t.Errorf("request messages = %+v, want the progress of the call as input material", req.Messages)
+			if progressCarried(req.Messages, progressNoteFragment) {
+				t.Errorf("request messages = %+v, want no progress report in the material a decision reads", req.Messages)
 			}
 			if paired := observationOf(req.Messages, "task-progress-host"); paired != nil {
 				t.Errorf("request messages = %+v, want the progress to answer no call", req.Messages)
@@ -42,8 +42,12 @@ func TestProgressNotificationReachesTheAgent(t *testing.T) {
 		if result, err := rig.consume(ctx, provider, customEventOf(owner)); err != nil || result != "progress consumed" {
 			t.Fatalf("consume beside a progress notification = (%q, %v), want the one consumed result", result, err)
 		}
-		if requests := provider.recorded(); len(requests) != 1 {
+		requests := provider.recorded()
+		if len(requests) != 1 {
 			t.Fatalf("model requests = %d, want the one decision of the range", len(requests))
+		}
+		if progressCarried(requests[0].Messages, progressNoteFragment) {
+			t.Fatalf("request messages = %+v, want the progress of the call carried into no decision", requests[0].Messages)
 		}
 	})
 

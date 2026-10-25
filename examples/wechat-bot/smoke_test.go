@@ -3067,6 +3067,11 @@ func TestLocalSmokeInjectedSession(t *testing.T) {
 const symptomChat = "symptom-anchor-chat"
 
 var (
+	// symptomConfirmationWords 是"不该说的话"词表：受理、在跑、结算承诺与轮询提示。
+	symptomConfirmationWords = []string{
+		"accepted", "(running)", "background task", "will arrive as a notification",
+		"reports progress", "[send_ok]", "delivered to",
+	}
 	// symptomAdmissionMaterial 是模型世界里的"内部受理材料"判据：结算通知回合的
 	// 请求不该再读到它们（判别力来自请求侧）。
 	symptomAdmissionMaterial = []string{
@@ -3266,5 +3271,95 @@ func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
 			t.Fatalf("回答投递到了 %q，want %q", evt.Target, symptomChat)
 		}
 		t.Logf("[symptom-g1] 负锚：正常提问的回答仍投递 %q", evt.Body)
+	})
+}
+
+// TestLocalSmokeSymptomSettledOnce 是症状直译锚 G2：同一条委派链路从受理到结算，用户在本轮收到恰好一条结果消息，且该条不是确认类话术。
+// - settled_exactly_once：结算之前的模型请求不含内部受理材料，结算通知回合的请求也不含受理/进度材料；用户世界本轮恰好一条、非确认类、等于结算正文。
+// - no_duplicate_settle_text：同一正文至多投递一次，结算正文不被第二条重复。
+// - 脚本仿真（诚实边界）：脚本模型只在读到内部状态素材（回执/进度里的 accepted/running 等字样）时复述确认，读到结算通知则转述结算正文；裸 "ok" 没有可复述的素材，它保持沉默。这是行为仿真，不是产品缺陷本身——修复前回执携带状态字样，同一脚本因此多发一条确认（红证形态 2 条）。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomSettledOnce(t *testing.T) {
+	const marker = "SMOKE-R9611"
+
+	t.Run("settled_exactly_once", func(t *testing.T) {
+		rig, provider := symptomRig(t)
+		provider.hook = func(w http.ResponseWriter, _ int, modelName string, messages []smokeModelMessage) bool {
+			if modelName != smokeEntryModel || len(messages) == 0 {
+				return false
+			}
+			for _, msg := range messages {
+				if symptomHit(msg.Content, symptomAdmissionMaterial) != "" {
+					fmt.Fprint(w, smokeAnswerBody("delegate ack "+marker))
+					return true
+				}
+			}
+			if text := smokeLastUserText(messages); strings.Contains(text, "tagent: task ") && strings.Contains(text, "settled") {
+				fmt.Fprint(w, smokeAnswerBody("worker result "+marker))
+				return true
+			}
+			if smokeEndedWithTool(messages) {
+				fmt.Fprint(w, smokeAnswerBody(""))
+				return true
+			}
+			return false
+		}
+		rig.drive(symptomChat, marker+" smoke delegate artifact")
+		rig.waitText(symptomChat, "worker result "+marker, 30*time.Second)
+
+		entry := symptomEntryRequests(provider)
+		settleAt := -1
+		for i, req := range entry {
+			last := smokeLastUserText(req.Messages)
+			if strings.Contains(last, "tagent: task ") && strings.Contains(last, "settled") {
+				settleAt = i
+				break
+			}
+		}
+		if settleAt < 0 {
+			t.Fatalf("结算通知回合没有发生：模型没读到结算通知，本轮不可判读\nrecent requests:\n%s",
+				rig.recentRequests(8))
+		}
+		if word, role, body, ok := symptomMaterialHit(entry[:settleAt]); ok {
+			t.Errorf("结算前的模型请求仍含内部受理材料 %q（%s）：%q —— 多余确认正由它诱导",
+				word, role, body)
+		}
+		if word, role, body, ok := symptomMaterialHit(entry[settleAt : settleAt+1]); ok {
+			t.Errorf("结算通知回合的模型请求仍含内部受理/进度材料 %q（%s）：%q", word, role, body)
+		}
+
+		texts := symptomTexts(rig, symptomChat)
+		switch {
+		case len(texts) != 1:
+			t.Fatalf("本轮 outbound 文本应为 1 条，实际 %d 条：%s", len(texts), symptomQuote(texts))
+		case symptomHit(texts[0], symptomConfirmationWords) != "":
+			t.Fatalf("本轮唯一一条命中确认词表 %q：%q",
+				symptomHit(texts[0], symptomConfirmationWords), texts[0])
+		case !strings.Contains(texts[0], "worker result "+marker):
+			t.Fatalf("本轮唯一一条不是委派任务的结算正文：%q，want 含 %q", texts[0], "worker result "+marker)
+		}
+	})
+
+	t.Run("no_duplicate_settle_text", func(t *testing.T) {
+		rig, _ := symptomRig(t)
+		rig.drive(symptomChat, marker+" smoke delegate artifact")
+		rig.waitText(symptomChat, "settle-ack "+marker, 30*time.Second)
+		texts := symptomTexts(rig, symptomChat)
+		seen := map[string]int{}
+		for _, body := range texts {
+			seen[body]++
+		}
+		for body, n := range seen {
+			if n > 1 {
+				t.Fatalf("同一正文投递了 %d 次：%q（本轮全部：%s）", n, body, symptomQuote(texts))
+			}
+		}
+		settleBody := "worker result " + marker
+		delivered := strings.Count(strings.Join(texts, "\n"), settleBody)
+		if delivered > 1 {
+			t.Fatalf("结算正文 %q 投递了 %d 次，want 至多 1 次（本轮全部：%s）",
+				settleBody, delivered, symptomQuote(texts))
+		}
+		t.Logf("[symptom-g2] 负锚：本轮 %d 条文本，无重复正文（结算正文投递 %d 次）", len(texts), delivered)
 	})
 }

@@ -615,15 +615,15 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
     Backflow admits one notification of a call into the range of the invocation
     that issued that call, so it drives that range's next decision and no other.
-    A progress notification commits as a notice fact of that range before it
-    is read: the chain is the truth of the notification, so the range reads it
-    back as a projection increment, and a loop beside no chain reads the cache
-    it kept beside the commit. A non-terminal notification that is not progress
-    carries no result to pair and is ignored here. The settled delivery commits
-    as the delivery fact of the range before it is handed on, so the delivery
-    boundary of a call is observed as the fact it is; the After pass of that
-    fact runs beside the notification rather than under the cancellation of the
-    caller that delivered it, because observation is a bypass.
+    A progress notification commits as a notice fact of that range and nothing
+    more: the chain is the truth of the report, and a report of the pipeline's
+    own rounds is never material a decision reads. A non-terminal notification
+    that is not progress carries no result to pair and is ignored here.
+    The settled delivery commits as the delivery fact of the range before it is
+    handed on, so the delivery boundary of a call is observed as the fact it is;
+    the After pass of that fact runs beside the notification rather than under
+    the cancellation of the caller that delivered it, because observation is a
+    bypass.
 
 func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID
     CommitFactFor commits one fact on behalf of the named agent and runs the
@@ -649,15 +649,17 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     reads the range's history as it actually ended. - The whole drive is watched
     as one in-flight production beside its invocation identity — the queueing
     waits included — and confirms its stop only when the drive really ended.
-    - A progress notification of the range's own call is read at each round head
-    as a projection increment of the session chain — the chain is the truth of
-    the notification — and a range beside no chain reads the cache kept beside
-    its commit. - A drive whose budget is spent runs one closing round and
-    ends there: the closing round delivers what the range already produced, its
-    transcript is committed the same way, and the obligation it opens is none.
-    - The drive is observed as one consumer run: its start and its end are
-    DEBUG lines carrying identities, counts and the terminal, never transcript
-    content.
+    - A progress notification of the range's own call commits as a fact of its
+    chain and enters no round head: the report is audit and projection material,
+    never input a decision speaks from. - A terminal notification of the
+    range's own call enters the round head as input material: a settle, a
+    failure or a cancellation is what an unattended follow-up turn speaks from,
+    and the progress reports beside it are skipped by their own category.
+    - A drive whose budget is spent runs one closing round and ends there:
+    the closing round delivers what the range already produced, its transcript
+    is committed the same way, and the obligation it opens is none. - The drive
+    is observed as one consumer run: its start and its end are DEBUG lines
+    carrying identities, counts and the terminal, never transcript content.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could
