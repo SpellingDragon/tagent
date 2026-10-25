@@ -472,7 +472,7 @@
     },
     {
       "id": "S15",
-      "title": "task 逻辑状态：静默逐级识别 watch→stable→suspect（每级报一次）＋progress 回调抵达下一次决策且不答调用",
+      "title": "task 逻辑状态：静默逐级识别 watch→stable→suspect（每级报一次）＋progress 只落 fact、不进下一次决策且不答调用",
       "task_ids": [
         "02.2",
         "02.5"
@@ -484,7 +484,7 @@
       "anchor_tests": [
         "runtime/task:TestLogicalStatusRecognition",
         "runtime/agent:TestBackflowNotificationLanes",
-        "tests/integration/execution:TestProgressNotificationReachesTheAgent"
+        "tests/integration/execution:TestProgressNotificationStaysOutOfTheDecision"
       ],
       "observations": {
         "logical_status_ladder": [
@@ -492,7 +492,7 @@
           "stable",
           "suspect"
         ],
-        "progress_reaches_decision": true
+        "progress_reaches_decision": false
       }
     }
   ]

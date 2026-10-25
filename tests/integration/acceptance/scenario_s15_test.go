@@ -3,6 +3,7 @@ package acceptance
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,7 +51,10 @@ func scenarioS15Spec() task.Spec {
 
 // TestScenario15TaskLogicalStatus drives the logical status ladder of one task beside the progress lane of one range.
 // - a task whose state stands unchanged crosses watch, stable and suspect in that order, and each step is reported once
-// - a progress notification reaches the next decision of the invocation that issued the call, and answers no call
+// - the range is opened by one decision before the report arrives, so the fact has an addressed range to land in
+// - the decision after the notification is the one that must stay clear of it
+// - a progress notification stays a fact of the range and reaches no decision of the invocation that issued the call, and answers no call
+// - the lane is a witness, not a recorder: the observation reads false only while the assertions on the request and the committed fact hold
 // 契约: docs/wiki/agent/agent-architecture.md#core-components
 func TestScenario15TaskLogicalStatus(t *testing.T) {
 	ctx := context.Background()
@@ -81,21 +85,34 @@ func TestScenario15TaskLogicalStatus(t *testing.T) {
 
 	loop, provider := scenarioProgressLoop(t)
 	const invocationID = event.InvocationID("inv-progress-15")
-	loop.Backflow(invocationID, task.Notice{TaskID: "task-progress-15", Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "fact-progress-15"})
+	facts := &scenarioProgressFacts{}
+	loop.SetFactCommit(facts.commit)
+	rangeAddress := event.Address{AgentID: "agent-a", SessionID: "session-s15"}
+	instance := event.InstanceID("inst-s15")
 	if _, err := loop.Drive(ctx, agent.Invocation{
 		InvocationID: invocationID,
-		Address:      event.Address{AgentID: "agent-a", SessionID: "session-s15"},
-		Instance:     event.InstanceID("inst-s15"),
+		Address:      rangeAddress,
+		Instance:     instance,
 		Ready:        []event.Event{{Key: "event-s15", Message: model.Message{Role: model.RoleUser, Content: scenarioS15Input}}},
+	}); err != nil {
+		t.Fatalf("open the range the progress lane drives: %v", err)
+	}
+	progress := task.Notice{TaskID: "task-progress-15", Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "fact-progress-15"}
+	loop.Backflow(invocationID, progress)
+	if _, err := loop.Drive(ctx, agent.Invocation{
+		InvocationID: invocationID,
+		Address:      rangeAddress,
+		Instance:     instance,
+		Ready:        []event.Event{{Key: "event-s15-next", Message: model.Message{Role: model.RoleUser, Content: scenarioS15Input}}},
 	}); err != nil {
 		t.Fatalf("drive the range beside a progress notification: %v", err)
 	}
 	requests := provider.recorded()
-	if len(requests) != 1 {
-		t.Fatalf("model requests = %d, want the one decision of the range", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want the one decision per drive", len(requests))
 	}
 	carried, answered := false, false
-	for _, message := range requests[0].Messages {
+	for _, message := range requests[1].Messages {
 		if strings.Contains(message.Content, scenarioS15ProgressFragment) {
 			carried = carried || (message.Role == model.RoleUser && message.ToolID == "" && message.ToolName == "")
 			answered = answered || message.ToolID == "task-progress-15"
@@ -103,6 +120,12 @@ func TestScenario15TaskLogicalStatus(t *testing.T) {
 	}
 
 	observations := map[string]any{}
+	if carried {
+		t.Errorf("request messages = %+v, want the progress of the call carried into no decision", requests[1].Messages)
+	}
+	if landed := facts.under(agent.NoticeFactKey(invocationID, progress)); len(landed) != 1 {
+		t.Errorf("facts committed under the notice identity = %d, want the one fact the progress lands as", len(landed))
+	}
 	observations["logical_status_ladder"] = ladder
 	observations["progress_reaches_decision"] = carried && !answered
 
@@ -134,4 +157,33 @@ func scenarioProgressLoop(t *testing.T) (*agent.Loop, *scenarioModel) {
 		t.Fatalf("hold the state plan: %v", err)
 	}
 	return agent.NewLoop(bindings, state.NewOccupancy(), event.InstanceID("inst-s15"), nil), provider
+}
+
+// scenarioProgressFacts is the commit face of the progress scenario: it keeps
+// every fact the loop commits, so the report can be read back under the identity
+// production commits it with rather than under one the scenario invents.
+type scenarioProgressFacts struct {
+	mu   sync.Mutex
+	seen []event.Event
+}
+
+// commit keeps one fact as it stands and reports the identity it carries.
+func (f *scenarioProgressFacts) commit(evt event.Event) event.EventID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seen = append(f.seen, evt)
+	return evt.Key
+}
+
+// under reports the facts committed under one identity.
+func (f *scenarioProgressFacts) under(key event.EventID) []event.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var hits []event.Event
+	for _, evt := range f.seen {
+		if evt.Key == key {
+			hits = append(hits, evt)
+		}
+	}
+	return hits
 }
