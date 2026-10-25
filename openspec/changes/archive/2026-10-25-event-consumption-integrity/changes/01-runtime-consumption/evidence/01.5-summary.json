@@ -1,0 +1,249 @@
+{
+  "leaf": "01.5",
+  "title": "根正式装配与缺端口拒绝",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T16:05:00Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/host/event_integrity_test.go（与 00.2/01.3/01.4/02.2/02.4/03.2/03.3 同文件单写）新增 TestEventIntegrityFormalAssembly，恰两个具名子测试：formal_boot_delivers_turn（正锚兼消费者锚）与 missing_sender_fails_closed（负锚，双分支）。正锚只给 tagent.WithSender 这一个选项，文档为 scriptedHostDocument 的最小声明（entry user + 单 provider/model + localfile storage，无任何 tool），一次用户 turn 经根 Boot 装配的 Host.Invoke 完成，最终答复由产品 deliverFresh 经正式 MessageSender 恰投递一次，SessionFacts 的 assistant 输出事实归属该 turn 的 InvocationID，drain 点义务排空。负锚分支一：文档不声明 send 且无 sender，Boot 成功，用户 turn 在 Host.Invoke 返回 ErrHostSenderMissing，provider 零请求；分支二：文档声明 send 且无 sender，Boot 期以同一 ErrHostSenderMissing 拒绝，provider 零请求。未接 G4 compaction 写入点，未接 03.9 跨进程改投，未新增 public API/持久格式，未改产品文件，未放宽 test-mirror 门。",
+  "method": "正锚用 scriptedProvider + integrityScript 单步脚本（requestTail(input) 匹配 → scriptedAnswerOf(answer)），bootFormalAssemblyHost 只调用 writeScriptedHostDocument（裸文档）与 tagent.Boot(configPath, WithSender(sender))，没有任何测试侧补挂；断言读 sender 实际动作（deliverySender：target/body/call-frame/result）、Host.Run().SessionFacts、provider 实际服务请求与 closeIntegrityHost 的 DrainReport。负锚两分支各自使用独立 provider 与独立临时根：分支一断言 errors.Is(err, tagent.ErrHostSenderMissing) 与 len(provider.recorded())==0；分支二断言 Boot 返回同一具名错误、host 未建立、provider 零请求。消费者锚即正锚：根 Boot 正式入口 + Host.Invoke 完成真实回合。",
+  "environment": {
+    "os": "Darwin arm64 (darwin 14.7.2)",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5",
+    "note": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "extended (untracked file created by 00.2; 本叶在文件末尾追加 01.5 段，共 +156 行；gofmt 后无改动)",
+      "lines": 5409,
+      "sha256": "bbd22839c6c79c73214f164d008f2175a0983dbb224db6acd629b214dbf778df"
+    }
+  ],
+  "product_changes": [],
+  "product_change_decision": "产品零改动：本叶只写测试文件。根 Boot 已具备本叶两锚所需的全部装配（Host.Invoke 的 user-address sender 门、deliverFresh、三处具名拒绝），无需新增接缝；不因导出符号/零用例接回任何路径。写集内 host.go 的 sha256 c84e6997d820821364a0c993b5ae689195c3224a185c28f6a32b3b136b091a4c 与 01.4 记录一致（本叶未触碰）；run.go/facts.go 的工作区修改来自更早的 01.3/02.1 等叶，非本叶产生；prepare.go/tools.go/request.go/invoke.go 在 git status 中保持 clean。",
+  "leaf_writes": {
+    "test": "tests/integration/host/event_integrity_test.go",
+    "evidence": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.5-summary.json",
+    "product": []
+  },
+  "root_wiring_audit": {
+    "method": "逐叶核对 02.1—02.5、02.7 的交接产物与根 Boot/Assemble 的正式装配点；只读源码与既有证据摘要，不改产品。02.6 微信审批按计划经 01.6 回验，不并入本叶。",
+    "rows": [
+      {
+        "leaf": "02.1",
+        "product": "evolution/meditation/driver.go（retained+rearm）",
+        "root_wiring": "host.go:371 meditation.NewDriver；host.go:377 NewSettleDriver；host.go:269 hostMeditationPort",
+        "status": "ready, consumed by Boot"
+      },
+      {
+        "leaf": "02.2",
+        "product": "evolution/meditation/deliver.go（逐目标覆盖回执/同动作身份幂等）",
+        "root_wiring": "host.go:269 hostMeditationPort.CommitToSession；host.go:1330 toolsFor 注册 deliver_summary；Boot 的 reflection 装配",
+        "status": "ready, consumed by Boot"
+      },
+      {
+        "leaf": "02.3",
+        "product": "无产品改动（复用既有折叠/投影）",
+        "root_wiring": "run.go:267 NewAgeFoldPlugin；run.go:328 query.NewProjection；Run.CommitToSession → AgeFoldPlugin.ObserveCommit",
+        "status": "ready, consumed by Assemble；compaction_event_writer 子锚仍按 G4 待裁（见 pending_decisions）"
+      },
+      {
+        "leaf": "02.4",
+        "product": "无产品改动（复用既有 lease/reload）",
+        "root_wiring": "host.go:342 rl.NewModelLease；host.go:347 WithModelLease；host_reload.go:161 Run.NoteModelChange；Host.Reload",
+        "status": "ready, consumed by Boot/Reload"
+      },
+      {
+        "leaf": "02.5",
+        "product": "无产品改动（复用既有 governance/task wrapper）",
+        "root_wiring": "host.go:388 WithApprover；host.go:391 WithPolicy；governance.Open 风险规则/审批；runtime/task wrapper",
+        "status": "ready, consumed by Boot options"
+      },
+      {
+        "leaf": "02.7",
+        "product": "无产品改动（复用既有 capture/export）",
+        "root_wiring": "host.go:279 openHostCapture；host.go:336 WithCapture；Host.Invoke 真实回合写入；公开 rl.NewChainExporter/Export 只读消费",
+        "status": "ready, consumed by Boot"
+      }
+    ],
+    "conclusion": "02 域各叶根接线产物均已在根 Boot/Assemble/Reload 中可达，无根文件接线缺口；唯一未接的是 G4 compaction 写入点与 03.9 跨进程改投，均为新产品行为，按调派令上报待裁、本叶不实施。"
+  },
+  "anchor_evidence": {
+    "positive": {
+      "name": "TestEventIntegrityFormalAssembly/formal_boot_delivers_turn",
+      "roles": ["positive", "consumer"],
+      "asserts": [
+        "文档最小声明（无 tool）且只加 WithSender：Boot 成功，用户 turn 完成且恰 1 个 decision",
+        "provider 恰服务 1 次请求，模型为 model-entry，请求 tools 不含 send（默认装配不虚构渠道面）",
+        "sender 恰记录 1 个动作：body=最终答复、target=显式用户地址、confirmed、无 call frame（deliverFresh 而非工具调用）",
+        "SessionFacts 中该答复的 agent_output 事实恰 1 份，InvocationID 等于 turn 的 InvocationID",
+        "closeIntegrityHost 的 DrainReport.Drained=true 且 Unsettled 为空（义务排空）",
+        "integrityScript.audit() 无未达/重复/未预期步骤"
+      ],
+      "consumer_path": "tagent.Boot（裸文档 + WithSender）→ Host.Invoke（user address）→ driveLocked → deliverFresh → MessageSender",
+      "evidence": "single.jsonl 与 run-1..10.jsonl 中 formal_boot_delivers_turn run=1/pass=1"
+    },
+    "negative": {
+      "name": "TestEventIntegrityFormalAssembly/missing_sender_fails_closed",
+      "roles": ["negative"],
+      "branches": [
+        {
+          "document": "不声明 send，无 sender",
+          "assert": "Boot 成功；Host.Invoke 用户 turn 返回 errors.Is(ErrHostSenderMissing)；provider 零请求",
+          "purpose": "证明 Host.Invoke 的 user-address 门独立拒绝，且拒绝发生在任何模型请求之前"
+        },
+        {
+          "document": "声明 send 工具，无 sender",
+          "assert": "Boot 返回 errors.Is(ErrHostSenderMissing)；host 未建立；provider 零请求",
+          "purpose": "证明 Boot 门先于运行期拒绝，不能以同一错误冒充 Host.Invoke 门"
+        }
+      ],
+      "evidence": "single.jsonl 与 run-1..10.jsonl 中 missing_sender_fails_closed run=1/pass=1"
+    },
+    "consumer": {
+      "name": "TestEventIntegrityFormalAssembly/formal_boot_delivers_turn",
+      "path": "根 Boot 正式装配 + Host.Invoke；未使用测试侧手工接线",
+      "evidence": "同上正锚"
+    }
+  },
+  "verification": {
+    "single": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityFormalAssembly$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.5/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/single.jsonl",
+      "log_sha256": "3db7f9f63cf7896ff78088b2606c9b06c72cb3f00b2c5808033c9a37300176bb",
+      "parsed": {
+        "parent": "TestEventIntegrityFormalAssembly run=1 pass=1 fail=0 skip=0",
+        "children": ["formal_boot_delivers_turn", "missing_sender_fails_closed"],
+        "named_subtests_run_pass": 2,
+        "unexpected_subtests": [],
+        "package": "ok github.com/SpellingDragon/tagent/tests/integration/host 1.670s"
+      }
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.5\"; : > \"$E/exits.txt\"; for i in $(seq 1 10); do id=$(python3 -c 'import uuid;print(uuid.uuid4())'); go test ./tests/integration/host -run '^TestEventIntegrityFormalAssembly$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/exits.txt\"; [ \"$rc\" -eq 0 ] || exit \"$rc\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "exits": "10 行全 exit=0（exits.txt）",
+      "parse": "逐轮 JSON 解析：父测试与 2 个具名子测试均恰 run=1/pass=1，无 fail/skip/零匹配/额外子测试 → ALL_OK（10/10）",
+      "rounds": [
+        {"round": 1, "run_id": "a3483abc-ca00-421d-a096-b0402997ad07", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-1.jsonl", "log_sha256": "68267253152608e4dfb9411b99541ef7aed1950afd2a705c5e7d4a4aaf003a83", "log_bytes": 6556},
+        {"round": 2, "run_id": "a6bf284e-5e01-4cc8-b49d-6d7847028f5a", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-2.jsonl", "log_sha256": "e89be09e014989714fc63462eea55eb37cdb1fe6ca50be789748ddaa8f46efe2", "log_bytes": 6554},
+        {"round": 3, "run_id": "c50d2a1d-86e1-4e73-b362-0262e2b4499a", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-3.jsonl", "log_sha256": "a008046dcce400873aa5a13ec42021ccc323c5e4e5bb41fcb33d9d9e44a57b66", "log_bytes": 6567},
+        {"round": 4, "run_id": "f9441d7b-1e22-4d59-9e90-5a9c9f6cedb6", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-4.jsonl", "log_sha256": "20afa0485a70e8ffad0a049c3b5b4fd0c33b6f93e081548b47dfbc5edb343b39", "log_bytes": 6571},
+        {"round": 5, "run_id": "dcc2a338-9e59-405e-af21-35981ab56f61", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-5.jsonl", "log_sha256": "7c0e8f7c9bb3755cb257751ad5d36c6131468fa514dca890987a9fd9f6f2510d", "log_bytes": 6569},
+        {"round": 6, "run_id": "d1f8a02d-2bab-4536-af73-970fa337befa", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-6.jsonl", "log_sha256": "a43fcab298e122dcc7fbcff29c55c317d7aa10b7694007d4263bb2052b69d42d", "log_bytes": 6554},
+        {"round": 7, "run_id": "6d677d42-5d3d-4bc5-ad6a-996c0348d576", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-7.jsonl", "log_sha256": "802ebd8b33eea18a53e3ebe9fb7986be794e26b4948ca56bf66225d2cb258504", "log_bytes": 6557},
+        {"round": 8, "run_id": "47cedfa9-b5c2-4d4d-aecb-6eb64284ad04", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-8.jsonl", "log_sha256": "cceee106a42c755efd79976e90560c1af5751397852a035135a4ba35c65dff2f", "log_bytes": 6551},
+        {"round": 9, "run_id": "4f4cfce8-57ee-4e35-93b1-71cb8ae84e43", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-9.jsonl", "log_sha256": "377bf4ad0673290bbf0fd51c74f6ef69929edd5dc9a27c0f48f09cce0819b6e5", "log_bytes": 6567},
+        {"round": 10, "run_id": "1087c83e-1638-426b-a800-a11ec2454b21", "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/run-10.jsonl", "log_sha256": "73b69bbe0fd79507fd5d1d99538cf5fb28ac3065b53c1cde3af0ae7b1d06ac16", "log_bytes": 6556}
+      ],
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/exits.txt"
+    },
+    "family_regression": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrity' -count=1 -race -json -timeout 20m",
+      "exit_code": 0,
+      "result": "9 个父测试（Reproduction/TaskContinuation/Delivery/ReflectionDelivery/Replacement/IdentityMatrix/DecisionFlowMatrix/Harness/FormalAssembly）与 46 个具名子测试全部 run/pass，无 fail/skip",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/family-race.jsonl",
+      "log_sha256": "d91a66d449daa73936f75d7c8715756192c0276610bd3633325c61311430e7c2"
+    },
+    "host_package": {
+      "command": "go test ./tests/integration/host -count=1 -timeout 20m",
+      "exit_code": 0,
+      "result": "ok github.com/SpellingDragon/tagent/tests/integration/host 13.091s",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/host-package.txt",
+      "log_sha256": "dba3186048cd4f958f565710c593128969fa30b69a0a08b918db91a8d1b2daf5"
+    },
+    "build_vet": {
+      "root": {
+        "command": "go build ./... && go vet ./...",
+        "build_exit": 0,
+        "vet_exit": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/build-vet-root.txt",
+        "log_sha256": "95284844a61fa52667fd2d8bae56b49820d61413320d66a63870d7154f2ec09b"
+      },
+      "wechat_bot": {
+        "command": "cd examples/wechat-bot && go build ./... && go vet ./...",
+        "build_exit": 0,
+        "vet_exit": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/build-vet-wechat.txt",
+        "log_sha256": "fc0a5123593087d470183ddbdc7e8ce5f008f66f30cb797cc778a38821da2c58"
+      },
+      "cli_host": {
+        "command": "cd examples/cli-host && go build ./... && go vet ./...",
+        "build_exit": 0,
+        "vet_exit": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/build-vet-cli.txt",
+        "log_sha256": "f0d66d83f1b56371b228d74d1313765b98697d280637b2449267d2e694ecfdfc"
+      }
+    },
+    "ownership_gate": {
+      "command": "go -C . run ./scripts/codetools event-ownership --check --json",
+      "exit_code": 0,
+      "violations": 0,
+      "counts": {"owners": 6, "symbols": 14, "packages_scanned": 31, "candidates": 48, "direct_calls": 21, "allowed": 14, "forbidden": 0, "unregistered": 0, "unowned": 0, "ambiguous": 0, "uncovered": 4, "same_name_non_target": 30},
+      "uncovered": "4 条为 04.3 已登记的回调/未注册接收者间接调用（run.go:311 host.deliver、tools.go:621 consume.sink、runtime/agent/delegate.go:414 notice.advance、runtime/agent/shutdown.go:192 notice.advance），非本叶引入，不折算为已覆盖",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/ownership.json",
+      "log_sha256": "f3dbdbc9b3703fa2d18c34afdb25ba07de13d3a09d3673e32f7cf520f658c97a"
+    },
+    "test_mirror_gate": {
+      "command": "go run ./scripts/codetools package-layout . examples/wechat-bot examples/cli-host",
+      "exit_code": 0,
+      "result": "package-layout: 559 file(s); names, skeleton pins and test mirrors hold",
+      "note": "未放宽 mirrorExemptFiles；tests/integration/ 仍为既有豁免树",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/package-layout.txt",
+      "log_sha256": "b7c2f662bc7d7c54d0f56c772a412983f72b4bfcb7c9aa354146debff18dac54"
+    },
+    "contract_cross_check": {
+      "command": "python3 scripts/check_runtime_evidence.py --check-contract --contract golden/runtime/event_integrity_scenarios.json --json",
+      "exit_code": 1,
+      "note": "非本叶验收命令，仅作源码/合同交叉核对。报错均为既存且与本叶无关：TestEventIntegrityProjection 缺 compaction_event_writer（G4 待裁，02.3 未勾选）与 TestEventIntegrityRestart 的 8 个具名子测试未登记（03.9 未勾选、合同滞后）。错误列表中没有 TestEventIntegrityFormalAssembly：本叶两个子测试与合同逐字符一致，无额外子测试。",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.5/contract-check.json",
+      "log_sha256": "dcad92284dba93c7d81b7b5b78774d805161e3f6d1129dcd5de43a7e4da8b875"
+    }
+  },
+  "pending_decisions": [
+    {
+      "id": "G4",
+      "question": "是否在根装配接入 compaction 写入点（把 Fold 的 payload 作为 CompactionEventType 事实提交并让 RebuildProjectionFromWAL 读取），从而解除 02.3/compaction_event_writer 子锚？",
+      "evidence": "02.3-summary.json：CompactionFact 仅内存、RebuildProjectionFromWAL 零生产调用、生产折叠唯一事实链产物是 compress.request。",
+      "options": [
+        "A. 授权在根装配新增 compaction 写入点（新产品行为，需另获 public API/持久格式授权；本叶未实施）",
+        "B. 裁定 G4 永久不适用，改写 02.3 验收面并归档勘误（本叶未实施）"
+      ],
+      "impact": "02.3 整叶勾选等此裁定；01.5 已在证据中如实列出，不代为实现。"
+    },
+    {
+      "id": "03.9-redelivery-seam",
+      "question": "是否把重启后保留为 open 的 owed 通知接入跨进程恢复投递（CloseInstance/Retained/RecoveryMaterial 的生产调用）？",
+      "evidence": "03.9-summary.json：restart 不提交 settle 事实，drain 未排空并具名 task-1: awaiting-delivery；义务冻结在被中断的旧实例，当前生产无跨进程改投。全仓 grep 仅测试/骨架断言调用 CloseInstance/Retained/RecoveryMaterial。",
+      "options": [
+        "A. 授权新增恢复投递接缝（跨进程/新产品行为，需另行设计与授权；本叶未实施）",
+        "B. 维持已验收的 open 保留分支，03.9 按 ready 保留（本叶未实施）"
+      ],
+      "impact": "03.9 的勾选路径取决于此裁定；01.5 不接改投，也不以测试补线。"
+    }
+  ],
+  "observations": [
+    "00.2 的 event-short 十轮最终绿证是 01.5 完成后的触发项（verify_after_01.5），不属于 01.5 的 verify_after；本叶 verify_after=[]，未代跑 00.2 十轮。本轮 family regression 已含 TestEventIntegrityReproduction 4/4 单轮绿。",
+    "正锚刻意不声明 send 工具、不加 WithSender 之外任何选项，与 01.4 的 all_legal_actions_delivered（声明 send + 显式工具动作）形成互补：01.5 验默认装配面，01.4 验声明动作面。",
+    "负锚两个分支在同一具名子测试内顺序执行，不新增嵌套子测试名，保证与 golden 合同的 (parent,name) 唯一键逐字符一致。",
+    "02 域 02.1 没有独立 evidence/02.1-summary.json（其十轮凭据登记在 ORCHESTRATION.md 台账）；本叶对 02.1 的根接线核对依据 driver.go 源码与 host.go:371/377/269 的实际调用点，而非该叶摘要。"
+  ],
+  "limitations": [
+    "未做变异测试（04.4 职责）；本叶负锚的可证伪性由 00.3 冻结的拒绝语义与 04.4 变异门另行保障。",
+    "未验证真实远端渠道/掉电恢复；01.5 只验根 Boot 默认装配与两条具名拒绝路径。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "action": "把 `- [ ] 01.5` 勾为 `- [x]`，并把文件头进度句更新为 01.1—01.7 中仅 01.5 由未勾转为已勾；不改其他叶与验收面。"
+  }
+}

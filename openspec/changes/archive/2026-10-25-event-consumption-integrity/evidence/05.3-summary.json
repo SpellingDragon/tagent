@@ -1,0 +1,41 @@
+{
+ "leaf": "05.3",
+ "title": "四篇文档终验（CI 段落转正）",
+ "status": "green",
+ "executed_at": "2026-10-25",
+ "verify_after": "05.2 已通过：bundle 门 ok=true（17 份真实证据）、workflow 自测 39 OK、checker 自测 94 OK",
+ "commands": [
+  {
+   "command": "python3 scripts/check_doc_budget.py --json",
+   "exit_code": 0,
+   "result": "ok=true; 206 files / 21934 lines == baseline（slack 0/0，未上调）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.3/doc-budget.json"
+  },
+  {
+   "command": "python3 -m unittest discover -s scripts -p 'test_check_doc_budget.py'",
+   "exit_code": 0,
+   "result": "OK（test_extra_file_fails / test_extra_lines_fail / test_tighten_refuses_to_raise_and_leaves_the_file_alone 保持红）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.3/doc-budget-selftest.log"
+  },
+  {
+   "command": "go -C . run ./scripts/codetools doc-refs docs/wiki docs/*.md",
+   "exit_code": 0,
+   "result": "no dangling file citations（7 条历史引用按引入提交解析）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.3/doc-refs.log"
+  },
+  {
+   "command": "bash scripts/lint.sh",
+   "exit_code": 0,
+   "result": "lint: ok（含 gen_godoc 68 包、proc-refs、package-layout）；勾选 05.2/05.3 后终态复跑仍 exit 0",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4/lint-post-tick.log"
+  }
+ ],
+ "documents": {
+  "README.md": "事件门一行：四 job/artifact、short 十次独立、long 六组合 7200/720、mutations、required 仅汇总；状态由『拟新增/未启用』转为『已落地（本地门通过；远端 required 待 F4）』",
+  "docs/OPERATION.md": "§5.4 事件门：四 job 命令与 artifact、killed/uncovered 判据、L1/L2/L3 边界、失败处置；标题与状态句同步转正（L1 已落地，L2/F4 待验）",
+  "docs/FACT-VOCABULARY.md": "门禁裁决不是事实（killed/uncovered、required、L1/L2/L3 只引事实身份，不入链）",
+  "docs/GLOSSARY.md": "事件门词条：三档判据与 required 只汇总的边界"
+ },
+ "deviation": "README 与 OPERATION 各一处状态句由『拟新增/未启用』改为『已落地（L1）』，行数不变（206/21934 持平）；这是 05.2 通过后的必然后续，非验收面缩水。",
+ "ticked": true
+}

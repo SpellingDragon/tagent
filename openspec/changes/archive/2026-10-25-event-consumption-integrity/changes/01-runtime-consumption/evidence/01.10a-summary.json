@@ -1,0 +1,176 @@
+{
+  "leaf": "01.10a",
+  "title": "执行资源查询面生命周期",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-24T11:06:34Z",
+  "completed_at": "2026-10-24T11:06:34Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tool/exec/event_integrity_test.go 落地包内测试 TestEventIntegrityExecLifecycle（父测试 + 6 个具名子测试）：经 RunTool.Call 正式执行入口 → Manager（Acquire/Renew/Observe/Capture/Release/Explain）→ MonitorWatch 只验收五态查询面可达性，并验收 stable/partial 两负锚“查询面不报成功/完成”。真实 tmux 进程驱动四态；retained 未确认分支复用包内既有 scriptedExecutor 端口替身，ReleaseTool/Manager 仍是正式查询面。零产品改动、零新增 public API、零根装配（01.10b 不在本叶）。",
+  "shared_input": {
+    "path": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10-summary.json",
+    "usage": "计划回写③停报产出的五态归因与泄漏实证，两叶共同输入；本叶直接据此落查询面测试，未重做归因、未采用其选项 A 的 public API/根接线。"
+  },
+  "method": "包内测试直接经 RunTool.Call（含同键复用）/ReleaseTool.Call 驱动真实 TmuxExecutor；进程仍活由 Manager.Observe（ProbeAlive）、Manager.Held 与独立 tmux has-session 三方分离取证；退出码只在 Release 答案中出现；释放后同键再由 ReleaseTool 取具名 ErrResourceUnknown；未确认停止用既有 scriptedExecutor 的 stopFn 返回 Confirmed=false，经 ReleaseTool 得到 retained 答案并保持 Held=1；stable 态由包内 Monitor.Poll/Status 观察，partial 态取首帧（alpha，尚无 omega）。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "tmux": "tmux 3.6a (/opt/homebrew/bin/tmux)",
+    "module": "github.com/SpellingDragon/tagent",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a"
+  },
+  "artifacts": [
+    {
+      "path": "tool/exec/event_integrity_test.go",
+      "sha256": "65bfa300f50899f38e92db4cfe14d632cdadf873d2f4ecab9455b291128715d1",
+      "bytes": 21324,
+      "lines": 513,
+      "note": "拟新增包内测试（package exec），与 exec-lifecycle 产品文件同包不同文件；含 TestEventIntegrityExecLifecycle 的 6 个具名子测试与 10 个局部 helper；既有 exec_test.go / tmux_executor_test.go 原样未改。"
+    }
+  ],
+  "product_changes": [],
+  "consumers": {
+    "formal_entry": "tool/exec 包内正式入口：NewRunTool(manager).Call（exec_run）与 NewReleaseTool(manager).Call（exec_release）。",
+    "query_faces": "Manager.Acquire（经 RunTool.Call 间接）、Manager.Renew、Manager.Observe、Manager.Capture、Manager.Release、Manager.Explain、Manager.Held/Acquired/Reused/Released；Monitor.Poll/Status（watch/stable/suspect）。",
+    "separation_evidence": "调用返回后同时断言 Manager.Held=1、Manager.Observe→ProbeAlive、独立 `tmux has-session` 成功，三条分离证据共同否定“调用返回=进程结束”。",
+    "exit_code_evidence": "同键 exec_run 答案不含 exit=；退出码 7 只在 exec_release 的 `released ... after confirmed stop: exit=7` 中出现。",
+    "named_unknown_evidence": "释放后同键 exec_release 返回 nil 答案 + ErrResourceUnknown；Manager.Explain 同键亦 ErrResourceUnknown。",
+    "retained_evidence": "scriptedExecutor.Stop 返回 Confirmed=false 时，exec_release 答案 `retained probe/retained-unconfirmed: stop unconfirmed: the executor did not observe an ending`，Manager.Held=1、Released=0、Explain.LastStop.Confirmed=false。"
+  },
+  "subtests": [
+    {
+      "name": "returned_call_does_not_prove_exit",
+      "anchor": "正①（兼消费者锚）",
+      "assertion": "exec_run 返回 `executed tmux/<key>: alpha`；答案不含 exit=/released，且无成功/完成词。随后 Held=1、Observe→ProbeAlive、tmux has-session 成功、Renew 成功且 Explain.Renewed=1、Explain 的 obligations 仍含 unsettled。"
+    },
+    {
+      "name": "partial_output_is_not_completion",
+      "anchor": "负②",
+      "assertion": "首帧答案含 alpha 且不含 omega（部分输出），同时 Observe→ProbeAlive、Held=1、Explain 仍 unsettled、Monitor 首轮 watch；对答案与 Monitor 词表断言无 success/complete/done/finished 形态。"
+    },
+    {
+      "name": "same_key_capture_sees_more_output",
+      "anchor": "正②",
+      "assertion": "首轮 exec_run 后经 Manager.Capture 等到 alpha+omega 的后续帧；同键第二次 exec_run 答案同时含 alpha 与 omega，Acquired=1、Reused=1、Held=1；答案不含 exit=/released 与完成词。"
+    },
+    {
+      "name": "release_reports_exit_code",
+      "anchor": "正③",
+      "assertion": "进程 `sh -c 'echo beta; sleep 1; exit 7'` 真实退出（Manager.Observe→ProbeDead 后）由 exec_release 返回 `released ... after confirmed stop: exit=7`；Held=0、Released=1、Explain→ErrResourceUnknown；释放前的 exec_run 答案不含 exit=。"
+    },
+    {
+      "name": "released_or_named_unknown",
+      "anchor": "正④",
+      "assertion": "活进程显式释放返回 `released ... after confirmed stop: exit=-1`（未观察到的退出码不伪报为 0），Held=0；同键再释放返回 nil + ErrResourceUnknown，Explain 亦 ErrResourceUnknown；未确认停止分支返回 `retained ... stop unconfirmed: <reason>`，Held=1、Released=0、Explain.LastStop.Confirmed=false、scripted stops=1。"
+    },
+    {
+      "name": "stable_is_not_success",
+      "anchor": "负①",
+      "assertion": "Monitor 从 watch 到 stable，同时 Manager.Observe→ProbeAlive、Held=1；Monitor.Status=stable；同键 exec_run 答案仍为 `executed ... gamma`，无成功/完成词；Explain 仍 unsettled；Monitor 三态词表（watch/stable/suspect）逐项断言不含 success/complete/done/finished。"
+    }
+  ],
+  "negative_anchor_registration": {
+    "question": "tool/exec 是否存在把 stable 或 partial output 报为成功/完成的查询面",
+    "answer": "不存在。包内查询面的判词只有：RunTool.Call=`executed <key>: <frame>`；ReleaseTool.Call=`released ... after confirmed stop: exit=N` 或 `retained ... stop unconfirmed: <reason>`；Manager.Observe=alive/dead/unknown；Manager.Capture=原始帧；Manager.Explain=Held/LastStop/Obligations（义务 `the execution outcome is unsettled` 直到确认释放）；Monitor.Poll/Status=watch/stable/suspect（静默分类）。",
+    "asserted_shape": "测试以“无任何面可报成功”为可判形态：对每个被使用的查询答案做成功/完成词扫描，对 MonitorStatus 全部三个常量做同一扫描，并断言 Explain 的 unsettled 义务仍在；不虚构不存在的成功报告面，也不把 stable/partial 追认为完成。",
+    "confirmed_stop_is_not_task_success": "`released ... exit=N` 是执行结束/停止证据，不是业务任务成功；本叶未把该答案解释为 success，证据中如实分栏。"
+  },
+  "verification": {
+    "single": {
+      "command": "go test ./tool/exec -run '^TestEventIntegrityExecLifecycle$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.10a/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/single.jsonl",
+      "log_sha256": "50a47f02ef1f603a83d4849cfd12c4c591773e6324ab2793cb0598849fea2ad1",
+      "log_bytes": 10164,
+      "parsed": {
+        "parent": "TestEventIntegrityExecLifecycle run=1 pass=1",
+        "children_run_pass": 6,
+        "children": [
+          "returned_call_does_not_prove_exit",
+          "partial_output_is_not_completion",
+          "same_key_capture_sees_more_output",
+          "release_reports_exit_code",
+          "released_or_named_unknown",
+          "stable_is_not_success"
+        ],
+        "fail": 0,
+        "skip": 0,
+        "zero_match": false
+      }
+    },
+    "ten_rounds": {
+      "command": "go test ./tool/exec -run '^TestEventIntegrityExecLifecycle$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.10a/run-$i.jsonl\" 2>&1",
+      "independent_processes": 10,
+      "count_flag": "-count=1 每轮独立进程；未使用 -count=10，未合并日志",
+      "exit_codes": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/exits.txt",
+      "exits_sha256": "2b436b67ce1a50322b0e4e6ae3d4b36e5aa7ef31342793d0b0cceb21623ed288",
+      "parsed_each_round": "7 run / 7 pass（父 + 6 子测试），0 fail，0 skip，0 zero-match；每轮 STATE 日志均含 exit=7、exit=-1、retained、stable、partial、same-key 六类证据。",
+      "runs": [
+        {"run": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-1.jsonl", "sha256": "2b0180f9201065c89cdcc5d64ba10da5efb71310ce654710a5bf97794ed526e0", "bytes": 10167},
+        {"run": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-2.jsonl", "sha256": "f4ed648e09bb3b0c6d2fd5a7b1a9c33671aa7052b6c20d7ab5d0e713c7f89ad7", "bytes": 10163},
+        {"run": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-3.jsonl", "sha256": "b118c718683f9ee0cb70dfd370def7fda78242fd0eb21949cdd1ceb4bc5bf9d2", "bytes": 10163},
+        {"run": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-4.jsonl", "sha256": "32e251ee49a919185fd48d40af27e0d718145db6f9fd4cf9d403ff67d828e288", "bytes": 10161},
+        {"run": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-5.jsonl", "sha256": "3929b869ccece1b5273b5968e464279441560b144e9d696b59bc5beda22b1aee", "bytes": 10163},
+        {"run": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-6.jsonl", "sha256": "28bd07bfe8e5b1b8b681a4d5fc0bf2cee84a8cce6e8372a80ae56ac9832f9f30", "bytes": 10162},
+        {"run": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-7.jsonl", "sha256": "2a062f3aab21e2248471d1ccbf029a60b5668370276e7bc097a45192c7cc18bf", "bytes": 10162},
+        {"run": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-8.jsonl", "sha256": "bebe6d3decf6ca2e38dc0c417f003cb43a51f21b84ce17e2403050a29b955149", "bytes": 10163},
+        {"run": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-9.jsonl", "sha256": "2398e5ab737afbb1e3c9fdff66178e0e576ae95c1b05d5f130ebb46f6d033bc3", "bytes": 10165},
+        {"run": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10a/run-10.jsonl", "sha256": "b3e7b72d20c985ed6fd6f23193e0a3cda75aa8460baa76384f6ac0c982aee6ee", "bytes": 10165}
+      ]
+    },
+    "existing_package_tests": {
+      "command": "go test ./tool/exec/ -count=1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "output": "ok github.com/SpellingDragon/tagent/tool/exec 5.209s"
+    },
+    "vet": {
+      "command": "go vet ./tool/exec/",
+      "exit_code": 0,
+      "output": "VET_OK"
+    },
+    "gofmt": {
+      "command": "gofmt -l tool/exec/",
+      "exit_code": 0,
+      "output": "空（无未格式化文件）"
+    },
+    "workspace": {
+      "command": "git status --short tool/exec/",
+      "output": "?? tool/exec/event_integrity_test.go（仅拟新增测试；tracked 产品文件无 diff）",
+      "leaked_tmux_sessions": "无（tmux list-sessions | grep tagent-ei- 为空）",
+      "head": "6cc441436c2aab15edcee34cf2561086232c8311（基线未变）"
+    }
+  },
+  "red_lines": [
+    "MUST NOT 只凭调用返回判定资源结束：已由 Held=1 + Observe→ProbeAlive + tmux has-session 三方分离证据否定。",
+    "MUST NOT 以稳定/部分输出冒充成功或完成：已对答案与 Monitor 词表做成功/完成词扫描，并断言 Explain 的 unsettled 义务仍在。",
+    "不新增 public API：本叶无产品改动、无导出符号新增。",
+    "不接根装配：未改 host.go/run.go/tools.go 等；Boot/Host.Invoke 归 01.10b。",
+    "不新建第二套执行资源仓：全部经既有 Manager/TmuxExecutor/Monitor。",
+    "未确认停止不伪报释放：retained 分支断言 Held=1、Released=0、LastStop.Confirmed=false。"
+  ],
+  "errors_during_implementation": [
+    "首轮 single 日志的 `STATE released` 行把已置空的 error 以 %q 打印，出现 `unknown=%!q(<nil>)` 可读性瑕疵；仅日志格式问题，不影响断言。已在十轮前改为打印具名 ErrResourceUnknown 并重跑 single（替换后 single.jsonl 为最终版）。"
+  ],
+  "limitations": [
+    "tmux 依赖沿用包内既有约定：`if !IsTmuxAvailable() { t.Skip(...) }`（与 tmux_executor_test.go 一致）。本机 tmux 3.6a 可用，单轮与十轮均真实执行、无 skip；在无 tmux 的宿主上该测试会 skip，属既有包约定，04.2 检查器应如实读取而不将其计为本叶绿证。",
+    "retained/unconfirmed 分支复用包内既有 scriptedExecutor 端口替身，因为真实 tmux 无法确定性制造“停止未确认”；Manager.Release/ReleaseTool.Call 仍为正式面，未改写 Manager 内部状态。",
+    "本叶只验收查询面可达性；返回后持续续租/状态事件通知/生产 Sweep/Host.Close/重启接管分别归 01.10b（未实施、未勾选），本证据不宣称这些能力存在。",
+    "‘无成功报告面’是对本测试实际枚举的查询面（RunTool.Call、ReleaseTool.Call、Manager.Observe/Capture/Explain/Held、Monitor.Poll/Status）的事实登记，不是对全包所有符号的形式化否定证明；枚举清单已在本文件 consumers/negative_anchor_registration 中逐项列明。"
+  ],
+  "tasks_md_update": {
+    "path": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.10a",
+    "from": "- [ ] 01.10a **执行资源查询面生命周期**",
+    "to": "- [x] 01.10a **执行资源查询面生命周期**",
+    "header_sync": "域头 ‘01.10a/01.10b … 均尚未实施’ 同步为 ‘01.10a 已实施勾选、01.10b 尚未实施’，不勾选 01.10b。"
+  },
+  "verify_after": [],
+  "status": "complete",
+  "checkbox": "[x]"
+}

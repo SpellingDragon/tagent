@@ -1,0 +1,596 @@
+{
+  "leaf": "00.1",
+  "change": "event-consumption-integrity",
+  "domain": "00-contract-evidence",
+  "artifact": "contract-inventory",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "scope": "只盘点 E1-E8 八类事件机制的生产入口、事实身份、消费者、确认/保留点、待验证断言与现行规格引用；不修产品、不改主规格、不把静态观察定性为缺陷。",
+  "method": "每个 production_entry 的 file:line 均以 Read 打开该行所在源码块复核后写入，未沿用记忆或规划期行号；unverified_assertion 一律写明“静态”与待验主体，措辞为待运行验证的静态风险。",
+  "non_defect_rule": "无调用声明、Seq=0、局部内存字段与零引用结构按 findings.md 的定性边界只入盘点与静态风险栏，不写成已证实缺陷；事实定性统一交给 00.2 行为复现与 00.3 冻结裁定。",
+  "mechanisms": [
+    {
+      "id": "E1",
+      "title": "用户/HTTP 输入",
+      "mechanism": "三条生产入口汇入同一输入事实提交路径。(a) 微信 hostRuntime.Drive 组装 InvokeRequest{TriggerSource:\"user\"} 调 host 注入的 invoke 函数；(b) CLI cliSession.invoke 直接调 tagent.Run.Invoke；(c) 宿主 loopback 面 POST /task 由 hostFace.inject 先回 202 再异步调 Host.Invoke。Host.Invoke 校验会址完整与未关闭、按需铸 invocation 号、取会址门后交 driveLocked；driveLocked 在门内读 baseline 再调 Run.Invoke。Run.Invoke 对每条输入消息建 event.Event（typeOf 依角色定 Type），逐条 commitFact 成 range 入口事实，再 loop.Drive 驱动。",
+      "production_entry": [
+        {
+          "file": "host.go",
+          "line": 579,
+          "symbol": "(*Host).Invoke",
+          "read_verified": "Read host.go:570-607"
+        },
+        {
+          "file": "host.go",
+          "line": 614,
+          "symbol": "(*Host).driveLocked（门内读 baseline=len(SessionFacts) 后调 run.Invoke）",
+          "read_verified": "Read host.go:609-637"
+        },
+        {
+          "file": "host.go",
+          "line": 2029,
+          "symbol": "(*hostFace).inject（POST /task，路由见 host.go:1993）",
+          "read_verified": "Read host.go:1986-2065"
+        },
+        {
+          "file": "invoke.go",
+          "line": 34,
+          "symbol": "(*Run).Invoke",
+          "read_verified": "Read invoke.go:34-68"
+        },
+        {
+          "file": "invoke.go",
+          "line": 58,
+          "symbol": "evt.Key = r.commitFact(evt)（每条输入一条事实）",
+          "read_verified": "Read invoke.go:41-60"
+        },
+        {
+          "file": "examples/cli-host/main.go",
+          "line": 206,
+          "symbol": "(*cliSession).invoke -> rt.Invoke(tagent.Run)",
+          "read_verified": "Read examples/cli-host/main.go:198-219"
+        },
+        {
+          "file": "examples/wechat-bot/wechat.go",
+          "line": 267,
+          "symbol": "(*hostRuntime).Drive -> h.invoke(InvokeRequest)",
+          "read_verified": "Read examples/wechat-bot/wechat.go:246-280"
+        }
+      ],
+      "fact_identity": "输入事实身份是 InstanceID+InvocationID+EventID：未预置 Key 时由 mintEventID 铸造（facts.go:40），事实携带 InvocationID；host 侧 invocation 号由 nextInvocation 铸（host.go:668、host.go:810），微信侧由 SessionRouter.NextInvocation 铸。同一 invocation 的多条输入各成一条事实，不合并成一条。通知四元 (TaskID,Round,Kind,Seq) 不适用于本类；typeOf 依消息角色决定 Type（invoke.go:155）。",
+      "consumers": [
+        "loop 的 range 装配读取 Invocation.Ready（invoke.go:61-67 交 loop.Drive）",
+        "attachDeclaredReplay / recordMapped 把事实并入会话投影并推进 ended 边界（facts.go:102、facts.go:66）",
+        "noticeProjection.NoticeBoundary 以 ended 为通知读取边界（facts.go:164）",
+        "age_foldSessions.SessionOf 依 r.facts 反查事实所属会话（age_fold.go:165）",
+        "Host.deliverFresh 按 baseline 之后的 assistant 正文投递（host.go:882）"
+      ],
+      "confirmation_or_retention": "输入没有独立确认点：commitFact 进入事实表即视为已提交，driveLocked 的会址门（lockAddressContext，host.go:867）把同会址的用户回合与通知回合串行。未送达的输入不做重试保留；微信入站只有 SeenStore 层面的 Admit 去重（wechat.go:234），不构成输入事实的确认账。",
+      "unverified_assertion": [
+        "静态：hostFace.inject 先 WriteHeader(202) 再起 goroutine 调 Host.Invoke（host.go:2055-2064），202 只表示受理、不表示回合结果；部署方是否把该受理当“已交付”未经运行验证。",
+        "静态：hostFace.inject 用 f.host.userAddress() 取“最后准入的用户会话”（host.go:2050），与 findings EVID-02 的二次提交路径相关；该取值在并发注入下指向哪个会话须由 00.2 复现验证，本轮不定性。",
+        "静态：CLI 入口走 tagent.Run.Invoke（examples/cli-host/main.go:206）而非 Host.Invoke，因此不经过 deliverFresh；两入口的投递语义差异未做运行对拍。"
+      ],
+      "spec_refs": [
+        "persistent-event-loop",
+        "inbound-intent-declaration",
+        "resident-continuity",
+        "framework-flow-adapter"
+      ],
+      "historical_or_unsupported_boundary": "归档 event-turning 设计写明空 Input，而当前 fireNoticeTurn 同时提交 Feedback 正文事实（host.go:675-690）并把同正文放进 InvokeRequest.Input（host.go:691-696）。历史设计不改写，此处只登记差异，交由 00.2 用当前正式入口证明可达性。"
+    },
+    {
+      "id": "E2",
+      "title": "工具与子代理任务通知",
+      "mechanism": "每个原生 callable 工具经 Run.wrap 包成 admissionGate{task.Wrap(manager, toolProducer, WithResultRecorder(r.record), WithMailbox(r.sink), WithApprover(approve))}。Wrapper.Call 读 CallFrame 取调用身份，按 ruling 分 run/hold/deny；run 走 manager.Admit，重放返回 AdmissionDedup，新调用则 go execute。execute 在工具返回后写结果事实、依 callErr/recordErr 定 status 与 kind、构造 Notice{TaskID,Round,Kind,Seq:0,Event:fact}、registry.Advance 提交状态迁移与 outbox envelope，再 w.mailbox 进入 Run.sink：sink 先 bookNotice（TrackDelivery→AcceptNotice→Site→claim/consume）再 loop.Backflow(invocationID, notice) 回灌发起 invocation 的下一 decision。终态通知另有一条经理侧通道：Run.deliver 注册路由→AcceptNotice→observeSettleDelivery 提交 TypeTaskSettled 事实并跑 After pass。通知身份在 MemoryRegistry.IssueNotice 路径由 NoticeSequencer 铸造。",
+      "production_entry": [
+        {
+          "file": "tools.go",
+          "line": 613,
+          "symbol": "(*Run).wrap（620 行 task.Wrap + WithMailbox(r.sink) + WithApprover）",
+          "read_verified": "Read tools.go:601-640"
+        },
+        {
+          "file": "runtime/task/wrapper.go",
+          "line": 165,
+          "symbol": "(*Wrapper).Call",
+          "read_verified": "Read runtime/task/wrapper.go:160-198"
+        },
+        {
+          "file": "runtime/task/wrapper.go",
+          "line": 213,
+          "symbol": "(*Wrapper).run（227 行 go w.execute）",
+          "read_verified": "Read runtime/task/wrapper.go:209-229"
+        },
+        {
+          "file": "runtime/task/wrapper.go",
+          "line": 285,
+          "symbol": "(*Wrapper).execute（302 行 Notice{... Seq: 0}）",
+          "read_verified": "Read runtime/task/wrapper.go:280-316"
+        },
+        {
+          "file": "runtime/task/handoff.go",
+          "line": 218,
+          "symbol": "NoticeSequencer（239 Issue / 266 MemoryRegistry.IssueNotice）",
+          "read_verified": "Read runtime/task/handoff.go:211-275"
+        },
+        {
+          "file": "facts.go",
+          "line": 347,
+          "symbol": "(*Run).sink（355 行 loop.Backflow）",
+          "read_verified": "Read facts.go:340-357"
+        },
+        {
+          "file": "tools.go",
+          "line": 70,
+          "symbol": "(*Run).observeSettleDelivery（49 行 (*Run).deliver）",
+          "read_verified": "Read tools.go:49-125"
+        },
+        {
+          "file": "runtime/state/mailbox.go",
+          "line": 59,
+          "symbol": "(*MemoryStore).AcceptNotice（176 Claim / 201 Consume / 236 Reclaim）",
+          "read_verified": "Read runtime/state/mailbox.go:48-124；Claim/Consume/Reclaim 行号经 grep -n 定位"
+        },
+        {
+          "file": "facts.go",
+          "line": 178,
+          "symbol": "noticeProjection.NoticesFrom（155 类型定义）",
+          "read_verified": "Read facts.go:144-205"
+        },
+        {
+          "file": "settle_turn.go",
+          "line": 129,
+          "symbol": "(*SettleDriver).ObserveCommit",
+          "read_verified": "Read settle_turn.go:119-162"
+        }
+      ],
+      "fact_identity": "通知身份固定四元 (TaskID,Round,Kind,Seq)：task.Notice（runtime/task/registry.go:14-36）与 Notice.FactKey() 的拼写 \"%s:%d:%s:%d\"（runtime/task/fact.go:18-20）。Event 字段只是已提交事实的引用，不替代身份（registry.go:25-29）；Text 不入身份（registry.go:30-35），重投同正文保持首份 fact key。同身份不同内容被具名拒绝：noticeSeat 返回 ErrNoticeConflict（runtime/state/mailbox.go:95-107）。终态交付事实用 settle-<FactKey hex>（tools.go:123），重投保持同一身份。",
+      "consumers": [
+        "loop.Backflow 把通知回灌发起 invocation 的下一 decision（facts.go:355）",
+        "noticeProjection.NoticesFrom 供 range 增量读通知（facts.go:178）",
+        "SettleDriver.ObserveCommit 由 TypeTaskSettled 事实触发无人回合（settle_turn.go:129；装配 host.go:377-383）",
+        "MemoryManager 的 outbox/envelope 与 retry（runtime/task/handoff.go:260-300）",
+        "Run.Close 的 settleOwed 按 obligations 分类等待（invoke.go:123-152）",
+        "mailbox 的 Claim/Consume/Reclaim 供执行方与恢复扫描（runtime/state/mailbox.go）"
+      ],
+      "confirmation_or_retention": "邮箱三段时间点：AcceptNotice（受理，按身份幂等且同身份不同内容被拒）、Claim（执行方领取）、Consume（消费完成并写 ConsumeReceipt）；Reclaim 允许对未消费项重领（ErrClaimSettled 拒已消费）。投递被接受不等于业务消费完成：deliver 返回 DeliveryAccepted 只说明进入邮箱且交付事实已提交（tools.go:49-61）；observeSettleDelivery 对同一 settleDeliveryKey 二次提交直接返回（tools.go:105-110）。",
+      "unverified_assertion": [
+        "静态：Wrapper.execute 固定写 Seq: 0（runtime/task/wrapper.go:302）而未经 NoticeSequencer.Issue，而 MemoryRegistry.IssueNotice 走 sequencer（handoff.go:266-275）。同一 task 的多次/多类通知是否因 Seq 恒 0 而共享同一身份，须由 00.2 的 duplicate_notice_material 行为复现验证；本轮不据此定性缺陷。",
+        "静态：execute 在 w.mailbox 返回错误时直接 return（runtime/task/wrapper.go:312-314），不回滚已提交的 Advance；该分支的可达性与补偿路径待运行验证。",
+        "静态：AcceptNotice 的幂等表 m.accepted 是 MemoryStore 内的进程内 map（runtime/state/mailbox.go:99-106、122），重启后如何重建未见生产读取路径；不得据此断定跨重启丢失去重，须证。",
+        "静态：SettleDriver.firing 是驱动器级单标志，忙时 ObserveCommit 直接返回 nil 不排队（settle_turn.go:151-155）；是否造成终态通知永不续转，取决于后续是否有正式补偿，交 00.2/01.3 判定。"
+      ],
+      "spec_refs": [
+        "async-task-execution",
+        "unified-task-semantics",
+        "subagent-turn-execution",
+        "persistent-event-loop",
+        "task-reentry"
+      ]
+    },
+    {
+      "id": "E3",
+      "title": "输出与渠道发送",
+      "mechanism": "宿主把所有出站正文收敛到 MessageSender 一个面，并用 hostDeliveryMeter 包装计数。用户回合结束时 driveLocked 调 deliverFresh，取 baseline 之后的纯 assistant 正文逐条 Send；模型显式 send 由 hostSendTool.Call 用 hostCallAddress 取会址后 Send，失败渲染成 [send_denied] 结果文本。微信侧 hostSender.Send→sendWithLineage→sendToUser 完成目标解析（只认已绑定的精确会址）、typing 清理、超 2000 字的长文分片或截断、附件投递，失败时 emitReceipt 把回执注入该会址内部 inbox。",
+      "production_entry": [
+        {
+          "file": "host.go",
+          "line": 882,
+          "symbol": "(*Host).deliverFresh（901 freshAssistantOf）",
+          "read_verified": "Read host.go:878-916"
+        },
+        {
+          "file": "host.go",
+          "line": 109,
+          "symbol": "type MessageSender（126 (*hostDeliveryMeter).Send / 136 acceptedCount）",
+          "read_verified": "Read host.go:101-141"
+        },
+        {
+          "file": "host.go",
+          "line": 1632,
+          "symbol": "(*hostSendTool).Call（1602 类型定义，1658 sender.Send）",
+          "read_verified": "Read host.go:1596-1677"
+        },
+        {
+          "file": "examples/wechat-bot/wechat.go",
+          "line": 364,
+          "symbol": "(*hostSender).Send（369 sendWithLineage / 377 sendToUser）",
+          "read_verified": "Read examples/wechat-bot/wechat.go:351-433"
+        },
+        {
+          "file": "examples/wechat-bot/wechat.go",
+          "line": 437,
+          "symbol": "(*hostSender).deliverFiles（464 emitReceipt）",
+          "read_verified": "Read examples/wechat-bot/wechat.go:435-479"
+        },
+        {
+          "file": "examples/wechat-bot/wechat.go",
+          "line": 277,
+          "symbol": "(*hostRuntime).Drive 失败回合的兜底 Send",
+          "read_verified": "Read examples/wechat-bot/wechat.go:270-279"
+        }
+      ],
+      "fact_identity": "出站没有事件身份，只有动作身份分片：deliverFresh 一次调用按正文逐条 Send（Send 签名只有 (ctx,target,content)，host.go:109-112，无动作号）；hostSendTool 的动作可经 CallFrame 关联到 CallID，但 Send 本身不携带该号（host.go:1654-1661）；微信长文分片、附件投递、失败回执各自是独立动作（wechat.go:409-432、437-447）。回执正文自描述身份：[delivery-receipt] 投递终态=… 血统=…，血统固定 delivery_receipt 且不递归（wechat.go:453-479）。",
+      "consumers": [
+        "微信通道 wechatOutbound.SendTextToUser（wechat.go:424）",
+        "hostDeliveryMeter.acceptedCount 供 /metrics 的投递计数（host.go:136、host.go:1992）",
+        "internalInbox 把回执排队给该会址下一回合（wechat.go:303 InjectInternal、322 Drain）",
+        "CLI 宿主不经 sender：直接打印 SessionHistory（examples/cli-host/main.go:214）"
+      ],
+      "confirmation_or_retention": "MessageSender.Send 只返回 error，成功只代表出站面接受，不能证明远端送达（host.go:109-112 的 redline 也如此声明）。deliverFresh 对拒绝只 assemblyWarn，不重试、不登记未确认（host.go:892-894）。hostSendTool 把失败渲染为 [send_denied] 文本并让回合继续（host.go:1658-1666）。微信侧会址未绑定即具名拒绝 errNoSendTarget 并留 no-target 回执（wechat.go:387-391）；文本失败留 send-failed 回执并把 error 回调用方（wechat.go:424-428）。已确认/未确认的分账由 01.4 落地，本轮只登记现状。",
+      "unverified_assertion": [
+        "静态：Send 返回 nil 在微信 SDK 语义下是否覆盖“服务端已受理”，本轮未取证；不得把“已送出请求”当“已确认送达”。",
+        "静态：deliverFresh 的 baseline 是 len(h.run.SessionFacts(addr))（host.go:626），在会址门内读取；若通知回合（fireNoticeTurn）在用户回合之后插入 assistant 正文，deliverFresh 是否会重复投递历史正文，须由 00.2 的 request_and_send_identity_correlation / duplicate_notice_material 验证。",
+        "静态：显式 send 与 deliverFresh 共用一个 sender 但无共享动作账，一次发送成功是否覆盖另一动作的未确认状态未取证（design D1.2/D6 只冻结义务）。",
+        "静态：微信长文超过 2000 字时先用 longText 分片，失败才截断（wechat.go:410-421），分片与截断两条路径的送达粒度差异未做运行对拍。"
+      ],
+      "spec_refs": [
+        "wechat-host-send-tool",
+        "delivery-dispatch-receipts",
+        "telemetry-channel"
+      ]
+    },
+    {
+      "id": "E4",
+      "title": "治理与审批",
+      "mechanism": "治理门是 governance.Policy.Judge：读 plugin.CallPass，按 RiskContext 与规则表裁决；critical 走 riskCritical（无审批面即具名拒绝；有则按 (tool,argsDigest) 查审批记录，未批准即 hold 并确保请求已注册）。装配侧 Run.wrap 用 policyRuling(r.policy) 或 r.approver 作为 task.Approver，Wrapper.Call→ruling 得 run/hold/deny 三态：run 执行、hold 把任务推进 StatusAwaitingApproval 并回 HoldReceipt、deny 经 recorder 写配对结果后返回 ErrDenied。审批请求由 ApprovalManager.Request 先落文件再广播到 channel，Decide 记录裁决且重复回复幂等；微信侧 approvalGateway.Deliver 发审批卡片、Resolve 解析 approve/reject <digest 前缀> 并调 Decide；CLI 侧 runApprovalCLI 以 by=cli 走同一 Resolve。",
+      "production_entry": [
+        {
+          "file": "evolution/governance/policy.go",
+          "line": 245,
+          "symbol": "(*Policy).Judge（332 riskCritical，464 dispositionFor）",
+          "read_verified": "Read evolution/governance/policy.go:240-340"
+        },
+        {
+          "file": "tools.go",
+          "line": 613,
+          "symbol": "(*Run).wrap 取 policyRuling(r.policy) 或 r.approver 作 Approver",
+          "read_verified": "Read tools.go:601-622"
+        },
+        {
+          "file": "runtime/task/wrapper.go",
+          "line": 202,
+          "symbol": "(*Wrapper).ruling（237 hold / 269 deny）",
+          "read_verified": "Read runtime/task/wrapper.go:200-278"
+        },
+        {
+          "file": "runtime/task/approval/approval_store.go",
+          "line": 130,
+          "symbol": "(*ApprovalManager).Request（179 Decide / 215 Lookup）",
+          "read_verified": "Read runtime/task/approval/approval_store.go:120-215"
+        },
+        {
+          "file": "examples/wechat-bot/wechat_approval.go",
+          "line": 148,
+          "symbol": "(*approvalGateway).Resolve（122 Deliver / 225 approvalRuling / 240 policyRuling / 267 runApprovalCLI）",
+          "read_verified": "Read examples/wechat-bot/wechat_approval.go:115-278"
+        },
+        {
+          "file": "examples/wechat-bot/wechat.go",
+          "line": 831,
+          "symbol": "命令处理内 gateway.Resolve(msg.FromUserID, msg.Text())",
+          "read_verified": "grep -n \"Resolve(\" examples/wechat-bot/wechat.go 命中 831"
+        },
+        {
+          "file": "examples/wechat-bot/main.go",
+          "line": 23,
+          "symbol": "runApprovalCLI(gateway, os.Args[1:]) 在登录前处理 approve/reject",
+          "read_verified": "Read examples/wechat-bot/main.go:17-26"
+        }
+      ],
+      "fact_identity": "审批身份分两层：请求层 ApprovalSubject.ID（newApprovalRequestID，policy.go:453）+ ArgsDigest（approval_store.go:136-140）；任务层 task.Hold{TaskID, ApprovalID, ExpectedDigest}（wrapper.go:247-252），ApprovalID 由 NewApprovalID() 另铸。裁决幂等键是请求 ID：a.index[id] 命中即返回首个请求（approval_store.go:154-157），已批准/已拒绝再 Decide 返回首个裁决（approval_store.go:189-193）。裁决者记在 by 字段（wechat:<userID> 或 cli，wechat_approval.go:162）。",
+      "consumers": [
+        "task.Wrapper 的 run/hold/deny 三态分支（runtime/task/wrapper.go:188-197）",
+        "Policy.record 的拒绝/审计流水（policy.go:500）",
+        "ApprovalManager 的 channel 广播与 DeliveryGaps 可视缺口（approval_store.go:112、164-166）",
+        "审批人经微信命令（wechat.go:831）或 CLI（main.go:23）回复裁决",
+        "invoke.go settleOwed 把 awaiting-approval 计为未结义务（invoke.go:123-152，ObligationKind 见 registry.go:111-120）"
+      ],
+      "confirmation_or_retention": "Request 先 a.write 落文件再把快照广播到每个 channel；channel 失败只记 DeliveryGap 且不让注册失败（approval_store.go:162-168）。Decide 首次裁决生效、重复回复幂等，过期后拒绝 ErrApprovalExpired（approval_store.go:194-197）。Lookup 对未批准会触发节流重扫请求目录，使外部写入的裁决在运行中可见（approval_store.go:212-214）。信任边界：Resolve 只接受白名单 approver 或 cli，其余具名拒绝（wechat_approval.go:154-156）；digest 前缀不足位数或命中多条都具名拒绝（wechat_approval.go:174-192）。",
+      "unverified_assertion": [
+        "静态：riskCritical 每次裁决按 (tool,argsDigest) Lookup 复用已批准记录（approval_store.go:205-215），同一 digest 被不同 task/调用复用时是否越权放行，须行为验证；不得仅凭静态读定性。",
+        "静态：Hold.ApprovalID（NewApprovalID）与 ApprovalSubject.ID（newApprovalRequestID）在两处独立铸造，源码未见互相绑定；请求与 hold 的对应关系待 00.2/02.5 验证。",
+        "静态：审批请求落盘在 ApprovalManager.dir，进程重启后的 rebuild 与内存 index 是否一致未验证（rebuild 见 approval_store.go:328）。",
+        "静态：ApprovalManager.Request 的 index 命中即返回既有请求（approval_store.go:154-157），未比较 risk/rule/reason；同 ID 不同证据的重放是否被静默接受，待验。"
+      ],
+      "spec_refs": [
+        "approval-channels",
+        "tool-lifecycle-management",
+        "unified-task-semantics"
+      ],
+      "historical_or_unsupported_boundary": "findings 记“旧 approval spec 描述根 tagent approve”。核实：仓库根无 main.go（ls main.go 不存在），生产审批回应入口只有 examples/wechat-bot 的 approve/reject（main.go:23 -> runApprovalCLI）与微信命令（wechat.go:831）。旧根 CLI 属历史描述，不冒充当前支持的生产机制，本叶不据此补新产品。"
+    },
+    {
+      "id": "E5",
+      "title": "冥想与显式跨会话回流",
+      "mechanism": "反射由提交事件驱动：meditation.Driver.ObserveCommit 读提交事实，只对 hostFacingStamp 的触发源继续（driver.go:104），按 interval 地板与 firing 单飞标志决定后 go fire；fire 再读 watermark 的 minGap 地板，满足则 reflection.Tick。反射回合经 runReflectionInput.InjectReflection 铸 \"<session>#meditation-<n>\" invocation、调 run.InjectEvent 提交事实并驱动该 agent 自己的 loop session，只有 Terminal==KindCompleted 才记 ReflectionConsumed 并由 reflection 推进 AnchorStore watermark。显式跨会话回流是模型调 deliver_summary 工具：DeliverSummaryTool.Call 对每个 deliver_to 目标的 active session 各 CommitToSession 一条 TypeExternalInput + MetaKeyTriggerSource=reflection 事实。",
+      "production_entry": [
+        {
+          "file": "host.go",
+          "line": 371,
+          "symbol": "meditation.NewDriver(reflection, interval, minGap) 装配（reflection 由 host.go:362 构造）",
+          "read_verified": "Read host.go:355-386"
+        },
+        {
+          "file": "evolution/meditation/driver.go",
+          "line": 93,
+          "symbol": "(*Driver).ObserveCommit（56 NewDriver，129 fire）",
+          "read_verified": "Read evolution/meditation/driver.go:1-170"
+        },
+        {
+          "file": "tools.go",
+          "line": 926,
+          "symbol": "(*runReflectionInput).InjectReflection（906 ReflectionInput）",
+          "read_verified": "Read tools.go:902-944"
+        },
+        {
+          "file": "evolution/meditation/reflection.go",
+          "line": 363,
+          "symbol": "receipt, err := r.input.InjectReflection(...)（接口声明 106）",
+          "read_verified": "grep -n InjectReflection evolution/meditation/reflection.go 命中 106/363"
+        },
+        {
+          "file": "evolution/meditation/watermark.go",
+          "line": 142,
+          "symbol": "(*AnchorStore).Current（157 Advance）",
+          "read_verified": "Read evolution/meditation/watermark.go:140-172"
+        },
+        {
+          "file": "evolution/meditation/deliver.go",
+          "line": 109,
+          "symbol": "(*DeliverSummaryTool).Call（168 addresses）",
+          "read_verified": "Read evolution/meditation/deliver.go:100-170"
+        },
+        {
+          "file": "run.go",
+          "line": 945,
+          "symbol": "(*Run).CommitToSession（回流写入面）",
+          "read_verified": "grep -n \"func (r \\*Run) CommitToSession\" run.go 命中 945"
+        }
+      ],
+      "fact_identity": "反射输入事实由 InjectEvent/commitFact 铸造事件键；invocation 号拼为 \"<session>#meditation-<seq>\"，seq 来自 runReflectionInput 的进程内自增（tools.go:917、927-931）。回流事实由 CommitToSession 生成事件键，Meta 携带 MetaKeyTriggerSource=reflection 与 MetaKeyEventSummary，Owner/Source/Target 均为目标会址（deliver.go:141-152）。watermark 身份是 Anchors.LastMeditation 时刻，单调不回退（watermark.go:167-170）。",
+      "consumers": [
+        "meditation.Reflection.Tick 消费 fire 的调用（driver.go:159）",
+        "目标会话的 loop 把回流事实当成其下一 range 的 external input（deliver.go:153 -> CommitToSession）",
+        "WatermarkGate 供 Run.ReflectionGate 与 driver 的 minGap 读（run.go:1035、driver.go:147-157）",
+        "host 的 observer 日志面记录每次 tick 结论（host.go:372-374）"
+      ],
+      "confirmation_or_retention": "反射确认是 ReflectionReceipt{Outcome: ReflectionConsumed}，只有 terminal==KindCompleted 才算；其余 terminal 返回 ReflectionDeferred 且 watermark 不动（tools.go:936-943）。Driver.firing 是整驱动器单飞标志：忙时 ObserveCommit 返回 nil 不排队（driver.go:109-117）。回流确认是 CommitToSession 返回 EventID；多目标时统计 failed 并以 [deliver_summary_ok] delivered to N session(s) 或 [send_denied] 报告（deliver.go:153-163）。",
+      "unverified_assertion": [
+        "静态：Driver.ObserveCommit 的 firing 是驱动器级单标志（driver.go:110-113），反射在跑时其它提交被静默跳过；该事件是否会永久失去反射机会，取决于后续是否有事件再触发，须 00.2/02.1 验证，不得定性。",
+        "静态：firing 在 fire 的 defer 中复位（driver.go:131-135），而 lastFired 只在 TickFired 时更新（driver.go:160-164），两个窗口不同；节奏语义待验。",
+        "静态：runReflectionInput.seq 是进程内自增（tools.go:917、927-930），重启后从 1 重计；是否与历史 invocation 号碰撞须运行验证。",
+        "静态：DeliverSummaryTool 只写目标会话事实，不读目标会话的消费确认，回流的“已提交”与“已被目标消费”未分账，待验。"
+      ],
+      "spec_refs": [
+        "self-improvement-meditation",
+        "meditation-delivery-tool",
+        "cross-session-delivery",
+        "meditation-idle-gating"
+      ]
+    },
+    {
+      "id": "E6",
+      "title": "压缩与投影恢复",
+      "mechanism": "压缩是提交驱动的投影折叠：AgeFoldPlugin.ObserveCommit 读提交事实、反查会话链、取该会话注册的投影与窗口、按 VolumeThresholdBytes 判阈值，满足则 ReplayProjection.FoldByAge；Triggered 时把每个压缩判断经 fileCompressRequest 落成 CompressRequest 事实（Key=request.ID，无 message，故不进投影）。投影的生命周期有两条：生产注册路径是 attachDeclaredReplay 以 replay.NewReplayProjection() 新建空投影后 AttachReplay 登记，此后由 recordMapped 逐条 Append 生长；另有 RebuildProjectionFromWAL 从事实链重建的入口。任务链的重启恢复由 restoreChains 逐链 Records→registry.Restore 完成。",
+      "production_entry": [
+        {
+          "file": "age_fold.go",
+          "line": 118,
+          "symbol": "(*AgeFoldPlugin).ObserveCommit（137 FoldByAge 调用，200 fileCompressRequest）",
+          "read_verified": "Read age_fold.go:109-153、194-225"
+        },
+        {
+          "file": "run.go",
+          "line": 267,
+          "symbol": "r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})",
+          "read_verified": "grep -n \"NewAgeFoldPlugin\" run.go 命中 267"
+        },
+        {
+          "file": "memory/replay/age_segments.go",
+          "line": 227,
+          "symbol": "(*ReplayProjection).FoldByAge（142 SegmentsOf，185 AgeFoldPlan）",
+          "read_verified": "grep -n \"func (p \\*ReplayProjection) FoldByAge\" memory/replay/age_segments.go 命中 227"
+        },
+        {
+          "file": "facts.go",
+          "line": 102,
+          "symbol": "(*Run).attachDeclaredReplay（121 replay.NewReplayProjection；66 recordMapped）",
+          "read_verified": "Read facts.go:55-126"
+        },
+        {
+          "file": "request.go",
+          "line": 248,
+          "symbol": "(*Run).AttachReplay（231 replayEntry，271 normalizeFoldWindow）",
+          "read_verified": "Read request.go:226-290"
+        },
+        {
+          "file": "memory/replay/projection.go",
+          "line": 352,
+          "symbol": "RebuildProjectionFromWAL（284 SyntheticKey，352 起）",
+          "read_verified": "Read memory/replay/projection.go:337-380"
+        },
+        {
+          "file": "run.go",
+          "line": 543,
+          "symbol": "(*Run).restoreChains（590 Recovery）",
+          "read_verified": "Read run.go:538-594"
+        },
+        {
+          "file": "memory/replay/fold.go",
+          "line": 47,
+          "symbol": "(*ReplayProjection).Fold（135 foldSummaryKey / 146 foldRefKey）",
+          "read_verified": "grep -n \"func (p \\*ReplayProjection) Fold\" memory/replay/fold.go 命中 47"
+        }
+      ],
+      "fact_identity": "压缩判断身份是 event.CompressRequest.FactKey()（内容寻址）：fileCompressRequest 先查 r.facts[request.ID] 再提交，重复提交是同一判断（age_fold.go:204-212）。折叠产物键由 foldSummaryKey/foldRefKey/ageKey 生成（fold.go:135/146、age_segments.go:368）。投影条目身份是 ProjectionEntry.Key（即原事实键），合成键由 SyntheticKey 判定（projection.go:284）。任务链恢复身份是 TaskID + 持久 CommitRecord（restoreChains 逐链读取）。",
+      "consumers": [
+        "request 装配的 prefix 布局读取投影（request.go:292-300 注释描述的固定顺序）",
+        "noticeProjection 读同一投影取通知（facts.go:164-205）",
+        "ReplayEntries 诊断读（facts.go:134-142）",
+        "AssembleBudgetPrefix 的展示决策与 ReplaySettle 事实（replay_budget.go:127-234）",
+        "FoldByAge 的下一轮（阈值按渲染体积累计）"
+      ],
+      "confirmation_or_retention": "折叠确认是 AgeFoldReport.Triggered 且每个 request 的 FactKey 已落（age_fold.go:144-151）；折叠失败只返回 error，不回滚已提交事实（age_fold.go:141-143）。FileCompressRequest 幂等，且判断事实不带 message、绝不进入它判断的投影（age_fold.go:194-224）。恢复侧：RebuildProjectionFromWAL 对非空投影返回 RebuildSkipNotEmpty（projection.go:359-361），并以 compaction payload 避免二次折叠（projection.go:337-347 注释）。restoreChains 逐链读取、失败即停并 assemblyError、成功项回填 r.commit.remember（run.go:548-565）。",
+      "unverified_assertion": [
+        "静态：RebuildProjectionFromWAL（memory/replay/projection.go:352）在生产代码中无调用者——grep -rn RebuildProjectionFromWAL 命中仅 memory/replay 内定义/skeleton 断言与 tests/**；生产注册路径是 facts.go:121 的空投影 NewReplayProjection + recordMapped 逐条 Append。这是零调用静态事实，按 findings 的“不由单次搜索缺失定性”只登记为风险：进程重启后投影能否从事实链复原，须 02.3/00.4 验证。",
+        "静态：同类零调用还有 ReplayProjection.Fold（fold.go:47）——grep -rn \".Fold(ctx\" 仅命中 memory/replay/fold_test.go 与 tests/integration/**；当前生产折叠走 FoldByAge。属历史/测试面入口，不写成缺陷。",
+        "静态：recordMapped 只在 r.replays[session] 已注册时追加（facts.go:69-72），attachDeclaredReplay 要求 spec.MaxTokens > 0（facts.go:118）；声明未给窗口的会话是否整体落在投影之外，待验。",
+        "静态：age_foldSessions.ProjectionOf 在未注册时返回零值 FoldWindow{}（age_fold.go:178-186），ObserveCommit 先查 carried 再算阈值（age_fold.go:129-136），故零窗口不会误折叠；但窗口为 0 的会话永不折叠是否为预期，须由 03/04 场景确认。"
+      ],
+      "spec_refs": [
+        "event-compaction",
+        "event-sourced-projection",
+        "compaction-scheduler",
+        "adaptive-segment-size",
+        "compression-user-message"
+      ],
+      "historical_or_unsupported_boundary": "findings 记“投影折叠及恢复存在多个声明/实现入口”：当前并存 Fold（fold.go:47，整链折叠）与 FoldByAge（age_segments.go:227，分段折叠），以及 AttachReplay（生产注册）与 RebuildProjectionFromWAL（事实链重建）两条恢复入口。本叶只登记入口清单，不裁定唯一生产路径，裁定权在 00.3。"
+    },
+    {
+      "id": "E7",
+      "title": "模型替换",
+      "mechanism": "模型替换是 lease 上的一次安装，触发有两条。其一 Host.Reload：POST /reload 由 hostFace.reload 认证后调 Host.Reload，重读文档、compatibleWith 冻结结构、run.Publish 发布新代、h.models.set(doc) 换构建源，再对 modelChanges 逐个 NoteModelChange。其二 Run.Publish 成功后 noteDeclaredModelChanges 对声明模型引用变动的 agent 自行提交替换事实。事实由 event.ModelReplacementFor 构造并经 loop.CommitFactFor 提交。LeaseObserver.ObserveCommit 读该事实、校验 from 与 CurrentVersion() 一致后调 ModelLease.Replace（rebuild→publish→install，旧版本 retire 并在最后一个在途流结束后关闭）。",
+      "production_entry": [
+        {
+          "file": "host.go",
+          "line": 2002,
+          "symbol": "(*hostFace).reload（路由 POST /reload 见 host.go:1994）",
+          "read_verified": "Read host.go:1986-2012"
+        },
+        {
+          "file": "host_reload.go",
+          "line": 112,
+          "symbol": "(*Host).Reload（180 modelChanges，226 heldModelVersion）",
+          "read_verified": "Read host_reload.go:107-237"
+        },
+        {
+          "file": "run.go",
+          "line": 1571,
+          "symbol": "(*Run).noteModelReplacement（1562 NoteModelChange，1604 noteDeclaredModelChanges）",
+          "read_verified": "Read run.go:1550-1645"
+        },
+        {
+          "file": "rl/lease_observer.go",
+          "line": 85,
+          "symbol": "(*LeaseObserver).ObserveCommit",
+          "read_verified": "Read rl/lease_observer.go:75-112"
+        },
+        {
+          "file": "rl/replacement.go",
+          "line": 281,
+          "symbol": "(*ModelLease).Replace（349 Restore，485 VersionedModel）",
+          "read_verified": "Read rl/replacement.go:275-355"
+        },
+        {
+          "file": "run.go",
+          "line": 1477,
+          "symbol": "(*Run).mountLeaseObservers（1493 rebuildLeaseModel，1517 publishLease）",
+          "read_verified": "grep -n \"^func (r \\*Run) mountLeaseObservers\\|rebuildLeaseModel\\|publishLease\" run.go 命中 1477/1493/1517"
+        },
+        {
+          "file": "host_model.go",
+          "line": 135,
+          "symbol": "hostModelVersion（145 modelVersion，152 splitHostModelVersion）",
+          "read_verified": "grep -n \"^func hostModelVersion\" host_model.go 命中 135"
+        }
+      ],
+      "fact_identity": "替换事实类型为 event.ModelReplacementType，Meta 携带 MetaKeyModelFromVersion / MetaKeyModelToVersion 与 source=config，Owner.AgentID 定位目标 agent（run.go:1585；lease_observer.go:93-106）。版本串由 hostModelVersion(provider,name) 生成（host_model.go:135）并由 splitHostModelVersion 反解；安装身份是 ModelIdentity{Model,Version}（replacement.go:29-64）。拒绝均具名：ErrLeaseVersionMissing（lease_observer.go:101）、ErrLeaseStaleReplacement（lease_observer.go:106）、ErrLeaseVersionHeld（replacement.go:300-302）、ErrLeaseRebuildFailed/ErrLeasePublishFailed（replacement.go:309/322）。持久历史单元是 ReplacementRecord{Schema,From,To,State,At}（replacement.go:324-330）。",
+      "consumers": [
+        "LeaseObserver 挂在 agent 的 After pass 上消费替换事实（rl/lease_observer.go:85）",
+        "VersionedModel 的每次 GenerateContent/GenerateContentIter 依 lease 引用计数取版本（replacement.go:507/555）",
+        "Run.LeasePublications / LeaseLosses 供宿主报告（run.go:1637/1646）",
+        "hostReloadReport.ModelChanges[].Fact 把事实键回报给 reload 调用方（host_reload.go:49-57、host_reload.go:161-167）"
+      ],
+      "confirmation_or_retention": "替换确认是 publish 成功且 l.current 切到新版本（replacement.go:320-340）；rebuild 失败或 publish 拒绝都走 refuse 记一条 refused 记录且不安装（replacement.go:305-323）。旧版本 retired 由 sweep 在最后一个在途流结束后关闭（replacement.go:335-340、438）。Restore 拒绝历史末端与应用版本不一致的重启（replacement.go:344-355 起）。NoteModelChange 提交失败返回 ErrModelChangeUncommitted，noteDeclaredModelChanges 把失败收进 leaseLosses 而非当作已替换（run.go:1587-1590、1626-1630）。",
+      "unverified_assertion": [
+        "静态：Reload 对每个 change 调 NoteModelChange(agent, \"\", to, config) 让 from 由 noteModelReplacement 取 CurrentVersion()（host_reload.go:161；run.go:1582-1584），而 modelChanges 的 From 来自 heldModelVersion（host_reload.go:187）；两种“当前版本”读法（CutPrefix 语义 vs CurrentVersion）是否一致须运行验证。",
+        "静态：heldModelVersion 在 current==name 时返回 (\"\", true)，即“无版本”形态（host_reload.go:231-236）；此时替换事实的 from 为空，LeaseObserver 的 from 校验被跳过（lease_observer.go:105 的 from != \"\" 短路）；陈旧替换是否因此被放行待验。",
+        "静态：Reload 先 run.Publish 再 NoteModelChange（host_reload.go:150-168），两步之间失败会留下“已发布未替换”窗口；可恢复性待 01/02 验证。",
+        "静态：reloadMu 是进程内互斥（host_reload.go:117），跨进程/多实例同时 reload 的语义未取证。"
+      ],
+      "spec_refs": [
+        "swappable-executor",
+        "generation-bound-model-references",
+        "config-hot-reload"
+      ]
+    },
+    {
+      "id": "E8",
+      "title": "训练采集与观测",
+      "mechanism": "采集在 Boot 期开一个 run 级轨迹账户：openHostCapture 建 <root>/trajectories 目录、NewFileCaptureWriter、NewCaptureSink(hostCaptureID) 与 NewTrajectoryCapture，再以 hostRunCapture 作 rl.CaptureScope 经 WithCapture 交给 run；Run.mountCapture 用 NewCaptureAdapter 挂到 loop 的窄采集面，按 decision 取 request view 快照、按 attempt 记行。loop 的回合末 Seal 被 hostRunCapture.Seal 置空，只有 Host.Close 才 sealHostCapture 真封账。委托子代理经 builder.Capture→withCapture 包裹 worker 模型，逐次调用记 attempt。离线导出是库入口 ChainExporter.Export，按 (episode,invocation,session) 配对事实链生成 SFT 行。观测面由 hostTelemetryObserver 按文档声明开 log observer 或分层 SDK observer 与 trace/metric 管线。",
+      "production_entry": [
+        {
+          "file": "host.go",
+          "line": 279,
+          "symbol": "capture, err = openHostCapture(root)（338 行 WithCapture(&hostRunCapture{...})）",
+          "read_verified": "grep -n \"openHostCapture\\|hostRunCapture{\" host.go 命中 279/338"
+        },
+        {
+          "file": "host_capture.go",
+          "line": 36,
+          "symbol": "openHostCapture（57 sealHostCapture，89 (*hostRunCapture).Record，98 Seal，104 Scope）",
+          "read_verified": "Read host_capture.go:26-139"
+        },
+        {
+          "file": "run.go",
+          "line": 1533,
+          "symbol": "(*Run).mountCapture（1541 NewCaptureAdapter，1545 loop.SetCapture）",
+          "read_verified": "Read run.go:1529-1548"
+        },
+        {
+          "file": "rl/capture_wiring.go",
+          "line": 123,
+          "symbol": "(*TrajectoryCapture).Record（310 (*CaptureAdapter).Record，288 Snapshot）",
+          "read_verified": "grep -n \"func (c \\*TrajectoryCapture) Record\\|func (a \\*CaptureAdapter) Record\" rl/capture_wiring.go 命中 123/310"
+        },
+        {
+          "file": "rl/sink.go",
+          "line": 234,
+          "symbol": "(*CaptureSink).Record（304 admitLine，345 Seal，434 refused）",
+          "read_verified": "grep -n \"func (s \\*CaptureSink) Record\\|func (s \\*CaptureSink) Seal\\|func refused\" rl/sink.go 命中 234/345/434"
+        },
+        {
+          "file": "tool/subagent/capture.go",
+          "line": 38,
+          "symbol": "withCapture（tool/subagent/builder.go:134 调用）",
+          "read_verified": "Read tool/subagent/capture.go:20-60；grep -n withCapture tool/subagent/builder.go 命中 134"
+        },
+        {
+          "file": "rl/export_chain.go",
+          "line": 127,
+          "symbol": "(*ChainExporter).Export（96 NewChainExporter，200 WriteSamples）",
+          "read_verified": "Read rl/export_chain.go:100-140"
+        },
+        {
+          "file": "host.go",
+          "line": 453,
+          "symbol": "hostTelemetryObserver",
+          "read_verified": "Read host.go:445-497"
+        }
+      ],
+      "fact_identity": "采集身份分层：账户 CaptureID=host-trajectory（host_capture.go:27）；视图身份 SnapshotRef/ModelViewRef（按 decision 固定 request view）；尝试身份 event.AttemptID/DecisionID/EpisodeID（capture_wiring.go:310、produce.go:85 AttemptOf）。落盘单元是 jsonl 行与 RecordKind（sink.go:129 起），行序即安装序，封账产出 CaptureManifest。观测面身份是 plugin.Observer 与 telemetry 的 span/metric（host.go:480-482）。导出配对身份是 turnIdentity{episode,invocation,session}（export_chain.go:110-117）。",
+      "consumers": [
+        "Host.Close 的 sealHostCapture 封账（host_capture.go:57；host.go:767 sealCapture）",
+        "CaptureLedger 的准入/丢弃计数（sink.go:76、332）",
+        "rl.ChainExporter.Export 公开离线导出（export_chain.go:127，库 API）",
+        "hostDeliveryMeter / /metrics 的投递计数（host.go:136、host.go:1992）",
+        "telemetry observer 的 trace/metric 管线（host.go:467-482）"
+      ],
+      "confirmation_or_retention": "采集准入是 CaptureSink.Record 返回 CaptureAdmission；有界队列满时按 CaptureBound 具名拒收并计入 ledger（refused/lossReasons，sink.go:304-345、434-442）。封账是 TrajectoryCapture.Seal 产出 CaptureManifest 并 await writer 完成（sink.go:345-367）。hostRunCapture.Seal 故意返回零值 manifest，避免 loop 的回合末 Seal 关掉 run 级账户（host_capture.go:96-100）。导出确认是返回 []SFTSample 与 error，Limit<0 具名拒绝 ErrExportLimit（export_chain.go:131-133），无 invocation 的事实不参与配对（export_chain.go:119-126 注释）。",
+      "unverified_assertion": [
+        "静态：ChainExporter.Export 在生产代码中无宿主自动调用——grep -rn NewChainExporter 命中仅 rl/export_chain.go 定义与 tests/**、examples/wechat-bot/smoke_data_test.go。与 findings“零宿主自动调用不要求新CLI，导出为公开库入口”一致，按零调用静态事实登记，不写成缺陷。",
+        "静态：CaptureSink 有界排队满即拒收并计数（sink.go:304-345、434），被拒/丢失的行是否会被下游误当完整轨迹，须 02.6 验证。",
+        "静态：hostRunCapture.Seal 恒返回零 manifest（host_capture.go:98-100），真实 manifest 只在 Host.Close 产生；进程被强杀时是否留下可判定的“未封”标记，待运行验证。",
+        "静态：CaptureLedger 的计数是进程内原子量（sink.go:102-114），重启后归零，跨重启丢失总量不能由此面聚合，待验。",
+        "静态：子代理采集只在 builder 带 Capture 时生效（builder.go:134 与 withCapture 的 nil 短路），未带 Capture 的委托路径静默不记；该条件在生产装配下是否恒成立待验。"
+      ],
+      "spec_refs": [
+        "trajectory-recording",
+        "offline-training-export",
+        "self-telemetry-audit",
+        "decision-capture"
+      ]
+    }
+  ]
+}

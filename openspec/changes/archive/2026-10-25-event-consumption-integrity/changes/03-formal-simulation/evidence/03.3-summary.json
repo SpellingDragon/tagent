@@ -1,0 +1,234 @@
+{
+  "leaf": "03.3",
+  "title": "多决策流矩阵（decision-flow-matrix）",
+  "change": "event-consumption-integrity",
+  "domain": "03-formal-simulation",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T23:36:00+08:00",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "根模块多决策流矩阵取证：tests/integration/host/event_integrity_test.go 新增父测试 TestEventIntegrityDecisionFlowMatrix，下辖 positive / negative / consumer 三个子测试，三锚共享同一次父测试执行负载（design D3/D5）。覆盖：用户输入→send 工具→send 结果→继续决策→子代理委派→受理结果→最终答复的完整链在同一 invocation 内不漏不重；两个 user 会话的忙/闲续转交错（A 的 notice follow-up parked 时 B 的 terminal notice 到达，必须 retained，A turn 结束后再续转）；两个 notice flow 各自的 notice fact、输入、请求、答复、动作逐身份对应；negative：忙时丢通知、续转新建 invocation、同一通知二次生成输入、子代理结果丢失、忙时旁开（未 retained）、重复/缺失/错投/未声明动作、跨会话串流，加 03.1 脚本机制的脚本外请求/缺步/重复步三例；consumer：Boot→Host.Invoke 正式入口驱动 9 条请求（7 entry + 2 worker）、2 个 active session、drain 0 unsettled。产品代码零改动。",
+  "method": "tagent.Boot 装配 entry agent（send 工具 + worker 子代理）与 worker agent。会话 A 驱动 3 决策（send note → 依 send 结果委派 worker → 依受理结果答复），会话 B 驱动 2 决策（委派 → 答复）；两个 worker 决策与 A 的 notice follow-up 均以 park/release 作模型屏障。驱动次序：A turn → await worker1 → B turn → await worker2 → release worker1 → A settle → await followA（parked，driver firing）→ release worker2 → B settle → 观测 busyRequests/busyInputs → release followA → A 答复送达 → await followB → B 答复送达。观测只取正式面：scriptedProvider 实际服务的请求（Index/Model/Messages）、recordingSender 记录的动作（target/body/pending/result）、Host.SessionFacts、Host.ActiveSessions、Run.Close 的 DrainReport。negative 以真实负载做 10 种定向变异，要求检查器恰报对应具名 kind；随后用 03.1 integrityScript 回放观测到的 entry 请求，验证脚本外请求、声明但未发生的步、重复到达的步各留下 1 条具名 violation。consumer 从根公开入口回读请求来源、会话与排空点。",
+  "environment": {
+    "os": "Darwin arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.3",
+    "note": "原始 json/jsonl 只落仓库外临时目录；本文件只留摘要、哈希与 log 名。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "extended (untracked new file; 03.3 段落从 4301 行起追加父测试 + 3 子测试 + decisionFlow* 辅助，文件 4299 → 5253 行，共 +954 行)",
+      "lines": 5253,
+      "sha256": "5d4e6c38ad8b981ddc95a117272cb3599c46d8f6dcc993c592d3e99caad0c870"
+    }
+  ],
+  "product_changes": [],
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath) 装配 entry + worker → Host.Invoke 驱动 A 的 3 决策、B 的 2 决策与两条 notice follow-up → Run.Close 排空",
+    "observation": "请求侧 = scriptedProvider 实际服务请求（Index/Model/Messages）；动作侧 = recordingSender 的 senderAction{target,body,pending,result}；事实侧 = Host.SessionFacts；运行面 = Host.ActiveSessions(\"user\") 与 Run.Close 的 DrainReport",
+    "consumer_subtest": "consumer：provider 恰服务 9 条请求（7 model-entry + 2 model-worker），每条 request.Index == 服务位置；ActiveSessions(\"user\") == 2；entry 尾两条的 Index == 两个 follow-up 请求的观测位置；每个 notice flow 的 noticeFact/inputFacts[0]/outputFact 的 Owner == 本会话地址；follow-up 请求 Model == model-entry；DrainReport.Drained == true 且 len(Unsettled) == 0；全部动作 confirmed 且 target 属于两个 user 会话之一"
+  },
+  "subtests": [
+    {
+      "name": "positive",
+      "anchor": "positive",
+      "line": 5057,
+      "asserts": [
+        "真实负载的 decisionFlowViolations 为空（turn 链 / notice flow / window / busy / action 五类检查全通过）",
+        "实际送达动作序 reflect.DeepEqual(scene.declared)（note, A 答复, B 答复, A follow, B follow），不重不漏",
+        "A 的 3 个决策：send 结果出现在决策 2 请求；worker 调用与受理结果出现在决策 3 请求",
+        "A 的 input fact / output fact / send result fact 的 InvocationID 同为 turn.InvocationID（send 后原 invocation 继续决策）",
+        "A follow-up 请求序号 < B retained follow-up 请求序号（retained 通知在 in-flight turn 结束后才续转）",
+        "两个 notice flow 的 noticeFact.InvocationID 不同（各自一 range），且各自不等于所属用户 turn 的 range",
+        "busy 窗口 busyRequests == 0 且 busyInputs == 0",
+        "B 会话中该 retained notice 的 feedback fact 恰 1 条"
+      ]
+    },
+    {
+      "name": "negative",
+      "anchor": "negative",
+      "line": 5101,
+      "asserts": [
+        "真实负载先被断言零违规（负锚不以真实负载已坏为前提）",
+        "10 种定向变异各自只留下对应具名 kind（identityMatrixViolationKinds 排序去重后 len==1 且相等）",
+        "03.1 脚本外请求：声明 1 步后喂 entry[0] 与 entry[1] → 恰 1 条 unexpected",
+        "03.1 声明但未发生的步：声明 2 步只喂 entry[0] → 恰 1 条 missing",
+        "03.1 重复到达：声明 2 步后喂 entry[0], entry[1], entry[0] → 恰 1 条 duplicate"
+      ]
+    },
+    {
+      "name": "consumer",
+      "anchor": "consumer",
+      "line": 5188,
+      "asserts": [
+        "provider 服务 9 条请求，模型分布恰为 model-entry×7 与 model-worker×2（无其他模型）",
+        "Boot 装配建立恰 2 个 user 会话",
+        "每条请求的 Index 与其服务位置一致，观测不是从自建切片自证",
+        "entry 窗口从两个用户输入开始；entry 尾部两条即两个 follow-up 请求（Index 与观测位置互证）",
+        "每个 notice flow 恰 1 条新输入 fact，noticeFact/inputFact/outputFact 的 Owner 均在本会话",
+        "follow-up 请求模型为 model-entry",
+        "Run.Close 的 DrainReport.Drained == true 且 Unsettled 为空",
+        "全部动作 confirmed 且落在两个 user 会话之一"
+      ]
+    }
+  ],
+  "negative_mutations": [
+    {
+      "name": "busy_notice_dropped",
+      "line": 4916,
+      "mutation": "清空 retained notice 的新输入 fact 集合，模拟忙时通知被驱动丢弃（通知到达但未生成任何新用户输入）",
+      "kind": "notice_dropped"
+    },
+    {
+      "name": "continuation_new_invocation",
+      "line": 4925,
+      "mutation": "把 A turn 的最终答复 output fact 的 InvocationID 改为外部 range，模拟 send 后续转另起 invocation",
+      "kind": "continuation_new_invocation"
+    },
+    {
+      "name": "notice_second_input",
+      "line": 4933,
+      "mutation": "为同一 notice 追加第二条 user-input fact 与请求中的第二份用户副本，模拟同一通知二次生成输入",
+      "kind": "notice_second_input"
+    },
+    {
+      "name": "subagent_result_dropped",
+      "line": 4948,
+      "mutation": "从 A 的最后一个决策请求中删除 worker 调用的结果消息，模拟子代理通知丢结果",
+      "kind": "subagent_result_dropped"
+    },
+    {
+      "name": "action_duplicated",
+      "line": 4956,
+      "mutation": "把 A 的最终答复动作再追加一次，模拟重复动作到达",
+      "kind": "duplicate_action"
+    },
+    {
+      "name": "busy_notice_not_retained",
+      "line": 4969,
+      "mutation": "把 busy 窗口观测改为已服务 1 条决策，模拟 notice 在 in-flight turn 旁打开而非 retained",
+      "kind": "busy_notice_not_retained"
+    },
+    {
+      "name": "action_missing",
+      "line": 4977,
+      "mutation": "删除 retained notice 的 follow-up 动作，模拟合法动作未送达",
+      "kind": "action_missing"
+    },
+    {
+      "name": "action_misplaced",
+      "line": 4985,
+      "mutation": "把 retained notice 的 follow-up 动作 target 改为另一会话，模拟动作错投",
+      "kind": "action_misplaced"
+    },
+    {
+      "name": "action_unexpected",
+      "line": 4998,
+      "mutation": "追加一条不属于任何决策的动作，模拟脚本外动作",
+      "kind": "unexpected_action"
+    },
+    {
+      "name": "flows_crossed",
+      "line": 5006,
+      "mutation": "互换两个 follow-up 请求历史中的本会话用户输入，模拟两条通知流跨会话串线",
+      "kind": "flow_crossed"
+    },
+    {
+      "name": "script_unexpected_request",
+      "line": 5134,
+      "mutation": "03.1 机制：声明 1 步后先喂 entry[0]（命中），再喂 entry[1]（脚本外）",
+      "kind": "unexpected (03.1 integrityUnexpected)"
+    },
+    {
+      "name": "script_declared_step_missing",
+      "line": 5134,
+      "mutation": "03.1 机制：声明 2 步但只喂 entry[0]，第二步声明后从未发生",
+      "kind": "missing (03.1 integrityMissing)"
+    },
+    {
+      "name": "script_step_reached_twice",
+      "line": 5134,
+      "mutation": "03.1 机制：声明 2 步后喂 entry[0], entry[1], entry[0]，已消费步再次到达",
+      "kind": "duplicate (03.1 integrityDuplicate)"
+    }
+  ],
+  "mechanics": {
+    "send_continuation": "决策 1 的 send 结果作为 tool message 进入决策 2 请求（entry[1]）；决策 2 发出 worker 调用，因此 worker 调用与 worker 受理结果同时出现在决策 3 请求（entry[2]）。turn 的 InvocationID 与 input fact、output fact、send result fact、worker result fact 的 InvocationID 全部相同，证明 send 后原 invocation 继续决策；positive 显式断言 entry[1] 携 send 结果、entry[2] 发出 worker 调用。",
+    "busy_retention": "SettleDriver 全 run 单例以 firing 标志与 retained 队列串行化：A 的 follow-up 在模型处 parked 时，B 的 terminal notice 只提交 settle delivery fact，不提交 feedback notice fact、不服务新请求（busyRequests==0、busyInputs==0）；A turn 结束后 retained notice 才续转，故 B follow-up 请求序号在 A 之后。",
+    "notice_range": "每条 notice 走 feedback fact 并新铸 follow-up invocation（00.3 收窄裁决允许的形态，01.3 已验）；03.3 不重复断言 literal 复用原 invocation，只断言两个 notice flow 的 range 彼此不同、且不等于所属用户 turn 的 range。continuation_new_invocation 负锚因此落在用户 turn 的 send 续转（output fact 离开 turn range），不与 notice 的新 range 形态冲突。",
+    "action_identity": "5 个合法动作（send note、A 答复、B 答复、A follow-up、B retained follow-up）各恰一次、逐地址 confirmed；动作序等于脚本声明序；任何重复、缺失、错投或未声明动作均具名失败。",
+    "no_sleep": "busy 窗口的观测点在 script.await(followA) 的模型 park 屏障之后读取，不使用 sleep 后“暂无消息”作为无重复/未旁开的证据。"
+  },
+  "verification": {
+    "single_round": {
+      "command": "go -C . test ./tests/integration/host -run '^TestEventIntegrityDecisionFlowMatrix$' -count=1 -race -v > $E/baseline.log 2>&1",
+      "exit": 0,
+      "result": "父测试 + positive / negative / consumer 各恰一次 run/pass；PASS ok 0.15s（包 ok 1.608s）",
+      "log": "baseline.log"
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/03.3\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in $(seq 1 10); do id=$(python3 -c 'import uuid;print(uuid.uuid4())'); go -C . test ./tests/integration/host -run '^TestEventIntegrityDecisionFlowMatrix$' -count=1 -race -json -timeout 10m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done; test \"$(ls \"$E\"/run-*.jsonl | wc -l | tr -d ' ')\" = 10",
+      "exits": "10 行全 0（run-ids.txt 含 10 个 run_id）",
+      "checker": "逐轮 grep run-$i.jsonl：\"Action\":\"pass\" 且 Test 前缀为 TestEventIntegrityDecisionFlowMatrix 的事件数 == 4（父 + 3 子），fail 事件 == 0；10/10 轮通过，无 skip。",
+      "logs": "run-1.jsonl … run-10.jsonl, run-ids.txt, ids.txt"
+    },
+    "regression": [
+      {
+        "command": "go -C . test ./tests/integration/host -run '^TestEventIntegrity' -count=1 -race -timeout 20m",
+        "exit": 0,
+        "result": "ok 5.810s（TestEventIntegrity 全族，含 03.1/03.2/03.3）",
+        "log": "family.log"
+      },
+      {
+        "command": "go -C . test ./tests/integration/host -count=1 -race -timeout 20m",
+        "exit": 0,
+        "result": "ok 19.962s（host 包全量既有用例）",
+        "log": "regression-host.log"
+      }
+    ],
+    "gates": [
+      {
+        "command": "go vet ./tests/integration/host",
+        "exit": 0,
+        "log": "vet.log"
+      },
+      {
+        "command": "gofmt -l tests/integration/host/event_integrity_test.go",
+        "exit": 0,
+        "result": "无输出（写集干净）",
+        "log": "gofmt.log"
+      }
+    ]
+  },
+  "diagnostics": [
+    {
+      "stage": "compile",
+      "issue": "decisionFlowSecondInput 同时被负载常量（会话 B 输入正文）与违例 kind 使用，Go 报 redeclared。",
+      "fix": "违例 kind 改名 decisionFlowNoticeSecondInput；负载常量保持 decisionFlowSecondInput。"
+    },
+    {
+      "stage": "compile",
+      "issue": "decisionFlowUnexpectedAction 同时被违例 kind 常量与变异函数使用，Go 报 redeclared。",
+      "fix": "变异函数改名 decisionFlowWithUnexpectedAction；kind 常量保持 decisionFlowUnexpectedAction。"
+    },
+    {
+      "stage": "first_single_round",
+      "issue": "首轮 red：window 检查在 entry[1] 找 worker 调用，但决策 2 的 worker 调用出现在决策 3 请求 entry[2]，entry[1] 只携 send 结果。",
+      "fix": "检查点移到 entry[2]（worker 调用与受理结果同请求），positive 断言同步修正；重跑父 + 3 子全绿。非产品缺陷。"
+    }
+  ],
+  "convergences": {
+    "negative_by_mutation": "根公开入口无法在不改产品的前提下制造“丢通知 / 新 invocation / 二次输入 / 丢子代理结果 / 旁开 / 动作异常 / 跨流串线”，故 negative 以真实负载为基线做 10 种定向变异，要求检查器对每种形状恰报一个具名 kind；真实负载零违规由 negative 先行断言，避免基线已坏。",
+    "script_departures": "脚本外请求、声明但未发生的步、重复到达的步不只依赖 03.1 自带测试：03.3 用观测到的真实 entry 请求回放 03.1 integrityScript，确认三者在多决策链负载上各自留下 1 条 unexpected/missing/duplicate。",
+    "anchored_on_observed_load": "请求、动作、事实、会话与排空点全部来自 provider / sender / Host 的正式观测面；consumer 用 request.Index 与服务位置互证，避免从自建切片自证。",
+    "distinction_from_01_3_and_03_2": "01.3 验单通知续转与同会话忙时保留；03.2 验同正文多身份与会话隔离；03.3 验多条决策流的交错形态——send 后继续决策、工具与子代理结果驱动后续决策、跨会话忙/闲续转交错，以及动作逐身份对应。",
+    "no_new_api": "全程未新增 API、接缝或持久格式；decisionFlow* 辅助仅在测试文件内，产品零改动。"
+  },
+  "checkpoint": {
+    "tasks_md": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+    "state": "保持 - [ ]（verify_after=01.5；产物 ready，待 01.5 后正式证据回验再勾选）",
+    "line": 38
+  }
+}

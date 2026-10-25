@@ -1,0 +1,834 @@
+{
+  "leaf": "01.3",
+  "title": "任务续转与不重复消费",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T12:01:46Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "修复 00.2 已复现的两个缺陷（EVID-02 双路材料、EVID-03 忙时通知丢失），并在 tests/integration/host/event_integrity_test.go 增加 TestEventIntegrityTaskContinuation：五个正锚 + 三个负锚，全部经 Boot 正式装配、Host.Invoke、真实 SettleDriver、fireNoticeTurn、Run.Invoke、Loop 头 notice 读取的正式链驱动；重复按通知身份/事实/因果判定，不按正文出现次数判定。",
+  "method": "8 个具名子测试。每个子测试用 03.1 基座（integrityScript/scriptedProvider/recordingSender/model 屏障）经 bootReproductionHost（声明 max_tokens: 32000，使 replay projection 存在）驱动一次或多次真实任务委托与 settle；断言读取 provider 实际收到的请求、SessionFacts 事实链、agent.NoticeFactKey 身份键与 sender 实际动作。未新增第二套 provider/sender/barrier，未改 03.1 harness 行为。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "extended (untracked file created by 00.2)",
+      "lines": 1584,
+      "sha256": "bb4f6cae6ecb1a0dff9b689989c661a68762a6bdaae11556fd6eb9b2825de146"
+    },
+    {
+      "path": "host.go",
+      "state": "modified",
+      "lines_added": 0,
+      "lines_removed": 1,
+      "sha256": "c84e6997d820821364a0c993b5ae689195c3224a185c28f6a32b3b136b091a4c"
+    },
+    {
+      "path": "facts.go",
+      "state": "modified",
+      "lines_added": 25,
+      "lines_removed": 10,
+      "sha256": "ee8534c54ac1353b347980306d343fbb38c12c6a52fd508c4e44fb0e82716cfb"
+    },
+    {
+      "path": "settle_turn.go",
+      "state": "modified",
+      "lines_added": 75,
+      "lines_removed": 22,
+      "sha256": "82f035fd9a30883b72f3d6eec081b6076b7e17076091ec9aea009e597f514942"
+    }
+  ],
+  "product_changes": [
+    {
+      "path": "host.go",
+      "symbol": "Host.fireNoticeTurn",
+      "change": "删除 InvokeRequest.Input 的正文（-1 行）：Follow-up turn 只提交 notice feedback 事实（Key=agent.NoticeFactKey(invocationID, notice)，TriggerSource=task，TaskID/NoticeKind/EventSummary），空 Input + TriggerSource=task 驱动。",
+      "why": "EVID-02 修复：同一通知材料不再经 Run.Invoke 再提交一份 TypeExternalInput 事实。"
+    },
+    {
+      "path": "facts.go",
+      "symbol": "Run.recordMapped + admitsRange",
+      "change": "range 边界准入从「仅 TypeExternalInput」扩展为「TypeExternalInput 或 TriggerSource=task 的 TypeFeedback」；删除 rangeInvocation 非空守卫（AttachReplay 时 ended=projection.Len()，首个新 fact 的 position 恒等，行为等价）。",
+      "why": "跟随 EVID-02 的候选最小路径：notice 事实本身就是投影的一条 entry，把它作为新 range 起点，投影前缀保留此前全部会话材料并排除 notice 自身；进度通知（同 TypeFeedback 但非 task）不会误开 range。"
+    },
+    {
+      "path": "settle_turn.go",
+      "symbol": "SettleDriver.ObserveCommit/fireFact/fireOne/rearm/Stop",
+      "change": "新增 driver 内 settleNotice{addr,fact} 保留队列：ObserveCommit 在 firing 时 append 而非丢弃；fireFact 在每轮结束后 rearm，队列非空且未停止则继续 fireOne；Stop 置 stopped 后清空队列并取消在飞 turn。未新增全局缓冲。",
+      "why": "EVID-03 修复：忙时到达的终态通知保留，并在当前 firing 结束后重新评估触发（retained+rearm，与 02.1 meditation driver 同型）。"
+    }
+  ],
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath, tagent.WithSender(sender))（03.1 bootIntegrityHostWithAgents 的正式装配）",
+    "drive": "driveIntegrityTurn -> Host.Invoke -> driveLocked -> Run.Invoke -> agent.Loop.Drive",
+    "notice_trigger": "Run.commitFact -> sink -> bookNotice -> SettleDriver.ObserveCommit（PostCommitObserver；只认 TypeTaskSettled + 终态 notice kind + 已记住的 user address）",
+    "follow_up": "Host.fireNoticeTurn -> CommitToSession(TypeFeedback, TriggerSource=task) -> driveLocked(无 Input) -> Run.Invoke -> Loop.Backflow/Drive 头 progressNotes -> noticeProjection.NoticeBoundary/NoticesFrom（按 prefix 读 TypeFeedback）",
+    "facts": "Run.SessionFacts；agent.NoticeFactKey(invocationID, notice)；Run.recordMapped/admitsRange；request.go 的 replayEntry.ended / projectedSegment",
+    "sender": "runtime MessageSender -> recordingSender（实际投递动作与 target 记录）"
+  },
+  "red_lines": {
+    "formal_chain_only": "所有正/负锚都来自 Boot + Host.Invoke + 真实 SettleDriver + fireNoticeTurn + Run.Invoke 的一次或多真实运行；未手工 CommitToSession 通知事实，未自建第二套通知身份或第二套消费基座。",
+    "no_duplicate_judged_by_identity": "重复判定读事实类型/trigger source/TaskID/NoticeKind/NoticeFactKey 与 sender 动作；正文在历史投影中的合法重现（TypeTaskSettled 在 RoleOf 下为 tool 角色）不计为重复，符合 00.3 logical_consumption 轴。",
+    "no_new_invocation_semantic_narrowing": "按 00.3 invocation_version_conflict=semantic-narrowing 与任务指令：断言同 session 责任范围（Owner==addr）、原任务因果（TaskID/EventSummary）、不合并不同 invocation 身份（follow range != user range，notice key 不落 user range，user external input 不折入 follow range），不断言字面复用旧 invocation ID。",
+    "write_set_respected": "产品改动仅 host.go / facts.go / settle_turn.go（均在 01.3 候选写集内）；invoke.go、runtime/agent/loop.go、runtime/task/registry.go、runtime/task/handoff.go、runtime/state/mailbox.go 未改。"
+  },
+  "subtests": [
+    {
+      "name": "idle_notice_drives_next_decision",
+      "anchor": "positive",
+      "line": 923,
+      "asserts": [
+        "单任务 idle 交付后，同一 session 地址出现唯一 follow-up decision，且为链上最后 decision",
+        "follow-up 请求携带 notice 材料恰 1 份 user 副本，并携带此前 user input 恰 1 份（投影前缀完整）",
+        "通知事实 Key == agent.NoticeFactKey(followInvocation, notice)，Meta TaskID/NoticeKind 携带原任务与 settled 因果",
+        "followInvocation 与 user invocation 不同；accepted/follow 动作各 1 次、地址为 addr、confirmed"
+      ]
+    },
+    {
+      "name": "busy_notice_retained_and_consumed",
+      "anchor": "positive",
+      "line": 988,
+      "asserts": [
+        "第一 follow-up 在 model 处 park 时第二任务 settle；此刻无 request 携带第二材料，200ms 静默窗口内无新请求（通知留在 driver）",
+        "释放第一 follow-up 后，第二材料由后续 decision 消费，index 在 A 之后；每份材料恰 1 份 user 副本，B 请求历史含 A 材料 1 份",
+        "两条通知 fact key/invocation 互异，B key == NoticeFactKey；四个动作各 1 次且地址正确"
+      ]
+    },
+    {
+      "name": "two_tasks_same_host_each_continuation",
+      "anchor": "positive",
+      "line": 1078,
+      "asserts": [
+        "同 session 两任务顺序 settle：各材料恰 1 份 user 副本，第二请求 index 在第一之后",
+        "第二请求历史含第一材料 1 份（历史重现合法）、两 user input 各 1 份",
+        "两通知 fact TaskID/InvocationID/Key 互异且各自 key == NoticeFactKey；动作与 audit 干净"
+      ]
+    },
+    {
+      "name": "multi_session_same_host_isolated",
+      "anchor": "positive",
+      "line": 1164,
+      "asserts": [
+        "同 host 两 session 各一任务：各自材料恰 1 份、各自历史 input 恰 1 份",
+        "互不携带对方的 input/material/settle 事实；followFact.Owner 分别为各自 addr",
+        "两 follow invocation 不同、key == NoticeFactKey；动作 target 为各自 addr"
+      ]
+    },
+    {
+      "name": "late_notice_not_dropped",
+      "anchor": "positive",
+      "line": 1258,
+      "asserts": [
+        "第一 continuation 完成并静默 250ms 后才释放第二 worker：B settle 前链上无 B 的 settle 事实",
+        "释放后 B 由 A 之后的 decision 消费；各材料恰 1 份、B 历史含 A 材料 1 份、两 input 各 1 份",
+        "两 follow invocation 不同、B key == NoticeFactKey；四个动作各 1 次"
+      ]
+    },
+    {
+      "name": "no_duplicate_input_for_same_notice",
+      "anchor": "negative",
+      "line": 1342,
+      "asserts": [
+        "同一通知身份只生成 1 个新 user-input fact，且为 TypeFeedback / TriggerSource=task / TaskID 与 NoticeKind 正确 / Key == NoticeFactKey",
+        "同一 follow range 内不存在同正文的 TypeExternalInput 事实（EVID-02 的重复面）",
+        "仅 1 个 request 携带该材料、且该请求 user 副本恰 1；无第二请求"
+      ]
+    },
+    {
+      "name": "busy_notice_not_dropped",
+      "anchor": "negative",
+      "line": 1425,
+      "asserts": [
+        "第一 follow-up park 时第二终态已交付：交付事实存在，但 notice fact 计数为 0，且无 request 携带第二材料（未抢跑、未丢）",
+        "释放 A 后第二通知由后续 decision 消费（index 后移）、notice fact 恰 1、key == NoticeFactKey、TaskID 正确",
+        "四个动作各 1 次；audit 干净"
+      ]
+    },
+    {
+      "name": "no_new_invocation_for_notice",
+      "anchor": "negative",
+      "line": 1513,
+      "asserts": [
+        "follow-up 事实 Owner == user addr（同 session/agent 责任范围）",
+        "followInvocation != userInvocation；Key == NoticeFactKey(followInvocation, notice)",
+        "TaskID / Meta TaskID / EventSummary 保持原任务与 settled 因果",
+        "user range 下 notice key 计数为 0；follow range 内无被折入的 user external input；请求材料恰 1 份"
+      ]
+    }
+  ],
+  "fix_paths": [
+    {
+      "defect": "EVID-02 双路材料",
+      "before": "fireNoticeTurn 先 CommitToSession 提交正文 TypeFeedback 事实，再把同正文作为 InvokeRequest.Input 交给 driveLocked -> Run.Invoke 提交 TypeExternalInput 事实；00.2 红证 438 行读到同一通知身份 2 个新 user-input facts（feedback + external_input，同在 session-reproduction-duplicate#2）。",
+      "chosen": "保留 Feedback 事实，删除 InvokeRequest.Input（空 Input + TriggerSource=task），并在 facts.go 把 range 边界准入扩展为「external input 或 task-trigger feedback」。",
+      "why": "facts.go 的 noticeProjection.NoticeBoundary/NoticesFrom 消费面只读 TypeFeedback 且按 prefix 过滤；notice 事实本身是 projection 的一条 entry，把它作为新 range 起点后，投影前缀恰好保留此前全部会话材料、排除 notice 自身，Loop 头的 progressNotes 从 boundary 读到 notice —— 一次逻辑消费恰好一份新输入，且历史不丢。实测：reproduction 四子测试全绿；follow-up 请求材料 1 份 + 先前 input 1 份；随动回合真实驱动并投递正文。",
+      "rejected_reverse": "反向（去 Feedback 留 Input）需为 follow-up 材料补一套消费面（noticeProjection 只读 Feedback），并丢失 SettleDriver/因果/幂等锚点所依赖的 NoticeFactKey 事实，超出最小修复；且与 event-turning 原设计方向相反。"
+    },
+    {
+      "defect": "EVID-03 忙时通知丢失",
+      "before": "SettleDriver.ObserveCommit 在 d.firing 时直接 return nil 丢弃观察；00.2 红证 570 行：第二终态交付事实已记录，但 30s 内无后续 decision 消费、notice fact 为 0。",
+      "chosen": "driver 内 settleNotice{addr,fact} retained 队列 + fireFact 循环 rearm（参考 02.1 meditation driver）；Stop 清理队列并取消在飞 turn；不新增全局缓冲。",
+      "why": "保留发生在既有 driver 内、绑定同一 address 责任范围；当前 firing 结束后 rearm 立即评估下一条，不并发抢同一 address 门。"
+    }
+  ],
+  "commands": {
+    "baseline_before_fix": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityReproduction$' -count=1 -race -json > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3/baseline-reproduction.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 1,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/baseline-reproduction.jsonl",
+      "log_sha256": "d959fa7176740b2d5facecda0a420580994a77b5aa983fe352c92038332cabdb",
+      "log_bytes": 24868,
+      "parsed": {
+        "parent": "TestEventIntegrityReproduction run=1 fail=1",
+        "control_normal_path": "pass",
+        "duplicate_notice_material": "fail: the follow-up notice identity task-2:0:settled:0 generated 2 new user-input facts in invocation session-reproduction-duplicate#2, want exactly 1 (event_integrity_test.go:438)",
+        "busy_notice_loss": "fail: the settled delivery fact was recorded while the first follow-up was parked, but no later decision consumed it within 30s; facts of task task-4 = 1 with 0 feedback notice fact(s) (event_integrity_test.go:570)",
+        "request_and_send_identity_correlation": "pass"
+      }
+    },
+    "reproduction_after_fix": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityReproduction$' -count=1 -race -json > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3/single-reproduction-after-fix.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/single-reproduction-after-fix.jsonl",
+      "log_sha256": "3b9c8c593aca19002aec905052ba05803079af8c0dfef504946c6f1c9d8d2c94",
+      "log_bytes": 22514,
+      "parsed": {
+        "parent": "TestEventIntegrityReproduction run=1 pass=1",
+        "children_run_pass": 4,
+        "children": [
+          "control_normal_path",
+          "duplicate_notice_material",
+          "busy_notice_loss",
+          "request_and_send_identity_correlation"
+        ],
+        "skip": 0,
+        "fail": 0
+      }
+    },
+    "single": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityTaskContinuation$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/single.jsonl",
+      "log_sha256": "49ad1d9feeebf364cf730dd4b66ba42a9e20a0fae3229b6d41d082784359f085",
+      "log_bytes": 56740,
+      "parsed": {
+        "parent": "TestEventIntegrityTaskContinuation run=1 pass=1",
+        "named_subtests_run_pass": 8,
+        "skip": 0,
+        "fail": 0
+      }
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.3\"; for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityTaskContinuation$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; printf 'round-%d EXIT=%d\\n' \"$i\" \"$?\" >> \"$E/rounds-exit.txt\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {
+          "round": 1,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-1.jsonl",
+          "log_sha256": "f8362a205fda2a07b1c5d056743b147f1644d57cab11637dc106bb58656a8cab",
+          "log_bytes": 56731,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 2,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-2.jsonl",
+          "log_sha256": "66aff40c2799cc9c7c07ca4dbc66a039679bd29a7dccb33a7e1ab368f285c23c",
+          "log_bytes": 56727,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 3,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-3.jsonl",
+          "log_sha256": "1b64cf22c392f7d65f3296925c4a59fc1a805e4dd8791664faa2122256310f8e",
+          "log_bytes": 56738,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 4,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-4.jsonl",
+          "log_sha256": "d565e6cf6a432e56e0549067ccddb4ecf4ed0486d086cab71467340e15a50aa6",
+          "log_bytes": 56741,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 5,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-5.jsonl",
+          "log_sha256": "3e209f1cc3245a7ab2e0d927800b372edb0a220138a7864ef65bb19b51c335bd",
+          "log_bytes": 56752,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 6,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-6.jsonl",
+          "log_sha256": "051e01d2e95f749cc63185d3d382c19fa1d3c4db7a9c77d702c59dd32377c879",
+          "log_bytes": 56726,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 7,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-7.jsonl",
+          "log_sha256": "b96d220753168fe9f9fc46568ec66c306b1654bd153af4efdca4b2b3ccc655bf",
+          "log_bytes": 56729,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 8,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-8.jsonl",
+          "log_sha256": "081ef6ce3c6ccaca0a6eaa14ce5b1e6694cb25c3710cd61a4d7b4b1a3c13e020",
+          "log_bytes": 56743,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 9,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-9.jsonl",
+          "log_sha256": "f184c6c683c79fa346244f2e9425dbd9e300bdfbc23f4ce470217b7065a11a11",
+          "log_bytes": 56740,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 10,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/run-10.jsonl",
+          "log_sha256": "dbb7b0b8a218c02cb03a42f1c829f85ea56f11e73b428dc9f0629bd69f0cfb6f",
+          "log_bytes": 56748,
+          "parent_run_pass": true,
+          "named_subtests_run_pass": 8,
+          "skip": 0,
+          "fail": 0
+        }
+      ],
+      "parser": "python3 逐轮 json.loads 每行，按 Test 归集 run/pass/skip/fail；要求父测试与全部 8 个具名子测试各 run=1、pass=1、skip=0、fail=0，且无其它测试记录",
+      "parsed_result": "ALL_TEN_OK=True (rounds-exit.txt: round-1..round-10 EXIT=0)"
+    },
+    "regression": {
+      "host_package": {
+        "command": "go test ./tests/integration/host -count=1",
+        "exit_code": 0,
+        "summary": "ok github.com/SpellingDragon/tagent/tests/integration/host 9.936s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/regression-host.txt",
+        "log_sha256": "a5fcbccae551362885dcd76466790092ddff5923bf04ac1daf9ea3beda419508",
+        "log_bytes": 68
+      },
+      "execution_and_history": {
+        "command": "go test ./tests/integration/execution ./tests/integration/history -count=1",
+        "exit_code": 0,
+        "summary": "ok .../tests/integration/execution 2.965s; ok .../tests/integration/history 3.561s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/regression-execution-history.txt",
+        "log_sha256": "d690ffeae865897d3b0d56e91e5c172ac3350bb897b5889aeb28d4662dcc3411",
+        "log_bytes": 144
+      },
+      "harness_and_existing_settle": {
+        "command": "go test ./tests/integration/host -run '^(TestEventIntegrityHarness|TestSettledNoticeDrivesFollowUpTurn|TestSettleDriverIgnoresNonTerminalFacts)$' -count=1 -race -json > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3/harness-and-settle-after-fix.jsonl\" 2>&1",
+        "exit_code": 0,
+        "parsed": "TestEventIntegrityHarness run=1 pass=1; TestSettledNoticeDrivesFollowUpTurn run=1 pass=1; TestSettleDriverIgnoresNonTerminalFacts run=1 pass=1",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/harness-and-settle-after-fix.jsonl"
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go vet ./...",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/vet.txt",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l host.go invoke.go settle_turn.go facts.go runtime/agent/loop.go runtime/task/registry.go runtime/task/handoff.go runtime/state/mailbox.go tests/integration/host/event_integrity_test.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0"
+      },
+      "event_ownership": {
+        "command": "go run ./scripts/codetools event-ownership --check",
+        "exit_code": 0,
+        "summary": "event-ownership: OK (4 uncovered call site(s) reported, none counted as covered)",
+        "json_command": "go run ./scripts/codetools event-ownership --check --json",
+        "json": {
+          "ok": true,
+          "violations": 0,
+          "uncovered": 4,
+          "counts": {
+            "owners": 6,
+            "symbols": 14,
+            "packages_scanned": 31,
+            "candidates": 47,
+            "direct_calls": 20,
+            "allowed": 14,
+            "forbidden": 0,
+            "unregistered": 0,
+            "unowned": 0,
+            "ambiguous": 0,
+            "uncovered": 4,
+            "same_name_non_target": 29
+          }
+        },
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/event-ownership.json",
+        "log_sha256": "87b020ec6dba6c86fd080c66815211a08f2cfd448386289e897a46b169b60f24",
+        "log_bytes": 9597
+      }
+    },
+    "negative_anchor_mutation_check": {
+      "purpose": "证明两个负锚在缺陷代码下确实转红，不是空转。临时恢复 host.go 的 InvokeRequest.Input 行并让 ObserveCommit 在 firing 时直接丢弃；跑完立即从备份恢复，并用 shasum -a 256 -c fix.sha256 验证三文件逐字节回到修复态（host.go OK / settle_turn.go OK / facts.go OK）。",
+      "command": "go test ./tests/integration/host -run 'TestEventIntegrityTaskContinuation/(no_duplicate_input_for_same_notice|busy_notice_not_dropped)' -count=1 -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3/mutation-red.jsonl\" 2>&1",
+      "exit_code": 1,
+      "parsed": {
+        "no_duplicate_input_for_same_notice": "fail: the notice identity task-2:0:settled:0 generated 2 new user-input facts ... want exactly 1",
+        "busy_notice_not_dropped": "fail: no request carried the notice material ... within 30s; model requests = 7"
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.3/mutation-red.jsonl",
+      "log_sha256": "9c5addd9036a4d64ad21a92ccdc3b4726455506b6e3b6ebfba20d1c4353d5a1d",
+      "log_bytes": 15984,
+      "restore_verified": true
+    }
+  },
+  "observations": [
+    "任务行字面写「MUST NOT 为通知新建 invocation」，但 00.3 的 invocation_version_conflict 裁定为 semantic-narrowing：拒绝字面复用原 invocation ID，允许 follow-up 在责任范围内由 nextInvocation 新 mint; 本叶按任务指令与 00.3 断言责任范围/因果/不合并，不断言字面复用。",
+    "TypeTaskSettled 在 RoleOf 下是 tool 角色，settle 交付事实会在后续 range 的投影前缀中以 tool 消息重现正文；这属 00.3「正文在历史投影中合法重现不算重复」，测试只按 user 角色与新输入事实计数。",
+    "新测试统一使用 bootReproductionHost（声明 max_tokens: 32000），因为 replay projection 是 notice 事实作为 range 材料被 Loop 头读到的前提；03.1 默认 harness agent 未声明模型窗口，未为此改 harness。",
+    "facts.go 删除 `held.rangeInvocation != \"\"` 守卫与 AttachReplay 的 ended=projection.Len() 等价（首个新 fact 的 position 恒等于该值），保留准入门槛即可。",
+    "settle_turn_test.go 的 TestSettledNoticeDrivesFollowUpTurn 在本修复前已存在且全绿，说明无 Input 的随动回合与 notice 材料读取链在本叶修复前即被既有测试覆盖；本叶新增的是同一通知恰好一份新输入与忙时保留的判定。"
+  ],
+  "limitations": [
+    "busy_notice_retained_and_consumed 的兼核项「消费 turn 收尾后已外显通知降级为票据行」与 late_notice_not_dropped 的兼核项「内部性通知保留 N 轮」在基线没有生产呈现面（只有 memory/replay 预算驱动的 PresentationTicket，无通知 ticket 降级实现）；本叶不断言、不伪造，留给 02 域呈现工作。",
+    "未新增 public API 或持久化格式；产品改动仅 host.go/facts.go/settle_turn.go。",
+    "未触碰 01.4/01.5 的发送与正式接线范围；00.2 保持未勾（其勾选门为 01.5 后 event-short 十轮）。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.3",
+    "action": "本摘要写入后勾选该一条为 [x]；00.2 保持未勾"
+  },
+  "status": "complete",
+  "checkbox": "checked",
+  "completed_at": "2026-10-24T09:19:47Z",
+  "reopened_patch": {
+    "generated_at": "2026-10-24T09:19:47Z",
+    "task_line": "01.3 补差重开：追加 notice_input_without_projection，三态（未配置投影/零窗口/有窗口）下随动回合通知材料均可达；无投影配置合法路径不断通知输入；不得恢复正文 Input 双路。",
+    "attribution": {
+      "question": "AttachReplay 未挂时 Loop 头读什么？",
+      "finding_before_fix": "facts.go attachDeclaredReplay 只在 window.MaxTokens > 0 时 AttachReplay 并 attachNoticeFeed；max_tokens 未声明或为 0 时提前 return，loop 的 notice feed 保持 nil。host.go fireNoticeTurn 以空 Input 驱动随动回合、只提交 TypeFeedback 通知事实；loop.progressNotes 在无 feed 时只读 in.takeNotices()（仅 progress 通知经 admitNotice 填充），而该通知事实不在其中 → 随动请求只剩上一轮 transcript，通知材料丢失。",
+      "finding_after_fix": "无投影链的通知读面改为从活账本（r.facts/r.factOrder，按 session + TypeFeedback + 通知身份前缀过滤）作答：progressNotes 仍然只经 noticeProjection 一条读路径取通知，in.takeNotices 仅保留为 loop 无 run 装配时的回退。",
+      "state_shapes": [
+        {
+          "state": "no_declared_window",
+          "declaration": "entry agent 无 max_tokens",
+          "projection": false,
+          "ReplayEntries.registered": false
+        },
+        {
+          "state": "zero_window",
+          "declaration": "max_tokens: 0",
+          "projection": false,
+          "ReplayEntries.registered": false
+        },
+        {
+          "state": "declared_window",
+          "declaration": "max_tokens: 256",
+          "projection": true,
+          "ReplayEntries.registered": true
+        }
+      ],
+      "test_pins_the_shape": "每个态都断言 host.Run().ReplayEntries(session) 的 registered 等于该态声明（false/false/true），确保被测装配确为无投影链，而不是猜测。"
+    },
+    "anchor": {
+      "name": "TestEventIntegrityTaskContinuation/notice_input_without_projection",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "subtests": [
+        "no_declared_window",
+        "zero_window",
+        "declared_window"
+      ],
+      "chain": "Boot -> Host.Invoke 驱动委托 -> 声明子代理 worker 结算 -> SettleDriver.ObserveCommit -> Host.fireNoticeTurn（提交 NoticeFactKey 通知事实、空 Input 驱动）-> Run.Invoke -> Loop.Drive -> Loop.progressNotes -> noticeProjection.NoticeBoundary/NoticesFrom。",
+      "positive_assert": "三态下随动请求都携带通知材料原文（user 消息与通知事实正文逐字节相等），且携带上一轮用户输入一次。",
+      "negative_anchor_1": "continuationSingleCopy：随动请求中通知材料 MUST 恰为 1 份 user 副本 —— 恢复 Input 双路会让同一材料在 ready 与通知读面各出现一次，即 FAIL。",
+      "negative_anchor_2": "continuationNoticeFact：同一 task 的通知事实 MUST 恰为 1 条，且 Key == agent.NoticeFactKey(invocation, notice)；未为通知再提交第二份用户输入事实。"
+    },
+    "red": {
+      "implementation": "修复前 facts.go：无窗口链不 attach notice feed，noticeProjection 对无投影链回答 held=false。",
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityTaskContinuation$/^notice_input_without_projection$' -count=1 -race -json -timeout 8m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3-patch/red.jsonl\" 2>&1",
+      "exit_code": 1,
+      "log": {
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/red-prefix-child-selector.jsonl",
+        "log_sha256": "3580e70338f66dc83f51e3e72c3bd62fc2e6e20e78706dc634db4c93935c25a0",
+        "log_bytes": 19776,
+        "parent": "TestEventIntegrityTaskContinuation",
+        "named_tests_run_pass": 1,
+        "skip": 0,
+        "fail": 4,
+        "all_pass": false,
+        "tests": {
+          "TestEventIntegrityTaskContinuation": {
+            "run": 1,
+            "pass": 0,
+            "skip": 0,
+            "fail": 1
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection": {
+            "run": 1,
+            "pass": 0,
+            "skip": 0,
+            "fail": 1
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection/no_declared_window": {
+            "run": 1,
+            "pass": 0,
+            "skip": 0,
+            "fail": 1
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection/zero_window": {
+            "run": 1,
+            "pass": 0,
+            "skip": 0,
+            "fail": 1
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection/declared_window": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          }
+        }
+      },
+      "result": "no_declared_window FAIL、zero_window FAIL（随动请求不携带通知材料，请求不匹配任何声明步骤）；declared_window PASS（有投影链本来就经 notice feed 读到通知）。",
+      "failure_message": "event_integrity_projectionless_test.go:101: the follow-up decision of the %s state carried no user input of the notice material ... (the request matched no declared step)",
+      "note": "红证用子 selector（父 + 新锚）跑修复前实现；declared_window 在红证中即 PASS，正说明缺陷是『无投影读路径断开』而不是有投影链的回归。红证文件在并回单文件前取自临时测试文件，行号属于该临时文件。"
+    },
+    "fix": {
+      "path": "facts.go",
+      "symbols": [
+        "Run.attachDeclaredReplay",
+        "noticeProjection.NoticeBoundary",
+        "noticeProjection.NoticesFrom",
+        "Run.noticesOfLocked"
+      ],
+      "change": [
+        "attachDeclaredReplay：window.MaxTokens <= 0 分支也 attachNoticeFeed（无窗口链仍有通知读面）。",
+        "NoticeBoundary：无注册投影的链返回 (0, true) —— 该链的读面是活账本，通知事实尚未经任何 transcript 呈现，序列从头开始。",
+        "NoticesFrom：无注册投影的链改读 noticesOfLocked（本 session 的 TypeFeedback 事实，按提交序；游标是该序列的位置；仍按通知身份前缀过滤），有投影的链仍只读 projection。",
+        "不新增事实、不改通知身份、不恢复 Input 双路；通知材料仍只来自该通知已提交事实。"
+      ],
+      "public_api_or_format": "无新增 public API、无新增持久化格式。"
+    },
+    "green": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityTaskContinuation$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.3/single.jsonl\" 2>&1",
+      "exit_code": 0,
+      "single": {
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/single.jsonl",
+        "log_sha256": "caa62881a3c9c9845d33984a9c8a5973f2ecc812eab571d2da5401c2881051b9",
+        "log_bytes": 84391,
+        "parent": "TestEventIntegrityTaskContinuation",
+        "named_tests_run_pass": 13,
+        "skip": 0,
+        "fail": 0,
+        "all_pass": true,
+        "tests": {
+          "TestEventIntegrityTaskContinuation": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/idle_notice_drives_next_decision": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/busy_notice_retained_and_consumed": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/two_tasks_same_host_each_continuation": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/multi_session_same_host_isolated": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/late_notice_not_dropped": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/no_duplicate_input_for_same_notice": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/busy_notice_not_dropped": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/no_new_invocation_for_notice": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/notice_visible_under_small_window": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection/no_declared_window": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection/zero_window": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection/declared_window": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          }
+        }
+      },
+      "rounds_command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.3\"; for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityTaskContinuation$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; done",
+      "ten_rounds": [
+        {
+          "round": 1,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-1.jsonl",
+          "log_sha256": "155ae0c82a5010116bffc9376aff6a2250f4f73cdac8f88130a362246ea62a18",
+          "log_bytes": 84397,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 2,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-2.jsonl",
+          "log_sha256": "0055df01433a2b9b21cc5112e6dc1969a8c0500f0ef532e3fbac9a1404068a46",
+          "log_bytes": 84390,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 3,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-3.jsonl",
+          "log_sha256": "8bf416df41c05a5a22b875bfadb1b30ab7aa6304ac0120b3bccfe4cf9772157d",
+          "log_bytes": 84389,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 4,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-4.jsonl",
+          "log_sha256": "e65569cbce993068441744c1a1f3937a6623914ef2418b70ca90d386343bfbe5",
+          "log_bytes": 84394,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 5,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-5.jsonl",
+          "log_sha256": "2a341a779f7644ebf4b98cb33f53ebdc4ea96130b5d2613969050530f27173cc",
+          "log_bytes": 84395,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 6,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-6.jsonl",
+          "log_sha256": "789e7063591f93899f43164fdc2489a0be8004228eb3528b502c35f4c3c743dd",
+          "log_bytes": 84397,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 7,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-7.jsonl",
+          "log_sha256": "6674d0a241a134daf6a06a2c73a633785788a1b060ca6c71b567ad4aff3378d3",
+          "log_bytes": 84401,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 8,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-8.jsonl",
+          "log_sha256": "3c7fed3c6ea373b388ab69960e36525505ae29ccb142a408656169a769c661b5",
+          "log_bytes": 84400,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 9,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-9.jsonl",
+          "log_sha256": "538e7504cf809a11e40eaa5a0e091896a55379dcd15b63f5a6050db49a0bff91",
+          "log_bytes": 84385,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 10,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3/run-10.jsonl",
+          "log_sha256": "6aea382519112242b2cdd7160eb2bdfbd51c0ab146ffb4aea256d71f8ea4dd28",
+          "log_bytes": 84397,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 13,
+          "skip": 0,
+          "fail": 0
+        }
+      ],
+      "key_log_lines": [
+        "state=no_declared_window projection=false notice=task-2:0:settled:0 fact_key=6e6f74696365... request_index=3 material=\"tagent: task task-2 settle...\"",
+        "state=zero_window projection=false notice=task-2:0:settled:0 fact_key=6e6f74696365... request_index=3 material=\"tagent: task task-2 settled\"",
+        "state=declared_window projection=true notice=task-2:0:settled:0 fact_key=6e6f74696365... request_index=3 material=\"tagent: task task-2 settled\""
+      ],
+      "original_anchors_no_regression": "同一父测试的 8 个原有锚（idle_notice_drives_next_decision、busy_notice_retained_and_consumed、two_tasks_same_host_each_continuation、multi_session_same_host_isolated、late_notice_not_dropped、no_duplicate_input_for_same_notice、busy_notice_not_dropped、no_new_invocation_for_notice、notice_visible_under_small_window）在单轮与十轮中全部 run=1 pass=1。"
+    },
+    "family_regression": {
+      "commands": [
+        "go test ./tests/integration/host -run '^TestEventIntegrity' -count=1 -race -json -timeout 30m",
+        "go test ./tests/integration/execution -run '^TestEventIntegrity' -count=1 -race -json -timeout 30m",
+        "go test ./tests/integration/history -run '^TestEventIntegrity' -count=1 -race -json -timeout 20m"
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ],
+      "log_refs": [
+        "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3-patch/family-host.jsonl",
+        "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3-patch/family-execution.jsonl",
+        "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3-patch/family-history.jsonl"
+      ],
+      "summary": "host 61 条 pass、execution 全绿、history 全绿；含 01.2 的 handover_before_confirmation 与 01.3 原有 9 个锚，均未回退。"
+    },
+    "hygiene": {
+      "gofmt": {
+        "command": "gofmt -l facts.go tests/integration/host",
+        "exit_code": 0,
+        "output": ""
+      },
+      "vet": {
+        "command": "go vet ./tests/integration/host/ .",
+        "exit_code": 0,
+        "output": ""
+      },
+      "build": {
+        "command": "go build ./...",
+        "exit_code": 0
+      },
+      "ownership": {
+        "command": "go run ./scripts/codetools event-ownership --check",
+        "exit_code": 0,
+        "violations": 0,
+        "output_tail": "event-ownership: OK (4 uncovered call site(s) reported, none counted as covered)"
+      }
+    },
+    "deviations": [
+      {
+        "planned": "01.3 写集：tests/integration/host/event_integrity_test.go",
+        "actual": "先以同包临时文件 event_integrity_projectionless_test.go 取证红，随后并入 event_integrity_test.go 并删除临时文件",
+        "reason": "红证要在产品修复前跑；并入后 10 轮/单轮证据均在单文件树上重跑，写集最终只含任务行声明的那个文件。",
+        "impact": "无残留文件；红证失败行号属于临时文件（已在 red.note 标注）。"
+      },
+      {
+        "planned": "补差子测试只读通知路径",
+        "actual": "facts.go 的无投影读面读活账本 r.facts/r.factOrder（内存）",
+        "reason": "通知事实的持久化/恢复不在 01.3 写集与本叶验收面内（01.8/01.9 负责）；本叶只要求无投影配置时读路径不断，且材料只来自该通知已提交事实。",
+        "impact": "重启进程内已提交事实由 durable 层重建属 01.9；本叶不宣称跨重启的通知读面。"
+      }
+    ]
+  }
+}

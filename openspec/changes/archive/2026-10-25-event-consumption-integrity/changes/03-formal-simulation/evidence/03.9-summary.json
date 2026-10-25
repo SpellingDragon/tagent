@@ -1,0 +1,350 @@
+{
+  "leaf": "03.9",
+  "title": "独立进程重启义务恢复（evals-harness）",
+  "change": "event-consumption-integrity",
+  "domain": "03-formal-simulation",
+  "artifact": "summary",
+  "status": "evidence_ready_pending_01.5",
+  "checkbox": "unchecked",
+  "generated_at": "2026-10-23T14:25:10Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/history/event_integrity_test.go（与 01.2/02.3 同文件单写）新增 TestEventIntegrityRestart，按 positive/negative/consumer 三组具名子测试覆盖交付义务的五个中断点（before_commit / after_commit / after_claim / before_confirmation / after_confirmation）：seed 子进程按相位提交一条任务链后等待父进程 kill，recover 子进程在同一临时 localfile 根上走正式 tagent.Boot 装配、发起 Boot 后首次实际 Invoke、经真实 sender 发送、再以 run 自身 drain 读未结清义务，最后由第三个 opener 只读持久边界。父进程只中断自建子进程（Process.Kill + WaitStatus.Signaled），临时目录由 t.TempDir 自建自清。产品代码零写入。",
+  "method": "每相位一次 seed + 一次 recover，结果按相位缓存供 positive/negative/consumer 复用，负锚不再二次中断进程。seed 用 restartGate 包装真实 state.FactLog：before_commit 扣留 settle 事实的 Put（键前缀 tagent/task/v1/fact:、值含 evt-restart-settled），before_confirmation 扣留消费回执的 Put（前缀 tagent/task/v1/consume:）；因 localfile 在 Put->kvCommit 时即整 shard 原子落盘，门控必须扣留写本身而非 Sync（Sync 直接委托）。门控不返回并在 entered 上报，父进程确认 barrier 进入后 Kill。recover 用 restartHostDocument(root) 生成正式 host 文档（entry/provider/model/providers/agents/storage=localfile root）并 tagent.Boot(config, tagent.WithSender(recorded sender))；随后 host.Invoke 驱动首次真实请求（脚本化 chat.completions 端点记录请求体并回 restartAnswerBody）、sender 记录发送体；run.Close 以 2s deadline 调用并容忍 agent.ErrDrainUnsettled，读取 drain.Unsettled 的 taskID+reason、SessionFacts 中的 TypeTaskSettled 计数与内容；restartBoundary 以第三个 opener 打开同一 root（ledger.OpenTier + state.NewDurableCommit）读 TaskIDs/Outbox 并对种子通知做 Accept，得到 Tasks/Owed/Accept/AcceptErr。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9",
+    "notes": "原始 -json 日志只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。十轮为十个独立测试进程（-count=1 -race），逐轮 uuid 落 run-ids.txt，原始退出码同文件逐行记录。工作树同时含并行单对根产品/host 测试的改动；本叶写集只有 event_integrity_test.go 与 openspec 证据。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/history/event_integrity_test.go",
+      "state": "untracked new file (shared with 01.2/02.3)",
+      "lines": 2754,
+      "sha256": "ac797ccc0d8c1bde056f69c482123db211f88ece6466854542299d6052b5bfab",
+      "note": "仅新增 03.9 的父测试、positive/negative/consumer 三组具名子测试、子进程与断言助手；01.2/02.3 既有测试与断言未改（父 selector 只匹配 TestEventIntegrityRestart）。本轮 gofmt -w 只改动新增 03.9 段的两处对齐，未触碰 01.2/02.3 段。"
+    }
+  ],
+  "product_changes": [],
+  "subtests": [
+    {
+      "name": "positive/before_commit",
+      "anchor": "positive",
+      "asserts": [
+        "seed 在 settle 事实的 Put 被扣留时被父进程 Kill：gate={Barrier:settle-commit Entered:true}，该事实从未落盘；任务注册（spawn 事实）此前已正常提交，故重启重建的是 accepted 任务而非空链",
+        "restart 恰重建一个任务且 Status==task.StatusAccepted(1)，读不到任何通知",
+        "第三个 opener 读到 Tasks=1、Owed=0；对种子通知 Accept 返回 pending 且错误为 \"state: the notification carries no delivery obligation\"",
+        "restart 不提交 settle 事实（Settles=0）；run drain 未排空并恰有一条未结清：task-1: awaiting-tool（accepted 任务欠的是执行义务，不是投递）",
+        "restart 的首次实际请求恰 1 次且末条 user 消息为 restartRecoverInput；sender 恰 1 条且含 restartAnswerBody"
+      ]
+    },
+    {
+      "name": "positive/after_commit",
+      "anchor": "positive",
+      "asserts": [
+        "seed 的 settle 提交已返回、通知已进入持久 outbox 后中断",
+        "restart 从链重建任务并读到恰一条通知（task-1 round=1 kind=settled，冻结路由目标实例为 inst-restart）",
+        "持久边界仍 Owed=1 且 Accept=accepted（投递义务仍开放、仍可被接受）",
+        "restart 不提交 settle 事实（Settles=0）；drain 未排空并具名 task-1: awaiting-delivery（义务冻结在被中断的旧实例，当前生产无跨进程改投）",
+        "首次实际请求 1 次且携带 restartRecoverInput；sender 1 条且含 restartAnswerBody"
+      ]
+    },
+    {
+      "name": "positive/after_claim",
+      "anchor": "positive",
+      "asserts": [
+        "seed 以生产 state.Store.Claim 领取通知后中断：seed mailbox Phase=claimed、Completed=false、Consumed=0",
+        "restart 读到的通知仍为 claimed（领取不被误读为确认）",
+        "持久边界 Owed=1 且 Accept=accepted；restart Settles=0；drain 恰一条 task-1: awaiting-delivery",
+        "首次实际请求 1 次且携带 restartRecoverInput；sender 1 条且含 restartAnswerBody"
+      ]
+    },
+    {
+      "name": "positive/before_confirmation",
+      "anchor": "positive",
+      "asserts": [
+        "seed 领取后消费回执的 Put 被扣留时被 Kill：gate={Barrier:consumption-receipt Entered:true}，回执从未落盘（seed Consumed=0、Phase=claimed）",
+        "restart 读到的通知仍为 claimed，未把「领取后未确认」当成已消费",
+        "持久边界 Owed=1 且 Accept=accepted；restart Settles=0；drain 恰一条 task-1: awaiting-delivery",
+        "首次实际请求 1 次且携带 restartRecoverInput；sender 1 条且含 restartAnswerBody"
+      ]
+    },
+    {
+      "name": "positive/after_confirmation",
+      "anchor": "positive",
+      "asserts": [
+        "seed 以生产 state.Store.Consume 落消费回执后中断：seed mailbox Phase=consumed、Completed=true、Consumed=1",
+        "restart 重建任务但读不到任何通知（已确认不再提供第二次）",
+        "restart 不提交 settle 事实（Settles=0）；drain 已排空且无未结清",
+        "持久边界 Owed=0，对通知 Accept 被拒且错误含 \"no delivery obligation\"（回执已闭合投递义务）",
+        "首次实际请求 1 次且携带 restartRecoverInput；sender 1 条且含 restartAnswerBody"
+      ]
+    },
+    {
+      "name": "negative/confirmed_not_resent",
+      "anchor": "negative",
+      "asserts": [
+        "对 after_confirmation 的恢复结果：若 restart 再次给出通知、再提交一条 settle 事实、或持久边界仍欠该通知，则失败（已确认动作重入再发）",
+        "实测 notices=0 settles=0 owed=0，负锚通过"
+      ]
+    },
+    {
+      "name": "negative/unconfirmed_not_lost",
+      "anchor": "negative",
+      "asserts": [
+        "对 before_confirmation（回执未落盘）的恢复结果：若 rebuild 不出任务（链被丢）、或 Owed=1 但 drain 已排空/未具名、或 Owed=0 但 drain 未排空或 Settles!=1，则失败（未确认义务丢失）",
+        "实测 recovered=1、Owed=1、drain 未排空并具名 task-1: awaiting-delivery，负锚通过"
+      ]
+    },
+    {
+      "name": "negative/cross_boundary_not_misjudged",
+      "anchor": "negative",
+      "asserts": [
+        "claimed 侧（after_claim）必须仍 Owed=1 且 Accept=accepted；confirmed 侧（after_confirmation）必须 Owed=0 且 Accept 被具名拒绝",
+        "若 restart 把 claim 读成 consumed、把 confirmation 读成 claim、或两侧边界读数相同，则失败（跨边界误判）",
+        "实测 claimed owed=1/Accept=accepted，confirmed owed=0/AcceptErr=\"state: the notification carries no delivery obligation\"，两侧 Owed 不同，负锚通过"
+      ]
+    },
+    {
+      "name": "consumer",
+      "anchor": "consumer",
+      "asserts": [
+        "五个相位各自由正式 tagent.Boot 装配（host 文档 storage=localfile 指向 seed 的同一 root，provider 为脚本化 chat.completions 端点），并以 host.Invoke 发起 Boot 后首次实际请求",
+        "每个相位恰 1 次模型请求且请求末条 user 消息为 restartRecoverInput（不是镜像/回放）",
+        "每个相位恰 1 条真实 sender 发送且内容含 restartAnswerBody",
+        "五个相位复用 positive/negative 已产出的同一份子进程报告，不再额外中断进程"
+      ]
+    }
+  ],
+  "verification": {
+    "single": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityRestart$' -count=1 -race -json -timeout 30m",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "elapsed_parent_seconds": 13.8,
+      "parsed": {
+        "parent": "TestEventIntegrityRestart run=1 pass=1 fail=0 skip=0",
+        "named_subtests_run_pass": 11,
+        "children": [
+          "positive",
+          "positive/before_commit",
+          "positive/after_commit",
+          "positive/after_claim",
+          "positive/before_confirmation",
+          "positive/after_confirmation",
+          "negative",
+          "negative/confirmed_not_resent",
+          "negative/unconfirmed_not_lost",
+          "negative/cross_boundary_not_misjudged",
+          "consumer"
+        ]
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/single.json",
+      "log_sha256": "f716c801cd5f14a7f83f1dc951cc555abdee6039154c690a259d40a960a03560",
+      "log_bytes": 18355
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/03.9\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in $(seq 1 10); do id=$(python3 -c 'import uuid;print(uuid.uuid4())'); go test ./tests/integration/history -run '^TestEventIntegrityRestart$' -count=1 -race -json -timeout 30m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done; test \"$(ls \"$E\"/run-*.jsonl | wc -l | tr -d ' ')\" = 10",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "exits": "10/10 exit=0",
+      "run_ids_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-ids.txt",
+      "run_ids_sha256": "3701c43c93f1e3f140e03a725de4efbf0dbbb7deba2b1813ea5336cd145442d9",
+      "run_ids_bytes": 571,
+      "rounds": [
+        {
+          "round": 1,
+          "run_id": "612a80cb-332e-48f9-8606-b4d622c0ba81",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-1.jsonl",
+          "log_sha256": "361385af4be82ae0c7903b1dcf4aa83d304677aa0890c0174adc785c5dbc703d",
+          "log_bytes": 18361
+        },
+        {
+          "round": 2,
+          "run_id": "cf1ea483-a3b9-4ea8-9dd7-d89c5f1d7399",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-2.jsonl",
+          "log_sha256": "b35807fe0645f19523ed3c9e91c08b695722d0837e8008ef1bde3406dafb1c02",
+          "log_bytes": 18361
+        },
+        {
+          "round": 3,
+          "run_id": "3472c2d3-f1ed-4b7a-b2a9-4c1e6fecba44",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-3.jsonl",
+          "log_sha256": "4638cb38ebddb60f3a7568d9a0078fc38be00a95bf10101b01afc87195e09120",
+          "log_bytes": 18360
+        },
+        {
+          "round": 4,
+          "run_id": "2fbf73f1-2dc6-4637-a75d-c82fa3dab3d0",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-4.jsonl",
+          "log_sha256": "91041a4aeefb011da483d94a1c03af57d8587034772a68144c73c5c03a4b1139",
+          "log_bytes": 18362
+        },
+        {
+          "round": 5,
+          "run_id": "168a0b02-0929-4f7f-9ce1-4fc1289f92c4",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-5.jsonl",
+          "log_sha256": "af2a0c7072eac1c424db34acd31d45178caeb1c34029f868ba72db65fed55e0c",
+          "log_bytes": 18356
+        },
+        {
+          "round": 6,
+          "run_id": "d4babc19-c600-4093-b6be-3be418f4b0ce",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-6.jsonl",
+          "log_sha256": "139e6e65f505829a210199f3a509361f1ef9b799443934199ec4199a71a224f0",
+          "log_bytes": 18358
+        },
+        {
+          "round": 7,
+          "run_id": "fdb2818b-e3d8-4bfc-97f7-ca1c64ea2873",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-7.jsonl",
+          "log_sha256": "138ebdccec62b6b23bb005f76c22721a6aa6629c7a0f0310fdcf934117107275",
+          "log_bytes": 18360
+        },
+        {
+          "round": 8,
+          "run_id": "a9365b29-4dc4-4c04-86a8-47cee2154af3",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-8.jsonl",
+          "log_sha256": "38e9615e4de18549e5a19cbaa91cbfcd51f724499ac85235069b5b5fe37eed21",
+          "log_bytes": 18353
+        },
+        {
+          "round": 9,
+          "run_id": "f75587c5-eeed-4daa-a7a6-dcc923bee983",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-9.jsonl",
+          "log_sha256": "b6172f12b65e19b985328765e24291dcfb7294c4a0311d8b17522dd7756ac6d3",
+          "log_bytes": 18363
+        },
+        {
+          "round": 10,
+          "run_id": "9bcb878e-ed4f-486c-a359-8851361558fa",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/run-10.jsonl",
+          "log_sha256": "867ba12f915224263ae85ab7db7cfae00fac2b4640774ec40b97e07d766a9d47",
+          "log_bytes": 18357
+        }
+      ],
+      "parser": "python3 逐行 json.loads；每个测试恰一次 run、恰一次终局 pass、0 fail、0 skip；父测试 + positive(+5) + negative(+3) + consumer = 12 个具名测试全数覆盖；不使用 grep -c / tee。",
+      "parsed_result": "ALL_LOGS_OK=True（10/10 轮，named=12 bad=[] fails=[] ok=True）",
+      "parse_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/parse-output.txt",
+      "parse_sha256": "d2dd3f0bb20c0cdeb618235cbffa1660e79849178963e44005293332e885e453",
+      "parse_bytes": 428
+    },
+    "regression": {
+      "history_all": {
+        "command": "go test ./tests/integration/history -count=1",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "ok github.com/SpellingDragon/tagent/tests/integration/history 11.029s",
+        "note": "含 01.2 全部既有测试、02.3 与本叶新增 03.9；01.2/02.3 断言未改",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/regress-history.txt",
+        "log_sha256": "cf2acc69f27ac3d3b122cb2987e35f29e6bcc93c941d5da3ff72b0d2ef8403ca",
+        "log_bytes": 72
+      },
+      "host_sample": {
+        "command": "go test ./tests/integration/host -run '^(TestProjectionCarriesTheCommittedSequence|TestBootPassesModelParameters|TestPublicRuntimeEntry)$' -count=1 -v",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "3/3 PASS；TestProjectionCarriesTheCommittedSequence 0.00s、TestBootPassesModelParameters 0.11s、TestPublicRuntimeEntry 0.00s；ok github.com/SpellingDragon/tagent/tests/integration/host 0.469s",
+        "note": "host 包抽查；并行单正在改 host 包与根产品，本轮编译与运行均通过，未撞中间态，无需重试",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/host-sample.txt",
+        "log_sha256": "021d8f320691789a807ed0cb3826d52209c33a97cb70f4d0f026cf61a505364f",
+        "log_bytes": 7327
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go vet ./tests/integration/history",
+        "exit_code": 0,
+        "output": "",
+        "note": "go vet 与 go build（go test 隐含）均通过",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/vet.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l tests/integration/history/event_integrity_test.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0",
+        "note": "gofmt -w 的差异仅落在新增 03.9 段（两处对齐），01.2/02.3 段未触碰",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/03.9/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      }
+    }
+  },
+  "deviations": [
+    {
+      "planned": "确认前/提交前的门控语义按「拦 Sync（barrier 未返回）」实现",
+      "actual": "门控改为扣留 Put 本身（匹配的 key 不委托底层 log 并阻塞），Sync 直接委托",
+      "reason": "memory/ledger/tier_facts.go:30 的 TierFacts.Put 即 kvCommit，localfile 在写时就以 tmp+rename 原子发布整 shard；拦 Sync 不会让记录缺席，重启仍能读到 settle 事实/消费回执（首轮实测 before_commit 重建出 owed、before_confirmation 读到 notices=[]）。",
+      "impact": "修正后 before_commit 与 before_confirmation 的门控才真实成立（gate Entered=true 且记录未落盘）。该发现是测试夹具的修正，不涉及产品改动。"
+    },
+    {
+      "planned": "重启进程关闭时走 Host.Close（正式关停入口）",
+      "actual": "只用 run.Close(ctx, agent.CloseRequest{Deadline: now+2s})，容忍 agent.ErrDrainUnsettled，不再调用 host.Close",
+      "reason": "Host.Close 以零 deadline 调 Run.Close，settleOwed 对永远无法结算的义务（投递冻结在旧实例）空转，首轮实测 recover 子进程在 host.Close 阻塞 120s 直至子进程 ctx 到期；该阻塞不是本叶要证明的行为。",
+      "impact": "drain 读取仍来自生产 run.Close 的返回值；未结清义务被具名（task-1: awaiting-delivery / awaiting-tool）。after_confirmation 无义务，drain 在窗口内正常排空。"
+    },
+    {
+      "planned": "提交前中断后重启应「没有任何任务」",
+      "actual": "重启重建出一个 StatusAccepted 任务、无通知、欠 awaiting-tool 义务",
+      "reason": "任务注册（spawn 事实）先于 settle 提交并已持久化；before_commit 扣留的是 release 通知的 settle 事实。当前生产没有「注册未提交」的可见中间态（Register 本身即 DurableCommit）。",
+      "impact": "断言按真实边界改写为「无通知、无 settle 事实、边界 Owed=0、drain 具名 awaiting-tool」；仍可证伪（任何 settle 事实/通知/投递出现都会失败）。"
+    },
+    {
+      "planned": "重启后对未确认通知应重新投递并提交 settle 事实（Settles==1）",
+      "actual": "after_commit/after_claim/before_confirmation 的实测分支是「义务保留为 open」：持久边界 Owed=1、Accept=accepted、drain 具名 awaiting-delivery、Settles=0",
+      "reason": "AcceptNotice 的 openTarget 要求通知目标实例是本进程已建立的 site，而 Run 每进程 newInstanceID()；恢复出的通知冻结旧实例 inst-restart，重启进程无法向其投递（ErrUnknownTarget）。CloseInstance/Retained/RecoveryMaterial 存在但无生产调用者。",
+      "impact": "restartAssertOwed 以 Owed 双分支不变量表达两种合法生产行为；本轮走保留分支。非丢失已被持久边界 Owed=1 与 drain 具名证明；「重启后真实改投」未宣称，属产品接线缺口（不改产品，按 03 域约束上报）。"
+    },
+    {
+      "planned": "消费者锚通过 host 文档 environment_block 指定持久根",
+      "actual": "host 文档只用 storage{type: localfile, root} 指定持久根，agents 仅声明 agent-a",
+      "reason": "host.go 的 hostAgent 是 strict 解码且不支持 environment_block（api/config 的 Declaration 才支持）；产品零写入边界下不改 host.go。",
+      "impact": "Boot 仍走正式 host 文档装配；持久根由 storage 配置生效，五个相位的 recover 均在同一 root 上读回 seed 的链。"
+    },
+    {
+      "planned": "为负锚做临时产品变异取证",
+      "actual": "未做临时变异",
+      "reason": "产品代码零写入是 03 域硬约束，且并行单正在改根产品/host 测试，临时变异会互踩。",
+      "impact": "负锚由具名断言（重入再发/丢失/跨边界误判各自独立失败路径）与十轮稳定复跑承载；未以变异红灯作为附加证据。"
+    }
+  ],
+  "observations": [
+    "单轮实测五相位读数（recover 子进程报告）：before_commit recovered=1 notices=0 requests=1 sends=1 settles=0 drain={Drained:false Unsettled:[task-1: awaiting-tool]} boundary={Tasks:1 Owed:0 Accept:pending AcceptErr:\"state: the notification carries no delivery obligation\"}；after_commit recovered=1 notices=1 settles=0 drain={Drained:false Unsettled:[task-1: awaiting-delivery]} boundary={Tasks:1 Owed:1 Accept:accepted}；after_claim 与 before_confirmation 同 after_commit（seed 分别为 Phase:claimed / 回执被扣留且 Consumed:0）；after_confirmation recovered=1 notices=0 settles=0 drain={Drained:true Unsettled:[]} boundary={Tasks:1 Owed:0 Accept:pending AcceptErr:no delivery obligation}，seed mailbox Phase:consumed Completed:true Consumed:1。",
+    "每相位恰两次子进程（seed + recover），positive/negative/consumer 复用同一份报告：单轮日志中 12 个具名测试各 run=1 pass=1，未因负锚重复中断进程。",
+    "父进程对所有 seed 断言 Process.Kill 后 WaitStatus.Signaled()，确认中断由父造成；seed 从不 close/drain，kill 后日志只保留真正落盘的记录。",
+    "两处实现缺陷由实测暴露并修正：① localfile 在 Put 时即发布，门控必须扣留写而非 Sync；② Host.Close 零 deadline 会为不可结算义务空转，改用 run.Close 的显式窗口并读未结清清单。",
+    "持久边界的 Accept 探测是第三个 opener（ledger.OpenTier + state.NewDurableCommit）在 recover 进程报告后重新打开 root，读数不依赖任一进程内存。",
+    "十轮为十个独立测试进程（-count=1 -race），每轮 12 个具名测试全绿、退出码 0；host 抽查 3/3 PASS。"
+  ],
+  "limitations": [
+    "不宣称掉电恢复：中断是父进程对子进程的 Kill（进程级），localfile 以 tmp+rename 发布整 shard，未做 fsync/掉电级崩溃注入；验收面亦明确不要求。",
+    "重启后的「真实改投」未验证：当前生产无法向旧实例冻结路由投递（无 CloseInstance/Retained 生产调用），义务保留为 open 并具名；改投能力属产品接线缺口，需上游裁定。",
+    "seed 的 claim/consume 用生产 state.Store.Claim/Consume 与真实 durable carrier（不是测试替身），但 site 由测试建立（Establish），因为 seed 只写任务链、不 Boot 完整 host；该建立用的是生产 state API。",
+    "消费者锚记录的是 Boot 后首次 Invoke 的实际请求与 sender 发送，不是中断前那一轮的请求回放；验收面要求的正是新子进程 Boot 后首次实际请求与发送。",
+    "未做临时产品变异取证（见 deviations）；负锚可证伪性由具名断言与十轮稳定复跑承载。",
+    "03.9 的 verify_after=01.5：本摘要只证明产物 ready 与三锚及十轮证据；正式回验前保持未勾选。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+    "line": "03.9",
+    "action": "保持 `- [ ]` 未勾选：verify_after=01.5，三锚与十轮证据已 ready，待 01.5 正式回验后再勾选；本次未编辑 tasks.md。"
+  }
+}

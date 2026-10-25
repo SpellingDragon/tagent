@@ -1,0 +1,59 @@
+{
+ "leaf": "05.2",
+ "title": "required 汇总消费同一 bundle 门（本地完成门复验）",
+ "status": "green",
+ "executed_at": "2026-10-25",
+ "previous_red": "evidence/05.2-bundle-gate-red.json（叶外指纹口径缺陷，保留为红证）",
+ "fix": {
+  "checker": "scripts/check_runtime_evidence.py check_bundle_module_fingerprints：按 module_path 对 short/long 证据求交集，交集模块的 content_hash/revision 必须一致；非交集模块是 scope 差异不是漂移。替换原先对 module_fingerprints 列表的逐字比较。",
+  "fixture": "scripts/test_check_runtime_evidence.py event_fingerprints(scope)：short 记 3 模块（root/cli-host/wechat-bot），long 只记 wechat-bot，共享模块同 digest；新增 test_scope_specific_module_sets_are_not_baseline_drift，共享模块 digest 或 revision 漂移必须红。",
+  "ci_budget": ".github/workflows/ci.yml long 片 --timeout 1200、job timeout-minutes 25；scripts/preflight.sh 同步 --timeout 1200；scripts/test_check_runtime_workflow.py 断言同步，注释改为 03.11 实测口径。"
+ },
+ "commands": [
+  {
+   "command": "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'",
+   "exit_code": 0,
+   "result": "Ran 94 tests; OK",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.2-final/checker-selftest.log"
+  },
+  {
+   "command": "python3 -m unittest discover -s scripts -p 'test_check_runtime_workflow.py'",
+   "exit_code": 0,
+   "result": "Ran 39 tests; OK",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.2-final/workflow-selftest.log"
+  },
+  {
+   "command": "python3 -c \"import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))\"",
+   "exit_code": 0,
+   "result": "yaml ok"
+  },
+  {
+   "command": "python3 scripts/check_runtime_evidence.py --bundle \"${TMPDIR}/event-consumption-integrity/final-bundle\" --contract golden/runtime/event_integrity_scenarios.json --json",
+   "exit_code": 0,
+   "result": "ok=true; errors=[]; bundle_evidence_files=17（10 short + 6 long + 1 mutation）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.2-final/bundle-gate-green.json"
+  }
+ ],
+ "bundle_facts": {
+  "short_evidence": 10,
+  "short_unique_run_ids": 10,
+  "repeat_index_coverage": "1..10",
+  "long_evidence": 6,
+  "long_combos": [[1, 256], [1, 32768], [7, 256], [7, 32768], [42, 256], [42, 32768]],
+  "mutation_evidence": 1,
+  "distinct_test_ids": 28,
+  "baseline_fingerprint_rule": "shared module wechat-bot 在 short/long 同为 sha256:7d22cc947ce5c0f9…；root/cli-host 仅 short 覆盖，按 scope 差异接受"
+ },
+ "negative_anchor": {
+  "case": "在 final-bundle 副本把 long/seed-7-window-256 的共享模块 wechat-bot content_hash 改为 sha256:999…",
+  "command": "python3 scripts/check_runtime_evidence.py --bundle ${TMPDIR}/event-consumption-integrity/05.2-final/neg-bundle --contract golden/runtime/event_integrity_scenarios.json --json",
+  "exit_code": 1,
+  "error": "bundle fingerprints module 'wechat-bot' with 2 different baseline content digest values (sha256:7d22cc947c... in repeat-1; sha256:9999999999... in seed-7-window-256); the evidence must describe one source tree",
+  "log_ref": "${TMPDIR}/event-consumption-integrity/05.2-final/bundle-gate-red-shared-module.json"
+ },
+ "consumer_anchor": {
+  "ci": ".github/workflows/ci.yml event-integrity-required 调用同一 check_runtime_evidence.py --bundle；scripts/check_runtime_workflow.py 断言其 needs/always/下载与命令未改",
+  "local": "05.1 的真实 17 份证据按 04.5 bundle 布局组装后被同一命令消费"
+ },
+ "ticked": true
+}

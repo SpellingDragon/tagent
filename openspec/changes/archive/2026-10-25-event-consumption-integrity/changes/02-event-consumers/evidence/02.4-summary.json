@@ -1,0 +1,97 @@
+{
+  "leaf": "02.4",
+  "title": "模型替换（event-driven-model-replacement / in-flight-stream-version）",
+  "change": "event-consumption-integrity",
+  "domain": "02-event-consumers",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T14:05:21Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "模型替换面取证：tests/integration/host/event_integrity_test.go 的父测试 TestEventIntegrityReplacement，下辖 5 个具名子测试（2 正 + 2 负 + 1 消费者锚）。正锚覆盖新请求拿到新生效版本、在途流保持起始版本；负锚覆盖同版本不重复发布/安装、失败替换不安装；消费者锚经 Host.Reload / POST /reload 后于请求侧观察新生效版本。OBS-E7 经源码核实与测试实证：heldModelVersion 的 current==name 返回 (\"\",true) 短路仅在 lease 无版本时成立，Boot 装配的 lease 恒以 doc.modelVersion 版本化（host.go:342），Host 路径不可达该短路；无版本 lease 的首次版本化是真实移动，其后同版本被 rl.ErrLeaseVersionHeld 拒绝（不 rebuild、不发布），故无重复替换判定缺口。产品零改动。",
+  "method": "单元入口用 tagent.Assemble + WithModelLease 装配的正式 Run（真实 Run.Invoke / NoteModelChange / LeasePublications / Presentations），以『新旧两个 model.Model 实例各自记录收到的请求』作为请求侧证据，替换回执只作辅助；消费者锚用 tagent.Boot 装配正式 HTTP host，POST /reload 后从 scriptedProvider 的请求模型字段观察 model-a → model-b。在途流子测试以可控 stream 模型把首轮钉在生成中，替换后断言新实例零请求、旧实例继续供流且下一轮才到达新实例。重复/失败子测试断言 lease 层具名结果（ErrLeaseVersionHeld / ErrLeaseRebuildFailed）、Rebuild 次数、LeasePublications 计数与 Presentations 具名 gap，并验证旧版本继续服务。",
+  "environment": {
+    "os": "Darwin arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.4",
+    "note": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "added (untracked new file; 02.4 段落追加父测试 + 5 子测试 + replacementRig/replacementVersionModel 辅助，共 +434 行)",
+      "lines": 3624,
+      "sha256": "d8f9a0c04d1e7ef2c2356edcee69a7acdd3ee736539eddee18175016c8e2d981"
+    }
+  ],
+  "product_changes": [],
+  "obs_e7": {
+    "question": "heldModelVersion 在 current==name 时返回 (\"\", true) 是否造成重复替换判定缺口？",
+    "source_findings": [
+      "host_reload.go:226 heldModelVersion：current==name 仅当 lease.CurrentVersion() 等于模型名，即 lease 未持版本时成立；否则按 name+分隔符切出版本并 found=false。",
+      "host.go:342 Boot 对每个 agent 以 doc.modelVersion(spec.ID) 创建 rl.NewModelLease；声明的版本非空，故 Host 路径的 current 恒为 name@version，短路不可达。",
+      "host_reload.go:180 modelChanges 以 lease 现持版本作 From，to==version 时跳过：替换失败（version 未前进）会在下一次 reload 被重新判定，不会误读为已应用。",
+      "rl/replacement.go Replace：version==heldVersion 直接 ErrLeaseVersionHeld，不 rebuild、不 publish；rebuild 失败 ErrLeaseRebuildFailed；publish 失败 ErrLeasePublishFailed。"
+    ],
+    "empirical": "duplicate_same_version_not_reinstalled 的两段：Host 同文档两次 Reload → 第二次 ModelChanges=0、LeasePublications 不增；Assemble 无版本 lease 首次版本化后再次 NoteModelChange 同版本 → Rebuild 次数与 LeasePublications 均不增，Presentations 具名 gap 满足 errors.Is(_, rl.ErrLeaseVersionHeld)。",
+    "conclusion": "无判定缺口，产品零改动。按任务行语义以『不重复发布/安装且结果可判定』验收，未要求公共 Reload 报错。"
+  },
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath) → Host.Invoke 首轮 → rewriteScriptedHostDocument(model-b) → POST /reload → scriptedProvider 第二轮请求 Model=model-b（请求侧证据），change 报告仅辅助",
+    "unit_entry": "tagent.Assemble(declaration, nativeAgents) + WithModelLease(agent, rl.NewModelLease(...), WithLeaseRebuild(...)) → Run（Run.Invoke / Run.NoteModelChange / Run.LeasePublications 为正式公开面）",
+    "consumer_subtest": "formal_reload_entry：Boot model-a 首轮 provider 见 model-a；POST /reload 后 Reloaded=true 且 1 条 change（agent user、from local/model-a、to local/model-b、Fact 非空）；第二轮 provider servedRequests 长度 2、models=[model-a, model-b] 且第二条携带该轮输入"
+  },
+  "subtests": [
+    {"name": "new_request_gets_new_version", "anchor": "positive", "line": 3358, "asserts": ["首轮由实例 A 恰服务 1 次请求", "NoteModelChange 后 CurrentVersion = model-b@local/model-b", "第二轮由实例 B 恰服务 1 次且请求携带该轮输入（请求侧可见新生效版本）"]},
+    {"name": "inflight_stream_keeps_start_version", "anchor": "positive", "line": 3402, "asserts": ["首轮流在生成中被替换时保持起始版本：实例 B 零请求", "旧实例继续供流至 partial+final 关闭且首轮结算完成", "下一轮才由实例 B 服务且只收到该轮请求"]},
+    {"name": "duplicate_same_version_not_reinstalled", "anchor": "negative", "line": 3466, "asserts": ["Host 同文档两次 Reload：第二次无 ModelChanges、LeasePublications 不增、两轮均服务 model-a", "无版本 lease 首次版本化 rebuilds=1/publications=1", "同版本再次 NoteModelChange：rebuilds 仍 1、publications 仍 1，具名 gap errors.Is ErrLeaseVersionHeld", "下一轮仍由已装版本服务 1 次"]},
+    {"name": "failed_replacement_not_installed", "anchor": "negative", "line": 3545, "asserts": ["rebuild 失败：CurrentVersion 保持 model-a@local/model-a", "Replacements 恰 1 条 refused 且 Reason 含首个原因", "LeasePublications=0，具名 gap errors.Is ErrLeaseRebuildFailed", "下一轮旧实例继续服务"]},
+    {"name": "formal_reload_entry", "anchor": "consumer", "line": 3588, "asserts": ["Boot 首轮 provider 请求 Model=model-a", "POST /reload 返回 Reloaded=true 且 1 条 ModelChange（agent user、from local/model-a、to local/model-b、Fact 非空）", "第二轮 provider 请求 models=[model-a, model-b] 且第二条携带第二轮输入"]}
+  ],
+  "baseline_and_fix": {
+    "baseline_log": "baseline.json",
+    "red": [],
+    "green": ["new_request_gets_new_version", "inflight_stream_keeps_start_version", "duplicate_same_version_not_reinstalled", "failed_replacement_not_installed", "formal_reload_entry"],
+    "fixes": [
+      "首次实现即全绿：按取证优先原则保留回归，未修改任何产品文件",
+      "测试设计收敛：在途流证据不以替换回执自证，改用新旧模型实例的请求记录（该轮替换后新实例零请求即请求侧证据）"
+    ]
+  },
+  "convergences": {
+    "request_side_evidence": "Boot 的 openai HTTP 模型无法在请求侧暴露响应版本身份，故 in-flight 与单元锚用 Assemble + WithModelLease 的新旧实例请求记录取证；消费者锚用 provider 请求模型字段。两者均为请求侧，不以替换回执自证。",
+    "duplicate_semantics": "重复替换只要求不重复发布/安装且结果可判定：Host 层表现为无 change，lease 层表现为具名 ErrLeaseVersionHeld；均未要求公共 Reload 报错。",
+    "failed_semantics": "失败替换只在 Presentations 暴露具名 gap（model-lease 插件），不新增 API 或持久格式；旧版本继续服务由下一轮请求证明。"
+  },
+  "verification": {
+    "single_round": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityReplacement$' -count=1 -race -json",
+      "exit": 0,
+      "result": "父测试 + 5 子测试各恰一次 run/pass（6 个测试）",
+      "log": "baseline.json"
+    },
+    "ten_rounds": {
+      "command": "for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityReplacement$' -count=1 -race -json > \"$EVID/run-$i.json\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$EVID/exits.txt\"; if [ \"$rc\" -ne 0 ]; then exit \"$rc\"; fi; done",
+      "exits": "10 行全 0",
+      "checker": "python3 逐轮解析 run-$i.json：父测试与 5 子测试各 run==1 且 pass==1，无 fail/skip/重复/零匹配 → ALL-OK（10/10 轮，每轮 6 个测试）",
+      "logs": "run-1.json … run-10.json, exits.txt"
+    },
+    "regression": [
+      {"command": "go test ./tests/integration/host -count=1", "exit": 0, "result": "ok 12.908s（含 00.2 4/4、01.3、01.4 既有用例）"},
+      {"command": "go test ./tests/integration/execution -count=1", "exit": 0, "result": "ok 2.962s"},
+      {"command": "go test ./tests/integration/history -count=1", "exit": 1, "result": "并行单中间态（非本单写集）：首跑 build 失败（undefined restartAssert* 辅助，parallel 单正在写该文件）；重试一次已可编译，但并行单的 TestEventIntegrityRestart 因 agents.agent-a.environment_block: unknown field 失败（其 config fixture 引用尚未落地的字段），与本单无关", "log": "regression-history-retry.log"},
+      {"command": "go test ./tests/integration/history -count=1 -skip '^TestEventIntegrityRestart$'", "exit": 0, "result": "ok 2.507s（排除并行单在写叶子后其余 history 用例全绿）", "log": "regression-history-skip-parallel.log"}
+    ],
+    "gates": [
+      {"command": "go build ./...", "exit": 0},
+      {"command": "go vet ./...", "exit": 0},
+      {"command": "gofmt -l tests/integration/host/event_integrity_test.go", "exit": 0, "result": "无输出（写集干净）"},
+      {"command": "go run ./scripts/codetools event-ownership --check", "exit": 0, "result": "symbols 14 owners 6 direct 21 allowed 14；OK（4 uncovered 如实报告，未计覆盖）", "violations": 0}
+    ]
+  },
+  "checkpoint": {
+    "tasks_md": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+    "state": "保持 - [ ]（verify_after=01.5；产物 ready，待 01.5 后正式证据回验再勾选）",
+    "line": 157
+  }
+}

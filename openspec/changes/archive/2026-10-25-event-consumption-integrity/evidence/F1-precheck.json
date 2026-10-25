@@ -1,0 +1,1795 @@
+{
+ "baseline": "6cc441436c2aab15edcee34cf2561086232c8311",
+ "generated_at": "2026-10-25T02:14:06+0800",
+ "change": "event-consumption-integrity",
+ "leaf_source": "openspec/changes/event-consumption-integrity/task-graph.json",
+ "head_at_snapshot": "6cc441436c2aab15edcee34cf2561086232c8311",
+ "head_equals_baseline": true,
+ "snapshot_is_live_tree": true,
+ "snapshot_drift": {
+  "note": "F1 只读期间工作树被并行方继续写入（快照非冻结树）。S0→S1 新增两条质量门改动：M scripts/check_concept_budget.py、M scripts/codetools/package_layout.go（mtime 均 2026-10-25 02:11:52）；另 run.go 在 S0 后于 02:08:32 被重写（S0 时已为 M，内容又被改）。S1→S2 的 untracked +1 是本单自身产物 evidence/F1-precheck.json，不计外部改动。跨样本已跟踪集合逐项比对：除上述外无增删。",
+  "samples": [
+   {
+    "at": "S0~02:04",
+    "tracked": 46,
+    "untracked": 94,
+    "note": "git diff --stat 报 46 files changed；无 check_concept_budget.py / package_layout.go"
+   },
+   {
+    "at": "S1~02:11",
+    "tracked": 48,
+    "untracked": 94,
+    "note": "+check_concept_budget.py +package_layout.go"
+   },
+   {
+    "at": "S2~02:13",
+    "tracked": 48,
+    "untracked": 95,
+    "note": "仅 +F1-precheck.json（本单产物）"
+   }
+  ],
+  "concurrent_writers_after_dispatch": [
+   "run.go@02:08:32（重写）",
+   "scripts/check_concept_budget.py@02:11:52",
+   "scripts/codetools/package_layout.go@02:11:52",
+   "examples/wechat-bot/wechat-bot 二进制@02:12:34",
+   "examples/cli-host/tagent-cli-host 二进制@02:12:36",
+   "examples/wechat-bot/.wechat-config/cursor.txt@02:13:42"
+  ],
+  "recheck_advice": "F2/F3 前必须重新采样；F1 结论只能作为 generated_at 时点的快照"
+ },
+ "tracked_diff_files": {
+  "count": 48,
+  "files": [
+   {
+    "path": ".github/workflows/ci.yml",
+    "state": "tracked_M",
+    "category": "ci",
+    "leaves": [
+     "05.1",
+     "05.2"
+    ]
+   },
+   {
+    "path": "README.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": [
+     "05.3"
+    ]
+   },
+   {
+    "path": "docs/FACT-VOCABULARY.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": [
+     "05.3"
+    ]
+   },
+   {
+    "path": "docs/GLOSSARY.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": [
+     "05.3"
+    ]
+   },
+   {
+    "path": "docs/OPERATION.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": [
+     "05.3"
+    ]
+   },
+   {
+    "path": "docs/api/github_com__SpellingDragon__tagent.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": []
+   },
+   {
+    "path": "docs/api/github_com__SpellingDragon__tagent__runtime__state.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": []
+   },
+   {
+    "path": "docs/api/github_com__SpellingDragon__tagent__scripts__codetools.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": []
+   },
+   {
+    "path": "docs/api/github_com__SpellingDragon__tagent__tool__exec.md",
+    "state": "tracked_M",
+    "category": "docs",
+    "leaves": []
+   },
+   {
+    "path": "evolution/meditation/deliver.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "02.2"
+    ]
+   },
+   {
+    "path": "evolution/meditation/driver.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "02.1"
+    ]
+   },
+   {
+    "path": "examples/cli-host/main_test.go",
+    "state": "tracked_M",
+    "category": "test",
+    "leaves": [
+     "01.7"
+    ]
+   },
+   {
+    "path": "examples/wechat-bot/smoke_harness_test.go",
+    "state": "tracked_M",
+    "category": "test",
+    "leaves": [
+     "01.6",
+     "03.4",
+     "03.5",
+     "03.6",
+     "03.7",
+     "03.8",
+     "03.10",
+     "03.11"
+    ]
+   },
+   {
+    "path": "examples/wechat-bot/smoke_test.go",
+    "state": "tracked_M",
+    "category": "test",
+    "leaves": [
+     "03.4",
+     "03.5",
+     "03.6",
+     "03.7",
+     "03.8",
+     "03.10",
+     "03.11"
+    ]
+   },
+   {
+    "path": "examples/wechat-bot/wechat_test.go",
+    "state": "tracked_M",
+    "category": "test",
+    "leaves": [
+     "02.6"
+    ]
+   },
+   {
+    "path": "facts.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.1",
+     "01.3",
+     "01.5",
+     "01.8",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "golden/runtime/architecture.json",
+    "state": "tracked_M",
+    "category": "golden",
+    "leaves": [
+     "04.3"
+    ]
+   },
+   {
+    "path": "host.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.1",
+     "01.2",
+     "01.3",
+     "01.4",
+     "01.5",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "invoke.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.1",
+     "01.3",
+     "01.5",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "memory/replay/replay_budget.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "02.3"
+    ]
+   },
+   {
+    "path": "request.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.5",
+     "01.8",
+     "01.9",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "run.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.1",
+     "01.2",
+     "01.5",
+     "01.8",
+     "01.9",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "runtime/agent/loop.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.1",
+     "01.2",
+     "01.3"
+    ]
+   },
+   {
+    "path": "runtime/state/durable.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.2"
+    ]
+   },
+   {
+    "path": "runtime/state/mailbox.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.2",
+     "01.3"
+    ]
+   },
+   {
+    "path": "runtime/state/memory.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.2"
+    ]
+   },
+   {
+    "path": "scripts/check_concept_budget.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": []
+   },
+   {
+    "path": "scripts/check_runtime_architecture.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.3"
+    ]
+   },
+   {
+    "path": "scripts/check_runtime_evidence.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.1",
+     "04.2",
+     "04.5"
+    ]
+   },
+   {
+    "path": "scripts/check_runtime_plan.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.5"
+    ]
+   },
+   {
+    "path": "scripts/codetools/check.go",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": []
+   },
+   {
+    "path": "scripts/codetools/main.go",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.3"
+    ]
+   },
+   {
+    "path": "scripts/codetools/package_layout.go",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": []
+   },
+   {
+    "path": "scripts/lint.sh",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.3",
+     "04.5"
+    ]
+   },
+   {
+    "path": "scripts/preflight.sh",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "05.1"
+    ]
+   },
+   {
+    "path": "scripts/run_runtime_scenarios.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.2"
+    ]
+   },
+   {
+    "path": "scripts/runtime_checklib.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.2"
+    ]
+   },
+   {
+    "path": "scripts/test_check_runtime_architecture.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.3"
+    ]
+   },
+   {
+    "path": "scripts/test_check_runtime_evidence.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.1",
+     "04.2",
+     "04.5"
+    ]
+   },
+   {
+    "path": "scripts/test_check_runtime_plan.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.5"
+    ]
+   },
+   {
+    "path": "scripts/test_check_runtime_workflow.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "05.1",
+     "05.2"
+    ]
+   },
+   {
+    "path": "scripts/test_run_runtime_scenarios.py",
+    "state": "tracked_M",
+    "category": "scripts_tooling",
+    "leaves": [
+     "04.2"
+    ]
+   },
+   {
+    "path": "settle_turn.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.3",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "tests/integration/host/meditation_boot_test.go",
+    "state": "tracked_M",
+    "category": "test",
+    "leaves": [
+     "03.1"
+    ]
+   },
+   {
+    "path": "tests/integration/host/scripted_provider_test.go",
+    "state": "tracked_M",
+    "category": "test",
+    "leaves": [
+     "03.1"
+    ]
+   },
+   {
+    "path": "tool/exec/exec.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.10a",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "tool/exec/tool.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.10a",
+     "01.10b"
+    ]
+   },
+   {
+    "path": "tools.go",
+    "state": "tracked_M",
+    "category": "product_source",
+    "leaves": [
+     "01.1",
+     "01.5",
+     "01.10b"
+    ]
+   }
+  ]
+ },
+ "untracked_files": {
+  "count": 95,
+  "by_category": {
+   "docs": 2,
+   "golden": 1,
+   "openspec_change_planning": 79,
+   "scripts_tooling": 4,
+   "test": 8,
+   "product_source": 1
+  },
+  "note": "全部未跟踪件逐项列于 files 与 file_to_leaf_map；不以 tracked diff 代表全量差异",
+  "files": [
+   "docs/tagent-posttraining-design.docx",
+   "docs/tagent-training-handoff.zip",
+   "golden/runtime/event_integrity_scenarios.json",
+   "openspec/changes/event-consumption-integrity/.openspec.yaml",
+   "openspec/changes/event-consumption-integrity/ORCHESTRATION.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/design.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.json",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.json",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.json",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/proposal.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/specs/committed-event-attribution/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/specs/event-metadata-contract/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/design.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.1-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10a-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10b-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.2-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.3-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.4-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.5-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.6-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.7-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.8-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.9-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/proposal.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/async-task-execution/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/delivery-dispatch-receipts/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/execution-resource-lifecycle/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/persistent-event-loop/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/session-fact-lifecycle/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/telemetry-channel/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/design.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.2-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.3-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.4-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.5-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.6-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.7-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/proposal.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/approval-channels/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/config-hot-reload/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/decision-capture/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/event-sourced-projection/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/meditation-delivery-tool/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/meditation-idle-gating/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/design.md",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.10-calibration.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.11-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.2-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.3-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.4-03.8-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.9-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/EVID-05-fix-summary.json",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/proposal.md",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/specs/evals-harness/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+   "openspec/changes/event-consumption-integrity/changes/04-regression-gates/design.md",
+   "openspec/changes/event-consumption-integrity/changes/04-regression-gates/proposal.md",
+   "openspec/changes/event-consumption-integrity/changes/04-regression-gates/specs/architecture-guardrails/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+   "openspec/changes/event-consumption-integrity/changes/05-mr-integration/design.md",
+   "openspec/changes/event-consumption-integrity/changes/05-mr-integration/proposal.md",
+   "openspec/changes/event-consumption-integrity/changes/05-mr-integration/specs/resident-release-evidence/spec.md",
+   "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md",
+   "openspec/changes/event-consumption-integrity/coverage.md",
+   "openspec/changes/event-consumption-integrity/design.md",
+   "openspec/changes/event-consumption-integrity/evidence/F1-precheck.json",
+   "openspec/changes/event-consumption-integrity/evidence/post-01.5-recheck.json",
+   "openspec/changes/event-consumption-integrity/findings.md",
+   "openspec/changes/event-consumption-integrity/proposal.md",
+   "openspec/changes/event-consumption-integrity/specs/orchestration/spec.md",
+   "openspec/changes/event-consumption-integrity/task-graph.json",
+   "openspec/changes/event-consumption-integrity/tasks.md",
+   "scripts/check_event_integrity_mutations.py",
+   "scripts/codetools/event_ownership.go",
+   "scripts/codetools/event_ownership_test.go",
+   "scripts/test_check_event_integrity_mutations.py",
+   "tests/integration/capabilities/event_integrity_test.go",
+   "tests/integration/evolution/event_integrity_test.go",
+   "tests/integration/execution/event_integrity_test.go",
+   "tests/integration/history/event_integrity_test.go",
+   "tests/integration/host/event_integrity_harness_test.go",
+   "tests/integration/host/event_integrity_test.go",
+   "tests/integration/learning/event_integrity_test.go",
+   "tool/exec/event_integrity_test.go",
+   "tool/exec/state.go"
+  ]
+ },
+ "submodule_untouched": {
+  "path": "examples/wechat-bot/skills/interview/agent-interview-helper",
+  "gitlink_commit_at_baseline": "888fc1616cfb9c25f0fb049fc3a5e36716d51888",
+  "worktree_head": "888fc1616cfb9c25f0fb049fc3a5e36716d51888",
+  "commit_unchanged": true,
+  "present_in_tracked_diff": false,
+  "worktree_dirty_pre_existing": [
+   "?? plan.md",
+   "?? question.md"
+  ],
+  "not_cleaned": true,
+  "note": "gitlink 与基线同 commit（888fc16…），diff 无该路径；工作树仅 2 个既有未跟踪文件；.gitmodules 无该路径映射（git submodule status 报 fatal，属既有形态）"
+ },
+ "specs_untouched": {
+  "main_specs_changed": [],
+  "archive_changed": [],
+  "archive_untracked": [],
+  "ok": true
+ },
+ "deps_unchanged": {
+  "changed": [],
+  "ok": true
+ },
+ "user_data_untouched": {
+  "probe_paths": [
+   "examples/wechat-bot/tagent.yaml",
+   "examples/wechat-bot/tagent.rl.yaml",
+   "examples/wechat-bot/.wechat-config"
+  ],
+  "status_output": "",
+  "changed": [],
+  "ok": true,
+  "note": "两份 tracked yaml 未进 diff；.wechat-config/token 无 status 记录（.wechat-config/ 被 examples/wechat-bot/.gitignore:90 忽略）；wechat-bot 下代码改动只有 3 个 _test.go",
+  "runtime_data_activity": {
+   "path": "examples/wechat-bot/.wechat-config/cursor.txt",
+   "mtime": "02:13:42",
+   "ignored_by": "examples/wechat-bot/.gitignore:90 .wechat-config/",
+   "note": "运行数据被并行运行的微信进程刷新，非本单写入、不进 VCS；但说明有 wechat 运行实例在跑（F2 需避让）"
+  }
+ },
+ "runtime_observations": {
+  "ignored_binaries_rebuilt": [
+   {
+    "path": "examples/wechat-bot/wechat-bot",
+    "mtime": "02:12:34",
+    "ignored_by": "examples/wechat-bot/.gitignore:95"
+   },
+   {
+    "path": "examples/cli-host/tagent-cli-host",
+    "mtime": "02:12:36",
+    "ignored_by": "examples/cli-host/.gitignore:2"
+   }
+  ],
+  "concurrent_run_suspected": "微信/CLI 二进制在同一分钟内重建 + .wechat-config/cursor.txt 持续被写 → 有并行运行实例；F2/F3 前先按 ORCHESTRATION §2.4 释放表核占用再跑"
+ },
+ "boundary_checks": {
+  "a_external_approved_plan": "none（本变更独立；见 external_approved_plan）",
+  "b_user_config_data_untouched": "tagent.yaml/tagent.rl.yaml 未进 diff；.wechat-config/token 无 status 记录；wechat-bot 仅 3 个 _test.go 与既有脏子模块",
+  "c_submodule_left_untouched": "gitlink 888fc16 未变，diff 无该路径，工作树 2 个既有未跟踪文件未清理",
+  "d_deps_unchanged": "go.mod/go.sum（含子模块 go.mod）无 diff",
+  "e_main_specs_untouched": "openspec/specs 无 diff",
+  "f_archive_untouched": "openspec/changes/archive 无 diff、无未跟踪"
+ },
+ "external_approved_plan": {
+  "path": null,
+  "ok": true,
+  "note": "本变更独立，无原批准外部计划文件；ORCHESTRATION §2.2 末段仅声明『不修改旧批准计划』"
+ },
+ "artifact_self": {
+  "path": "openspec/changes/event-consumption-integrity/evidence/F1-precheck.json",
+  "note": "本单唯一写入；作为未跟踪件计入 untracked_files（不剔除，避免少报）",
+  "write_scope_respected": true
+ },
+ "counts": {
+  "tracked": 48,
+  "untracked": 95,
+  "total_rows": 143,
+  "mapped": 132,
+  "unmapped": 11,
+  "red_flags": 8,
+  "by_category": {
+   "ci": 1,
+   "docs": 10,
+   "product_source": 17,
+   "test": 14,
+   "golden": 2,
+   "scripts_tooling": 20,
+   "openspec_change_planning": 79
+  },
+  "diff_numstat": "48 files changed, 13497 insertions(+), 309 deletions(-)"
+ },
+ "file_to_leaf_map": {
+  ".github/workflows/ci.yml": {
+   "category": "ci",
+   "leaves": [
+    "05.1",
+    "05.2"
+   ],
+   "mapped": true
+  },
+  "README.md": {
+   "category": "docs",
+   "leaves": [
+    "05.3"
+   ],
+   "mapped": true
+  },
+  "docs/FACT-VOCABULARY.md": {
+   "category": "docs",
+   "leaves": [
+    "05.3"
+   ],
+   "mapped": true
+  },
+  "docs/GLOSSARY.md": {
+   "category": "docs",
+   "leaves": [
+    "05.3"
+   ],
+   "mapped": true
+  },
+  "docs/OPERATION.md": {
+   "category": "docs",
+   "leaves": [
+    "05.3"
+   ],
+   "mapped": true
+  },
+  "docs/api/github_com__SpellingDragon__tagent.md": {
+   "category": "docs",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-DOCSAPI-05.3"
+  },
+  "docs/api/github_com__SpellingDragon__tagent__runtime__state.md": {
+   "category": "docs",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-DOCSAPI-05.3"
+  },
+  "docs/api/github_com__SpellingDragon__tagent__scripts__codetools.md": {
+   "category": "docs",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-DOCSAPI-05.3"
+  },
+  "docs/api/github_com__SpellingDragon__tagent__tool__exec.md": {
+   "category": "docs",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-DOCSAPI-05.3"
+  },
+  "evolution/meditation/deliver.go": {
+   "category": "product_source",
+   "leaves": [
+    "02.2"
+   ],
+   "mapped": true
+  },
+  "evolution/meditation/driver.go": {
+   "category": "product_source",
+   "leaves": [
+    "02.1"
+   ],
+   "mapped": true
+  },
+  "examples/cli-host/main_test.go": {
+   "category": "test",
+   "leaves": [
+    "01.7"
+   ],
+   "mapped": true
+  },
+  "examples/wechat-bot/smoke_harness_test.go": {
+   "category": "test",
+   "leaves": [
+    "01.6",
+    "03.4",
+    "03.5",
+    "03.6",
+    "03.7",
+    "03.8",
+    "03.10",
+    "03.11"
+   ],
+   "mapped": true
+  },
+  "examples/wechat-bot/smoke_test.go": {
+   "category": "test",
+   "leaves": [
+    "03.4",
+    "03.5",
+    "03.6",
+    "03.7",
+    "03.8",
+    "03.10",
+    "03.11"
+   ],
+   "mapped": true
+  },
+  "examples/wechat-bot/wechat_test.go": {
+   "category": "test",
+   "leaves": [
+    "02.6"
+   ],
+   "mapped": true
+  },
+  "facts.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.1",
+    "01.3",
+    "01.5",
+    "01.8",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "golden/runtime/architecture.json": {
+   "category": "golden",
+   "leaves": [
+    "04.3"
+   ],
+   "mapped": true
+  },
+  "host.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.1",
+    "01.2",
+    "01.3",
+    "01.4",
+    "01.5",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "invoke.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.1",
+    "01.3",
+    "01.5",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "memory/replay/replay_budget.go": {
+   "category": "product_source",
+   "leaves": [
+    "02.3"
+   ],
+   "mapped": true
+  },
+  "request.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.5",
+    "01.8",
+    "01.9",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "run.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.1",
+    "01.2",
+    "01.5",
+    "01.8",
+    "01.9",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "runtime/agent/loop.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.1",
+    "01.2",
+    "01.3"
+   ],
+   "mapped": true
+  },
+  "runtime/state/durable.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.2"
+   ],
+   "mapped": true
+  },
+  "runtime/state/mailbox.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.2",
+    "01.3"
+   ],
+   "mapped": true
+  },
+  "runtime/state/memory.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.2"
+   ],
+   "mapped": true
+  },
+  "scripts/check_concept_budget.py": {
+   "category": "scripts_tooling",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-check_concept_budget.py"
+  },
+  "scripts/check_runtime_architecture.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.3"
+   ],
+   "mapped": true
+  },
+  "scripts/check_runtime_evidence.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.1",
+    "04.2",
+    "04.5"
+   ],
+   "mapped": true
+  },
+  "scripts/check_runtime_plan.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.5"
+   ],
+   "mapped": true
+  },
+  "scripts/codetools/check.go": {
+   "category": "scripts_tooling",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-check.go"
+  },
+  "scripts/codetools/main.go": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.3"
+   ],
+   "mapped": true
+  },
+  "scripts/codetools/package_layout.go": {
+   "category": "scripts_tooling",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-package_layout.go"
+  },
+  "scripts/lint.sh": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.3",
+    "04.5"
+   ],
+   "mapped": true
+  },
+  "scripts/preflight.sh": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "05.1"
+   ],
+   "mapped": true
+  },
+  "scripts/run_runtime_scenarios.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.2"
+   ],
+   "mapped": true
+  },
+  "scripts/runtime_checklib.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.2"
+   ],
+   "mapped": true
+  },
+  "scripts/test_check_runtime_architecture.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.3"
+   ],
+   "mapped": true
+  },
+  "scripts/test_check_runtime_evidence.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.1",
+    "04.2",
+    "04.5"
+   ],
+   "mapped": true
+  },
+  "scripts/test_check_runtime_plan.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.5"
+   ],
+   "mapped": true
+  },
+  "scripts/test_check_runtime_workflow.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "05.1",
+    "05.2"
+   ],
+   "mapped": true
+  },
+  "scripts/test_run_runtime_scenarios.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.2"
+   ],
+   "mapped": true
+  },
+  "settle_turn.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.3",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "tests/integration/host/meditation_boot_test.go": {
+   "category": "test",
+   "leaves": [
+    "03.1"
+   ],
+   "mapped": true
+  },
+  "tests/integration/host/scripted_provider_test.go": {
+   "category": "test",
+   "leaves": [
+    "03.1"
+   ],
+   "mapped": true
+  },
+  "tool/exec/exec.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.10a",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "tool/exec/tool.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.10a",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "tools.go": {
+   "category": "product_source",
+   "leaves": [
+    "01.1",
+    "01.5",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "docs/tagent-posttraining-design.docx": {
+   "category": "docs",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-tagent-posttraining-design.docx"
+  },
+  "docs/tagent-training-handoff.zip": {
+   "category": "docs",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-tagent-training-handoff.zip"
+  },
+  "golden/runtime/event_integrity_scenarios.json": {
+   "category": "golden",
+   "leaves": [
+    "04.1"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/.openspec.yaml": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/ORCHESTRATION.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/specs/committed-event-attribution/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/specs/event-metadata-contract/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.1-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10a-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10b-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.2-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.3-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.4-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.5-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.6-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.7-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.8-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.9-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/async-task-execution/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/delivery-dispatch-receipts/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/execution-resource-lifecycle/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/persistent-event-loop/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/session-fact-lifecycle/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/telemetry-channel/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.2-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.3-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.4-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.5-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.6-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/evidence/02.7-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/approval-channels/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/config-hot-reload/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/decision-capture/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/event-sourced-projection/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/meditation-delivery-tool/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/specs/meditation-idle-gating/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.10-calibration.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.11-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.2-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.3-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.4-03.8-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.9-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/EVID-05-fix-summary.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/specs/evals-harness/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/04-regression-gates/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/04-regression-gates/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/04-regression-gates/specs/architecture-guardrails/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/05-mr-integration/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/05-mr-integration/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/05-mr-integration/specs/resident-release-evidence/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/coverage.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/design.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/evidence/F1-precheck.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/evidence/post-01.5-recheck.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/findings.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/proposal.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/specs/orchestration/spec.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/task-graph.json": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "openspec/changes/event-consumption-integrity/tasks.md": {
+   "category": "openspec_change_planning",
+   "leaves": [
+    "planning(P0)"
+   ],
+   "mapped": true
+  },
+  "scripts/check_event_integrity_mutations.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.4"
+   ],
+   "mapped": true
+  },
+  "scripts/codetools/event_ownership.go": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.3"
+   ],
+   "mapped": true
+  },
+  "scripts/codetools/event_ownership_test.go": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.3"
+   ],
+   "mapped": true
+  },
+  "scripts/test_check_event_integrity_mutations.py": {
+   "category": "scripts_tooling",
+   "leaves": [
+    "04.4"
+   ],
+   "mapped": true
+  },
+  "tests/integration/capabilities/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "02.5"
+   ],
+   "mapped": true
+  },
+  "tests/integration/evolution/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "02.1"
+   ],
+   "mapped": true
+  },
+  "tests/integration/execution/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "01.1",
+    "01.10b"
+   ],
+   "mapped": true
+  },
+  "tests/integration/history/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "01.2",
+    "01.8",
+    "01.9",
+    "02.3",
+    "03.9"
+   ],
+   "mapped": true
+  },
+  "tests/integration/host/event_integrity_harness_test.go": {
+   "category": "test",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-event_integrity_harness_test.go"
+  },
+  "tests/integration/host/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "00.2",
+    "01.3",
+    "01.4",
+    "01.5",
+    "02.2",
+    "02.4",
+    "03.2",
+    "03.3"
+   ],
+   "mapped": true
+  },
+  "tests/integration/learning/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "02.7"
+   ],
+   "mapped": true
+  },
+  "tool/exec/event_integrity_test.go": {
+   "category": "test",
+   "leaves": [
+    "01.10a"
+   ],
+   "mapped": true
+  },
+  "tool/exec/state.go": {
+   "category": "product_source",
+   "leaves": [],
+   "mapped": false,
+   "red_flag": "RF-state.go"
+  }
+ },
+ "red_flags": [
+  {
+   "id": "RF-DOCSAPI-05.3",
+   "path": [
+    "docs/api/github_com__SpellingDragon__tagent.md",
+    "docs/api/github_com__SpellingDragon__tagent__runtime__state.md",
+    "docs/api/github_com__SpellingDragon__tagent__scripts__codetools.md",
+    "docs/api/github_com__SpellingDragon__tagent__tool__exec.md"
+   ],
+   "state": "tracked_M",
+   "kind": "declared_out_of_write_set",
+   "evidence": "docs/api 4 页面重生成；ORCHESTRATION 台账 01.2 行『docs/api 重生成留 05.3/收尾』、并发波次丁行『05.3：docs/api 4文件重生成』已申报；但 05.3 write_files 只有 README/docs/OPERATION.md/docs/FACT-VOCABULARY.md/docs/GLOSSARY.md",
+   "attribution_suggestion": "计划回写：05.3 写集补 docs/api/*.md（生成物，gen_godoc 派生），或裁定重生成不进 diff",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-check_concept_budget.py",
+   "path": "scripts/check_concept_budget.py",
+   "state": "tracked_M",
+   "kind": "out_of_write_set_gate_edit",
+   "evidence": "diff +4 行：BASELINE 新增 ('struct-fields','tool/exec/state.go:StateEvent',8)，注释自述归 01.10b；文件 mtime 2026-10-25 02:11:52（F1 派单后由并行方写入）；无任何叶 write_files 命中，EVID-05-fix-summary 记录当时该 checker 仍 FAILED，故非 03 域产物",
+   "attribution_suggestion": "疑似 01.10b 收尾（StateEvent 8 字段豁免）越出写集：要求 01.10b 战报补申报并把该文件加入写集，或编排者裁定回退",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-check.go",
+   "path": "scripts/codetools/check.go",
+   "state": "tracked_M",
+   "kind": "out_of_write_set_gate_edit",
+   "evidence": "diff 仅 +1 行：procRefSkip 登记 scripts/check_event_integrity_mutations.py；台账 04.5/05.3 行申报过 proc-refs 修复（05.3『proc-refs绿』），但该文件不在任何叶 write_files（04.3 写集含 main.go/event_ownership.go，不含 check.go）",
+   "attribution_suggestion": "计划回写：把 scripts/codetools/check.go 的 procRefSkip 行登记到 04.5 或 05.3 写集，或由编排者裁定归属",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-package_layout.go",
+   "path": "scripts/codetools/package_layout.go",
+   "state": "tracked_M",
+   "kind": "out_of_write_set_gate_edit",
+   "evidence": "diff 变更 mirrorExemptFiles 语义注释并新增 'tool/exec/event_integrity_test.go' 豁免（注释自述 01.10a）；文件 mtime 2026-10-25 02:11:52（F1 派单后）；04.3 写集含 main.go/event_ownership.go 不含本文件",
+   "attribution_suggestion": "test-mirror 豁免面变更属质量门策略：要求 04.3/01.10a 战报补申报+写集登记，或编排者裁定（02.6/03 域曾明文禁止扩大该名单，需确认范围仅限 tool/exec）",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-tagent-posttraining-design.docx",
+   "path": "docs/tagent-posttraining-design.docx",
+   "state": "untracked",
+   "kind": "user_artifact_no_leaf",
+   "evidence": "未跟踪 72KB 文档（mtime 2026-10-24 01:18），无任何叶写集命中，非本变更产物",
+   "attribution_suggestion": "疑似用户自有资料：保持未跟踪、不得提交；建议 .gitignore 或移出仓库（编排者裁定）",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-tagent-training-handoff.zip",
+   "path": "docs/tagent-training-handoff.zip",
+   "state": "untracked",
+   "kind": "user_artifact_no_leaf",
+   "evidence": "未跟踪 150KB 压缩包（mtime 2026-10-24 01:19），无任何叶写集命中，非本变更产物",
+   "attribution_suggestion": "疑似用户自有资料：保持未跟踪、不得提交；建议 .gitignore 或移出仓库（编排者裁定）",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-event_integrity_harness_test.go",
+   "path": "tests/integration/host/event_integrity_harness_test.go",
+   "state": "untracked",
+   "kind": "declared_out_of_write_set",
+   "evidence": "新增未跟踪 03.1 台架基座（integrityScript/violation 账/屏障/bootIntegrityHostWithAgents）；00.2-reproduction.json 与 00.4-baseline.json 明确列为『03.1 基座』产物；但 graph 03.1 write_files 只有 scripted_provider_test.go、meditation_boot_test.go、public_runtime_entry_test.go",
+   "attribution_suggestion": "计划回写缺口（已申报非隐藏越界）：将 harness 文件补入 03.1 写集",
+   "in_any_leaf_write_set": false
+  },
+  {
+   "id": "RF-state.go",
+   "path": "tool/exec/state.go",
+   "state": "untracked",
+   "kind": "declared_out_of_write_set",
+   "evidence": "新增未跟踪产品文件 323 行（Owner/OwnerResolver/StatePhase/StateEvent/StateObserver/WithStateObserver 6 导出符号）；01.10b-summary.json artifacts/minimal_api_face 已逐符号申报并与 00.3 最小面一致；但 graph 01.10b write_files 与 ORCHESTRATION §2.2 P1X 白名单均为 tool/exec/{tool,exec,monitor,tmux_executor,stop}，未含 state.go",
+   "attribution_suggestion": "计划回写缺口（已申报非隐藏越界）：将 tool/exec/state.go 补入 01.10b 写集与 P1X 名单",
+   "in_any_leaf_write_set": false
+  }
+ ]
+}

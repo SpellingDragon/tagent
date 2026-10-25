@@ -3,6 +3,7 @@
 ## Purpose
 TBD - created by archiving change capture-decision-snapshots. Update Purpose after archive.
 ## Requirements
+
 ### Requirement: 可选SDK决策快照
 启用trajectory_capture后 SHALL 记录v2 SDK请求、冻结工具声明、响应序列、终态及owner；旧trajectory_dump模式保持可用。MUST 标明capture_scope，不能冒称provider wire或隐藏提示完整。
 
@@ -94,3 +95,31 @@ Native logprobs SHALL 仅在**响应确实返回**时标记为 `present`；provi
 #### Scenario: 未 seal 即关闭（失败）
 - **WHEN** 关闭时仍有未 seal 的在途记录
 - **THEN** MUST 记 `partial` 并给出丢失/在途计数，MUST NOT 虚构完整统计。
+
+### Requirement: 记录与真实请求/尝试逐项对应
+
+每一次真实发生的模型请求 MUST 对应一条或一组可核对的采集记录；未发生的请求 MUST NOT 产生记录，MUST NOT 预写或以重试补齐虚构请求。每一次真实发生的尝试（含失败、错误、准入被拒与流中断）SHALL 要么被记录为具名失败尝试（携带错误与终态），要么进入显式损失账目（`RecordingLosses` 语义）；MUST NOT 记为成功，MUST NOT 静默消失。采集计数 SHALL 可逐项对账：真实请求/尝试集合与「记录 + 显式损失」集合 MUST 按调用身份一一对应，MUST NOT 以「至少有一条记录」或总量非零代替逐项对应。记录与请求的关联 MUST 以该次调用已有的身份（invocation / call_id）为准，MUST NOT 以时间顺序或内容相似度匹配。
+
+#### Scenario: 真实请求逐项有记录
+
+- **WHEN** 一个进程内发生 N 次真实模型请求且采集全程可用
+- **THEN** 每个请求 MUST 在记录中按调用身份找到其对应项（可为该请求的一组分片），无请求被遗漏
+- **AND** MUST NOT 出现无对应请求的记录
+
+#### Scenario: 失败尝试如实记录（失败）
+
+- **WHEN** 一次模型尝试以错误或流中断结束
+- **THEN** 该尝试 SHALL 被记录为具名失败（含错误与终态），MUST NOT 记为成功
+- **AND** 其计数 SHALL 出现在失败/错误统计中，可与真实尝试数对账
+
+#### Scenario: 准入被拒进入损失账目（失败）
+
+- **WHEN** 采集准入被拒绝或队列满导致该次尝试无法落盘
+- **THEN** 该次尝试 MUST 进入显式损失账目，MUST NOT 静默消失
+- **AND** 损失计数 SHALL 与真实尝试数、记录数三者可对账
+
+#### Scenario: 未发生请求不产生记录（失败）
+
+- **WHEN** 请求在发出前被拒绝、取消或从未发起
+- **THEN** MUST NOT 产生对应的模型请求记录，也 MUST NOT 计入尝试总数
+- **AND** 采集计数 SHALL 与真实请求数一致

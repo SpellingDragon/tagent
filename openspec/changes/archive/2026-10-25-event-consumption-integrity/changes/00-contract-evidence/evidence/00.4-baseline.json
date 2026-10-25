@@ -1,0 +1,335 @@
+{
+  "leaf": "00.4",
+  "title": "既有基线：根模块 / 微信模块 / CLI 模块 / deterministic Golden（基线提交独立副本）",
+  "generated_at": "2026-10-23T09:41:16Z",
+  "baseline": {
+    "commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+    "short_commit": "6cc4414",
+    "subject": "fix(host): the settle turn carries its notice as ready input, not as a feed race",
+    "source_repo": "/Users/pengweiye/Documents/codes/tagent"
+  },
+  "isolation": {
+    "rationale": "当前工作树含 00.1/03.1 未提交改动（M tests/integration/host/meditation_boot_test.go、M tests/integration/host/scripted_provider_test.go、?? tests/integration/host/event_integrity_harness_test.go），基线不得与其同树混跑；两条隔离树均只取基线提交的已跟踪内容。",
+    "trees": [
+      {
+        "id": "A",
+        "role": "主基线副本（用户指定的 git archive 方式；任务行命令 1-4 的原始执行树）",
+        "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4-baseline-tree",
+        "method": "git archive <baseline-commit> | tar -x",
+        "archive_command": "git -C /Users/pengweiye/Documents/codes/tagent archive 6cc441436c2aab15edcee34cf2561086232c8311 | tar -x -C \"${TMPDIR:-/tmp}/event-consumption-integrity/00.4-baseline-tree\"",
+        "archive_exit_code": 0,
+        "has_git": false,
+        "git_rev_parse": {
+          "command": "git -C <tree A> rev-parse HEAD",
+          "exit_code": 128,
+          "stderr": "fatal: not a git repository (or any of the parent directories): .git"
+        },
+        "file_count": 2106,
+        "tracked_paths_in_commit": 2107,
+        "file_count_note": "差值 1 = 子模块 gitlink examples/wechat-bot/skills/interview/agent-interview-helper（160000）；archive 只落空目录，不含子模块工作树内容。该子模块不入本次基线测试面，副本内为空的 agent-interview-helper/ 与任务要求一致，未在其上做任何改动。"
+      },
+      {
+        "id": "B",
+        "role": "git 元数据基线树（红项隔离复验树；deterministic runner 需要 git revision）",
+        "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4-baseline-tree-git",
+        "method": "git clone --shared <source> <path> + git checkout --detach <baseline-commit>",
+        "clone_exit_code": 0,
+        "checkout_exit_code": 0,
+        "head": "6cc441436c2aab15edcee34cf2561086232c8311",
+        "git_status_porcelain_lines": 0,
+        "file_count_excluding_git": 2106
+      }
+    ],
+    "content_equivalence": {
+      "command": "diff -rq <tree A> <tree B> --exclude=.git",
+      "exit_code": 0,
+      "conclusion": "两树源码逐文件一致；树 B 仅额外携带 .git 元数据。"
+    },
+    "dirty_worktree_excluded": [
+      "tests/integration/host/meditation_boot_test.go (M)",
+      "tests/integration/host/scripted_provider_test.go (M)",
+      "tests/integration/host/event_integrity_harness_test.go (??)",
+      "examples/wechat-bot/skills/interview/agent-interview-helper (既有脏子模块，未处理)"
+    ]
+  },
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4",
+    "log_ref_template": "${TMPDIR:-/tmp}/event-consumption-integrity/00.4/<name>",
+    "notes": "原始日志只落临时目录，未写入规划目录；本文件仅留摘要与 log_ref。"
+  },
+  "commands": [
+    {
+      "id": "c1-root-all",
+      "tree": "A",
+      "task_row_command": "go test -count=1 ./...",
+      "cwd": "<tree A>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/root-all.jsonl",
+      "log_sha256": "44135e5c71ef861ba6ce523fc682828b777e57430c30d31b04a19ca0925bec04",
+      "log_bytes": 4692,
+      "result": "ok_packages=38, no_test_files_packages=29, total_packages=67, FAIL_lines=0",
+      "result_probe": "awk '{print $1}' root-all.jsonl | sort | uniq -c  => 38 ok / 29 ?",
+      "red": false
+    },
+    {
+      "id": "c2-wechat-all",
+      "tree": "A",
+      "task_row_command": "go -C examples/wechat-bot test -tags smoke -count=1 ./...",
+      "cwd": "<tree A>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/wechat-all.jsonl",
+      "log_sha256": "d49915da55121cc625f6d63985683a43cbb86a02736b3d65a91a3cc6262540ae",
+      "log_bytes": 25,
+      "result": "ok  wechat-bot  156.008s（-tags smoke 已按任务行执行；包级 ok，非 no test files）",
+      "red": false
+    },
+    {
+      "id": "c3-cli-all",
+      "tree": "A",
+      "task_row_command": "go -C examples/cli-host test -count=1 ./...",
+      "cwd": "<tree A>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/cli-all.jsonl",
+      "log_sha256": "96154edc5e8f849a44bb4a4799105c9be3c949aa0c0a5bf5c227e3de54bb17ef",
+      "log_bytes": 28,
+      "result": "ok  tagent-cli-host  0.341s",
+      "red": false
+    },
+    {
+      "id": "c4-deterministic",
+      "tree": "A",
+      "task_row_command": "python3 scripts/run_runtime_scenarios.py --scope deterministic",
+      "cwd": "<tree A>",
+      "exit_code": 2,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic.jsonl",
+      "log_sha256": "e89721ab97ba976f797bc5a464984fc3cbb5090bf92c724044c30b00f8a3925a",
+      "log_bytes": 129,
+      "result": "run_runtime_scenarios: cannot read the repository revision: fatal: not a git repository (or any of the parent directories): .git",
+      "red": true,
+      "red_item": "R1",
+      "reruns": [
+        {
+          "attempt": 2,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic-rerun.jsonl",
+          "log_sha256": "e89721ab97ba976f797bc5a464984fc3cbb5090bf92c724044c30b00f8a3925a",
+          "log_bytes": 129,
+          "exit_code": 2,
+          "identical_to_initial": true
+        }
+      ],
+      "isolated_rerun_on_tree": "B => c9-deterministic-git-tree"
+    },
+    {
+      "id": "c6-root-all-git-tree",
+      "tree": "B",
+      "task_row_command": "go test -count=1 ./...",
+      "cwd": "<tree B>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/root-all.git-tree.jsonl",
+      "log_sha256": "a2e051f4fd359cbe5aed1da4c47c44a8c22a93a410696e81bd055a045a48d3f6",
+      "log_bytes": 4692,
+      "result": "ok_packages=38, no_test_files_packages=29, total_packages=67, FAIL_lines=0（与 c1 同结论，伪差异仅为日志头包顺序）",
+      "red": false
+    },
+    {
+      "id": "c7-wechat-all-git-tree",
+      "tree": "B",
+      "task_row_command": "go -C examples/wechat-bot test -tags smoke -count=1 ./...",
+      "cwd": "<tree B>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/wechat-all.git-tree.jsonl",
+      "log_sha256": "596cba88c32d006413d5a62b0e28e3490f97174b2d5e4f2f841650c4e049da1c",
+      "log_bytes": 25,
+      "result": "ok  wechat-bot  （与 c2 同结论）",
+      "red": false
+    },
+    {
+      "id": "c8-cli-all-git-tree",
+      "tree": "B",
+      "task_row_command": "go -C examples/cli-host test -count=1 ./...",
+      "cwd": "<tree B>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/cli-all.git-tree.jsonl",
+      "log_sha256": "3710f4ff66cc9cc92acb2c81f430745ed8037d51ceb13eddf9ca5081cbd1dced",
+      "log_bytes": 28,
+      "result": "ok  tagent-cli-host  （与 c3 同结论）",
+      "red": false
+    },
+    {
+      "id": "c9-deterministic-git-tree",
+      "tree": "B",
+      "task_row_command": "python3 scripts/run_runtime_scenarios.py --scope deterministic",
+      "cwd": "<tree B>",
+      "exit_code": 3,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic.git-tree.jsonl",
+      "log_sha256": "34d1479e55069a051b68b84a55dc9bbbce4d1a45adf20287641c21ba1888a017",
+      "log_bytes": 1771,
+      "result": "scope=deterministic required=14(S01-S09,S11-S15) remaining_required=S10 attested=14 drift=1 unattested=0; run_id=run-20261023T093725Z-deterministic; S11 value drift: parent_pipeline_after_order[len] expected 5 / observed 4",
+      "red": true,
+      "red_item": "R2",
+      "reruns": [
+        {
+          "attempt": 2,
+          "run_id": "run-20261023T093733Z-deterministic",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic.git-tree-rerun.jsonl",
+          "log_sha256": "aad2de8d0e07a7d02a583f410f7245f433f59099d7fd1bc0264a4ae4c5607f36",
+          "exit_code": 0,
+          "verdict": "match",
+          "s11": "match 10 observation(s) equal"
+        },
+        {
+          "attempt": 3,
+          "run_id": "run-20261023T093740Z-deterministic",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic.git-tree-run3.jsonl",
+          "log_sha256": "ccc51f2e582b82ab5e4c43264bf8ccd0c26c4029ae62cf41c577d746415cfdec",
+          "exit_code": 0,
+          "verdict": "match",
+          "s11": "match 10 observation(s) equal"
+        },
+        {
+          "attempt": 4,
+          "run_id": "run-20261023T093746Z-deterministic",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic.git-tree-run4.jsonl",
+          "log_sha256": "414209427ac651bd80de351b9299345ac5c0be9edf0ac8494e0cfaae0fa4b965",
+          "exit_code": 0,
+          "verdict": "match",
+          "s11": "match 10 observation(s) equal"
+        },
+        {
+          "attempt": 5,
+          "run_id": "run-20261023T093750Z-deterministic",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/deterministic.git-tree-run5.jsonl",
+          "log_sha256": "68c3919acc9089a69fa548a761f7f4fcfa2ca9a6d896855c26814458891a1bab",
+          "exit_code": 0,
+          "verdict": "match",
+          "s11": "match 10 observation(s) equal"
+        }
+      ]
+    }
+  ],
+  "supplementary": [
+    {
+      "id": "s1-wechat-verbose",
+      "tree": "B",
+      "purpose": "证明 -tags smoke 下微信用例真实执行（c2/c7 只有包级 ok 行）",
+      "task_row_command": "go -C examples/wechat-bot test -tags smoke -count=1 -v ./...",
+      "cwd": "<tree B>",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.4/wechat-all.git-tree-v.log",
+      "log_sha256": "79401f0bde71efd33e8f0b469082f1ab63c41b6e696415d0ba24bc1a0e8a49b1",
+      "log_bytes": 114340,
+      "result": "top_level_PASS=21, FAIL_or_SKIP=0",
+      "passed_tests": [
+        "TestLocalSmokeWave2Data",
+        "TestLocalSmokeWave2Errors",
+        "TestLocalSmokeWave2Exec",
+        "TestLocalSmokeWave2MCP",
+        "TestLocalSmokeWave2Recall",
+        "TestLocalSmokeWave2Skill",
+        "TestLocalSmoke",
+        "TestLocalSmokeGuards",
+        "TestClassifyInbound",
+        "TestInboundFileSaving",
+        "TestIntakeMediaAndLongText",
+        "TestDedupKeyAndSeenStore",
+        "TestSessionRouter",
+        "TestFileDeliveryRules",
+        "TestHostSenderIsTheOnlyOutboundPath",
+        "TestApprovalGateway",
+        "TestApprovalRuling",
+        "TestReincarnationNotice",
+        "TestSystemAlertConsumption",
+        "TestRegisteredHandlersDriveTheChannel",
+        "TestHostDrivesSessionsAndTheActiveChannel"
+      ],
+      "note": "该补充运行只用于枚举用例；勾选与对账仍以任务行命令 c2/c7 为准。"
+    }
+  ],
+  "red_items": [
+    {
+      "id": "R1",
+      "command_id": "c4-deterministic",
+      "tree": "A",
+      "classification": "environment_precondition_failure",
+      "is_product_red": false,
+      "is_new_in_this_change": false,
+      "cause": "run_runtime_scenarios.py 的 git_revision() 要求 git -C <root> rev-parse HEAD 成功；git archive 副本按指定方式不含 .git，命令在触碰产品代码前即按 EXIT_USAGE(2) 退出。",
+      "log_excerpt": "run_runtime_scenarios: cannot read the repository revision: fatal: not a git repository (or any of the parent directories): .git",
+      "repeatability": {
+        "attempts": 2,
+        "both_exit_code": 2,
+        "logs_byte_identical": true,
+        "log_sha256": "e89721ab97ba976f797bc5a464984fc3cbb5090bf92c724044c30b00f8a3925a"
+      },
+      "handling": "未改 runner、未改产品；在内容逐文件一致（diff -rq exit 0）且 HEAD=基线提交的树 B 隔离复跑同一命令，取得真实 deterministic 结果（c9）。",
+      "no_skip_filter_used": true
+    },
+    {
+      "id": "R2",
+      "command_id": "c9-deterministic-git-tree",
+      "tree": "B",
+      "classification": "existing_intermittent_red",
+      "is_product_red": true,
+      "is_new_in_this_change": false,
+      "detected_by": "golden 三轴对照（runner exit 3），非 go test 业务断言：同轮 go test exit_code=0。",
+      "scenario": {
+        "id": "S11",
+        "test_name": "TestScenario11ConfigDrivenSubagentAndPipeline",
+        "test_package": "tests/integration/acceptance",
+        "task_ids": ["03.3"]
+      },
+      "observation": {
+        "key": "parent_pipeline_after_order",
+        "axis": "value",
+        "expected_len": 5,
+        "observed_len": 4,
+        "run_id": "run-20261023T093725Z-deterministic",
+        "evidence_json": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/tagent-runtime-scenarios/run-20261023T093725Z-deterministic/evidence.json",
+        "event_refs": ["decision-inv-config-parent-1", "decision-inv-config-parent-2", "task-2"],
+        "event_refs_note": "漂移轮与 match 轮的 event_refs 相同，缺失落在 after_order 记录条数而非事件引用集合。"
+      },
+      "repeatability": {
+        "attempts": 5,
+        "drift": 1,
+        "match": 4,
+        "rate": "1/5",
+        "drift_run_ids": ["run-20261023T093725Z-deterministic"],
+        "match_run_ids": [
+          "run-20261023T093733Z-deterministic",
+          "run-20261023T093740Z-deterministic",
+          "run-20261023T093746Z-deterministic",
+          "run-20261023T093750Z-deterministic"
+        ]
+      },
+      "caveats": [
+        "首轮（漂移轮）是树 B 上该命令的第一次执行，其后四轮均在已编译/已预热状态；不排除时序敏感，但 c6 已先跑过同一 acceptance 包的根级测试，冷编译假设不成立。",
+        "5 轮样本只用于定性（存在间歇漂移），不足以估计真实频率。"
+      ],
+      "handling": "按任务规则在同一隔离基线复验并定性为既有间歇红；不改产品、不改 golden、不删记录；供 05.1/05.4/F2 作为既有基线对照。",
+      "consumers": ["05.1", "05.4", "F2"]
+    }
+  ],
+  "deterministic_scope": {
+    "scope": "deterministic",
+    "required": ["S01", "S02", "S03", "S04", "S05", "S06", "S07", "S08", "S09", "S11", "S12", "S13", "S14", "S15"],
+    "remaining_required_out_of_scope": ["S10"],
+    "attested_per_run": 14,
+    "note": "S10 不在 deterministic scope（runner 的 remaining_required 列出），既有 deterministic 场景在每轮均有记录（attested=14）。"
+  },
+  "not_covered": [
+    "不覆盖真实微信/真实模型/掉电/72h/训练制品等外部证明边界（与本叶无关）。",
+    "c2/c7 的任务行命令只有包级 ok 行；逐用例枚举由补充运行 s1 提供，不替代 c2/c7 的退出码对账。"
+  ],
+  "verification": {
+    "command": "python3 -c '<read json; assert len(commands)>=4 and every(exit_code & log_ref)>'",
+    "required_assertions": [
+      "commands 数组长度 >= 4",
+      "每条 command 含整数 exit_code 与存在的 log_ref 文件",
+      "每条 exit_code != 0 的 command 具备 reruns 或 isolated_rerun_on_tree（负锚 baseline_red_without_isolated_rerun）"
+    ]
+  }
+}

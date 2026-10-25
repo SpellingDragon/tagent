@@ -1,0 +1,226 @@
+{
+  "leaf": "01.9",
+  "title": "冷启动恢复与后续使用",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-24T10:57:15Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/history/event_integrity_test.go 追加 TestEventIntegrityRestoreUse：父进程用真实子进程（-test.run 自执行、TAGENT_HTTP_PORT=0、临时 localfile 根、报告 tmp+rename 原子落盘）先跑一个正式回合（用户输入 → recall_query 工具结果 → 助手输出），再分别以优雅 Close 与 SIGKILL 停止 seed，随后由第二个子进程经正式 Boot 重开同一 durable 根，读回原文/归属/工具配对，并驱动下一个真实 Host.Invoke。五个具名子测试覆盖四正锚（原文、归属、配对、下一请求实际使用）与一负锚（仅账本可查不算完成）。产品侧仅按红证归因补读侧 run.go::seedReplay，不改持久格式、不新增 public API、不建第二状态仓。",
+  "attribution": {
+    "question": "01.8 写侧 persist-before-live 已落，冷启动后材料仅账本可查、下一请求不使用的真实缺口在哪一侧",
+    "read_facts": [
+      "facts.go:commitFactChecked/persistFact 已把每个事实先写 Originals.Put + SegmentStore.StoreEvent，成功后才进 r.facts；01.8 已勾选。",
+      "run.go NewRun（基线）只恢复 restoreChains（task 因果链）、seedObservedEvents（观察表）、seedLandedSeq（seq 续接）；r.replays 启动为空 map。",
+      "facts.go:recordMapped 只把本进程随后提交的事实追加进已注册投影；attachDeclaredReplay 只在首个新事实提交时为该 session 注册空投影，不会重放 tier 已有事实。",
+      "loop 的 transcript := history + ready；重启后 history 为空，requestBoundary 的 projectedMainContext 是唯一历史来源，未注册投影时下一请求只剩新输入。",
+      "memory.EventBody 只持久化 Key/Type/Summary/Content/Timestamp/Owner/Format/RetentionPolicy；不含 InvocationID/TaskID/CallID/ToolName/ToolCalls。",
+      "replayEntry.endedAt 为空表示链上全部条目都是已结束材料；冷启动无 in-flight transcript，正应全量呈现，随后新输入再移动边界。"
+    ],
+    "conclusion": "缺口纯在读侧：tier 中事实与正文齐全（①②③红证前即为绿），但 Boot 没有把已提交事实重建成投影，导致④与负锚红。最小修是在 NewRun 的 tier 恢复块调用 seedReplay：逐条 DecodeEventBody → 构造 event.Event → sessionOf/mappedEntryOf 分组重放 → 按声明窗口 AttachReplay。持久格式与公开 API 均未改。"
+  },
+  "method": "seedReplay 读取 tier.Segments.Events（按 partition/window/seq 的提交顺序），对每条 body 解码并复用与实时提交相同的 sessionOf/agentOf/mappedEntryOf 映射，按 session 顺序 Append 到新 ReplayProjection；窗口取 specOfLocked(current.Plan.Declaration, agent) 的 foldWindowOf，MaxTokens<=0 的 session 不注册（与 attachDeclaredReplay 同规则）；注册时 endedAt 留空，全部恢复条目按已结束材料呈现。新回合的输入提交后 recordMapped 把 endedAt 移到新输入，恢复材料留在预算前缀、新输入留在 transcript，不重复呈现。解码失败使 Boot 失败而不是静默丢弃。不写回 tier、不折价、不新增状态仓。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9",
+    "module": "github.com/SpellingDragon/tagent"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/history/event_integrity_test.go",
+      "sha256": "53e779247e25bb093a979223e303b38bc9c567bac484c3054a7eaf2fc6a06b3f",
+      "note": "与 01.2/01.8/02.3/03.9 同文件单写；本次追加 restore* harness 与 TestEventIntegrityRestoreUse 五子测试（3953 → 4791 行），既有 TestEventIntegrityConsumptionRecovery/Projection/Restart/Persistence 原样保留。"
+    },
+    {
+      "path": "run.go",
+      "sha256": "68beb5cdde46df07faecfc91b29173352dfbff20e68607c4efedbc905be882df",
+      "note": "仅新增 memory/replay import、NewRun 中一次 seedReplay 调用与 seedReplay 函数（+75 行）；未改持久格式与公开 API。"
+    }
+  ],
+  "product_changes": [
+    {
+      "file": "run.go",
+      "kind": "candidate",
+      "change": "新增 Run.seedReplay(ctx, tier)：从 tier.Segments.Events 解码全部已提交事实，按 session 重放 mappedEntryOf 序列，按声明窗口经 AttachReplay 注册；endedAt 留空使恢复序列全量成为已结束材料；解码失败返回错误使 Boot 具名失败。NewRun 在 seedLandedSeq 之后调用。"
+    }
+  ],
+  "consumers": {
+    "formal_entry": "子进程 tagent.Boot(configPath, WithSender) → Host.Run → Host.Invoke(tagent.InvokeRequest{InvocationID, Address, Input})；父进程只负责 Start/Kill/Wait 与读取子进程报告。",
+    "recovery_chain": "报错关闭/中断后，新进程 NewRun → ledger.OpenTier(同一 root) → state.NewDurableCommit(ledger.TierFactLog(tier)) → restoreChains → supplyRetrieval → seedObservedEvents → seedLandedSeq → seedReplay/AttachReplay。",
+    "request_chain": "Host.Invoke → loop 决策 → Run.requestBoundary → projectedMainContext → projectedSegment（replay.AssembleBudgetPrefix + agent.RoleOf）→ 真实 provider 请求；测试用 provider 记录的请求断言，不由测试手工回填投影。",
+    "pairing_chain": "task wrapper 登记 Spec.CallID/InvocationID/Source/InstanceID → settle record 的 Outbox Notice{Kind:NoticeSettled, TaskID, Event=结果事实键}；重启后 state.DurableCommit.Records/Facts 读回同一链，测试以 Spec.CallID + Notice.Event→结果事实原文断言配对。",
+    "evidence": "single.jsonl 含父进程 SIGKILL、cmd.Wait 的 signal=killed、重启 CommittedEvent 三段原文（27/209/34 字节）、下一请求四条 role/content 原始行。"
+  },
+  "subtests": [
+    {
+      "name": "restart_restores_original_text",
+      "anchor": "正①",
+      "assertion": "优雅 Close 与 SIGKILL 两态各自重开同一 root：seed 报告非空（9 个身份 + 3 段文本），重启经 CommittedEvent 读回的对话输入/工具结果/助手输出与 seed 提交字节逐字节相等（bytes.Equal），且观察表含工具结果类型。"
+    },
+    {
+      "name": "restart_restores_invocation_attribution",
+      "anchor": "正②",
+      "assertion": "restoreChains 的 Recovery 中命中 seed.TaskID 且 Recovered=true、Status=Settled、Owner=agent-persistence；run.Query(ObjectInvocation/ObjectTask) 命中 seed 的 InvocationID/TaskID，Address 与 InstanceID 与 seed 完全一致；错配即 Fatal。"
+    },
+    {
+      "name": "restart_restores_tool_call_result_pairing",
+      "anchor": "正③",
+      "assertion": "durable chain 首条 Spec.CallID=provider 实际发出的 call-restore-watch、InvocationID/Source/InstanceID 与 seed 一致、Links>=2；settle Notice 的 Event=seed.ResultFact、TaskID=seed.TaskID；该结果事实在重启后读回的字节与 seed.ResultText 逐字节相等；配对断裂即 Fatal。"
+    },
+    {
+      "name": "next_request_uses_restored_material",
+      "anchor": "正④兼消费者",
+      "assertion": "重启后 Host.Invoke 触发一个真实 provider 请求；请求至少 4 条消息，前三条例为 user=seed 输入、tool=seed 工具结果、assistant=seed 助手输出（role 与 content 逐字节），末条为新的用户输入；不是仅账本可查。"
+    },
+    {
+      "name": "restore_only_ledger_is_not_completion",
+      "anchor": "负锚",
+      "assertion": "先要求账本三段原文在重启后逐字节齐全，再要求下一真实请求同时携带这三段材料；仅账本齐全而请求未携带即 Fatal。修复前该子测试以 messages=[user:新输入] 失败，修复后通过。"
+    }
+  ],
+  "verification": {
+    "red": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityRestoreUse$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.9/single-red2.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 1,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/single-red2.jsonl",
+      "log_sha256": "e9fd2a85991b6c8fc5fc9faff5e2b4e3b731712035ac6980bb42596640802204",
+      "log_bytes": 14655,
+      "parsed": {
+        "parent": "TestEventIntegrityRestoreUse fail=1",
+        "pass": ["restart_restores_original_text", "restart_restores_invocation_attribution", "restart_restores_tool_call_result_pairing"],
+        "fail": ["next_request_uses_restored_material", "restore_only_ledger_is_not_completion"]
+      },
+      "reasons": {
+        "next_request_uses_restored_material": "the seed-graceful restart's next request carried 1 message(s) [user:\"which shelf watches the lantern?\"], want the restored material beside its own input",
+        "restore_only_ledger_is_not_completion": "the seed-graceful restart recovered the conversation input in the ledger but its next actual request carried none of it; messages=[user:\"which shelf watches the lantern?\"]"
+      },
+      "note": "红证在仅含 01.8 写侧、未加 seedReplay 的 run.go 上取得：①②③已绿，④与负锚红，直接证明缺口在读侧投影重建。"
+    },
+    "single": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityRestoreUse$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.9/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/single.jsonl",
+      "log_sha256": "146efeee38c8ca576712ba767ccc9ae39d9eb28ee2cd87c29d0bda65780fd23e",
+      "log_bytes": 16598,
+      "parsed": {
+        "parent": "TestEventIntegrityRestoreUse run=1 pass=1",
+        "children_run_pass": 5,
+        "children": [
+          "restart_restores_original_text",
+          "restart_restores_invocation_attribution",
+          "restart_restores_tool_call_result_pairing",
+          "next_request_uses_restored_material",
+          "restore_only_ledger_is_not_completion"
+        ],
+        "skip": 0,
+        "fail": 0
+      },
+      "observations": [
+        "graceful: parent: the gracefully closed seed-graceful seed pid=90552 exited 0 after its drained close",
+        "kill: parent: interrupt the seed-kill seed pid=90665 with SIGKILL",
+        "kill wait: parent: the killed seed-kill seed pid=90665 was waited out with signal=killed",
+        "restore graceful: tier answered input 1-761f... bytes=27, tool result 2-a96e... bytes=209, assistant output 4-4d56... bytes=34",
+        "restore kill: tier answered input 1-68ca... bytes=27, tool result 2-2930... bytes=209, assistant output 4-2925... bytes=34",
+        "next request graceful/kill: role=user \"the lantern needs a watcher\" → role=tool recall_query JSON → role=assistant \"the watcher sits on the east shelf\" → role=user \"which shelf watches the lantern?\""
+      ]
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.9\"; for i in $(seq 1 10); do go test ./tests/integration/history -run '^TestEventIntegrityRestoreUse$' -count=1 -race -json -timeout 10m > \"$E/run-$i.jsonl\" 2>&1; echo \"run-$i exit=$?\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-1.jsonl", "log_sha256": "b246757b7382f2d4159a4cacd2c5cc7454baae9c0b6d2029885390a3a28a8546", "log_bytes": 16590, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-2.jsonl", "log_sha256": "640d7f47daf6091698b9daeab1ef6e5de3d1c438b15f60f87cc9bc5f86a0a5da", "log_bytes": 16590, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-3.jsonl", "log_sha256": "b84403622137806390caa74f4162d1d0b1efac77bb4258f02901872675c36e34", "log_bytes": 16591, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-4.jsonl", "log_sha256": "2e629452e10d1801e5871ca4d3f08ca74b3d8da60408e9f7c5e9903eb03c6485", "log_bytes": 16590, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-5.jsonl", "log_sha256": "005502da3ca7b8be7c06be51f1061e90201a8ee25e13f85430149895e7888417", "log_bytes": 16590, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-6.jsonl", "log_sha256": "89801d846d22c69bae55f4cee0a9b1410e8a3ecd2674ac364a9aeca793eede60", "log_bytes": 16592, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-7.jsonl", "log_sha256": "a8f4986c0965869aa92197234546b5415516e8b34f333ecf9a1f87a584e6a99e", "log_bytes": 16591, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-8.jsonl", "log_sha256": "70e621a9f6ad45b996f0abc2a792f1fd8c440e698c1e0738c188842fac05c6f8", "log_bytes": 16588, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-9.jsonl", "log_sha256": "e7971a763b6320f17635f01e72dc8fb5541b6b354481619b42d99705dd8dc6c7", "log_bytes": 16592, "children_pass": 5, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/run-10.jsonl", "log_sha256": "4f326994828c5c6a07ec203c922a2c774a2d4b5611c894dc1362f534fd1ad32e", "log_bytes": 16586, "children_pass": 5, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐行 json.loads，按 Test 归集 run/pass/skip/fail；要求父测试 run=1 pass=1、5 个具名子测试各 pass=1、skip=0、fail=0；另要求每轮含 graceful Close 一行与 SIGKILL+Wait 两行。",
+      "parsed_result": "ALL_TEN_OK=True"
+    },
+    "family_regression": {
+      "command": "go test ./tests/integration/history -run 'TestEventIntegrity' -count=1 -race -json -timeout 25m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.9/family.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/family.jsonl",
+      "log_sha256": "9c262fd475a9bc56d807fea4d7818c797419119c2f8675ee23f701286a85b88a",
+      "log_bytes": 116798,
+      "parsed": {
+        "top_pass": ["TestEventIntegrityConsumptionRecovery", "TestEventIntegrityProjection", "TestEventIntegrityRestart", "TestEventIntegrityPersistence", "TestEventIntegrityRestoreUse"],
+        "subtest_pass": 35,
+        "fail": 0,
+        "skip": 0
+      },
+      "note": "01.2（ConsumptionRecovery）与 01.8（Persistence）均通过，未回退；Projection/Restart 既有锚同绿。"
+    },
+    "host_spot_check": {
+      "command": "go test ./tests/integration/host -run '^(TestProjectionCarriesTheCommittedSequence|TestProjectionAbsentKeepsTheTranscript|TestProjectionAssemblyServesTheThreeUses|TestUserTurnDeliversThroughProjectionSession|TestPublicRuntimeEntry)$' -count=1 -race -json -timeout 15m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.9/host.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/host.jsonl",
+      "log_sha256": "b977b357ac85d3604ee4283350820b7d57022a25e1cd1fcedadaf4b3f8411936",
+      "log_bytes": 24986,
+      "parsed": {"top_pass": 5, "subtest_pass": 7, "fail": 0, "skip": 0}
+    },
+    "hygiene": {
+      "go_vet_all": {"command": "go vet ./...", "exit_code": 0, "output": "", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/vet.txt", "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "log_bytes": 0},
+      "go_build_all": {"command": "go build ./...", "exit_code": 0, "output": "", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/build.txt", "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "log_bytes": 0},
+      "gofmt": {"command": "gofmt -l run.go tests/integration/history/event_integrity_test.go", "exit_code": 0, "output": ""},
+      "event_ownership": {
+        "command": "go run ./scripts/codetools event-ownership --check --json",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.9/ownership.json",
+        "log_sha256": "5a9fa7eff412575bbb935b6626d929bd24c6d32f6f6f7ca03498139072df7f8d",
+        "log_bytes": 9887,
+        "parsed": {"ok": true, "violations": 0, "forbidden": 0, "unregistered": 0, "unowned": 0, "ambiguous": 0, "uncovered": 4},
+        "uncovered_note": "4 条均为既有方法值回调，非本叶新增调用点。"
+      }
+    }
+  },
+  "red_lines": {
+    "formal_entry_only": "恢复与后续请求只在子进程内走 Boot → Host.Invoke；父进程不构造 Run、不写投影、不手工 commitFact。",
+    "durable_is_real": "两态都使用同一临时 localfile 根与真实子进程；测试未使用内存 store 冒充 durable，kill 由父进程 SIGKILL 并等待真实 WaitStatus。",
+    "next_request_is_real": "④只读 provider 实际记录的请求消息（role/content），不由测试回填或只查账本。",
+    "no_power_loss_claim": "kill 是运行中进程的 SIGKILL，不是掉电；不宣称掉电语义。",
+    "format_frozen": "未改 memory.EventBody、未扩 replay.ProjectionEntry、未新增 public API；00.3 默认冻结条款被遵守。"
+  },
+  "errors_during_implementation": [
+    {
+      "what": "首次红跑（single-red.jsonl，exit=1）五个子测试全红，但原因是测试基座缺陷而非产品归因：restoreCallOf 读取 requests[0]，而 assistant tool_call 只出现在后续请求；waitRestoreReport 与子进程写共用 bytes.Buffer 触发 DATA RACE。",
+      "fix": "restoreCallOf 改为扫描整轮全部请求；新增 sync.Mutex 保护的 restoreLog 供 cmd.Stdout/Stderr 与父进程读取共用。",
+      "evidence": "single-red.jsonl（217354 字节）仅作为基座缺陷记录，不作为产品红证。"
+    },
+    {
+      "what": "基座修复后红证 single-red2.jsonl：①②③ pass，④与负锚 fail，失败原文显示下一请求仅 1 条 [user:新输入]。",
+      "fix": "按归因在 run.go 增加读侧 seedReplay；未改格式/API。",
+      "evidence": "single-red2.jsonl（14655 字节，sha256 e9fd2a85…）与 single.jsonl 绿证。"
+    }
+  ],
+  "limitations": [
+    "kill 是运行中进程的 SIGKILL（报告已落盘后），不等价于掉电；掉电语义（未落盘写丢失）不在本叶宣称范围。",
+    "中间工具轮的 assistant tool-call 消息本身不是 durable fact（loop 只在回合终局 commitOutput），因此恢复请求不重放该 assistant 消息；工具配对的验收形态是 durable chain 的 Spec.CallID + settle Notice.Event → 结果事实原文，而不是伪造一条可重放的 call 消息。",
+    "恢复请求中的 tool 消息只有正文，没有 tool_call_id（EventBody 不持久化该字段，00.3 未授权扩格式）；这满足本叶“材料被下一真实请求携带”的验收，但不构成对任意 provider 协议严格性的保证。",
+    "age-fold 产物此前只在进程内投影中，tier 只存原始事实；重启恢复原始事实后，下一次达到阈值的 fold 会重新派生摘要，而不是恢复旧产物。",
+    "seedReplay 每次 Boot 全量扫描 tier.Segments.Events（与既有 seedObservedEvents/seedLandedSeq 同量级）；未做增量/索引优化。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.9",
+    "action": "本摘要写入后勾选该一条为 [x]"
+  },
+  "verify_after": [],
+  "status": "complete",
+  "checkbox": "[x]",
+  "completed_at": "2026-10-24T10:57:15Z"
+}

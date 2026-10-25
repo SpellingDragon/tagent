@@ -1,0 +1,260 @@
+{
+  "leaf": "01.8",
+  "title": "会话事实持久化与实时召回",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-24T09:56:04Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/history/event_integrity_test.go 增加 TestEventIntegrityPersistence，经 Boot/Host.Invoke 正式回合产生对话、工具结果与助手输出事实，再经声明式 recall_query/recall_get 工具（host.go 的 recall.New → Run.RecallReads）当次读回；六个具名子测试覆盖四锚：当次可查（new_fact_recalled_same_turn、original_text_matches_committed_bytes、formal_recall_tool_returns_new_fact 兼消费者）、存储失败不伪成功、索引失败留可恢复欠账、新事实不使旧记录不可达。测试未手工 commitFact、未使用测试内存 store，未知身份只经 Host.Invoke 返回。",
+  "attribution": {
+    "question": "commitFact 的持久化真实载体归因",
+    "read_facts": [
+      "facts.go:commitFact（基线）只写 r.facts/r.factOrder 与 recordMapped 投影，无任何 tier 写入",
+      "memory.BodyFromEvent / EventBody.Encode / OriginalStore.Put / FileSegmentStore.StoreEvent / StoreQuerySource.LandEvent / VectorSeam.Submit 在基线均无生产调用（grep -rn 生产代码仅测试命中）",
+      "run.go NewRun：tier 打开后只做 supplyRetrieval（ObserveStore 启动快照 + 全量 Submit）与 seedObservedEvents（只读）",
+      "durable chain（state.NewDurableCommit(ledger.TierFactLog(tier))）只承载 task fact:/spec:/consume: 键，不承载会话事件",
+      "读侧 CommittedEvent/RecallPort/recall tools 已接线；缺的是写侧"
+    ],
+    "conclusion": "会话事实的持久化载体是 memory/ledger 的事件段（BodyFromEvent + Originals.Put + SegmentStore.StoreEvent），基线没有生产写入点；最小改动是在 facts.go 的提交入口接上该管线，读侧复用既有 CommittedEvent/RecallPort，不新建第二套状态仓。"
+  },
+  "method": "提交先落段存储（body 原文 + segment barrier），成功后才进入 r.facts；StoreEvent 失败向调用方传播，Invoke/InjectEvent/CommitToSession/record 因此可见失败；LandEvent 与 VectorSeam.Submit 是已提交事实的落地/索引后果，失败只告警不回滚。seq 按 partition 单调分配，重启时由 seedLandedSeq 从已发布事件续接；重复身份先 GetEvent 幂等跳过，并发同身份以 ErrContentConflict 视为已发布。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8",
+    "module": "github.com/SpellingDragon/tagent"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/history/event_integrity_test.go",
+      "sha256": "fe63424fa93a1db59b97ba4cc79980652dfd15d2db47afc3f4204a1d778b2b18",
+      "note": "与 01.2/02.3/03.9 同文件单写；本次追加 TestEventIntegrityPersistence 与 persistence* harness/6 子测试，既有 TestEventIntegrityConsumptionRecovery/Projection/Restart 原样保留（行数 3026 → 3953）"
+    },
+    {
+      "path": "facts.go",
+      "sha256": "d228104b61dea0c7f585794677adb906572da1b9d01ee0d3b776ecae0f5a2b9d"
+    },
+    {
+      "path": "run.go",
+      "sha256": "b385d897271363e1e1e917b094e3d64b0a13b428648c04bdeaee078dca922224"
+    },
+    {
+      "path": "invoke.go",
+      "sha256": "211f25a015764ac12e11a53b44e478756c34d49fc622ac9229460060cde0cac3"
+    },
+    {
+      "path": "tools.go",
+      "sha256": "74d48b32add0f098bf76142aea8a9d4ac0bd508ffebe3491615db54cf9051bb3"
+    }
+  ],
+  "product_changes": [
+    {
+      "file": "facts.go",
+      "kind": "candidate",
+      "change": "新增 commitFactChecked/persistFact：事实先写入 tier（BodyFromEvent(text/plain,keep) → Originals.Put → 每 partition 单调 seq → SegmentStore.StoreEvent），成功后才进入 live ledger；commitFact 保留 EventID 签名，失败告警并返回空身份；LandEvent 与 seam.Submit（content 回退 summary，与 read.go supplyRetrieval 同文案）为提交后后果；record 改为 checked 并传播错误。"
+    },
+    {
+      "file": "run.go",
+      "kind": "candidate",
+      "change": "Run 增加 landing sync.Mutex / landedSeq map[int]int64；tier 装配时 seedLandedSeq 从 tier.Segments.Events 续接每个 partition 的 seq；Invoke 输入、InjectEvent、CommitToSession 改用 commitFactChecked 并在失败时返回具名错误（不再驱动未落地事实的回合）。"
+    },
+    {
+      "file": "invoke.go",
+      "kind": "outside_candidate_list_declared",
+      "change": "Invoke 的输入事实改用 commitFactChecked，失败返回 tagent: commit the input fact: <cause>。归因：若不传播，正式入口会在存储拒绝后仍返回成功身份，负锚 storage_failure_not_reported_as_success 在 Host.Invoke 上不可能成立；改动 7 行，不新增 API/格式。"
+    },
+    {
+      "file": "tools.go",
+      "kind": "outside_candidate_list_declared",
+      "change": "observeSettleDelivery 在 commitFact 返回空身份时直接返回，不再用未提交身份调用 pipeline.After。归因：commitFact 现在以空身份表达未提交，After 读取不存在的键会把缺口误记为已观测；改动 3 行。"
+    }
+  ],
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath, WithSender) → Host.Invoke(tagent.InvokeRequest{InvocationID, Address, Input})，测试只调用 Host 的正式入口。",
+    "commit_chain": "Host.Invoke → Run.Invoke → Run.commitFactChecked → persistFact → memory.BodyFromEvent → ledger.OriginalStore.Put → ledger.FileSegmentStore.StoreEvent → memory.StoreQuerySource.LandEvent → memory.VectorSeam.Submit；loop 的 commitOutput/commitNotice/commitSettled 与 task wrapper 的 record 走同一 commitFact 面。",
+    "recall_chain": "host.go toolsFor 的 declaresRecall → tool/recall.New(Run.RecallReads()+RecallPort) → RecallPort.Event/Reference/QueryEvents/ReadSegmentScoped → StoreQuerySource / StoreSearcher / ScopedOriginalStore；观察以 RoleUser 消息进入下一请求（测试按该形状读取答案）。",
+    "evidence": "single 子测试日志显示 input/output/tool 三个身份与当次 recall_query 命中；recall_get 返回 body 与提交字节逐字节相等；⑥ 的旧记录在插入新记录前后两次命中。"
+  },
+  "subtests": [
+    {
+      "name": "new_fact_recalled_same_turn",
+      "anchor": "正①",
+      "assertion": "一个含 recall_query 调用的正式回合后，输入/输出/工具结果三条事实都有身份且经 CommittedEvent 可读；随后正式 recall_query 回答携带输入身份；嵌入端点收到输入原文。"
+    },
+    {
+      "name": "original_text_matches_committed_bytes",
+      "anchor": "正②",
+      "assertion": "recall_get 对输入事实返回 found=true 且 body 与提交的 73 字节原文完全相等（含 unicode 与引号），不是摘要或重写。"
+    },
+    {
+      "name": "formal_recall_tool_returns_new_fact",
+      "anchor": "正③兼消费者",
+      "assertion": "工具结果事实经 recall_get 读回原文（209 字节，含 recall_query）；该回合的助手输出经 recall_query 命中；两条新事实的原文都提交给嵌入端点。"
+    },
+    {
+      "name": "storage_failure_not_reported_as_success",
+      "anchor": "负①",
+      "assertion": "把 <root>/kv/<partition>/snapshot.json 换成同名目录后，Host.Invoke 返回错误且 errors.Is(err, ledger.ErrSegmentBarrier)；该回合模型请求数为 0；SessionFacts 不含被拒输入；解除后同一输入重试成功并被 recall_query 命中。"
+    },
+    {
+      "name": "index_failure_leaves_recoverable_debt",
+      "anchor": "负②",
+      "assertion": "嵌入端点对含 lantern 的文档 503：事实仍可 recall_get，语义查询 illumination 不命中（非静默遗漏而是可观测欠账）；同 root 重启后 supplyRetrieval 全量重提交，端点成功且同一查询命中。"
+    },
+    {
+      "name": "new_fact_keeps_old_reachable",
+      "anchor": "负③",
+      "assertion": "旧 harbor 记录在插入新 lantern 记录前可被 harbor 查询命中；新记录入索引后旧记录仍命中，新记录不回答旧语义查询（cosine<=0 被丢弃）。"
+    }
+  ],
+  "verification": {
+    "red": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityPersistence$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.8/red.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 1,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/red.jsonl",
+      "log_sha256": "476361eef93c91e8dca0ab193798b7bb9712755a9e335fdb00a1f9ee8bf2dfda",
+      "log_bytes": 31435,
+      "parsed": {
+        "parent": "TestEventIntegrityPersistence fail=1",
+        "children_fail": 6,
+        "skip": 0
+      },
+      "reasons": {
+        "new_fact_recalled_same_turn": "the retrieval answer does not carry the committed input 1-3b01a385048347f25b81e8546e4a9dea: map[count:0 dropped:0 items:[] partitions:[agent-persistence] tool:recall_query",
+        "original_text_matches_committed_bytes": "the exact read answered found=false ... reason:missing",
+        "formal_recall_tool_returns_new_fact": "the embedding endpoint never answered <input>; texts=[]",
+        "storage_failure_not_reported_as_success": "hold the shard snapshot .../kv/732/snapshot.json: rename ...: no such file or directory（写侧未接线，tier 从未写过 shard，注入点在基线不可达）",
+        "index_failure_leaves_recoverable_debt": "the embedding endpoint never refused <debt>",
+        "new_fact_keeps_old_reachable": "the embedding endpoint never answered <old>; texts=[]"
+      },
+      "note": "红证在基线代码上取得。此后仅对测试文件增加诊断 t.Logf 与 shard 缺失的显式提示，断言与子测试名未变。"
+    },
+    "single": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityPersistence$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.8/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/single.jsonl",
+      "log_sha256": "ec26ef2d052feae5c09c3c40b582304847c3d249c386da7383a455a1167352c7",
+      "log_bytes": 57563,
+      "parsed": {
+        "parent": "TestEventIntegrityPersistence run=1 pass=1",
+        "children_run_pass": 6,
+        "children": [
+          "new_fact_recalled_same_turn",
+          "original_text_matches_committed_bytes",
+          "formal_recall_tool_returns_new_fact",
+          "storage_failure_not_reported_as_success",
+          "index_failure_leaves_recoverable_debt",
+          "new_fact_keeps_old_reachable"
+        ],
+        "skip": 0,
+        "fail": 0
+      },
+      "observations": [
+        "the turn committed input=1-... output=4-... tool=2-...; the query answered 3 item(s)",
+        "the exact read answered the committed bytes: key=1-... bytes=73",
+        "the tool result 2-... kept its original bytes=209",
+        "the refused commit failed beside tagent: commit the input fact: memory: segment commit barrier failed: rename .../kv/732/snapshot.json.tmp .../kv/732/snapshot.json: file exists",
+        "the index refused the document 3 time(s); the restart submitted it and the query answered 1-...",
+        "the old record 1-... stayed reachable beside the new 7-...; the query answered 3 item(s)"
+      ]
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.8\"; for i in $(seq 1 10); do go test ./tests/integration/history -run '^TestEventIntegrityPersistence$' -count=1 -race -json -timeout 10m > \"$E/run-$i.jsonl\" 2>&1; echo \"run-$i exit=$?\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-1.jsonl", "log_sha256": "a0c8ce78bf5f0a22b5dc16eb8cc14289e1ab36eca237fddb450ce850c573fa20", "log_bytes": 57567, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-2.jsonl", "log_sha256": "d5e291dc0a7a251d88d430a2dd4460b7e693664cfaac87031de1042d4212bc49", "log_bytes": 60162, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-3.jsonl", "log_sha256": "ea5d4ecc93158e90e4a5a02bc4a8fe0df97748cbbc74492f292b9a4bbae28b53", "log_bytes": 57559, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-4.jsonl", "log_sha256": "8238064b092be864957ade11d30cd6f669012747d247c1815ea38c6bb819cdf0", "log_bytes": 57564, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-5.jsonl", "log_sha256": "9d081c15087e26e5f9c68fd9037d1dd3fb1d9188bd4fb041de4a28fb6720095e", "log_bytes": 58661, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-6.jsonl", "log_sha256": "efce848608d2b69ab3a23d0388535ab5c038794281a6685430690e462d33730e", "log_bytes": 57565, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-7.jsonl", "log_sha256": "bea8f7f3c5f144c828e16e8b3e4a1812a09478bb21b2a5b919fc96e80bfc3fa8", "log_bytes": 57565, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-8.jsonl", "log_sha256": "e78bf8178c7dc38b3ffd21c35cd43ce82533a6984513e88798e3cf9b218d9c27", "log_bytes": 57556, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-9.jsonl", "log_sha256": "24790931e66951cb6c040ebd0f1a905ecdc3b706109abb3d61926376cecfaea8", "log_bytes": 57576, "children_pass": 6, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/run-10.jsonl", "log_sha256": "d449c6c77b25bd00cdce5b8ae3eb8264978896788ddef65a22b3c5fdb22d944c", "log_bytes": 57560, "children_pass": 6, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐行 json.loads，按 Test 归集 run/pass/skip/fail；要求父测试 run=1 pass=1、6 个具名子测试各 pass=1、skip=0、fail=0。",
+      "parsed_result": "ALL_TEN_OK=True"
+    },
+    "family_regression": {
+      "command": "go test ./tests/integration/host ./tests/integration/execution ./tests/integration/history -run 'TestEventIntegrity' -count=1 -race -json -timeout 20m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.8/family-green.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/family-green.jsonl",
+      "log_sha256": "5c7ae2236e5f830d6f6bbb21eaaf2f45f9a67f340877e6c6e50af6b4c44e82ff",
+      "log_bytes": 357487,
+      "parsed": {
+        "pass_events": {"host": 61, "execution": 8, "history": 35},
+        "fail": 0,
+        "skip": 0
+      },
+      "original_anchors_not_regressed": [
+        "TestEventIntegrityConsumptionRecovery/handover_before_confirmation",
+        "TestEventIntegrityTaskContinuation/notice_input_without_projection/{no_declared_window,zero_window,declared_window}",
+        "TestEventIntegrityProjection/{actual_request_assembly,fold_product_no_self_trigger,notice_visible_under_fold,rebuild_does_not_refold,small_window_fold_and_restore,unconsumed_not_lost}",
+        "TestEventIntegrityRestart/{consumer,positive/*,negative/*}",
+        "TestEventIntegrityNoticeIdentity/*、TestEventIntegrityFormalAssembly/*、TestEventIntegrityReflectionDelivery/*"
+      ]
+    },
+    "broader": {
+      "unit_modules": {
+        "command": "go test . ./runtime/... ./memory/... -count=1 -timeout 15m",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/unit-all.txt",
+        "log_sha256": "b2cc44e0d809298fd5ba115817586a1dd0e02b20128ae6da1b04a9d39c355168",
+        "log_bytes": 663
+      },
+      "integration_all": {
+        "command": "go test ./tests/integration/... -count=1 -timeout 20m",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/integration-all.txt",
+        "log_sha256": "37f5d6320bd1589bae23c14ef22e625ae86e9c189b9deab7358f8a744df0ed19",
+        "log_bytes": 794
+      }
+    },
+    "hygiene": {
+      "go_vet_all": {"command": "go vet ./...", "exit_code": 0, "output": ""},
+      "gofmt": {"command": "gofmt -l facts.go run.go invoke.go tools.go tests/integration/history", "exit_code": 0, "output": ""},
+      "go_build_all": {"command": "go build ./...", "exit_code": 0, "output": ""},
+      "event_ownership": {
+        "command": "go run ./scripts/codetools event-ownership -check -json",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.8/ownership.json",
+        "log_sha256": "94d3c58fa8985985b4a426ec901490fcf51a0b3fa6fefa4b1e615fb5627fff80",
+        "parsed": {"ok": true, "violations": 0, "uncovered": 4},
+        "uncovered_note": "4 条均为既有方法值回调（Assemble→deliver 等），非本叶新增调用点。"
+      }
+    }
+  },
+  "red_lines": {
+    "formal_entry_only": "六个子测试只调用 Boot/Host.Invoke 与 Host.Run 的读面；测试文件内无手工 commitFact/CommitToSession、无测试内存 store、无直接构造 recall.Reads。",
+    "no_fake_success": "负①断言错误必为 ErrSegmentBarrier、模型请求数为 0、被拒输入不得出现在 SessionFacts，并在解除注入后重试成功。",
+    "debt_is_observable_not_silent": "负②先断言端点确实拒绝（failureCount>0）、语义查询确实未命中、原文仍可经 recall_get 取回，再以同 root 重启付费。",
+    "reachability_floor_not_ranking": "负③只验旧记录在新记录入索引前后均可达且新记录不回答旧语义；不涉及整体排序语义（归另立变更）。"
+  },
+  "incident": {
+    "what": "本叶实施期间一次 Write 未使用追加模式，覆盖了 tests/integration/history/event_integrity_test.go（原 3026 行），该文件为 untracked，git 无法恢复。",
+    "recovery": "从 Qoder 本地历史（~/Library/Application Support/Qoder/User/History/3f8a7642/qUnY.go，3026 行，含 handover_before_confirmation）恢复原文，再以追加方式并入 01.8 harness；恢复后 gofmt/build/vet 全绿，原 TestEventIntegrityConsumptionRecovery/Projection/Restart 与全族回归均通过。",
+    "evidence": "family_regression 的 pass_events=history 35 且含 handover_before_confirmation 等原锚，证明原文件功能已恢复。"
+  },
+  "limitations": [
+    "红证在基线代码上取得；④ 在基线因 tier 从未写入而停在注入点（shard 不存在），未能展示“失败被报成成功”的原始形态——该负锚的真实性由绿证承担：注入后 errors.Is(ErrSegmentBarrier)、0 次模型请求、无 live fact、解除后可重试成功。",
+    "索引欠账的恢复路径复用 Boot 时 supplyRetrieval 的全量重提交，未新增独立的欠账账本；这符合“不预建第二消费状态仓”，但重启窗口前的语义查询确实不可命中（是欠账不是静默成功）。",
+    "seq 分配为 run 内每 partition 单调（landing 互斥），跨进程依赖 seedLandedSeq 续接；同一 partition 若存在多个独立写者（当前无）需另行协调。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.8",
+    "action": "本摘要写入后勾选该一条为 [x]"
+  },
+  "status": "complete",
+  "checkbox": "[x]",
+  "completed_at": "2026-10-24T09:56:04Z"
+}

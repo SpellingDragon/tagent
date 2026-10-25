@@ -1,0 +1,110 @@
+{
+ "leaf": "F1",
+ "generated_at": "2026-10-25T04:20:32+08:00",
+ "baseline": "6cc441436c2aab15edcee34cf2561086232c8311",
+ "head": "6cc441436c2aab15edcee34cf2561086232c8311",
+ "method": "git diff <baseline> --numstat；git status --short --untracked-files=all；与 task-graph.json leaves[].write_files 交叉",
+ "counts": {
+  "tracked": 50,
+  "untracked": 97,
+  "rows": 147,
+  "mapped": 72,
+  "unmapped": 75,
+  "other_status": 51
+ },
+ "diff_stat": "50 files changed, 13512 insertions(+), 328 deletions(-)",
+ "boundary_checks": {
+  "submodule": {
+   "baseline": "888fc1616cfb9c25f0fb049fc3a5e36716d51888",
+   "head": "888fc1616cfb9c25f0fb049fc3a5e36716d51888",
+   "same": true,
+   "diff_empty": true
+  },
+  "main_specs_diff_empty": true,
+  "archive_diff_empty": true,
+  "archive_untracked": [],
+  "deps_changed": [],
+  "user_data_changed": []
+ },
+ "red_flags": [
+  {
+   "id": "RF-DOCSAPI-05.3",
+   "paths": [
+    "docs/api/github_com__SpellingDragon__tagent.md",
+    "docs/api/github_com__SpellingDragon__tagent__runtime__state.md",
+    "docs/api/github_com__SpellingDragon__tagent__scripts__codetools.md",
+    "docs/api/github_com__SpellingDragon__tagent__tool__exec.md"
+   ],
+   "state": "tracked_M",
+   "kind": "declared_out_of_write_set",
+   "disposition": "docs/api 生成物单次重生成（mtime 02:18）；台账 01.2 与并发波次丁已申报；本轮由 4 文件扩至 6（新增 memory__replay、runtime__agent），同类已申报"
+  },
+  {
+   "id": "RF-check_concept_budget.py",
+   "paths": "scripts/check_concept_budget.py",
+   "state": "tracked_M",
+   "kind": "out_of_write_set_gate_edit",
+   "disposition": "脚本门禁编辑；01.10b 已申报（BASELINE 登记 tool/exec/state.go:StateEvent）；写集外已申报"
+  },
+  {
+   "id": "RF-check.go",
+   "paths": "scripts/codetools/check.go",
+   "state": "tracked_M",
+   "kind": "out_of_write_set_gate_edit",
+   "disposition": "procRefSkip 登记 check_event_integrity_mutations.py；04.5/05.3 proc-refs 修复已申报"
+  },
+  {
+   "id": "RF-package_layout.go",
+   "paths": "scripts/codetools/package_layout.go",
+   "state": "tracked_M",
+   "kind": "out_of_write_set_gate_edit",
+   "disposition": "mirror 豁免登记 tool/exec/event_integrity_test.go；01.10a 已申报"
+  },
+  {
+   "id": "RF-tagent-posttraining-design.docx",
+   "paths": "docs/tagent-posttraining-design.docx",
+   "state": "untracked",
+   "kind": "user_artifact_no_leaf",
+   "disposition": "用户自有资料（未跟踪），不入提交清单"
+  },
+  {
+   "id": "RF-tagent-training-handoff.zip",
+   "paths": "docs/tagent-training-handoff.zip",
+   "state": "untracked",
+   "kind": "user_artifact_no_leaf",
+   "disposition": "用户自有资料（未跟踪），不入提交清单"
+  },
+  {
+   "id": "RF-event_integrity_harness_test.go",
+   "paths": "tests/integration/host/event_integrity_harness_test.go",
+   "state": "untracked",
+   "kind": "declared_out_of_write_set",
+   "disposition": "03.1 台架基座（未跟踪）；00.2/00.4 证据已申报"
+  },
+  {
+   "id": "RF-state.go",
+   "paths": "tool/exec/state.go",
+   "state": "untracked",
+   "kind": "declared_out_of_write_set",
+   "disposition": "01.10b 最小公开面（未跟踪，6 导出符号逐项申报）"
+  }
+ ],
+ "unmapped_classes": {
+  "change_planning": 60,
+  "docs_api": 6,
+  "user_data": 2,
+  "unrelated_change": 2,
+  "declared_gap": 2,
+  "gate_script": 3,
+  "other": []
+ },
+ "new_since_precheck": [
+  "docs/api/github_com__SpellingDragon__tagent__memory__replay.md",
+  "docs/api/github_com__SpellingDragon__tagent__runtime__agent.md"
+ ],
+ "unrelated_untracked": [
+  "openspec/changes/post-training-data-loop/.openspec.yaml",
+  "openspec/changes/post-training-data-loop/proposal.md"
+ ],
+ "conclusion": "六项授权边界零改动；8 项红旗全部已归因（docx/zip 为用户资料、不入提交清单）；未映射项=本 change 规划面(P0)+docs/api 生成物+用户资料+无关未跟踪 change+已申报缺口+脚本门禁已申报编辑，无未归因差异"
+}
