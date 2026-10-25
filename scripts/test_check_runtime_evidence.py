@@ -10,6 +10,8 @@ checker has to reject it.
 import copy
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1071,7 +1073,7 @@ class EventFixture:
         else:
             log_path = Path(log_from)
         evidence = copy.deepcopy(evidence)
-        evidence["test_log"] = str(log_path)
+        evidence["test_log"] = os.path.relpath(log_path, directory)
         evidence["test_log_sha256"] = event_digest(log_path)
         path = directory / "evidence.json"
         path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1279,6 +1281,19 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertEqual(len(summary["test_ids"]), 28)
         self.assertIsNone(payload["productVerified"])
 
+    def test_bundle_is_readable_after_it_is_copied_off_the_producer(self):
+        # CI uploads each artifact on the runner that produced it and checks the
+        # downloaded copy on another runner, where no producer path exists. A
+        # bundle that names its logs by their producing path reads green here
+        # and red there; the copy must be checked with the original gone.
+        bundle = self.write_bundle("portable")
+        moved = self.root / "elsewhere" / "bundle"
+        shutil.copytree(bundle, moved)
+        shutil.rmtree(bundle)
+        code, out, err = self.check_bundle(moved)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(json.loads(out)["counts"]["bundle_evidence_files"], 17)
+
     def test_scope_specific_module_sets_are_not_baseline_drift(self):
         # The runner fingerprints only the groups a scope selects, so a legal
         # bundle carries different module sets per scope. The gate must accept
@@ -1377,7 +1392,8 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         first = json.loads((bundle / "short-1" / "evidence.json").read_text(encoding="utf-8"))
         second_path = bundle / "short-2" / "evidence.json"
         second = json.loads(second_path.read_text(encoding="utf-8"))
-        second["test_log"] = first["test_log"]
+        second["test_log"] = os.path.relpath(bundle / "short-1" / "test-log.jsonl",
+                                             bundle / "short-2")
         second["test_log_sha256"] = first["test_log_sha256"]
         second_path.write_text(json.dumps(second, ensure_ascii=False, indent=2),
                                encoding="utf-8")

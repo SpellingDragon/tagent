@@ -441,7 +441,11 @@ class EventRunnerTest(unittest.TestCase):
             self.assertEqual(evidence["run_id"], repeat["run_id"])
             self.assertEqual(evidence["repeat_index"], index)
             self.assertEqual(evidence["repeat_total"], 3)
-            self.assertEqual(evidence["test_log"], repeat["test_log"])
+            # The evidence names its log beside itself, so the artifact still
+            # resolves after CI copies it off the runner that produced it.
+            self.assertFalse(Path(evidence["test_log"]).is_absolute())
+            self.assertEqual(str(Path(repeat["directory"]) / evidence["test_log"]),
+                             repeat["test_log"])
         # One broken repeat must not invalidate the other independent rounds.
         def drop_alpha_terminal(position, rows):
             if position != 6:
