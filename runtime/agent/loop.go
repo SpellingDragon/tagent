@@ -344,7 +344,7 @@ func consumerDebug(format string, args ...any) {
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
 	case task.NoticeProgress:
-		l.admitNotice(invocationID, notice)
+		l.commitProgressFact(invocationID, notice)
 		return
 	case task.NoticeSettled, task.NoticeFailed, task.NoticeCancelled:
 	default:
@@ -361,12 +361,12 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
 }
 
-// admitNotice admits one progress notification as a notice fact of the range
-// that issued the call, and parks nothing beside it: the fact is the audit and
-// projection record of the report, and a progress report is never input
+// commitProgressFact commits one progress notification as a notice fact of the
+// range that issued the call, and parks nothing beside it: the fact is the audit
+// and projection record of the report, and a progress report is never input
 // material of a decision — the model is told what the user asked, never what the
 // task pipeline is doing in its rounds.
-func (l *Loop) admitNotice(invocationID event.InvocationID, notice task.Notice) {
+func (l *Loop) commitProgressFact(invocationID event.InvocationID, notice task.Notice) {
 	in := l.intakeFor(invocationID)
 	if addr := in.rangeAddress(); addr.IsComplete() {
 		l.commitNotice(invocationID, addr, notice)
@@ -1102,35 +1102,22 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 
 // intake is one invocation's backflow intake: the address its range runs at,
 // the cache of the settled tool messages that arrived before their wait began,
-// the waits of the calls still running, and the notification entries the range
-// has not read yet.
+// the waits of the calls still running, and the notice facts the range has
+// already read.
 //
 // The intake holds no notification lane of its own: a notification is a fact of
 // the session chain, committed before it is admitted here, and a drive reads the
-// notices of its range as a projection increment. The entries parked here are
-// the fallback of that read — the material a range beside no projection reads —
-// and each of them names the fact its chain carries, so a read beside a chain
-// reports a notification once and a read beside no chain still reports it once.
-// The settled cache is the same shape for the delivery facts of the calls a
-// decision admitted: a settled result is committed as the delivery fact of its
-// range before it lands here, and the wait of its call pairs it through this
-// cache. A notification of one invocation never reaches the intake of another.
+// notices of its range as a projection increment. The settled cache is the same
+// shape for the delivery facts of the calls a decision admitted: a settled
+// result is committed as the delivery fact of its range before it lands here,
+// and the wait of its call pairs it through this cache. A notification of one
+// invocation never reaches the intake of another.
 type intake struct {
 	mu      sync.Mutex
 	address event.Address
 	waiters map[event.TaskID][]chan delivered
 	settled map[event.TaskID][]delivered
-	notices []noticeEntry
 	read    map[event.EventID]bool
-}
-
-// noticeEntry is one admitted progress notification as the cache of the intake
-// keeps it: the identity of the fact it committed under — empty for a
-// notification admitted before its range recorded an address, or beside no
-// commit face — beside the notification itself.
-type noticeEntry struct {
-	key    event.EventID
-	notice task.Notice
 }
 
 // setAddress records the address the range of this intake runs at, so the
@@ -1177,31 +1164,6 @@ func (in *intake) deliver(taskID event.TaskID, item delivered) {
 		return
 	}
 	in.settled[taskID] = append(in.settled[taskID], item)
-}
-
-// notify parks one admitted progress notification in the cache of the intake.
-// The loop admits a progress report as its fact alone and parks nothing beside
-// it: the report answers no call, and no decision of a range reads this cache,
-// so the parked face stays beside the fact it projects instead of model
-// material.
-func (in *intake) notify(entry noticeEntry) {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	in.notices = append(in.notices, entry)
-}
-
-// takeNotices hands on the parked notifications the range has not read yet and
-// leaves the cache empty. No decision of a range reads it: a progress report
-// reaches its range as the fact it committed, never as model material.
-func (in *intake) takeNotices() []noticeEntry {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	if len(in.notices) == 0 {
-		return nil
-	}
-	taken := in.notices
-	in.notices = nil
-	return taken
 }
 
 // terminalNotes reads the terminal notifications of one invocation as input
@@ -1289,12 +1251,15 @@ func noticeKindOf(key event.EventID, prefix event.EventID) task.NoticeKind {
 
 // pipelineProgress reports whether one notice fact is a progress report of the
 // task pipeline's own rounds: the category says so and the notice names the
-// execution round it reports in. A fact of the progress category that names no
-// round is not that report: the unattended material of an execution-resource
-// observation is committed under the same category so it never fires a settle,
-// it reports a resource state instead of a pipeline round, and it is the
-// material its own follow-up turn speaks from. A malformed round keeps the
-// material: dropping a notice is louder than reading one.
+// execution round it reports in.
+//
+// The round test is a category-reuse patch, not progress semantics: an
+// execution-resource observation commits its material under the same category
+// with no round (host.observeExecState) and must reach the next request, while
+// no producer emits pipeline progress today, so the Round>0 branch is exercised
+// by tests only. A malformed round keeps the material. The zero-round shape is
+// pinned in TestQuietProgressNotice's zero_round_progress_is_material case;
+// change this criterion only beside it.
 func pipelineProgress(key event.EventID, prefix event.EventID) bool {
 	if noticeKindOf(key, prefix) != task.NoticeProgress {
 		return false

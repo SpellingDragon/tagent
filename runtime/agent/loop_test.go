@@ -699,9 +699,9 @@ func (c *invariantCommitFace) list() []event.Event {
 
 // TestBackflowNotificationLanes pins the lanes one notification of a call is admitted into.
 // - a progress notification commits as a notice fact of its range, answers no call, and no decision reads it
-// - the range reads no progress projection at its round head, and nothing is parked beside the fact
+// - the range reads no progress projection at its round head, and nothing lands in the intake beside the fact
 // - a range beside no chain commits nothing for a report it cannot address, and settles nothing
-// - a settled notification still pairs its result with the call and parks no notice
+// - a settled notification still pairs its result with the call
 // - a notification that is neither progress nor terminal leaves the range exactly as it stands
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 func TestBackflowNotificationLanes(t *testing.T) {
@@ -748,13 +748,9 @@ func TestBackflowNotificationLanes(t *testing.T) {
 		in.mu.Lock()
 		parked := len(in.settled[notice.TaskID])
 		waiters := len(in.waiters[notice.TaskID])
-		cached := len(in.notices)
 		in.mu.Unlock()
 		if parked != 0 || waiters != 0 {
 			t.Fatalf("intake beside a progress notification = (%d parked, %d waits), want the settled wait left open", parked, waiters)
-		}
-		if cached != 0 {
-			t.Fatalf("notice cache = %d, want no progress parked beside the fact that records it", cached)
 		}
 
 		turn, err := loop.Drive(ctx, Invocation{
@@ -788,15 +784,13 @@ func TestBackflowNotificationLanes(t *testing.T) {
 	t.Run("unaddressed_progress_commits_nothing", func(t *testing.T) {
 		behaviour := newInvariantLoopModel("answer-cache", nil)
 		loop, _, _ := invariantLoop(t, behaviour)
+		commits := &invariantCommitFace{feed: newInvariantNoticeFeed(0)}
+		loop.SetFactCommit(commits.commit)
 		notice := task.Notice{TaskID: "task-cache", Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "fact-cache"}
 		loop.Backflow("invocation-cache", notice)
 
-		in := loop.intakeFor("invocation-cache")
-		in.mu.Lock()
-		cached := len(in.notices)
-		in.mu.Unlock()
-		if cached != 0 {
-			t.Fatalf("notice cache = %d, want no progress parked for a report that committed no fact", cached)
+		if facts := commits.list(); len(facts) != 0 {
+			t.Fatalf("committed facts = %d, want no fact for a report beside no addressed range", len(facts))
 		}
 		if notes := loop.terminalNotes(Invocation{InvocationID: "invocation-cache", Address: invariantLoopAddress}); len(notes) != 0 {
 			t.Fatalf("terminal notes = %+v, want nothing to read beside no fact", notes)
@@ -827,10 +821,9 @@ func TestBackflowNotificationLanes(t *testing.T) {
 		in := loop.intakeFor("invocation-settled")
 		in.mu.Lock()
 		parked := len(in.settled["task-settled"])
-		cached := len(in.notices)
 		in.mu.Unlock()
-		if parked != 1 || cached != 0 {
-			t.Fatalf("intake beside a settled notification = (%d parked, %d notices), want the paired result alone", parked, cached)
+		if parked != 1 {
+			t.Fatalf("intake beside a settled notification = %d parked, want the paired result", parked)
 		}
 		if item, ok := in.await(ctx, "task-settled"); !ok || item.fact != notice.Event {
 			t.Fatalf("await = (%+v, %v), want the settled result the call waits for", item, ok)
@@ -846,10 +839,9 @@ func TestBackflowNotificationLanes(t *testing.T) {
 		in.mu.Lock()
 		parked := len(in.settled["task-accepted"])
 		waits := len(in.waiters["task-accepted"])
-		cached := len(in.notices)
 		in.mu.Unlock()
-		if parked != 0 || waits != 0 || cached != 0 {
-			t.Fatalf("intake beside an accepted notification = (%d parked, %d waits, %d notices), want the intake untouched", parked, waits, cached)
+		if parked != 0 || waits != 0 {
+			t.Fatalf("intake beside an accepted notification = (%d parked, %d waits), want the intake untouched", parked, waits)
 		}
 		if notes := loop.terminalNotes(Invocation{InvocationID: "invocation-accepted", Address: invariantLoopAddress}); len(notes) != 0 {
 			t.Fatalf("notification cache beside an accepted notification = %+v, want it empty", notes)
@@ -879,6 +871,7 @@ func TestBackflowNotificationLanes(t *testing.T) {
 // TestQuietProgressNotice pins that a progress report commits as a fact of its range and enters no decision.
 // - progress_fact_committed: the report commits under its stable notice identity with its kind and task, and a repeated delivery keeps that one record
 // - progress_absent_from_next_request: the drive commits the fact, parks nothing, and its request carries the ready input alone
+// - zero_round_progress_is_material: a zero-round notice under the progress category is execution-resource material and reaches the next request
 // - terminal_notification_reaches_the_next_request: the terminal notification of the same range stays at the read face and enters the next request
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 func TestQuietProgressNotice(t *testing.T) {
@@ -966,14 +959,47 @@ func TestQuietProgressNotice(t *testing.T) {
 		if cursors := feed.readCursors(); len(cursors) == 0 {
 			t.Fatalf("notice reads = %v, want the terminal read face to run beside the progress report", cursors)
 		}
-		if notes := in.takeNotices(); len(notes) != 0 {
-			t.Fatalf("parked notices = %+v, want no progress cached for a later read", notes)
-		}
 		in.mu.Lock()
 		parked, waits := len(in.settled[notice.TaskID]), len(in.waiters[notice.TaskID])
 		in.mu.Unlock()
 		if parked != 0 || waits != 0 {
 			t.Fatalf("intake beside a progress report = (%d parked, %d waits), want nothing parked beside the fact", parked, waits)
+		}
+	})
+
+	t.Run("zero_round_progress_is_material", func(t *testing.T) {
+		behaviour := newInvariantLoopModel("answer-quiet-observation", nil)
+		loop, _, _ := invariantLoop(t, behaviour)
+		feed := newInvariantNoticeFeed(0)
+		ledger := newQuietNoticeLedger(feed)
+		loop.SetNoticeFeed(feed)
+		loop.SetFactCommit(ledger.commit)
+		in := loop.intakeFor("invocation-quiet-observation")
+		in.setAddress(invariantLoopAddress)
+		observation := task.Notice{TaskID: "task-quiet-observation", Round: 0, Kind: task.NoticeProgress, Seq: 0, Event: "fact-quiet-observation"}
+		loop.Backflow("invocation-quiet-observation", observation)
+
+		if facts := ledger.list(); len(facts) != 1 {
+			t.Fatalf("committed notice facts = %d, want the observation committed as its fact", len(facts))
+		}
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-quiet-observation",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-quiet-observation",
+				Message: model.Message{Role: model.RoleUser, Content: "hello"},
+			}},
+		})
+		if err != nil || turn.Terminal != model.KindCompleted {
+			t.Fatalf("drive beside a zero-round progress report = (%v, %v), want the one completed turn", turn.Terminal, err)
+		}
+		requests := behaviour.requestMessages()
+		if len(requests) != 1 {
+			t.Fatalf("model requests = %d, want the one decision of the range", len(requests))
+		}
+		if material := progressNoteOf(observation).Content; !invariantCarries(requests[0], material) {
+			t.Fatalf("first request messages = %+v, want the material host.observeExecState commits under the progress category with no round, which is execution-resource state and not pipeline progress", requests[0])
 		}
 	})
 
