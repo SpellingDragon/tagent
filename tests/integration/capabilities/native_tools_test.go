@@ -406,12 +406,13 @@ func checkPair(t *testing.T, msg model.Message, callID, tool, content string) {
 }
 
 // checkReceipt checks one paired tool message against the admission receipt of
-// its call: the receipt pairs the call with its admitted task before that task
-// settles, beside no settled body and beside no wrapper prefix.
+// its call: the receipt pairs the call with the minimal ok confirmation before
+// that task settles, beside no settled body, beside no wrapper prefix and
+// beside nothing of the admission that the model could repeat.
 func checkReceipt(t *testing.T, msg model.Message, callID, tool, settled string) {
 	t.Helper()
 	if msg.Role != model.RoleTool || msg.ToolID != callID || msg.ToolName != tool ||
-		!strings.Contains(msg.Content, "accepted task-") || !strings.Contains(msg.Content, "(running)") ||
+		msg.Content != "ok" ||
 		strings.Contains(msg.Content, settled) || strings.Contains(msg.Content, "the call was answered with") {
 		t.Errorf("paired tool message = %+v, want the admission receipt of %q paired under tool %q beside no settled body", msg, callID, tool)
 	}

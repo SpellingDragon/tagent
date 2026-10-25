@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -121,8 +120,8 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 			t.Fatalf("caller requests = %d, want one request per decision", len(requests))
 		}
 		receipt := findMessage(requests[1].Messages, "call-review", model.RoleTool)
-		if receipt == nil || !strings.Contains(receipt.Content, "accepted task-") {
-			t.Fatalf("second request carries no admission receipt: %+v", requests[1].Messages)
+		if receipt == nil || receipt.Content != "ok" {
+			t.Fatalf("second request carries no minimal ok admission receipt: %+v", requests[1].Messages)
 		}
 		settled := findMessage(requests[1].Messages, "call-review", model.RoleUser)
 		if settled == nil {

@@ -973,7 +973,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 // - The pipeline is assembled from the instances of that generation: every declared port dispatches its instance exactly as NewFlow dispatches it, so the loop and the plugin set share one dispatch and no second assembly arises here.
 // - The one Before pass travels on the context into the admission ruling beside the call frame, so the pre-execution ruling consumes the risk grade its risk faces rendered and never runs a second risk face of its own.
 // - The transformed final call is the one both executed and recorded; the identity it is admitted under stays the resolved CallID.
-// - The receipt is the synchronous answer of the call: the model reads the admission and the task identity it was registered under, and the settled result never answers the call again.
+// - The receipt is the synchronous answer of the call: the model reads the minimal confirmation that the call happened, the task identities stay out of the request, and the settled result never answers the call again.
 // - Every call of this decision is already admitted and answered with its receipt before the first wait for a settled result begins.
 // - The settled result fact is the stored event the next decision of this range reduces; a call that recorded no fact contributes none.
 // - The After pass reads only a fact whose canonical commit already happened: a failed observation is a visible gap in the returned presentation and never rolls the committed fact back, and a dropped presentation drops the presentation only. The presentation is the read-out the inspection face consumes; the loop keeps the committed fact itself.
@@ -1473,13 +1473,24 @@ func refusalText(cause error) string {
 	return "tagent: the call was refused before execution"
 }
 
-// admissionText reports the receipt text of one admitted call: the task it was
-// registered as beside its running state, and the settlement-then-notify
-// promise the model can end its turn on. The text names no status query and no
-// waiting step, so it never invites polling, and the delivery promise it keeps
-// stays fully dependable.
-func admissionText(receipt task.AdmissionReceipt) string {
-	return fmt.Sprintf("accepted %s (running): the call runs as a background task and its result will arrive as a notification when it settles", receipt.TaskID)
+// admissionReceiptText is the whole content of one admission receipt: the
+// minimal confirmation that the call happened. Nothing else of the admission
+// travels to the model — not the task identity, not the running state, not the
+// settlement promise. An admission is the system's own confirmation, and a
+// system confirmation is never speaking material: the task id, the state word
+// and the notification promise are exactly the fragments a model restates as
+// an extra acknowledgement, so the confirmation is cut to this constant and
+// the task keeps its own record of what it was admitted as.
+const admissionReceiptText = "ok"
+
+// admissionText reports the receipt text of one admitted call as that minimal
+// confirmation. The answer still pairs with the call under the tool role and
+// the call id, so the model can tell the call was admitted and that its result
+// arrives later. The wording a model must act on stays outside this function:
+// the approval hold keeps its "parked awaiting approval" and a refusal keeps
+// its named reason.
+func admissionText(task.AdmissionReceipt) string {
+	return admissionReceiptText
 }
 
 // observationOf turns one settled result into the observation its call enters

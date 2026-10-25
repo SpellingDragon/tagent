@@ -302,12 +302,12 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 	}
 	receipts := 0
 	for _, msg := range requests[1].Messages {
-		if msg.Role == model.RoleTool && strings.Contains(msg.Content, "accepted task-") {
+		if msg.Role == model.RoleTool && msg.Content == "ok" {
 			receipts++
 		}
 	}
 	if receipts != 3 {
-		t.Fatalf("second request carries %d admission receipts, want one real receipt per admitted call", receipts)
+		t.Fatalf("second request carries %d minimal ok admission receipts, want one real receipt per admitted call", receipts)
 	}
 }
 

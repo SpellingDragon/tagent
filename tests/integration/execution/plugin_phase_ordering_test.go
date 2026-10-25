@@ -106,7 +106,7 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			t.Fatalf("replay assistant = %+v, want the native call the model recorded kept byte-identical", assistant)
 		}
 		if receipt := replay[2]; receipt.Role != model.RoleTool || receipt.ToolID != "call-1" || receipt.ToolName != "echo-final" ||
-			!strings.Contains(receipt.Content, "accepted task-") || !strings.Contains(receipt.Content, "(running)") ||
+			receipt.Content != "ok" ||
 			strings.Contains(receipt.Content, "final-out") || strings.Contains(receipt.Content, "the call was answered with") {
 			t.Fatalf("paired tool message = %+v, want the admission receipt of call-1 paired under its native CallID", receipt)
 		}

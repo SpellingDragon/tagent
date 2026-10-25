@@ -98,8 +98,8 @@ func TestAgentReferenceDelegatesToTheDeclaredTarget(t *testing.T) {
 			t.Fatalf("the target tool's description = %q, want the text of the description file the reference names", got)
 		}
 		receipt := findToolMessage(callerRequests[1].Messages, "call-knowledge")
-		if receipt == nil || !strings.Contains(receipt.Content, "accepted task-") {
-			t.Fatalf("the second caller request carries no admission receipt: %+v", callerRequests[1].Messages)
+		if receipt == nil || receipt.Content != "ok" {
+			t.Fatalf("the second caller request carries no minimal ok admission receipt: %+v", callerRequests[1].Messages)
 		}
 
 		knowledgeRequests := knowledge.recorded()

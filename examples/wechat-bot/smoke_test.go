@@ -3029,3 +3029,209 @@ func TestEventIntegrityLongRun(t *testing.T) {
 		t.Logf("[consumer] /task turns=%d answered=%d via %s", recon.ConsumerTurns, recon.ConsumerAnswered, reportPath)
 	})
 }
+
+// symptomChat 是症状锚驱动的会话：每台 rig 只驱动它，outbound 因此可以整表计数。
+const symptomChat = "symptom-anchor-chat"
+
+var (
+	// symptomAdmissionMaterial 是模型世界里的"内部受理材料"判据：结算通知回合的
+	// 请求不该再读到它们（判别力来自请求侧）。
+	symptomAdmissionMaterial = []string{
+		"accepted task-", "(running)", "background task", "will arrive as a notification",
+		"reports progress",
+	}
+)
+
+// symptomRig 起一台症状锚专用宿主：独立临时根、脚本 provider 与替身通道；冥想
+// 节奏拉到 1h，避免本轮测量被反思回合插队。
+func symptomRig(t *testing.T) (*smokeRig, *smokeProvider) {
+	t.Helper()
+	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
+	cfg.MeditationInterval = "1h"
+	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	cfg.Endpoint = provider.endpoint()
+	cfg.write(t)
+	rig := bootSmokeRig(t, cfg, provider)
+	t.Cleanup(func() {
+		if err := rig.close(); err != nil {
+			t.Errorf("close the symptom rig: %v", err)
+		}
+	})
+	return rig, provider
+}
+
+// symptomTexts 报告替身通道向该会话投递过的文本正文，按到达顺序。
+func symptomTexts(rig *smokeRig, chat string) []string {
+	var texts []string
+	for _, evt := range rig.recorded() {
+		if evt.Kind == "text" && evt.Target == chat {
+			texts = append(texts, evt.Body)
+		}
+	}
+	return texts
+}
+
+// symptomQuote 渲染一组正文：失败信息必须能读出"用户实际收到什么"。
+func symptomQuote(bodies []string) string {
+	if len(bodies) == 0 {
+		return "(无)"
+	}
+	return strconv.Quote(strings.Join(bodies, " | "))
+}
+
+// symptomHit 报告正文命中的第一个词，没有命中时回报空。
+func symptomHit(body string, words []string) string {
+	for _, word := range words {
+		if strings.Contains(body, word) {
+			return word
+		}
+	}
+	return ""
+}
+
+// symptomEntryRequests 报告脚本模型收到的入口模型请求。
+func symptomEntryRequests(provider *smokeProvider) []smokeModelRequest {
+	var requests []smokeModelRequest
+	for _, req := range provider.recorded() {
+		if req.Model == smokeEntryModel {
+			requests = append(requests, req)
+		}
+	}
+	return requests
+}
+
+// symptomAdmissionReceipts 报告入口模型请求里配对本轮委派调用的受理回执正文：取键
+// 只看结构（tool 角色 + 本次调用的 id），不看正文——01 域后回执恰为最小 "ok"。
+func symptomAdmissionReceipts(provider *smokeProvider, callID string) []string {
+	var receipts []string
+	for _, req := range symptomEntryRequests(provider) {
+		for _, msg := range req.Messages {
+			if msg.Role == string(tagentmodel.RoleTool) && msg.ToolCallID == callID {
+				receipts = append(receipts, msg.Content)
+			}
+		}
+	}
+	return receipts
+}
+
+// symptomToolResultPaired 报告请求里是否已有这次调用的交代：按结构（tool 角色
+// 结果 + 本调用的 id）取键，不按回执正文取键——受理回执是裸 "ok"，正文里没有
+// 可识别的字样。
+func symptomToolResultPaired(messages []smokeModelMessage, callID string) bool {
+	for _, msg := range messages {
+		if msg.Role == string(tagentmodel.RoleTool) && msg.ToolCallID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+// symptomRequestCarries 报告一次请求的任一消息是否含给定子串。
+func symptomRequestCarries(messages []smokeModelMessage, want string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// symptomMaterialHit 报告一组入口请求里第一条命中内部受理/进度材料判据的消息：
+// 命中的词、消息角色与正文一并交回，失败信息据此判读。
+func symptomMaterialHit(requests []smokeModelRequest) (string, string, string, bool) {
+	for _, req := range requests {
+		for _, msg := range req.Messages {
+			for _, word := range symptomAdmissionMaterial {
+				if strings.Contains(msg.Content, word) {
+					return word, msg.Role, msg.Content, true
+				}
+			}
+		}
+	}
+	return "", "", "", false
+}
+
+// symptomStableTexts 轮询到该会话的文本条数稳定（300ms 条数不变）或超时，再把正文
+// 交回：失败告知可能随 Drive 同步落地，也可能由后续回合追加。
+func symptomStableTexts(rig *smokeRig, chat string, timeout time.Duration) []string {
+	deadline := time.Now().Add(timeout)
+	last := -1
+	idleSince := time.Now()
+	for {
+		texts := symptomTexts(rig, chat)
+		if len(texts) != last {
+			last, idleSince = len(texts), time.Now()
+		} else if len(texts) > 0 && time.Since(idleSince) > 300*time.Millisecond {
+			return texts
+		}
+		if time.Now().After(deadline) {
+			return texts
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestLocalSmokeSymptomAcceptedSilent 是症状直译锚 G1：委派被受理后、任务结算前，用户不该收到“已受理/在跑/稍后会通知你”这一类确认。
+// - 正锚 silent_until_settled：模型后续请求里与本调用配对的 tool result 恰为最小 "ok"，不携带 task id、状态词、后台任务与结算承诺。
+// - 叠加锚 silent_until_settled：受理后、结算前本会话 outbound=0；脚本模型安静时它先于修复即绿，不替代模型世界判据。
+// - 负锚 legitimate_answer_still_delivered：正常提问的回答仍必须投递，防静默吞正常输出。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
+	t.Run("silent_until_settled", func(t *testing.T) {
+		const marker = "SMOKE-R9601"
+		const callID = "call-" + marker
+		rig, provider := symptomRig(t)
+		provider.hook = func(w http.ResponseWriter, _ int, modelName string, messages []smokeModelMessage) bool {
+			if modelName != smokeEntryModel {
+				return false
+			}
+			if symptomToolResultPaired(messages, callID) ||
+				strings.HasPrefix(smokeLastUserText(messages), "tagent: task ") {
+				fmt.Fprint(w, smokeAnswerBody(""))
+				return true
+			}
+			if strings.Contains(smokeLastUserText(messages), marker) {
+				fmt.Fprint(w, smokeToolCallBody(callID, smokeWorkerModel,
+					`{"input":"produce `+marker+`"}`))
+				return true
+			}
+			return false
+		}
+
+		rig.drive(symptomChat, marker+" 后台跑一下这个任务")
+		if got := smokeRequestsFor(provider, smokeWorkerModel); got == 0 {
+			t.Fatalf("委派链路没有发生：worker 模型被调用 %d 次\nrecent requests:\n%s",
+				got, rig.recentRequests(8))
+		}
+
+		receipts := symptomAdmissionReceipts(provider, callID)
+		if len(receipts) == 0 {
+			t.Fatalf("模型后续请求里没有与 %q 配对的受理回执（tool result）：受理链路不可判读\nrecent requests:\n%s",
+				callID, rig.recentRequests(8))
+		}
+		if receipts[0] != "ok" {
+			t.Errorf("受理回执不是最小 ok：模型真实收到的 tool result = %q，want %q", receipts[0], "ok")
+		}
+		if word := symptomHit(receipts[0], symptomAdmissionMaterial); word != "" {
+			t.Errorf("受理回执携带了内部受理材料：模型真实收到的 tool result = %q（命中 %q）",
+				receipts[0], word)
+		}
+
+		texts := symptomStableTexts(rig, symptomChat, 2*time.Second)
+		if len(texts) != 0 {
+			t.Errorf("受理后、结算前本会话 outbound 应为 0 条，实际 %d 条：%s", len(texts), symptomQuote(texts))
+		}
+		t.Logf("[symptom-g1] 用户世界 outbound=%d（叠加断言；模型世界判据见正锚）", len(texts))
+	})
+
+	t.Run("legitimate_answer_still_delivered", func(t *testing.T) {
+		const marker = "SMOKE-R9602"
+		rig, _ := symptomRig(t)
+		rig.drive(symptomChat, marker+" 普通问题")
+		evt := rig.waitText(symptomChat, "answer "+marker, 30*time.Second)
+		if evt.Target != symptomChat {
+			t.Fatalf("回答投递到了 %q，want %q", evt.Target, symptomChat)
+		}
+		t.Logf("[symptom-g1] 负锚：正常提问的回答仍投递 %q", evt.Body)
+	})
+}

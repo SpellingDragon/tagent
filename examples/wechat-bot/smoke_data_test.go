@@ -172,8 +172,8 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 				}
 			}
 		}
-		if !strings.Contains(receipt, "accepted task-") || !strings.Contains(receipt, "(running)") {
-			t.Fatalf("call_subagent receipt = %q, want the admitted task identity and its running state", receipt)
+		if receipt != "ok" {
+			t.Fatalf("call_subagent receipt = %q, want the minimal ok admission confirmation", receipt)
 		}
 		if strings.Contains(receipt, "[call_subagent_denied]") {
 			t.Fatalf("call_subagent receipt = %q, want the admission, not a named refusal", receipt)

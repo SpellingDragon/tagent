@@ -317,6 +317,7 @@ func (p *smokeProvider) serve(w http.ResponseWriter, r *http.Request) {
 // answerFor 是本台架的响应脚本：委派子 agent 回结果正文、冥想 agent 投递摘要、
 // 入口 agent 先落工具调用再按回执/观察/结算通知收尾。
 // - an entry turn that ended with a tool call answers from the receipt or observation alone, never with a second call
+// - 受理回执按结构取键（tool 角色 + 本次调用的 id）：回执是裸 "ok"，正文里没有可识别的字样，按正文取键会让脚本答不上来而重复发起委派。
 func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage, index int) string {
 	last := smokeLastUserText(messages)
 	switch modelName {
@@ -335,7 +336,7 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 		switch {
 		case strings.Contains(end, "parked awaiting approval"):
 			return smokeAnswerBody("hold-ack " + marker)
-		case strings.Contains(end, "accepted task"):
+		case smokePairedResult(messages, "call-worker-"+marker):
 			return smokeAnswerBody("delegate ack " + marker)
 		case strings.Contains(end, "[send_ok]"):
 			return smokeAnswerBody("approved-done " + marker)
@@ -1027,6 +1028,16 @@ func smokeEndedWithTool(messages []smokeModelMessage) bool {
 	content := strings.TrimSpace(last.Content)
 	return strings.HasPrefix(content, "{") && strings.Contains(content, "call-") ||
 		strings.HasPrefix(content, "[send_") || strings.HasPrefix(content, "[deliver_summary_")
+}
+
+// smokePairedResult 报告请求的最后一条消息是不是给定调用的工具结果：按角色与
+// 调用 id 取键，因为受理回执是裸 "ok"，正文里没有可识别的字样。
+func smokePairedResult(messages []smokeModelMessage, callID string) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	last := messages[len(messages)-1]
+	return last.Role == string(tagentmodel.RoleTool) && last.ToolCallID == callID
 }
 
 // smokeFrame 报告用户消息是不是循环折成的工具结果帧。

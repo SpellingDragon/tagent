@@ -119,12 +119,12 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("second tool call = %+v, want the native call kept byte-identical", assistant.ToolCalls[1])
 		}
 		if receipt := second[2]; receipt.Role != model.RoleTool || receipt.ToolID != "call-1" || receipt.ToolName != "echo-a" ||
-			!strings.Contains(receipt.Content, "accepted task-") || !strings.Contains(receipt.Content, "(running)") ||
+			receipt.Content != "ok" ||
 			strings.Contains(receipt.Content, "out-a") || strings.Contains(receipt.Content, "the call was answered with") {
 			t.Fatalf("first paired tool message = %+v, want the admission receipt of call-1 paired under its own tool id", receipt)
 		}
 		if receipt := second[3]; receipt.Role != model.RoleTool || receipt.ToolID != "call-2" || receipt.ToolName != "echo-b" ||
-			!strings.Contains(receipt.Content, "accepted task-") || !strings.Contains(receipt.Content, "(running)") ||
+			receipt.Content != "ok" ||
 			strings.Contains(receipt.Content, "out-b") || strings.Contains(receipt.Content, "the call was answered with") {
 			t.Fatalf("second paired tool message = %+v, want the admission receipt of call-2 paired under its own tool id", receipt)
 		}
@@ -327,7 +327,7 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatalf("backflow request assistant message = %+v, want the native tool call replayed", replay[1])
 		}
 		if receipt := replay[2]; receipt.Role != model.RoleTool || receipt.ToolID != "call-g1" || receipt.ToolName != "gated-tool" ||
-			!strings.Contains(receipt.Content, "accepted task-") || strings.Contains(receipt.Content, "released") {
+			receipt.Content != "ok" || strings.Contains(receipt.Content, "released") {
 			t.Fatalf("backflow request receipt = %+v, want the admission receipt of call-g1 paired under its own tool id", receipt)
 		}
 		if obs := replay[3]; obs.Content != "released" || obs.ToolID != "call-g1" || obs.ToolName != "gated-tool" || obs.Role == model.RoleTool {

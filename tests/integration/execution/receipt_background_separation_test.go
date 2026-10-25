@@ -119,8 +119,8 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		if receipt.Role != model.RoleTool || receipt.ToolID != want.callID || receipt.ToolName != want.tool {
 			t.Fatalf("receipt of %s = %+v, want the admission receipt paired under its own call identity", want.callID, receipt)
 		}
-		if !strings.Contains(receipt.Content, "accepted task-") || !strings.Contains(receipt.Content, "(running)") {
-			t.Fatalf("receipt of %s = %q, want the admitted task named in its running state before any settlement", want.callID, receipt.Content)
+		if receipt.Content != "ok" {
+			t.Fatalf("receipt of %s = %q, want the minimal ok confirmation before any settlement", want.callID, receipt.Content)
 		}
 		if strings.Contains(receipt.Content, "bg-slow") || strings.Contains(receipt.Content, "bg-fast") {
 			t.Fatalf("receipt of %s = %q, want no settled body beside the receipt: the receipt answers the call before its task settles", want.callID, receipt.Content)
@@ -191,7 +191,7 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			counts["second input"]++
 		case msg.Role == model.RoleAssistant && len(msg.ToolCalls) == 2:
 			counts["tool call turn"]++
-		case msg.Role == model.RoleTool && strings.Contains(msg.Content, "accepted task-"):
+		case msg.Role == model.RoleTool && msg.Content == "ok":
 			counts["receipt"]++
 		case msg.Content == "bg-slow":
 			counts["slow observation"]++
