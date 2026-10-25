@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	osexec "os/exec"
 	"strconv"
 	"strings"
@@ -273,6 +274,7 @@ func TestExecFaceWiredFromDocument(t *testing.T) {
 	if !tagentexec.IsTmuxAvailable() {
 		t.Skip("tmux is not available on this runner")
 	}
+	isolateTmuxServer(t)
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
@@ -540,4 +542,17 @@ func wiringContains(names []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// isolateTmuxServer points this check at a tmux server of its own: another
+// package finishing the shared server must not take the declared execution with
+// it, and the socket directory stays short enough for the platform limit.
+func isolateTmuxServer(t *testing.T) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "tagent-tmux-")
+	if err != nil {
+		t.Fatalf("create the private tmux directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMUX_TMPDIR", dir)
 }

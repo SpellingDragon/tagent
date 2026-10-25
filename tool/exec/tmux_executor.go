@@ -185,7 +185,8 @@ func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, er
 // stop could not observe is reported as -1 rather than as a clean exit. A
 // session list that does not name the key is read again before the ending is
 // confirmed, because a client refused by a busy server reads no sessions at
-// all, and the pane state beside its status is read in one message.
+// all, and a server that left mid-read took every session with it; the pane
+// state beside its status is read in one message.
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error) {
 	name, err := sessionNameOf(key)
 	if err != nil {
@@ -274,7 +275,8 @@ func (e *TmuxExecutor) awaitFirstFrame(ctx context.Context, key ResourceKey) {
 
 // sessionNames lists the session names tmux reports, with a server that is not
 // running read as an empty list: a refusal is retried at the server cadence,
-// so a busy server's refusal is never read as an empty list.
+// so a busy server's refusal or a server that left mid-read is never read as an
+// empty list before the retries pass.
 func (e *TmuxExecutor) sessionNames(ctx context.Context) ([]string, error) {
 	for attempt := 1; ; attempt++ {
 		out, err := e.tmux(ctx, "list-sessions", "-F", "#{session_name}")
@@ -430,10 +432,19 @@ func containsName(names []string, name string) bool {
 	return false
 }
 
-// tmuxServerAbsent reports whether err is the tmux verdict that no server is
-// running, which leaves every session of it absent.
+// tmuxServerAbsent reports whether err is a tmux verdict that the server is not
+// there: a server that never started, a socket that is already gone, and a
+// server that left while the client waited all leave every session of it
+// absent, and each is told apart from a call that failed beside a live server.
 func tmuxServerAbsent(err error) bool {
-	return err != nil && (strings.Contains(err.Error(), "no server running") || strings.Contains(err.Error(), "No such file or directory"))
+	if err == nil {
+		return false
+	}
+	detail := err.Error()
+	return strings.Contains(detail, "no server running") ||
+		strings.Contains(detail, "No such file or directory") ||
+		strings.Contains(detail, "server exited unexpectedly") ||
+		strings.Contains(detail, "lost server")
 }
 
 // sleepContext waits for one cadence and reports whether the wait finished

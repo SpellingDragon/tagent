@@ -1542,6 +1542,7 @@ func TestEventIntegrityExecStateEvents(t *testing.T) {
 	if !tagentexec.IsTmuxAvailable() {
 		t.Skip("tmux is not available on this runner")
 	}
+	isolateTmuxServer(t)
 	t.Run("lease_keeps_renewing_after_return", runEventIntegrityExecLeaseKeepsRenewing)
 	t.Run("state_change_emits_followup_notice", runEventIntegrityExecStateChangeNotice)
 	t.Run("next_turn_consumes_exec_state", runEventIntegrityExecNextTurnConsumesState)
@@ -2034,4 +2035,17 @@ func eventIntegrityRequestsSummary(requests []eventIntegrityRequest) string {
 		lines = append(lines, fmt.Sprintf("request %d model=%s messages=%v", request.Index, request.Model, texts))
 	}
 	return strings.Join(lines, " | ")
+}
+
+// isolateTmuxServer points this check at a tmux server of its own: another
+// package finishing the shared server must not take the live execution with it,
+// and the socket directory stays short enough for the platform limit.
+func isolateTmuxServer(t *testing.T) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "tagent-tmux-")
+	if err != nil {
+		t.Fatalf("create the private tmux directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMUX_TMPDIR", dir)
 }

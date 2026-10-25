@@ -692,5 +692,6 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
     the stop is confirmed by the session leaving the list, and an exit status
     the stop could not observe is reported as -1 rather than as a clean exit.
     A session list that does not name the key is read again before the ending
-    is confirmed, because a client refused by a busy server reads no sessions at
-    all, and the pane state beside its status is read in one message.
+    is confirmed, because a client refused by a busy server reads no sessions
+    at all, and a server that left mid-read took every session with it; the pane
+    state beside its status is read in one message.

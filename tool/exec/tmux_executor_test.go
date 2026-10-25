@@ -22,6 +22,7 @@ func TestTmuxExecutorRunsCommand(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
 	}
+	isolateTmuxServer(t)
 	executor, err := NewTmuxExecutor()
 	if err != nil {
 		t.Fatalf("executor construction = %v, want a tmux executor", err)
@@ -79,6 +80,7 @@ func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
 	}
+	isolateTmuxServer(t)
 	executor, err := NewTmuxExecutor()
 	if err != nil {
 		t.Fatalf("executor construction = %v, want a tmux executor", err)
@@ -138,6 +140,7 @@ func TestTmuxSessionListRetriesBusyServer(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
 	}
+	isolateTmuxServer(t)
 	real, err := osexec.LookPath("tmux")
 	if err != nil {
 		t.Skip("tmux is not available on this system")
@@ -179,6 +182,73 @@ func TestTmuxSessionListRetriesBusyServer(t *testing.T) {
 	}
 }
 
+// TestTmuxStopConfirmsBesideAServerThatLeft pins the verdict of a server that left while a client waited.
+// - the session list answers the exit of the server that held the sessions instead of a name list
+// - the stop is confirmed with the status unobserved, so a release beside a gone server names no held resource
+func TestTmuxStopConfirmsBesideAServerThatLeft(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	isolateTmuxServer(t)
+	real, err := osexec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not available on this system")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "tmux")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"list-sessions\" ]; then\n" +
+		"  echo 'server exited unexpectedly' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"exec \"$TMUX_REAL_BINARY\" \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the tmux shim = %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("TMUX_REAL_BINARY", real)
+
+	executor := &TmuxExecutor{}
+	evidence, err := executor.Stop(context.Background(), tmuxTestKey())
+	if err != nil {
+		t.Fatalf("stop beside a server that left = %v", err)
+	}
+	if !evidence.Confirmed {
+		t.Fatalf("stop evidence = %+v, want the gone server read as a confirmed stop", evidence)
+	}
+	if evidence.ExitCode != -1 {
+		t.Fatalf("stop exit code = %d, want the unobserved -1", evidence.ExitCode)
+	}
+}
+
+// TestTmuxStopNamesAReadThatFailedBesideTheServer pins the line between a gone server and a failed read.
+// - a list that fails with a verdict other than the server leaving is not read as an absent server
+// - the stop answers that failure with the resource unconfirmed instead of reporting a release
+func TestTmuxStopNamesAReadThatFailedBesideTheServer(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	isolateTmuxServer(t)
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "tmux")
+	script := "#!/bin/sh\n" +
+		"echo 'usage: tmux [-2CDlNuUVv] [-c shell-command] [-f file] [-L socket-name]' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the tmux shim = %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	executor := &TmuxExecutor{}
+	evidence, err := executor.Stop(context.Background(), tmuxTestKey())
+	if err == nil {
+		t.Fatalf("stop beside a failed read = %+v, want the read failure named", evidence)
+	}
+	if evidence.Confirmed {
+		t.Fatalf("stop evidence = %+v, want the resource left unconfirmed", evidence)
+	}
+}
+
 // TestMonitorSuspectAfterQuiet pins the fake-dead classification of one live session.
 // - a session running sleep records no frame, so the first poll only watches
 // - quiet past the fake-dead threshold of its rhythm is reported as suspect
@@ -186,6 +256,7 @@ func TestMonitorSuspectAfterQuiet(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
 	}
+	isolateTmuxServer(t)
 	executor, err := NewTmuxExecutor()
 	if err != nil {
 		t.Fatalf("executor construction = %v, want a tmux executor", err)
@@ -245,6 +316,7 @@ func TestRunToolExecutesThroughTmuxExecutor(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
 	}
+	isolateTmuxServer(t)
 	executor, err := NewTmuxExecutor()
 	if err != nil {
 		t.Fatalf("executor construction = %v", err)
@@ -268,6 +340,19 @@ func TestRunToolExecutesThroughTmuxExecutor(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(answer), "smoke-exec-marker") {
 		t.Fatalf("exec_run answer = %q, want smoke-exec-marker", answer)
 	}
+}
+
+// isolateTmuxServer points this test at a tmux server of its own: another
+// package finishing the shared server must not take the sessions under test
+// with it, and the socket directory stays short enough for the platform limit.
+func isolateTmuxServer(t *testing.T) {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "tagent-tmux-")
+	if err != nil {
+		t.Fatalf("create the private tmux directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("TMUX_TMPDIR", dir)
 }
 
 // tmuxTestKey returns a tmux resource key whose session name belongs to this

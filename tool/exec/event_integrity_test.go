@@ -29,6 +29,7 @@ func TestEventIntegrityExecLifecycle(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
 	}
+	isolateTmuxServer(t)
 
 	t.Run("returned_call_does_not_prove_exit", func(t *testing.T) {
 		manager, _ := eventIntegrityManager(t)
