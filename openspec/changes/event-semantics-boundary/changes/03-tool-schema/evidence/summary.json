@@ -1,0 +1,18 @@
+{
+  "leaf": "03.2",
+  "change": "event-semantics-boundary",
+  "domain": "03-tool-schema",
+  "subject": "exec_release Declaration same vocabulary as exec_run",
+  "files": ["tool/exec/tool.go", "tool/exec/exec_test.go"],
+  "commands": [
+    {"cmd": "go test ./tool/exec -run '^TestExecReleaseDeclarationPinsTheResourceShape$' -count=1 -race -json -timeout 2m", "exit": 0, "log_ref": "${TMPDIR:-/tmp}/event-semantics-boundary/03.2/single.jsonl"},
+    {"cmd": "same, independent process runs 1-3", "exit": 0, "log_ref": "${TMPDIR:-/tmp}/event-semantics-boundary/03.2/run-{1,2,3}.jsonl"},
+    {"cmd": "go test ./tool/exec -count=1 -race -timeout 5m", "exit": 0, "log_ref": "${TMPDIR:-/tmp}/event-semantics-boundary/03.2/package-regression.log"},
+    {"cmd": "bash scripts/lint.sh", "exit": 0, "log_ref": "${TMPDIR:-/tmp}/event-semantics-boundary/lint-03.log"}
+  ],
+  "anchors": {
+    "positive": ["names_the_only_family", "names_the_session_name_format", "pattern_agrees_with_the_validator"],
+    "negative": ["abstract_phrase_gone", "prefixed_key_hint_absent", "both_declarations_share_one_vocabulary"],
+    "consumer": "production_preset_carries_the_same_text (declaration read from NewPreset(...)[1])"
+  }
+}

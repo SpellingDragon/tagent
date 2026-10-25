@@ -1,0 +1,107 @@
+# 00-symptom-anchors 红证（D1 交付）
+#
+# 仓库: /Users/pengweiye/Documents/codes/tagent
+# 日期: 2026-10-25
+# 被测文件: examples/wechat-bot/smoke_test.go（本单唯一写入文件，未提交）
+# 工作站: 未跑 git add / git commit；测试留在工作区（有意红窗，preflight 会红到 01.1/02.3 转绿）
+#
+# 结论: 三条父测试各连跑 2 次，6/6 exit=1，失败断言行逐字一致（确定性红）。
+#       每条红证都落在约定的判别断言上，无编译错误、无台架错误、无超时。
+
+## 0. 复跑命令（逐条精确选中；$? 即测试退出码）
+
+go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptomAcceptedSilent$' -count=1 -tags smoke -timeout 300s
+go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptomSettledOnce$'     -count=1 -tags smoke -timeout 300s
+go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptomFailureNotice$'   -count=1 -tags smoke -timeout 300s
+# 合并（三父测试一次跑）
+go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptom' -count=1 -tags smoke -timeout 300s
+# 合并 + race（无 DATA RACE）
+go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptom' -count=1 -tags smoke -timeout 300s -race
+
+## 1. G1 受理静默 — TestLocalSmokeSymptomAcceptedSilent
+
+exit=1（run-1 / run-2 一致）
+
+  smoke_test.go:3268: 受理回执不是最小 ok：模型真实收到的 tool result = "accepted task-1 (running): the call runs as a background task and its result will arrive as a notification when it settles"（命中 "accepted task-"），修复后应为 "ok"
+  smoke_test.go:3278: [symptom-g1] 用户世界 outbound=0（脚本模型安静，修复前即为绿，红证由模型世界承担）
+  smoke_test.go:3291: [symptom-g1] 负锚：正常提问的回答仍投递 "answer SMOKE-R9602"
+--- FAIL: TestLocalSmokeSymptomAcceptedSilent (2.27s)
+    --- FAIL: TestLocalSmokeSymptomAcceptedSilent/silent_until_settled (2.16s)
+    --- PASS: TestLocalSmokeSymptomAcceptedSilent/legitimate_answer_still_delivered (0.11s)
+
+判别锚（模型世界，红）：模型后续请求里真实收到的 tool result 仍是内部受理回执，
+不是最小 "ok"；命中判据 "accepted task-"。
+叠加锚（用户世界，今天绿）：/task 注入面之外的 rig.drive 路径下，脚本模型安静，
+受理后、结算前 outbound=0。该条如实登记为"修复前即绿"，不替代上面红证。
+负锚（今天绿）：普通提问的回答仍投递，防"静默吞正常输出"。
+
+## 2. G2 完成恰一条 — TestLocalSmokeSymptomSettledOnce
+
+exit=1（run-1 / run-2 一致）
+
+  smoke_test.go:3336: 结算前的模型请求仍含内部受理材料 "accepted task-"（tool）："accepted task-1 (running): the call runs as a background task and its result will arrive as a notification when it settles" —— 多余确认正由它诱导
+  smoke_test.go:3349: 本轮 outbound 文本应为 1 条，实际 2 条："delegate ack SMOKE-R9611 | settle-ack SMOKE-R9611"
+  smoke_test.go:3380: [symptom-g2] 负锚：本轮 2 条文本，无重复正文（结算正文投递 0 次）
+--- FAIL: TestLocalSmokeSymptomSettledOnce (0.27s)
+    --- FAIL: TestLocalSmokeSymptomSettledOnce/settled_exactly_once (0.17s)
+    --- PASS: TestLocalSmokeSymptomSettledOnce/no_duplicate_settle_text (0.10s)
+
+判别锚（模型世界，红）：结算之前的那次入口请求仍把受理回执当输入材料，
+"多余确认"正由它诱导。
+叠加锚（用户世界，红）：本轮 outbound 文本 2 条（受理确认 + 结算结果），应为 1 条。
+负锚（今天绿）：结算正文未被第二条重复投递（结算正文投递 0 次）。
+
+诚实边界（grill 子断言的实测修正，必须登记）：第三轮 grill 原文要求"结算通知
+回合的模型请求含 progress/受理类材料"即红。实测该断言在旧代码上不成立——结算
+回合只读到两帧（原始用户输入 + "tagent: task … settled\nresult:\nworker result …"），
+不含受理材料。故它今天为绿，保留为可执行断言（smoke_test.go:3340-3342），
+不得以它代替红证；红证由"结算前的请求含受理材料"承担。
+脚本"见状态素材就应答"（读到受理回执回 "delegate ack"、读到结算通知回
+"settle-ack"）是行为仿真，不是产品缺陷本身；若评审否决该仿真，诚实结论是
+"fake 模型下用户世界不红"，红证退回 G1 的模型世界断言。该出口写在测试注释里。
+
+## 3. G3 失败必告知 — TestLocalSmokeSymptomFailureNotice
+
+exit=1（run-1 / run-2 一致）
+
+  smoke_test.go:3419: 失败告知不含原始错误标识 500，只有柔化话术（非原始错误）："执行出错：本轮模型回合失败，未产出交付内容。"
+  smoke_test.go:3438: [symptom-g3] 负锚：成功回合零失败话术（1 条文本）
+--- FAIL: TestLocalSmokeSymptomFailureNotice (1.94s)
+    --- FAIL: TestLocalSmokeSymptomFailureNotice/raw_error_reaches_the_user (1.87s)
+    --- PASS: TestLocalSmokeSymptomFailureNotice/success_turn_no_failure_text (0.06s)
+
+判别锚（用户世界，红）：provider 返回 500 后用户只收到示例宿主 hostRuntime.Drive
+的固定降级文案 "执行出错：本轮模型回合失败，未产出交付内容。"——不含任何原始
+错误标识（"500"），如实登记为"非原始错误"。"恰好一条"当前为绿（就这 1 条罐头）；
+02.1 落地框架直投后会变 2 条（框架原文 + 示例罐头），收敛示例层文案属 02 域
+（上报项 P-02），本测试不因此放宽"恰一条"。
+负锚（今天绿）：成功回合零失败话术。
+
+## 4. 合并与 race
+
+  combined.log      exit=1：三父测试各 FAIL，失败子测试同上（silent_until_settled /
+                    settled_exactly_once / raw_error_reaches_the_user）
+  combined-race.log exit=1：同上；DATA RACE 计数 = 0
+
+## 5. 原始日志（仓库外，不随单提交）
+
+  /tmp/event-semantics-boundary/D1/final2/AcceptedSilent-run-{1,2}.log
+  /tmp/event-semantics-boundary/D1/final2/SettledOnce-run-{1,2}.log
+  /tmp/event-semantics-boundary/D1/final2/FailureNotice-run-{1,2}.log
+  /tmp/event-semantics-boundary/D1/final2/combined.log
+  /tmp/event-semantics-boundary/D1/final2/combined-race.log
+  （更早一轮同样结论的日志在 /tmp/event-semantics-boundary/D1/*.log）
+
+抽取失败行的命令（任取一份日志可复跑）：
+  grep -E "^(---|    ---) (FAIL|PASS)|smoke_test.go:[0-9]+:" <log>
+
+## 6. 与 tasks.md 旧口径的偏离（已在上报中申报）
+
+- tasks.md 00.1/00.2 写"独立注入会话 symptom.g1/one"，D1 派发按第三轮 grill 改为
+  一律 rig.drive（生产入站、绑定 fakeChannel）。injected 会话无送达绑定，G2/G3
+  的 outbound 断言在其上永远不成立，故不采用 postTaskSession。
+- tasks.md「证据口径」写"仓内不新增证据文件"，D1 派发要求写本文件，以派发为准；
+  原始日志仍留在仓库外。
+- tasks.md 给出的验证命令带 -race -json -timeout 30m 并写 /tmp/.../00.x；本单按派发
+  的跑法（-tags smoke -timeout 300s，逐条精确 -run 各 2 次 + 合并 + 合并 race），
+  覆盖同等或更强。

@@ -1,0 +1,70 @@
+F1 契约零改动断言（收尾 F1）
+基线：8d34616^（本变更首个提交 8d34616 的父提交）
+范围：8d34616^..HEAD（HEAD=fd550d8）
+采集：2026-10-25，工作树 /Users/pengweiye/Documents/codes/tagent
+
+--------------------------------------------------------------------------------
+[F1-a] v2 合同 golden/runtime/event_integrity_scenarios.json —— 期望 diff 为空
+$ git diff 8d34616^..HEAD -- golden/runtime/event_integrity_scenarios.json
+（无输出）
+$ git diff 8d34616^..HEAD -- golden/runtime/event_integrity_scenarios.json | wc -c
+0
+结论：PASS（0 字节；v2 合同自 8d34616 之后零改，A1 保留）
+
+--------------------------------------------------------------------------------
+[F1-b] v1 金样 golden/runtime/scenarios.json —— 期望恰 3 行改动且仅 S15
+$ git diff --numstat 8d34616^..HEAD -- golden/runtime/scenarios.json
+3	3	golden/runtime/scenarios.json
+（即 +3/-3，净 0 行；diff 文本 31 行，改动内容行 3 对）
+
+$ git diff 8d34616^..HEAD -- golden/runtime/scenarios.json
+diff --git a/golden/runtime/scenarios.json b/golden/runtime/scenarios.json
+index c296e78..a9ea8a4 100644
+--- a/golden/runtime/scenarios.json
++++ b/golden/runtime/scenarios.json
+@@ -472,7 +472,7 @@
+     },
+     {
+       "id": "S15",
+-      "title": "task 逻辑状态：静默逐级识别 watch→stable→suspect（每级报一次）＋progress 回调抵达下一次决策且不答调用",
++      "title": "task 逻辑状态：静默逐级识别 watch→stable→suspect（每级报一次）＋progress 只落 fact、不进下一次决策且不答调用",
+       "task_ids": [
+         "02.2",
+         "02.5"
+@@ -484,7 +484,7 @@
+       "anchor_tests": [
+         "runtime/task:TestLogicalStatusRecognition",
+         "runtime/agent:TestBackflowNotificationLanes",
+-        "tests/integration/execution:TestProgressNotificationReachesTheAgent"
++        "tests/integration/execution:TestProgressNotificationStaysOutOfTheDecision"
+       ],
+       "observations": {
+         "logical_status_ladder": [
+@@ -492,7 +492,7 @@
+           "stable",
+           "suspect"
+         ],
+-        "progress_reaches_decision": true
++        "progress_reaches_decision": false
+       }
+     }
+   ]
+
+逐行核对：三处改动全部落在 "id": "S15" 场景块内（title / anchor_tests / observations），
+未触及 S01–S14、未新增/删除场景、未改其他字段。
+结论：PASS（恰 3 行、仅 S15；与 tasks.md P-04「v1 S15 过期文案同批改写」声明一致）
+
+--------------------------------------------------------------------------------
+[F1-c] 主规格变更仅限本变更声明的 delta
+$ git diff --stat 8d34616^..HEAD -- openspec/specs/persistent-event-loop/spec.md
+ openspec/specs/persistent-event-loop/spec.md | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+$ git diff --numstat 8d34616^..HEAD -- openspec/specs/
+28	0	openspec/specs/persistent-event-loop/spec.md
+（openspec/specs 面只有这一个文件被改：+28/-0）
+
+结论：PASS（persistent-event-loop +28，与 3.1 记账「主规格新增『循环面的模型感知边界』1 处 + 三场景 3 处」一致；无其他主规格文件进入 diff）
+
+--------------------------------------------------------------------------------
+F1 总判：PASS（a/b/c 三项全部符合声明）

@@ -1,0 +1,54 @@
+# Tasks — 01-silent-receipts（系统内部确认的静默语义）
+
+> **状态：恰 3 个叶 checkbox（1.1—1.3）；三叶均已勾选并各附转绿凭据（1.1=`1332064`，1.2=`49fd79f`，1.3=`84d6625`）。**
+>
+> **串行约束（硬）**：1.1 → 1.2 → 1.3 **必须串行**，禁止并发。1.1 与 1.3 同写 `runtime/agent/loop.go`（1.3 依赖 1.1 后 `dispatch` 分支的稳定形态）；1.1 与 1.2 的真实交集是 `examples/wechat-bot/smoke_harness_test.go`（两叶各改脚本模型的一类分支键）。
+>
+> **跨域串行（硬）**：本域 `host.go`（1.2）与 `runtime/agent/loop.go`（1.1/1.3）同 02 域 2.1 的写集相交 → **02 域 2.1 MUST 在本域 1.1 与 1.2 之后启动**，二者不得并行落在同一工作树。
+>
+> **前置**：00 域已落（`examples/wechat-bot/smoke_test.go` 与台架辅助归 00；本域只改 `smoke_harness_test.go` 与 `smoke_data_test.go` 的分支键/断言）。无 00 域则先停，不得预改脚本。
+>
+> **红证口径**：1.1、1.2、1.3 各自先在**修复前**跑一次点名命令记红（失败断言必须落在"回执正文不是 `ok`"/"progress 事实上模型"这类语义断言上，编译错误不算红），改后同命令必须 exit=0。红/绿两份 `-json` 日志都落仓库外 `/tmp/event-semantics-boundary/<叶>/`，仓内不新增证据文件。
+>
+> **上报项 P-01（已写入 proposal/design，勾选前须编排者确认）**：1.3 的写集包含 `Loop.progressNotes` 的**读路径**（`Drive` 每轮 `transcript = append(transcript, l.progressNotes(inv)...)`）。若只按派发单去掉 `in.notify`，"progress 不进模型"不成立，1.3 MUST NOT 勾选。
+>
+> **禁止**：不改 `[send_denied]`、`HoldReceipt` 文案、终态通知路径；不删 progress 事实；不改 golden/主规格/CI；不改 `examples/wechat-bot/wechat.go`（归 02）；不以测试内手工接线替代真实 `Drive` 请求装配。
+
+## 三叶账目
+
+- [x] 1.1 把受理回执收敛为最小 `ok`（`runtime/agent/loop.go` 的 `admissionText` 返回常量 `ok`；`dispatch` 的 `paired(call.ID, name, …)` tool 角色配对与 `task.AdmissionFresh`/`HoldReceipt`/default 三分支不变）+ 新增 `TestQuietReceipts` 并同轮把 **8 文件 11 处**既有受理断言（`receipt_background_separation_test.go:122,194`、`native_conversation_roundtrip_test.go:122,127,330`、`plugin_phase_ordering_test.go:109`、`subagent_call_test.go:124`、`native_tools_test.go:414`、`agent_reference_test.go:101`、`request_boundary_test.go:305`、`smoke_data_test.go:175`，逐处映射见 design D6）由按正文取键改为按结构/`ok` 取键 —— 验证：`E=/tmp/event-semantics-boundary/01.1; mkdir -p "$E"; go test ./tests/integration/execution/ -run '^TestQuietReceipts$' -count=1 -race -json -timeout 20m > "$E/run-1.json" 2>&1; echo "exit=$?"; grep -c '"Action":"fail"' "$E/run-1.json"`（修复前预期 exit≠0 且失败行为 `admission_receipt_is_minimal_ok`；修复后必须 exit=0）；正锚 `TestQuietReceipts/admission_receipt_is_minimal_ok`（正文恰为 `ok`、角色为 `tool`、`ToolID` 等于本调用 id）；负锚 `TestQuietReceipts/hold_receipt_keeps_business_wording`（`HoldReceipt` 的 `parked awaiting approval` 一字不改，防静默波及业务需注意）；消费者锚 `Loop.Drive → dispatch → task.Admit → paired` 正式派发路径下 fake provider 记录的下一轮请求中该 `tool_call_id` 的消息正文；前置 00 域已落（同 `smoke_harness_test.go` 文件族）
+  - 转绿凭据（提交 `1332064`）：点名命令 `go test ./tests/integration/execution/ -run '^TestQuietReceipts$' -count=1 -race` → exit=0（`admission_receipt_is_minimal_ok` 与 `hold_receipt_keeps_business_wording` 双绿）；判别力：把 `admissionText` 还原为旧文案后同命令 exit=1，失败行落在 `admission_receipt_is_minimal_ok`（`accepted task-1 (running): …`）；消费者锚 = `Loop.Drive → dispatch → task.Admit → paired`，fake provider 记录的下一轮请求中 `tool_call_id=call-quiet-1` 的消息正文恰为 `ok`；G1 `TestLocalSmokeSymptomAcceptedSilent` 同轮 exit=0（`go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptomAcceptedSilent$' -count=1 -tags smoke`）。
+
+- [x] 1.2 把投递成功回执收敛为 `ok`（`host.go` 的 `hostSendTool.Call` 成功路径 `return "ok", nil`；`denied(...)` 的 `[send_denied] <reason>` 与 `Declaration` 说明文字一字不改）+ 新增 `TestQuietSendReceipt` 并同轮修订 `tests/integration/host/event_integrity_test.go` 三处 `[send_ok]` 断言与 `smoke_harness_test.go` 的 `[send_` 帧判断 —— 验证：`E=/tmp/event-semantics-boundary/01.2; mkdir -p "$E"; go test ./tests/integration/host/ -run '^TestQuietSendReceipt$' -count=1 -race -json -timeout 20m > "$E/run-1.json" 2>&1; echo "exit=$?"; grep -o 'delivered to [^"]*' "$E/run-1.json" | head -2`（修复前预期 exit≠0 且失败行为 `success_receipt_is_minimal_ok`；修复后必须 exit=0）；正锚 `TestQuietSendReceipt/success_receipt_is_minimal_ok`（正式 `Host.Invoke` 下 send 工具成功回执恰为 `ok`，MUST NOT 含目标会话 id）；负锚 `TestQuietSendReceipt/denied_receipt_keeps_named_reason`（拒绝仍为 `[send_denied] <reason>`，不可降为 `ok`）；消费者锚 `Host.Invoke → hostSendTool.Call` 的正式宿主工具装配（非测试直调）→ tool 结果回灌模型的 provider 请求；前置 1.1（串行；同 `smoke_harness_test.go`）
+  - 转绿凭据（提交 `49fd79f`）：点名命令 `go test ./tests/integration/host/ -run '^TestQuietSendReceipt$' -count=1 -race` → exit=0（`success_receipt_is_minimal_ok` 与 `denied_receipt_keeps_named_reason` 双绿）；判别力：把成功回执还原为 `[send_ok] delivered to …` 后同命令 exit=1，失败行落在 `success_receipt_is_minimal_ok`（负锚仍绿）；消费者锚 = `Host.Invoke → hostSendTool.Call` 的正式宿主工具装配 → 下一轮 provider 请求里该 `tool_call_id` 的正文恰为 `ok`；追平：`event_integrity_test.go` 三处断言（`:2066`/`:2162`/`:2337`，两条负向均补正向 `ok` 判据）与 `smoke_harness_test.go` 的 `smokeCredentialFrame`（按“正文恰为凭据”取键，不再按 `[send_` 前缀）；提交树 `git worktree` 于 `49fd79f`：`go build ./...`、`go vet`、host 点名与 `TestEventIntegrity`、`-tags smoke` vet 全 exit=0。**`grep` 残留 1 处已登记**：`grep -rn "send_ok" --include="*.go"` 唯一命中 `examples/wechat-bot/smoke_test.go:3073`，属 00 域症状锚的**负向确认词表** `symptomConfirmationWords`（旧话术作回滚哨兵保留，不是断言期望）；正向 `ok` 断言已落在 `TestQuietSendReceipt/success_receipt_is_minimal_ok` 与 `event_integrity_test.go:2162` 的 `== "ok"`，G3 区域按边界不碰。
+
+- [x] 1.3 让 progress 只落事实（`runtime/agent/loop.go`：`admitNotice` 去掉 `in.notify`、`Drive` 摘除 `progressNotes` 的读调用点；`commitNotice` 的事实/Seq/幂等不动）+ 新增 `TestQuietProgressNotice` 并把 `TestBackflowNotificationLanes` 两个 progress 子测试**反向改写**（子测试名改为下划线形态以便 `-run` 精确选中：`progress_commits_fact_without_model_material`、`unaddressed_progress_commits_nothing`）—— 验证：`E=/tmp/event-semantics-boundary/01.3; mkdir -p "$E"; go test ./runtime/agent/ ./tests/integration/execution/ -run '^(TestQuietProgressNotice|TestBackflowNotificationLanes|TestQuietReceipts)$' -count=1 -race -json -timeout 20m > "$E/run-1.json" 2>&1; echo "exit=$?"; grep -o 'progress[^"]\{0,40\}' "$E/run-1.json" | head -3`（修复前预期 exit≠0 且失败行为 `progress_absent_from_next_request`；修复后必须 exit=0）；正锚 `TestQuietProgressNotice/progress_fact_committed`（`NoticeFactKey` 事实仍在、`Kind=progress`、Seq 单调、重复运输不生成第二份事实）；负锚 `TestQuietProgressNotice/progress_absent_from_next_request`（下一请求 transcript 不含 progress 文本、`intake` 无缓存待取）；消费者锚 `Loop.Drive` 每轮真实请求装配（读 provider 记录）——并**如实声明 progress 当前无生产发出者**，本域消费者锚只证"读路径已断"不证"生产链路"；前置 1.1（同文件串行）
+  - 转绿凭据（提交 `84d6625`）：点名命令 `go test ./runtime/agent/ ./tests/integration/execution/ -run '^(TestQuietProgressNotice|TestBackflowNotificationLanes|TestQuietReceipts)$' -count=1 -race -json` → exit=0、0 个 fail 事件（`run-after.json` 12 个 pass 事件：3 个父测试 + 9 个子测试）；判别力：关闭 `pipelineProgress` 的跳过（`if false &&`）后同命令 exit=1、5 个失败测试名 / 6 个 fail 事件（`progress_absent_from_next_request`、`progress_commits_fact_without_model_material`、`terminal_notification_reaches_the_next_request` 等），恢复后 exit=0。正锚 `progress_fact_committed`（`NoticeFactKey` 事实仍在、kind/task meta、重复运输一份）；负锚 `progress_absent_from_next_request`（下一请求不含 progress 文本、intake 无缓存待取）；消费者锚 `Loop.Drive → terminalNotes` 的正式请求装配（fake provider 记录）。
+  - **NoticesFrom 消费者核对（ORCHESTRATION D3 核对项）**：生产消费者唯一 = `Loop.terminalNotes`（原 `progressNotes`，仅被 `Drive` 调用）；核出**终态通知与执行资源状态观察共用该读面**——`Host.fireNoticeTurn` 把两者都提交为 `NoticeFactKey` 前缀的 feedback 事实，`Host.observeExecState` 且复用 `NoticeProgress` 分类（只为不触发 settle driver）。整面摘除会把 `TestEventIntegrityExecStateEvents` 打红（实测 exit=1，`Held:false` 与脚本步骤不可达）；最终只摘“流水线进度报告”：`pipelineProgress` 以“分类=progress 且事实携带执行轮次（Round>0）”为判据，无人值守素材（Round=0）与终态照读；该测试单独跑 exit=0。
+  - G2 转绿（随本提交）：`go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptomSettledOnce$' -count=1 -tags smoke` → exit=0；判别力：把 `admissionText` 的 `ok` 还原为旧受理文案后同命令 exit=1（`本轮 outbound 文本应为 1 条，实际 2 条："delegate ack … | worker result …"`，且结算前请求含 `accepted task-`）；脚本仿真按“只在读到内部状态素材时复述确认”取键，旧回执因此诱发第二条，裸 `ok` 使其沉默。
+  - 验证面（`84d6625`）：全量 `go -C examples/wechat-bot test . -run '^TestLocalSmoke$' -count=1 -tags smoke` → exit=0（70.9s）；`go test ./runtime/agent/`、`./tests/integration/host/`、`./tests/integration/execution/`、`./tests/integration/acceptance/` 全 `-race` exit=0；`go build ./...`/`go vet ./runtime/agent/ ./`/`bash scripts/lint.sh` exit=0；提交树 `go test ./... -short -count=1` exit=0。**如实声明：progress 通知当前无生产发出者**（仅 `Loop.Backflow` 的测试/契约夹具），本叶消费者锚只证“读路径已断”，不证“生产链路”。
+
+## 每叶实施步骤（非 checkbox）
+
+- 先跑**修复前**点名命令留红证（`run-before.json`），再改生产代码，再跑同一命令取绿证（`run-after.json`）；两份都保留 exit 码。
+- 1.1：先改 `admissionText`，再按 design D6 表逐处改 11 处既有断言与 `smoke_data_test.go`/`smoke_harness_test.go` 的取键方式；`smoke_harness_test.go` 的脚本模型分支键改为 `role=="tool" && ToolCallID==<本调用>`，不得退化为“见任何 tool 结果即同一答复”。
+- 1.2：改 `hostSendTool.Call` 成功路径后，先跑 `-run '^TestQuietSendReceipt$'`，再跑 `go test ./tests/integration/host/ -run '^TestEventIntegrity' -count=1` 确认三处 `[send_ok]` 断言已同步（`:2162` 正向断言改 `== "ok"`；`:2066`/`:2337` 两条负向断言 MUST 补正向断言，不得空转变绿）；`smoke_harness_test.go` 的 `[send_` 前缀判断改为“`tool` 角色结果 + 调用 id”。
+- 1.3：改 `admitNotice` 后**必须**再摘 `Drive` 的 `progressNotes` 调用点；`TestBackflowNotificationLanes` 的两个 progress 子测试反向改写为"事实已提交 / intake 为空 / 下一请求不含 progress 文本"，不得删除、不得留空断言；第三个子测试（非 progress 通知不改变 range）保持不动，作为终态硬边界哨兵。
+- 1.3 完成后跑一次 `go test ./runtime/agent/ -count=1` 全包，确认 `NoticeFeed` 未变为死代码告警、既有装配无连锁红。
+- 任一叶转向绿后，把 00 域对应症状测试一起跑（1.1→00.1/00.2；1.2 无直接症状锚），把转绿结果记在叶下说明里。
+
+## 域内自检
+
+- `quiet-receipts` 五条 requirement 在实现与测试中各至少有一条断言对应；没有“只改文案不改读路径”的假绿。
+- D6 表的 **11 处受理断言**逐处落地（8 文件），无遗漏、无“改成注释”式删除；两条 `[send_ok]` 负向断言已补正向判据。
+- 受理回执断言是**结构 + 正文**双断言（`Role`/`ToolID`/`Content=="ok"`），不是只断 `Content`。
+- `[send_denied]`、`HoldReceipt`、`NoticeSettled/Failed/Cancelled` 的文本与路径零改动（`git diff` 逐条核对）。
+- `TestBackflowNotificationLanes` 两个 progress 子测试是被反向改写，不是被删除或 `t.Skip`。
+- 未改 golden、主规格、CI、`examples/wechat-bot/wechat.go`；未提交。
+- **P-01 已上报**：1.3 的读路径扩面若未获批，本域停在 1.2，`quiet-receipts` 的 progress 条款标为未交付。
+
+## 本域交付（非 checkbox，只读核对）
+
+- 已写 `proposal.md` / `design.md` / `tasks.md` / `specs/quiet-receipts/spec.md`。
+- 未改任何产品代码、产品测试、CI、主规格与 golden；未提交。
+- 主代理独立执行 `openspec validate` / `openspec status`（本域不自行宣称 CLI 校验通过）。
