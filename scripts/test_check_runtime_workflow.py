@@ -12,18 +12,22 @@ job.
 
 ci.yml carries the event-integrity producer jobs (short ten independent rounds,
 the six-shard long matrix, the fault mutations), the required summary, the
-race package set and the manual soak command. The same rule applies there: the
-producer jobs must run on every pull request with no skip hatch, the summary
-must download every producer artifact and hand it to the one bundle checker,
-and the preflight script must call the same entry points by default.
+symptom-anchor job, the race package set and the manual soak command. The same
+rule applies there: the producer jobs must run on every pull request with no
+skip hatch, the summary must download every producer artifact and hand it to the
+one bundle checker, the symptom anchors -- which cannot enter the v2 contract
+without breaking its cross-check against the archived task graph -- must run
+under their own unconditional job, and the preflight script must call the same
+entry points by default.
 
 Negative controls mutate a parsed COPY of the workflow, or a textual copy of the
 preflight script (never the files themselves): removing a gate step or an event
 job, adding a path filter, adding continue-on-error, replacing ten independent
 short rounds with one count-amplified run, making the long shards an opt-in
 preflight flag, shrinking the race set to host/history, dropping a need,
-removing always(), and losing a producer artifact, a matrix combination or a
-short round must each turn the check red. The cancelled/skipped/empty upstream
+removing always(), losing a producer artifact, a matrix combination or a short
+round, deleting the symptom job, narrowing its selector, or giving it a skip
+hatch must each turn the check red. The cancelled/skipped/empty upstream
 results and the mixed-baseline bundle are executed for real, not asserted as
 text: the results step runs under bash with each upstream value, and the
 checker itself runs over a bundle whose evidence files disagree on the baseline.
@@ -248,6 +252,23 @@ EVENT_PRODUCER_JOBS = ("event-integrity-short",
                        "event-integrity-mutations")
 EVENT_JOBS = EVENT_PRODUCER_JOBS + ("event-integrity-required",)
 LEGACY_JOBS = ("test", "race", "validators", "openspec", "soak")
+
+# The symptom anchors (event-semantics-boundary 04.3) sit in the wechat-bot
+# module behind the smoke build tag and stay outside the v2 event contract: they
+# are absent from the archived task graph's test registry, which the contract
+# cross-checks bidirectionally, so registering them would fail the contract
+# itself. Their gate is this dedicated job instead.
+SYMPTOM_JOB = "event-semantics-symptoms"
+SYMPTOM_ARTIFACT = "event-semantics-symptoms"
+SYMPTOM_EVIDENCE_DIR = "${{ runner.temp }}/symptom"
+SYMPTOM_PREFIX = "TestLocalSmokeSymptom"
+SYMPTOM_MODULE = "go -C examples/wechat-bot test"
+SMOKE_TEST_DIR = REPO / "examples" / "wechat-bot"
+# Pinned by name: a rename that drops one of these would leave the job green
+# while a user-voice promise lost its witness.
+SYMPTOM_PARENTS = ("TestLocalSmokeSymptomAcceptedSilent",
+                   "TestLocalSmokeSymptomSettledOnce",
+                   "TestLocalSmokeSymptomFailureNotice")
 
 # The race set is mapped from every modified product package and every formal
 # integration suite. host/history alone is the shrunken set the negative control
@@ -632,6 +653,142 @@ def assert_soak_command(workflow):
             "soak selector {!r} matches no test in tests/integration/host".format(match.group(1)))
 
 
+def go_version(job, job_name):
+    setups = [step for step in job_steps(job)
+              if str(step.get("uses", "")).startswith("actions/setup-go")]
+    if len(setups) != 1:
+        raise AssertionError(
+            "{} must set up Go exactly once, found {}".format(job_name, len(setups)))
+    version = (setups[0].get("with") or {}).get("go-version")
+    if not version:
+        raise AssertionError("{} pins no Go version".format(job_name))
+    return version
+
+
+def smoke_test_names():
+    names = set()
+    for path in sorted(SMOKE_TEST_DIR.glob("*_test.go")):
+        names.update(re.findall(r"^func (Test\w+)\(",
+                                path.read_text(encoding="utf-8"), re.MULTILINE))
+    return names
+
+
+def symptom_selector(run):
+    match = re.search(r"-run '(\^[^']*)'", run)
+    if not match:
+        raise AssertionError(
+            "the symptom command carries no anchored prefix selector: {!r}".format(run))
+    return match.group(1)
+
+
+def assert_symptom_job(workflow):
+    """The symptom gate: unconditional, prefix-selected, evidence on failure.
+
+    The three anchors cannot join the v2 contract (their absence from the
+    archived task graph's registry is exactly what the contract cross-checks),
+    so this job is their only automatic witness. Deleting it, narrowing the
+    selector so one anchor silently drops out, or giving it any skip hatch must
+    all fail here.
+    """
+    jobs = ci_jobs(workflow)
+    job = jobs.get(SYMPTOM_JOB)
+    if job is None:
+        raise AssertionError(
+            "ci.yml is missing the {} job: the three symptom anchors would then "
+            "have no unconditional gate".format(SYMPTOM_JOB))
+    if job.get("runs-on") != "ubuntu-latest":
+        raise AssertionError("{} must run on ubuntu-latest".format(SYMPTOM_JOB))
+    if job.get("if"):
+        raise AssertionError(
+            "{} must not carry a job-level if: {!r}: a skipped symptom job is a "
+            "silent hole in the user-voice proof".format(SYMPTOM_JOB, job.get("if")))
+    if job.get("continue-on-error") not in (None, False):
+        raise AssertionError("{} must not set continue-on-error".format(SYMPTOM_JOB))
+    budget = job.get("timeout-minutes")
+    if not isinstance(budget, int) or isinstance(budget, bool) or not 1 <= budget <= 30:
+        raise AssertionError(
+            "{} timeout-minutes must be a measured budget between 1 and 30, "
+            "found {!r}".format(SYMPTOM_JOB, budget))
+    if go_version(job, SYMPTOM_JOB) != go_version(jobs["test"], "test"):
+        raise AssertionError(
+            "{} must pin the same Go version as the pre-existing jobs: a smoke "
+            "anchor proven on one toolchain is not proven on another".format(SYMPTOM_JOB))
+    if "secrets." in json.dumps(job, ensure_ascii=False):
+        raise AssertionError(
+            "{} must not gate on credentials: the smoke suite is mocked".format(SYMPTOM_JOB))
+    for step in job_steps(job):
+        if step.get("continue-on-error") not in (None, False):
+            raise AssertionError("{} step {!r} must not set continue-on-error".format(
+                SYMPTOM_JOB, step.get("name")))
+    # exec/async cases skip without tmux; the job would then be green while the
+    # anchors never ran.
+    if not any("install -y tmux" in (step.get("run") or "")
+               for step in job_steps(job)):
+        raise AssertionError(
+            "{} must install tmux: without it the exec/async cases skip and the "
+            "symptom anchors prove nothing".format(SYMPTOM_JOB))
+    required = jobs.get("event-integrity-required") or {}
+    needs = required.get("needs") or []
+    if isinstance(needs, str):
+        needs = [needs]
+    if SYMPTOM_JOB in needs:
+        raise AssertionError(
+            "{} must stay a gate of its own: the event summary consumes the three "
+            "producers' evidence through the bundle checker, and a smoke job's "
+            "log is not part of that evidence schema".format(SYMPTOM_JOB))
+
+    run = run_with(job, SYMPTOM_MODULE)
+    for needle in ("-tags smoke", "-count=1", "-timeout 600s",
+                   "-run '^" + SYMPTOM_PREFIX + "'"):
+        if needle not in run:
+            raise AssertionError(
+                "{} command is missing {!r}: {!r}".format(SYMPTOM_JOB, needle, run))
+    seconds = int(re.search(r"-timeout (\d+)s", run).group(1))
+    if seconds <= 0 or seconds >= budget * 60:
+        raise AssertionError(
+            "{} must bound the go test process inside the job's timeout-minutes "
+            "({}s vs {}m)".format(SYMPTOM_JOB, seconds, budget))
+    if 'E="$RUNNER_TEMP/symptom"' not in run:
+        raise AssertionError(
+            "{} must write its evidence outside the repository, under "
+            "$RUNNER_TEMP/symptom: {!r}".format(SYMPTOM_JOB, run))
+
+    # The selector is a prefix, not an enumeration: prove it hits all three
+    # pinned anchors and nothing else, so neither a shrunken -run nor a widened
+    # one can drift the job's meaning.
+    selector = symptom_selector(run)
+    pattern = re.compile(selector)
+    names = smoke_test_names()
+    parents = sorted(name for name in names if name.startswith(SYMPTOM_PREFIX))
+    if parents != sorted(SYMPTOM_PARENTS):
+        raise AssertionError(
+            "the wechat-bot module must hold exactly the three symptom anchors, "
+            "found {}".format(parents))
+    missed = [name for name in parents if not pattern.search(name)]
+    if missed:
+        raise AssertionError(
+            "the symptom selector {!r} misses {}".format(selector, missed))
+    overtaken = sorted(name for name in names
+                       if name not in parents and pattern.search(name))
+    if overtaken:
+        raise AssertionError(
+            "the symptom selector {!r} also selects non-symptom tests {}: the job "
+            "would run unrelated smoke work under a symptom name".format(
+                selector, overtaken))
+
+    assert_single_artifact_upload(SYMPTOM_JOB, job, SYMPTOM_ARTIFACT, SYMPTOM_EVIDENCE_DIR)
+    upload = [step for step in job_steps(job)
+              if str(step.get("uses", "")).startswith("actions/upload-artifact")][0]
+    if (upload.get("with") or {}).get("if-no-files-found") != "error":
+        raise AssertionError(
+            "{} must fail when it produced no evidence, not pass quietly".format(
+                SYMPTOM_JOB))
+    if fnmatch.fnmatchcase(SYMPTOM_ARTIFACT, "event-integrity-*"):
+        raise AssertionError(
+            "the symptom artifact must stay outside the event-integrity-* download "
+            "glob: the summary has no schema for it and would mix bundles")
+
+
 def preflight_step_sections(text):
     parts = re.split(r'^step "([^"]+)"$', text, flags=re.MULTILINE)
     if len(parts) < 3:
@@ -791,6 +948,71 @@ class CiWorkflowTest(unittest.TestCase):
 
     def test_soak_command_matches_real_test(self):
         assert_soak_command(self.workflow)
+
+    def test_symptom_job_runs_the_three_anchors_unconditionally(self):
+        assert_symptom_job(self.workflow)
+        jobs = ci_jobs(self.workflow)
+        self.assertNotIn(SYMPTOM_JOB, jobs["event-integrity-required"].get("needs") or [],
+                         "the symptom job stays a separate gate")
+
+    def test_negative_control_removing_symptom_job_turns_check_red(self):
+        mutated = copy.deepcopy(self.workflow)
+        del mutated["jobs"][SYMPTOM_JOB]
+        with self.assertRaises(AssertionError):
+            assert_symptom_job(mutated)
+
+    def test_negative_control_symptom_skip_hatches_turn_check_red(self):
+        job_if = copy.deepcopy(self.workflow)
+        job_if["jobs"][SYMPTOM_JOB]["if"] = "success()"
+        step_hatch = copy.deepcopy(self.workflow)
+        step_with(step_hatch["jobs"][SYMPTOM_JOB], SYMPTOM_MODULE)["continue-on-error"] = True
+        job_hatch = copy.deepcopy(self.workflow)
+        job_hatch["jobs"][SYMPTOM_JOB]["continue-on-error"] = True
+        for label, mutated in (("job-level if", job_if),
+                               ("step continue-on-error", step_hatch),
+                               ("job continue-on-error", job_hatch)):
+            with self.subTest(mutation=label):
+                with self.assertRaises(AssertionError):
+                    assert_symptom_job(mutated)
+
+    def test_negative_control_narrowing_symptom_selector_turns_check_red(self):
+        for replacement in ("-run '^TestLocalSmokeSymptomAcceptedSilent$'",
+                            "-run '^TestLocalSmoke'"):
+            mutated = copy.deepcopy(self.workflow)
+            step = step_with(mutated["jobs"][SYMPTOM_JOB], SYMPTOM_MODULE)
+            step["run"] = re.sub(r"-run '\^[^']*'", replacement, step["run"])
+            with self.subTest(replacement=replacement):
+                with self.assertRaises(AssertionError):
+                    assert_symptom_job(mutated)
+
+    def test_negative_control_symptom_budget_toolchain_and_evidence_drift_turns_check_red(self):
+        dropped = copy.deepcopy(self.workflow)
+        step = step_with(dropped["jobs"][SYMPTOM_JOB], SYMPTOM_MODULE)
+        step["run"] = step["run"].replace(" -timeout 600s", "")
+        with self.assertRaises(AssertionError):
+            assert_symptom_job(dropped)
+        bloated = copy.deepcopy(self.workflow)
+        bloated["jobs"][SYMPTOM_JOB]["timeout-minutes"] = 45
+        with self.assertRaises(AssertionError):
+            assert_symptom_job(bloated)
+        drifted = copy.deepcopy(self.workflow)
+        setup = [step for step in job_steps(drifted["jobs"][SYMPTOM_JOB])
+                 if str(step.get("uses", "")).startswith("actions/setup-go")][0]
+        setup["with"]["go-version"] = "1.25"
+        with self.assertRaises(AssertionError):
+            assert_symptom_job(drifted)
+        skipped = copy.deepcopy(self.workflow)
+        skipped["jobs"][SYMPTOM_JOB]["steps"] = [
+            step for step in job_steps(skipped["jobs"][SYMPTOM_JOB])
+            if "tmux" not in (step.get("run") or "")]
+        with self.assertRaises(AssertionError):
+            assert_symptom_job(skipped)
+        lost = copy.deepcopy(self.workflow)
+        for step in job_steps(lost["jobs"][SYMPTOM_JOB]):
+            if str(step.get("uses", "")).startswith("actions/upload-artifact"):
+                step["if"] = "success()"
+        with self.assertRaises(AssertionError):
+            assert_symptom_job(lost)
 
     def test_preflight_runs_event_short_long_mutations_by_default(self):
         assert_preflight_default_event_entry(self.preflight)
