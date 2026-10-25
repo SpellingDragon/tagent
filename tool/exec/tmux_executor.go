@@ -40,6 +40,10 @@ const (
 	// did not name the resource, so a live session is never killed on one
 	// transient read.
 	tmuxStopRecheckGap = 20 * time.Millisecond
+	// tmuxDrainWindow is how long a command's pane stays open after the command
+	// exits, so the pane's screen records the output of a command that ends at
+	// once even beside concurrent clients.
+	tmuxDrainWindow = 100 * time.Millisecond
 )
 
 var (
@@ -78,7 +82,9 @@ func newTmuxExecutor(probe func() bool) (*TmuxExecutor, error) {
 // after the window is certain to keep its pane, so an exit status stays
 // observable even for a command that ends at once and even beside a busy
 // server. The option is read back before the command starts, so a window that
-// did not take it fails the start instead of losing the ending later. The call
+// did not take it fails the start instead of losing the ending later. The
+// command runs in a subshell whose status is re-raised after a drain window, so
+// a command that ends at once still leaves its output on the pane. The call
 // answers once the new session has produced its first frame, or once the
 // bounded observation window passed without one. A key whose session already
 // runs is refused instead of opened a second time.
@@ -124,7 +130,7 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
 	if decl.Dir != "" {
 		respawn = append(respawn, "-c", decl.Dir)
 	}
-	respawn = append(respawn, commandLine(decl))
+	respawn = append(respawn, commandLineWithDrain(decl))
 	if _, err := e.tmux(ctx, respawn...); err != nil {
 		_, _ = e.tmux(ctx, "kill-session", "-t", name)
 		return ResourceKey{}, err
@@ -364,6 +370,14 @@ func validSessionName(name string) bool {
 		}
 	}
 	return true
+}
+
+// commandLineWithDrain renders the declared command as a subshell whose status
+// is re-raised after the drain window: a command that ends at once still leaves
+// its output on the pane before the pane is reported dead.
+func commandLineWithDrain(decl ExecutionDecl) string {
+	return fmt.Sprintf("( %s ); code=$?; sleep %s; exit $code",
+		commandLine(decl), strconv.FormatFloat(tmuxDrainWindow.Seconds(), 'f', -1, 64))
 }
 
 // commandLine renders one declaration as the shell command line tmux runs: the

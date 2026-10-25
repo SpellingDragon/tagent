@@ -73,7 +73,7 @@ func TestTmuxExecutorRunsCommand(t *testing.T) {
 }
 
 // TestTmuxExecutorKeepsImmediateExitStatus pins the order a start applies its exit-retaining option in.
-// - a command that ends at once still leaves its pane behind, so the session is listed after the exit
+// - a command that ends at once still leaves its pane and its output behind, so the session is listed and the frame carries the marker
 // - stop answers the recorded status instead of reporting an unobserved ending
 func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	if !IsTmuxAvailable() {
@@ -85,7 +85,7 @@ func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	}
 	ctx := context.Background()
 	key := tmuxTestKey()
-	decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "exit 7"}, Resource: key}
+	decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "echo smoke-now-marker; exit 7"}, Resource: key}
 	if _, err := executor.Start(ctx, decl); err != nil {
 		t.Fatalf("start = %v", err)
 	}
@@ -111,6 +111,13 @@ func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	}
 	if !containsName(names, key.Key) {
 		t.Fatalf("the session %s left the list beside its ended pane: the pane was not kept", key.Key)
+	}
+	frame, err := executor.Capture(ctx, key)
+	if err != nil {
+		t.Fatalf("capture the immediate exit = %v", err)
+	}
+	if !strings.Contains(string(frame), "smoke-now-marker") {
+		t.Fatalf("captured frame = %q, want the marker of a command that ended at once", frame)
 	}
 	evidence, err := executor.Stop(ctx, key)
 	if err != nil {
