@@ -3030,6 +3030,39 @@ func TestEventIntegrityLongRun(t *testing.T) {
 	})
 }
 
+// TestLocalSmokeInjectedSession 验证可选 session 字段的注入驱动独立会话。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#module-layout
+func TestLocalSmokeInjectedSession(t *testing.T) {
+	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
+	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	cfg.Endpoint = provider.endpoint()
+	cfg.write(t)
+	rig := bootSmokeRig(t, cfg, provider)
+	defer func() {
+		if err := rig.close(); err != nil {
+			t.Errorf("close the injected-session rig: %v", err)
+		}
+	}()
+
+	if status, _ := rig.postTaskStatus("before any session"); status != http.StatusServiceUnavailable {
+		t.Fatalf("blank injection before any session = %d, want 503", status)
+	}
+	status, body := rig.postTaskSession("SMOKE-G1b inject session", "diag.g1b/one")
+	if status != http.StatusAccepted {
+		t.Fatalf("session-scoped injection status = %d %q, want 202", status, body)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for provider.count() < 1 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if got := provider.count(); got < 1 {
+		t.Fatalf("the injected session drove %d model requests, want >= 1", got)
+	}
+	if status, _ := rig.postTaskStatus("SMOKE-G1b follow-up on the injected session"); status != http.StatusAccepted {
+		t.Fatalf("blank injection after an injected session = %d, want 202 (the injected drive admitted it)", status)
+	}
+}
+
 // symptomChat 是症状锚驱动的会话：每台 rig 只驱动它，outbound 因此可以整表计数。
 const symptomChat = "symptom-anchor-chat"
 

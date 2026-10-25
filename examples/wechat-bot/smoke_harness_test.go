@@ -1263,9 +1263,17 @@ func (r *smokeRig) postTask(text string) {
 // 注入面会拒绝什么，而不是只靠主流程全绿反推。
 func (r *smokeRig) postTaskStatus(text string) (int, string) {
 	r.t.Helper()
-	payload, err := json.Marshal(smokeInjection{
-		Messages:      []smokeInjectionMessage{{Role: string(tagentmodel.RoleUser), Content: text}},
-		TriggerSource: "user",
+	return r.postTaskSession(text, "")
+}
+
+// postTaskSession 发一次可选携带独立会话标签的注入：空标签维持
+// “驱动最近 admit 会话”的旧语义，非空标签驱动 injected 会话。
+func (r *smokeRig) postTaskSession(text, session string) (int, string) {
+	r.t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"messages":       []map[string]string{{"role": "user", "content": text}},
+		"trigger_source": "user",
+		"session":        session,
 	})
 	if err != nil {
 		r.t.Fatalf("encode the injection: %v", err)

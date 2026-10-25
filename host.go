@@ -947,6 +947,31 @@ func (h *Host) userAddress() (event.Address, bool) {
 	return h.lastAddr, h.lastAddr.IsComplete()
 }
 
+// injectAddress spells the address of one inject-only session: the entry
+// agent beside a session identity under the "injected" namespace, kept apart
+// from every chat session a channel spells. The label is reduced to the safe
+// spelling so two labels never collide through escaping.
+func (h *Host) injectAddress(label string) event.Address {
+	var b strings.Builder
+	b.WriteString("injected:")
+	for _, r := range strings.TrimSpace(label) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+		if b.Len() >= 72 {
+			break
+		}
+	}
+	h.mu.Lock()
+	entry := h.entry
+	h.mu.Unlock()
+	return event.Address{AgentID: entry, SessionID: event.SessionID(b.String())}
+}
+
 // addressGate is the one-slot gate that serializes the drives of one session:
 // the token is held by the drive in flight, and a waiter parks on the channel
 // instead of a mutex, so a cancelled follow-up leaves the wait.
@@ -1984,10 +2009,13 @@ const (
 )
 
 // hostInjection is the body an inbound channel posts to the task endpoint: the
-// messages the turn reads and the lineage the channel declares for it.
+// messages the turn reads and the lineage the channel declares for it. A
+// non-empty Session spells an inject-only session of its own instead of
+// reusing the chat session the host admitted last.
 type hostInjection struct {
 	Messages      []hostInjectionMessage `json:"messages"`
 	TriggerSource string                 `json:"trigger_source"`
+	Session       string                 `json:"session"`
 }
 
 // hostInjectionMessage is one message of an injection: the role it speaks for
@@ -2147,10 +2175,16 @@ func (f *hostFace) inject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, ErrHostEmptyTask.Error(), http.StatusBadRequest)
 		return
 	}
-	addr, ok := f.host.userAddress()
-	if !ok {
-		http.Error(w, ErrHostNoActiveSession.Error(), http.StatusServiceUnavailable)
-		return
+	var addr event.Address
+	if label := strings.TrimSpace(injection.Session); label != "" {
+		addr = f.host.injectAddress(label)
+	} else {
+		var ok bool
+		addr, ok = f.host.userAddress()
+		if !ok {
+			http.Error(w, ErrHostNoActiveSession.Error(), http.StatusServiceUnavailable)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusAccepted)
 	go func() {
