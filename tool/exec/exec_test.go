@@ -623,7 +623,8 @@ func testExecutionDecl(key string) ExecutionDecl {
 var _ Executor = (*scriptedExecutor)(nil)
 
 // TestExecRunDeclarationPinsTheResourceShape pins the run declaration's kind and resource to their one legal shape:
-// - kind names the only family this host serves and says an empty kind selects it
+// - kind names the only family this host serves, admits the empty kind that selects it, and says so
+// - every kind enum value is a kind the executor accepts
 // - resource names the session name format with its bound, character set and a legal example
 // - the resource pattern and validSessionName agree on every sample name
 // - no abstract family or key phrase stands where the legal values belong
@@ -655,7 +656,8 @@ func TestExecRunDeclarationPinsTheResourceShape(t *testing.T) {
 }
 
 // TestExecReleaseDeclarationPinsTheResourceShape pins the release declaration to the shape the run declaration carries:
-// - kind names the only family this host serves and says an empty kind selects it
+// - kind names the only family this host serves, admits the empty kind that selects it, and says so
+// - every kind enum value is a kind the executor accepts
 // - resource names the session name format with its bound, character set and a legal example
 // - the resource pattern and validSessionName agree on every sample name
 // - no abstract family or key phrase stands where the legal values belong
@@ -730,8 +732,13 @@ func assertExecResourceShapePinned(t *testing.T, declaration *trpctool.Declarati
 func assertExecKindNamesTheOnlyFamily(t *testing.T, declaration *trpctool.Declaration) {
 	t.Helper()
 	kind, _ := execResourceEntries(t, declaration)
-	if len(kind.Enum) != 1 || kind.Enum[0] != KindTmux {
-		t.Fatalf("%s kind enum = %v, want exactly [%s]", declaration.Name, kind.Enum, KindTmux)
+	if len(kind.Enum) != 2 || kind.Enum[0] != "" || kind.Enum[1] != KindTmux {
+		t.Fatalf("%s kind enum = %v, want the empty kind beside [%s]", declaration.Name, kind.Enum, KindTmux)
+	}
+	for _, value := range kind.Enum {
+		if _, err := sessionNameOf(ResourceKey{Kind: fmt.Sprint(value), Key: sessionNameExample}); err != nil {
+			t.Fatalf("%s kind enum value %v is refused by the executor: %v", declaration.Name, value, err)
+		}
 	}
 	if !strings.Contains(kind.Description, fmt.Sprint(KindTmux)) {
 		t.Fatalf("%s kind description = %q, want it to name %s", declaration.Name, kind.Description, KindTmux)

@@ -120,11 +120,12 @@ const (
 )
 
 // kindSchema returns the declared shape of the kind parameter: the one family
-// the host serves, named by its only legal value.
+// the host serves, named by its only legal value beside the empty kind that
+// selects it.
 func kindSchema() *trpctool.Schema {
 	return &trpctool.Schema{
 		Type:        "string",
-		Enum:        []any{KindTmux},
+		Enum:        []any{"", KindTmux},
 		Description: fmt.Sprintf(`the execution resource family: %q is the only family this tool serves; leave it empty to select %s, and any other family is refused by name`, KindTmux, KindTmux),
 	}
 }
