@@ -1050,6 +1050,11 @@ type Turn struct {
 	// Terminal is the terminal the latest decision reduced to, or KindUnknown
 	// while no decision reached one.
 	Terminal model.Kind
+	// Failure is the raw cause the latest decision's reduction recorded when its
+	// terminal is KindFailed, and it stands empty otherwise. It is the text a
+	// host delivers when a failed turn produced no deliverable body; a reduction
+	// that observed no cause leaves it empty rather than inventing one.
+	Failure string
 	// FinalRound names why the closing round of this drive ran: the round budget
 	// or the time budget was spent, so the latest decision delivers instead of
 	// continuing. It stands empty for a drive that ended on its own terminal.

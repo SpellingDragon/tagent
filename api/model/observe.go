@@ -15,6 +15,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -51,7 +52,10 @@ func (c *callObservation) saw(resp *Response) {
 
 // end renders the one line of one request's terminal. It runs once per
 // request, after the terminal stands, and reads the Outcome as the reduction
-// derived it: the Kind, the accumulated usage and the stream size.
+// derived it: the Kind, the accumulated usage and the stream size. A failed
+// request appends the raw cause to that same line, escaped onto one line; a
+// completed request carries no cause field, and a failure that observed no text
+// renders no empty field.
 func (c *callObservation) end(outcome Outcome) {
 	if c == nil {
 		return
@@ -62,9 +66,18 @@ func (c *callObservation) end(outcome Outcome) {
 		}
 	}()
 	elapsed := time.Since(c.started)
-	quietCallDebug("tagent: model response model=%s terminal=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d responses=%d latency_ms=%d",
-		callModel(c.model), outcome.Kind, outcome.Usage.PromptTokens, outcome.Usage.CompletionTokens,
-		outcome.Usage.TotalTokens, c.responses, elapsed.Milliseconds())
+	format := "tagent: model response model=%s terminal=%s prompt_tokens=%d completion_tokens=%d total_tokens=%d responses=%d latency_ms=%d"
+	args := []any{callModel(c.model), outcome.Kind, outcome.Usage.PromptTokens, outcome.Usage.CompletionTokens,
+		outcome.Usage.TotalTokens, c.responses, elapsed.Milliseconds()}
+	if outcome.Kind == KindFailed {
+		if cause := outcome.Cause(); cause != nil {
+			if text := strings.TrimSpace(cause.Error()); text != "" {
+				format += " error=%q"
+				args = append(args, text)
+			}
+		}
+	}
+	quietCallDebug(format, args...)
 }
 
 // callModel reports the model name one request was served by, or the named

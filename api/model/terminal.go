@@ -195,6 +195,23 @@ type Outcome struct {
 	Late []*Response
 }
 
+// Cause reports the error this outcome's reduction observed: the error the
+// retained body carries, or the first error on the observation trace, or nil
+// when the reduction observed none. It reads the same evidence in the same
+// order the record side reads it, so the raw cause one face reports is the raw
+// cause every face reports.
+func (o Outcome) Cause() error {
+	if o.Body != nil && o.Body.Error != nil {
+		return o.Body.Error
+	}
+	for _, item := range o.Trace {
+		if item.Err != nil {
+			return item.Err
+		}
+	}
+	return nil
+}
+
 // Reducer folds one model request into its single terminal outcome. The channel
 // consumer and the iterator consumer drive the same reducer, so both stream
 // shapes share exactly one terminal judgement. One request is folded by exactly

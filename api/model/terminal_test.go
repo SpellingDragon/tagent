@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -408,6 +409,60 @@ func TestUsageAccumulationInvariants(t *testing.T) {
 		fold.retain(invariantTail(2, 2))
 		if fold.retained() != partial {
 			t.Fatalf("retained body changed by a tail, want the valid content kept")
+		}
+	})
+}
+
+// TestOutcomeCause checks the one read every consumer takes of a reduction's recorded error.
+// - the error the retained body carries wins over anything on the trace
+// - a failed reduction names the error its trace recorded
+// - a completed reduction names no cause
+// - a failed reduction that recorded no text names no cause
+func TestOutcomeCause(t *testing.T) {
+	bodyCause := &ResponseError{Message: "the retained body refused the request"}
+	traceCause := &ResponseError{Message: "the trace refused the request"}
+
+	t.Run("the retained body names the cause first", func(t *testing.T) {
+		outcome := Outcome{
+			Kind:  KindFailed,
+			Body:  &Response{Error: bodyCause},
+			Trace: []Item{{Signal: SignalError, Kind: KindFailed, Err: traceCause}},
+		}
+		if cause := outcome.Cause(); cause != bodyCause {
+			t.Fatalf("cause = %v, want the error the retained body carries", cause)
+		}
+	})
+
+	t.Run("a failed reduction names the cause its trace recorded", func(t *testing.T) {
+		ch := make(chan *Response, 1)
+		ch <- &Response{Error: &ResponseError{Type: ErrorTypeAPIError, Message: "provider answered 500"}}
+		close(ch)
+
+		outcome := ReduceChannel(context.Background(), ch, nil)
+
+		if outcome.Kind != KindFailed {
+			t.Fatalf("terminal = %s, want the failed terminal of the error response", outcome.Kind)
+		}
+		cause := outcome.Cause()
+		if cause == nil || !strings.Contains(cause.Error(), "500") {
+			t.Fatalf("cause = %v, want the raw error the trace recorded", cause)
+		}
+	})
+
+	t.Run("a completed reduction names no cause", func(t *testing.T) {
+		outcome := ReduceChannel(context.Background(), invariantChannel(invariantAnswer("done", 1, 1)), nil)
+		if outcome.Kind != KindCompleted {
+			t.Fatalf("terminal = %s, want the completed terminal of the answer", outcome.Kind)
+		}
+		if cause := outcome.Cause(); cause != nil {
+			t.Fatalf("cause = %v, want none beside a completed terminal", cause)
+		}
+	})
+
+	t.Run("a failed reduction without recorded text names no cause", func(t *testing.T) {
+		outcome := Outcome{Kind: KindFailed, Trace: []Item{{Signal: SignalError, Kind: KindFailed}}}
+		if cause := outcome.Cause(); cause != nil {
+			t.Fatalf("cause = %v, want none when the reduction recorded no error", cause)
 		}
 	})
 }

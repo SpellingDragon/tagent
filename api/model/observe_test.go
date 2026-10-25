@@ -105,8 +105,15 @@ func (l *observedLogger) Fatalf(format string, args ...any) {
 
 // mentions reports whether one line at the level carries every fragment.
 func (l *observedLogger) mentions(level string, fragments ...string) bool {
+	return len(l.linesMentioning(level, fragments...)) > 0
+}
+
+// linesMentioning returns every recorded line at the level carrying every
+// fragment, in the order the observation took them.
+func (l *observedLogger) linesMentioning(level string, fragments ...string) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	matched := make([]string, 0, len(l.lines))
 	for _, line := range l.lines {
 		if !strings.HasPrefix(line, level+": ") {
 			continue
@@ -118,10 +125,10 @@ func (l *observedLogger) mentions(level string, fragments ...string) bool {
 			}
 		}
 		if holds {
-			return true
+			matched = append(matched, line)
 		}
 	}
-	return false
+	return matched
 }
 
 // watchObservation points the model observation at the given tracer and logger
@@ -138,6 +145,8 @@ func watchObservation(tb testing.TB, tracer trace.Tracer, logger trpclog.Logger)
 // - the terminal is rendered as one INFO line carrying the model, the terminal and the token totals
 // - the line carries the latency of the request and the number of responses the stream produced
 // - a failed request renders its failed terminal beside the named absence of a model
+// - a failed request names its raw cause on the same single line, escaped onto one line
+// - a completed request carries no cause field, and a failure without recorded text renders no empty field
 // - a logger that fails does not block the reduction and still leaves the terminal standing
 func TestModelCallObservation(t *testing.T) {
 	t.Run("one request is one INFO line and no span of its own", func(t *testing.T) {
@@ -228,6 +237,67 @@ func TestModelCallObservation(t *testing.T) {
 		}
 		if !logger.mentions("info", "model response", "terminal=failed", "model=unnamed") {
 			t.Fatalf("info lines = %v, want the failed terminal named in place of an unnamed model", logger.lines)
+		}
+	})
+
+	t.Run("a failed request names its cause", func(t *testing.T) {
+		tracer, logger := &observedTracer{}, &observedLogger{}
+		watchObservation(t, tracer, logger)
+		ch := make(chan *Response, 1)
+		ch <- &Response{Error: &ResponseError{Type: ErrorTypeAPIError, Message: "provider answered 500\nretry later"}}
+		close(ch)
+
+		outcome := ReduceChannel(context.Background(), ch, nil)
+
+		if outcome.Kind != KindFailed {
+			t.Fatalf("terminal = %s, want the failed terminal of the error response", outcome.Kind)
+		}
+		lines := logger.linesMentioning("info", "model response")
+		if len(lines) != 1 {
+			t.Fatalf("info lines = %v, want exactly one model-response line for one request", logger.lines)
+		}
+		if !strings.Contains(lines[0], "terminal=failed") || !strings.Contains(lines[0], "error=") || !strings.Contains(lines[0], "500") {
+			t.Fatalf("info line = %q, want the failed terminal beside the raw cause", lines[0])
+		}
+		if strings.Contains(lines[0], "\n") || !strings.Contains(lines[0], `\n`) {
+			t.Fatalf("info line = %q, want the reason escaped onto the same single line", lines[0])
+		}
+	})
+
+	t.Run("a completed request names no cause", func(t *testing.T) {
+		tracer, logger := &observedTracer{}, &observedLogger{}
+		watchObservation(t, tracer, logger)
+		ch := make(chan *Response, 1)
+		ch <- invariantAnswer("done", 2, 1)
+		close(ch)
+
+		outcome := ReduceChannel(context.Background(), ch, nil)
+
+		if outcome.Kind != KindCompleted {
+			t.Fatalf("terminal = %s, want the completed terminal of the answer", outcome.Kind)
+		}
+		if lines := logger.linesMentioning("info", "model response", "error="); len(lines) != 0 {
+			t.Fatalf("info lines = %v, want no cause field beside a completed terminal", lines)
+		}
+	})
+
+	t.Run("a failure without a message renders no empty cause", func(t *testing.T) {
+		tracer, logger := &observedTracer{}, &observedLogger{}
+		watchObservation(t, tracer, logger)
+		ch := make(chan *Response, 1)
+		ch <- &Response{Error: &ResponseError{Type: ErrorTypeStreamError}}
+		close(ch)
+
+		outcome := ReduceChannel(context.Background(), ch, nil)
+
+		if outcome.Kind != KindFailed {
+			t.Fatalf("terminal = %s, want the failed terminal of the error response", outcome.Kind)
+		}
+		if !logger.mentions("info", "terminal=failed") {
+			t.Fatalf("info lines = %v, want the failed terminal standing", logger.lines)
+		}
+		if lines := logger.linesMentioning("info", "model response", "error="); len(lines) != 0 {
+			t.Fatalf("info lines = %v, want no empty cause field", lines)
 		}
 	})
 

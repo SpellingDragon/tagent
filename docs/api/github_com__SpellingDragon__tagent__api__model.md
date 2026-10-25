@@ -251,6 +251,13 @@ func ReduceSeq(ctx context.Context, seq Seq[*Response], onAlert func(Alert)) (ou
     stands. The consumer reads the returned Outcome as the terminal fact and
     MUST NOT write a second terminal judgement beside it.
 
+func (o Outcome) Cause() error
+    Cause reports the error this outcome's reduction observed: the error the
+    retained body carries, or the first error on the observation trace, or nil
+    when the reduction observed none. It reads the same evidence in the same
+    order the record side reads it, so the raw cause one face reports is the raw
+    cause every face reports.
+
 type Reducer struct {
 	// Has unexported fields.
 }

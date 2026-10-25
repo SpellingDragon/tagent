@@ -525,8 +525,12 @@ func checkIntegrityUnexpectedRequestFails(t *testing.T) {
 	if requests := provider.servedRequests(); len(requests) != 2 {
 		t.Fatalf("model requests = %d, want the declared decision beside the refused one", len(requests))
 	}
-	if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != "only note" {
-		t.Fatalf("delivered bodies = %q, want the one action the declared step caused", bodies)
+	bodies := sender.bodies()
+	if len(bodies) != 2 || bodies[0] != "only note" {
+		t.Fatalf("delivered bodies = %q, want the declared action beside the raw failure notice", bodies)
+	}
+	if !strings.Contains(bodies[1], "unexpected") || !strings.Contains(bodies[1], "400") {
+		t.Fatalf("failure notice = %q, want the raw refusal of the unexpected request", bodies[1])
 	}
 	violations := script.audit()
 	if got := integrityViolationsOf(violations, integrityUnexpected); len(got) != 1 {
@@ -626,8 +630,11 @@ func checkIntegrityDuplicateStepFails(t *testing.T) {
 		t.Fatalf("violations = %v, want no missing step beside the duplicate step", violations)
 	}
 	bodies := sender.bodies()
-	if len(bodies) != 2 || bodies[0] != note || bodies[1] != note {
-		t.Fatalf("delivered bodies = %q, want the repeated action readable twice", bodies)
+	if len(bodies) != 3 || bodies[0] != note || bodies[1] != note {
+		t.Fatalf("delivered bodies = %q, want the repeated action readable twice beside the raw failure notice", bodies)
+	}
+	if !strings.Contains(bodies[2], "duplicate") || !strings.Contains(bodies[2], "400") {
+		t.Fatalf("failure notice = %q, want the raw refusal of the duplicate step", bodies[2])
 	}
 }
 

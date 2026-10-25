@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/document"
@@ -648,7 +649,7 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 		return turn, err
 	}
 	if user {
-		h.deliverFresh(ctx, req.Address, baseline, sender)
+		h.deliverFresh(ctx, req.Address, baseline, sender, turn)
 	}
 	return turn, nil
 }
@@ -1000,16 +1001,42 @@ func (h *Host) lockAddressContext(ctx context.Context, addr event.Address) (func
 	}
 }
 
-// deliverFresh delivers the assistant bodies the session's committed facts
-// carry past the invocation baseline through the sender. A session the chain
-// maps onto a projection commits no transcript history, so the facts are the
-// one read face both session kinds share.
-func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender) {
+// failureNoticeMaxBytes bounds the raw cause one failure notice carries: a
+// provider error may run long, so the notice keeps its first 2 KiB and marks
+// the cut instead of letting the channel refuse the whole notice.
+const failureNoticeMaxBytes = 2 << 10
+
+// failureNoticeTruncated marks a failure notice whose cause was cut at
+// failureNoticeMaxBytes.
+const failureNoticeTruncated = "（已截断）"
+
+// failureNoticeSummary is the summary prefix of the fact one failure notice
+// leaves in the session chain: the audit line a later reader finds the notice
+// by.
+const failureNoticeSummary = "failure-notice"
+
+// deliverFresh delivers the assistant bodies the session's committed facts carry past
+// the invocation baseline through the sender; a session the chain maps onto a projection
+// commits no transcript history, so the facts are the one read face both session kinds share.
+// - A body wins over a failure: a turn that produced a deliverable answer delivers it.
+// - A failed turn without a body delivers the raw recorded cause; no cause stays silent.
+func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender, turn agent.Turn) {
 	if sender == nil {
 		return
 	}
 	contents := freshAssistantOf(h.run.SessionFacts(addr), baseline)
 	if len(contents) == 0 {
+		if turn.Terminal == model.KindFailed {
+			if notice := failureNoticeText(turn.Failure); notice != "" {
+				h.noteFailureNotice(ctx, addr, turn)
+				if err := sender.Send(ctx, addr, notice); err != nil {
+					assemblyWarn("tagent: the failure notice to %s was refused: %v", addr.SessionID, err)
+				}
+				return
+			}
+			assemblyDebug("tagent: the invocation of %s failed without a recorded cause", addr.SessionID)
+			return
+		}
 		assemblyDebug("tagent: the invocation of %s produced no deliverable assistant body", addr.SessionID)
 		return
 	}
@@ -1018,6 +1045,68 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline in
 			assemblyWarn("tagent: the host delivery to %s was refused: %v", addr.SessionID, err)
 		}
 	}
+}
+
+// failureNoticeText renders the body one failed turn delivers: the raw cause as
+// the reduction recorded it, bounded to failureNoticeMaxBytes at a rune boundary
+// and marked when it was cut. It never invents a reason: an empty cause answers
+// an empty body the caller does not send.
+func failureNoticeText(cause string) string {
+	text := strings.TrimSpace(cause)
+	if text == "" || len(text) <= failureNoticeMaxBytes {
+		return text
+	}
+	cut := failureNoticeMaxBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(text[:cut]) + failureNoticeTruncated
+}
+
+// noteFailureNotice commits the audit fact of one delivered failure notice: a feedback
+// fact owned by the address, carrying the raw cause and the terminal in its metadata and
+// no model payload in its message.
+// - No message content: the fact maps onto no projection entry and enters no model request.
+// - No notice kind and no task id: the notice consumers drive follow-up turns from those keys.
+// - A refused commit is a warning beside the delivery, never a reason to withhold the notice.
+func (h *Host) noteFailureNotice(ctx context.Context, addr event.Address, turn agent.Turn) {
+	if h == nil || h.run == nil {
+		return
+	}
+	if _, err := h.run.CommitToSession(ctx, addr, event.Event{
+		Type:      event.TypeFeedback,
+		Timestamp: time.Now(),
+		Meta: map[string]string{
+			event.MetaKeyTriggerSource:          "host",
+			event.MetaKeyEventSummary:           failureNoticeSummaryOf(turn.Failure),
+			event.MetaPrefix + "terminal":       turn.Terminal.String(),
+			event.MetaPrefix + "failure_reason": turn.Failure,
+		},
+		InvocationID: turn.InvocationID,
+	}); err != nil {
+		assemblyWarn("tagent: the failure notice of %s left no fact: %v", addr.SessionID, err)
+	}
+}
+
+// failureNoticeSummaryOf renders the audit line of one failure notice: the
+// summary prefix beside the first line of the cause, bounded by the same rune
+// bound the projection summary uses. The durable body keeps this line alone, so
+// the bound decides how much of the cause a later reader finds there.
+func failureNoticeSummaryOf(cause string) string {
+	line := cause
+	if at := strings.IndexByte(line, '\n'); at >= 0 {
+		line = line[:at]
+	}
+	line = strings.TrimSpace(line)
+	summary := failureNoticeSummary
+	if line != "" {
+		summary += ": " + line
+	}
+	runes := []rune(summary)
+	if len(runes) <= mappedSummaryRunes {
+		return summary
+	}
+	return string(runes[:mappedSummaryRunes]) + "…"
 }
 
 // freshAssistantOf reports the plain assistant bodies one session's committed

@@ -106,18 +106,14 @@ func AttemptOf(id event.AttemptID, decisionID event.DecisionID, episodeID event.
 	}
 }
 
-// AttemptError reports the error text one observed attempt carries: the error
-// of the retained body, or the first error the observation trace carries when
-// the body is absent or carries none. It is empty for an attempt that observed
-// no error, and it reports what was observed without judging a terminal.
+// AttemptError reports the error text one observed attempt carries: the same
+// cause the reduction reports, read through the one accessor every face shares
+// so the attempt record and the observation line can never name two causes for
+// one request. It is empty for an attempt that observed no error, and it reports
+// what was observed without judging a terminal.
 func AttemptError(outcome model.Outcome) string {
-	if outcome.Body != nil && outcome.Body.Error != nil {
-		return outcome.Body.Error.Message
-	}
-	for _, item := range outcome.Trace {
-		if item.Err != nil {
-			return item.Err.Error()
-		}
+	if cause := outcome.Cause(); cause != nil {
+		return cause.Error()
 	}
 	return ""
 }
