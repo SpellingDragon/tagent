@@ -152,3 +152,11 @@ func zeroEmbedded() *Embedder {
 		return []float64{1}, nil
 	})}
 }
+
+// TestEmbedRefusesEmptyTextByName 验证空文本在请求前被具名拒绝。
+func TestEmbedRefusesEmptyTextByName(t *testing.T) {
+	e := &Embedder{}
+	if _, err := e.Embed(context.Background(), ""); !errors.Is(err, ErrEmptyText) {
+		t.Fatalf("embed of empty text: err = %v, want ErrEmptyText", err)
+	}
+}

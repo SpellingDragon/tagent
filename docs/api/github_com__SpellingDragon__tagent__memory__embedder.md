@@ -41,6 +41,11 @@ var ErrEmbeddingUnwired = errors.New("memory/embedder: the embedding connection 
     ErrEmbeddingUnwired reports an embedder with no provider connection behind
     it: the zero value carries no vector source and answers no request.
 
+var ErrEmptyText = errors.New("memory/embedder: embedder was handed empty text")
+    ErrEmptyText names the refusal an embedder answers empty input with:
+    an empty query keeps the retrieval on its keyword leg instead of paying
+    doomed provider attempts.
+
 FUNCTIONS
 
 func Validate(spec config.EmbeddingSpec) error

@@ -141,12 +141,20 @@ func (e *Embedder) Connection() config.EmbeddingSpec {
 	}
 }
 
+// ErrEmptyText names the refusal an embedder answers empty input with: an
+// empty query keeps the retrieval on its keyword leg instead of paying doomed
+// provider attempts.
+var ErrEmptyText = errors.New("memory/embedder: embedder was handed empty text")
+
 // Embed returns the vector of text under the declared connection, honouring
 // cancellation and answering a named failure when the provider fails, returns
 // no vector, or returns a vector of another width.
 func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if text == "" {
+		return nil, ErrEmptyText
 	}
 	if e == nil || e.source == nil {
 		return nil, ErrEmbeddingUnwired
