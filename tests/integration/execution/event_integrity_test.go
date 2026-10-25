@@ -11,6 +11,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -982,6 +983,19 @@ func (s *eventIntegritySender) Send(_ context.Context, target event.Address, con
 	return nil
 }
 
+// deliveredCount counts every body the host delivered to one address.
+func (s *eventIntegritySender) deliveredCount(addr event.Address) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for i := range s.targets {
+		if s.targets[i] == addr {
+			count++
+		}
+	}
+	return count
+}
+
 // delivered counts the bodies the host delivered to one address that carry the
 // named text.
 func (s *eventIntegritySender) delivered(addr event.Address, text string) int {
@@ -1534,9 +1548,11 @@ func eventIntegrityAwaitEnvelope(t *testing.T, delivered <-chan task.Envelope) t
 }
 
 // TestEventIntegrityExecStateEvents checks the execution state events the manager produces after the acquiring call returned.
-// - the lease keeps renewing and a state change reaches the notification chain and the next decision
-// - the exit status of an ended resource is readable through the event face
+// - the lease keeps renewing after the call returned
+// - stable, suspect and exited observations leave audit facts only: no turn and no model material
+// - the next decision of the range reads no execution state material
 // - the host close releases every resource it still holds, and a restarted host names the resource it cannot confirm
+// - two subtests keep frozen names from the old follow-up path while asserting silence; renaming needs the archived graph updated with it
 // 契约: docs/wiki/agent/task-lifecycle.md#ttl-reclaim
 func TestEventIntegrityExecStateEvents(t *testing.T) {
 	if !tagentexec.IsTmuxAvailable() {
@@ -1544,8 +1560,8 @@ func TestEventIntegrityExecStateEvents(t *testing.T) {
 	}
 	isolateTmuxServer(t)
 	t.Run("lease_keeps_renewing_after_return", runEventIntegrityExecLeaseKeepsRenewing)
-	t.Run("state_change_emits_followup_notice", runEventIntegrityExecStateChangeNotice)
-	t.Run("next_turn_consumes_exec_state", runEventIntegrityExecNextTurnConsumesState)
+	t.Run("state_change_emits_followup_notice", runEventIntegrityExecThreeStatesAudit)
+	t.Run("next_turn_consumes_exec_state", runEventIntegrityExecNextTurnCarriesNoState)
 	t.Run("host_close_releases_exec_resources", runEventIntegrityExecHostCloseReleases)
 	t.Run("restart_takes_over_or_names_unconfirmed", runEventIntegrityExecRestartNamesUnknown)
 	t.Run("unconfirmed_restart_not_reported_stopped", runEventIntegrityExecRestartNotReportedStopped)
@@ -1558,9 +1574,11 @@ const (
 	// eventIntegrityExecQuietRhythm keeps the stable and fake-dead thresholds
 	// beyond the life of a check, so only the event a check drives is produced.
 	eventIntegrityExecQuietRhythm = "{ interval: 100ms, stable_duration: 60000ms, interactive_stable_duration: 60000ms, fake_dead_duration: 60000ms }"
-	// eventIntegrityExecStableRhythm reaches the stable threshold inside a
-	// check, so a quiet live resource reports its stable state.
-	eventIntegrityExecStableRhythm = "{ interval: 100ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 60000ms }"
+	// eventIntegrityExecTriStateRhythm reaches every intermediate observation
+	// of a short live run before it exits: the stable threshold passes inside
+	// the run, the fake-dead threshold passes while it is still alive, and the
+	// observed death follows, so one boot produces stable, suspect and exited.
+	eventIntegrityExecTriStateRhythm = "{ interval: 50ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 700ms }"
 )
 
 // eventIntegrityExecSuccessWords are the words a lifecycle observation must
@@ -1618,69 +1636,72 @@ func runEventIntegrityExecLeaseKeepsRenewing(t *testing.T) {
 	}
 }
 
-// runEventIntegrityExecStateChangeNotice proves a state change of a tracked
-// resource reaches the notification chain and drives the next decision:
-//   - the stable observation of a live resource commits a notice fact under the
-//     follow-up range through the same entry a terminal settle uses
-//   - the follow-up request carries the state material as a user message
-//   - the material reports the observation alone: it claims no success
-//   - the resource is still held, so the observation freed nothing
-func runEventIntegrityExecStateChangeNotice(t *testing.T) {
-	const (
-		input    = "watch the quiet run"
-		accepted = "the quiet run is held"
-		followed = "the stable state reached the next decision"
-	)
+// runEventIntegrityExecThreeStatesAudit proves the intermediate observations of
+// one tracked resource are recorded as audit facts and never drive the model:
+//   - a short run is held, then observed stable, suspect and exited
+//   - each observation commits one payload-free feedback fact with resource, phase and exit-code metadata, no notice kind and no task id
+//   - no request reaches the provider and no body reaches the address beside the three observations
+//   - the confirmed exit frees the resource
+func runEventIntegrityExecThreeStatesAudit(t *testing.T) {
+	const input = "start the run whose states stay silent"
 	eventIntegrityEnv(t)
 	provider := newEventIntegrityProvider(t)
 	script := newEventIntegrityScript()
 	resource := eventIntegrityExecResource(t)
 	key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
-	script.expect(eventIntegrityExecModel, "the entry starts the quiet run", eventIntegrityTail(input)).
-		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-quiet", eventIntegrityExecRunArgs(resource, "sleep", `["30"]`)))
-	script.expect(eventIntegrityExecModel, "the entry accepts the quiet run", eventIntegrityCarriesToolResult("call-exec-quiet")).
-		answers(eventIntegrityAnswerOf(accepted))
-	stable := script.expect(eventIntegrityExecModel, "the stable observation fires its follow-up", eventIntegrityCarriesExecState(key, "stable")).
-		answers(eventIntegrityAnswerOf(followed))
+	script.expect(eventIntegrityExecModel, "the entry starts the short run", eventIntegrityTail(input)).
+		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-states",
+			eventIntegrityExecRunArgs(resource, "sh", `["-c","sleep 2; exit 7"]`)))
+	script.expect(eventIntegrityExecModel, "the entry accepts the short run", eventIntegrityCarriesToolResult("call-exec-states")).
+		answers(eventIntegrityAnswerOf("the short run is under way"))
 	provider.decide = script.decide
 	sender := newEventIntegritySender()
-	host := eventIntegrityBootExec(t, provider, sender, eventIntegrityExecModel, eventIntegrityExecStableRhythm)
+	host := eventIntegrityBootExec(t, provider, sender, eventIntegrityExecModel, eventIntegrityExecTriStateRhythm)
 	eventIntegrityKeepHost(t, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	addr := event.Address{AgentID: "user", SessionID: "session-exec-stable"}
+	addr := event.Address{AgentID: "user", SessionID: "session-exec-states"}
 	if _, err := eventIntegrityInvoke(ctx, host, addr, "", input); err != nil {
 		t.Fatalf("the entry turn ended by error: %v", err)
 	}
-	script.await(t, stable)
-	sender.awaitDelivered(t, addr, followed)
-	material := eventIntegrityExecStateMaterial(t, provider.requests(), key, "stable")
-	if word := eventIntegrityExecSuccessClaim(material); word != "" {
-		t.Fatalf("the stable material claims %q: %q", word, material)
+	beforeRequests := len(provider.requests())
+	beforeOutbound := sender.deliveredCount(addr)
+	for _, phase := range []tagentexec.StatePhase{tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited} {
+		fact := eventIntegrityAwaitExecStateFact(t, host, addr, phase)
+		eventIntegrityAssertExecAuditFact(t, fact, key, phase, 7)
 	}
-	explanation, err := host.Run().ExecState(key)
-	if err != nil || !explanation.Held {
-		t.Fatalf("the resource %s is not held beside its stable observation: explanation=%+v err=%v", key, explanation, err)
+	if facts := eventIntegrityExecStateFacts(host.Run().SessionFacts(addr)); len(facts) != 3 {
+		t.Fatalf("execution state audit facts = %d, want one per observed phase: %v", len(facts), facts)
 	}
-	if !eventIntegrityTmuxAlive(resource) {
-		t.Fatalf("the session %s is not alive beside its stable observation", resource)
+	time.Sleep(400 * time.Millisecond)
+	if requests := len(provider.requests()); requests != beforeRequests {
+		t.Fatalf("model requests = %d -> %d beside three silent observations, want no new turn: %s",
+			beforeRequests, requests, eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if outbound := sender.deliveredCount(addr); outbound != beforeOutbound {
+		t.Fatalf("outbound bodies = %d -> %d beside three silent observations, want no new turn", beforeOutbound, outbound)
+	}
+	if _, err := host.Run().ExecState(key); !errors.Is(err, tagentexec.ErrResourceUnknown) {
+		t.Fatalf("state of the exited resource = %v, want %v beside a confirmed exit", err, tagentexec.ErrResourceUnknown)
+	}
+	if eventIntegrityTmuxAlive(resource) {
+		t.Fatalf("the session %s is alive after its confirmed exit", resource)
 	}
 	if violations := script.audit(); len(violations) != 0 {
-		t.Fatalf("the stable script left violations: %v", violations)
+		t.Fatalf("the state script left violations: %v", violations)
 	}
 }
 
-// runEventIntegrityExecNextTurnConsumesState proves the ended resource reports
-// its exit status through the event face and the next decision consumes it:
-// - the command exits with status 7 after its call returned
-// - the exited material carries that exit code to the follow-up request
-// - the run call's own answer never carried the exit code
-// - the resource was freed by the observed exit, so its state is not held
-func runEventIntegrityExecNextTurnConsumesState(t *testing.T) {
+// runEventIntegrityExecNextTurnCarriesNoState proves the next decision of the
+// range reads no execution state material:
+//   - the three observations of a short run commit their audit facts
+//   - the next user turn adds exactly one provider request
+//   - no request of the range carries the state text the old chain injected
+func runEventIntegrityExecNextTurnCarriesNoState(t *testing.T) {
 	const (
-		input    = "start the short run"
-		accepted = "the short run is under way"
-		followed = "the exit code reached the next decision"
+		input    = "start the run before the next question"
+		question = "what is left in the background?"
+		answer   = "nothing the state report says"
 	)
 	eventIntegrityEnv(t)
 	provider := newEventIntegrityProvider(t)
@@ -1688,40 +1709,47 @@ func runEventIntegrityExecNextTurnConsumesState(t *testing.T) {
 	resource := eventIntegrityExecResource(t)
 	key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
 	script.expect(eventIntegrityExecModel, "the entry starts the short run", eventIntegrityTail(input)).
-		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-exit",
-			eventIntegrityExecRunArgs(resource, "sh", `["-c","echo beta; sleep 1; exit 7"]`)))
-	script.expect(eventIntegrityExecModel, "the entry accepts the short run", eventIntegrityCarriesToolResult("call-exec-exit")).
-		answers(eventIntegrityAnswerOf(accepted))
-	exited := script.expect(eventIntegrityExecModel, "the exited observation fires its follow-up", eventIntegrityCarriesExecState(key, "exited")).
-		answers(eventIntegrityAnswerOf(followed))
+		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-next",
+			eventIntegrityExecRunArgs(resource, "sh", `["-c","sleep 2; exit 7"]`)))
+	script.expect(eventIntegrityExecModel, "the entry accepts the short run", eventIntegrityCarriesToolResult("call-exec-next")).
+		answers(eventIntegrityAnswerOf("the short run is under way"))
+	script.expect(eventIntegrityExecModel, "the next user turn asks its own question", eventIntegrityTail(question)).
+		answers(eventIntegrityAnswerOf(answer))
 	provider.decide = script.decide
 	sender := newEventIntegritySender()
-	host := eventIntegrityBootExec(t, provider, sender, eventIntegrityExecModel, eventIntegrityExecQuietRhythm)
+	host := eventIntegrityBootExec(t, provider, sender, eventIntegrityExecModel, eventIntegrityExecTriStateRhythm)
 	eventIntegrityKeepHost(t, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	addr := event.Address{AgentID: "user", SessionID: "session-exec-exit"}
+	addr := event.Address{AgentID: "user", SessionID: "session-exec-next"}
 	if _, err := eventIntegrityInvoke(ctx, host, addr, "", input); err != nil {
 		t.Fatalf("the entry turn ended by error: %v", err)
 	}
-	script.await(t, exited)
-	sender.awaitDelivered(t, addr, followed)
-	material := eventIntegrityExecStateMaterial(t, provider.requests(), key, "exited")
-	if !strings.Contains(material, "exit code 7") {
-		t.Fatalf("the exited material does not carry the observed exit code: %q", material)
+	for _, phase := range []tagentexec.StatePhase{tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited} {
+		eventIntegrityAwaitExecStateFact(t, host, addr, phase)
 	}
-	callAnswer := eventIntegrityToolResultText(provider.requests(), "call-exec-exit")
-	if callAnswer == "" {
-		t.Fatal("no request carried the result of the run call")
+	before := len(provider.requests())
+	if _, err := eventIntegrityInvoke(ctx, host, addr, "", question); err != nil {
+		t.Fatalf("the next user turn ended by error: %v", err)
 	}
-	if strings.Contains(callAnswer, "exit=") || strings.Contains(strings.ToLower(callAnswer), "exit code 7") {
-		t.Fatalf("the run call answer already carried the exit status: %q", callAnswer)
+	requests := provider.requests()
+	if len(requests) != before+1 {
+		t.Fatalf("model requests = %d -> %d beside one user turn, want exactly one new request: %s",
+			before, len(requests), eventIntegrityRequestsSummary(requests))
+	}
+	for _, request := range requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, "reports state") || strings.Contains(message.Content, "exec-state: ") {
+				t.Fatalf("request %d carried execution state material in a %s message: %q",
+					request.Index, message.Role, message.Content)
+			}
+		}
 	}
 	if _, err := host.Run().ExecState(key); !errors.Is(err, tagentexec.ErrResourceUnknown) {
-		t.Fatalf("state of the exited resource = %v, want %v beside a confirmed exit", err, tagentexec.ErrResourceUnknown)
+		t.Fatalf("state of the exited resource = %v, want %v", err, tagentexec.ErrResourceUnknown)
 	}
 	if violations := script.audit(); len(violations) != 0 {
-		t.Fatalf("the exit script left violations: %v", violations)
+		t.Fatalf("the next-turn script left violations: %v", violations)
 	}
 }
 
@@ -1949,35 +1977,81 @@ func eventIntegrityTmuxAlive(resource string) bool {
 	return osexec.Command("tmux", "has-session", "-t", resource).Run() == nil
 }
 
-// eventIntegrityCarriesExecState matches the request that carries the material
-// of one execution state observation of the named resource.
-func eventIntegrityCarriesExecState(key tagentexec.ResourceKey, phase string) func(eventIntegrityRequest) bool {
-	marker := "execution resource " + key.String() + " reports state " + phase
-	return func(request eventIntegrityRequest) bool {
-		for _, message := range request.Messages {
-			if message.Role == string(model.RoleUser) && strings.Contains(message.Content, marker) {
-				return true
+// eventIntegrityExecStateFacts reports every execution state audit fact one
+// session recorded, across all observed phases.
+func eventIntegrityExecStateFacts(facts []event.Event) []event.Event {
+	out := make([]event.Event, 0, 3)
+	for _, fact := range facts {
+		if fact.Type != event.TypeFeedback {
+			continue
+		}
+		if strings.HasPrefix(fact.Meta[event.MetaKeyEventSummary], "exec-state: ") {
+			out = append(out, fact)
+		}
+	}
+	return out
+}
+
+// eventIntegrityAwaitExecStateFact waits until the session records the one
+// audit fact of the named observed phase.
+func eventIntegrityAwaitExecStateFact(t *testing.T, host *tagent.Host, addr event.Address, phase tagentexec.StatePhase) event.Event {
+	t.Helper()
+	summary := "exec-state: " + string(phase)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		matches := make([]event.Event, 0, 1)
+		for _, fact := range host.Run().SessionFacts(addr) {
+			if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyEventSummary] == summary {
+				matches = append(matches, fact)
 			}
 		}
-		return false
+		if len(matches) == 1 {
+			return matches[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the %s observation left %d audit facts, want one: %v", phase, len(matches),
+				eventIntegrityExecStateFacts(host.Run().SessionFacts(addr)))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// eventIntegrityExecStateMaterial reports the material one request carried for
-// the named resource and phase.
-func eventIntegrityExecStateMaterial(t *testing.T, requests []eventIntegrityRequest, key tagentexec.ResourceKey, phase string) string {
+// eventIntegrityAssertExecAuditFact checks one execution state fact is an audit
+// record and never model material: feedback-typed, payload-free and carrying
+// the resource and phase metadata without the notice keys that drive turns.
+func eventIntegrityAssertExecAuditFact(t *testing.T, fact event.Event, key tagentexec.ResourceKey, phase tagentexec.StatePhase, exitCode int) {
 	t.Helper()
-	marker := "execution resource " + key.String() + " reports state " + phase
-	for _, request := range requests {
-		for _, message := range request.Messages {
-			if message.Role == string(model.RoleUser) && strings.Contains(message.Content, marker) {
-				return message.Content
-			}
-		}
+	if fact.Type != event.TypeFeedback {
+		t.Fatalf("the %s audit fact type = %q, want %q", phase, fact.Type, event.TypeFeedback)
 	}
-	t.Fatalf("no request carried the %s material of %s: %s", phase, key,
-		eventIntegrityRequestsSummary(requests))
-	return ""
+	if fact.Message.Content != "" {
+		t.Fatalf("the %s audit fact carries model material %q, want no payload", phase, fact.Message.Content)
+	}
+	if fact.TaskID != "" {
+		t.Fatalf("the %s audit fact carries task id %q, want none", phase, fact.TaskID)
+	}
+	if kind := fact.Meta[event.MetaKeyNoticeKind]; kind != "" {
+		t.Fatalf("the %s audit fact carries notice kind %q, want none", phase, kind)
+	}
+	if id := fact.Meta[event.MetaKeyTaskID]; id != "" {
+		t.Fatalf("the %s audit fact carries notice task id %q, want none", phase, id)
+	}
+	if got := fact.Meta[event.MetaPrefix+"resource"]; got != key.String() {
+		t.Fatalf("the %s audit fact resource = %q, want %q", phase, got, key)
+	}
+	if got := fact.Meta[event.MetaPrefix+"phase"]; got != string(phase) {
+		t.Fatalf("the %s audit fact phase = %q, want %q", phase, got, phase)
+	}
+	exit, held := fact.Meta[event.MetaPrefix+"exit_code"]
+	if phase == tagentexec.StateExited {
+		if !held || exit != strconv.Itoa(exitCode) {
+			t.Fatalf("the exited audit fact exit_code = %q (recorded %v), want %d", exit, held, exitCode)
+		}
+		return
+	}
+	if held {
+		t.Fatalf("the %s audit fact carries exit code %q, want none beside no confirmed stop", phase, exit)
+	}
 }
 
 // eventIntegrityExecSuccessClaim reports the success word one lifecycle text
@@ -1990,21 +2064,6 @@ func eventIntegrityExecSuccessClaim(text string) string {
 		}
 	}
 	return ""
-}
-
-// eventIntegrityToolResultText reports the text one request carried as the
-// result of the named native call: the settled observation the wait of the
-// call paired, not the receipt that admitted it.
-func eventIntegrityToolResultText(requests []eventIntegrityRequest, callID string) string {
-	text := ""
-	for _, request := range requests {
-		for _, message := range request.Messages {
-			if message.ToolCallID == callID && message.Content != "" {
-				text = message.Content
-			}
-		}
-	}
-	return text
 }
 
 // eventIntegrityModelConversation reports every message body the requests of

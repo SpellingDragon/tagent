@@ -353,17 +353,17 @@ jobs:
           path: ${{ runner.temp }}/bundle
           if-no-files-found: warn
 
-  # Event-semantics symptom anchors (event-semantics-boundary 04.3). The three
+  # Event-semantics symptom anchors (event-semantics-boundary 04.3). The four
   # user-voice smoke tests (accepted stays silent, settled reports once, failed
-  # turn delivers the raw cause) live in the wechat-bot module behind the smoke
-  # build tag, and they are absent from the archived task graph's test
-  # registry - registering them in the v2 contract would break the contract's
-  # bidirectional cross-check with that graph. So they get a job of their own
-  # that shares the event producers' no-skip-hatch discipline: no path filter,
-  # no job-level if, no continue-on-error. Whether a job is *required* is an
-  # external setting (branch protection) this file cannot assert; all this job
-  # guarantees is that it exists and runs on every pull request and every push
-  # to main/dev.
+  # turn delivers the raw cause, exec states stay silent) live in the wechat-bot
+  # module behind the smoke build tag. They are absent from the archived task
+  # graph's test registry, and registering them in the v2 contract would break
+  # the contract's bidirectional cross-check with that graph. So they get a job
+  # of their own that shares the event producers' no-skip-hatch discipline:
+  # no path filter, no job-level if, no continue-on-error. Whether a job is
+  # *required* is an external setting (branch protection) this file cannot
+  # assert; all this job guarantees is that it exists and runs on every pull
+  # request and every push to main/dev.
   event-semantics-symptoms:
     runs-on: ubuntu-latest
     # The smoke scope measured ~5s locally; 20m covers a cold compile of the
@@ -380,12 +380,12 @@ jobs:
       # and a symptom anchor that lands on a skip proves nothing.
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      # `^TestLocalSmokeSymptom` is a prefix selector, not three full names: the
-      # smoke file holds exactly three tests under that prefix today, so the
-      # command selects all three and picks up a fourth symptom anchor without a
-      # workflow edit. `-json` keeps the per-test verdicts (pass/skip) in the
+      # `^TestLocalSmokeSymptom` is a prefix selector, not a list of full names:
+      # the smoke file holds every symptom anchor under that prefix, so the
+      # command selects all of them and picks up a new anchor without a workflow
+      # edit. `-json` keeps the per-test verdicts (pass/skip) in the
       # uploaded evidence instead of a flat log.
-      - name: Symptom anchors (three user-voice tests)
+      - name: Symptom anchors (user-voice tests)
         run: |
           E="$RUNNER_TEMP/symptom"
           mkdir -p "$E"

@@ -268,7 +268,8 @@ SMOKE_TEST_DIR = REPO / "examples" / "wechat-bot"
 # while a user-voice promise lost its witness.
 SYMPTOM_PARENTS = ("TestLocalSmokeSymptomAcceptedSilent",
                    "TestLocalSmokeSymptomSettledOnce",
-                   "TestLocalSmokeSymptomFailureNotice")
+                   "TestLocalSmokeSymptomFailureNotice",
+                   "TestLocalSmokeSymptomExecStateSilent")
 
 # The race set is mapped from every modified product package and every formal
 # integration suite. host/history alone is the shrunken set the negative control
@@ -694,7 +695,7 @@ def assert_symptom_job(workflow):
     job = jobs.get(SYMPTOM_JOB)
     if job is None:
         raise AssertionError(
-            "ci.yml is missing the {} job: the three symptom anchors would then "
+            "ci.yml is missing the {} job: the symptom anchors would then "
             "have no unconditional gate".format(SYMPTOM_JOB))
     if job.get("runs-on") != "ubuntu-latest":
         raise AssertionError("{} must run on ubuntu-latest".format(SYMPTOM_JOB))
@@ -753,16 +754,16 @@ def assert_symptom_job(workflow):
             "{} must write its evidence outside the repository, under "
             "$RUNNER_TEMP/symptom: {!r}".format(SYMPTOM_JOB, run))
 
-    # The selector is a prefix, not an enumeration: prove it hits all three
-    # pinned anchors and nothing else, so neither a shrunken -run nor a widened
-    # one can drift the job's meaning.
+    # The selector is a prefix, not an enumeration: prove it hits every pinned
+    # anchor and nothing else, so neither a shrunken -run nor a widened one can
+    # drift the job's meaning.
     selector = symptom_selector(run)
     pattern = re.compile(selector)
     names = smoke_test_names()
     parents = sorted(name for name in names if name.startswith(SYMPTOM_PREFIX))
     if parents != sorted(SYMPTOM_PARENTS):
         raise AssertionError(
-            "the wechat-bot module must hold exactly the three symptom anchors, "
+            "the wechat-bot module must hold exactly the pinned symptom anchors, "
             "found {}".format(parents))
     missed = [name for name in parents if not pattern.search(name)]
     if missed:

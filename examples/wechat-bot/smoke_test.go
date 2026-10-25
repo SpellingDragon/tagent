@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
+	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 )
 
 // smokeKind 是一轮的响应形状。
@@ -3414,4 +3416,202 @@ func TestLocalSmokeSymptomFailureNotice(t *testing.T) {
 		}
 		t.Logf("[symptom-g3] 负锚：成功回合零失败话术（%d 条文本）", len(symptomTexts(rig, symptomChat)))
 	})
+}
+
+// TestLocalSmokeSymptomExecStateSilent 是症状直译锚 G4：执行资源在调用返回后的中间态（stable/suspect/exited）不得驱动模型回合，也不得成为说话素材。
+// - 正锚 three_states_leave_no_turn：三态各静默，每个观察落地后 provider 请求数与用户 outbound 都不增加。
+// - 负锚 state_still_recorded：三态都必须落无载荷审计事实（资源、相位、退出码可查），防"静默=什么都没记"。
+// - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，事实链由 rig.sessionFacts 读取。
+// - 观测帧：exec_run 的结果折成用户角色 "executed tmux/<resource>: ..."，按帧正文判本轮已有交代。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomExecStateSilent(t *testing.T) {
+	if !tagentexec.IsTmuxAvailable() {
+		t.Skip("tmux is not available on this runner")
+	}
+	const marker = "SMOKE-R9631"
+	resource := fmt.Sprintf("smoke-exec-%d", time.Now().UnixNano())
+	t.Cleanup(func() { _ = osexec.Command("tmux", "kill-session", "-t", resource).Run() })
+
+	rig, provider := symptomExecRig(t)
+	provider.hook = func(w http.ResponseWriter, _ int, modelName string, messages []smokeModelMessage) bool {
+		if modelName != smokeEntryModel {
+			return false
+		}
+		if strings.Contains(smokeLastUserText(messages), "executed tmux/"+resource) {
+			fmt.Fprint(w, smokeAnswerBody("exec-ok "+marker))
+			return true
+		}
+		if symptomRequestCarries(messages, marker) {
+			args := fmt.Sprintf(`{"command":"sh","args":["-c","sleep 2; exit 7"],"kind":"tmux","resource":%q}`, resource)
+			fmt.Fprint(w, smokeToolCallBody("call-"+marker, "exec_run", args))
+			return true
+		}
+		return false
+	}
+
+	rig.drive(symptomChat, marker+" 后台跑一下这个任务")
+	rig.waitText(symptomChat, "exec-ok "+marker, 60*time.Second)
+	beforeRequests := provider.count()
+	beforeOutbound := len(symptomTexts(rig, symptomChat))
+
+	t.Run("three_states_leave_no_turn", func(t *testing.T) {
+		for _, phase := range []tagentexec.StatePhase{tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited} {
+			fact := symptomAwaitExecStateFact(t, rig, symptomChat, resource, phase)
+			symptomAssertExecAuditFact(t, fact, resource, phase)
+			time.Sleep(300 * time.Millisecond)
+			if got := provider.count(); got != beforeRequests {
+				t.Fatalf("%s 观察后 provider 请求数 = %d -> %d，want 零新回合\nrecent requests:\n%s",
+					phase, beforeRequests, got, rig.recentRequests(8))
+			}
+			if got := len(symptomTexts(rig, symptomChat)); got != beforeOutbound {
+				t.Fatalf("%s 观察后用户 outbound = %d -> %d，want 零新消息：%s",
+					phase, beforeOutbound, got, symptomQuote(symptomTexts(rig, symptomChat)))
+			}
+			t.Logf("[symptom-g4] 正锚：%s 观察静默（requests=%d, outbound=%d）", phase, beforeRequests, beforeOutbound)
+		}
+	})
+
+	t.Run("state_still_recorded", func(t *testing.T) {
+		for _, phase := range []tagentexec.StatePhase{tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited} {
+			fact := symptomAwaitExecStateFact(t, rig, symptomChat, resource, phase)
+			symptomAssertExecAuditFact(t, fact, resource, phase)
+		}
+		if facts := symptomExecStateFacts(rig, symptomChat); len(facts) != 3 {
+			t.Fatalf("执行状态审计事实 = %d 条，want 三态各一条：%v", len(facts), facts)
+		}
+		t.Logf("[symptom-g4] 负锚：三态审计事实均落盘（消息载荷为空、无通知分类）")
+	})
+}
+
+// symptomExecRig 起一台声明 exec 面与三态观察节奏的症状锚宿主。
+func symptomExecRig(t *testing.T) (*smokeRig, *smokeProvider) {
+	t.Helper()
+	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
+	cfg.MeditationInterval = "1h"
+	cfg.Doc = symptomExecDocument
+	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	cfg.Endpoint = provider.endpoint()
+	cfg.write(t)
+	rig := bootSmokeRig(t, cfg, provider)
+	t.Cleanup(func() {
+		if err := rig.close(); err != nil {
+			t.Errorf("close the exec symptom rig: %v", err)
+		}
+	})
+	return rig, provider
+}
+
+// symptomExecDocument 渲染 G4 的宿主文档：入口 agent 只声明 exec 面，观察节奏
+// 让一条短命令在存活期内依次经过 stable、suspect，再在死亡时报告 exited。
+func symptomExecDocument(c *smokeConfig) string {
+	return fmt.Sprintf(`entry: %s
+provider: local
+model: %s
+prompt_dir: %s
+request_timeout_seconds: 60
+providers:
+  local: { provider: openai, api_endpoint: "%s", api_key_env: SMOKE_API_KEY }
+agents:
+  %s:
+    model: %s
+    tools:
+      - { kind: tool, id: exec }
+    max_tokens: %d
+    exec:
+      monitor: { interval: 50ms, stable_duration: 150ms, interactive_stable_duration: 150ms, fake_dead_duration: 700ms }
+storage: { type: localfile, root: %s }
+governance:
+  enabled: true
+  enforcement: normal
+  dir: %s
+  approval_ttl_minutes: 30
+  risk_rules:
+    - { tool: send, level: critical }
+app:
+  wechat:
+    config_dir: %s
+    token_file: %s
+    context_token_dir: %s
+    workspace_dir: %s
+    approvers: [%s]
+`,
+		smokeSessionTag, c.Model, c.PromptDir, c.Endpoint,
+		smokeSessionTag, c.Model, c.maxTokens(),
+		c.StorageRoot, c.ApprovalDir,
+		c.ConfigDir, filepath.Join(c.ConfigDir, "token.json"), c.ContextDir,
+		c.WorkspaceDir, smokeApproverChat,
+	)
+}
+
+// symptomExecStateFacts 报告会话里全部执行状态审计事实。
+func symptomExecStateFacts(rig *smokeRig, chat string) []event.Event {
+	var facts []event.Event
+	for _, fact := range rig.sessionFacts(chat) {
+		if fact.Type != event.TypeFeedback {
+			continue
+		}
+		if strings.HasPrefix(fact.Meta[event.MetaKeyEventSummary], "exec-state: ") {
+			facts = append(facts, fact)
+		}
+	}
+	return facts
+}
+
+// symptomAwaitExecStateFact 等到会话记录下该相位的唯一审计事实。
+func symptomAwaitExecStateFact(t *testing.T, rig *smokeRig, chat, resource string, phase tagentexec.StatePhase) event.Event {
+	t.Helper()
+	summary := "exec-state: " + string(phase)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
+		var matches []event.Event
+		for _, fact := range symptomExecStateFacts(rig, chat) {
+			if fact.Meta[event.MetaKeyEventSummary] == summary && fact.Meta[event.MetaPrefix+"resource"] == key.String() {
+				matches = append(matches, fact)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s 审计事实 = %d 条，want 一条（resource=%s）：%v\nrecent requests:\n%s",
+				phase, len(matches), resource, symptomExecStateFacts(rig, chat), rig.recentRequests(8))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// symptomAssertExecAuditFact 检查一条执行状态事实是无载荷审计记录：feedback 类型、
+// 无消息正文、无通知分类与任务号，资源与相位可查；exited 另带退出码。
+func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string, phase tagentexec.StatePhase) {
+	t.Helper()
+	if fact.Message.Content != "" {
+		t.Fatalf("%s 审计事实携带模型材料 %q，want 无载荷", phase, fact.Message.Content)
+	}
+	if fact.TaskID != "" {
+		t.Fatalf("%s 审计事实携带任务号 %q，want 无", phase, fact.TaskID)
+	}
+	if kind := fact.Meta[event.MetaKeyNoticeKind]; kind != "" {
+		t.Fatalf("%s 审计事实携带通知分类 %q，want 无", phase, kind)
+	}
+	if id := fact.Meta[event.MetaKeyTaskID]; id != "" {
+		t.Fatalf("%s 审计事实携带通知任务号 %q，want 无", phase, id)
+	}
+	key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
+	if got := fact.Meta[event.MetaPrefix+"resource"]; got != key.String() {
+		t.Fatalf("%s 审计事实 resource = %q, want %q", phase, got, key)
+	}
+	if got := fact.Meta[event.MetaPrefix+"phase"]; got != string(phase) {
+		t.Fatalf("%s 审计事实 phase = %q, want %q", phase, got, phase)
+	}
+	exit, held := fact.Meta[event.MetaPrefix+"exit_code"]
+	if phase == tagentexec.StateExited {
+		if !held || exit != "7" {
+			t.Fatalf("exited 审计事实 exit_code = %q (recorded %v)，want 7", exit, held)
+		}
+		return
+	}
+	if held {
+		t.Fatalf("%s 审计事实携带退出码 %q，want 无（无确认终止）", phase, exit)
+	}
 }
