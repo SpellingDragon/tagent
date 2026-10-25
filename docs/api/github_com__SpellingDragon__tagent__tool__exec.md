@@ -673,13 +673,22 @@ func (e *TmuxExecutor) Probe(ctx context.Context, key ResourceKey) (ProbeResult,
 
 func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceKey, error)
     Start creates the session the declaration's resource key names and runs
-    its command inside it, with the pane kept after the command exits. The call
-    answers once the new session has produced its first frame, or once the
-    bounded observation window passed without one. A key whose session already
-    runs is refused instead of opened a second time.
+    its command inside it, with the pane kept after the command exits. The
+    session opens on its own shell, the exit-retaining option is applied there,
+    and the pane is then respawned with the declared command: the command starts
+    only after the window is certain to keep its pane, so an exit status stays
+    observable even for a command that ends at once and even beside a busy
+    server. The option is read back before the command starts, so a window
+    that did not take it fails the start instead of losing the ending later.
+    The call answers once the new session has produced its first frame, or once
+    the bounded observation window passed without one. A key whose session
+    already runs is refused instead of opened a second time.
 
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error)
     Stop ends the session behind key and reports what was observed: a pane that
     already ended answers its recorded exit status, a live pane is killed and
     the stop is confirmed by the session leaving the list, and an exit status
     the stop could not observe is reported as -1 rather than as a clean exit.
+    A session list that does not name the key is read again before the ending
+    is confirmed, because a client refused by a busy server reads no sessions at
+    all, and the pane state beside its status is read in one message.

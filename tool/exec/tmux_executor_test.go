@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +69,106 @@ func TestTmuxExecutorRunsCommand(t *testing.T) {
 	}
 	if probe.State != ProbeDead {
 		t.Fatalf("probe after stop = %v, want %v", probe.State, ProbeDead)
+	}
+}
+
+// TestTmuxExecutorKeepsImmediateExitStatus pins the order a start applies its exit-retaining option in.
+// - a command that ends at once still leaves its pane behind, so the session is listed after the exit
+// - stop answers the recorded status instead of reporting an unobserved ending
+func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	executor, err := NewTmuxExecutor()
+	if err != nil {
+		t.Fatalf("executor construction = %v, want a tmux executor", err)
+	}
+	ctx := context.Background()
+	key := tmuxTestKey()
+	decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "exit 7"}, Resource: key}
+	if _, err := executor.Start(ctx, decl); err != nil {
+		t.Fatalf("start = %v", err)
+	}
+	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, err := executor.Probe(ctx, key)
+		if err != nil {
+			t.Fatalf("probe = %v", err)
+		}
+		if probe.State == ProbeDead {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the immediate exit was never observed (last state=%v)", probe.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	names, err := executor.sessionNames(ctx)
+	if err != nil {
+		t.Fatalf("list the sessions after the exit = %v", err)
+	}
+	if !containsName(names, key.Key) {
+		t.Fatalf("the session %s left the list beside its ended pane: the pane was not kept", key.Key)
+	}
+	evidence, err := executor.Stop(ctx, key)
+	if err != nil {
+		t.Fatalf("stop = %v", err)
+	}
+	if !evidence.Confirmed {
+		t.Fatalf("stop evidence = %+v, want a confirmed stop", evidence)
+	}
+	if evidence.ExitCode != 7 {
+		t.Fatalf("stop exit code = %d, want the recorded 7", evidence.ExitCode)
+	}
+}
+
+// TestTmuxSessionListRetriesBusyServer pins the re-read of a session list a busy server refused.
+// - the first list answers the verdict of a server that is not running
+// - the list is read again rather than read as empty, so the running session is still named
+func TestTmuxSessionListRetriesBusyServer(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	real, err := osexec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not available on this system")
+	}
+	ctx := context.Background()
+	key := tmuxTestKey()
+	if err := osexec.Command(real, "new-session", "-d", "-s", key.Key, "sleep", "30").Run(); err != nil {
+		t.Fatalf("open the probe session = %v", err)
+	}
+	t.Cleanup(func() { _ = osexec.Command(real, "kill-session", "-t", key.Key).Run() })
+
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "tmux")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"list-sessions\" ] && [ ! -e \"$TMUX_REFUSED_ONCE\" ]; then\n" +
+		"  : > \"$TMUX_REFUSED_ONCE\"\n" +
+		"  echo 'no server running on /tmp/tmux-1001/default' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"exec \"$TMUX_REAL_BINARY\" \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the tmux shim = %v", err)
+	}
+	refused := filepath.Join(dir, "refused")
+	t.Setenv("PATH", dir)
+	t.Setenv("TMUX_REFUSED_ONCE", refused)
+	t.Setenv("TMUX_REAL_BINARY", real)
+
+	executor := &TmuxExecutor{}
+	names, err := executor.sessionNames(ctx)
+	if err != nil {
+		t.Fatalf("list the sessions beside the refused read = %v", err)
+	}
+	if !containsName(names, key.Key) {
+		t.Fatalf("the session names = %v, want the running %s named despite the refused read", names, key.Key)
+	}
+	if _, err := os.Stat(refused); err != nil {
+		t.Fatalf("the shim never refused a read: %v", err)
 	}
 }
 

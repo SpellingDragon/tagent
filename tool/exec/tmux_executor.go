@@ -31,6 +31,15 @@ const (
 	tmuxCommandWindow = 5 * time.Second
 	// tmuxSessionMaxName is the longest session name one key may name.
 	tmuxSessionMaxName = 64
+	// tmuxServerAttempts and tmuxServerRetryGap bound the re-reads of a session
+	// list whose client reports no server: a busy server refuses a client
+	// transiently, and one refusal is no evidence that the sessions left.
+	tmuxServerAttempts = 5
+	tmuxServerRetryGap = 20 * time.Millisecond
+	// tmuxStopRecheckGap is the pause before a stop re-reads a session list that
+	// did not name the resource, so a live session is never killed on one
+	// transient read.
+	tmuxStopRecheckGap = 20 * time.Millisecond
 )
 
 var (
@@ -63,10 +72,16 @@ func newTmuxExecutor(probe func() bool) (*TmuxExecutor, error) {
 }
 
 // Start creates the session the declaration's resource key names and runs its
-// command inside it, with the pane kept after the command exits. The call answers
-// once the new session has produced its first frame, or once the bounded
-// observation window passed without one. A key whose session already runs is
-// refused instead of opened a second time.
+// command inside it, with the pane kept after the command exits. The session
+// opens on its own shell, the exit-retaining option is applied there, and the
+// pane is then respawned with the declared command: the command starts only
+// after the window is certain to keep its pane, so an exit status stays
+// observable even for a command that ends at once and even beside a busy
+// server. The option is read back before the command starts, so a window that
+// did not take it fails the start instead of losing the ending later. The call
+// answers once the new session has produced its first frame, or once the
+// bounded observation window passed without one. A key whose session already
+// runs is refused instead of opened a second time.
 func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceKey, error) {
 	name, err := sessionNameOf(decl.Resource)
 	if err != nil {
@@ -86,13 +101,33 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
 	if decl.Dir != "" {
 		args = append(args, "-c", decl.Dir)
 	}
-	args = append(args, commandLine(decl))
-	args = append(args, ";", "set-option", "-t", name, "remain-on-exit", "on")
 	if _, startErr := e.tmux(ctx, args...); startErr != nil {
 		created, probeErr := e.sessionExists(ctx, name)
 		if probeErr != nil || !created {
 			return ResourceKey{}, startErr
 		}
+	}
+	if _, err := e.tmux(ctx, "set-option", "-w", "-t", name, "remain-on-exit", "on"); err != nil {
+		_, _ = e.tmux(ctx, "kill-session", "-t", name)
+		return ResourceKey{}, err
+	}
+	kept, err := e.tmux(ctx, "show-options", "-w", "-v", "-t", name, "remain-on-exit")
+	if err != nil {
+		_, _ = e.tmux(ctx, "kill-session", "-t", name)
+		return ResourceKey{}, err
+	}
+	if setting := strings.TrimSpace(kept); setting != "on" {
+		_, _ = e.tmux(ctx, "kill-session", "-t", name)
+		return ResourceKey{}, fmt.Errorf("exec: the tmux window of %s kept remain-on-exit %q, want on", name, setting)
+	}
+	respawn := []string{"respawn-pane", "-k", "-t", name}
+	if decl.Dir != "" {
+		respawn = append(respawn, "-c", decl.Dir)
+	}
+	respawn = append(respawn, commandLine(decl))
+	if _, err := e.tmux(ctx, respawn...); err != nil {
+		_, _ = e.tmux(ctx, "kill-session", "-t", name)
+		return ResourceKey{}, err
 	}
 	e.awaitFirstFrame(ctx, decl.Resource)
 	return decl.Resource, nil
@@ -141,7 +176,10 @@ func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, er
 // Stop ends the session behind key and reports what was observed: a pane that
 // already ended answers its recorded exit status, a live pane is killed and the
 // stop is confirmed by the session leaving the list, and an exit status the
-// stop could not observe is reported as -1 rather than as a clean exit.
+// stop could not observe is reported as -1 rather than as a clean exit. A
+// session list that does not name the key is read again before the ending is
+// confirmed, because a client refused by a busy server reads no sessions at
+// all, and the pane state beside its status is read in one message.
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error) {
 	name, err := sessionNameOf(key)
 	if err != nil {
@@ -154,13 +192,25 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 		return evidence, err
 	}
 	if !containsName(names, name) {
-		evidence.Confirmed = true
-		return evidence, nil
+		if !sleepContext(ctx, tmuxStopRecheckGap) {
+			evidence.Confirmed = true
+			return evidence, nil
+		}
+		again, againErr := e.sessionNames(ctx)
+		if againErr != nil {
+			evidence.Reason = againErr.Error()
+			return evidence, againErr
+		}
+		if !containsName(again, name) {
+			evidence.Confirmed = true
+			return evidence, nil
+		}
 	}
-	paneDead, deadErr := e.tmux(ctx, "display-message", "-p", "-t", name, "#{pane_dead}")
-	if deadErr == nil && strings.TrimSpace(paneDead) == "1" {
-		if raw, statusErr := e.tmux(ctx, "display-message", "-p", "-t", name, "#{pane_dead_status}"); statusErr == nil {
-			if code, convErr := strconv.Atoi(strings.TrimSpace(raw)); convErr == nil {
+	paneDeath, deadErr := e.tmux(ctx, "display-message", "-p", "-t", name, "#{pane_dead} #{pane_dead_status}")
+	if deadErr == nil {
+		fields := strings.Fields(paneDeath)
+		if len(fields) > 0 && fields[0] == "1" && len(fields) > 1 {
+			if code, convErr := strconv.Atoi(fields[1]); convErr == nil {
 				evidence.ExitCode = code
 			}
 		}
@@ -217,23 +267,28 @@ func (e *TmuxExecutor) awaitFirstFrame(ctx context.Context, key ResourceKey) {
 }
 
 // sessionNames lists the session names tmux reports, with a server that is not
-// running read as an empty list.
+// running read as an empty list: a refusal is retried at the server cadence,
+// so a busy server's refusal is never read as an empty list.
 func (e *TmuxExecutor) sessionNames(ctx context.Context) ([]string, error) {
-	out, err := e.tmux(ctx, "list-sessions", "-F", "#{session_name}")
-	if err != nil {
-		if tmuxServerAbsent(err) {
+	for attempt := 1; ; attempt++ {
+		out, err := e.tmux(ctx, "list-sessions", "-F", "#{session_name}")
+		if err == nil {
+			lines := strings.Split(out, "\n")
+			names := make([]string, 0, len(lines))
+			for _, line := range lines {
+				if name := strings.TrimSpace(line); name != "" {
+					names = append(names, name)
+				}
+			}
+			return names, nil
+		}
+		if !tmuxServerAbsent(err) {
+			return nil, err
+		}
+		if attempt >= tmuxServerAttempts || !sleepContext(ctx, tmuxServerRetryGap) {
 			return nil, nil
 		}
-		return nil, err
 	}
-	lines := strings.Split(out, "\n")
-	names := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if name := strings.TrimSpace(line); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names, nil
 }
 
 // sessionExists reports whether one named session is present in the session list.
