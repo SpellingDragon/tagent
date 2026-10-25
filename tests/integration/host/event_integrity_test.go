@@ -2063,8 +2063,8 @@ func runUnknownResultRetained(t *testing.T) {
 	if !strings.Contains(result, "[send_denied]") || !strings.Contains(result, errDeliveryOutcomeUnknown.Error()) {
 		t.Fatalf("the caller read %q, want the named denial carrying the ambiguity %q; messages = %+v", result, errDeliveryOutcomeUnknown, requests[1].Messages)
 	}
-	if strings.Contains(result, "[send_ok]") {
-		t.Fatalf("the caller read %q as a success; an unknown result must not be reported as delivered", result)
+	if result == "ok" || !strings.HasPrefix(result, "[send_denied] ") {
+		t.Fatalf("the caller read %q, want the named denial alone; an unknown result must never read as the delivered ok", result)
 	}
 
 	actions := sender.actions()
@@ -2159,8 +2159,8 @@ func runExplicitRetryKeepsLink(t *testing.T) {
 	if !ok {
 		t.Fatalf("the answer decision carried no tool result for the retry call %q: %+v", retry, requests[2].Messages)
 	}
-	if !strings.Contains(confirmedText, "[send_ok]") {
-		t.Fatalf("the retry result read %q, want the named success of the delivered retry", confirmedText)
+	if confirmedText != "ok" {
+		t.Fatalf("the retry result read %q, want the bare ok the delivered retry is answered with", confirmedText)
 	}
 
 	actions := sender.actions()
@@ -2334,8 +2334,8 @@ func runUnknownResultNotAutoResent(t *testing.T) {
 	if got := deliveryBodyCount(sender.actions(), note); got != 1 {
 		t.Fatalf("the ambiguous action %q was sent %d times during the turn, want exactly 1", note, got)
 	}
-	if result, ok := deliveryToolResult(provider.servedRequests()[1], callID); !ok || strings.Contains(result, "[send_ok]") {
-		t.Fatalf("the caller read %q for the ambiguous action, want the denial only", result)
+	if result, ok := deliveryToolResult(provider.servedRequests()[1], callID); !ok || !strings.HasPrefix(result, "[send_denied] ") || result == "ok" {
+		t.Fatalf("the caller read %q for the ambiguous action, want the named denial and never the delivered ok", result)
 	}
 
 	time.Sleep(300 * time.Millisecond)

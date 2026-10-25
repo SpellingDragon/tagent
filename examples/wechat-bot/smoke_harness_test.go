@@ -338,7 +338,9 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 			return smokeAnswerBody("hold-ack " + marker)
 		case smokePairedResult(messages, "call-worker-"+marker):
 			return smokeAnswerBody("delegate ack " + marker)
-		case strings.Contains(end, "[send_ok]"):
+		case smokePairedResult(messages, "call-retry-"+marker):
+			return smokeAnswerBody("approved-done " + marker)
+		case smokeCredentialFrame(end):
 			return smokeAnswerBody("approved-done " + marker)
 		case strings.Contains(end, "call-worker"):
 			return smokeAnswerBody("delegate ack " + marker)
@@ -1012,8 +1014,9 @@ func smokeLastContent(messages []smokeModelMessage) string {
 }
 
 // smokeEndedWithTool 报告本次决策的最后一条消息是否已是工具交代：工具角色的
-// 结果消息，或循环折成用户角色的两种帧——以调用 id 开头的回执帧
-// （{call-... task-N true/false ...}）与工具结果帧（[send_ok] / [deliver_summary_ok]）。
+// 结果消息（send 成功回执就是裸 ok 的工具结果），或循环折成用户角色的两种帧——
+// send 成功回执凭据本身（裸 ok）与回执帧/工具结果帧（{call-... task-N true/false ...} /
+// [deliver_summary_ok]）。
 // 判"本轮是否已有交代"必须看最后一条消息的角色：帧本身就是用户角色，只看最后
 // 一条用户消息之后的尾巴会漏掉它。反思输入以 "[reflection]" 开头，所以帧前缀
 // 只认具体的结果标记，不能按 "[" 一刀切。
@@ -1027,7 +1030,7 @@ func smokeEndedWithTool(messages []smokeModelMessage) bool {
 	}
 	content := strings.TrimSpace(last.Content)
 	return strings.HasPrefix(content, "{") && strings.Contains(content, "call-") ||
-		strings.HasPrefix(content, "[send_") || strings.HasPrefix(content, "[deliver_summary_")
+		smokeCredentialFrame(content) || strings.HasPrefix(content, "[deliver_summary_")
 }
 
 // smokePairedResult 报告请求的最后一条消息是不是给定调用的工具结果：按角色与
@@ -1044,11 +1047,21 @@ func smokePairedResult(messages []smokeModelMessage, callID string) bool {
 func smokeFrame(content string) bool {
 	content = strings.TrimSpace(content)
 	return strings.HasPrefix(content, "{") && strings.Contains(content, "call-") ||
-		strings.HasPrefix(content, "[send_") || strings.HasPrefix(content, "[deliver_summary_")
+		smokeCredentialFrame(content) || strings.HasPrefix(content, "[deliver_summary_")
 }
 
+// smokeCredentialFrame 报告用户消息是不是 send 成功回执折成的帧：回执是凭据
+// 不是消息，正文里没有可识别的字样，判据只能是整条正文就是这份凭据本身。
+func smokeCredentialFrame(content string) bool {
+	return strings.TrimSpace(content) == smokeSendCredential
+}
+
+// smokeSendCredential 是 send 成功回执的正文：模型收到的只该是这份凭据，目标会话
+// 与送达字样都不进材料。
+const smokeSendCredential = "ok"
+
 // smokeMarkerIn 报告请求里最近一条非帧用户消息携带的冒烟标记：工具结果帧
-// （回执帧、[send_ok]）自身不带标记，标记在它之前那条用户消息里。
+// （回执帧、send 凭据、[deliver_summary_ok]）自身不带标记，标记在它之前那条用户消息里。
 func smokeMarkerIn(messages []smokeModelMessage) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]

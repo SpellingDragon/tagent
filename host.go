@@ -1753,7 +1753,9 @@ func (t *hostSendTool) Declaration() *trpctool.Declaration {
 
 // Call implements tool.CallableTool: every refusal and delivery failure is
 // answered as result text, and an error is reserved for a malformed argument
-// shape.
+// shape. A delivered body is answered with the bare ok: the receipt is the
+// credential that the delivery happened, not a report to repeat, so it names
+// no target session and carries no wording the model could speak to the user.
 func (t *hostSendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(jsonArgs, &probe); err != nil {
@@ -1783,7 +1785,7 @@ func (t *hostSendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if err := t.sender.Send(ctx, addr, args.Content); err != nil {
 		return t.denied(err.Error()), nil
 	}
-	return "[send_ok] delivered to " + string(addr.SessionID), nil
+	return "ok", nil
 }
 
 // denied renders one refusal as result text.
