@@ -122,7 +122,7 @@ func (t *Tool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
 		Name: ToolName,
 		Description: "delegate one sub-agent call as an asynchronous task and answer with its admission receipt: " +
-			"the receipt carries the task identity, and the progress and terminal of that task arrive as its notifications. " +
+			"the receipt is a bare ok; the terminal of that task arrives as a notification in a follow-up turn of this session. " +
 			"exactly one assembly source is given, and a call naming both is refused: " +
 			"agents_file names a markdown agents file whose --- frontmatter declares name/description/model/prompt/skills/tools/mcp and whose body is the prompt, " +
 			"while the explicit source declares prompt/model/skills/tools/mcp (and name/description) directly, " +

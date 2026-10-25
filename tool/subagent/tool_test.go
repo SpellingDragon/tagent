@@ -21,6 +21,7 @@ import (
 
 // TestSubagentToolDeclaration holds the tool contract the model reads and the refusals a call answers with:
 // - the description names the agents file source and every explicit parameter, as two mutually exclusive sources
+// - the description states the bare ok receipt and promises no task identity or progress delivery
 // - the input schema declares exactly the argument keys of both sources beside the request input and the structured handoff
 // - both sources at once, a failed assembly, an unreadable file, an undeclared argument and a refused delegation answer a named denial beside no task
 // - a declared handoff is admitted beside its request, while a handoff naming no intent or an undeclared key answers a named denial beside no task
@@ -45,6 +46,18 @@ func TestSubagentToolDeclaration(t *testing.T) {
 		for _, segment := range []string{"structured handoff", "intent", "acceptance constraints"} {
 			if !strings.Contains(declaration.Description, segment) {
 				t.Fatalf("description names no %q of the handoff: %q", segment, declaration.Description)
+			}
+		}
+	})
+
+	t.Run("the description promises no receipt payload", func(t *testing.T) {
+		description := tool.Declaration().Description
+		if !strings.Contains(description, "bare ok") {
+			t.Fatalf("description = %q, want it to state the bare ok receipt", description)
+		}
+		for _, promise := range []string{"task identity", "carries the task", "progress"} {
+			if strings.Contains(description, promise) {
+				t.Fatalf("description = %q, want no %q promise the bare ok does not keep", description, promise)
 			}
 		}
 	})
@@ -250,6 +263,36 @@ func TestCallSubagentSamplingOverride(t *testing.T) {
 			t.Fatalf("delegated request reasoning effort = %v, want no key beside a call naming none", *request.ReasoningEffort)
 		}
 	})
+}
+
+// TestTargetDeclarationPromisesTheBareReceipt pins the model face of one declared agent tool to the receipt an admission answers with:
+// - the description states the bare ok receipt
+// - it promises no task identity and no progress delivery
+// - it names the terminal notification as the follow-up material
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestTargetDeclarationPromisesTheBareReceipt(t *testing.T) {
+	target, err := NewTarget(TargetOptions{
+		Name:        "recall",
+		Description: "reads the memory this run holds",
+		Assembly:    &Assembly{Definition: Definition{Name: "recall", Model: "model-recall"}},
+		Delegation:  &stubDelegation{},
+		Bindings:    state.NewBindings(),
+	})
+	if err != nil {
+		t.Fatalf("construct the target tool: %v", err)
+	}
+	description := target.Declaration().Description
+	if !strings.Contains(description, "bare ok") {
+		t.Fatalf("description = %q, want it to state the bare ok receipt", description)
+	}
+	for _, promise := range []string{"task identity", "carries the task", "progress"} {
+		if strings.Contains(description, promise) {
+			t.Fatalf("description = %q, want no %q promise the bare ok does not keep", description, promise)
+		}
+	}
+	if !strings.Contains(description, "terminal") || !strings.Contains(description, "notification") {
+		t.Fatalf("description = %q, want it to name the terminal notification", description)
+	}
 }
 
 // newSamplingTool returns the tool over one delegation stand-in, the model

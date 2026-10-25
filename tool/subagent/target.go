@@ -134,8 +134,8 @@ func (t *Target) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
 		Name: t.name,
 		Description: t.purpose() + " " +
-			"the call admits one turn of the declared agent as an asynchronous task and answers with its admission receipt; " +
-			"progress and terminal arrive as the notifications of that task. " +
+			"the call admits one turn of the declared agent as an asynchronous task and answers with a bare ok; " +
+			"the terminal of that turn arrives as a notification in a follow-up turn of this session. " +
 			"the call may state a structured handoff beside the request and may hand over stored event references. " +
 			"every refusal answers " + deniedMarker + " beside no task.",
 		InputSchema: &trpctool.Schema{
