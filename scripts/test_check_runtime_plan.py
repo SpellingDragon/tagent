@@ -836,6 +836,19 @@ exit 0
 '''
 
 
+# The lint selftest step discovers test_check_runtime_*.py. A repository that has
+# none of them makes `unittest` exit 5 (`NO TESTS RAN`) on Python >= 3.11, so the
+# fixture carries one passing stub: the object under test is the plan gate, not
+# the selftest count.
+SELFTEST_STUB = '''import unittest
+
+
+class SelftestStub(unittest.TestCase):
+    def test_stub(self):
+        self.assertTrue(True)
+'''
+
+
 class LintObjectSelectionTest(unittest.TestCase):
     """lint.sh 的计划门必须检查活动 graph，而不是固定归档路径。"""
 
@@ -860,6 +873,8 @@ class LintObjectSelectionTest(unittest.TestCase):
             write(scripts / name, PY_STUB)
         for name in ("gen_godoc.sh", "test_race_check.sh", "test_check_package_layout.sh"):
             write(scripts / name, SH_STUB)
+        write(scripts / "test_check_runtime_stub.py", SELFTEST_STUB)
+        write(scripts / "test_check_doc_budget.py", SELFTEST_STUB)
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
