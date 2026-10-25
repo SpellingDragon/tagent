@@ -97,8 +97,8 @@ P-01 批准（01.3 含 progress 读路径）；P-02 批准（示例层罐头文�
 - `observeExecState` 重写：三态不 `fireNoticeTurn`、不写 notice-kind fact、`Message.Content` 为空；只 `CommitToSession` 落 `exec-state: <phase>` 的无载荷 feedback 审计事实（`meta_resource`/`meta_phase`，confirmed 另带 `meta_exit_code`），保留一条 `assemblyDebug`；拒绝提交只记 warning，不重试、不驱动回合。
 - `execStateText` 删除。全仓引用面：`grep -rn 'execStateText' --include='*.go' .` exit=1（无命中）；查询面/看板没有该符号消费者，故不存在“静默破坏查询面”。
 - `runtime/agent/loop.go` 两处注释改为当前事实：progress 判据是分类守卫，exec 不再是 producer；逻辑未改。
-- 反向改 `TestEventIntegrityExecStateEvents`（不删不 skip）：三态后 provider 请求数与 outbound 均不增；三态各一条无载荷审计事实；下一请求不含 `reports state`/`exec-state: ` 材料。子测试名与 `consumer_anchor` 保持冻结合同原名（`state_change_emits_followup_notice` / `next_turn_consumes_exec_state`），因为归档 `task-graph.json` 与 v2 合同双向互校；改名需同批改归档图，本轮不做，测试 doc 已明写名字与新语义不一致。
-- 新增 G4 `TestLocalSmokeSymptomExecStateSilent`：`rig.drive` 真实 boot 入站；正锚 `three_states_leave_no_turn`（三态各观察后 `requests=2`、`outbound=1` 不变），负锚 `state_still_recorded`（三条审计事实仍落盘、正文为空、无通知分类/任务号），消费者锚 `Host.Invoke → exec_run → observeExecState → CommitToSession`。
+- 反向改 `TestEventIntegrityExecStateEvents`（不删不 skip）：三态后 provider 请求数与 outbound 均不增；三态均有载荷为空的审计事实；下一请求不含 `reports state`/`exec-state: ` 材料。状态机可能把 stable 观察两次（stable→suspect→stable→exited），断言按相位覆盖而不按总条数钉死，避免把合法重复观察判成失败。子测试名与 `consumer_anchor` 保持冻结合同原名（`state_change_emits_followup_notice` / `next_turn_consumes_exec_state`），因为归档 `task-graph.json` 与 v2 合同双向互校；改名需同批改归档图，本轮不做，测试 doc 已明写名字与新语义不一致。
+- 新增 G4 `TestLocalSmokeSymptomExecStateSilent`：`rig.drive` 真实 boot 入站；正锚 `three_states_leave_no_turn`（三态各观察后 `requests=2`、`outbound=1` 不变），负锚 `state_still_recorded`（三态审计事实仍落盘、正文为空、无通知分类/任务号，允许重复观察），消费者锚 `Host.Invoke → exec_run → observeExecState → CommitToSession`。
 
 ### 契约与预算
 
@@ -110,8 +110,8 @@ P-01 批准（01.3 含 progress 读路径）；P-02 批准（示例层罐头文�
 
 ### 验证（原始退出码）
 
-- 集成：`go test ./tests/integration/execution/ -run '^TestEventIntegrityExecStateEvents$' -count=1 -race -json` → exit=0；6 子测试全 pass、0 fail。
-- G4：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomExecStateSilent$' -count=1 -race -json` → exit=0；`three_states_leave_no_turn` 与 `state_still_recorded` 均 pass。
+- 集成：`go test ./tests/integration/execution/ -run '^TestEventIntegrityExecStateEvents$' -count=1 -race -json` → exit=0；6 子测试全 pass、0 fail；`-count=5` → exit=0（5/5）。
+- G4：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomExecStateSilent$' -count=1 -race -json` → exit=0；`three_states_leave_no_turn` 与 `state_still_recorded` 均 pass；`-count=3` → exit=0（3/3）。
 - 四症状：`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -v` → exit=0；4 父测试 + 8 子测试全 PASS。
 - 包测：`go test ./runtime/agent/ ./tests/integration/host/ ./tests/integration/execution/ -count=1` → exit=0（三包 ok）。
 - 构建/静态：`go build ./...`、根/微信/cli-host 三模块 `go vet ./...` 全 exit=0。
