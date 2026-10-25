@@ -678,20 +678,25 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
     and the pane is then respawned with the declared command: the command starts
     only after the window is certain to keep its pane, so an exit status stays
     observable even for a command that ends at once and even beside a busy
-    server. The option is read back before the command starts, so a window that
-    did not take it fails the start instead of losing the ending later. The
-    command runs in a subshell whose status is re-raised after a drain window,
-    so a command that ends at once still leaves its output on the pane. The
-    call answers once the new session has produced its first frame, or once the
+    server. The option is read back before the command starts, so a window
+    that did not take it fails the start instead of losing the ending later.
+    The command runs in a subshell whose status is re-raised after a drain
+    window, so a command that ends at once still leaves its output on the pane,
+    and the status is also written to the session's exit record, so an ending
+    tmux did not keep still answers the status the command ended with. The call
+    answers once the new session has produced its first frame, or once the
     bounded observation window passed without one. A key whose session already
     runs is refused instead of opened a second time.
 
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error)
     Stop ends the session behind key and reports what was observed: a pane that
-    already ended answers its recorded exit status, a live pane is killed and
-    the stop is confirmed by the session leaving the list, and an exit status
-    the stop could not observe is reported as -1 rather than as a clean exit.
-    A session list that does not name the key is read again before the ending
-    is confirmed, because a client refused by a busy server reads no sessions
-    at all, and a server that left mid-read took every session with it; the pane
-    state beside its status is read in one message.
+    already ended answers its recorded exit status, a dead pane whose tmux kept
+    no status answers the status the session's own record kept, a live pane is
+    killed and the stop is confirmed by the session leaving the list, and an
+    exit status neither the pane nor its record carried is reported as -1 rather
+    than as a clean exit. A session list that does not name the key is read
+    again before the ending is confirmed, because a client refused by a busy
+    server reads no sessions at all, and a server that left mid-read took every
+    session with it; the pane state beside its status is read in one message,
+    and the record is removed as it is read, so no status is kept beside a
+    session that left.

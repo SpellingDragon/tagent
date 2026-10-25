@@ -76,6 +76,7 @@ func TestTmuxExecutorRunsCommand(t *testing.T) {
 // TestTmuxExecutorKeepsImmediateExitStatus pins the order a start applies its exit-retaining option in.
 // - a command that ends at once still leaves its pane and its output behind, so the session is listed and the frame carries the marker
 // - stop answers the recorded status instead of reporting an unobserved ending
+// - the record beside the session is removed by the stop that read the kept status
 func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	if !IsTmuxAvailable() {
 		t.Skip("tmux is not available on this system")
@@ -130,6 +131,101 @@ func TestTmuxExecutorKeepsImmediateExitStatus(t *testing.T) {
 	}
 	if evidence.ExitCode != 7 {
 		t.Fatalf("stop exit code = %d, want the recorded 7", evidence.ExitCode)
+	}
+	record, err := exitRecordPath(key.Key)
+	if err != nil {
+		t.Fatalf("name the exit record = %v", err)
+	}
+	if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the record after a stop that read the kept status = %v, want it removed", err)
+	}
+}
+
+// TestTmuxStopReadsTheStatusTheRecordKept pins the status a tmux did not keep.
+// - a command that exits 7 runs in a kept pane, and the pane is observed dead
+// - the pane-death read answers a dead pane with no status, as a tmux that lost the ending does
+// - the stop answers the recorded 7 and removes the record it read
+func TestTmuxStopReadsTheStatusTheRecordKept(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	isolateTmuxServer(t)
+	executor, err := NewTmuxExecutor()
+	if err != nil {
+		t.Fatalf("executor construction = %v, want a tmux executor", err)
+	}
+	ctx := context.Background()
+	key := tmuxTestKey()
+	decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "echo record-marker; exit 7"}, Resource: key}
+	if _, err := executor.Start(ctx, decl); err != nil {
+		t.Fatalf("start = %v", err)
+	}
+	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
+	waitForPaneDead(t, executor, key)
+	record, err := exitRecordPath(key.Key)
+	if err != nil {
+		t.Fatalf("name the exit record = %v", err)
+	}
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("the record beside the session = %v, want the status the wrapper wrote", err)
+	}
+	hideStatusBesideThePane(t)
+	evidence, err := executor.Stop(ctx, key)
+	if err != nil {
+		t.Fatalf("stop beside a pane that kept no status = %v", err)
+	}
+	if !evidence.Confirmed {
+		t.Fatalf("stop evidence = %+v, want a confirmed stop", evidence)
+	}
+	if evidence.ExitCode != 7 {
+		t.Fatalf("stop exit code = %d, want the recorded 7", evidence.ExitCode)
+	}
+	if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the record after the stop = %v, want it removed as it was read", err)
+	}
+}
+
+// TestTmuxStopKeepsTheUnobservedStatusBesideNoRecord pins the status neither side kept.
+// - a command that exits 7 runs in a kept pane, and the pane is observed dead
+// - the pane-death read keeps no status and the record beside the session is gone
+// - the stop answers the unobserved -1 instead of the 7 this session ended with
+func TestTmuxStopKeepsTheUnobservedStatusBesideNoRecord(t *testing.T) {
+	if !IsTmuxAvailable() {
+		t.Skip("tmux is not available on this system")
+	}
+	isolateTmuxServer(t)
+	executor, err := NewTmuxExecutor()
+	if err != nil {
+		t.Fatalf("executor construction = %v, want a tmux executor", err)
+	}
+	ctx := context.Background()
+	key := tmuxTestKey()
+	decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "echo record-marker; exit 7"}, Resource: key}
+	if _, err := executor.Start(ctx, decl); err != nil {
+		t.Fatalf("start = %v", err)
+	}
+	t.Cleanup(func() { _, _ = executor.Stop(context.Background(), key) })
+	waitForPaneDead(t, executor, key)
+	record, err := exitRecordPath(key.Key)
+	if err != nil {
+		t.Fatalf("name the exit record = %v", err)
+	}
+	if _, err := os.Stat(record); err != nil {
+		t.Fatalf("the record beside the session = %v, want the status the wrapper wrote", err)
+	}
+	if err := os.Remove(record); err != nil {
+		t.Fatalf("remove the record beside the session = %v", err)
+	}
+	hideStatusBesideThePane(t)
+	evidence, err := executor.Stop(ctx, key)
+	if err != nil {
+		t.Fatalf("stop beside a pane and a record that both kept no status = %v", err)
+	}
+	if !evidence.Confirmed {
+		t.Fatalf("stop evidence = %+v, want a confirmed stop", evidence)
+	}
+	if evidence.ExitCode != -1 {
+		t.Fatalf("stop exit code = %d, want the unobserved -1", evidence.ExitCode)
 	}
 }
 
@@ -353,6 +449,50 @@ func isolateTmuxServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	t.Setenv("TMUX_TMPDIR", dir)
+}
+
+// waitForPaneDead observes one execution until its pane is reported dead, and
+// fails the test when the ending is not observed inside the wait.
+func waitForPaneDead(t *testing.T, executor *TmuxExecutor, key ResourceKey) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		probe, err := executor.Probe(context.Background(), key)
+		if err != nil {
+			t.Fatalf("probe = %v", err)
+		}
+		if probe.State == ProbeDead {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the ending was never observed (last state=%v)", probe.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// hideStatusBesideThePane points this test at a tmux whose pane-death read keeps
+// no status: a dead pane keeps answering as dead with the status unread, as a
+// tmux that lost the ending does, and every other call reaches the real binary.
+func hideStatusBesideThePane(t *testing.T) {
+	t.Helper()
+	real, err := osexec.LookPath("tmux")
+	if err != nil {
+		t.Skip("tmux is not available on this system")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "tmux")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"display-message\" ] && [ \"$5\" = \"#{pane_dead} #{pane_dead_status}\" ]; then\n" +
+		"  echo 1\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exec \"$TMUX_REAL_BINARY\" \"$@\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the tmux shim = %v", err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("TMUX_REAL_BINARY", real)
 }
 
 // tmuxTestKey returns a tmux resource key whose session name belongs to this

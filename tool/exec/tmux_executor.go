@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +46,9 @@ const (
 	// exits, so the pane's screen records the output of a command that ends at
 	// once even beside concurrent clients.
 	tmuxDrainWindow = 100 * time.Millisecond
+	// tmuxExitRecordDir names the directory below the user's cache directory
+	// that keeps one session's recorded exit status.
+	tmuxExitRecordDir = "exec-exit"
 )
 
 var (
@@ -84,10 +89,12 @@ func newTmuxExecutor(probe func() bool) (*TmuxExecutor, error) {
 // server. The option is read back before the command starts, so a window that
 // did not take it fails the start instead of losing the ending later. The
 // command runs in a subshell whose status is re-raised after a drain window, so
-// a command that ends at once still leaves its output on the pane. The call
-// answers once the new session has produced its first frame, or once the
-// bounded observation window passed without one. A key whose session already
-// runs is refused instead of opened a second time.
+// a command that ends at once still leaves its output on the pane, and the status
+// is also written to the session's exit record, so an ending tmux did not keep
+// still answers the status the command ended with. The call answers once the new
+// session has produced its first frame, or once the bounded observation window
+// passed without one. A key whose session already runs is refused instead of
+// opened a second time.
 func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceKey, error) {
 	name, err := sessionNameOf(decl.Resource)
 	if err != nil {
@@ -103,6 +110,7 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
 	if exists {
 		return ResourceKey{}, fmt.Errorf("%w: %s", errSessionExists, name)
 	}
+	record := newExitRecord(name)
 	args := []string{"new-session", "-d", "-s", name}
 	if decl.Dir != "" {
 		args = append(args, "-c", decl.Dir)
@@ -130,7 +138,7 @@ func (e *TmuxExecutor) Start(ctx context.Context, decl ExecutionDecl) (ResourceK
 	if decl.Dir != "" {
 		respawn = append(respawn, "-c", decl.Dir)
 	}
-	respawn = append(respawn, commandLineWithDrain(decl))
+	respawn = append(respawn, commandLineWithDrain(decl, record))
 	if _, err := e.tmux(ctx, respawn...); err != nil {
 		_, _ = e.tmux(ctx, "kill-session", "-t", name)
 		return ResourceKey{}, err
@@ -180,13 +188,15 @@ func (e *TmuxExecutor) Capture(ctx context.Context, key ResourceKey) ([]byte, er
 }
 
 // Stop ends the session behind key and reports what was observed: a pane that
-// already ended answers its recorded exit status, a live pane is killed and the
-// stop is confirmed by the session leaving the list, and an exit status the
-// stop could not observe is reported as -1 rather than as a clean exit. A
-// session list that does not name the key is read again before the ending is
-// confirmed, because a client refused by a busy server reads no sessions at
-// all, and a server that left mid-read took every session with it; the pane
-// state beside its status is read in one message.
+// already ended answers its recorded exit status, a dead pane whose tmux kept no
+// status answers the status the session's own record kept, a live pane is killed
+// and the stop is confirmed by the session leaving the list, and an exit status
+// neither the pane nor its record carried is reported as -1 rather than as a
+// clean exit. A session list that does not name the key is read again before the
+// ending is confirmed, because a client refused by a busy server reads no
+// sessions at all, and a server that left mid-read took every session with it;
+// the pane state beside its status is read in one message, and the record is
+// removed as it is read, so no status is kept beside a session that left.
 func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence, error) {
 	name, err := sessionNameOf(key)
 	if err != nil {
@@ -200,6 +210,7 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 	}
 	if !containsName(names, name) {
 		if !sleepContext(ctx, tmuxStopRecheckGap) {
+			clearExitRecord(name)
 			evidence.Confirmed = true
 			return evidence, nil
 		}
@@ -209,6 +220,7 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 			return evidence, againErr
 		}
 		if !containsName(again, name) {
+			clearExitRecord(name)
 			evidence.Confirmed = true
 			return evidence, nil
 		}
@@ -216,9 +228,16 @@ func (e *TmuxExecutor) Stop(ctx context.Context, key ResourceKey) (StopEvidence,
 	paneDeath, deadErr := e.tmux(ctx, "display-message", "-p", "-t", name, "#{pane_dead} #{pane_dead_status}")
 	if deadErr == nil {
 		fields := strings.Fields(paneDeath)
-		if len(fields) > 0 && fields[0] == "1" && len(fields) > 1 {
-			if code, convErr := strconv.Atoi(fields[1]); convErr == nil {
+		if len(fields) > 0 && fields[0] == "1" {
+			recorded := takeRecordedExitStatus(name)
+			status := ""
+			if len(fields) > 1 {
+				status = fields[1]
+			}
+			if code, convErr := strconv.Atoi(status); convErr == nil {
 				evidence.ExitCode = code
+			} else {
+				evidence.ExitCode = recorded
 			}
 		}
 	}
@@ -376,10 +395,77 @@ func validSessionName(name string) bool {
 
 // commandLineWithDrain renders the declared command as a subshell whose status
 // is re-raised after the drain window: a command that ends at once still leaves
-// its output on the pane before the pane is reported dead.
-func commandLineWithDrain(decl ExecutionDecl) string {
-	return fmt.Sprintf("( %s ); code=$?; sleep %s; exit $code",
-		commandLine(decl), strconv.FormatFloat(tmuxDrainWindow.Seconds(), 'f', -1, 64))
+// its output on the pane before the pane is reported dead, and a pane whose tmux
+// lost the ending still leaves the status in the record beside the session.
+func commandLineWithDrain(decl ExecutionDecl, record string) string {
+	line := fmt.Sprintf("( %s ); code=$?; ", commandLine(decl))
+	if record != "" {
+		line += fmt.Sprintf("printf '%%d' \"$code\" > %s 2>/dev/null; ", shellQuote(record))
+	}
+	return line + fmt.Sprintf("sleep %s; exit $code",
+		strconv.FormatFloat(tmuxDrainWindow.Seconds(), 'f', -1, 64))
+}
+
+// newExitRecord prepares the exit record of the named session: the record an
+// earlier session under the same key left behind is cleared, so no stop reads a
+// status this session did not write, and a record that cannot be prepared answers
+// no path, so the session runs beside the status tmux keeps alone.
+func newExitRecord(name string) string {
+	path, err := exitRecordPath(name)
+	if err != nil {
+		return ""
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return ""
+	}
+	_ = os.Remove(path)
+	return path
+}
+
+// exitRecordPath names the file one session's drain wrapper records its command's
+// exit status in: the path is derived from the session name alone, so a stop in
+// another process still finds the record of the session it stops, and the base is
+// the user's own cache directory, so no other user writes a status this session
+// reads.
+func exitRecordPath(name string) (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "tagent", tmuxExitRecordDir, name), nil
+}
+
+// takeRecordedExitStatus reads and removes the exit status the drain wrapper of
+// the named session recorded: a tmux that lost the pane's ending keeps a dead pane
+// with no pane_dead_status, and the wrapper's record is the status that ending
+// still carries. The record is removed whatever it holds, so a stop leaves no
+// status beside a session that ended, and a record that is absent or unreadable
+// answers the unobserved -1 rather than a status the session did not end with.
+func takeRecordedExitStatus(name string) int {
+	path, err := exitRecordPath(name)
+	if err != nil {
+		return -1
+	}
+	raw, readErr := os.ReadFile(path)
+	_ = os.Remove(path)
+	if readErr != nil {
+		return -1
+	}
+	code, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if convErr != nil {
+		return -1
+	}
+	return code
+}
+
+// clearExitRecord removes the exit record of the named session without reading
+// it: a session that left needs no status kept beside it.
+func clearExitRecord(name string) {
+	path, err := exitRecordPath(name)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // commandLine renders one declaration as the shell command line tmux runs: the
