@@ -64,6 +64,10 @@ import runtime_checklib as lib
 DOC_SUFFIXES = (".md", ".markdown")
 # 生成物不进预算：体量与包数耦合，新鲜度由生成器自己的 --check 负责。
 GENERATED_DOC_PREFIXES = ("docs/api/",)
+# 运行时提示资源不进预算：examples 部署的 resources/prompts/ 是 description_file
+# 热载的运行时资产（工具描述/子代理提示），随部署配置演进，不是面向人的文档面。
+RUNTIME_PROMPT_PREFIXES = ("examples/wechat-bot/resources/prompts/",
+                           "examples/cli-host/resources/prompts/")
 # 过程工件不进预算：变更计划/归档件是 openspec change 的过程记录，不是长期文档面。
 PROCESS_DOC_PREFIXES = ("openspec/changes/",)
 DEFAULT_BASELINE = os.path.join("scripts", "doc_budget.json")
@@ -108,6 +112,7 @@ def git_doc_paths(root):
     return sorted({name for name in names
                    if name and name.lower().endswith(DOC_SUFFIXES)
                    and not name.startswith(GENERATED_DOC_PREFIXES)
+                   and not name.startswith(RUNTIME_PROMPT_PREFIXES)
                    and not name.startswith(PROCESS_DOC_PREFIXES)})
 
 

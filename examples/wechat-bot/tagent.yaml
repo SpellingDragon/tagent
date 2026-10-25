@@ -84,7 +84,7 @@ agents:
     # 检出库不带它时,宿主按 skip-missing 契约跳过一个 info 日志继续装配;
     # 部署方把 USER.md 放进 prompt_dir 即被加载。
     system_prompt:
-      files: [AGENTS.md, SOUL.md, USER.md, TOOLS.md]
+      files: [AGENTS.md, SOUL.md, USER.md]
     # 主动送达面:声明即授权(不声明的 agent 看不见 send);发送通路与会话解析复用宿主唯一实现。
     # 委派面:knowledge/recall/plan 声明为 agent 引用——模型看到名为 knowledge/recall/plan 的工具,
     # 工具面是被委派 agent 自己的 tools[],描述从 description_file 热载。
@@ -93,6 +93,7 @@ agents:
       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
       - { kind: agent, agent: recall, event_params: [event_keys] }
       - { kind: agent, agent: plan, description_file: plan_tool_desc.md }
+      - { kind: agent, agent: action, description_file: action_tool_desc.md }
     # 模型窗口:声明即注册会话投影——历史按窗口余量呈现,三龄段折叠随体积默认触发;
     # compress_threshold(缺省0.8)/keep_recent_tasks(缺省2)不写即走默认。
     max_tokens: 128000
@@ -145,6 +146,7 @@ agents:
       - { kind: tool, id: skill_load }
       - { kind: tool, id: read_file }
       - { kind: tool, id: mcp_call }
+      - { kind: tool, id: mcp_discover }
     # 待接线:memory / max_tokens / compress_threshold / memory_query
 
   # ---- Recall:记忆检索子 Agent ----
