@@ -1693,6 +1693,13 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	if !strings.Contains(committed.Message.Content, smokeIntegrityFoldTail) {
 		t.Fatalf("the committed original lost its tail beside the fold (fact %s)", original.Key)
 	}
+	synthetics = smokeIntegrityFoldBoundary(t, rig, chat)
+	boundaryKeys := make([]string, 0, len(synthetics))
+	for _, entry := range synthetics {
+		boundaryKeys = append(boundaryKeys, string(entry.Key))
+	}
+	t.Logf("[integrity-fold-boundary] %s held %d fold product(s) at the restore boundary: %v",
+		chat, len(synthetics), boundaryKeys)
 	host.close(t)
 	rig.reboot()
 
@@ -1755,6 +1762,22 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	smokeIntegrityAssertReflectQuiet(t, provider, settled, time.Second)
 	t.Logf("[integrity-fold-negative] the rebuilt projection minted %d product(s) and a second fold consumed nothing; the restart restored the %d fold product(s) the chain held %v with no judgment of its own and the original %s stayed readable across it",
 		len(first.Products), len(restored), afterKeys, original.Key)
+}
+
+// smokeIntegrityFoldBoundary 报告活进程在重启边界持有的折叠产物，作为重启恢复键集
+// 的比较基准。在线折叠在每次提交后重新审视投影，反思落定之前的读取可能落后于进程
+// 随后铸造的产物；重启必须恢复进程在关闭前持有的键集，边界读取因此在关闭前取。
+func smokeIntegrityFoldBoundary(t *testing.T, rig *smokeRig, chat string) []replay.ProjectionEntry {
+	t.Helper()
+	entries, carried := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
+	if !carried {
+		t.Fatalf("session %s registered no projection at the restore boundary", chat)
+	}
+	synthetics := syntheticEntries(entries)
+	if len(synthetics) == 0 {
+		t.Fatalf("the fold minted no synthetic entry on %s at the restore boundary", chat)
+	}
+	return synthetics
 }
 
 // smokeIntegrityRebuildProjection 从宿主真实写下的会话事实链重建投影：压缩请求
