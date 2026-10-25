@@ -725,18 +725,19 @@ func settleNoticeText(notice task.Notice) string {
 	return text
 }
 
-// observeExecState hands one lifecycle event of an execution resource to the
-// notification chain: an event whose acquiring call named a complete range
-// drives one unattended follow-up turn at that address through the same
-// fireNoticeTurn entry a terminal settle uses, so the next decision of the range
-// reads the state as a notification instead of polling the ledger. Stable,
-// suspect and exited observations are consumed this way; a release or a
-// retention stays on the explicit answer of the call that released or retained
-// the resource, so one action never produces two consumption paths.
+// observeExecState records one lifecycle event of an execution resource as an
+// audit fact and nothing else: stable, suspect and exited observations are
+// evidence a reader can query, never material a model reads and never a reason
+// to drive a turn. The acquiring call answered already, so an observation beside
+// it must not wake the model, and a release or retention stays on the explicit
+// answer of the call that released or retained the resource.
 //
-// The observer is a bypass of the manager: it is called outside the manager's
-// lock, it drops every event once the host closed, and it never changes whether
-// the resource stays held.
+// The fact follows noteFailureNotice: a feedback fact owned by the address, no
+// message payload and no notice keys, so consumers that drive a turn from a kind
+// and a task id never see it; the observation stays readable in the resource,
+// phase and exit-code metadata, a refused commit is a warning beside it, and the
+// observer bypasses the manager (outside its lock, silent after close, never
+// changing whether the resource stays held).
 func (h *Host) observeExecState(evt tagentexec.StateEvent) {
 	if h == nil || h.run == nil {
 		return
@@ -756,48 +757,28 @@ func (h *Host) observeExecState(evt tagentexec.StateEvent) {
 	}
 	h.execWG.Add(1)
 	h.mu.Unlock()
-	material := execStateText(evt)
 	go func() {
 		defer h.execWG.Done()
 		ctx, cancel := context.WithTimeout(h.ctx, hostShutdownGrace)
 		defer cancel()
-		fact := event.Event{
-			Type: event.TypeFeedback,
-			Meta: map[string]string{
-				event.MetaKeyTriggerSource: "task",
-				event.MetaKeyEventSummary:  string(task.NoticeProgress),
-				event.MetaKeyNoticeKind:    string(task.NoticeProgress),
-				event.MetaKeyTaskID:        string(evt.Owner.TaskID),
-			},
-			Message: model.Message{Role: model.RoleUser, Content: material},
-			TaskID:  evt.Owner.TaskID,
+		meta := map[string]string{
+			event.MetaKeyTriggerSource:    "host",
+			event.MetaKeyEventSummary:     "exec-state: " + string(evt.Phase),
+			event.MetaPrefix + "resource": evt.Resource.String(),
+			event.MetaPrefix + "phase":    string(evt.Phase),
 		}
-		if err := h.fireNoticeTurn(ctx, evt.Owner.Address, fact); err != nil && !errors.Is(err, ErrHostClosed) {
-			assemblyWarn("tagent: the execution state turn of %s reported: %v", evt.Resource, err)
+		if evt.Confirmed {
+			meta[event.MetaPrefix+"exit_code"] = strconv.Itoa(evt.ExitCode)
 		}
+		if _, err := h.run.CommitToSession(ctx, evt.Owner.Address, event.Event{
+			Type:      event.TypeFeedback,
+			Timestamp: time.Now(),
+			Meta:      meta,
+		}); err != nil && !errors.Is(err, ErrHostClosed) {
+			assemblyWarn("tagent: the execution state of %s left no audit fact: %v", evt.Resource, err)
+		}
+		assemblyDebug("tagent: execution resource %s observed %s (audit only, no turn)", evt.Resource, evt.Phase)
 	}()
-}
-
-// execStateText renders the input material one execution lifecycle event reads
-// as: the resource, the observed phase and the evidence behind it, as a user
-// message of the follow-up range. The text reports the observation alone, so a
-// quiet frame is never rendered as a success and an unobserved ending is never
-// rendered as one.
-func execStateText(evt tagentexec.StateEvent) string {
-	text := fmt.Sprintf("tagent: execution resource %s reports state %s", evt.Resource, evt.Phase)
-	switch evt.Phase {
-	case tagentexec.StateExited:
-		text += fmt.Sprintf(": exit code %d", evt.ExitCode)
-	case tagentexec.StateRetained:
-		if detail := strings.TrimSpace(evt.Detail); detail != "" {
-			text += ": the resource stays held: " + detail
-		}
-	default:
-		if detail := strings.TrimSpace(evt.Detail); detail != "" {
-			text += ": " + detail
-		}
-	}
-	return text
 }
 
 // Close stops the endpoints and the reflection driver, drains the run and

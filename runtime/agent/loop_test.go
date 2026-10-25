@@ -999,7 +999,7 @@ func TestQuietProgressNotice(t *testing.T) {
 			t.Fatalf("model requests = %d, want the one decision of the range", len(requests))
 		}
 		if material := progressNoteOf(observation).Content; !invariantCarries(requests[0], material) {
-			t.Fatalf("first request messages = %+v, want the material host.observeExecState commits under the progress category with no round, which is execution-resource state and not pipeline progress", requests[0])
+			t.Fatalf("first request messages = %+v, want the material a zero-round progress fact carries, which is not a pipeline round report", requests[0])
 		}
 	})
 

@@ -1172,10 +1172,9 @@ func (in *intake) deliver(taskID event.TaskID, item delivered) {
 // turn speaks from, so the drive reads it beside the transcript. A progress
 // report of the pipeline's own rounds is never material a decision speaks from:
 // the report is a fact of the chain the audit and the projection read, so this
-// read skips it. The progress category alone does not name that report — an
-// execution-resource observation commits its unattended material under the same
-// category, so it never fires a settle — hence the skip keys on the round the
-// notice carries rather than on the category (see pipelineProgress).
+// read skips it. No producer commits progress material today, so the skip is a
+// category guard for the shape a future producer would use; it keys on the round
+// the notice carries rather than on the category (see pipelineProgress).
 // A notification is a fact of the chain, so a read beside a chain is a
 // projection increment from the ended-material boundary of the session; every
 // read re-resolves that boundary from the fact identity the chain records
@@ -1253,13 +1252,13 @@ func noticeKindOf(key event.EventID, prefix event.EventID) task.NoticeKind {
 // task pipeline's own rounds: the category says so and the notice names the
 // execution round it reports in.
 //
-// The round test is a category-reuse patch, not progress semantics: an
-// execution-resource observation commits its material under the same category
-// with no round (host.observeExecState) and must reach the next request, while
-// no producer emits pipeline progress today, so the Round>0 branch is exercised
-// by tests only. A malformed round keeps the material. The zero-round shape is
-// pinned in TestQuietProgressNotice's zero_round_progress_is_material case;
-// change this criterion only beside it.
+// The round test is a category guard, not progress semantics: no producer emits
+// pipeline progress, so the Round>0 branch is exercised by tests only, while a
+// zero-round fact keeps the material. An execution-resource observation is not a
+// producer here: host.observeExecState records an audit fact with no notice keys,
+// so the progress category carries no execution state. A malformed round keeps
+// the material. The zero-round shape is pinned in TestQuietProgressNotice's
+// zero_round_progress_is_material case; change this criterion only beside it.
 func pipelineProgress(key event.EventID, prefix event.EventID) bool {
 	if noticeKindOf(key, prefix) != task.NoticeProgress {
 		return false
