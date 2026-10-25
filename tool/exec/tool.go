@@ -110,6 +110,36 @@ type releaseArgs struct {
 	Resource string `json:"resource"`
 }
 
+const (
+	// sessionNameCharset is the character set of a session name, spelled as the
+	// resource pattern carries it.
+	sessionNameCharset = "[A-Za-z0-9_-]"
+	// sessionNameExample is a session name validSessionName accepts, shown to the
+	// model as the legal form.
+	sessionNameExample = "wx-fetch"
+)
+
+// kindSchema returns the declared shape of the kind parameter: the one family
+// the host serves, named by its only legal value.
+func kindSchema() *trpctool.Schema {
+	return &trpctool.Schema{
+		Type:        "string",
+		Enum:        []any{KindTmux},
+		Description: fmt.Sprintf(`the execution resource family: %q is the only family this tool serves; leave it empty to select %s, and any other family is refused by name`, KindTmux, KindTmux),
+	}
+}
+
+// resourceSchema returns the declared shape of the resource parameter: a session
+// name of that one family, bounded, drawn from its character set and exemplified.
+func resourceSchema() *trpctool.Schema {
+	return &trpctool.Schema{
+		Type:    "string",
+		Pattern: fmt.Sprintf(`^%s{1,%d}$`, sessionNameCharset, tmuxSessionMaxName),
+		Description: fmt.Sprintf("the %s session name of the execution resource — 1-%d characters from %s (letters, digits, hyphens and underscores), for example %s; it is a session name, never a path and never a <kind>:<key> key",
+			KindTmux, tmuxSessionMaxName, sessionNameCharset, sessionNameExample),
+	}
+}
+
 // Declaration returns the fixed declaration of the run tool.
 func (t *RunTool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
@@ -121,8 +151,8 @@ func (t *RunTool) Declaration() *trpctool.Declaration {
 				"command":  {Type: "string", Description: "the program to run"},
 				"args":     {Type: "array", Items: &trpctool.Schema{Type: "string"}, Description: "the arguments handed to the command"},
 				"dir":      {Type: "string", Description: "the working directory of the command"},
-				"kind":     {Type: "string", Description: "the resource family the key identifies within"},
-				"resource": {Type: "string", Description: "the canonical key of the execution resource"},
+				"kind":     kindSchema(),
+				"resource": resourceSchema(),
 				"ttl":      {Type: "string", Description: "the lease of the run as a duration string"},
 				"monitor":  {Type: "object", Description: "the monitor rhythm keys of this run"},
 			},
@@ -139,8 +169,8 @@ func (t *ReleaseTool) Declaration() *trpctool.Declaration {
 		InputSchema: &trpctool.Schema{
 			Type: "object",
 			Properties: map[string]*trpctool.Schema{
-				"kind":     {Type: "string", Description: "the resource family the key identifies within"},
-				"resource": {Type: "string", Description: "the canonical key of the execution resource"},
+				"kind":     kindSchema(),
+				"resource": resourceSchema(),
 			},
 			Required: []string{"resource"},
 		},

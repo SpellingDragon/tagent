@@ -3,9 +3,14 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // TestLeaseLifecycleKeepsOneHolderFromAcquireToSweep pins the lease state machine: one holder per key, renewal inside the window, expiry decided only by a sweep.
@@ -616,3 +621,211 @@ func testExecutionDecl(key string) ExecutionDecl {
 }
 
 var _ Executor = (*scriptedExecutor)(nil)
+
+// TestExecRunDeclarationPinsTheResourceShape pins the run declaration's kind and resource to their one legal shape:
+// - kind names the only family this host serves and says an empty kind selects it
+// - resource names the session name format with its bound, character set and a legal example
+// - the resource pattern and validSessionName agree on every sample name
+// - no abstract family or key phrase stands where the legal values belong
+// - no description offers a prefixed key such as tmux:local
+// - the run declaration the production preset hands the model carries the same entries
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
+func TestExecRunDeclarationPinsTheResourceShape(t *testing.T) {
+	declaration := NewRunTool(nil).Declaration()
+
+	t.Run("names_the_only_family", func(t *testing.T) {
+		assertExecKindNamesTheOnlyFamily(t, declaration)
+	})
+	t.Run("names_the_session_name_format", func(t *testing.T) {
+		assertExecResourceNamesTheSessionNameFormat(t, declaration)
+	})
+	t.Run("pattern_agrees_with_the_validator", func(t *testing.T) {
+		assertExecResourcePatternAgreesWithValidator(t, declaration)
+	})
+	t.Run("abstract_phrase_gone", func(t *testing.T) {
+		assertExecDescriptionsCarryNoAbstractPhrase(t, declaration)
+	})
+	t.Run("prefixed_key_hint_absent", func(t *testing.T) {
+		assertExecDescriptionsOfferNoPrefixedKey(t, declaration)
+	})
+	t.Run("production_preset_carries_the_same_text", func(t *testing.T) {
+		manager, _, _ := newLeaseTestManager(t)
+		assertExecResourceShapePinned(t, execPresetDeclaration(t, manager, 0, "exec_run"))
+	})
+}
+
+// TestExecReleaseDeclarationPinsTheResourceShape pins the release declaration to the shape the run declaration carries:
+// - kind names the only family this host serves and says an empty kind selects it
+// - resource names the session name format with its bound, character set and a legal example
+// - the resource pattern and validSessionName agree on every sample name
+// - no abstract family or key phrase stands where the legal values belong
+// - no description offers a prefixed key such as tmux:local
+// - run and release carry one pattern, one enum and one description vocabulary
+// - the release declaration the production preset hands the model carries the same entries
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
+func TestExecReleaseDeclarationPinsTheResourceShape(t *testing.T) {
+	declaration := NewReleaseTool(nil).Declaration()
+
+	t.Run("names_the_only_family", func(t *testing.T) {
+		assertExecKindNamesTheOnlyFamily(t, declaration)
+	})
+	t.Run("names_the_session_name_format", func(t *testing.T) {
+		assertExecResourceNamesTheSessionNameFormat(t, declaration)
+	})
+	t.Run("pattern_agrees_with_the_validator", func(t *testing.T) {
+		assertExecResourcePatternAgreesWithValidator(t, declaration)
+	})
+	t.Run("abstract_phrase_gone", func(t *testing.T) {
+		assertExecDescriptionsCarryNoAbstractPhrase(t, declaration)
+	})
+	t.Run("prefixed_key_hint_absent", func(t *testing.T) {
+		assertExecDescriptionsOfferNoPrefixedKey(t, declaration)
+	})
+	t.Run("both_declarations_share_one_vocabulary", func(t *testing.T) {
+		assertExecDeclarationsShareOneVocabulary(t, NewRunTool(nil).Declaration(), declaration)
+	})
+	t.Run("production_preset_carries_the_same_text", func(t *testing.T) {
+		manager, _, _ := newLeaseTestManager(t)
+		assertExecResourceShapePinned(t, execPresetDeclaration(t, manager, 1, "exec_release"))
+	})
+}
+
+// execPresetDeclaration returns the declaration of one tool the production preset presents.
+func execPresetDeclaration(t *testing.T, manager *Manager, index int, name string) *trpctool.Declaration {
+	t.Helper()
+	tools := NewPreset(manager, MonitorConfig{})
+	if len(tools) != 2 {
+		t.Fatalf("preset holds %d tools, want the run and the release tool", len(tools))
+	}
+	declaration := tools[index].Declaration()
+	if declaration.Name != name {
+		t.Fatalf("preset tool %d is %q, want %q", index, declaration.Name, name)
+	}
+	return declaration
+}
+
+// execResourceEntries returns the kind and resource entries one declaration judges.
+func execResourceEntries(t *testing.T, declaration *trpctool.Declaration) (kind, resource *trpctool.Schema) {
+	t.Helper()
+	if declaration.InputSchema == nil {
+		t.Fatalf("%s declares no input schema", declaration.Name)
+	}
+	kind = declaration.InputSchema.Properties["kind"]
+	resource = declaration.InputSchema.Properties["resource"]
+	if kind == nil || resource == nil {
+		t.Fatalf("%s declares kind=%v resource=%v, want both entries", declaration.Name, kind, resource)
+	}
+	return kind, resource
+}
+
+func assertExecResourceShapePinned(t *testing.T, declaration *trpctool.Declaration) {
+	t.Helper()
+	assertExecKindNamesTheOnlyFamily(t, declaration)
+	assertExecResourceNamesTheSessionNameFormat(t, declaration)
+	assertExecResourcePatternAgreesWithValidator(t, declaration)
+	assertExecDescriptionsCarryNoAbstractPhrase(t, declaration)
+	assertExecDescriptionsOfferNoPrefixedKey(t, declaration)
+}
+
+func assertExecKindNamesTheOnlyFamily(t *testing.T, declaration *trpctool.Declaration) {
+	t.Helper()
+	kind, _ := execResourceEntries(t, declaration)
+	if len(kind.Enum) != 1 || kind.Enum[0] != KindTmux {
+		t.Fatalf("%s kind enum = %v, want exactly [%s]", declaration.Name, kind.Enum, KindTmux)
+	}
+	if !strings.Contains(kind.Description, fmt.Sprint(KindTmux)) {
+		t.Fatalf("%s kind description = %q, want it to name %s", declaration.Name, kind.Description, KindTmux)
+	}
+	if !strings.Contains(kind.Description, "leave it empty") {
+		t.Fatalf("%s kind description = %q, want it to say an empty kind selects the default", declaration.Name, kind.Description)
+	}
+}
+
+func assertExecResourceNamesTheSessionNameFormat(t *testing.T, declaration *trpctool.Declaration) {
+	t.Helper()
+	_, resource := execResourceEntries(t, declaration)
+	for _, want := range []string{fmt.Sprint(tmuxSessionMaxName), sessionNameCharset, sessionNameExample} {
+		if !strings.Contains(resource.Description, want) {
+			t.Fatalf("%s resource description = %q, want it to carry %q", declaration.Name, resource.Description, want)
+		}
+	}
+}
+
+func assertExecResourcePatternAgreesWithValidator(t *testing.T, declaration *trpctool.Declaration) {
+	t.Helper()
+	_, resource := execResourceEntries(t, declaration)
+	if resource.Pattern == "" {
+		t.Fatalf("%s resource entry carries no pattern", declaration.Name)
+	}
+	pattern, err := regexp.Compile(resource.Pattern)
+	if err != nil {
+		t.Fatalf("%s resource pattern %q does not compile: %v", declaration.Name, resource.Pattern, err)
+	}
+	samples := []string{
+		sessionNameExample,
+		"a",
+		strings.Repeat("a", tmuxSessionMaxName),
+		strings.Repeat("a", tmuxSessionMaxName+1),
+		"",
+		"tmux:local",
+		"a b",
+		"a.b",
+		"a/b",
+		"a:b",
+	}
+	legal := 0
+	for _, name := range samples {
+		matched, valid := pattern.MatchString(name), validSessionName(name)
+		if matched != valid {
+			t.Fatalf("pattern.MatchString(%q) = %t, validSessionName(%q) = %t, want the same verdict", name, matched, name, valid)
+		}
+		if valid {
+			legal++
+		}
+	}
+	if legal == 0 || legal == len(samples) {
+		t.Fatalf("samples decide nothing: %d of %d are legal", legal, len(samples))
+	}
+}
+
+func assertExecDescriptionsCarryNoAbstractPhrase(t *testing.T, declaration *trpctool.Declaration) {
+	t.Helper()
+	kind, resource := execResourceEntries(t, declaration)
+	for _, phrase := range []string{"the resource family", "canonical key of the execution resource"} {
+		for _, description := range []string{kind.Description, resource.Description} {
+			if strings.Contains(description, phrase) {
+				t.Fatalf("%s description = %q, want no abstract phrase %q in place of the legal values", declaration.Name, description, phrase)
+			}
+		}
+	}
+}
+
+func assertExecDescriptionsOfferNoPrefixedKey(t *testing.T, declaration *trpctool.Declaration) {
+	t.Helper()
+	hint := regexp.MustCompile(`(?:tmux|kind|resource)\s*:\s*[A-Za-z0-9_-]`)
+	if !hint.MatchString("tmux:local") {
+		t.Fatal("the prefixed-key detector misses tmux:local, so its silence proves nothing")
+	}
+	kind, resource := execResourceEntries(t, declaration)
+	for _, description := range []string{kind.Description, resource.Description} {
+		if hint.MatchString(description) {
+			t.Fatalf("%s description = %q offers a prefixed key", declaration.Name, description)
+		}
+	}
+}
+
+func assertExecDeclarationsShareOneVocabulary(t *testing.T, run, release *trpctool.Declaration) {
+	t.Helper()
+	runKind, runResource := execResourceEntries(t, run)
+	releaseKind, releaseResource := execResourceEntries(t, release)
+	if runResource.Pattern != releaseResource.Pattern {
+		t.Fatalf("run pattern = %q, release pattern = %q, want one pattern", runResource.Pattern, releaseResource.Pattern)
+	}
+	if fmt.Sprint(runKind.Enum) != fmt.Sprint(releaseKind.Enum) {
+		t.Fatalf("run enum = %v, release enum = %v, want one enum", runKind.Enum, releaseKind.Enum)
+	}
+	if runKind.Description != releaseKind.Description || runResource.Description != releaseResource.Description {
+		t.Fatalf("run descriptions = %q / %q, release = %q / %q, want one vocabulary",
+			runKind.Description, runResource.Description, releaseKind.Description, releaseResource.Description)
+	}
+}
