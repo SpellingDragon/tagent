@@ -3078,6 +3078,9 @@ var (
 		"accepted task-", "(running)", "background task", "will arrive as a notification",
 		"reports progress",
 	}
+	// symptomFailureWords 是失败话术：只含这些柔化话术而不含原始错误标识，就是
+	// 没有把原始错误告知用户。
+	symptomFailureWords = []string{"执行出错", "未产出交付内容"}
 )
 
 // symptomRig 起一台症状锚专用宿主：独立临时根、脚本 provider 与替身通道；冥想
@@ -3361,5 +3364,54 @@ func TestLocalSmokeSymptomSettledOnce(t *testing.T) {
 				settleBody, delivered, symptomQuote(texts))
 		}
 		t.Logf("[symptom-g2] 负锚：本轮 %d 条文本，无重复正文（结算正文投递 %d 次）", len(texts), delivered)
+	})
+}
+
+// TestLocalSmokeSymptomFailureNotice 是症状直译锚 G3：模型调用真失败时，用户收到一条带原始错误信息的告知，成功回合不产生失败话术。
+// - raw_error_reaches_the_user：provider 注入 500 后，用户世界恰好一条告知，正文携带原始错误标识 500 而非只有柔化话术。
+// - success_turn_no_failure_text：成功回合里没有任何失败话术。
+// - 会话绑定：走 rig.drive 的生产入站路径，降级文案只在 Drive 上出现，/task 注入面会漏掉它。
+// - 500 注入沿用台架先例：请求先被 recorded 记下再回 500，只有带本轮标记的入口请求命中。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomFailureNotice(t *testing.T) {
+	t.Run("raw_error_reaches_the_user", func(t *testing.T) {
+		const marker = "SMOKE-R9621"
+		rig, provider := symptomRig(t)
+		provider.hook = func(w http.ResponseWriter, _ int, modelName string, messages []smokeModelMessage) bool {
+			if modelName != smokeEntryModel || !symptomRequestCarries(messages, marker) {
+				return false
+			}
+			http.Error(w, "smoke symptom: the scripted model refuses the "+marker+" turn", http.StatusInternalServerError)
+			return true
+		}
+
+		rig.drive(symptomChat, marker+" 这轮模型会失败")
+		if provider.count() == 0 {
+			t.Fatalf("失败注入没有到达 provider：模型请求数为 0")
+		}
+		texts := symptomStableTexts(rig, symptomChat, 10*time.Second)
+		if len(texts) != 1 {
+			t.Fatalf("失败回合的告知应为恰好 1 条，实际 %d 条：%s", len(texts), symptomQuote(texts))
+		}
+		if !strings.Contains(texts[0], "500") {
+			t.Fatalf("失败告知不含原始错误标识 500，只有柔化话术（非原始错误）：%q", texts[0])
+		}
+		if word := symptomHit(texts[0], symptomFailureWords); word != "" && !strings.Contains(texts[0], "500") {
+			t.Fatalf("失败告知只含柔化话术 %q，未带原始错误：%q", word, texts[0])
+		}
+		t.Logf("[symptom-g3] 失败告知带原始错误：%q", texts[0])
+	})
+
+	t.Run("success_turn_no_failure_text", func(t *testing.T) {
+		const marker = "SMOKE-R9622"
+		rig, _ := symptomRig(t)
+		rig.drive(symptomChat, marker+" 普通问题")
+		rig.waitText(symptomChat, "answer "+marker, 30*time.Second)
+		for _, body := range symptomTexts(rig, symptomChat) {
+			if word := symptomHit(body, symptomFailureWords); word != "" {
+				t.Fatalf("成功回合出现了失败话术 %q：%q", word, body)
+			}
+		}
+		t.Logf("[symptom-g3] 负锚：成功回合零失败话术（%d 条文本）", len(symptomTexts(rig, symptomChat)))
 	})
 }

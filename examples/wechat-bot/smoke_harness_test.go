@@ -3569,7 +3569,7 @@ func (r *smokeRig) smokeLongFault(recorder *smokeLogRecorder, channel *smokeLong
 		if err := r.driveResult(step.Session, step.Text); err != nil {
 			outcome.DriveError = err.Error()
 		}
-		if body, err := r.smokeLongAwaitAny(step.Session, append(wants, "执行出错"), 20*time.Second); err == nil {
+		if body, err := r.smokeLongAwaitAny(step.Session, append(wants, "500"), 20*time.Second); err == nil {
 			outcome.AnswerBody = body
 			outcome.Answered = strings.Contains(body, wants[0])
 		}

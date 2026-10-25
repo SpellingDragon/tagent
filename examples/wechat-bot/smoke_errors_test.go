@@ -1,6 +1,6 @@
 //go:build smoke
 
-// smoke_errors_test.go 是第二波冒烟的失败路径：模型回合失败后的降级外发、热换
+// smoke_errors_test.go 是第二波冒烟的失败路径：模型回合失败后的原始错误告知、热换
 // 被租约拒绝后 lease 持有的版本继续服务、审批过期后重试的调用仍被扣留。台架复用
 // smoke_harness_test.go 的真实装配，故障注入与断言留在本文件。
 //
@@ -22,8 +22,11 @@ import (
 )
 
 const (
-	// smokeErrorsFailureText 是微信 Drive 在回合失败时投递的降级文案。
-	smokeErrorsFailureText = "执行出错：本轮模型回合失败，未产出交付内容。"
+	// smokeErrorsFailureText 是框架在回合失败时直投的原始错误里的一段：
+	// 它取自 provider 的 500 响应，不是任何应用层的兜底句子。
+	smokeErrorsFailureText = "500 Internal Server Error"
+	// smokeErrorsFallbackText 是旧的无原因兜底文案，任何一层都不许再外发它。
+	smokeErrorsFallbackText = "执行出错：本轮模型回合失败，未产出交付内容。"
 	// smokeErrorsMissingProvider 是坏文档引用却未声明的 provider 键。
 	smokeErrorsMissingProvider = "smoke-errors-missing"
 	// smokeErrorsTTLMinutes 是审批有效期的最小配置值。
@@ -51,7 +54,7 @@ func TestLocalSmokeWave2Errors(t *testing.T) {
 }
 
 // smokeErrorsModelTurn 让脚本模型对指定轮返回 500：回合以失败终端收尾，用户收到
-// 一次降级文案，下一轮在新的请求上恢复。
+// 一次框架直投的原始错误，下一轮在新的请求上恢复。
 func smokeErrorsModelTurn(t *testing.T) {
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
@@ -81,6 +84,9 @@ func smokeErrorsModelTurn(t *testing.T) {
 	if got := smokeErrorsTextCount(rig, chat, smokeErrorsFailureText); got != 1 {
 		t.Fatalf("failure notice delivered %d times, want exactly one", got)
 	}
+	if got := smokeErrorsTextCount(rig, chat, smokeErrorsFallbackText); got != 0 {
+		t.Fatalf("the fixed fallback sentence was delivered %d times, want none", got)
+	}
 	if got := smokeErrorsTextCount(rig, chat, "answer "+smokeErrorsFailedTurn); got != 0 {
 		t.Fatalf("the failed turn delivered %d answer(s), want none", got)
 	}
@@ -98,6 +104,9 @@ func smokeErrorsModelTurn(t *testing.T) {
 	}
 	if got := smokeErrorsTextCount(rig, chat, smokeErrorsFailureText); got != 1 {
 		t.Fatalf("failure notice delivered %d times after recovery, want exactly one", got)
+	}
+	if got := smokeErrorsTextCount(rig, chat, smokeErrorsFallbackText); got != 0 {
+		t.Fatalf("the fixed fallback sentence was delivered %d times after recovery, want none", got)
 	}
 	if err := rig.healthz(); err != nil {
 		t.Fatalf("health after the failed turn: %v", err)

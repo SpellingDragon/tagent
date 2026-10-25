@@ -242,7 +242,9 @@ func (h *hostRuntime) Admit(key string) error {
 }
 
 // Drive routes one admitted delivery to its session and lets the host deliver
-// the turn's output through the sender port.
+// the turn's output through the sender port. A failed turn is answered by the
+// host's own failure notice: this layer holds no cause and writes no second
+// wording, so the user reads one raw error instead of a canned sentence.
 func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Address, error) {
 	addr, err := h.router.AddressFor(in.ChatID)
 	if err != nil {
@@ -274,7 +276,7 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 		return addr, err
 	}
 	if failed {
-		_ = h.sender.Send(ctx, addr, "执行出错：本轮模型回合失败，未产出交付内容。")
+		log.Debugf("[host] the turn of %s ended failed; the failure notice is delivered by the host", addr.SessionID)
 	}
 	return addr, nil
 }
