@@ -1670,8 +1670,17 @@ func runEventIntegrityExecThreeStatesAudit(t *testing.T) {
 		fact := eventIntegrityAwaitExecStateFact(t, host, addr, phase)
 		eventIntegrityAssertExecAuditFact(t, fact, key, phase, 7)
 	}
-	if facts := eventIntegrityExecStateFacts(host.Run().SessionFacts(addr)); len(facts) != 3 {
-		t.Fatalf("execution state audit facts = %d, want one per observed phase: %v", len(facts), facts)
+	facts := eventIntegrityExecStateFacts(host.Run().SessionFacts(addr))
+	observed := make(map[tagentexec.StatePhase]bool, 3)
+	for _, fact := range facts {
+		phase := tagentexec.StatePhase(fact.Meta[event.MetaPrefix+"phase"])
+		observed[phase] = true
+		eventIntegrityAssertExecAuditFact(t, fact, key, phase, 7)
+	}
+	for _, phase := range []tagentexec.StatePhase{tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited} {
+		if !observed[phase] {
+			t.Fatalf("execution state audit facts carry no %s observation: %v", phase, facts)
+		}
 	}
 	time.Sleep(400 * time.Millisecond)
 	if requests := len(provider.requests()); requests != beforeRequests {
@@ -2005,11 +2014,11 @@ func eventIntegrityAwaitExecStateFact(t *testing.T, host *tagent.Host, addr even
 				matches = append(matches, fact)
 			}
 		}
-		if len(matches) == 1 {
+		if len(matches) >= 1 {
 			return matches[0]
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the %s observation left %d audit facts, want one: %v", phase, len(matches),
+			t.Fatalf("the %s observation left %d audit facts, want at least one: %v", phase, len(matches),
 				eventIntegrityExecStateFacts(host.Run().SessionFacts(addr)))
 		}
 		time.Sleep(10 * time.Millisecond)

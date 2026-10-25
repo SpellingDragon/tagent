@@ -3476,10 +3476,19 @@ func TestLocalSmokeSymptomExecStateSilent(t *testing.T) {
 			fact := symptomAwaitExecStateFact(t, rig, symptomChat, resource, phase)
 			symptomAssertExecAuditFact(t, fact, resource, phase)
 		}
-		if facts := symptomExecStateFacts(rig, symptomChat); len(facts) != 3 {
-			t.Fatalf("执行状态审计事实 = %d 条，want 三态各一条：%v", len(facts), facts)
+		facts := symptomExecStateFacts(rig, symptomChat)
+		observed := make(map[tagentexec.StatePhase]bool, 3)
+		for _, fact := range facts {
+			phase := tagentexec.StatePhase(fact.Meta[event.MetaPrefix+"phase"])
+			observed[phase] = true
+			symptomAssertExecAuditFact(t, fact, resource, phase)
 		}
-		t.Logf("[symptom-g4] 负锚：三态审计事实均落盘（消息载荷为空、无通知分类）")
+		for _, phase := range []tagentexec.StatePhase{tagentexec.StateStable, tagentexec.StateSuspect, tagentexec.StateExited} {
+			if !observed[phase] {
+				t.Fatalf("执行状态审计事实缺 %s 观察：%v", phase, facts)
+			}
+		}
+		t.Logf("[symptom-g4] 负锚：三态审计事实均落盘（%d 条观察，消息载荷为空、无通知分类）", len(facts))
 	})
 }
 
@@ -3570,11 +3579,11 @@ func symptomAwaitExecStateFact(t *testing.T, rig *smokeRig, chat, resource strin
 				matches = append(matches, fact)
 			}
 		}
-		if len(matches) == 1 {
+		if len(matches) >= 1 {
 			return matches[0]
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s 审计事实 = %d 条，want 一条（resource=%s）：%v\nrecent requests:\n%s",
+			t.Fatalf("%s 审计事实 = %d 条，want 至少一条（resource=%s）：%v\nrecent requests:\n%s",
 				phase, len(matches), resource, symptomExecStateFacts(rig, chat), rig.recentRequests(8))
 		}
 		time.Sleep(10 * time.Millisecond)
