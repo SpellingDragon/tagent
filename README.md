@@ -97,9 +97,10 @@ flowchart LR
 | **冥想反思** | 事件驱动计时＋水位门＋防循环闭表（自产戳不触发） | `meditation:` 段，deliver_to 白名单 |
 | **语义召回** | embedding 混合检索＋按 key 回捞＋血统追踪 | `memory.engine:` 段 |
 | **治理审批** | 调用门（风险分级/审批 Hold/TTL）＋发布门 | `governance:` 段，critical 恒审批 |
-| **委派** | 声明面子 agent＋`call_subagent` 运行时组装（双源＋采样参数）＋settle 随动送达 | agent 引用＋显式源 |
+| **投递审核** | 发送插件唯一出口，投递前交审核（内容/血统/目标）；hold 批准补投、拒绝留审计 | DeliveryRuler，默认 allow |
+| **委派** | 声明面子 agent＋`call_subagent` 运行时组装＋settle 通知回合回传结果（受理回执=裸 `ok`） | agent 引用＋显式源 |
 | **per-agent 调优** | 思考开关/强度/温度/看门狗轮数各自独立 | 各 agent 段内声明 |
-| **命令执行** | tmux Executor＋三态监控（watch→stable→suspect），声明即接线 | `{ kind: tool, id: exec }` |
+| **命令执行** | tmux Executor＋三态监控；中间态仅落审计事实（`exec-state:`），不进模型 | `{ kind: tool, id: exec }` |
 | **审批闭环** | critical 自动 Hold→登记审批簿→微信下发→批准放行；声明式风险规则 | `governance.risk_rules` |
 | **技能正文** | skill_load 后正文经系统段进下一轮请求 | `skill_dirs` |
 | **训练数据** | Recorder＋Capture 轨迹（含委派 worker 全入册）＋ChainExporter 导出 | 默认记录，零配置 |
@@ -117,7 +118,7 @@ bash scripts/lint.sh                    # 仓库门禁
 bash scripts/preflight.sh               # 提交前全量预检（lint+golden+双模块测试+冒烟+事件门三档）
 ```
 
-事件完整性门（每 MR 三档：`event-integrity-short` 十次独立、`event-integrity-long` 六组合 7200 输入/720 重启、`event-integrity-mutations` 冻结变异）与 `event-integrity-required` 汇总**已落地**（本地门与 workflow 自测通过；远端 required 待 F4 授权），判据与 L1/L2/L3 边界见 [`docs/OPERATION.md`](docs/OPERATION.md#event-gates)。
+事件完整性门（每 MR 三档：`event-integrity-short` 十次独立、`event-integrity-long` 六组合 7200 输入/720 重启、`event-integrity-mutations` 冻结变异）与 `event-integrity-required` 汇总**已落地且远端必跑**；症状锚（受理静默/完成恰一条/失败告知/exec 静默/无 send/投递 hold）走 `event-semantics-symptoms`。判据与 L1/L2/L3 边界见 [`docs/OPERATION.md`](docs/OPERATION.md#event-gates)。
 
 **本地冒烟**（全 mock 资源，纯 CPU/IO——1,142 回合/s）：
 
