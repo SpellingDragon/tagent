@@ -217,6 +217,40 @@ func TestDeclaredNameIsNotItselfResidue(t *testing.T) {
 		"residue in prose must still be reported")
 }
 
+// TestDomainVocabularyIsNotResidue pins that this repository's own domain words name a format rather than narrate a change.
+// - A doc comment stating which schema, row or import a value belongs to must not be reported.
+// - A residue word outside that vocabulary is still reported, and a domain phrase beside it cannot shield the narration.
+func TestDomainVocabularyIsNotResidue(t *testing.T) {
+	chdirToRepoRoot(t)
+	dir := t.TempDir()
+
+	domain := dir + "/domain.go"
+	require.NoError(t, os.WriteFile(domain, []byte(
+		"package p\n\n"+
+			"// LegacyRecord is one legacy row held read-only: SchemaLegacyV1 and SchemaLegacyV2\n"+
+			"// rows are classified by classifyLegacyRow, the legacy import never writes them back\n"+
+			"// in their legacy shape, and a current record is never projected into a legacy one.\n"+
+			"type LegacyRecord struct{}\n"), 0o644))
+	require.Equal(t, 0, rulesIn(t, domain)["audit-marker"],
+		"naming the format a value belongs to must not count as change residue")
+
+	narration := dir + "/narration.go"
+	require.NoError(t, os.WriteFile(narration, []byte(
+		"package p\n\n"+
+			"// LegacyImport 由 the legacy implementation 承担，legacy segments lack an envelope。\n"+
+			"func LegacyImport() {}\n"), 0o644))
+	require.GreaterOrEqual(t, rulesIn(t, narration)["audit-marker"], 1,
+		"a residue word outside the domain vocabulary must still be reported")
+
+	mixed := dir + "/mixed.go"
+	require.NoError(t, os.WriteFile(mixed, []byte(
+		"package p\n\n"+
+			"// LegacyRow is one legacy row; it previously held the whole capture dump.\n"+
+			"func LegacyRow() {}\n"), 0o644))
+	require.GreaterOrEqual(t, rulesIn(t, mixed)["audit-marker"], 1,
+		"a masked domain phrase must not shield the narration beside it")
+}
+
 // TestUsedToRequiresWordBoundaries pins that residue words match as whole words, not as substrings.
 // - "refused to adopt" and "still-used tool closers" contain the phrase by accident and must not be reported, while an unambiguous residue word still is.
 func TestUsedToRequiresWordBoundaries(t *testing.T) {
@@ -775,6 +809,7 @@ func TestCoLocationSeparatesBuildUniverses(t *testing.T) {
 // TestCoLocationDropsTestSupportFiles pins that a file holding no top-level Test function never participates and never reports.
 func TestCoLocationDropsTestSupportFiles(t *testing.T) {
 	dir := t.TempDir()
+	colocWrite(t, dir, "p.go", "package p\n")
 	colocWrite(t, dir, "p_test.go", "// Package p.\n// 契约: docs/wiki/x.md#y\npackage p\n\nfunc Helper() {}\n")
 	colocWrite(t, dir, "a_test.go", colocBody("docs/wiki/x.md#y", "", 1))
 	colocWrite(t, dir, "b_test.go", colocBody("docs/wiki/x.md#y", "", 1))
@@ -783,6 +818,17 @@ func TestCoLocationDropsTestSupportFiles(t *testing.T) {
 	for _, f := range got {
 		require.NotContains(t, f.Path, "p_test.go")
 	}
+}
+
+// TestCoLocationSkipsDirectoryWithoutProductionFamily pins the rule's scope: a tree mirroring no production family is out of it.
+// - An integration test directory (every file a test) reports nothing: no edit could clear the finding.
+// - The same anchor in a directory that does hold production files is still fragmentation (see TestCoLocationFlagsFragmentedPair).
+func TestCoLocationSkipsDirectoryWithoutProductionFamily(t *testing.T) {
+	dir := t.TempDir()
+	colocWrite(t, dir, "a_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	colocWrite(t, dir, "b_test.go", colocBody("docs/wiki/x.md#y", "", 1))
+	require.Empty(t, checkResponsibilityCoLocation(colocFacts(t, dir)),
+		"a directory holding no production file is outside the co-location rule")
 }
 
 // TestCoLocationFlagsFragmentedPair pins the core catch: the unmirrored member of a same-anchor pair is reported and the mirror is named as the merge target.

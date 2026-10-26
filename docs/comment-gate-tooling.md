@@ -11,6 +11,7 @@
 | `codetools decls` | `<file>...` | 每个顶层声明一行 JSON：是否 test/benchmark、去注释体哈希、断言调用数、`t.Parallel` 数 |
 | `codetools comment-check` | `--base-root DIR --head-root DIR <file>...` | 逐文件证明"只改了注释" |
 | `codetools merge-check` | `--base-root DIR --head-root DIR [--map FILE] [--explain FILE] <dir>...` | 证明并入批无损（体一致 + 断言数不降） |
+| `codetools package-layout` | `<dir>...` | 包布局：文件名拼写、骨架断言唯一性、测试文件镜像 |
 | `comment_policy` | `[-baseline F] [-update-baseline] [-strict] [-no-baseline] [-v] [dir...]` | 注释形态棘轮 |
 
 两条共同纪律：
@@ -93,7 +94,7 @@
 
 不做全文件点号扫描是有意的：`scheduler.type=local` 这类配置覆盖语法、文档行文里的包名都会被误伤。门的强度来自位置精确，不来自范围贪大。扫描面是 git 索引里的 `*.sh`/`*.yaml`/`*.yml`，排除 `openspec/`（规格会原文引用已退役路径作为记录）与 `archive/`、`_tmp_report`。
 
-本门的出生背景：AReaL 在线训练桥退役时发现，`train_rl_config.yaml` 里的 `workflow: train.rl.tagent_adapter.*` 指向 AReaL 改名前的包布局——这类"看着对"的死配置，此前没有任何机器门能看见。
+本门拦的对象：`train_rl_config.yaml` 里的 `workflow: train.rl.tagent_adapter.*` 指向 AReaL 改名前的包布局，这类"看着对"的死配置没有任何机器门能看见。
 
 <a id="test-file-split"></a>
 ## 七、测试文件的域锚切分
@@ -118,4 +119,22 @@
 形状来自一次真实事故：`git mv` 在执行的那一刻就把重命名写进索引，随后不带 pathspec 的 `git commit` 会把它扫进下一个提交——无论那个提交本意是文档还是代码。于是一个标称 docs 的提交带着半套包迁移上了远端，全新检出不可编译。
 
 规则只看标题承诺，不看改动多少：要关的是"把代码伪装成文档"这一类，不是文档量。默认检查 HEAD（`commit-scope [ref]` 可指定），历史扫描留给 CI 之外的批量核查。
+
+<a id="package-layout"></a>
+## 九、包布局门
+
+`codetools package-layout` 守**文件名**这一层：目录内的文件属于哪个语义家族，读名字就该知道。三条判据各自具名拒绝：
+
+| 拒绝原因 | 含义 |
+|---|---|
+| `file-name-not-lower-snake` | 文件名不是 `lower_snake.go`：出现大写、连字符或空格。Go 允许这些拼写，正因如此门必须钉住一种——排序、import 差异与大小写不敏感文件系统都依赖唯一拼写 |
+| `skeleton-variant` | 包里有第二个骨架断言拼写（任何含 `skeleton` 却非 `skeleton_assert.go` 的生产文件）：编译期形状钉是一份契约，一个包只能有一个文件承载它 |
+| `skeleton-collision` | 同一目录出现 ≥2 个骨架断言文件：变体与正名并存时两条都报，残迹不会因为"正名还在"而隐身 |
+| `test-mirror-missing` | `*_test.go` 的词干对不上同目录任何生产文件：改名压力必须落在"它是哪个文件的测试"上 |
+
+镜像比对复用 §七 的**同一份**定义（精确 `<stem>.go`，宽容表冻结为 `_real` 一个后缀），不另立第二份变体表：两张表迟早会给出两个答案。
+
+两处豁免各有明确边界，不是宽容而是对象不存在：`examples/contract/` 的文件名是它实现的接口（`<Iface>_example.go`，由 `check_concept_budget.py` 强制），`tests/integration/` 是驱动运行时的夹具包——这两处都没有可供镜像的生产家族。
+
+判定逻辑是对文件列表的**纯函数**，单测因此不需要仓库；live 命令只是把目录遍历的结果喂进去。自测 `scripts/test_check_package_layout.sh` 造五个 fixture（干净／变体名／撞名／大写／孤儿测试）跑**真命令**，见证是进程退出码：只打印规则却退出 0 的门、或变成不可达的规则，都会在那里红；干净 fixture 是正向对照，恒红的门过不了它。目录 root 不存在是**不可用输入**，退出 2 而不是 0。
 

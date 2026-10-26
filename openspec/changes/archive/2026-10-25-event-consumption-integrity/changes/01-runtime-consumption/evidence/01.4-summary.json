@@ -1,0 +1,238 @@
+{
+  "leaf": "01.4",
+  "title": "发送动作与未确认",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T13:26:14Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/host/event_integrity_test.go 增加 TestEventIntegrityDelivery（同文件单写）：经 Boot 正式装配的声明式 send 工具 → MessageSender，以及用户 turn 的 deliverFresh，用受控记录型 sender 观察实际外发动作。四个正锚 + 三个负锚：合法动作均送达且各计一次、已确认动作重入不重发、未知结果保留未确认与错误、显式重试保留原动作关联；已确认不重发、未知不自动重发、不同动作身份不合并。未接回零生产引用的 state.SendFace，未为测试补生产发送实现，未新增 public API 或持久化格式。",
+  "method": "7 个具名子测试，全部经 bootDeliveryHost（tagent.Boot 读取声明 send 工具 + WithSender(受控 sender)）驱动真实 Host.Invoke；显式 send 走 runtime/task 包装后的声明工具调用，最终答复走 Host.deliverFresh。受控 sender 在 Send 中读取 task.CallFrameFrom(ctx) 记录显式 send 的动作身份（InstanceID/InvocationID/DecisionID/CallID），并可按调用序号脚本化返回歧义错误；最终答复动作无 call frame，其身份由产品提交的 agent_output 事实 Key 代表。断言读取 sender 实际动作序列、provider 实际请求、SessionFacts 事实链与产品提交的 TypeActionCommand 结果事实；不按 body 出现次数单独判定身份。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "extended (untracked file created by 00.2)",
+      "lines": 2473,
+      "lines_added_since_01.3": 889,
+      "sha256": "e541f8e8a85828c6ce58bae55c566a5ea933c154e2266de7540e305186f0ce8b"
+    },
+    {
+      "path": "host.go",
+      "state": "unchanged by this leaf; sha256 equals the 01.3 record",
+      "lines_added": 0,
+      "lines_removed": 0,
+      "sha256": "c84e6997d820821364a0c993b5ae689195c3224a185c28f6a32b3b136b091a4c"
+    }
+  ],
+  "product_changes": [],
+  "product_change_decision": "取证优先：先以断言跑当前行为，7/7 全绿；未发现 01.4 范围内已证实的产品缺陷，故不改 host.go。两次可证伪性 mutation 仅临时改 host.go，跑完立即从 host.go.orig 逐字节恢复并以 sha256 校验（c84e6997...）。",
+  "verification": {
+    "single": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityDelivery$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.4/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/single.jsonl",
+      "log_sha256": "c283da6485f4fd310a1c3fbd4ac69bbca098905123ef9cebc839a324a68c9ab4",
+      "log_bytes": 29673,
+      "parsed": {
+        "parent": "TestEventIntegrityDelivery run=1 pass=1",
+        "named_subtests_run_pass": 7,
+        "children": [
+          "all_legal_actions_delivered",
+          "confirmed_action_reentry_no_resend",
+          "unknown_result_retained",
+          "explicit_retry_keeps_link",
+          "confirmed_action_not_resent",
+          "unknown_result_not_auto_resent",
+          "distinct_actions_not_merged"
+        ],
+        "skip": 0,
+        "fail": 0
+      }
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.4\"; for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityDelivery$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; printf 'round-%d EXIT=%d\\n' \"$i\" \"$?\" >> \"$E/rounds-exit.txt\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-1.jsonl", "log_sha256": "cdf602e9db13917ca3a87687d20f4c0bd6ffb27332731daa13367fe6c47386de", "log_bytes": 29667, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-2.jsonl", "log_sha256": "3ff5b886c807be007641fe2db7c21d157e4e4cfa39c2ad077d80c8084467a228", "log_bytes": 29675, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-3.jsonl", "log_sha256": "ec7064fc01bb655aee7eb53e429ef74038e0401352b532185bed7c4974fdf255", "log_bytes": 29672, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-4.jsonl", "log_sha256": "7c23a31a7a9737c67605e4e71160834409c28d8b45b1b2ac6dccb712daca81c9", "log_bytes": 29663, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-5.jsonl", "log_sha256": "9650e6901da9ea4813adc5287c7d4bcd2f6db589d1d57e0ec2ef69972851ee25", "log_bytes": 29677, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-6.jsonl", "log_sha256": "4e3db756fdd63361a0971cb41c77b2ded47a631c049a723e4f22462de0fc0bfe", "log_bytes": 29675, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-7.jsonl", "log_sha256": "88932d627074a946e977593d32d8e46f596e35e19cb9922598a2cdeed7d94eaa", "log_bytes": 29670, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-8.jsonl", "log_sha256": "c291a0f03af452cae8ce477dd38bc43208d0c81f4c9e001a989d1ce0f3b31a41", "log_bytes": 29674, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-9.jsonl", "log_sha256": "05a12c70ed1db57e98c199e180a1c8c4ee394444792d48fdfee912057a3672eb", "log_bytes": 29667, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/run-10.jsonl", "log_sha256": "439f33337c85d9e041eed8429741157d23c76989f72f11bf7ad0de04f69d075c", "log_bytes": 29673, "parent_run_pass": true, "named_subtests_run_pass": 7, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐轮 json.loads 每行，按 Test 归集 run/pass/skip/fail；要求父测试与全部 7 个具名子测试各 run=1、pass=1、skip=0、fail=0，且无其它测试记录",
+      "parsed_result": "ALL_TEN_OK=True (rounds-exit.txt: round-1..round-10 EXIT=0)"
+    },
+    "regression": {
+      "host_package": {
+        "command": "go test ./tests/integration/host -count=1",
+        "exit_code": 0,
+        "summary": "ok github.com/SpellingDragon/tagent/tests/integration/host 10.937s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/regression-host.txt",
+        "log_sha256": "8fa928a820898644c987c81927d29dfea0ba004b6267d8f2522a209e68b44a21",
+        "log_bytes": 68
+      },
+      "named_leaf_regressions": {
+        "command": "go test ./tests/integration/host -run '^(TestEventIntegrityReproduction|TestEventIntegrityTaskContinuation|TestEventIntegrityHarness)$' -count=1 -json",
+        "exit_code": 0,
+        "parsed": "TestEventIntegrityReproduction 4/4 pass; TestEventIntegrityTaskContinuation 8/8 pass; TestEventIntegrityHarness 3/3 pass（父测试各 run=1 pass=1；skip=0 fail=0）",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/regression-named.jsonl",
+        "log_sha256": "d1ea9920fc94545b26a0c58050219c4616bb0314141bd2de1e3b617e5b984b7e",
+        "log_bytes": 95928
+      },
+      "execution_and_history": {
+        "command": "go test ./tests/integration/execution ./tests/integration/history -count=1",
+        "exit_code": 0,
+        "summary": "ok .../tests/integration/execution 3.284s; ok .../tests/integration/history 2.847s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/regression-execution-history.txt",
+        "log_sha256": "43628c47cc6509e13f1cac81874fcc2b29ecca2921a497a3983bd0c2c302d617",
+        "log_bytes": 144
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go vet ./...",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/vet.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l tests/integration/host/event_integrity_test.go host.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0"
+      },
+      "event_ownership": {
+        "command": "go run ./scripts/codetools event-ownership --check --json",
+        "exit_code": 0,
+        "json": {
+          "ok": true,
+          "violations": [],
+          "violations_count": 0,
+          "counts": {"owners": 6, "symbols": 14, "packages_scanned": 31, "candidates": 47, "direct_calls": 20, "allowed": 14, "forbidden": 0, "unregistered": 0, "unowned": 0, "ambiguous": 0, "uncovered": 4, "same_name_non_target": 29}
+        },
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/event-ownership.json",
+        "log_sha256": "87b020ec6dba6c86fd080c66815211a08f2cfd448386289e897a46b169b60f24",
+        "log_bytes": 9597
+      }
+    },
+    "negative_anchor_mutation_check": {
+      "purpose": "证明重入不重发/未知不自动重发的负锚在缺陷代码下确实转红，不是空转。两次均只临时改 host.go，跑完立即从 host.go.orig 恢复，并以 sha256 校验逐字节回到 c84e6997...。",
+      "mutation_a": {
+        "mutation": "deliverFresh 的 freshAssistantOf(..., baseline) 改为 freshAssistantOf(..., 0)，使每轮把历史 assistant 正文全部重发一次",
+        "command": "go test ./tests/integration/host -run '^TestEventIntegrityDelivery/(confirmed_action_reentry_no_resend|confirmed_action_not_resent)$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.4/mutation-a.jsonl\" 2>&1",
+        "exit_code": 1,
+        "parsed": {
+          "confirmed_action_reentry_no_resend": "fail: delivered bodies after the reentry = [\"the confirmed explicit action\" \"the confirmed final answer\" \"the confirmed final answer\" \"the second turn answer\"], want only the new action beside the two confirmed actions of the first turn",
+          "confirmed_action_not_resent": "fail: the repeated answer \"the answer delivered twice as two actions\" was delivered 3 times across the two turns, want the confirmed action beside the one new action of the later turn, not a resend"
+        },
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/mutation-a.jsonl",
+        "log_sha256": "4d5ac16a9fa67018f0e5d1e1c01026845de504e042e152aa4b32e57607703231",
+        "log_bytes": 12450,
+        "restore_verified": true,
+        "restore_sha256": "c84e6997d820821364a0c993b5ae689195c3224a185c28f6a32b3b136b091a4c"
+      },
+      "mutation_b": {
+        "mutation": "hostSendTool.Call 在 sender.Send 返回错误后自动再 Send 一次，模拟结果未知时自动重发",
+        "command": "go test ./tests/integration/host -run '^TestEventIntegrityDelivery/(unknown_result_retained|unknown_result_not_auto_resent|distinct_actions_not_merged)$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.4/mutation-b.jsonl\" 2>&1",
+        "exit_code": 1,
+        "parsed": {
+          "unknown_result_retained": "fail: recorded actions = 3, want the denied action beside the final answer, each once",
+          "unknown_result_not_auto_resent": "fail: the ambiguous action \"the action that must not be auto-retried\" was sent 2 times during the turn, want exactly 1",
+          "distinct_actions_not_merged": "fail: recorded actions = 3, want the send beside the answer even though both carry the same body"
+        },
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.4/mutation-b.jsonl",
+        "log_sha256": "fa9ad49d7b679d982eb182f9b9d2b667ba24092e3747a2e3d6c2c907cc718ab6",
+        "log_bytes": 13255,
+        "restore_verified": true,
+        "restore_sha256": "c84e6997d820821364a0c993b5ae689195c3224a185c28f6a32b3b136b091a4c"
+      }
+    }
+  },
+  "anchor_evidence": [
+    {
+      "name": "all_legal_actions_delivered",
+      "roles": ["positive", "consumer"],
+      "driver": "Boot 正式装配的声明式 send 工具 → MessageSender；同一用户 turn 的最终答复 → deliverFresh",
+      "assertion": "sender 记录两个动作：显式 send 带 task.CallFrame（InvocationID 等于本 turn invocation、CallID 等于工具调用 ID、InstanceID/DecisionID 非空）；最终答复无 call frame，映射到本 invocation 提交的 agent_output 事实；两条 body 精确等于 [scripted note, scripted answer]，actions=2。",
+      "observed": "pass: actions=2; bodies=[\"the explicit note\" \"the final answer\"]; framed send action identity matches the turn invocation and call id; the unframed answer maps to the agent_output fact of the same invocation"
+    },
+    {
+      "name": "confirmed_action_reentry_no_resend",
+      "roles": ["positive"],
+      "driver": "两轮 Host.Invoke：第一轮 send + 最终答复，第二轮仅新最终答复；同一 host 重入",
+      "assertion": "两轮 invocation 不同；最终 sender body 序列为 [first note, first answer, second answer]，first note / first answer / 首轮 callID 各只出现一次。",
+      "observed": "pass: delivered bodies = [\"the confirmed explicit action\" \"the confirmed final answer\" \"the second turn answer\"]; first note and first answer each delivered once"
+    },
+    {
+      "name": "unknown_result_retained",
+      "roles": ["positive"],
+      "driver": "受控 sender 对第 1 个动作返回 errDeliveryOutcomeUnknown；send 工具经 task wrapper 把失败回灌到同一 invocation 的下一决策",
+      "assertion": "turn completed 2 decisions；第二请求的 observation 含 [send_denied] 与错误文本且不含 [send_ok]；动作保持未确认且 errors.Is(result, err)；产品提交的 TypeActionCommand 事实 CallID 等于该 call、body 含错误文本、Owner/Invocation 归属本 turn；最终答复仍是独立已确认动作。",
+      "observed": "pass: the caller read the named denial carrying the ambiguity; recorded actions=2 (denied send unconfirmed + confirmed answer); the committed action-result fact carries the call identity and the ambiguity text"
+    },
+    {
+      "name": "explicit_retry_keeps_link",
+      "roles": ["positive"],
+      "driver": "同一 turn 内模型在读到 denial 后再次调用声明 send 工具重试",
+      "assertion": "3 decisions；第一个 send 未确认，重试动作有新 CallID/新 DecisionID 但 InvocationID 与首次相同、target/body 相同；重试决策请求携带原 denial 文本；actions=3 且同 body 计数=2（身份不按正文合并）。",
+      "observed": "pass: first send unconfirmed; retry carries a new call id and decision id under the same invocation; the retry request carries the original denial; actions=3 with the same body twice"
+    },
+    {
+      "name": "confirmed_action_not_resent",
+      "roles": ["negative"],
+      "driver": "两轮 Host.Invoke，脚本让两轮最终答复正文相同",
+      "assertion": "第一轮后该 body 计数=1；第二轮后计数=2（不是 3）；总 actions=3；首轮 callID/note 各一次；第二轮前的动作序列是第二轮后序列的前缀；两个 answer 事实分属不同 invocation 且 Key 不同。",
+      "observed": "pass: repeated answer delivered 2 times across two turns (once per turn), not 3; prefix of recorded actions unchanged; answer facts have different keys"
+    },
+    {
+      "name": "unknown_result_not_auto_resent",
+      "roles": ["negative"],
+      "driver": "受控 sender 对 send 返回歧义错误；turn 内、300ms quiet window、close+drain 后三个时点观察",
+      "assertion": "该 body 在三个时点都只被发送 1 次；drain 后动作仍未确认且保留原错误；产品结果事实仍含歧义文本。",
+      "observed": "pass: ambiguous body sent exactly 1 time in the turn, 1 time after the 300ms quiet window, and 1 time after close+drain; the action stays unconfirmed with the original error"
+    },
+    {
+      "name": "distinct_actions_not_merged",
+      "roles": ["negative"],
+      "driver": "显式 send 与最终答复使用相同 body，且 send 返回歧义错误",
+      "assertion": "actions=2 且同 body 计数=2；send 动作有 frame 且未确认，answer 动作无 frame 且已确认；answer 的 agent_output 事实 Key 不等于 send 的 CallID；answer 决策请求仍携带 send 的 denial。",
+      "observed": "pass: two actions with the same body are recorded separately; framed send unconfirmed, unframed answer confirmed; answer fact key differs from the send call id"
+    }
+  ],
+  "observations": [
+    "声明式 send 工具经 runtime/task 包装：模型下一请求先看到 tool 角色的任务准入回执（带 ToolCallID），随后是 user 角色的 observation（真正结果，wire 上无 ToolCallID）。首版测试误读准入回执，probe 红；改为从回执向后找第一条 user 角色消息后 7/7 绿。该修复只在测试读取侧，未改产品。",
+    "未发现 01.4 范围内已证实产品缺陷：7 个子测试在未改 host.go 的当前态全绿。可证伪性由两次 mutation 证明（重入重发、未知自动重发均能转红），mutation 后 host.go 逐字节恢复。",
+    "显式重试的动作身份由产品侧自然保留：重试是新 CallID/新 DecisionID，但同一 InvocationID；测试不以正文相同就判为同一动作。",
+    "未知结果动作的产品侧证据：SessionFacts 中 TypeActionCommand 事实带 CallID 与错误文本；调用侧 observation 为 [send_denied]，不伪报 [send_ok]。",
+    "受控 sender 是本测试文件内的 MessageSender 测试替身（记录 target/body/call frame/result，并可按序号注入错误）；03.1 的 senderLedger 不记录 call frame、也不支持逐动作注入错误，且其文件不在本叶写集，因此未修改 03.1 基座。该替身不进入生产装配，不替代 hostSendTool/deliverFresh。"
+  ],
+  "limitations": [
+    "只证明调用侧不自动重发、不伪报成功；不宣称渠道幂等或端到端恰好一次（00.3 external_send 轴明确无渠道幂等证据）。",
+    "未触碰 01.5—01.7（根/微信/CLI 三宿主正式装配测试）；未修冥想/审批等他域。",
+    "未接回零生产引用的 state.SendFace；未新增 public API 或持久化格式。",
+    "十轮日志产生于 mutation 之前；mutation 后 host.go 与测试文件 sha256 与十轮时完全一致，且恢复后重跑单轮 EXIT=0，故十轮仍对应当前字节。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.4",
+    "action": "本摘要写入后勾选该一条为 [x]，并把文件头进度句从 01.1—01.3/01.4—01.7 更新为 01.1—01.4/01.5—01.7"
+  }
+}

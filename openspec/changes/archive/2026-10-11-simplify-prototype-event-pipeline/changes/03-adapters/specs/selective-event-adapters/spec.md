@@ -1,0 +1,11 @@
+## ADDED Requirements
+### Requirement: 选择性事件变换
+插件 SHALL 只应用于声明种类，可在处理前后修改Data/Meta；默认memory插件只处理选定的低密度结果，输入不标记也不折叠。
+#### Scenario: 结果票据
+- **WHEN** 模型消费执行结果后再收到新输入
+- **THEN** 低密度原文已外置且票据可Recall，输入始终原样；未选择的事件不执行该插件
+### Requirement: 无状态代理及轨迹
+代理 SHALL 使用框架准备好的模型实例与完整请求（超参、system、skill、tool、inputs），记录输入/输出/错误，不持有agent状态。
+#### Scenario: 成功与失败模型调用
+- **WHEN** 通过agent入口调用不同配置的mock模型
+- **THEN** 实际模型得到对应参数与system，记录器取得真实请求及成功输出或错误，不影响原请求

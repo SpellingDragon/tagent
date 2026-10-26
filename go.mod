@@ -5,13 +5,18 @@ go 1.24.1
 require (
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.38.0
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.29.0
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.29.0
+	go.opentelemetry.io/otel/sdk/metric v1.38.0
 	gopkg.in/yaml.v3 v3.0.1
 	trpc.group/trpc-go/trpc-a2a-go v0.2.6-0.20260721084546-18c8244d0acb
 	trpc.group/trpc-go/trpc-agent-go v1.11.2
 	trpc.group/trpc-go/trpc-agent-go/model/provider v1.10.0
+	trpc.group/trpc-go/trpc-mcp-go v0.0.10
 )
 
 require (
+	github.com/bufbuild/protocompile v0.14.1 // indirect
 	github.com/getkin/kin-openapi v0.124.0 // indirect
 	github.com/go-openapi/jsonpointer v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.8 // indirect
@@ -21,12 +26,10 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/ugorji/go/codec v1.2.12 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.29.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.29.0 // indirect
-	go.opentelemetry.io/otel/sdk/metric v1.38.0 // indirect
+	github.com/yuin/goldmark v1.4.13 // indirect
 	golang.org/x/net v0.47.0 // indirect
-	trpc.group/trpc-go/trpc-mcp-go v0.0.10 // indirect
 )
 
 require (
@@ -76,10 +79,10 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.63.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.29.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.29.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.29.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.29.0
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.29.0
 	go.opentelemetry.io/otel/metric v1.38.0
-	go.opentelemetry.io/otel/sdk v1.38.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.38.0
 	go.opentelemetry.io/otel/trace v1.38.0
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
@@ -99,11 +102,42 @@ require (
 	trpc.group/trpc-go/trpc-agent-go/model/ollama v1.10.0 // indirect
 )
 
-// R1 (design D6): the producer-done fix is pinned to the published fork tag
-// (v1.11.2 + the 4 stream-close-contract commits), so nothing here depends on an
-// out-of-tree local checkout any more. Upstream PR #2637 carries the same commits.
-// TODO(upstream): remove this replace once trpc-group/trpc-agent-go#2637
-// (close event streams only after the producer is done) is merged and tagged.
-// Then switch to the official release, run the full gate suite (short/race/
-// lint(Go1.24)/check-openspec/bot), and note the removal in CHANGELOG.
+// DEPENDENCY DEBT (pinned module — the retirement condition is part of the pin).
+//
+// What is pinned: trpc.group/trpc-go/trpc-agent-go now resolves to the fork tag
+// github.com/SpellingDragon/trpc-agent-go@v1.11.2-tagent.1 = upstream v1.11.2
+// plus the 4 stream-close-contract commits (close event streams only after the
+// producer is done). The tag is published, so nothing here depends on an
+// out-of-tree local checkout: a fresh clone builds from the module proxy, and
+// `go mod verify` fails if the pinned content is not what the checksums record.
+//
+// Why it is pinned: those 4 commits reach no official tag yet. Upstream PR
+// trpc-group/trpc-agent-go#2637 carries the same change.
+//
+// RETIREMENT CONDITION — all four, in this order:
+//   1. trpc-group/trpc-agent-go#2637 is merged AND an official tag carries those
+//      4 commits (check: `go list -m -versions trpc.group/trpc-go/trpc-agent-go`
+//      lists a tag whose notes contain the producer-done/stream-close fix).
+//   2. That official tag contains the same commit set as the pinned fork tag
+//      (no behavior delta to re-review): compare the two logs, not the strings.
+//   3. The full gate suite is green against the official tag: short tests, race
+//      gate, lint (Go 1.24), openspec spec hygiene, and the bot module.
+//   4. The replacement is removed in one commit that also records it under
+//      CHANGELOG.md "Unreleased", so the debt does not outlive its pin.
+//
+// REMOVAL STEPS (this comment block stays until step e lands):
+//   a. go mod edit -dropreplace=trpc.group/trpc-go/trpc-agent-go
+//   b. go get trpc.group/trpc-go/trpc-agent-go@<official tag>
+//   c. go mod tidy && go mod verify
+//   d. re-run the gate suite named in condition 3 (an untested swap is not a fix)
+//   e. `bash scripts/check_dependency_debt.sh` must then report no pinned module;
+//      only then delete this block and note the removal in CHANGELOG.md.
+//
+// CHECK COMMAND: `bash scripts/check_dependency_debt.sh` re-prints this register
+// from go.mod on demand and always exits 0 — it is a reminder, never a gate, so a
+// pin stays visible without being able to block a build. The maintainer-facing
+// copy of this register is docs/OPERATION.md.
+//
+// Historical note (R1, design D6): the pin replaced a local `replace` to an
+// out-of-tree checkout, which made the build depend on one machine's disk layout.
 replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1

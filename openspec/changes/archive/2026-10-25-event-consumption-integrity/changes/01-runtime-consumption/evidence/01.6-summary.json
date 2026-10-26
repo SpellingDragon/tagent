@@ -1,0 +1,239 @@
+{
+  "leaf": "01.6",
+  "title": "微信宿主装配与缺身份拒绝",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T15:34:00Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 examples/wechat-bot/smoke_harness_test.go（//go:build smoke）增加 TestEventIntegrityHostAdapters：正锚 formal_channel_turn 只经渠道入站钩子驱动一轮，由 loadWechatConfig -> newWechatApp -> tagent.Boot -> bindChannel -> registerHandlers 的产品装配完成渠道入站 -> host 驱动 -> 模型请求 -> 答复回渠道，断言渠道恰一条答复、目标会话正确、请求身份可溯；负锚 missing_entry_fails_closed 以不含 entry 的声明文档经同一产品链装配，newWechatApp 返回具名 ErrNoChatAddress，且活宿主上空会话身份的 Drive 同样具名拒绝、不驱动模型、不外发、不落默认绑定。取证优先：两个锚对当前产品行为全绿，未改任何产品文件。",
+  "method": "测试只使用产品入口：bootSmokeIntegrityHost -> bootSmokeRig -> bootSmokeRigWith（smoke_harness_test.go:509）内部依次调用 loadWechatConfig（wechat.go:138）、newWechatApp（wechat.go:907）、tagent.Boot（main.go:33 同款调用）、bindChannel（wechat.go:812）与 registerHandlers（wechat.go:829）——即 main.go:19-37 与 wechat.go:940-954 的 bindWechat 正文，仅省去需要真实微信端点的 login（wechat.go:947）与一次性启动通知（wechat.go:955-956）。正锚不调用 rig.drive、不手工 Bind、不手工 CommitToSession：入站只经 fakeChannel.emit 触发 registerHandlers 注册的 OnMessage 钩子，之后由 hostRuntime.Drive -> Host.Invoke -> hostSender.Send 全程产品驱动。负锚第一段直接调用 loadWechatConfig + newWechatApp 并在装配期取得具名错误；第二段在活宿主上调用产品的 hostRuntime.Drive 并断言具名拒绝。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6",
+    "module": "wechat-bot (examples/wechat-bot, replace github.com/SpellingDragon/tagent => ../..)",
+    "parallel_work_note": "另单在改根产品（git status 显示 host.go/run.go/facts.go 等根文件被修改）。本单开工与收尾的 `go -C examples/wechat-bot vet -tags smoke ./...` 均 exit 0，未撞上编译中间态，无需重试。"
+  },
+  "artifacts": [
+    {
+      "path": "examples/wechat-bot/smoke_harness_test.go",
+      "state": "extended",
+      "lines": 1220,
+      "lines_added": 148,
+      "sha256": "f8c2f5ce4a5ada9f3ab0ded6e3b18588f601797124aa255e34f99d6346006e47",
+      "added_region": "1073-1220 行：TestEventIntegrityHostAdapters 父测试、两个子测试、两个轮次常量与 smokeIntegrityEntrylessDoc",
+      "prior_sha256": "01b671bb（03.4-03.8 证据记录值）"
+    },
+    {
+      "path": "examples/wechat-bot/wechat.go",
+      "state": "unchanged by this leaf; sha256 equals the pre-edit record",
+      "lines_added": 0,
+      "lines_removed": 0,
+      "sha256": "7f530e246020f3acc85f03ba72899ffe040b2453a9643278ee05c02770c12347",
+      "proof": "开工前备份 wechat.go.orig 与本文件 sha256 均为 7f530e24...；三次可证伪性 mutation 后每次逐字节恢复并用 sha256 复核；git status 未列出 examples/wechat-bot/wechat.go（无 M）"
+    },
+    {
+      "path": "examples/wechat-bot/main.go",
+      "state": "unchanged by this leaf",
+      "lines_added": 0,
+      "lines_removed": 0,
+      "sha256": "090e911a9e1dd4ae636a3e9bb64a34c7bb427b7f33e5594590cde9dd83816598",
+      "proof": "git status 未列出 examples/wechat-bot/main.go（无 M）"
+    }
+  ],
+  "product_changes": [],
+  "product_change_decision": "取证优先：扩展测试后两个锚对当前产品行为全绿（渠道回合恰一条答复、身份可溯；缺 entry 与空会话身份均具名 ErrNoChatAddress 且无模型请求/无外发/无默认绑定），未发现 01.6 范围内已证实的产品缺陷，故 main.go 与 wechat.go 零改动（wechat_approval.go 亦零改动）。三次可证伪性 mutation 仅临时改 wechat.go，跑完立即从 wechat.go.orig 逐字节恢复并复核 sha256。",
+  "falsifiability_mutations": [
+    {
+      "id": "m1_empty_agent_falls_back",
+      "target": "examples/wechat-bot/wechat.go NewSessionRouter",
+      "mutation": "把 agentID == \"\" 的具名拒绝改为回落默认 agent 标识（使缺 entry 的装配不再报错）",
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityHostAdapters$/missing_entry_fails_closed' -count=1 -json > \"$E/mutation-m1.jsonl\" 2>&1",
+      "exit_code": 1,
+      "result": "负锚 FAIL：smoke_harness_test.go:1178 `newWechatApp assembled an application from an entryless declaration: &{...}`，证明负锚能捕获「缺身份落默认地址」的回归",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/mutation-m1.jsonl",
+      "log_sha256": "691114df659a2a677813e9ffa319e04bc5a05a6523c5489953a02f643db5bf1e",
+      "log_bytes": 1051
+    },
+    {
+      "id": "m2_outbound_double_send",
+      "target": "examples/wechat-bot/wechat.go hostSender.Send",
+      "mutation": "在投递成功后再次调用渠道发送（同一答复双发）",
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityHostAdapters$/formal_channel_turn' -count=1 -json > \"$E/mutation-m2.jsonl\" 2>&1",
+      "exit_code": 1,
+      "result": "正锚 FAIL：smoke_harness_test.go:1108 `the channel received 2 answer(s) for SMOKE-R9001, want exactly one`，证明正锚读取的是渠道实际投递次数",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/mutation-m2.jsonl",
+      "log_sha256": "b8fb601475737df1051b7cc34f31f052e147da7ca1d2cd68241ab6fcc4eaca57",
+      "log_bytes": 618
+    },
+    {
+      "id": "m3_duplicate_user_input",
+      "target": "examples/wechat-bot/wechat.go hostRuntime.Drive",
+      "mutation": "在驱动前把用户输入追加两次（同一入站消费出两份材料）",
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityHostAdapters$/formal_channel_turn' -count=1 -json > \"$E/mutation-m3.jsonl\" 2>&1",
+      "exit_code": 1,
+      "result": "正锚 FAIL：smoke_harness_test.go:1139 `the request carried SMOKE-R9001 2 time(s), want exactly one input`，证明正锚核对的是「同一次入站恰一份新输入」而不只是请求存在",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/mutation-m3.jsonl",
+      "log_sha256": "05148dd340a467decbaa84f537bcb1f493cf035ec78b34d402fcf19ccb09a6fc",
+      "log_bytes": 351
+    }
+  ],
+  "verification": {
+    "single": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityHostAdapters$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.6/single.jsonl\" 2>&1",
+      "task_line_command_note": "01 域 tasks.md 的单轮命令省略了包选择参数 `.`；examples/wechat-bot 为单包模块目录，两种写法选择同一包。此处记录实际执行的带 `.` 形式。",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/single.jsonl",
+      "log_sha256": "f6e73b408af5208d1c7f4b374597a9d4dfdb0b84ab9c42900c6273e797579743",
+      "log_bytes": 3947,
+      "parsed": {
+        "parent": "TestEventIntegrityHostAdapters run=1 pass=1 elapsed=0.14s",
+        "named_subtests_run_pass": 2,
+        "named_subtests": [
+          "TestEventIntegrityHostAdapters/formal_channel_turn",
+          "TestEventIntegrityHostAdapters/missing_entry_fails_closed"
+        ],
+        "skip": 0,
+        "fail": 0,
+        "data_race": 0,
+        "package": "pass"
+      },
+      "product_log_lines": [
+        "[integrity-host-adapters] channel(smoke-chat-a) -> address(smoke-run:smoke:smoke-chat-a) -> one entry request -> one reply: \"answer SMOKE-R9001\"",
+        "[integrity-host-adapters] entryless declaration -> ErrNoChatAddress; empty chat identity -> ErrNoChatAddress with no model request, no outbound and no binding"
+      ]
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.6\"; mkdir -p \"$E\"; for i in $(seq 1 10); do go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityHostAdapters$' -count=1 -race -json -timeout 10m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; echo \"round=$i exit=$rc\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "run_id": "2201FB96-E179-4990-89B7-F3304DBDB0E7", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-1.jsonl", "log_sha256": "9af5b49d5542dd3851d0bb6062d73f3b90907888a9f0726dfc35ab2993f44c9f", "log_bytes": 3948, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 2, "exit_code": 0, "run_id": "CAF9AEF9-1D10-419E-BC0E-EB97CDE5B644", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-2.jsonl", "log_sha256": "d1b1483b03272e46f9b3e95af902cca7ee772b37b38f94764b1d79ee778741f3", "log_bytes": 3956, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 3, "exit_code": 0, "run_id": "7F9F5D8A-8316-49E2-B8D7-00A6629B5AC3", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-3.jsonl", "log_sha256": "8ce69f4a9af7100350ff309bc20a13f29146ba99918a51022925a4f28211640a", "log_bytes": 3947, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 4, "exit_code": 0, "run_id": "55F44583-F551-41D8-9A3E-1A42829D5FCC", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-4.jsonl", "log_sha256": "e808a4dcbbd8adee2f7374f7e1865ac91923f07b6f5cf0a807095a4dc2be9ff9", "log_bytes": 3947, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 5, "exit_code": 0, "run_id": "6EF5BB89-5CFD-4C6A-A7A8-9F89E748389C", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-5.jsonl", "log_sha256": "ead46be2eb95daaea25749fd380e1ef155fa4c1a59b7feec7f0781a437006cf6", "log_bytes": 3962, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 6, "exit_code": 0, "run_id": "BD290677-A0E2-4A1C-8F2D-7563D4D50340", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-6.jsonl", "log_sha256": "0bf9aa774f96fbd2b3d2f55be825132dcc26f600e26d7202e583c46548c73ef9", "log_bytes": 3945, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 7, "exit_code": 0, "run_id": "C0E0C7C9-8091-4798-86C0-37E0A435C0CA", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-7.jsonl", "log_sha256": "65d75d479fca50778423e1d20021cc145fa5a1d0cc5888a8815be2d32284eb48", "log_bytes": 3948, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 8, "exit_code": 0, "run_id": "EB563738-65DC-431B-AE2B-DA070E453FBA", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-8.jsonl", "log_sha256": "912318509b9ce27bd5c9f53e3965421f119d3f5404cc25b36295a05e271a30e4", "log_bytes": 3948, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 9, "exit_code": 0, "run_id": "BC929166-AAE3-4C31-B474-FA02B01D6D42", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-9.jsonl", "log_sha256": "000f3d30e0dfd70e17ea953f0093e7805e47f9a1b4866a69b44baccdcee8a9d5", "log_bytes": 3944, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0},
+        {"round": 10, "exit_code": 0, "run_id": "68E765D8-7925-4047-9F3C-187FCCD63EFF", "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/run-10.jsonl", "log_sha256": "40d22b60e60787bce19bc986f5aaf2e4eff0fa86a096fbe25268ac4c196a120c", "log_bytes": 3947, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0, "data_race": 0}
+      ],
+      "parser": "python3 逐轮 json.loads 每行；按 Test 归集 run/pass/skip/fail；要求父 selector 真实执行（父 run 存在）、两个具名子测试各 run=1/pass=1、skip=0、fail=0、包终局 pass、无 DATA RACE 输出行",
+      "parsed_result": "ALL_TEN_OK=True；十轮 run_id 互不相同，证明是十个独立进程"
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go -C examples/wechat-bot vet -tags smoke ./...",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/vet.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l examples/wechat-bot",
+        "exit_code": 0,
+        "output": "",
+        "output_lines": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "existing_package_tests": {
+        "command": "go -C examples/wechat-bot test -count=1 ./...",
+        "exit_code": 0,
+        "summary": "ok  \twechat-bot\t0.413s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/regress-pkg.txt",
+        "log_sha256": "d7554a7ca01c762cb47824beac8b416308f3e2a2bb0cd7b0ccbd83699d6e2ef5",
+        "log_bytes": 23
+      },
+      "local_smoke": {
+        "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmoke$' -count=1 -timeout 30m",
+        "exit_code": 0,
+        "summary": "ok  \twechat-bot\t63.437s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/regress-local-smoke.txt",
+        "log_sha256": "93bd80bc2245c3d720d456e0d363de0d1eb7bb2aaef93729fff7f2a4cb8fc8af",
+        "log_bytes": 24
+      },
+      "sibling_regression": {
+        "command": "go -C examples/wechat-bot test -tags smoke . -run '^(TestEventIntegrityHostAdapters|TestEventIntegrityApprovalControl|TestEventIntegrityReflectionDeliveryControl|TestEventIntegrityFoldControl|TestEventIntegrityReplacementControl|TestEventIntegrityCaptureControl)$' -count=1 -race -json -timeout 30m",
+        "exit_code": 0,
+        "summary": "6 个父测试（本叶 + 03.4-03.8 五父）共 23 条父/子测试记录全部 run=1 pass=1 skip=0 fail=0；DATA RACE 0 行",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.6/regress-siblings.jsonl",
+        "log_sha256": "806703458ff6c287c3785f514ffaa1585b3c3b8abd5751b55645dc19552b5117",
+        "log_bytes": 31585
+      },
+      "untouched_boundaries": {
+        "examples/wechat-bot/smoke_test.go": "sha256 9d5765fb7333b29408b42efbb1ef53dc6c1cd771ce76bec1b8014d3698d216ab，与 03.4-03.8 证据记录一致（五父测试与共享台架未改）",
+        "examples/wechat-bot/wechat_test.go": "sha256 8da8f108678530dad4cc8c3387638edfd5499a9714742c982242614cc790cfa1，与 02.6 证据记录一致（微信审批用例未改）",
+        "examples/wechat-bot/wechat_approval.go": "sha256 469b8579e746c2e8ace3974f971c08b7f0d96bdc8479d3b8c27560980630196c，与 02.6 证据记录一致"
+      },
+      "compile_under_parallel_root_edits": {
+        "command": "go -C examples/wechat-bot vet -tags smoke ./...",
+        "exit_code": 0,
+        "note": "另单正在改根产品；本单开工与收尾两次 vet 均通过，未遇编译中间态"
+      }
+    }
+  },
+  "consumers": {
+    "formal_entry": "examples/wechat-bot/main.go:19 loadWechatConfig -> main.go:27 newWechatApp -> main.go:33 tagent.Boot -> main.go:37 app.bindWechat",
+    "assembly": "wechat.go:907 newWechatApp -> 909 EnsureDirs -> 912 NewSessionRouter(event.AgentID(cfg.Entry), sessionPrefixOf(cfg.Entry))（wechat.go:677）-> hostRuntime{router, inbox, sender, seen}",
+    "boot_and_binding": "smoke_harness_test.go:509 bootSmokeRigWith 复刻 wechat.go:940 bindWechat 正文：host.invoke 包装 Host.Invoke（wechat.go:941-947）-> app.face = host.FaceAddr()（948）-> gateway.SetSender（949）-> bindChannel（953 / wechat.go:812）-> registerHandlers（954 / wechat.go:829）；省略 login（947）与一次性启动通知（955-956），二者需要真实微信端点（见 limitations）",
+    "drive": "fakeChannel.emit -> registerHandlers 注册的 OnMessage -> host.Admit(DedupKey) -> ClassifyInbound -> hostRuntime.Drive -> Host.Invoke -> 脚本 provider 的 /v1/chat/completions 请求 -> 最终答复经 hostSender.Send（Host.deliverFresh）-> fakeChannel.SendTextToUser",
+    "closed_rejection": "loadWechatConfig（无 entry 文档）-> newWechatApp -> NewSessionRouter(\"\", ...) 返回 wechat.go:647 的 ErrNoChatAddress；活宿主：hostRuntime.Drive -> SessionRouter.AddressFor 对空白 chat 身份返回同一 ErrNoChatAddress（wechat.go:695-698）-> 无 provider 请求、无外发、无 Bind"
+  },
+  "red_lines": {
+    "formal_run_only": "新增区域（smoke_harness_test.go:1073-1220）内 Bind( / CommitToSession / rig.drive( 作为调用点命中 0（仅注释提及）；正锚入站只经 rig.channel.emit 触发产品注册的钩子。",
+    "no_manual_wiring": "测试未手工装配 host、未手工写 facts、未构造 session；一切经 bootSmokeRigWith 的产品调用序列。",
+    "no_product_change": "wechat.go sha256 = 7f530e24...（与开工前一致）、main.go sha256 = 090e911a...（未改）；git status 无这两个文件的 M 标记。",
+    "writer_isolation": "smoke 文件簇单写：本单只改 smoke_harness_test.go；smoke_test.go/wechat_test.go/wechat_approval.go 的 sha256 与既有证据记录逐一相符。",
+    "smoke_tag": "文件首行 //go:build smoke；默认构建面不含新测试。"
+  },
+  "subtests": [
+    {
+      "name": "formal_channel_turn",
+      "anchor": "positive",
+      "line": 1093,
+      "asserts": [
+        "渠道入站一条消息后，渠道收到恰一条正文为 `answer SMOKE-R9001` 的答复（smokeErrorsTextCount == 1）",
+        "该答复 Target 等于入站 chat（smoke-chat-a），且其它 chat 未收到含本轮标记的正文",
+        "router.Target(addressOf(chat)) == chat；BoundAddresses(agent) 恰为唯一会址 `smoke-run:smoke:smoke-chat-a`",
+        "入口模型请求恰一条携带本轮标记，且该请求最后一条用户消息逐字节等于渠道入站正文",
+        "该请求全文里本轮标记只出现一次（同一入站只消费出一份新输入）",
+        "该会址上恰一条 external_input 事实携带本轮标记（逻辑消费恰一次）",
+        "答复正文由脚本按本轮标记生成并经 hostSender 回渠道（产品日志行记录 chat -> address -> 一条请求 -> 一条答复）"
+      ]
+    },
+    {
+      "name": "missing_entry_fails_closed",
+      "anchor": "negative",
+      "line": 1161,
+      "asserts": [
+        "不含 entry 的声明文档经 loadWechatConfig 读成空 Entry",
+        "newWechatApp 返回 nil 应用与 errors.Is(err, ErrNoChatAddress) 的具名拒绝（不落默认地址）",
+        "该拒绝装配未产生任何模型请求（provider.count() == 0）",
+        "活宿主上空会话身份（ChatID=\"   \"）的 Drive 返回 ErrNoChatAddress",
+        "该拒绝不驱动模型（provider 计数不变）、不产生出站事件、BoundAddresses 为空（无默认绑定）"
+      ]
+    }
+  ],
+  "limitations": [
+    "台架复刻 bindWechat 的 Boot 后正文并直接调用 bindChannel/registerHandlers，但省略 login、一次性启动通知与消息拉取循环——这些步骤需要真实微信端点；被省略的调用不参与本叶两锚的断言面。",
+    "正锚的渠道是 fakeChannel（内存记录 text/typing/stop-typing/file），不是真实微信 API；外部发送的幂等性不在本叶声明范围（见 00.3 冻结件）。",
+    "冥想节奏固定为 1h：首次宿主可见提交只触发一次反思；断言按入口模型 + 本轮标记过滤，避免反思请求/回流注入干扰。",
+    "负锚第一段 newWechatApp 在 NewSessionRouter 拒绝前已执行 EnsureDirs（目录副作用），但无身份、无绑定、无模型请求。",
+    "01.6 verify_after=[]：本叶不触发下游 verify_after 汇总；02.6 微信审批的最终回验以本叶完成作为前置，其回验由 02 域负责。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": 19,
+    "change": "- [ ] 01.6 -> - [x] 01.6",
+    "reason": "三锚齐全（正锚 formal_channel_turn、负锚 missing_entry_fails_closed、消费者锚 newWechatApp -> Boot -> bindChannel -> registerHandlers 正式链）；单轮 exit 0、十轮 10/10 exit 0、既有面回归与 vet/gofmt 全绿；verify_after=[] 已满足"
+  }
+}

@@ -1,0 +1,839 @@
+{
+  "schema_version": 1,
+  "artifact": "post-01.5-recheck",
+  "change": "event-consumption-integrity",
+  "generated_at": "2026-10-24T00:32:00+08:00",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "scope": "01.5/01.6 勾选后回验：全族新鲜单轮（host 9 父、五包 7 父、微信 smoke 6 父、微信审批 1 父）+ 00.2 十轮独立绿证 + 逐叶 evidence 摘要/测试名核对；只勾选 tasks.md 并写证据，不改产品/测试代码。",
+  "authorization": "调用方单 K 指令（00.2、02.1/02.2/02.4/02.5/02.6/02.7、03.2—03.9；02.3 除外）。",
+  "write_set": {
+    "product_code": [],
+    "test_code": [],
+    "tasks_md": [
+      "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+      "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md"
+    ],
+    "evidence": [
+      "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.json（追加 final_ten_rounds_after_01_5 与 checkbox 回填）",
+      "openspec/changes/event-consumption-integrity/evidence/post-01.5-recheck.json（本文件）"
+    ],
+    "raw_logs_outside_repo": [
+      "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/post-01.5-recheck",
+      "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2"
+    ]
+  },
+  "commands": [
+    {
+      "id": "1a",
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrity' -count=1 -race -json -timeout 20m",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/post-01.5-recheck/1a-host-family.jsonl",
+      "log_sha256": "d537b527d403196d40f55b622cc104d66f4473dfe4712829b14f33d5e42520f6",
+      "log_bytes": 203739,
+      "note": "9 父测试/46 子测试；包级 pass",
+      "parsed": {
+        "packages": {
+          "github.com/SpellingDragon/tagent/tests/integration/host": {
+            "pass": 1
+          }
+        },
+        "parents": {
+          "TestEventIntegrityReproduction": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityTaskContinuation": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityDelivery": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityReflectionDelivery": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityReplacement": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityIdentityMatrix": {
+            "run": 1,
+            "output": 30,
+            "pass": 1
+          },
+          "TestEventIntegrityDecisionFlowMatrix": {
+            "run": 1,
+            "output": 19,
+            "pass": 1
+          },
+          "TestEventIntegrityFormalAssembly": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityHarness": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          }
+        },
+        "parent_count": 9,
+        "child_run_count": 46
+      }
+    },
+    {
+      "id": "1b",
+      "command": "go test ./tests/integration/execution ./tests/integration/history ./tests/integration/learning ./tests/integration/capabilities ./tests/integration/evolution -run '^TestEventIntegrity' -count=1 -race -json",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/post-01.5-recheck/1b-five-packages.jsonl",
+      "log_sha256": "0030b1c2c4552b45ec104c8ee98f3247e101ec9a1eb017fa1d7471fce94a147a",
+      "log_bytes": 126842,
+      "note": "5 包各自 pass；7 父测试/49 子测试",
+      "parsed": {
+        "packages": {
+          "github.com/SpellingDragon/tagent/tests/integration/execution": {
+            "pass": 1
+          },
+          "github.com/SpellingDragon/tagent/tests/integration/learning": {
+            "pass": 1
+          },
+          "github.com/SpellingDragon/tagent/tests/integration/capabilities": {
+            "pass": 1
+          },
+          "github.com/SpellingDragon/tagent/tests/integration/evolution": {
+            "pass": 1
+          },
+          "github.com/SpellingDragon/tagent/tests/integration/history": {
+            "pass": 1
+          }
+        },
+        "parents": {
+          "TestEventIntegrityNoticeIdentity": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityCapture": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityConsumptionRecovery": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityApproval": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityMeditationSchedule": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityProjection": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityRestart": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          }
+        },
+        "parent_count": 7,
+        "child_run_count": 49
+      }
+    },
+    {
+      "id": "1c",
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^(TestEventIntegrityHostAdapters|TestEventIntegrity(Approval|ReflectionDelivery|Fold|Replacement|Capture)Control)$' -count=1 -race -json -timeout 30m",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/post-01.5-recheck/1c-wechat-smoke.jsonl",
+      "log_sha256": "5eb4f02d3634b52f4f9d6003b53aa8640cec423ea3c07abf35230e025f5de0d2",
+      "log_bytes": 31584,
+      "note": "6 父测试/17 子测试；耗时 132.5s",
+      "parsed": {
+        "packages": {
+          "wechat-bot": {
+            "pass": 1
+          }
+        },
+        "parents": {
+          "TestEventIntegrityHostAdapters": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityApprovalControl": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityReflectionDeliveryControl": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityFoldControl": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityReplacementControl": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          },
+          "TestEventIntegrityCaptureControl": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          }
+        },
+        "parent_count": 6,
+        "child_run_count": 17
+      }
+    },
+    {
+      "id": "1d",
+      "command": "go -C examples/wechat-bot test . -run '^TestEventIntegrityApprovalWeChat$' -count=1 -race -json",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/post-01.5-recheck/1d-wechat-approval.jsonl",
+      "log_sha256": "4fc63e447e508f94b6719f8c21c1082d7f9f5598fc42ba441a448e1519740428",
+      "log_bytes": 9598,
+      "note": "1 父测试/6 子测试",
+      "parsed": {
+        "packages": {
+          "wechat-bot": {
+            "pass": 1
+          }
+        },
+        "parents": {
+          "TestEventIntegrityApprovalWeChat": {
+            "run": 1,
+            "output": 2,
+            "pass": 1
+          }
+        },
+        "parent_count": 1,
+        "child_run_count": 6
+      }
+    }
+  ],
+  "ten_rounds_00_2": {
+    "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/event-short/00.2\"; mkdir -p \"$E\"; : > \"$E/exits.txt\"; for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityReproduction$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$E/exits.txt\"; [ \"$rc\" -eq 0 ] || exit \"$rc\"; done",
+    "cwd": "/Users/pengweiye/Documents/codes/tagent",
+    "exits": "10/10 exit=0",
+    "checker": "scripts/runtime_checklib.py + scripts/check_runtime_evidence.py（index_test_log/check_selector）逐轮核验：父+四固定子测试各恰一次 run 且终局 pass → 10/10 ok=True，exit 0",
+    "checker_exit": 0,
+    "checker_log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/check.out",
+    "rounds": [
+      {
+        "round": 1,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-1.jsonl",
+        "log_sha256": "2443dccf8df380e42e9a0dcc3f48507facf4c07956456fe821bcb88335199bde",
+        "log_bytes": 22505,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 2,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-2.jsonl",
+        "log_sha256": "ecdf0d31fbdb8c3eef2fe69989b21fa7d6cc78375545160e9b8ef5d765c5ce66",
+        "log_bytes": 22515,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 3,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-3.jsonl",
+        "log_sha256": "0a93ece105744ac7a3a410db28c1a8e27bd9e71b93fedbae9023702a27c24517",
+        "log_bytes": 22507,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 4,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-4.jsonl",
+        "log_sha256": "fdcca38487f80b52d03f72f8c2aaa0a6028596cea00d5e46afaf7e6000e5e3e5",
+        "log_bytes": 22500,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 5,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-5.jsonl",
+        "log_sha256": "8a5ba5bb8480e2ba4f2f133565e9b4505b8de29eec3e1cdd380858ec97957fa7",
+        "log_bytes": 22505,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 6,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-6.jsonl",
+        "log_sha256": "90101c0ef1a23825dd33977805d484ccc25041f2781cd5ef2653d7d5e3c00da7",
+        "log_bytes": 22513,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 7,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-7.jsonl",
+        "log_sha256": "8a05823a300a96918b365ac112378db1b5d0057bed68a83a85b6452474a4d142",
+        "log_bytes": 22500,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 8,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-8.jsonl",
+        "log_sha256": "ee36b900315ebfaccde5fef66fb4789f37733b533fb354fe6eecfa8f2f5e2484",
+        "log_bytes": 22514,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 9,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-9.jsonl",
+        "log_sha256": "98e23e2d8f9a6fcb9793a33c5dc954f6eef7b9a27e94d9f11afb70234797eb0c",
+        "log_bytes": 22510,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      },
+      {
+        "round": 10,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-10.jsonl",
+        "log_sha256": "56ebc8035a14f37965efb6320a9eb06c7675cb4c7f58b414ce689713f34ea187",
+        "log_bytes": 22505,
+        "parent_run_pass": 1,
+        "children_run_pass": 4,
+        "fail": 0,
+        "skip": 0
+      }
+    ]
+  },
+  "evidence_cross_check": [
+    {
+      "leaf": "00.2",
+      "fresh_run": "1a",
+      "parent": "TestEventIntegrityReproduction",
+      "evidence": "00-contract-evidence/evidence/00.2-reproduction.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "busy_notice_loss",
+        "control_normal_path",
+        "duplicate_notice_material",
+        "request_and_send_identity_correlation"
+      ],
+      "observed_children": [
+        "busy_notice_loss",
+        "control_normal_path",
+        "duplicate_notice_material",
+        "request_and_send_identity_correlation"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "02.1",
+      "fresh_run": "1b",
+      "parent": "TestEventIntegrityMeditationSchedule",
+      "evidence": "ORCHESTRATION.md 台账 W1首批 + ${TMPDIR}/event-consumption-integrity/02.1/{run-1..10.json,exits.txt,v.py}（02 域 tasks 头部规定不新增每叶摘要文件）",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "busy_observation_holds_watermark",
+        "cold_start_passes_through",
+        "formal_reflection_consumer",
+        "new_material_on_cadence",
+        "non_completed_terminal_defers",
+        "own_product_no_reentry"
+      ],
+      "observed_children": [
+        "busy_observation_holds_watermark",
+        "cold_start_passes_through",
+        "formal_reflection_consumer",
+        "new_material_on_cadence",
+        "non_completed_terminal_defers",
+        "own_product_no_reentry"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "02.2",
+      "fresh_run": "1a",
+      "parent": "TestEventIntegrityReflectionDelivery",
+      "evidence": "02-event-consumers/evidence/02.2-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "boot_deliver_to_target_request",
+        "delivery_does_not_rearm_novelty",
+        "empty_whitelist_fail_closed",
+        "explicit_call_reaches_target_session",
+        "partial_commit_failure_not_success",
+        "replay_identity",
+        "same_batch_yield_is_legal_success",
+        "target_not_running_named_refusal",
+        "unknown_target_named_refusal",
+        "wrong_target_no_extra_write",
+        "zero_live_target_not_success"
+      ],
+      "observed_children": [
+        "boot_deliver_to_target_request",
+        "delivery_does_not_rearm_novelty",
+        "empty_whitelist_fail_closed",
+        "explicit_call_reaches_target_session",
+        "partial_commit_failure_not_success",
+        "replay_identity",
+        "same_batch_yield_is_legal_success",
+        "target_not_running_named_refusal",
+        "unknown_target_named_refusal",
+        "wrong_target_no_extra_write",
+        "zero_live_target_not_success"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "02.4",
+      "fresh_run": "1a",
+      "parent": "TestEventIntegrityReplacement",
+      "evidence": "02-event-consumers/evidence/02.4-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "duplicate_same_version_not_reinstalled",
+        "failed_replacement_not_installed",
+        "formal_reload_entry",
+        "inflight_stream_keeps_start_version",
+        "new_request_gets_new_version"
+      ],
+      "observed_children": [
+        "duplicate_same_version_not_reinstalled",
+        "failed_replacement_not_installed",
+        "formal_reload_entry",
+        "inflight_stream_keeps_start_version",
+        "new_request_gets_new_version"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "02.5",
+      "fresh_run": "1b",
+      "parent": "TestEventIntegrityApproval",
+      "evidence": "02-event-consumers/evidence/02.5-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "approved_then_executes_once",
+        "changed_args_requires_new_approval",
+        "channel_delivery_failure_does_not_block",
+        "duplicate_response_no_second_execution",
+        "expired_response_refused",
+        "formal_governance_task_wrapper",
+        "rejected_never_executes",
+        "unapproved_never_executes",
+        "wrong_target_no_overreach"
+      ],
+      "observed_children": [
+        "approved_then_executes_once",
+        "changed_args_requires_new_approval",
+        "channel_delivery_failure_does_not_block",
+        "duplicate_response_no_second_execution",
+        "expired_response_refused",
+        "formal_governance_task_wrapper",
+        "rejected_never_executes",
+        "unapproved_never_executes",
+        "wrong_target_no_overreach"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "02.6",
+      "fresh_run": "1d",
+      "parent": "TestEventIntegrityApprovalWeChat",
+      "evidence": "02-event-consumers/evidence/02.6-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "ambiguous_prefix_refused",
+        "approval_request_fanout",
+        "non_approver_refused",
+        "parse_approve_reject",
+        "unknown_digest_refused",
+        "wechat_cli_entry"
+      ],
+      "observed_children": [
+        "ambiguous_prefix_refused",
+        "approval_request_fanout",
+        "non_approver_refused",
+        "parse_approve_reject",
+        "unknown_digest_refused",
+        "wechat_cli_entry"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "02.7",
+      "fresh_run": "1b",
+      "parent": "TestEventIntegrityCapture",
+      "evidence": "02-event-consumers/evidence/02.7-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "export_correlation_is_not_reward",
+        "failed_attempt_recorded_as_failure",
+        "formal_capture_then_offline_export",
+        "no_request_no_record",
+        "rejected_admission_in_loss_ledger",
+        "requests_and_attempts_match_records"
+      ],
+      "observed_children": [
+        "export_correlation_is_not_reward",
+        "failed_attempt_recorded_as_failure",
+        "formal_capture_then_offline_export",
+        "no_request_no_record",
+        "rejected_admission_in_loss_ledger",
+        "requests_and_attempts_match_records"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.2",
+      "fresh_run": "1a",
+      "parent": "TestEventIntegrityIdentityMatrix",
+      "evidence": "03-formal-simulation/evidence/03.2-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.3",
+      "fresh_run": "1a",
+      "parent": "TestEventIntegrityDecisionFlowMatrix",
+      "evidence": "03-formal-simulation/evidence/03.3-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.4",
+      "fresh_run": "1c",
+      "parent": "TestEventIntegrityApprovalControl",
+      "evidence": "03-formal-simulation/evidence/03.4-03.8-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.5",
+      "fresh_run": "1c",
+      "parent": "TestEventIntegrityReflectionDeliveryControl",
+      "evidence": "03-formal-simulation/evidence/03.4-03.8-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.6",
+      "fresh_run": "1c",
+      "parent": "TestEventIntegrityFoldControl",
+      "evidence": "03-formal-simulation/evidence/03.4-03.8-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.7",
+      "fresh_run": "1c",
+      "parent": "TestEventIntegrityReplacementControl",
+      "evidence": "03-formal-simulation/evidence/03.4-03.8-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.8",
+      "fresh_run": "1c",
+      "parent": "TestEventIntegrityCaptureControl",
+      "evidence": "03-formal-simulation/evidence/03.4-03.8-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "positive"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    },
+    {
+      "leaf": "03.9",
+      "fresh_run": "1b",
+      "parent": "TestEventIntegrityRestart",
+      "evidence": "03-formal-simulation/evidence/03.9-summary.json",
+      "recorded_test_matches": true,
+      "expected_children": [
+        "consumer",
+        "negative",
+        "negative/confirmed_not_resent",
+        "negative/cross_boundary_not_misjudged",
+        "negative/unconfirmed_not_lost",
+        "positive",
+        "positive/after_claim",
+        "positive/after_commit",
+        "positive/after_confirmation",
+        "positive/before_commit",
+        "positive/before_confirmation"
+      ],
+      "observed_children": [
+        "consumer",
+        "negative",
+        "negative/confirmed_not_resent",
+        "negative/cross_boundary_not_misjudged",
+        "negative/unconfirmed_not_lost",
+        "positive",
+        "positive/after_claim",
+        "positive/after_commit",
+        "positive/after_confirmation",
+        "positive/before_commit",
+        "positive/before_confirmation"
+      ],
+      "missing_children": [],
+      "extra_children": [],
+      "parent_run_pass": true,
+      "verdict": "pass"
+    }
+  ],
+  "leaf_verdicts": {
+    "00.2": "checked",
+    "02.1": "checked",
+    "02.2": "checked",
+    "02.4": "checked",
+    "02.5": "checked",
+    "02.6": "checked",
+    "02.7": "checked",
+    "03.2": "checked",
+    "03.3": "checked",
+    "03.4": "checked",
+    "03.5": "checked",
+    "03.6": "checked",
+    "03.7": "checked",
+    "03.8": "checked",
+    "03.9": "checked"
+  },
+  "excluded": {
+    "02.3": {
+      "state": "unchecked",
+      "reason": "G4 生产 compaction 写入点待用户裁定（01.5 pending_decisions 选项 A/B）；新鲜运行中 TestEventIntegrityProjection 无 compaction_event_writer 子测试，不得勾选。"
+    }
+  },
+  "checkbox_counts": {
+    "00": {
+      "tasks_md": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+      "total": 4,
+      "checked": 4,
+      "unchecked": 0
+    },
+    "01": {
+      "tasks_md": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "total": 7,
+      "checked": 7,
+      "unchecked": 0
+    },
+    "02": {
+      "tasks_md": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "total": 7,
+      "checked": 6,
+      "unchecked": 1
+    },
+    "03": {
+      "tasks_md": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "total": 11,
+      "checked": 10,
+      "unchecked": 1
+    },
+    "04": {
+      "tasks_md": "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+      "total": 5,
+      "checked": 2,
+      "unchecked": 3
+    },
+    "05": {
+      "tasks_md": "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md",
+      "total": 4,
+      "checked": 0,
+      "unchecked": 4
+    }
+  },
+  "pending_decisions": {
+    "G4": {
+      "leaves": [
+        "02.3"
+      ],
+      "summary": "CompactionFact 仅内存、RebuildProjectionFromWAL 零生产调用；01.5 未接写入点。",
+      "options": [
+        "A 授权新增根装配 compaction 写入点（需 public API/持久格式授权）",
+        "B 裁定 G4 永久不适用并改写 02.3 验收面"
+      ]
+    },
+    "03.9-redelivery-seam": {
+      "leaves": [
+        "03.9"
+      ],
+      "summary": "03.9 按 open 保留分支全绿（未确认义务保留、具名 awaiting-delivery）；跨进程改投接缝仍未建。本单按调派令勾选 03.9；若后续裁定 A（新增接缝），03.9 需重开补验。",
+      "options": [
+        "A 授权新增恢复投递接缝",
+        "B 维持 open 保留分支"
+      ]
+    }
+  },
+  "observations": [
+    "02.1 无每叶 summary 文件：02 域 tasks 头部明确「不新增每叶摘要文件，摘要回填根 ORCHESTRATION.md 台账」；其十轮原始日志（10×exit=0）与 v.py 检查器仍在 ${TMPDIR}/event-consumption-integrity/02.1，本单用项目 checker 复跑 10/10 ok=True。",
+    "03.3 原摘要的十轮检查用 grep 过滤 pass 事件而非项目 checker；本单用 scripts/runtime_checklib.py + check_runtime_evidence.py 对其 10 份历史日志复跑，10/10 ok=True。",
+    "03.4—03.8 共用一份合并摘要 03.4-03.8-summary.json，leaves 字段覆盖五叶；逐叶父测试与三锚在 leaves_detail 中可核。",
+    "02.3 的 TestEventIntegrityProjection 在当前树只有 5 个子测试（缺 compaction_event_writer），与「保持未勾」一致。"
+  ],
+  "red_lines": [
+    "未修改任何产品/测试代码；未用测试手工补接线。",
+    "新鲜运行均为 -count=1 -race -json 单轮独立进程；00.2 为 10 次独立进程、10 份日志。",
+    "原始日志只落仓库外临时目录。"
+  ]
+}

@@ -1,0 +1,3 @@
+Delegate to the action agent: an execution turn that carries out a decided instruction on the filesystem or the command line — writing, changing, listing, searching, running a command, or calling an external MCP tool.
+The turn runs on that agent's own tools (the file set rooted at its base directory, `exec_run` / `exec_release`, and the MCP gateway that reads the live registry), and its answer returns as the terminal notification of the admitted task.
+Do not use it for planning (the plan agent), for sending messages (this conversation keeps `send`), or for skill-material research (the knowledge agent): the action agent turns a decided instruction into done work with evidence.

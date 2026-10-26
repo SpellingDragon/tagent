@@ -1,0 +1,128 @@
+F3 回滚即红双证据（收尾 F3；DoD 见 F1/F2）
+工作树：/Users/pengweiye/Documents/codes/tagent
+HEAD：0cf8438（docs(openspec): the delivery review binds the outlet and records its ledger）
+采集：2026-10-26 13:26–13:34 CST
+证据根：$TMPDIR/drp-final（= /var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/drp-final）
+固定动作（每次定点破坏）：留 diff → go build ./... → 精确症状测试（期望红）→ git checkout -- <file> →
+git hash-object 与 git rev-parse HEAD:<file> 比对 → shasum -a 256 → git diff 字节数 → 精确症状测试（期望绿）。
+判据：红 = go test exit≠0 且失败落在具名断言；绿 = exit 0。
+测试命令模板：go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom<X>$' -count=1 -timeout 600s
+
+基线（破坏前，三文件均无未提交改动）：
+$ shasum -a 256 examples/wechat-bot/tagent.yaml examples/wechat-bot/smoke_harness_test.go host.go
+61cde18269ead2a6cc0c5d320ee5df6ba0691b80e1bf9b9335893cf57cfec674  examples/wechat-bot/tagent.yaml
+c0b2cc794fb24d7672184c5fb92e5f8f2ac36d76fa6dfc02b6d39ebe7570d2ec  examples/wechat-bot/smoke_harness_test.go
+6c70ea08b6fd05fe029c880361fa40d4f44eaaf9b9f866a072564c257e644058  host.go
+$ git diff -- examples/wechat-bot/tagent.yaml examples/wechat-bot/smoke_harness_test.go host.go | wc -c
+0
+
+================================================================================
+一、a）回滚 entry 去 send：tagent.yaml + 台架默认文档临时恢复 send → G-A 红 → 还原 → G-A 绿
+================================================================================
+[破坏 diff]（f3-a-diff.txt）
+--- a/examples/wechat-bot/tagent.yaml
++++ b/examples/wechat-bot/tagent.yaml
+@@ -89,6 +89,7 @@ agents:
+     # 工具面是被委派 agent 自己的 tools[],描述从 description_file 热载。
+     tools:
++      - { kind: tool, id: send }
+       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
+--- a/examples/wechat-bot/smoke_harness_test.go
++++ b/examples/wechat-bot/smoke_harness_test.go
+@@ -198,6 +198,7 @@ agents:
+   %s:
+     model: %s
+     tools:
++      - { kind: tool, id: send }
+       - { kind: agent, agent: smoke-worker }
+
+[编译] go build ./... → BUILD_EXIT=0
+
+[红 1：两层同时回滚，部署文档断言先命中]（f3-a1-red.log）
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomNoSendTool$' -count=1 -timeout 600s
+GA_RED_EXIT=1
+  --- FAIL: TestLocalSmokeSymptomNoSendTool (0.00s)
+      smoke_test.go:3635: 部署入口仍声明 send：tagent.yaml 含 "id: send"
+  FAIL	wechat-bot	0.357s
+  FAIL
+
+[红 2：只回滚 tagent.yaml、保留台架文档的 send，工具面断言命中]（f3-a1b-red-face.log）
+$ git checkout -- examples/wechat-bot/tagent.yaml   → tagent.yaml diff_bytes=0
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomNoSendTool$' -count=1 -timeout 600s
+GA_RED_FACE_EXIT=1
+  --- FAIL: TestLocalSmokeSymptomNoSendTool (0.45s)
+      smoke_test.go:3653: 入口工具面仍授予 "send"：请求授予的工具 = [send smoke-worker]，want 无 send
+  FAIL	wechat-bot	0.806s
+  FAIL
+
+[还原]
+$ git checkout -- examples/wechat-bot/smoke_harness_test.go → checkout_exit=0
+  blob=2b57769e91edb3f5320c2a86a2e645f6347341af
+  head=2b57769e91edb3f5320c2a86a2e645f6347341af（一致）
+$ shasum -a 256 examples/wechat-bot/smoke_harness_test.go examples/wechat-bot/tagent.yaml
+c0b2cc794fb24d7672184c5fb92e5f8f2ac36d76fa6dfc02b6d39ebe7570d2ec  examples/wechat-bot/smoke_harness_test.go（== 基线）
+61cde18269ead2a6cc0c5d320ee5df6ba0691b80e1bf9b9335893cf57cfec674  examples/wechat-bot/tagent.yaml（== 基线）
+$ git diff -- examples/wechat-bot/tagent.yaml examples/wechat-bot/smoke_harness_test.go | wc -c
+0
+
+[绿]（f3-a2-green.log）
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomNoSendTool$' -count=1 -timeout 600s
+GA_GREEN_EXIT=0
+  ok  	wechat-bot	0.821s
+
+结论（a）：PASS——回滚 entry 去 send 使 G-A 红（部署文档 3635；台架文档 3653 两层各有判别力），
+还原后 shasum 与 HEAD 一致、diff 0 字节，G-A 复绿。
+
+================================================================================
+二、b）短路投递裁决点（跳过 ruler 查询）→ G-B 红 → 还原 → G-B 绿
+================================================================================
+[破坏 diff]（f3-b-diff.txt）
+--- a/host.go
++++ b/host.go
+@@ -1214,7 +1214,7 @@ func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery pl
+ 	if sender == nil {
+ 		return deliveryRefused, "the host carries no outbound message sender"
+ 	}
+-	if ruler := h.deliveryRuler; ruler != nil {
++	if ruler := h.deliveryRuler; false && ruler != nil {
+ 		disposition, err := ruler.Rule(ctx, delivery)
+
+[编译] go build ./... → BUILD_EXIT=0
+
+[红]（f3-b1-red.log）
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomDeliveryHold$' -count=1 -timeout 600s
+GB_RED_EXIT=1
+  --- FAIL: TestLocalSmokeSymptomDeliveryHold (60.25s)
+      --- FAIL: TestLocalSmokeSymptomDeliveryHold/hold_waits_then_approves_once (30.12s)
+          smoke_test.go:3688: no held delivery to symptom-anchor-chat starts with "hold-ack SMOKE-R9702" within 30s; held = []
+      --- FAIL: TestLocalSmokeSymptomDeliveryHold/refuse_delivers_nothing_and_audits (30.13s)
+          smoke_test.go:3715: no held delivery to symptom-anchor-chat starts with "hold-ack SMOKE-R9703" within 30s; held = []
+  FAIL	wechat-bot	60.599s
+  FAIL
+
+[还原]
+$ git checkout -- host.go → checkout_exit=0
+  blob=d8a2c581c8403993ef59800e03b346ce938f8bfb
+  head=d8a2c581c8403993ef59800e03b346ce938f8bfb（一致）
+  shasum -a 256 = 6c70ea08b6fd05fe029c880361fa40d4f44eaaf9b9f866a072564c257e644058（== 基线）
+  git diff -- host.go | wc -c = 0
+
+[绿]（f3-b2-green.log）
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomDeliveryHold$' -count=1 -timeout 600s
+GB_GREEN_EXIT=0
+  ok  	wechat-bot	4.931s
+
+结论（b）：PASS——跳过 ruler 查询使两条挂起路径都失去裁决（held=[]，3688/3715 具名断言红），
+还原后 shasum 与 HEAD 一致、diff 0 字节，G-B 复绿。
+
+================================================================================
+三、残留检查
+================================================================================
+$ git status --porcelain
+ M examples/wechat-bot/skills/interview/agent-interview-helper   ← 采集前既有（gitlink 内容脏，非本轮改动）
+ M openspec/changes/delivery-review-plugins/findings.md          ← 账目
+ M openspec/changes/delivery-review-plugins/tasks.md             ← 账目
+ F1/F2/F3 证据文件（新增）
+产品文件 examples/wechat-bot/tagent.yaml、examples/wechat-bot/smoke_harness_test.go、host.go 均零 diff。
+
+F3 总判：PASS（a：两红一绿；b：一红一绿。合计两红两绿；两次还原的 blob/shasum/diff 三重一致）

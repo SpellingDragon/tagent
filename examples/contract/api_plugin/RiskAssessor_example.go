@@ -1,0 +1,54 @@
+package pluginexample
+
+import (
+	"context"
+
+	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
+
+	"github.com/SpellingDragon/tagent/api/plugin"
+)
+
+// argumentSize is the canonical risk face: it grades one call from the parameters and
+// identity already resolved for it.
+type argumentSize struct{}
+
+// Name reports the stable name of the element.
+func (argumentSize) Name() string { return "argument-size" }
+
+// Port reports the call->ruling port the element serves.
+func (argumentSize) Port() plugin.Port {
+	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+}
+
+// AssessRisk grades one call before its side effect and answers one declared grade.
+func (argumentSize) AssessRisk(_ context.Context, call *trpcmodel.ToolCall) plugin.RiskLevel {
+	if len(call.Function.Arguments) > 4096 {
+		return plugin.RiskHigh
+	}
+	return plugin.RiskLow
+}
+
+var (
+	_ plugin.Instance     = argumentSize{}
+	_ plugin.RiskAssessor = argumentSize{}
+)
+
+// ExampleRiskAssessor grades one call through the Before pass: the pass reports the
+// strongest grade its risk faces rendered, and the pre-execution ruling reads that grade
+// instead of running a second risk face.
+//
+// 契约: docs/wiki/agent/governance-enforcement.md#disposition-and-risk
+func ExampleRiskAssessor() {
+	pipeline, err := plugin.NewFlow([]plugin.Instance{argumentSize{}})
+	if err != nil {
+		return
+	}
+	pass, err := pipeline.Before(context.Background(), trpcmodel.ToolCall{
+		ID:       "call-1",
+		Function: trpcmodel.FunctionDefinitionParam{Name: "write", Arguments: []byte(`{"path":"a"}`)},
+	})
+	if err != nil {
+		return
+	}
+	_ = pass.Risk
+}

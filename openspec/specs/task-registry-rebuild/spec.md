@@ -56,6 +56,8 @@
 
 解析目标 SHALL 针对所选版本中的原任务所属 owner 工具集合，而非祖先直接工具集合或全局任意同名 agent；该版该 owner 无目标即明确拒绝，不伪造 Spawn 成功、不静默改投、保留任务链上下文。任务所属 owner 从该任务所在 tagent 自己的 manager／恢复接线取得，不从顶层单例推断；父层委派任务与子层内部任务分别恢复各自记录。复用既有持久身份材料，不为主子角色新增持久字段。闭包 MUST NOT 直接或通过 spawner/context 间接保留旧 wrapper、binding、lease 或私有 CM。TaskManager 只传递调用上下文及原任务材料，不成为编排版本选择者。
 
+持久提交与恢复 SHALL 与存储屏障协同（见 `event-segment-store`「LocalFileKV Sync 为原子快照屏障」）：**幂等提交返回已存在事实，不等于通知已交付**；重复提交 MUST NOT 新增事实，只有目标明确接纳才推进对应交付状态。未确认投递重放 SHALL 沿用原 task_spawned/settle/续命记录，MUST NOT 为此更换数据库或新增编排持久格式。
+
 #### Scenario: 多级任务重入定位所属 owner
 
 - **GIVEN** G1 中 A 可调用 B，B 可调用 C，A 的直接工具不含 C
@@ -86,4 +88,14 @@
 
 - **WHEN** 任务对应执行仍活着，Resume 仅向该执行提供新输入而不创建 Run
 - **THEN** 输入由原执行绑定处理，不发生新的编排版本选择
+
+#### Scenario: 幂等提交不等于已交付
+
+- **WHEN** 一次持久提交因幂等命中返回「已存在事实」
+- **THEN** MUST NOT 据此认定通知已交付；只有目标明确接纳才推进交付状态
+
+#### Scenario: 重放不新增编排持久格式
+
+- **WHEN** 未确认投递在恢复后重放
+- **THEN** SHALL 沿用原 task_spawned/settle/续命记录，MUST NOT 更换数据库或新增编排持久格式
 

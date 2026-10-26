@@ -1,0 +1,191 @@
+F2 全量门禁（逐条原始退出码）
+工作树：/Users/pengweiye/Documents/codes/tagent
+HEAD：0cf8438（docs(openspec): the delivery review binds the outlet and records its ledger）
+采集：2026-10-26 13:24 – 14:17 CST
+证据根：$TMPDIR/drp-final（= /var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/drp-final）
+说明：本文件每一节的 EXIT= 都是该命令的真实退出码；原始日志均可在证据根下按名复核。
+F3 的两处临时产品改动已在本轮开始前还原并核过 shasum（见 evidence/F3-redgreen.txt），
+本节所有门禁跑的都是 HEAD + 账目/证据改动 的树（产品文件零 diff）。
+
+--------------------------------------------------------------------------------
+[1] bash scripts/lint.sh —— 期望 lint: ok
+$ bash scripts/lint.sh
+...
+test_check_package_layout: OK (5 fixtures, negative cases exit non-zero)
+lint: ok
+LINT_EXIT=0
+日志：lint.log
+结论：PASS
+
+--------------------------------------------------------------------------------
+[2] 根模块三连
+$ go build ./...                → BUILD_EXIT=0
+$ go vet ./...                  → VET_EXIT=0
+$ go test ./... -short -count=1 → TEST_EXIT=0
+38 个包 ok、0 个 FAIL（grep -c '^ok' = 38 / grep -c '^FAIL' = 0）
+日志：root-triple.log
+结论：PASS（0/0/0）
+
+--------------------------------------------------------------------------------
+[3] 微信与 cli-host 三连
+$ go -C examples/wechat-bot build ./...            → BUILD_EXIT=0
+$ go -C examples/wechat-bot vet .                  → VET_EXIT=0
+$ go -C examples/wechat-bot test . -short -count=1 → TEST_EXIT=0（ok wechat-bot 0.567s）
+日志：wechat-triple.log
+
+$ go -C examples/cli-host build ./...            → BUILD_EXIT=0
+$ go -C examples/cli-host vet .                  → VET_EXIT=0
+$ go -C examples/cli-host test . -short -count=1 → TEST_EXIT=0（ok tagent-cli-host 0.346s）
+日志：clihost-triple.log
+结论：PASS（两模块各 0/0/0）
+
+--------------------------------------------------------------------------------
+[4] short 十轮（R32b：后台启动 + 轮询等待）
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-short --repeat 10 --root . --out $TMPDIR/drp-final/short --json
+SHORT_EXIT=0；verdict=match；counts={"repeat_total":10,"repeats_passed":10,
+"subtests_required":140,"tests_required":28}
+十轮逐轮证据（short/repeat-<i>/evidence.json，每轮独立进程、race=true）：
+  round  repeat_index  run_id                                verdict  go_test_exit_code  test_ids
+  1      1             4ed8b3f7-d54b-4f99-917f-262fca091e6d  match    0                  28
+  2      2             075a943c-4941-4873-805e-9dac4d55811c  match    0                  28
+  3      3             988a4011-c532-44fa-8654-3f48442214a9  match    0                  28
+  4      4             744ba238-f35d-4cbf-a3c8-798882aa00f2  match    0                  28
+  5      5             1d798a89-6d06-4a90-bb54-1497a0c724dd  match    0                  28
+  6      6             d219770a-2b22-45bc-8a85-fac5ea5b38cf  match    0                  28
+  7      7             c6d16aa5-c40b-4380-a504-be8949890126  match    0                  28
+  8      8             c059f42b-46ae-42ee-b57b-0eea352a70c3  match    0                  28
+  9      9             5f3fd993-37c0-4c4b-a45c-90fa7d438a1e  match    0                  28
+  10    10            469e8a63-8906-47a4-a92d-798efe67f6e8  match    0                  28
+  互异 run_id = 10/10；全部 verdict=match；全部 go_test_exit_code=0；每轮 28 test_id（集合恒定）
+  墙钟：13:29 → 13:57 ≈ 28m（十轮串行，每轮独立目录/独立 run_id）
+日志：short.log，证据：short/repeat-1..10/
+结论：PASS
+
+--------------------------------------------------------------------------------
+[5] long 六片（seed 1/7/42 × window 256/32768，各自独立目录与独立 run_id）
+命令模板：
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-long --seed <X> --window <Y> --repeat 1 --timeout 1200 --root . \
+    --out $TMPDIR/drp-final/long-s<X>-w<Y> --json
+派发：两批，每批三片并发（R32b 后台 + 轮询）；合同 matrix per_combo=1200 inputs/120 restarts，
+六片合计 7200/720，单片不写 7200/720。
+第一轮结果（全部跑在 HEAD 树上，race=true）：
+  seed/window  exit  verdict       run_id
+  1 / 256      0     match         17523718-bf3c-4fef-a583-4f25a591e121
+  1 / 32768    0     match         036ffeae-3a17-4bb5-abc6-820c4c06c696
+  7 / 256      1     unattested    81b715a9-fb39-433e-b738-abd738b8c2cb   ← 红，见下
+  7 / 32768    0     match         729632ec-1994-415a-b450-9b3226fab7ea
+  42 / 256     0     match         e993aca0-d72a-44bc-a341-2e49994f502f
+  42 / 32768   0     match         99c32a47-194f-4ae6-82fe-c64a81a94940
+
+[5-r] 7/256 红证与定性（红证保留，不删）
+  现场（long-s7-w256/repeat-1/test-log.jsonl）：
+    smoke_test.go:2860: generation 56 failed: the generation ended on a failed assertion; the child log names it
+    smoke_test.go:2853: answer generation 56 session smoke-chat-a round 149:
+      no text to smoke-chat-a carrying "settle-ack SMOKE-R70596" after 1m0s (recorded=41)
+    --- FAIL: TestEventIntegrityLongRun (208.52s)
+  定性：产品语义断言未失败；红点是第 56/120 代的 60s 墙钟等待超时（recorded=41，期望的结算文本未在
+  1 分钟内到达）。同树同合同的另两片 match；本轮三片 long + short 十轮并发，叠加宿主 IDE/Spotlight
+  常态负载（12 核机器 load average ≈12），判定为**并发加压下的等待超时**，不是本变更引入的语义回归。
+  处置（按台账先例）：红证原样保留在 long-s7-w256/；并行面清空后**受控重跑一次**且独占运行。
+
+[5-r2] 受控重跑（新目录，不覆盖红证）
+$ python3 scripts/run_runtime_scenarios.py ... --seed 7 --window 256 --repeat 1 --timeout 1200 \
+    --root . --out $TMPDIR/drp-final/long-s7-w256-rerun --json
+  exit=0  verdict=match  run_id=b6ae2edf-f99c-4466-b75c-33e8ce2a5e1a（≈10m 墙钟，独占机器）
+  日志：long-s7-w256-rerun.log；证据：long-s7-w256-rerun/repeat-1/
+结论：PASS（六片最终全部 verdict=match / exit=0：首轮 5 片 + 受控重跑 1 片；红证与重跑证据同时保留）
+
+--------------------------------------------------------------------------------
+[6] 故障变异（mutations）
+$ python3 scripts/check_event_integrity_mutations.py --all --json --out $TMPDIR/drp-final/mutations
+MUT_EXIT=0
+evidence.json：phase=04.4，control_tree_green=true，gate.ok=true，gate.failures=[]，
+not_evidence_backed=[]，pending=[]，killed=11/11（全部 assertion_hit=true）：
+  MUT-EVID-02-dual-material-input        killed
+  MUT-EVID-03-busy-notice-drop           killed
+  MUT-G1-meditation-busy-drop            killed
+  MUT-CAND-01.2-early-confirm            killed
+  MUT-CAND-01.1-conflicting-body         killed
+  MUT-CAND-02.2-wrong-target             killed
+  MUT-EVID-04-position-boundary          killed
+  MUT-EVID-05-restart-flat-restore       killed
+  MUT-CAND-01.8-storage-success          killed
+  MUT-CAND-01.2-handover-confirm         killed
+  MUT-CAND-01.10-alive-process-complete  killed
+日志：mutations.log，证据：mutations/evidence.json
+结论：PASS（控制树先绿，11/11 killed）
+
+--------------------------------------------------------------------------------
+[7] bundle 总门（short 十份 + long 六片 + mutations 一份）
+组装：$TMPDIR/drp-final/bundle/ —— 10 个 short 目录 + 6 个 long 目录 + 1 个 mutations 目录，
+每个证据目录同时带 evidence.json 与其 test-log.jsonl（7/256 用受控重跑证据，红证不入 bundle）。
+$ python3 scripts/check_runtime_evidence.py --bundle $TMPDIR/drp-final/bundle \
+    --contract golden/runtime/event_integrity_scenarios.json --json
+BUNDLE_EXIT=0；ok=true；errors=[]
+counts：{"bundle_evidence_files":17,"bundle_short_evidence":10,"bundle_long_evidence":6,
+         "bundle_mutation_evidence":1,"event_log_packages":9,"event_log_tests":180,"mode":"bundle"}
+notes：["bundle mode only checks evidence consistency; productVerified stays null"]
+过程记录（不隐去）：首次组装只复制了 17 份 evidence.json，BUNDLE_EXIT=1，errors 为 16 条
+"evidence.test_log not found: .../bundle/<dir>/test-log.jsonl"（checker 按证据目录解析 test_log）；
+补齐每目录的 test-log.jsonl 后复跑 → exit 0 / ok=true。日志：bundle-check.log
+结论：PASS（ok=true；本条不冒充产品验证）
+
+--------------------------------------------------------------------------------
+[8] 症状 job 实跑（与 CI job 同一条选择器）
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -timeout 600s
+SYMPTOM_EXIT=0；6 个父测试 / 10 个子测试全 pass、0 skip（ok wechat-bot 12.233s）：
+  TestLocalSmokeSymptomAcceptedSilent/silent_until_settled              PASS（G1）
+  TestLocalSmokeSymptomAcceptedSilent/legitimate_answer_still_delivered PASS
+  TestLocalSmokeSymptomSettledOnce/settled_exactly_once                 PASS（G2）
+  TestLocalSmokeSymptomSettledOnce/no_duplicate_settle_text             PASS
+  TestLocalSmokeSymptomFailureNotice/raw_error_reaches_the_user         PASS（G3）
+  TestLocalSmokeSymptomFailureNotice/success_turn_no_failure_text       PASS
+  TestLocalSmokeSymptomExecStateSilent/three_states_leave_no_turn       PASS（G4）
+  TestLocalSmokeSymptomExecStateSilent/state_still_recorded             PASS
+  TestLocalSmokeSymptomDeliveryHold/hold_waits_then_approves_once       PASS（G-B）
+  TestLocalSmokeSymptomDeliveryHold/refuse_delivers_nothing_and_audits  PASS
+  另有 TestLocalSmokeSymptomNoSendTool（G-A）PASS 0.40s
+环境前提：tmux 3.6a 在位（/opt/homebrew/bin/tmux）——缺 tmux 时 exec/async 子用例会 skip，skip 不算绿。
+日志：symptom-job.log
+结论：PASS（6 父测试全绿、0 skip）
+
+--------------------------------------------------------------------------------
+[9] 检查器自测 + OpenSpec 门
+$ python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'
+Ran 233 tests in 16.069s
+OK
+UNITTEST_EXIT=0
+日志：unittest.log
+
+$ bash scripts/check-openspec.sh
+OK: all main specs pass validate --strict.
+（NOTE: 另有 in-flight change post-training-data-loop 未过 strict，脚本明示"not gated — WIP"，不在本变更门禁面）
+CHECK_OPENSPEC_EXIT=0
+日志：openspec-gates.log
+结论：PASS（0 / 0）
+
+--------------------------------------------------------------------------------
+F2 总判：9 项全绿
+  1 lint=0；2 根三连=0-0-0（38 ok/0 FAIL）；3 微信=0-0-0、cli-host=0-0-0；
+  4 short 十轮=0（10 互异 run_id、140 子测试）；5 long 六片=6/6 match（1 片受控重跑，红证保留）；
+  6 mutations=11/11 killed；7 bundle ok=true（17 份）；8 症状 6 父/10 子全 pass、0 skip；
+  9 unittest 233 OK、check-openspec 0。
+
+环境事实（非门禁项，如实登记）：
+- 采集期间 12 核机器 load average ≈12，主因是宿主 IDE/Spotlight 常驻进程（非本轮启动）；已按 R32b
+  把 long 分成两批三片并发，7/256 的 60s 等待超时由此定性并受控重跑（独占）通过。
+- tmux 3.6a 在位；所有长跑均在后台启动、轮询回收，未与任何既有实例争用同一设备/端口。
+- 工作树在采集期间只有账目/证据改动，产品文件零 diff（git diff -- host.go tagent.yaml smoke_harness_test.go = 0 字节）。
+
+--------------------------------------------------------------------------------
+[10] 提交后复验（账目提交后，工作树=HEAD；产物文件仅 openspec/changes/delivery-review-plugins/**）
+$ bash scripts/lint.sh
+LINT_POSTCOMMIT_EXIT=0（lint: ok；新增证据为 .txt、账目行在 openspec/changes/**——
+  该前缀属 PROCESS_DOC_PREFIXES，不计入 markdown 文档预算，基线 22295 不变）
+$ git diff e6b67aa..HEAD -- golden/runtime/scenarios.json golden/runtime/event_integrity_scenarios.json | wc -c
+0
+$ git diff --numstat e6b67aa..HEAD -- openspec/specs/
+4	0	openspec/specs/persistent-event-loop/spec.md
+结论：PASS（提交后面与采集面一致；F1 断言在账目提交后仍成立）

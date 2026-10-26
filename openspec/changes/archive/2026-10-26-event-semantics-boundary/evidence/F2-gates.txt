@@ -1,0 +1,168 @@
+F2 全量门禁（逐条原始退出码）
+工作树：/Users/pengweiye/Documents/codes/tagent
+HEAD：fd550d8（git log -1）
+采集：2026-10-25 23:49 – 2026-10-26 00:26（CST）
+证据根：$TMPDIR/esb-final（= /var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/esb-final）
+说明：本文件每一节的 "EXIT=" 都是该命令的真实退出码，命令与日志可在证据根下按名复跑/复核。
+
+--------------------------------------------------------------------------------
+[1] bash scripts/lint.sh —— 期望 ok
+$ time bash scripts/lint.sh
+...
+lint: comment policy (product packages, zero findings)
+comment_policy: 0 finding(s) over the product packages
+lint: spec-hygiene … (openspec strict：all main specs pass validate --strict)
+lint: event bodies carry no text-prefix parsing
+lint: ok
+bash scripts/lint.sh  33.97s user 33.78s system 117% cpu 57.824 total
+EXIT=0
+日志：lint.log
+结论：PASS（lint: ok，exit 0）
+
+--------------------------------------------------------------------------------
+[2] 根模块三连
+$ go build ./...                      → BUILD_EXIT=0
+$ go vet ./...                        → VET_EXIT=0
+$ go test ./... -short -count=1       → TEST_EXIT=0
+go test ./... -short -count=1  36.92s user 18.76s system 145% cpu 38.206 total
+（全部包含 ok/无 test files，无 FAIL；tests/integration/host 30.742s、tool/exec 14.799s 等）
+日志：root-triple.log
+结论：PASS（0/0/0）
+
+--------------------------------------------------------------------------------
+[3] 微信模块 examples/wechat-bot 三连
+$ go -C examples/wechat-bot build ./...            → BUILD_EXIT=0
+$ go -C examples/wechat-bot vet .                  → VET_EXIT=0
+$ go -C examples/wechat-bot test . -short -count=1 → TEST_EXIT=0（ok wechat-bot 0.510s）
+日志：wechat-triple.log
+结论：PASS（0/0/0）
+
+--------------------------------------------------------------------------------
+[4] cli-host examples/cli-host 三连
+$ go -C examples/cli-host build ./...            → BUILD_EXIT=0
+$ go -C examples/cli-host vet .                  → VET_EXIT=0
+$ go -C examples/cli-host test . -short -count=1 → TEST_EXIT=0（ok tagent-cli-host 0.368s）
+日志：clihost-triple.log
+结论：PASS（0/0/0）
+
+--------------------------------------------------------------------------------
+[5] short 十轮（R32b：后台启动 + 轮询等待）
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-short --repeat 10 --root . --out $TMPDIR/esb-final/short --json
+SHORT_EXIT=0
+十轮逐轮证据（short/repeat-<i>/evidence.json）：
+  round  repeat_index  run_id                                verdict  go_test_exit_code  test_ids
+  1      1             13768713-bbcc-41f0-9af6-77c011b4a715  match    0                  28
+  2      2             2a2405bd-bb8c-46e1-b927-207346e86a32  match    0                  28
+  3      3             c33a86bf-853d-409f-86a8-e7071e0c289e  match    0                  28
+  4      4             1d6114ae-590c-4918-a8e6-4ffa249ff24f  match    0                  28
+  5      5             0cffb0b7-c343-49f6-a77c-0d8a8935962b  match    0                  28
+  6      6             5fa4abad-3083-4bb2-a859-48aa6fd7ac67  match    0                  28
+  7      7             b07efcf8-c97d-412c-a09a-550acf79fe9e  match    0                  28
+  8      8             01fd4845-f96f-4f9b-a94e-4c7db5b1d95c  match    0                  28
+  9      9             919ad829-17fc-466d-b040-11e0f3a9c8f7  match    0                  28
+  10    10            a50dc5f2-56c1-4d4f-a33b-e8c16e88278c  match    0                  28
+  互异 run_id = 10/10；全部 verdict=match；全部 go_test_exit_code=0；每轮 28 个 test_id（test 集合恒定）
+  墙钟：23:55:09 → 00:23:52 ≈ 28m43s（十轮串行，每轮独立目录/独立 run_id）
+日志：short.log，证据：short/repeat-1..10/
+结论：PASS
+
+--------------------------------------------------------------------------------
+[6] long 六片（seed 1/7/42 × window 256/32768，各自独立目录与独立 run_id）
+命令模板：
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-long --seed <X> --window <Y> --repeat 1 --timeout 1200 --root . \
+    --out $TMPDIR/esb-final/long-s<X>-w<Y> --json
+结果（全部 exit=0，全部 verdict=match，contract_digest 同一 sha256:7f543…）：
+  seed/window  exit  verdict  run_id                                inputs  restarts  test wall
+  1 / 256      0     match    f6a175b7-a6a3-4bba-bcda-11738318539a  1200    120       716.35s（进程墙钟 12m01s）
+  1 / 32768    0     match    36bea2e1-65d6-4421-b1ec-5bcffd237800  1200    120       981.07s
+  7 / 256      0     match    11f136ca-7ac6-4956-acfc-db92ac5f053b  1200    120       765.61s
+  7 / 32768    0     match    2621ce51-524f-4d5f-b556-03eb996641bf  1200    120       983.40s
+  42 / 256     0     match    4579cf04-dd6e-459b-8a86-ff4e43074cb4  1200    120       763.17s
+  42 / 32768   0     match    2c12463f-46ef-48a8-bb4b-ed5c7b84c1a3  1200    120       986.85s
+  合计 inputs=7200、restarts=720，与合同 matrix（3 seeds × 2 windows × per_combo 1200/120）逐数对上。
+  六片均未出现 flaky：无一片需要受控重跑。
+日志：long-s<X>-w<Y>.log；退出码账：long-exits.txt；证据：long-s<X>-w<Y>/repeat-1/
+结论：PASS（六片 verdict=match）
+
+--------------------------------------------------------------------------------
+[7] 故障变异（mutations）
+$ python3 scripts/check_event_integrity_mutations.py --all --json --out $TMPDIR/esb-final/mutations
+MUT_EXIT=0
+evidence.json：phase=04.4，control_tree_green=true，gate.ok=true，gate.failures=[]，
+not_evidence_backed=[]，killed=11/11：
+  MUT-EVID-02-dual-material-input        killed(named_assertion)
+  MUT-EVID-03-busy-notice-drop           killed(named_assertion)
+  MUT-G1-meditation-busy-drop            killed(named_assertion)
+  MUT-CAND-01.2-early-confirm            killed(named_assertion)
+  MUT-CAND-01.1-conflicting-body         killed(named_assertion)
+  MUT-CAND-02.2-wrong-target             killed(named_assertion)
+  MUT-EVID-04-position-boundary          killed(named_assertion)
+  MUT-EVID-05-restart-flat-restore       killed(named_assertion)
+  MUT-CAND-01.8-storage-success          killed(named_assertion)
+  MUT-CAND-01.2-handover-confirm         killed(named_assertion)
+  MUT-CAND-01.10-alive-process-complete  killed(named_assertion)
+日志：mutations.log，证据：mutations/evidence.json
+结论：PASS（gate.ok 11/11 killed，control 树先绿）
+
+--------------------------------------------------------------------------------
+[8] bundle 总门（short 十份 + long 六片 + mutations 一份）
+组装：$TMPDIR/esb-final/bundle/{short-1..10, long-s<X>-w<Y> ×6, mutations/evidence.json}（17 份 evidence.json）
+$ python3 scripts/check_runtime_evidence.py --bundle $TMPDIR/esb-final/bundle \
+    --contract golden/runtime/event_integrity_scenarios.json --json
+BUNDLE_EXIT=0；ok=true
+counts：{"bundle_evidence_files":17,"bundle_short_evidence":10,"bundle_long_evidence":6,
+         "bundle_mutation_evidence":1,"event_log_packages":9,"event_log_tests":180,"mode":"bundle"}
+notes：["bundle mode only checks evidence consistency; productVerified stays null"]
+（bundle 只核证据自洽；productVerified 仍为 null——本条不冒充产品验证）
+日志：bundle-check.log
+结论：PASS（ok=true）
+
+--------------------------------------------------------------------------------
+[9] 症状 job 实跑（与 CI job 同一条选择器）
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -timeout 600s
+SYMPTOM_EXIT=0，9 个 pass、0 skip：
+  TestLocalSmokeSymptomAcceptedSilent/silent_until_settled            pass
+  TestLocalSmokeSymptomAcceptedSilent/legitimate_answer_still_delivered pass
+  TestLocalSmokeSymptomAcceptedSilent                                 pass
+  TestLocalSmokeSymptomSettledOnce/settled_exactly_once               pass
+  TestLocalSmokeSymptomSettledOnce/no_duplicate_settle_text           pass
+  TestLocalSmokeSymptomSettledOnce                                    pass
+  TestLocalSmokeSymptomFailureNotice/raw_error_reaches_the_user        pass
+  TestLocalSmokeSymptomFailureNotice/success_turn_no_failure_text      pass
+  TestLocalSmokeSymptomFailureNotice                                  pass
+环境前提：tmux 3.6a 在位（/opt/homebrew/bin/tmux）——缺 tmux 时 exec/async 子用例会 skip，skip 不算绿。
+日志：symptom-job.json（-json 逐事件）
+结论：PASS（9 pass / 0 skip）
+
+--------------------------------------------------------------------------------
+[10] 检查器自测
+$ python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'
+...OK
+UNITTEST_EXIT=0
+日志：unittest.log
+结论：PASS
+
+--------------------------------------------------------------------------------
+[11] OpenSpec 门
+$ bash scripts/check-openspec.sh
+OK: all main specs pass validate --strict.
+（NOTE: 另有 in-flight change post-training-data-loop 未过 strict，脚本明示"not gated — WIP"，不在本变更门禁面）
+CHECK_OPENSPEC_EXIT=0
+$ openspec validate event-semantics-boundary --strict
+Change 'event-semantics-boundary' is valid
+VALIDATE_EXIT=0
+日志：openspec-gates.log
+结论：PASS（0/0）
+
+--------------------------------------------------------------------------------
+F2 总判：11 项全绿（1:0 / 2:0-0-0 / 3:0-0-0 / 4:0-0-0 / 5:0 / 6:六片 match / 7:gate.ok / 8:ok=true / 9:9 pass / 10:0 / 11:0-0）
+
+环境事实（非门禁项，如实登记）：
+- 工作树自带一处未提交修改 scripts/doc_budget.json（baseline lines 22192→22220 + rebaseline_reason 末条
+  "2026-10-25 event-semantics-boundary: +28 lines to openspec/specs/persistent-event-loop …"）。即 P-08 的
+  文档预算棘轮抬升以工作树形态存在、未入库；本轮 lint 绿因此是"工作树绿"，不是"HEAD 绿"（复跑 F2[1] 前须先确认该文件在位）。
+- 端口 8089 上有一个 3h+ 的历史 wechat-bot 进程（pid 49723，非本轮启动）。冒烟台架通过 TAGENT_HTTP_PORT=0
+  走临时端口，未与其冲突；未杀该进程。
+- 症状/长跑用例会各自建临时根；本轮的 run 目录落在 $TMPDIR/event-consumption-integrity/03.11/run-*。

@@ -1,7 +1,7 @@
 {
   "_comment": "Per-rule violation counts over the dirs listed in \"dirs\". A batch may only LOWER these numbers",
   "_regenerate": "bash scripts/lint.sh --update-baseline",
-  "dirs": [".","examples/wechat-bot"],
+  "dirs": [".","examples/cli-host","examples/wechat-bot"],
   "counts": {
   }
 }

@@ -1,0 +1,166 @@
+F3 DoD 核验 + 症状直译锚红转绿双证据（收尾 F3）
+工作树：/Users/pengweiye/Documents/codes/tagent
+HEAD：fd550d8（chore(openspec): the loop's model-facing boundary is written down）
+采集：2026-10-26 00:24–00:31 CST
+证据根：$TMPDIR/esb-final（= /var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/esb-final）
+固定动作（每次定点破坏）：留 diff → go build ./... → 精确测试（期望红）→ git checkout -- <file> →
+git hash-object 与 git rev-parse HEAD:<file> 比对 → shasum -a 256 → git diff 字节数 → 精确测试（期望绿）。
+判据：红 = go test exit≠0 且失败落在具名断言（smoke_test.go:<行>）；绿 = exit 0。
+测试命令模板：go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom<X>$' -count=1 -timeout 600s
+
+================================================================================
+一、A）runtime/agent/loop.go：admissionText 临时还原旧文案 → G1 红 → 还原 → G1 绿
+--------------------------------------------------------------------------------
+[破坏 diff]（f3-a1.log）
+--- a/runtime/agent/loop.go
++++ b/runtime/agent/loop.go
+@@ -1560,8 +1560,8 @@ const admissionReceiptText = "ok"
+-func admissionText(task.AdmissionReceipt) string {
+-	return admissionReceiptText
++func admissionText(receipt task.AdmissionReceipt) string {
++	return fmt.Sprintf("accepted %s (running): the call runs as a background task and its result will arrive as a notification when it settles", receipt.TaskID)
+ }
+[编译] go build ./... → BUILD_EXIT=0
+[红] TestLocalSmokeSymptomAcceptedSilent → exit 1
+  --- FAIL: TestLocalSmokeSymptomAcceptedSilent (2.21s)
+      smoke_test.go:3254: 受理回执不是最小 ok：模型真实收到的 tool result = "accepted task-1 (running): the call runs as a background task and its result will arrive as a notification when it settles"，want "ok"
+      smoke_test.go:3257: 受理回执携带了内部受理材料：……（命中 "accepted task-"）
+      smoke_test.go:3265: [symptom-g1] 用户世界 outbound=0（叠加断言；模型世界判据见正锚）
+  FAIL wechat-bot 2.597s
+[还原] git checkout -- runtime/agent/loop.go → checkout_exit=0
+  blob=e8b87839d87aeee1012034cd1dfa3e17b98ccc78
+  head=e8b87839d87aeee1012034cd1dfa3e17b98ccc78（一致）
+  shasum -a 256 = 3bd186f43e96025419fce1d8aa8af0fb0d85049d7b68ba7f08cea31b6ceb8098
+  git diff -- runtime/agent/loop.go | wc -c = 0
+[绿] TestLocalSmokeSymptomAcceptedSilent → G1_GREEN_EXIT=0（ok wechat-bot 2.659s）
+日志：f3-a1.log（红） / f3-a2.log（还原+绿）
+
+================================================================================
+二、B）G2 = TestLocalSmokeSymptomSettledOnce：原破坏面不红（如实记录）→ 换非受理面的正确破坏面
+--------------------------------------------------------------------------------
+[B1] host.go：send 成功回执临时还原 `[send_ok] delivered to ...`（f3-b1.log）
+  破坏 diff：
+  -	return "ok", nil
+  +	return "[send_ok] delivered to " + string(addr.SessionID), nil
+  BUILD_EXIT=0
+  G2_B1_EXIT=0  ← **不红**（该破坏面对 G2 无判别力）
+  补证（send 静默自身的具名锚）：TestQuietSendReceipt 在 B1 下 → QUIET_SEND_B1_EXIT=1
+    quiet_receipts_test.go:60: the success receipt = "[send_ok] delivered to session-event-integrity-delivery", want the bare ok the delivery is answered with
+    FAIL github.com/SpellingDragon/tagent/tests/integration/host 0.536s
+  还原：checkout_exit=0；blob=1ed1f8a0bfdc59eaf8205df9e0727e62874fbf0c = HEAD；
+        shasum -a 256 = 81149e70f032edbcf2de33334cd0db7907a181c0832adcf86ae8eb1c1fb953c8；diff_bytes=0
+  日志：f3-b1.log / f3-b1b.log
+
+  B1 不红的实证依据：
+  - 绿树 -v 跑 G2（f3-g2-v.log，207 行，exit 0）：场景确有 send 工具调用（"send-tool" 命中 3 条），
+    但模型侧材料零 progress（"reports progress" 命中 0 条）。
+  - 脚本化 provider 的回复分支只按 marker / 成对工具结果选择（smoke_harness_test.go:330–371），
+    不读 send 回执文本；因此把回执改回 `[send_ok] delivered to ...` 不改变该场景的 outbound 计数。
+
+[B2] runtime/agent/loop.go：terminalNotes 去掉 pipelineProgress 跳过（f3-b2.log）
+  破坏 diff：
+  -				if pipelineProgress(view.Key, prefix) {
+  -					continue
+  -				}
+  BUILD_EXIT=0
+  G2_B2_EXIT=0  ← **不红**（G2 场景根本不产生 progress 通知，"reports progress" 0 条，过滤器无事可滤）
+  还原：checkout_exit=0；blob=e8b87839d87aeee1012034cd1dfa3e17b98ccc78 = HEAD；diff_bytes=0
+        （还原后树上的 shasum -a 256 = 3bd186f4…，见 A 段复绿）
+  绿：G2_GREEN_EXIT=0（ok wechat-bot 0.630s）
+  日志：f3-b2.log / f3-b2b.log
+
+[B3] 旁证（不作为 b 的红锚）：受理回执恢复旧文案 → G2 红（f3-b3.log）
+  BUILD_EXIT=0；G2_B3_EXIT=1
+    smoke_test.go:3327: 结算前的模型请求仍含内部受理材料 "accepted task-"（tool）："accepted task-1 (running): …" —— 多余确认正由它诱导
+    smoke_test.go:3337: 本轮 outbound 文本应为 1 条，实际 2 条："delegate ack SMOKE-R9611 | worker result SMOKE-R9611"
+  还原：checkout_exit=0；blob=e8b8783… = HEAD；shasum -a 256 = 3bd186f4…；diff_bytes=0；G2_GREEN_EXIT=0（ok 0.797s）
+  说明：B3 证明"完整回滚本变更"时 G2 的红由受理面（与 G1 同源）驱动，send/progress 面在本场景单独回滚都不红。
+        这正是任务书 b 注记所述"G2 判别依赖受理静默+send 静默组合"的实测形态。
+
+[B4] b 的红锚（非受理面）：deliverFresh 把每个 fresh 正文投递两次 → "结算恰一次"被破坏（f3-b4.log）
+  破坏 diff：
+  @@ -1042,6 +1042,11 @@ func (h *Host) deliverFresh(…
+   	for _, content := range contents {
+   		if err := sender.Send(ctx, addr, content); err != nil {
+   			assemblyWarn("tagent: the host delivery to %s was refused: %v", addr.SessionID, err)
+   		}
+  +		if err := sender.Send(ctx, addr, content); err != nil {
+  +			assemblyWarn("tagent: the host delivery to %s was refused: %v", addr.SessionID, err)
+  +		}
+   	}
+  BUILD_EXIT=0
+  [红] G2_B4_EXIT=1（FAIL wechat-bot 0.859s）
+    --- FAIL: TestLocalSmokeSymptomSettledOnce/settled_exactly_once (0.29s)
+        smoke_test.go:3337: 本轮 outbound 文本应为 1 条，实际 2 条："worker result SMOKE-R9611 | worker result SMOKE-R9611"
+    --- FAIL: TestLocalSmokeSymptomSettledOnce/no_duplicate_settle_text (0.17s)
+        smoke_test.go:3357: 同一正文投递了 2 次："delegate ack SMOKE-R9611"（本轮全部："delegate ack SMOKE-R9611 | delegate ack SMOKE-R9611 | settle-ack SMOKE-R9611 | settle-ack SMOKE-R9611"）
+  [还原] git checkout -- host.go → checkout_exit=0
+    blob=1ed1f8a0bfdc59eaf8205df9e0727e62874fbf0c = HEAD
+    shasum -a 256 = 81149e70f032edbcf2de33334cd0db7907a181c0832adcf86ae8eb1c1fb953c8
+    git diff -- host.go | wc -c = 0
+  [绿] G2_B4_GREEN_EXIT=0（ok wechat-bot 0.821s）
+  日志：f3-b4.log（红） / f3-b4b.log（还原+绿）
+
+  结论（b）：原 b 破坏面（send 成功回执）在 G2 场景无判别力，B2 亦无；按任务书"不得伪造红"，
+  红锚改用**受理回执以外**的正确破坏面 B4（结算正文投递两次 = G2 症状本体"结算恰一次"的反面），
+  红证落在具名断言 3337/3357，还原后复绿。B3 作为"全回滚耦合"旁证保留，不计入 b 的红锚。
+
+================================================================================
+三、C）host.go：deliverFresh 失败告知分支临时短路 → G3 红 → 还原 → G3 绿
+--------------------------------------------------------------------------------
+[破坏 diff]（f3-c1.log）
+@@ -1027,14 +1027,6 @@ func (h *Host) deliverFresh(…
+ 	if len(contents) == 0 {
+ 		if turn.Terminal == model.KindFailed {
+-			if notice := failureNoticeText(turn.Failure); notice != "" {
+-				h.noteFailureNotice(ctx, addr, turn)
+-				if err := sender.Send(ctx, addr, notice); err != nil {
+-					assemblyWarn("tagent: the failure notice to %s was refused: %v", addr.SessionID, err)
+-				}
+-				return
+-			}
+-			assemblyDebug("tagent: the invocation of %s failed without a recorded cause", addr.SessionID)
+ 			return
+ 		}
+[编译] BUILD_EXIT=0
+[红] TestLocalSmokeSymptomFailureNotice → G3_RED_EXIT=1（FAIL wechat-bot 12.020s）
+  --- FAIL: TestLocalSmokeSymptomFailureNotice (11.65s)
+      smoke_test.go:3394: 失败回合的告知应为恰好 1 条，实际 0 条：(无)
+[还原] git checkout -- host.go → checkout_exit=0
+  blob=1ed1f8a0bfdc59eaf8205df9e0727e62874fbf0c = HEAD
+  shasum -a 256 = 81149e70f032edbcf2de33334cd0db7907a181c0832adcf86ae8eb1c1fb953c8
+  git diff -- bytes = 0
+[绿] G3_GREEN_EXIT=0（ok wechat-bot 2.586s）
+日志：f3-c1.log / f3-c2.log
+
+================================================================================
+四、还原后整树复核（f3-final.log）
+--------------------------------------------------------------------------------
+$ git status --porcelain
+ M examples/wechat-bot/skills/interview/agent-interview-helper   ← 本轮开始前即存在（首次 status 已登记）
+ M scripts/doc_budget.json                                       ← 本轮开始前即存在（P-08 工作树态）
+?? docs/tagent-posttraining-design.docx / docs/tagent-training-handoff.zip  ← 本轮开始前即存在
+?? openspec/changes/event-semantics-boundary/                    ← 本变更目录（未跟踪）
+产品文件零残留：
+  loop.go blob=e8b87839d87aeee1012034cd1dfa3e17b98ccc78 head=e8b87839…（一致）
+  host.go blob=1ed1f8a0bfdc59eaf8205df9e0727e62874fbf0c head=1ed1f8a…（一致）
+还原树上整份症状 job：
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -timeout 600s
+SYMPTOM_FINAL_EXIT=0；9 pass / 0 skip（三父测试 + 六子测试）
+日志：f3-final.log（树状态） / symptom-final.json（-json 逐事件）
+
+================================================================================
+五、DoD 表（逐项勾）
+--------------------------------------------------------------------------------
+| DoD 项 | 复核命令 | 结果 | 勾 |
+|---|---|---|---|
+| 三条症状测试红转绿（回滚即红双证据） | 见上 A/B/C 三段 | G1 红 exit1→绿 exit0；G2 红 exit1（B4 非受理面）→绿 exit0；G3 红 exit1→绿 exit0 | [x] |
+| 主规格三新场景 | `openspec validate persistent-event-loop --strict` | exit 0（"Specification 'persistent-event-loop' is valid"）；spec 内 Scenario 计数 72；本变更新增 Requirement「循环面的模型感知边界」+ 3 个 Scenario（受理回执不构成模型材料 / progress 只落 fact 不进 intake / 失败回合必达用户告知），+28 行 | [x] |
+| CI 门 | `.github/workflows/ci.yml` 的 `event-semantics-symptoms`（L367）无条件存在（artifact 上传 if-no-files-found: error）；`python3 -m unittest scripts.test_check_runtime_workflow` | 44 tests OK，exit 0 | [x] |
+| lint | `bash scripts/lint.sh`（F2[1]） | exit 0，`lint: ok`（注：doc_budget.json 为工作树未提交改动，见 F2 环境事实） | [x] |
+| F1 | evidence/F1-contract-zero-diff.txt | v2 diff 0 字节；v1 3/3 仅 S15；主规格 +28/-0 | [x] |
+| F2 | evidence/F2-gates.txt | 11 项全绿（六片 match、十轮 match、11/11 killed、bundle ok=true、症状 9 pass） | [x] |
+
+附：F3 复跑提示
+- 本节红证依赖脚本化 provider 的既有分支（smoke_harness_test.go:330–371）与症状判据表（symptomAdmissionMaterial / symptomConfirmationWords）。
+- 任何一次"改→测→还原"的最小闭环都应保持 git diff 字节数=0 与 blob==HEAD 两条同时成立；只做 checkout 不看 blob 不足以证明还原。

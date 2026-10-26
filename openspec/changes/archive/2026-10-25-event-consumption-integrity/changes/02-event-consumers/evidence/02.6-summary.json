@@ -1,0 +1,281 @@
+{
+  "leaf": "02.6",
+  "title": "微信审批（approval-channels）",
+  "change": "event-consumption-integrity",
+  "domain": "02-event-consumers",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T13:20:19Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "域内微信审批面取证：既有 reply 语法（approve/reject/批准/拒绝）、审批请求对每个已配置审批人的 fanout、三条具名拒绝（歧义前缀/未知 digest/非审批人），以及消费者锚 runApprovalCLI 写回应文件的全链（gateway 请求 → 审批人渠道 Resolve → ApprovalManager.Decide → approvals/<id>.json → 任务侧 Lookup 读取裁决）。只扩展现有 examples/wechat-bot/wechat_test.go，未新增测试文件、未改产品、未改根审批面、未扩大 mirrorExemptFiles，不做端到端微信往返。",
+  "method": "父测试 TestEventIntegrityApprovalWeChat 下六个具名子测试（父 selector 与任务行逐字符一致）。每个子测试用 newApprovalGateway（与 main.go 同一构造）建立 dir 落盘的 ApprovalManager，经 gateway.Manager().Request 注册审批请求（真实 Deliver 到 mockOutbound 审批人渠道），再用 gateway.Resolve 或 runApprovalCLI 裁决；断言读取 manager.Pending/Lookup、审批回应文件 approvals/<id>.json（status/decided_by）与出站记录 target，不以内部调用次数代替行为。",
+  "environment": {
+    "os": "Darwin 23.6.0 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6",
+    "note": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。"
+  },
+  "artifacts": [
+    {
+      "path": "examples/wechat-bot/wechat_test.go",
+      "state": "modified (extended existing approval test area)",
+      "lines": 1327,
+      "lines_added": 268,
+      "lines_removed": 0,
+      "sha256": "8da8f108678530dad4cc8c3387638edfd5499a9714742c982242614cc790cfa1"
+    },
+    {
+      "path": "examples/wechat-bot/wechat_approval.go",
+      "state": "unchanged",
+      "sha256": "469b8579e746c2e8ace3974f971c08b7f0d96bdc8479d3b8c27560980630196c",
+      "note": "全绿基线：现有 Delve/Resolve/match/parseApprovalReply/runApprovalCLI 已满足验收面；按「全绿则保留可证伪回归不改产品」，未做任何产品改动。临时变异仅用于负锚可证伪性取证，已逐字节还原（sha256 -c OK，git diff 为空）。"
+    }
+  ],
+  "product_changes": [],
+  "consumers": {
+    "formal_entry": "runApprovalCLI（main.go 在 tagent.Boot 前调用的同一函数）与 approvalGateway.Resolve（registerHandlers 的微信入站裁决路径）",
+    "chain": "approvalGateway.Manager().Request → ApprovalManager.Request（落盘 approvals/<id>.json + 经 approvalGateway.Deliver 投递到每个 approver 聊天）→ 审批人回复 approve/reject <digest> → approvalGateway.Resolve → parseApprovalReply/match → ApprovalManager.Decide → 回应文件 approvals/<id>.json（status/decided_by）→ 任务侧 ApprovalManager.Lookup(tool, argsDigest) 读取裁决（governance/policy.go 的同一读取入口）",
+    "cli_entry": "runApprovalCLI(gateway, []string{verb, digest}) → gateway.Resolve(\"cli\", verb+\" \"+digest)，回应文件 decided_by=wechat:cli",
+    "wechat_entry": "gateway.Resolve(\"boss\", verb+\" \"+digest)，回应文件 decided_by=wechat:boss",
+    "task_side_read": "ApprovalManager.Lookup 是 evolution/governance/policy.go 读取批准/拒绝状态的同一 API；子测试在每次裁决后断言 Lookup 返回对应 ID 与状态。"
+  },
+  "red_lines": {
+    "formal_entries_only": "审批请求由 ApprovalManager.Request 注册并真实经 Deliver 投递；裁决经 runApprovalCLI 或 gateway.Resolve 的正式路径，不手工写回应文件、不手工调用 Decide。",
+    "no_product_change": "examples/wechat-bot/wechat_approval.go 无 diff；根 runtime/task/approval、evolution/governance 未触碰。",
+    "no_new_test_file": "未新增 wechat_approval_test.go；未修改 mirrorExemptFiles；只扩展现有 wechat_test.go。",
+    "no_e2e_wechat": "未启动真实微信通道；端到端微信往返按任务边界归 01.6/03.4 复验。",
+    "g7_g9_caliber": "G7（过期回应已实现）属 02.5 负锚，本叶不重复取证、不声称已验；G9 口径下拒绝文本只断言现有实现的具名错误（errors.Is 到 approval.ErrApprovalNotFound / ErrApprovalAmbiguous / ErrApprovalNotApprover）与网关现有包装文本「审批失败 / 没有审批权限」，不写死规格前缀。"
+  },
+  "subtests": [
+    {
+      "name": "parse_approve_reject",
+      "anchor": "positive",
+      "line": 892,
+      "asserts": [
+        "approve/reject/批准/拒绝 四种既有回复写法都经 gateway.Resolve 被识别并落到正确状态（approved/denied）",
+        "每次裁决的 reply 携带请求 ID 与状态；ApprovalManager.Lookup 按 (tool, digest) 读到同一请求与状态",
+        "回应文件 approvals/<id>.json 的 status 与 decided_by=wechat:boss 与裁决一致"
+      ]
+    },
+    {
+      "name": "approval_request_fanout",
+      "anchor": "positive",
+      "line": 930,
+      "asserts": [
+        "一次注册对 [boss, ops] 各投递恰好一条审批请求文本，target 分别为 boss/ops",
+        "每条文本含请求 digest 的 shortDigest 与 tool 名",
+        "全部出站 target 只落在已配置审批人，非审批人零打扰"
+      ]
+    },
+    {
+      "name": "ambiguous_prefix_refused",
+      "anchor": "negative",
+      "line": 959,
+      "asserts": [
+        "两条同 digest 的 pending 请求下，approve 共同前缀被具名拒绝：errors.Is(err, ErrApprovalAmbiguous)",
+        "拒绝后两条请求仍为 pending，回应文件 status=pending 且 decided_by 为空（不误裁任何一条）",
+        "临时变异（match 歧义分支改为猜第一条）下该子测试转红：\"an ambiguous prefix = (true,<nil>), want ErrApprovalAmbiguous\""
+      ]
+    },
+    {
+      "name": "unknown_digest_refused",
+      "anchor": "negative",
+      "line": 984,
+      "asserts": [
+        "approve/reject 未知 digest 均被具名拒绝：errors.Is(err, approval.ErrApprovalNotFound)",
+        "已存在的 pending 请求不被裁决：Pending 仍 1 条、Lookup 仍 pending、回应文件仍 pending/undecided",
+        "approvals 目录仍只有已知请求的一个回应文件（未知 digest 不产生新文件）",
+        "临时变异（match 未知分支回落到 pending 第一条）下该子测试转红：\"approve over an unknown digest = (true,<nil>), want ErrApprovalNotFound\""
+      ]
+    },
+    {
+      "name": "non_approver_refused",
+      "anchor": "negative",
+      "line": 1019,
+      "asserts": [
+        "白名单外用户回复被具名拒绝：errors.Is(err, ErrApprovalNotApprover)，reply 为现有「没有审批权限」文本",
+        "非审批人回复不产生裁决：Pending 仍 1 条、回应文件 pending/undecided",
+        "出站记录仍只指向已配置审批人 boss，无向 stranger 的审批出站",
+        "空白名单下任意回复同样被 ErrApprovalNotApprover 拒绝且请求保持 pending",
+        "临时变异（跳过白名单检查）下该子测试转红：\"a ruling outside the whitelist = (true,<nil>), want ErrApprovalNotApprover\""
+      ]
+    },
+    {
+      "name": "wechat_cli_entry",
+      "anchor": "consumer",
+      "line": 1066,
+      "asserts": [
+        "gateway 请求：ApprovalManager.Request 落盘并将审批请求真实投递到审批人 boss 聊天（文本含 shortDigest）",
+        "微信渠道回复：gateway.Resolve(\"boss\", \"approve <digest>\") 写回应文件 status=approved、decided_by=wechat:boss；任务侧 Lookup 读到 approved",
+        "CLI 正式入口：runApprovalCLI(gateway, {\"approve\", digest}) 返回 handled=true/code=0，回应文件 status=approved、decided_by=wechat:cli；Lookup 读到 approved",
+        "CLI 拒绝：runApprovalCLI(gateway, {\"reject\", digest}) 写回应文件 status=denied、decided_by=wechat:cli；Lookup 读到 denied",
+        "临时变异（runApprovalCLI 不调用 Resolve）下该子测试转红：\"CLI response file = (pending by \"\"), want approved by wechat:cli\"（wechat_test.go:1105）"
+      ]
+    }
+  ],
+  "commands": {
+    "baseline_before_change": {
+      "command": "go -C examples/wechat-bot test -run '^TestApproval' -count=1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "summary": "PASS; ok wechat-bot 0.361s（TestApprovalGateway/TestApprovalRuling 基线绿）",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/baseline-approval-exact.txt",
+      "log_sha256": "5383a6ffbcc62f1bf9ffe18719f9ff73fb743d47c7340b63b1ec8232d1a09a9d",
+      "log_bytes": 1930
+    },
+    "single": {
+      "command": "go -C examples/wechat-bot test . -run '^TestEventIntegrityApprovalWeChat$' -count=1 -race -json",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "parsed": {
+        "parent": "TestEventIntegrityApprovalWeChat run=1 pass=1",
+        "named_subtests_run_pass": 6,
+        "children": [
+          "parse_approve_reject",
+          "approval_request_fanout",
+          "ambiguous_prefix_refused",
+          "unknown_digest_refused",
+          "non_approver_refused",
+          "wechat_cli_entry"
+        ],
+        "skip": 0,
+        "fail": 0
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/single.json",
+      "log_sha256": "ddd6179d662c0ffc25dcd71bba0cfbcb98f4c260c0cd81e22d82f46a7e1af59a",
+      "log_bytes": 9611
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/02.6\"; mkdir -p \"$E\"; for i in $(seq 1 10); do go -C examples/wechat-bot test -run '^TestEventIntegrityApprovalWeChat$' -count=1 -race -json > \"$E/run-$i.json\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$E/exits.txt\"; if [ \"$rc\" -ne 0 ]; then exit \"$rc\"; fi; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "exits": "10/10 exit=0",
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/exits.txt",
+      "exits_sha256": "2b436b67ce1a50322b0e4e6ae3d4b36e5aa7ef31342793d0b0cceb21623ed288",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-1.json", "log_sha256": "b7dd1d9859d347292c96e8f8b1e68a183d7aec02d71cc768047b6db1cb2cc760", "log_bytes": 9602, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-2.json", "log_sha256": "360914bb20e13f18dadc87f2de8c84accc661e016f01400b90b0a09ec050b849", "log_bytes": 9601, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-3.json", "log_sha256": "3d3dcd278782d8b9edc3257c9830c53e11480b42c0ba825ed73e9d893696748f", "log_bytes": 9595, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-4.json", "log_sha256": "56c2d60f863aa6c3a54825eaf217f48956124a7242baf9594278440531190007", "log_bytes": 9597, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-5.json", "log_sha256": "4c4f8160b4d49a8dcf86e6658904ff6f0d09b8f2889a5a7b72c75292e2996be7", "log_bytes": 9600, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-6.json", "log_sha256": "07aaac11982bad20788128d89567239fd20bffee8610814a756033de214829b0", "log_bytes": 9599, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-7.json", "log_sha256": "2c2cb333b60e58f24ce537fceb63c3c6fc4801bcaf5acb55dec4516da7533229", "log_bytes": 9597, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-8.json", "log_sha256": "9cf0beb8a445b41234c844bbdcede569322fa155abb6a8425c406435decaeac4", "log_bytes": 9597, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-9.json", "log_sha256": "1786bf4dbb7ad08dc52150d97d710f84203cf7f7964577eb47289491d9a3c536", "log_bytes": 9613, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/run-10.json", "log_sha256": "35956573c274fab3cbb4ea80e99b54474f0aaa9d075fa8a7772694d3714ea7a9", "log_bytes": 9596, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐轮 json.loads 每行；按 Test 归集 run/pass/fail/skip；要求父测试与全部 6 个具名子测试各 run=1、pass=1、fail=0、skip=0，且无其它测试记录、无包级 fail、无截断 JSON；不使用 grep -c。",
+      "parsed_result": "ALL_TEN_OK=True",
+      "parse_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/ten-rounds-parse.json",
+      "parse_sha256": "35aa670f66e34698358c6f97d461f9a0080de5b8caae33d31a05c821a7072003"
+    },
+    "negative_anchor_mutation_check": {
+      "purpose": "证明三条负锚在缺陷行为下确实转红，不是空转。临时变异：Resolve 跳过审批人白名单检查；match 未知 digest 回落 pending 第一条；match 歧义前缀猜第一条。跑完立即反向还原，wechat_approval.go sha256 与变异前一致。",
+      "command": "go -C examples/wechat-bot test . -run '^TestEventIntegrityApprovalWeChat$/(ambiguous_prefix_refused|unknown_digest_refused|non_approver_refused)$' -count=1 -json",
+      "exit_code": 1,
+      "parsed": {
+        "ambiguous_prefix_refused": "fail: an ambiguous prefix = (true,<nil>), want ErrApprovalAmbiguous",
+        "unknown_digest_refused": "fail: approve over an unknown digest = (true,<nil>), want ErrApprovalNotFound",
+        "non_approver_refused": "fail: a ruling outside the whitelist = (true,<nil>), want ErrApprovalNotApprover"
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/mutation-red.json",
+      "log_sha256": "6298ce7eff1983eeb2e5e5901a856692c86708ec1ed6789f1cf3dd1c298b4895",
+      "log_bytes": 5362,
+      "restore_verified": true,
+      "restored_sha256": "469b8579e746c2e8ace3974f971c08b7f0d96bdc8479d3b8c27560980630196c",
+      "restored_command": "shasum -a 256 -c approval-original.sha256",
+      "restored_output": "examples/wechat-bot/wechat_approval.go: OK"
+    },
+    "consumer_anchor_mutation_check": {
+      "purpose": "证明 wechat_cli_entry 依赖 runApprovalCLI 经 Resolve 写回应文件，不是空转：临时让 runApprovalCLI 直接返回而不调用 Resolve，子测试在回应文件断言处转红；随后逐字节还原。",
+      "command": "go -C examples/wechat-bot test . -run '^TestEventIntegrityApprovalWeChat$/^wechat_cli_entry$' -count=1 -json",
+      "exit_code": 1,
+      "parsed": "wechat_cli_entry fail: wechat_test.go:1105: CLI response file = (pending by \"\"), want approved by wechat:cli",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/consumer-mutation-red.json",
+      "log_sha256": "67d7f7d074cf7ba0173da4c1ee39ba0b3008cff1ca88611bdad5d6416393dba3",
+      "log_bytes": 2638,
+      "restore_verified": true,
+      "restored_sha256": "469b8579e746c2e8ace3974f971c08b7f0d96bdc8479d3b8c27560980630196c",
+      "post_restore_single": {
+        "command": "go -C examples/wechat-bot test . -run '^TestEventIntegrityApprovalWeChat$' -count=1 -race -json",
+        "exit_code": 0,
+        "parsed": "parent + 6 subtests run=1 pass=1, fail=0, skip=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/post-restore-single.json",
+        "log_sha256": "c4ec5e032186fbbe2a2d5872c2f55b3f8ab7cee5cc22ed3c367e793b40a7253e",
+        "log_bytes": 9591
+      }
+    },
+    "regression": {
+      "wechat_module_all": {
+        "command": "go -C examples/wechat-bot test -count=1 ./...",
+        "exit_code": 0,
+        "summary": "ok wechat-bot 0.469s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/regression-wechat-all.txt",
+        "log_sha256": "5e1eb237991d6558658e12312bc7daed8f4e07ae3765e5841bd78bdbef1884a4",
+        "log_bytes": 23
+      },
+      "wechat_module_all_post_restore": {
+        "command": "go -C examples/wechat-bot test -count=1 ./...",
+        "exit_code": 0,
+        "summary": "ok wechat-bot 0.427s（最终树：产品逐字节还原后复跑）",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/post-restore-regression.txt",
+        "log_sha256": "0ca786dd074bf154140bb68064fd6bd4f798cb910231db66f30b97c43ba9e7fc",
+        "log_bytes": 23
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go -C examples/wechat-bot vet ./...",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/vet.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0,
+        "post_restore": {
+          "command": "go -C examples/wechat-bot vet ./...",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/post-restore-vet.txt",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "gofmt": {
+        "command": "gofmt -l examples/wechat-bot/*.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0,
+        "post_restore": {
+          "command": "gofmt -l examples/wechat-bot/*.go",
+          "exit_code": 0,
+          "result": "GOFMT_LINES=0",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.6/post-restore-gofmt.txt",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    }
+  },
+  "observations": [
+    "派发说明写「父+5子测试」，但任务行、任务表与 task-graph/golden 合同均列 6 个具名子测试（2 正 + 3 负 + 1 消费者锚）；本叶按 6 个核验，十轮逐子测试 run=1/pass=1。",
+    "02.6 的 verify_after=01.6：本叶产物已 ready，但未到勾选时机。按任务指令与 tasks.md 口径，02.6 保持 `- [ ]`，不提前勾选；01.6 回验通过后再回填。",
+    "runApprovalCLI 会向 stdout 打印裁决结果（既有行为）；在 -json 证据中以 output 事件记录，不影响子测试 run/pass 判定。",
+    "G7（过期回应）的负锚在 02.5（根审批）取证；02.6 不重复、不以本叶部分覆盖冒充 G7 已验。G9 口径下本叶只断言现有实现的 errors.Is 具名错误与现有包装文本，不写死规格中的前缀。",
+    "测试只扩展现有 wechat_test.go；未新增 wechat_approval_test.go，未改 mirrorExemptFiles，未在测试里手工补产品接线（请求走 ApprovalManager.Request/Deliver，裁决走 Resolve/runApprovalCLI，读取走 Lookup 与回应文件）。",
+    "消费者锚另做了可证伪性检查：临时让 runApprovalCLI 不调用 Resolve 后，wechat_cli_entry 在回应文件断言处转红（pending vs approved），随后还原并复跑全绿；证明该锚不是靠测试手工写文件或其它路径空转。"
+  ],
+  "limitations": [
+    "未执行真实微信网络往返；端到端往返按任务边界归 01.6/03.4 复验。",
+    "未验证根 `tagent approve <digest>` CLI；该项归 02.5 的独立待验项。",
+    "未在 02.6 内证明审批过期/改参/重复回应幂等；这些属 02.5 根审批验收面，本叶不越界声称覆盖。",
+    "负锚变异检查是临时本地变异取证，不是产品改动；还原已用 sha256 -c 验证，工作树中 wechat_approval.go 无 diff。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+    "line": "02.6",
+    "action": "保持 `- [ ]` 未勾选：verify_after=01.6，微信宿主装配回验通过后才可勾选；本摘要只证明产物 ready 与三锚/十轮证据。"
+  }
+}

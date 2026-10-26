@@ -1,0 +1,624 @@
+{
+  "artifact": "summary",
+  "change": "event-consumption-integrity",
+  "domain": "03-formal-simulation",
+  "title": "控制事件 monolith 拆分为审批/回流/折叠/替换/采集五个独立父测试（03.4—03.8）",
+  "leaves": ["03.4", "03.5", "03.6", "03.7", "03.8"],
+  "generated_at": "2026-10-23T15:14:27Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "status": "evidence_ready_verify_after_01.5",
+  "checkbox": "03.4—03.8 全部保持 `- [ ]`：verify_after=01.5，本摘要只证明产物 ready 与三锚/十轮绿证。",
+  "common": {
+    "scope": "把 03.3 monolith `TestEventIntegrityControls`（单父 + positive/negative/consumer 三段，覆盖审批/回流/折叠/替换/采集五机制）拆为五个独立父测试，每父自带 positive/negative/consumer 三子测试；断言面逐段迁移，五节任务行（并 design 第 75—79 行）为锚定义。删除 monolith 函数本体后 grep 零命中。产品零改动；`wechat_test.go` 未触碰（并行单在写）。",
+    "method": "每个子测试 boot 自己的 `smokeIntegrityHost`（正式 `tagent.Boot` + 微信宿主装配：approvalGateway、registerHandlers、/task、/reload、/healthz），段末显式 `host.close(t)`；共享 rig 装配与观测提取为同文件 helper（`bootSmokeIntegrityHost`/`smokeIntegrityHost.close`/`smokeIntegrityAssertFold`/`smokeIntegrityWaitMeditationFact`/`smokeIntegrityCompressFacts` 等）。语义取自 monolith 对应段与五节任务行：03.4 审批段 + 全链 consumer；03.5 回流段（授权目标一次、越权具名拒绝、拒绝后合法、不重 arm）；03.6 折叠段（小窗折叠、原文票据可达、综述进请求、不自激/重建不再折叠）；03.7 替换段（reload 新版本、下一请求新版本、在途保持开始版本）；03.8 采集段（记录语义=请求、seal 完整、attempts.jsonl 读取）。每父十轮为十个独立进程（-count=1 -race -json），逐轮父+子 run→pass。",
+    "environment": {
+      "os": "darwin 14.7.2 arm64",
+      "go": "go1.27.1 darwin/arm64",
+      "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+      "log_base": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity",
+      "notes": "原始 json 只落仓库外临时目录；本文件只留摘要、sha256 与 log_ref。"
+    },
+    "artifacts": [
+      {
+        "path": "examples/wechat-bot/smoke_test.go",
+        "state": "modified (working tree; HEAD 版本不含 monolith，monolith 为 03.3 实施后在写集内新增、本次删除)",
+        "lines": 2643,
+        "sha256": "9d5765fb7333b29408b42efbb1ef53dc6c1cd771ce76bec1b8014d3698d216ab",
+        "note": "删除 `TestEventIntegrityControls` 函数本体；新增五个父测试（958/968/977/986/995 行）、段内 helper 与共享 helper。"
+      },
+      {
+        "path": "examples/wechat-bot/smoke_harness_test.go",
+        "state": "modified (minimal harness adjustment)",
+        "lines": 1071,
+        "sha256": "01b671bb8984ebf2d69e91733e8c9b8bb06b93e08ab2fb45e070b2cc67afe97e",
+        "note": "`installSmokeLog` 由“每测试改写 log.Default 并在 cleanup 恢复”改为进程级 `smokeLogSwitch` 分发器（全局只安装一次，测试只切换当前记录器）。原因：拆分后每个子测试都有自己的 cleanup，而宿主后台提交 goroutine 仍在读 `log.Default`（api/plugin/phases.go:453），反复改写会产生 DATA RACE（拆分过程中在 03.7/03.6 各实测到一次）。"
+      }
+    ],
+    "product_changes": [],
+    "shared_rig": {
+      "host": "`smokeIntegrityHost{rig, provider, cfg, logs}`；`bootSmokeIntegrityHost(t, interval, minGap)` 安装日志面后装配正式宿主；`close(t)` 幂等，段末显式关闭。",
+      "lifecycle": "每子测试独立宿主；需要第二宿主的场景先 `host.close(t)` 再 boot（03.4 negative→expired、03.7 positive→in-flight），避免两段宿主共享进程级日志面时竞争。",
+      "helpers": [
+        "smokeIntegrityAssertFold / smokeIntegrityCompressFacts（03.6 折叠三段共用）",
+        "smokeIntegrityRebuildProjection / smokeIntegrityChainSummary（03.6 重建投影 + 链摘要复现 oneLineOf）",
+        "smokeIntegrityWaitMeditationFact / smokeIntegrityWaitDelivered / smokeIntegrityReflectionDeliveries（03.5）",
+        "smokeIntegrityInflightVersion（03.7 positive 在途版本）",
+        "smokeIntegritySeal / smokeIntegrityAttemptLines（03.8）",
+        "smokeIntegrityRequestsForLastUser / smokeIntegrityModels / smokeIntegrityHasFact / smokeIntegrityWaitReflectCount / smokeIntegrityWaitReflectSettled / smokeIntegrityAssertReflectQuiet（跨叶观测）"
+      ]
+    },
+    "anchor_migration": {
+      "source": "03.3 monolith `TestEventIntegrityControls`（03.3 十轮日志仍保留其三条 t.Logf：positive `approval ... held->approved->executed once ... reflection delivered ... fold kept the original reachable ... reload installed smoke-entry-b ... capture reconciled 11 call(s)`；negative `the reflection/compress/replacement products stayed self-managed ...`、`the reload returned beside the in-flight stream ...`；consumer `config->Boot->bind->registerHandlers->/task: rejected before admission, admitted ..., approved and executed once, read ..., injected ... under smoke-entry-b`）。",
+      "mapping": [
+        {
+          "leaf": "03.4",
+          "from_monolith": "positive 的审批段；negative 的“批准只记录裁决、改参不得沿用旧批准、审批人零出站”；consumer 的整条 `/task` 链（含无会话 503）",
+          "to": "positive（held→approved→executed once、裁决不驱动请求、正文只归审批会话、bound addresses 唯一）；negative（改参重扣留、未知 digest 具名拒绝、拒绝裁决记 denied 不执行、过期裁决不放行、审批人会话零出站）；consumer（config→Boot→bind→registerHandlers→/task：503/准入/批准/重试执行一次/读取）"
+        },
+        {
+          "leaf": "03.5",
+          "from_monolith": "positive 的回流段（delivered once）；negative 的越权目标具名拒绝 + 回流产物不自激；consumer 的 deliver_summary→InjectReflection→目标下一次请求",
+          "to": "positive（授权目标恰一次、owner/source/target、审批人零事实、下一请求读到 marker）；negative（越权具名拒绝可读、拒绝后合法投递、1ms 节奏下不重 arm + 真实输入仍触发）；consumer（渠道入站→hosted deliver_summary→InjectReflection→/task 读回→恰一次）"
+        },
+        {
+          "leaf": "03.6",
+          "from_monolith": "positive 的折叠段（entries/synthetic/rendered vs window、原文可达、综述进请求）；negative 的折叠产物自管 lineage + 不自激；consumer 的后续请求装配消费折叠产物",
+          "to": "positive（小窗折叠触发、原文票据逐字节可达、综述进请求、产物 key 为 synthetic、compress 自管 lineage）；negative（compress 不重开新颖门、no-novelty 不增、reflect quiet、重建投影两次 FoldByAge 不自激、重启不新折叠、重启后不铸旧材料产物）；consumer（正式后续请求读到带早期材料的 history summary，投影体积仍在窗口内）"
+        },
+        {
+          "leaf": "03.7",
+          "from_monolith": "positive 的 reload 段（安装 smoke-entry-b、下一请求新版本）；negative 的同文档重复替换 + 替换失败仍安装 + 在途流不漂移；consumer 的 /reload→/task",
+          "to": "positive（reload 判定一次 model change、lease publication 唯一、替换事实自管 lineage、下一请求走新版本、在途流保持开始版本且流后下一回合新版本）；negative（同文档重复 reload 无第二 change/publication、未声明的 provider 触发 `ErrLeaseRebuildFailed` 不安装且旧版本继续服务）；consumer（/reload→/task 正式 HTTP 链）"
+        },
+        {
+          "leaf": "03.8",
+          "from_monolith": "positive 的采集段（records==calls、sealed、dropped=0、in-flight=0、seal.Files 含 attempts.jsonl）；negative 的无请求不记账 + 失败尝试不记成成功；consumer 的 attempts.jsonl 正式读取",
+          "to": "positive（含委派子调用的记录数逐项等于模型调用、seal 完整、dropped=0、in-flight=0、seal 文件条目计数）；negative（无会话拒绝驱动零请求且空采集零记录零文件、500 失败尝试以 failed terminal 入册且 Error 含 500、非 failed 不带 Error、DecisionID 绑定回合）；consumer（读回 digest/字节一致、attempt 行合法、heads 含答案）"
+        }
+      ],
+      "no_loss_claim": "monolith 每个段落的可观测断言均在上表有对应项；补充项只有两处（03.4 未知 digest 具名拒绝与拒绝裁决、03.8 failed terminal/Error 语义），二者来自五节任务行原文而非缩水。删除前逐锚对照 03.4—03.8 任务行与 design 第 75—79 行完成。"
+    },
+    "regression": {
+      "package_all": {
+        "command": "go -C examples/wechat-bot test -count=1 ./...",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "ok  \twechat-bot\t1.488s",
+        "note": "不带 smoke 标签的既有包测试（并行单在写 wechat_test.go，本轮通过）",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4-03.8/regress-pkg.txt",
+        "log_sha256": "603d84a2c214bdd21ca3632041ebce82cd7ce046b7b10082a8fbdd02fb5cb936",
+        "log_bytes": 23
+      },
+      "local_smoke": {
+        "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmoke$' -count=1 -timeout 30m",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "ok  \twechat-bot\t63.525s",
+        "note": "既有本地长程冒烟（smoke 标签）未被拆分改动破坏",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4-03.8/regress-local-smoke.txt",
+        "log_sha256": "8e4cfde397d5f23e13d93d81fb9622b4930532d25e33123eb758babb06bba636",
+        "log_bytes": 24
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go -C examples/wechat-bot vet -tags smoke ./...",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4-03.8/vet.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l examples/wechat-bot/smoke_test.go examples/wechat-bot/smoke_harness_test.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4-03.8/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "monolith_absent": {
+        "command": "grep -rn 'TestEventIntegrityControls' examples/wechat-bot",
+        "exit_code": 1,
+        "result": "MONOLITH_HITS=0",
+        "note": "exit=1 是 grep 无匹配；函数本体与名称均不在包内",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4-03.8/grep-monolith.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      }
+    }
+  },
+  "leaves_detail": {
+    "03.4": {
+      "title": "微信模块审批控制",
+      "parent": "TestEventIntegrityApprovalControl",
+      "subtests": [
+        {
+          "name": "positive",
+          "helper": "smokeIntegrityApprovalPositive",
+          "asserts": [
+            "critical 调用被扣留：hold-ack 后正文未投递，审批人会话收到带 digest 的审批请求",
+            "批准只记录裁决：Resolve 返回 approved，pending 清零，Lookup 为 ApprovalApproved 且 DecidedBy=wechat:<approver>",
+            "裁决不驱动任何模型请求（entry 请求计数不变）",
+            "重试执行恰一次：approved-done 与 marker 各 1，正文不达审批人会话",
+            "bound addresses 只含该会话"
+          ]
+        },
+        {
+          "name": "negative",
+          "helper": "smokeIntegrityApprovalNegative + smokeIntegrityApprovalExpired",
+          "asserts": [
+            "改参重试：新 digest 与旧批准不同、不执行、重新扣留为唯一 pending",
+            "错误裁决：approve deadbeef 以 approval.ErrApprovalNotFound 具名拒绝且不驱动请求、待办不变",
+            "拒绝裁决：reject <changed digest> 记 denied、不执行、待办清零、Lookup 状态 Denied",
+            "审批人会话零出站（marker 计数 0）",
+            "过期：短 TTL + 推进时钟后 Decide 返回 ErrApprovalExpired；重试仍扣留、无 approved-done、Lookup 仍指原请求、日志含 ruling=expired 与 expires_ms="
+          ]
+        },
+        {
+          "name": "consumer",
+          "helper": "smokeIntegrityApprovalConsumer",
+          "asserts": [
+            "配置装载：entry=smoke 会话、审批门 Enabled、注入面与 /healthz 可用",
+            "无会话 POST /task = 503 且 body 含 no user session，模型请求 0",
+            "渠道入站被准入：hold-ack、router target、external_input 事实",
+            "渠道裁决 approved 后 /task 重试执行一次；随后注入面读回一轮",
+            "全程只走正式装配（Boot→bind→registerHandlers→HTTP）"
+          ]
+        }
+      ],
+      "verification": {
+        "single": {
+          "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityApprovalControl$' -count=1 -race -json -timeout 30m",
+          "cwd": "/Users/pengweiye/Documents/codes/tagent",
+          "exit_code": 0,
+          "parsed": {
+            "elapsed_seconds": 120.6,
+            "children_seconds": {"positive": 30.11, "negative": 60.32, "consumer": 30.16},
+            "pass_events": 5,
+            "fail_events": 0,
+            "races": 0
+          },
+          "note": "120s 主要来自三个宿主各自约 30s 的 Close 超时面（产品关闭语义），不是挂起",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4/single.jsonl",
+          "log_sha256": "f94f18b6aca0ef04b37b9379cc2ef9bebfac29ad3317113e1b30e86775d990cc",
+          "log_bytes": 5641
+        },
+        "ten_rounds": {
+          "command": "E=\"$TMPDIR/event-consumption-integrity/03.4\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in {1..10}; do id=$(uuidgen); go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityApprovalControl$' -count=1 -race -json -timeout 30m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done",
+          "independent_processes": true,
+          "count_flag": "-count=1",
+          "exits": "10/10 exit=0",
+          "per_round": "每轮 5 pass（3 子 + 父 + 包级）、0 fail、0 DATA RACE",
+          "run_ids": [
+            "run=1 run_id=8D66F84E-9659-4EC6-B052-C6622CE5DFD5 exit=0",
+            "run=2 run_id=27DEE863-8861-4F93-AD60-3EC3D390A1D3 exit=0",
+            "run=3 run_id=1DCFAAC6-4BE1-45BB-8F4A-CB38B58D53D4 exit=0",
+            "run=4 run_id=AF5E83BB-47E9-4777-8BAE-CFD0C569BB92 exit=0",
+            "run=5 run_id=895BB247-FA71-4C59-BE9E-D5EC5128EFE8 exit=0",
+            "run=6 run_id=2EC9627B-E98F-4EE3-80DE-8B652DA595DA exit=0",
+            "run=7 run_id=0821317D-7CCF-4457-9086-A5DDC3441888 exit=0",
+            "run=8 run_id=87A834AD-3D61-40AE-A2A2-5B0345C4E770 exit=0",
+            "run=9 run_id=5C29A436-8E1E-4525-A9EB-14C766C01A50 exit=0",
+            "run=10 run_id=F02F244D-0141-4CAF-883D-8CF6082719DE exit=0"
+          ],
+          "logs": [
+            "run-1 fddf297b652af13c4db1153f260979e32198df77fcb5bc3529bf35d58be4faec 5643",
+            "run-2 f5004d79d8e2dce6ed631f44adb477c87c5fce71f0d0145720d5ddcaa9c54098 5640",
+            "run-3 e57481d9c704490fdafae740c2a10c0ec91d9ffbb51078bd1a98d514568b7518 5643",
+            "run-4 4ec4ce85995eb17fc10a87d006a598f0274b19a8c96193f17f77c8777e559e16 5640",
+            "run-5 1d05c7b0cf5032a03eae654f17c51e1e67758acfd2ccbfa1fcdfad5fc7c14414 5642",
+            "run-6 adb0295eca87fa243ba4e63a255c600fa102c0c96730f9a0d7db5707a8e58e8e 5640",
+            "run-7 8b5435e2d8d2ed8e2bbeaa02d2f7fef76f9cd2408f0585232395c586d19cc537 5638",
+            "run-8 c2fb54d852f92afd041e231ffffbc8527a4071c3c344656af6ae37647653658d 5641",
+            "run-9 6999521f5cad83f1010cda9a139267ad3986c3f21eae44f939ac73ca8fac63b1 5639",
+            "run-10 2e2b8a70f3771257f60d984e3f506b3b9752d350a058fbaca2a4bbd60309f9b4 5642"
+          ],
+          "parse_command": "for f in $E/run-*.jsonl; do echo \"$(basename $f) $(grep -c '\"Action\":\"pass\"' $f)P $(grep -c '\"Action\":\"fail\"' $f)F $(grep -c 'DATA RACE' $f)R\"; done",
+          "run_ids_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4/run-ids.txt",
+          "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.4"
+        }
+      },
+      "leaf_deviations": [
+        {
+          "planned": "03.4 任务行：批准后同一 digest 不再二次执行",
+          "actual": "断言为“裁决不驱动执行、重试执行一次、改参重新扣留、拒绝裁决为终止裁决”；未主张第二次重试必被拒",
+          "reason": "产品审批不是一次性消费：ApprovalManager 的 approved 裁决在 TTL 内持续有效（Lookup 命中即放行），同 digest 重试会再次执行。任务行该句按“批准本身不执行、执行发生在重试且恰一次”落地，避免写入产品不支持的行为。"
+        }
+      ],
+      "leaf_observations": [
+        "子测试内部需要第二宿主（过期场景）时先显式 close 第一宿主，两个宿主不共享进程级日志面。",
+        "无会话 503 的归属放在 consumer（任务行把 /task 全链归于消费者锚，monolith 的 consumer 段亦如此）。"
+      ]
+    },
+    "03.5": {
+      "title": "微信模块反思回流控制",
+      "parent": "TestEventIntegrityReflectionDeliveryControl",
+      "subtests": [
+        {
+          "name": "positive",
+          "helper": "smokeIntegrityReflectionPositive",
+          "asserts": [
+            "回流落授权目标恰一次（smokeIntegrityReflectionDeliveries==1，target==目标地址）",
+            "回流事实的 trigger 是 meditation.LineageReflection，owner/source/target 归属正确",
+            "审批人会话零事实、零出站",
+            "下一正式请求读到回流 marker"
+          ]
+        },
+        {
+          "name": "negative",
+          "helper": "smokeIntegrityReflectionNegative (smokeIntegrityWrongRoute) + smokeIntegrityReflectionSelfManaged",
+          "asserts": [
+            "越权目标被具名拒绝：拒绝文本可读、拒绝不落任何链、审批人会话零出站",
+            "拒绝后合法目标仍可投递，摘要只落授权目标一次，下一请求读到",
+            "1ms 节奏：回流产物 trigger 为自管 lineage、NoveltyPolicy 不 Novel、no-novelty 计数不增、reflect quiet",
+            "真实输入仍能触发下一轮反思（静默不是驱动已死）"
+          ]
+        },
+        {
+          "name": "consumer",
+          "helper": "smokeIntegrityReflectionConsumer",
+          "asserts": [
+            "渠道入站驱动一轮，hosted 冥想 agent 的 deliver_summary 在端点出现（工具调用帧）",
+            "deliver_summary -> InjectReflection 落目标链（external_input + reflection lineage）",
+            "审批人链零事实零出站",
+            "下一次正式 /task 读到 reflection marker，回流恰一次"
+          ]
+        }
+      ],
+      "verification": {
+        "single": {
+          "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReflectionDeliveryControl$' -count=1 -race -json -timeout 30m",
+          "cwd": "/Users/pengweiye/Documents/codes/tagent",
+          "exit_code": 0,
+          "parsed": {"elapsed_seconds": 3.64, "children_seconds": {"positive": 0.66, "negative": 2.33, "consumer": 0.66}, "pass_events": 5, "fail_events": 0, "races": 0},
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.5/single.jsonl",
+          "log_sha256": "98a1e1a48414c27be82ecd38ff886bbebb9cc6b60a8f17a3b6d98c7c1aa4a4cf",
+          "log_bytes": 6008
+        },
+        "ten_rounds": {
+          "command": "E=\"$TMPDIR/event-consumption-integrity/03.5\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in {1..10}; do id=$(uuidgen); go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReflectionDeliveryControl$' -count=1 -race -json -timeout 30m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done",
+          "independent_processes": true,
+          "count_flag": "-count=1",
+          "exits": "10/10 exit=0",
+          "per_round": "每轮 5 pass、0 fail、0 DATA RACE",
+          "run_ids": [
+            "run=1 run_id=15D0F186-E3F8-4417-A1D2-61ADD46AA934 exit=0",
+            "run=2 run_id=7D5CFE7C-18E0-45C0-8B64-45349867ED61 exit=0",
+            "run=3 run_id=02F235B7-0573-4D07-B533-534FC0F8E46B exit=0",
+            "run=4 run_id=614B8F76-DB08-410E-ACEE-F3C2D02F411A exit=0",
+            "run=5 run_id=EF02F436-B473-458E-B8A5-23296EA209A6 exit=0",
+            "run=6 run_id=E2E617D8-2FFC-43F5-B165-0DF29E7CAB96 exit=0",
+            "run=7 run_id=E123F6D1-868C-413F-8348-B9DB0657452E exit=0",
+            "run=8 run_id=F51EC6BB-6A00-43D6-9907-0154195DA6AD exit=0",
+            "run=9 run_id=999BD6E9-50F5-452C-9A24-AFE43A17BDF7 exit=0",
+            "run=10 run_id=26F592C2-A9E6-4120-8E90-EF28898B5166 exit=0"
+          ],
+          "logs": [
+            "run-1 e87f652b5c9b783249868fe00b03b9c9d6523e96df29cd8fb2998ed91b08f98d 6005",
+            "run-2 cccbeb3c830375163c3940b663c6037daf52ae84b96acbcb31e209b656f6e77a 6009",
+            "run-3 759907afc43e1b397ca3d810a708ac6cb7eb8f2f9a397c2eecc8da9f93ff05c3 6006",
+            "run-4 4b7cb8216a889966c79e3628f2ff44773171c32baca051e69e52b0f99801b18a 6009",
+            "run-5 3c44fb0df261a9db2ff1ea458f080dc7326c78e4f43a8efeb1ad40c6b8ebcbcb 6010",
+            "run-6 25e9ae2245f4fb0655792c859ac792dc9fbccab24df7e3b7e00791f22fba7f86 6009",
+            "run-7 cde1807eba3df8c07e8583a0841abdae74be88841534688f31fd1f9b4e506ef5 6007",
+            "run-8 b5186fc859ae8a10970bcef68c1d3ad32ad6aeaa5662c61e04e45e0530aaf649 6004",
+            "run-9 252e4074be84078474af94fa6a4e04fc3317b8084bd414310e3c625ce6f4907b 6006",
+            "run-10 8cede03141408d620566a4465ba852df24429bdfc14aaa46531c477dbaaddda1 6006"
+          ],
+          "parse_command": "同 03.4 的逐轮 pass/fail/race 统计",
+          "run_ids_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.5/run-ids.txt",
+          "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.5"
+        }
+      },
+      "leaf_deviations": [],
+      "leaf_observations": [
+        "“不重 arm”用 1ms 冥想节奏 + 500ms 稳定窗 + 真实输入对照（reflect 计数继续增长）证明静默不是停摆。"
+      ]
+    },
+    "03.6": {
+      "title": "微信模块压缩投影控制",
+      "parent": "TestEventIntegrityFoldControl",
+      "subtests": [
+        {
+          "name": "positive",
+          "helper": "smokeIntegrityFoldPositive",
+          "asserts": [
+            "小窗折叠实际触发：投影长出 history summary、synthetic 条目、compress.request",
+            "原文票据逐字节可达（CommittedEvent 读回被折原文，tail marker 在）",
+            "综述进入下一请求装配",
+            "折叠产物是自管 lineage、不重开新颖门、synthetic key 合法"
+          ]
+        },
+        {
+          "name": "negative",
+          "helper": "smokeIntegrityFoldNegative + smokeIntegrityRebuildProjection",
+          "asserts": [
+            "compress 事实自管 lineage、NoveltyPolicy 不 Novel、no-novelty 不增、reflect quiet",
+            "重建投影（产品 RebuildProjectionFromWAL）第一次 FoldByAge 触发且铸产物，第二次 NewFolded==0/Products 空/投影摘要不变（产物不自激）",
+            "重启前原文票据仍逐字节可读（折叠后的材料仍在事实链）",
+            "重启后新回合请求恰一条且不含 history summary、compress 事实为 0、ReplayEntries 的 synthetic 不含早期材料（重建不再折叠）"
+          ]
+        },
+        {
+          "name": "consumer",
+          "helper": "smokeIntegrityFoldConsumer",
+          "asserts": [
+            "正式后续请求读到带早期材料的 history summary",
+            "投影渲染体积 <= 窗口阈值",
+            "后续请求持续消费折叠产物（不是一次性）"
+          ]
+        }
+      ],
+      "verification": {
+        "single": {
+          "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -race -json -timeout 30m",
+          "cwd": "/Users/pengweiye/Documents/codes/tagent",
+          "exit_code": 0,
+          "parsed": {"elapsed_seconds": 3.44, "children_seconds": {"positive": 0.11, "negative": 3.23, "consumer": 0.10}, "pass_events": 5, "fail_events": 0, "races": 0},
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.6/single.jsonl",
+          "log_sha256": "28af1f5ff734ded9ea971590a19c12a094c2f7b43af4a4c03d7548fb3aab9ed9",
+          "log_bytes": 6450
+        },
+        "ten_rounds": {
+          "command": "E=\"$TMPDIR/event-consumption-integrity/03.6\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in {1..10}; do id=$(uuidgen); go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -race -json -timeout 30m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done",
+          "independent_processes": true,
+          "count_flag": "-count=1",
+          "exits": "10/10 exit=0",
+          "per_round": "每轮 5 pass、0 fail、0 DATA RACE",
+          "run_ids": [
+            "run=1 run_id=7C773D5F-F0A6-437D-A3B1-6B99CC04CFF2 exit=0",
+            "run=2 run_id=10796D72-7FE5-49B6-92E7-39854E222565 exit=0",
+            "run=3 run_id=8A051E9B-9006-4264-9448-45427AF28F0B exit=0",
+            "run=4 run_id=684A82E5-9D09-43D6-BE2E-094689348075 exit=0",
+            "run=5 run_id=8E8E0968-BF19-4173-9818-35101A86F1D0 exit=0",
+            "run=6 run_id=DEB00EA8-84D8-4EC0-BCD5-9BFD1F99D360 exit=0",
+            "run=7 run_id=78AC7D42-1DF3-4538-A462-4475AC536A39 exit=0",
+            "run=8 run_id=9FA9F95D-EE77-4B9E-AA36-6488FADA754B exit=0",
+            "run=9 run_id=DCCDE5FD-AC86-46DB-AE74-A254F04CAE85 exit=0",
+            "run=10 run_id=B8CBEF3F-10EB-4412-AA66-272D33C191D7 exit=0"
+          ],
+          "logs": [
+            "run-1 8a49dd6386a12e700c3a0a94695546de01a8bbbf80f943706cc58aff0078b514 6434",
+            "run-2 ed9bc7cb8964b6f87f8d32d8f85a0628765a9379ceb722db68f7f90aba699b6e 6450",
+            "run-3 44b1fa2cf2e33fefe0ab214f65022be0518b490bfc9c31f8d19eced500bbbe07 6429",
+            "run-4 2de969cce297af3240843789e3dba8d84fd7a7fb2018e31b90304e435b712ecd 6450",
+            "run-5 2342b7457e1642fad6e6e136cfa1499cf8311a5f5afe745d9f3a6a8202389fa4 6436",
+            "run-6 d701bc9d2ba1ef6415ab8f6e65f6eab49e31e1c73a0bcbbcfa2bd3e4024a4533 6434",
+            "run-7 620991bdf612d1c275c9cf3fccbe64aa7ffc0afda97ff9fa3643a61ddc2fbdf5 6436",
+            "run-8 0c5aa5e3855da74f987826d13fa78d89c105536da669c300538390de22745941 6438",
+            "run-9 fbf753c84826728afd3b70c48f6952229ea5c599878b6824d123ac17ea1f7f7a 6435",
+            "run-10 07cdad7f2f1942e6186ea46f5c80581f81ba0fe76dae8b102e9a11f930194cc5 6435"
+          ],
+          "parse_command": "同 03.4 的逐轮 pass/fail/race 统计",
+          "run_ids_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.6/run-ids.txt",
+          "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.6"
+        }
+      },
+      "leaf_deviations": [
+        {
+          "planned": "03.6 任务行/design：256 窗口下折叠实际触发",
+          "actual": "按产品真实窗口断言：`tagent.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()` = 2400 bytes；03.3 monolith 日志亦为 window=2400",
+          "reason": "宿主装配只声明 FoldWindow 两字段，产品 VolumeThresholdBytes 由 BudgetCharsPerToken 计算；256 不是当前产品窗口值，伪造 256 会让断言与真实装配脱节。"
+        },
+        {
+          "planned": "03.6 负锚：重建触发再折叠（跨宿主重启）",
+          "actual": "①用产品 `replay.RebuildProjectionFromWAL` 从宿主写下的链重建投影，同一窗口连续两次 FoldByAge：第二次不消费/不铸产物/不改写投影；②重启后新回合不新折叠（无 history summary、compress=0、synthetic 不含早期材料）；③原文票据可达在重启前断言",
+          "reason": "宿主重启时 replay 用 `replay.NewReplayProjection()` 全新注册（facts.go attachDeclaredReplay），不从持久链回放；持久层不保存通用事件体（CommittedEvent 回退 tier.Segments.GetEvent 只读内存 cache），重启后无法按 key 读回原文。产品级“重建不再折叠”由 02.3 `TestEventIntegrityProjection/rebuild_does_not_refold` 已有覆盖；本叶用公开 API 重建验证不自激，不冒充跨重启回放。"
+        }
+      ],
+      "leaf_observations": [
+        "重建链跳过 compress.request（判断不是材料，不进投影）与空正文事实，等价于 AgeFold/fileCompressRequest 的语义。",
+        "重建后的 segment 划分与增量多遍折叠不同（链里含 reflection external_input），故只断言“触发且铸产物 + 二次不消费”，不比较 summary 内容寻址键。"
+      ]
+    },
+    "03.7": {
+      "title": "微信模块替换控制",
+      "parent": "TestEventIntegrityReplacementControl",
+      "subtests": [
+        {
+          "name": "positive",
+          "helper": "smokeIntegrityReplacementPositive + smokeIntegrityInflightVersion",
+          "asserts": [
+            "/reload 判定一次 model change 并安装唯一 lease publication",
+            "替换事实自管 lineage、不重开新颖门",
+            "下一 /task 请求恰一次走新版本",
+            "在途流保持开始版本：reload 不阻塞借用中的版本、流内请求仍报 smoke-entry、流后下一回合走新版本、LeaseLosses 为空"
+          ]
+        },
+        {
+          "name": "negative",
+          "helper": "smokeIntegrityReplacementRepeat + smokeIntegrityReplacementRefused",
+          "asserts": [
+            "同文档重复 reload：无第二 model change、不新增 publication、不重开 no-novelty、reflect quiet",
+            "替换到未声明 provider：替换事实照常提交，model-lease gap 为 ErrLeaseRebuildFailed 且含缺失 provider 名、日志 result=refused、下一轮仍由旧版本服务、被拒版本从不服务"
+          ]
+        },
+        {
+          "name": "consumer",
+          "helper": "smokeIntegrityReplacementConsumer",
+          "asserts": [
+            "渠道入站准入会话后 POST /reload 安装新版本",
+            "随后 POST /task 请求恰一次走新版本、零次走旧版本"
+          ]
+        }
+      ],
+      "verification": {
+        "single": {
+          "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReplacementControl$' -count=1 -race -json -timeout 30m",
+          "cwd": "/Users/pengweiye/Documents/codes/tagent",
+          "exit_code": 0,
+          "parsed": {"elapsed_seconds": 1.44, "children_seconds": {"positive": 0.21, "negative": 1.18, "consumer": 0.05}, "pass_events": 5, "fail_events": 0, "races": 0},
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.7/single.jsonl",
+          "log_sha256": "bc59262c2292e676a21519848b6a6bc6570d86fdb5388e9ea441f0410e2eccaa",
+          "log_bytes": 6174
+        },
+        "ten_rounds": {
+          "command": "E=\"$TMPDIR/event-consumption-integrity/03.7\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in {1..10}; do id=$(uuidgen); go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReplacementControl$' -count=1 -race -json -timeout 30m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done",
+          "independent_processes": true,
+          "count_flag": "-count=1",
+          "exits": "10/10 exit=0",
+          "per_round": "每轮 5 pass、0 fail、0 DATA RACE",
+          "run_ids": [
+            "run=1 run_id=CCF80C2A-4F43-490B-94DF-8DA15B0B327F exit=0",
+            "run=2 run_id=C6A154CB-A052-4242-A9B0-247EA04E3809 exit=0",
+            "run=3 run_id=82C48652-8FEF-4622-B8E9-59AC1C4C66E0 exit=0",
+            "run=4 run_id=D0B8DB70-39DA-4E4C-9B48-4210E97AA138 exit=0",
+            "run=5 run_id=0F45E237-A8C0-44C5-8288-9DB73015F7D8 exit=0",
+            "run=6 run_id=92A50782-DAB8-4AD9-8174-1D2D8D2B1C7B exit=0",
+            "run=7 run_id=5BA1497A-6EB2-454A-B62A-7501132F1F89 exit=0",
+            "run=8 run_id=49258C46-8A52-4ECA-B83B-60DC9F284E8D exit=0",
+            "run=9 run_id=67E0D6A0-DB43-42BD-A56B-B2C11E3365AF exit=0",
+            "run=10 run_id=A738CE24-4C2E-44A0-B480-94D7A2FBA041 exit=0"
+          ],
+          "logs": [
+            "run-1 0e7daaff960472a52498d9288b84d82af275cb0aa4645a66197e67d81196fdb2 6174",
+            "run-2 2602c65937775aa41687f5409f5db071475225151e7b9260f47164d2aa7ecbda 6175",
+            "run-3 a061165aeae978205df2be3e1e4ccbd10de7bc4a027e2badcec94533a544a80b 6176",
+            "run-4 8b9a291dbbeb677b014eab27c5a32deeddc0fd9266442c5a6a7bc54ca42b555e 6176",
+            "run-5 802c67c871ef0b471e75c5bf2d55fb818fc2dcd5757367cf283b39ff8c57d8b3 6173",
+            "run-6 72340e3c0520a6434beba6b7dd171fb430db73e8bd866dcc5476007ee151226a 6173",
+            "run-7 b43ebfd5048e09d69824a1b348753458a3ad9387370e89775218cbb187e94bb5 6175",
+            "run-8 a22633d7f7ade0714274eb007f9012111a9bca16cd63ada10b52a6a9d2f006fe 6173",
+            "run-9 21d7afc775a3fcb716de617eee264dd15032ae816e78bd700837d0cf15ac3962 6174",
+            "run-10 874b8f67d947adaa371035f90981517f17f2b1fecdfbe5fb1f78bd47634f73f7 6175"
+          ],
+          "parse_command": "同 03.4 的逐轮 pass/fail/race 统计",
+          "run_ids_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.7/run-ids.txt",
+          "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.7"
+        }
+      },
+      "leaf_deviations": [
+        {
+          "planned": "03.7 任务行：在途流仍报开始版本列于 positive；negative 含在途请求版本漂移被接受即失败",
+          "actual": "`smokeIntegrityInflightVersion` 从 negative 移回 positive（任务行原语义）；它同时断言“流内旧版本、流后新版本、LeaseLosses 为空”，漂移在 positive 内被证伪",
+          "reason": "拆分过程中曾把在途场景放在 negative 以便独立宿主；按任务行归位后语义更贴合（在途保持开始版本是正锚要求）。"
+        }
+      ],
+      "leaf_observations": [
+        "in-flight 场景 boot 自己的宿主；进入前先 `host.close(t)`，且该 helper 不再改写全局日志面（沿用父测试的记录器），避免与上一宿主收尾提交竞争。"
+      ]
+    },
+    "03.8": {
+      "title": "微信模块采集控制",
+      "parent": "TestEventIntegrityCaptureControl",
+      "subtests": [
+        {
+          "name": "positive",
+          "helper": "smokeIntegrityCapturePositive",
+          "asserts": [
+            "attempts.jsonl 记录数与模型调用逐项相等（含委派子 agent 调用）",
+            "seal 已封、非 partial、dropped=0、in-flight=0、seal.Records==调用数",
+            "heads 数与记录数一致、seal.Files 含 attempts.jsonl 且条目计数一致"
+          ]
+        },
+        {
+          "name": "negative",
+          "helper": "smokeIntegrityCaptureNegative (smokeIntegrityCaptureNoRequest + smokeIntegrityCaptureFailedAttempt)",
+          "asserts": [
+            "无会话 POST /task=503、零模型请求、空采集 seal 完整且 records/dropped/in-flight 全零、无记录文件（准入拒绝不入损失账目）",
+            "500 回合：attempts.jsonl 有记录、行数不多于模型调用数、failed 尝试带 Error 且含 500、非 failed 不带 Error、至少一条 failed 且 DecisionID 绑定该会话（失败不被记成成功）"
+          ]
+        },
+        {
+          "name": "consumer",
+          "helper": "smokeIntegrityCaptureConsumer",
+          "asserts": [
+            "从正式 readTrajectory/smokeIntegrityAttemptLines 读回：记录数==调用数",
+            "seal 的 attempts.jsonl 条目 SHA256/字节数与磁盘逐字节一致，二次读取不变（测试只读不回写）",
+            "每行都是 attempt 且带 Attempt 载荷；heads 含本轮答案"
+          ]
+        }
+      ],
+      "verification": {
+        "single": {
+          "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityCaptureControl$' -count=1 -race -json -timeout 30m",
+          "cwd": "/Users/pengweiye/Documents/codes/tagent",
+          "exit_code": 0,
+          "parsed": {"elapsed_seconds": 2.83, "children_seconds": {"positive": 0.48, "negative": 1.90, "consumer": 0.45}, "pass_events": 5, "fail_events": 0, "races": 0},
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.8/single.jsonl",
+          "log_sha256": "f0c46e4455e592cacfa5a8be4c02e99a293b8b54229511ac1338652c679bc02e",
+          "log_bytes": 5528
+        },
+        "ten_rounds": {
+          "command": "E=\"$TMPDIR/event-consumption-integrity/03.8\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in {1..10}; do id=$(uuidgen); go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityCaptureControl$' -count=1 -race -json -timeout 30m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done",
+          "independent_processes": true,
+          "count_flag": "-count=1",
+          "exits": "10/10 exit=0",
+          "per_round": "每轮 5 pass、0 fail、0 DATA RACE",
+          "run_ids": [
+            "run=1 run_id=83250DB4-2A56-409C-8304-4D35B165B5F0 exit=0",
+            "run=2 run_id=062F6BC1-CEAA-42B8-9448-C2D69087BBA2 exit=0",
+            "run=3 run_id=0B16A3EC-62D9-4813-B624-51898EB552D3 exit=0",
+            "run=4 run_id=31C09FCA-98BF-4122-92F4-02ECA81DF0D9 exit=0",
+            "run=5 run_id=312A19BB-EAAA-41B0-9A04-A9D93C613EC6 exit=0",
+            "run=6 run_id=DF795FBE-E979-4EE3-9D3F-56EE05001189 exit=0",
+            "run=7 run_id=8BA3005A-5AD5-4CD2-85A5-FA0B7829D661 exit=0",
+            "run=8 run_id=35A4A3A2-365D-4F44-BF59-8C075B36978D exit=0",
+            "run=9 run_id=36017BF4-FC12-4BB4-B444-B990C1266E0C exit=0",
+            "run=10 run_id=2B61791F-8080-4670-BDE3-C49CBDB54332 exit=0"
+          ],
+          "logs": [
+            "run-1 6e508bfa39c2b58bcc72afe96e21b7c6392eb94fdb01a360f5096e70e10b3a53 5527",
+            "run-2 33b13ca95da0588037688690a08ca7a45eb613690f048489f0246ed900fecc18 5529",
+            "run-3 f3741ae7704e8430121eccf27f6f82d3b1dd2fedfb38bdd25f82be8242761813 5529",
+            "run-4 52ec374618b0af2d8dfb391059e5c48e0807047da8ac2addf5cb41f578eb5b54 5523",
+            "run-5 70535e3d36a8786fecf2fc5bcc26f95f1889558a8782d4474ea0f74b223e12a8 5531",
+            "run-6 996ebd8973fb9dd8a1763c0fafd7d31f5d202cfa771c80572cedfa09ac718c0c 5528",
+            "run-7 73bf72251b20611a3ae7cc9fc6e5f367d61273e50b79234c98914fdb95b0052b 5530",
+            "run-8 bb4010e0fa6fd24b9381cb4c4d0a906da61d23c9366a284ae77e5e7289182f3a 5527",
+            "run-9 ce50e25ae0e011068aa874ea66da4f97154f65c3f9e60df82319713f9ce5e154 5528",
+            "run-10 7fadde6a196a3e00c548c9f96654ac08e65168ce8416b304767e43c537390962 5530"
+          ],
+          "parse_command": "同 03.4 的逐轮 pass/fail/race 统计",
+          "run_ids_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.8/run-ids.txt",
+          "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.8"
+        }
+      },
+      "leaf_deviations": [
+        {
+          "planned": "03.8 正锚：attempts.jsonl 记录数 == 实际模型请求数",
+          "actual": "正锚仍在无重试场景逐项相等（含委派）；负锚的 500 场景只断言“行数不多于调用数 + failed terminal 语义”，不断言行数==HTTP 请求数",
+          "reason": "传输层对 500 的重试属于同一次 attempt（实测 5 次 HTTP 请求 = 3 次 500 重试 + 2 次 reflect，attempts.jsonl 3 行 = 2 reflect + 1 failed entry）。把 HTTP 预算当 attempt 预算会产出假负。"
+        }
+      ],
+      "leaf_observations": [
+        "“seal 后仍有在途即失败”没有产品注入点可制造在途记录；由 positive 与空采集 negative 的 seal.InFlight==0 断言承担（seal 完整性语义）。"
+      ]
+    }
+  },
+  "deviations": [
+    {
+      "planned": "冻结的 monolith 代码保留（tasks.md 拆分裁定：删除其代码须另获授权）",
+      "actual": "按用户单 C 指令删除 `TestEventIntegrityControls` 函数本体，grep 零命中",
+      "reason": "本次派单即“将其拆分为五叶独立父测试 … 删除 TestEventIntegrityControls 函数本体”，属对该裁定的明确授权；删前已逐锚对账五节任务行，断言不缩水。"
+    },
+    {
+      "planned": "harness 只做“拆分需要的最小微调”",
+      "actual": "`installSmokeLog` 改为进程级 `smokeLogSwitch` 分发器（+70/−7 行）",
+      "reason": "拆分后 15 个父子测试各自 cleanup 改写全局 log.Default，与宿主收尾的提交 goroutine 读 log.Default 竞争；实测 03.7 run-3、03.6 run-9 各一次 DATA RACE。分发器让全局只安装一次，测试只切换记录器，是让十轮可复跑的必要最小改动。"
+    }
+  ],
+  "observations": [
+    "五叶单轮 + 十轮全绿：每轮 5 pass（3 子 + 父 + 包级）、0 fail、0 DATA RACE。",
+    "同一 monolith 段落语义在五叶按机制归位；03.4 的 consumer 保留 monolith 的整条 /task 全链（含 503），其余四叶各自 formal consumer。",
+    "03.4 单轮约 120s：三个宿主各自约 30s 的 Close 等待；十轮约 22 分钟，未因耗时放宽任何断言。",
+    "拆分期间修复的两类 harness race 均为日志面热换（installSmokeLog 写 vs api/plugin/phases.go:453 读）；修复后所有十轮 0 race。",
+    "并行单在写 `wechat_test.go`：本叶未触碰该文件；`go test ./...` 与 TestLocalSmoke 在最终代码上通过。"
+  ],
+  "limitations": [
+    "未做变异取证（未临时改产品制造红灯）：负锚由具名断言与十轮复跑承载。",
+    "03.6 的跨重启原文票据读取受限（持久层不存通用事件体），重启面只验证“不再折叠”；产品级 rebuild_does_not_refold 由 02.3 承担。",
+    "03.4 过期场景用 fake clock + 短 TTL（产品公开选项），不是真实等待 TTL。",
+    "微信通道仍是 harness 既有 fakeChannel（出站记录来自生产 hostSender 路径），未接真实微信。",
+    "03.4—03.8 的 verify_after=01.5：本摘要只证明产物 ready，不勾选任务行。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+    "lines": "03.4—03.8",
+    "action": "全部保持 `- [ ]` 未勾选：verify_after=01.5，等待 01.5 正式回验后再定。"
+  }
+}

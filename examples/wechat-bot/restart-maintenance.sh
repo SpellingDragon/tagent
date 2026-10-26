@@ -12,7 +12,7 @@
 # v2 设计:
 #   1. 新锁路径 /tmp/tagent_maintenance.lock —— 旧 bot 手上的旧锁管不着这把新锁。
 #   2. 健康则静默退出（不刷日志），bot 挂了才重建 —— 这才是"保险"该有的行为。
-#   3. 目标 PID 自发现: pidfile 优先，退化为 :8089 监听探测。
+#   3. 目标 PID 自发现: pidfile 优先，退化为 HTTP 面端口监听探测。
 #   4. done 哨兵持久化到 $BASE/run/（工作分区，不怕 /tmp 清理）。
 #   5. 重启用 python os.posix_spawn 显式 close fd3..fd1023 —— 根治 fd 继承，
 #      下一代 bot 不再持有任何锁 fd。
@@ -29,7 +29,10 @@ SNAP=/tmp/tagent_env.snapshot
 NEWBIN=/tmp/wechat-bot.new
 DONEDIR="$BASE/run"
 DONEF="$DONEDIR/restart.done"
-HEALTH=http://127.0.0.1:8089/healthz
+# 端口与宿主 HTTP 面同源（env TAGENT_HTTP_PORT，缺省 8089）：改端口后探针与
+# 监听校验都跟着改，不在脚本里另存一份默认值。
+PORT="${TAGENT_HTTP_PORT:-8089}"
+HEALTH="http://127.0.0.1:$PORT/healthz"
 # hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧
 # rl.AuthTokenFromEnv 同源（env TAGENT_RL_AUTH_TOKEN）；401 视为 AUTH_FAIL，
 # 不判死进程、不触发重启。
@@ -65,7 +68,7 @@ if [ -s "$PIDF" ]; then
     [ -n "$C" ] && kill -0 "$C" 2>/dev/null && OLD_PID="$C"
 fi
 if [ -z "$OLD_PID" ]; then
-    OLD_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    OLD_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
 fi
 
 # bot 活着且健康 → 一切正常, 静默退出（含首次部署场景）
@@ -169,9 +172,9 @@ for i in $(seq 1 90); do
         exit 3
     fi
     if [ "$HC" = "200" ]; then
-        NEW_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+        NEW_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
         echo "${NEW_PID:-$SPAWN_PID}" > "$DONEDIR/restart.done"
-        log "RESTART OK: healthz=$(cat /tmp/tagent_healthz.json) new_pid=${NEW_PID:-?} after ~$((i*2))s"
+        log "RESTART OK: healthz=$HC new_pid=${NEW_PID:-?} after ~$((i*2))s"
 # reincarnation notice: metadata archive for the next process (task 2.1, D3)
         # 归档 env 快照后再清 /tmp：下次转世时若 /tmp 被清理（重启即清），
         # $BASE/run/env.snapshot 作为兜底环境来源（含 API keys 等启动必需变量）。

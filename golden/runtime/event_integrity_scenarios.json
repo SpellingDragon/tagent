@@ -1,0 +1,2367 @@
+{
+  "schema_version": 2,
+  "profile": "event-integrity",
+  "change": "event-consumption-integrity",
+  "graph_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/task-graph.json",
+  "families": [
+    {
+      "id": "E1",
+      "name": "用户/HTTP 输入"
+    },
+    {
+      "id": "E2",
+      "name": "工具/子代理通知"
+    },
+    {
+      "id": "E3",
+      "name": "输出渠道"
+    },
+    {
+      "id": "E4",
+      "name": "治理审批"
+    },
+    {
+      "id": "E5",
+      "name": "冥想回流"
+    },
+    {
+      "id": "E6",
+      "name": "压缩恢复"
+    },
+    {
+      "id": "E7",
+      "name": "模型替换"
+    },
+    {
+      "id": "E8",
+      "name": "采集观测"
+    }
+  ],
+  "tests": [
+    {
+      "id": "00.2/TestEventIntegrityReproduction",
+      "leaf": "00.2",
+      "kind": "diagnostic",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityReproduction",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityReproduction$",
+      "tags": [],
+      "race": true,
+      "tier": [
+        "diagnostic-baseline",
+        "event-short-final"
+      ],
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "control_normal_path",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "busy_notice_loss",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "duplicate_notice_material",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "request_and_send_identity_correlation",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "request_and_send_identity_correlation"
+    },
+    {
+      "id": "01.1/TestEventIntegrityNoticeIdentity",
+      "leaf": "01.1",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/execution",
+      "test_name": "TestEventIntegrityNoticeIdentity",
+      "file": "tests/integration/execution/event_integrity_test.go",
+      "selector": "^TestEventIntegrityNoticeIdentity$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "handoff_preserves_issued_target",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "multiple_progress_ordered_by_seq",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "tool_and_subagent_notice_reaches_original_invocation",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "conflicting_body_same_identity",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "cross_invocation_not_merged",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "duplicate_delivery",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "tool_and_subagent_notice_reaches_original_invocation"
+    },
+    {
+      "id": "01.2/TestEventIntegrityConsumptionRecovery",
+      "leaf": "01.2",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/history",
+      "test_name": "TestEventIntegrityConsumptionRecovery",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityConsumptionRecovery$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "claim_then_commit_retry_recovers",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consume_only_after_durable_commit",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "independent_process_restart",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "claim_does_not_confirm_early",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumed_entry_not_reprocessed",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "no_skip_over_gap",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "handover_before_confirmation",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "independent_process_restart"
+    },
+    {
+      "id": "01.3/TestEventIntegrityTaskContinuation",
+      "leaf": "01.3",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityTaskContinuation",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityTaskContinuation$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "busy_notice_retained_and_consumed",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "idle_notice_drives_next_decision",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "late_notice_not_dropped",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "multi_session_same_host_isolated",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "two_tasks_same_host_each_continuation",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "busy_notice_not_dropped",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "no_duplicate_input_for_same_notice",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "no_new_invocation_for_notice",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "notice_input_without_projection",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2",
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "notice_visible_under_small_window",
+          "kind": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2",
+            "E6"
+          ],
+          "mandatory": true,
+          "source": "evid-04-consumer"
+        }
+      ],
+      "consumer_anchor": "idle_notice_drives_next_decision"
+    },
+    {
+      "id": "01.4/TestEventIntegrityDelivery",
+      "leaf": "01.4",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityDelivery",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityDelivery$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "all_legal_actions_delivered",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "confirmed_action_reentry_no_resend",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "explicit_retry_keeps_link",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unknown_result_retained",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "confirmed_action_not_resent",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "distinct_actions_not_merged",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unknown_result_not_auto_resent",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "all_legal_actions_delivered"
+    },
+    {
+      "id": "01.5/TestEventIntegrityFormalAssembly",
+      "leaf": "01.5",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityFormalAssembly",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityFormalAssembly$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "formal_boot_delivers_turn",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "missing_sender_fails_closed",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_boot_delivers_turn"
+    },
+    {
+      "id": "01.6/TestEventIntegrityHostAdapters",
+      "leaf": "01.6",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityHostAdapters",
+      "file": "examples/wechat-bot/smoke_harness_test.go",
+      "selector": "^TestEventIntegrityHostAdapters$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "formal_channel_turn",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "missing_entry_fails_closed",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_channel_turn"
+    },
+    {
+      "id": "01.7/TestEventIntegrityCLIAdapter",
+      "leaf": "01.7",
+      "kind": "product-green",
+      "module": "tagent-cli-host",
+      "module_path": "tagent-cli-host",
+      "dir": "examples/cli-host",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityCLIAdapter",
+      "file": "examples/cli-host/main_test.go",
+      "selector": "^TestEventIntegrityCLIAdapter$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "formal_cli_turn",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "missing_model_key_fails_closed",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_cli_turn"
+    },
+    {
+      "id": "01.8/TestEventIntegrityPersistence",
+      "leaf": "01.8",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/history",
+      "test_name": "TestEventIntegrityPersistence",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityPersistence$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "new_fact_recalled_same_turn",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "original_text_matches_committed_bytes",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "formal_recall_tool_returns_new_fact",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "storage_failure_not_reported_as_success",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "index_failure_leaves_recoverable_debt",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "new_fact_keeps_old_reachable",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_recall_tool_returns_new_fact"
+    },
+    {
+      "id": "01.9/TestEventIntegrityRestoreUse",
+      "leaf": "01.9",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/history",
+      "test_name": "TestEventIntegrityRestoreUse",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityRestoreUse$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "restart_restores_original_text",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "restart_restores_invocation_attribution",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "restart_restores_tool_call_result_pairing",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "next_request_uses_restored_material",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "restore_only_ledger_is_not_completion",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "next_request_uses_restored_material"
+    },
+    {
+      "id": "01.10a/TestEventIntegrityExecLifecycle",
+      "leaf": "01.10a",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tool/exec",
+      "test_name": "TestEventIntegrityExecLifecycle",
+      "file": "tool/exec/event_integrity_test.go",
+      "selector": "^TestEventIntegrityExecLifecycle$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "returned_call_does_not_prove_exit",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "same_key_capture_sees_more_output",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "release_reports_exit_code",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "released_or_named_unknown",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "stable_is_not_success",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "partial_output_is_not_completion",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "returned_call_does_not_prove_exit"
+    },
+    {
+      "id": "01.10b/TestEventIntegrityExecStateEvents",
+      "leaf": "01.10b",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/execution",
+      "test_name": "TestEventIntegrityExecStateEvents",
+      "file": "tests/integration/execution/event_integrity_test.go",
+      "selector": "^TestEventIntegrityExecStateEvents$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "lease_keeps_renewing_after_return",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "state_change_emits_followup_notice",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "next_turn_consumes_exec_state",
+          "roles": [
+            "positive",
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "host_close_releases_exec_resources",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "restart_takes_over_or_names_unconfirmed",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unconfirmed_restart_not_reported_stopped",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "next_turn_consumes_exec_state"
+    },
+    {
+      "id": "02.1/TestEventIntegrityMeditationSchedule",
+      "leaf": "02.1",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/evolution",
+      "test_name": "TestEventIntegrityMeditationSchedule",
+      "file": "tests/integration/evolution/event_integrity_test.go",
+      "selector": "^TestEventIntegrityMeditationSchedule$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "cold_start_passes_through",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "new_material_on_cadence",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "busy_observation_holds_watermark",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "non_completed_terminal_defers",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "own_product_no_reentry",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "formal_reflection_consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_reflection_consumer"
+    },
+    {
+      "id": "02.2/TestEventIntegrityReflectionDelivery",
+      "leaf": "02.2",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityReflectionDelivery",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityReflectionDelivery$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "explicit_call_reaches_target_session",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "same_batch_yield_is_legal_success",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "delivery_does_not_rearm_novelty",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "empty_whitelist_fail_closed",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "partial_commit_failure_not_success",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "replay_identity",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "target_not_running_named_refusal",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unknown_target_named_refusal",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "wrong_target_no_extra_write",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "zero_live_target_not_success",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "boot_deliver_to_target_request",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E3",
+            "E5"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "boot_deliver_to_target_request"
+    },
+    {
+      "id": "02.3/TestEventIntegrityProjection",
+      "leaf": "02.3",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/history",
+      "test_name": "TestEventIntegrityProjection",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityProjection$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "small_window_fold_and_restore",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "fold_product_no_self_trigger",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "rebuild_does_not_refold",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unconsumed_not_lost",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "actual_request_assembly",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "rebuild_refolds_from_wal",
+          "kind": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true,
+          "source": "user-ruling-g4"
+        },
+        {
+          "name": "notice_visible_under_fold",
+          "kind": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2",
+            "E6"
+          ],
+          "mandatory": true,
+          "source": "evid-04"
+        }
+      ],
+      "consumer_anchor": "actual_request_assembly"
+    },
+    {
+      "id": "02.4/TestEventIntegrityReplacement",
+      "leaf": "02.4",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityReplacement",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityReplacement$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "inflight_stream_keeps_start_version",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "new_request_gets_new_version",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "duplicate_same_version_not_reinstalled",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "failed_replacement_not_installed",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "formal_reload_entry",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E7"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_reload_entry"
+    },
+    {
+      "id": "02.5/TestEventIntegrityApproval",
+      "leaf": "02.5",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/capabilities",
+      "test_name": "TestEventIntegrityApproval",
+      "file": "tests/integration/capabilities/event_integrity_test.go",
+      "selector": "^TestEventIntegrityApproval$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "approved_then_executes_once",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "changed_args_requires_new_approval",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "channel_delivery_failure_does_not_block",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "duplicate_response_no_second_execution",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "expired_response_refused",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "rejected_never_executes",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unapproved_never_executes",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "wrong_target_no_overreach",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "formal_governance_task_wrapper",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_governance_task_wrapper"
+    },
+    {
+      "id": "02.6/TestEventIntegrityApprovalWeChat",
+      "leaf": "02.6",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityApprovalWeChat",
+      "file": "examples/wechat-bot/wechat_test.go",
+      "selector": "^TestEventIntegrityApprovalWeChat$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "approval_request_fanout",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "parse_approve_reject",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "ambiguous_prefix_refused",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "non_approver_refused",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "unknown_digest_refused",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "wechat_cli_entry",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "wechat_cli_entry"
+    },
+    {
+      "id": "02.7/TestEventIntegrityCapture",
+      "leaf": "02.7",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/learning",
+      "test_name": "TestEventIntegrityCapture",
+      "file": "tests/integration/learning/event_integrity_test.go",
+      "selector": "^TestEventIntegrityCapture$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "requests_and_attempts_match_records",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "export_correlation_is_not_reward",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "failed_attempt_recorded_as_failure",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "no_request_no_record",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "rejected_admission_in_loss_ledger",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "formal_capture_then_offline_export",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "formal_capture_then_offline_export"
+    },
+    {
+      "id": "03.1/TestEventIntegrityHarness",
+      "leaf": "03.1",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityHarness",
+      "file": "tests/integration/host/scripted_provider_test.go",
+      "selector": "^TestEventIntegrityHarness$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E2"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.2/TestEventIntegrityIdentityMatrix",
+      "leaf": "03.2",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityIdentityMatrix",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityIdentityMatrix$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.3/TestEventIntegrityDecisionFlowMatrix",
+      "leaf": "03.3",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/host",
+      "test_name": "TestEventIntegrityDecisionFlowMatrix",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityDecisionFlowMatrix$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E1",
+            "E2"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.4/TestEventIntegrityApprovalControl",
+      "leaf": "03.4",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityApprovalControl",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityApprovalControl$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E3",
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E4"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.5/TestEventIntegrityReflectionDeliveryControl",
+      "leaf": "03.5",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityReflectionDeliveryControl",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityReflectionDeliveryControl$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E5"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E5"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.6/TestEventIntegrityFoldControl",
+      "leaf": "03.6",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityFoldControl",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityFoldControl$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E6"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.7/TestEventIntegrityReplacementControl",
+      "leaf": "03.7",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityReplacementControl",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityReplacementControl$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E7"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.8/TestEventIntegrityCaptureControl",
+      "leaf": "03.8",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityCaptureControl",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityCaptureControl$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E8"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.9/TestEventIntegrityRestart",
+      "leaf": "03.9",
+      "kind": "product-green",
+      "module": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "dir": ".",
+      "test_package": "./tests/integration/history",
+      "test_name": "TestEventIntegrityRestart",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityRestart$",
+      "tags": [],
+      "race": true,
+      "tier": "event-short",
+      "scope": "event-short",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2",
+            "E3",
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E2",
+            "E3",
+            "E6"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1",
+            "E3"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    },
+    {
+      "id": "03.11/TestEventIntegrityLongRun",
+      "leaf": "03.11",
+      "kind": "product-green",
+      "module": "wechat-bot",
+      "module_path": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "test_package": ".",
+      "test_name": "TestEventIntegrityLongRun",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityLongRun$",
+      "tags": [
+        "smoke"
+      ],
+      "race": true,
+      "tier": "event-long",
+      "scope": "event-long",
+      "subtests": [
+        {
+          "name": "positive",
+          "roles": [
+            "positive"
+          ],
+          "families": [
+            "E1",
+            "E2",
+            "E3"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "negative",
+          "roles": [
+            "negative"
+          ],
+          "families": [
+            "E3",
+            "E6",
+            "E7"
+          ],
+          "mandatory": true
+        },
+        {
+          "name": "consumer",
+          "roles": [
+            "consumer"
+          ],
+          "families": [
+            "E1"
+          ],
+          "mandatory": true
+        }
+      ],
+      "consumer_anchor": "consumer"
+    }
+  ],
+  "whole_chain": [
+    {
+      "id": "EI01",
+      "test_id": "03.2/TestEventIntegrityIdentityMatrix",
+      "families": [
+        "E1",
+        "E2"
+      ],
+      "aggregate_only": true,
+      "note": "03.2 身份与会话矩阵整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI02",
+      "test_id": "03.3/TestEventIntegrityDecisionFlowMatrix",
+      "families": [
+        "E1",
+        "E2"
+      ],
+      "aggregate_only": true,
+      "note": "03.3 多决策流矩阵整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI03",
+      "test_id": "03.4/TestEventIntegrityApprovalControl",
+      "families": [
+        "E1",
+        "E3",
+        "E4"
+      ],
+      "aggregate_only": true,
+      "note": "03.4 审批控制整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI04",
+      "test_id": "03.5/TestEventIntegrityReflectionDeliveryControl",
+      "families": [
+        "E1",
+        "E3",
+        "E5"
+      ],
+      "aggregate_only": true,
+      "note": "03.5 反思回流控制整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI05",
+      "test_id": "03.6/TestEventIntegrityFoldControl",
+      "families": [
+        "E1",
+        "E3",
+        "E6"
+      ],
+      "aggregate_only": true,
+      "note": "03.6 压缩投影控制整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI06",
+      "test_id": "03.7/TestEventIntegrityReplacementControl",
+      "families": [
+        "E1",
+        "E3",
+        "E7"
+      ],
+      "aggregate_only": true,
+      "note": "03.7 替换控制整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI07",
+      "test_id": "03.8/TestEventIntegrityCaptureControl",
+      "families": [
+        "E1",
+        "E3",
+        "E8"
+      ],
+      "aggregate_only": true,
+      "note": "03.8 采集控制整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI08",
+      "test_id": "03.4/TestEventIntegrityApprovalControl",
+      "families": [
+        "E1",
+        "E3",
+        "E4",
+        "E5",
+        "E6",
+        "E7",
+        "E8"
+      ],
+      "aggregate_only": true,
+      "note": "控制消费者（审批/反思/折叠/替换/采集）整链聚合组，锚定 03.4；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI09",
+      "test_id": "03.9/TestEventIntegrityRestart",
+      "families": [
+        "E1",
+        "E2",
+        "E3",
+        "E6"
+      ],
+      "aggregate_only": true,
+      "note": "03.9 独立进程重启整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    },
+    {
+      "id": "EI10",
+      "test_id": "03.11/TestEventIntegrityLongRun",
+      "families": [
+        "E1",
+        "E2",
+        "E3",
+        "E6",
+        "E7"
+      ],
+      "aggregate_only": true,
+      "note": "03.11 长程矩阵整链聚合组；aggregate_only，不新增测试/子场景，不计入数量"
+    }
+  ],
+  "non_product_leaves": [
+    {
+      "leaf": "00.1",
+      "evidence_kind": "doc_checker",
+      "checker": "",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.json"
+    },
+    {
+      "leaf": "00.3",
+      "evidence_kind": "doc_checker",
+      "checker": "",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json"
+    },
+    {
+      "leaf": "00.4",
+      "evidence_kind": "doc_checker",
+      "checker": "",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.json"
+    },
+    {
+      "leaf": "04.1",
+      "evidence_kind": "checker",
+      "checker": "scripts/check_runtime_evidence.py --check-contract",
+      "doc_ref": "golden/runtime/event_integrity_scenarios.json"
+    },
+    {
+      "leaf": "03.10",
+      "evidence_kind": "calibration_report",
+      "checker": "",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/03-formal-simulation/tasks.md"
+    },
+    {
+      "leaf": "04.2",
+      "evidence_kind": "checker+production_acceptance",
+      "checker": "scripts/run_runtime_scenarios.py",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/04-regression-gates/tasks.md"
+    },
+    {
+      "leaf": "04.3",
+      "evidence_kind": "checker",
+      "checker": "scripts/codetools/main.go (event-ownership)",
+      "doc_ref": "golden/runtime/architecture.json"
+    },
+    {
+      "leaf": "04.4",
+      "evidence_kind": "checker",
+      "checker": "scripts/check_event_integrity_mutations.py",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/04-regression-gates/design.md"
+    },
+    {
+      "leaf": "04.5",
+      "evidence_kind": "checker",
+      "checker": "scripts/check_runtime_plan.py",
+      "doc_ref": "scripts/check_runtime_evidence.py"
+    },
+    {
+      "leaf": "05.1",
+      "evidence_kind": "workflow_checker",
+      "checker": "scripts/test_check_runtime_workflow.py",
+      "doc_ref": ".github/workflows/ci.yml"
+    },
+    {
+      "leaf": "05.2",
+      "evidence_kind": "workflow_checker",
+      "checker": "scripts/check_runtime_evidence.py --bundle",
+      "doc_ref": ".github/workflows/ci.yml"
+    },
+    {
+      "leaf": "05.3",
+      "evidence_kind": "docs",
+      "checker": "scripts/verify_doc.py",
+      "doc_ref": "docs/OPERATION.md"
+    },
+    {
+      "leaf": "05.4",
+      "evidence_kind": "integration_acceptance",
+      "checker": "bash scripts/lint.sh",
+      "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/05-mr-integration/tasks.md"
+    }
+  ],
+  "scopes": [
+    {
+      "name": "event-short",
+      "repeat": 10,
+      "parent_tests": 28,
+      "named_anchors": 140,
+      "description": "event-short：全部绿测 + 00.2 诊断（03.11 除外）"
+    },
+    {
+      "name": "event-long",
+      "repeat": 1,
+      "parent_tests": 1,
+      "named_anchors": 3,
+      "description": "event-long：仅 03.11"
+    }
+  ],
+  "matrix": {
+    "seeds": [
+      1,
+      7,
+      42
+    ],
+    "windows": [
+      256,
+      32768
+    ],
+    "combos": 6,
+    "sessions_per_host": 4,
+    "inputs_per_session": 300,
+    "restarts_per_session": 30,
+    "per_combo": {
+      "inputs": 1200,
+      "restarts": 120
+    },
+    "total": {
+      "inputs": 7200,
+      "restarts": 720
+    }
+  },
+  "notes": [
+    "subtests[] 以 (parent,name) 为唯一键；137 个绿测具名子场景 + 4 个 00.2 诊断锚 = 141，按唯一键计，不按 positive/negative/consumer 引用求和。",
+    "consumer_anchor 可引用同时具有 positive 角色的行（dual-role），不复制同名行。",
+    "EI01—EI10 仅为 03 整链聚合组（aggregate_only），不计入测试/子场景数量，不替代 00/01/02/CLI 独立测试。",
+    "00.2 修复前红证单列；修复后 4 个诊断锚 mandatory 并纳入 event-short。",
+    "旧 03.3/TestEventIntegrityControls 已 superseded（见 task-graph.source_only_tests），不再登记合同；03.10 一次性只读校准为 non_product off_contract，不进入本合同。",
+    "01.2/handover_before_confirmation 与 01.3/notice_input_without_projection 为补差锚：源码落地前由 task-graph verification.pending_anchors 门控，合同先登记；补齐并过三锚+十轮前不得宣称已执行。"
+  ]
+}

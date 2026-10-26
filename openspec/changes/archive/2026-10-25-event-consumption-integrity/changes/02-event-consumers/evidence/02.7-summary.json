@@ -1,0 +1,231 @@
+{
+  "leaf": "02.7",
+  "title": "决策采集与离线导出（decision-capture，引用 offline-training-export）",
+  "change": "event-consumption-integrity",
+  "domain": "02-event-consumers",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T15:44:01Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "域内决策采集与离线导出取证：Boot 的 openHostCapture 在真实回合中记录每一次模型请求/尝试（含委派 worker 与 host settle follow-up）；失败尝试保留 provider 错误；准入拒绝进入 capture 损失账目（entry 经 loop 的 RecordingLosses，worker 经 sink ledger/manifest）；未发生请求不写记录；公开 rl.NewChainExporter/Export 只读关联 manifest/attempt/sample，不自动生成 reward、不丢弃 unrated 回合。只新增 tests/integration/learning/event_integrity_test.go，未改产品、未新增 CLI、未接 Boot 自动导出。",
+  "method": "父测试 TestEventIntegrityCapture 下六个具名子测试（父 selector 与任务行逐字符一致）。每个场景用 scripted OpenAI-compatible httptest endpoint 驱动 tagent.Boot 的正式 Host.Invoke；断言 provider 实际收到的请求、rl.SinkRecordsFile 中的 AttemptRecord、rl.ReadCaptureSeal 的 CaptureManifest、Run.RecordingLosses 以及公开 rl.ChainExporter 的 SFTSample/WriteSamples 结果。委派场景等待 host settle follow-up 的真实投递后再读 capture，避免竞态。",
+  "environment": {
+    "os": "Darwin 23.6.0 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7",
+    "note": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/learning/event_integrity_test.go",
+      "state": "added",
+      "lines": 1370,
+      "sha256": "c9e4f12dba7f9a33cb1d6a25b18d9ae462c3f65981b44fc18972239e09583ee9",
+      "note": "新增测试，gofmt 后无改动；包内既有 13 个测试保持通过。"
+    }
+  ],
+  "product_changes": [],
+  "consumers": {
+    "formal_entry": "tagent.Boot → openHostCapture（<storage root>/trajectories、FileCaptureWriter、CaptureSink(\"host-trajectory\")、TrajectoryCapture）→ Host.Invoke/Run/Loop → capture attempt records",
+    "worker_entry": "Boot 文档声明 kind: agent worker → tool/subagent.Builder.Capture=run capture scope → delegationFaces.admit → 异步 serve → withCapture/capturedModel worker 模型调用",
+    "export_entry": "rl.NewChainExporter(host.Run()) → ChainExporter.Export(rl.ExportOptions{SessionIDs: [...]}) → Run.SessionFacts → SFTSample；rl.WriteSamples 写 JSONL",
+    "manifest_entry": "rl.ReadCaptureSeal(<storage root>/trajectories) → CaptureManifest（CaptureID host-trajectory、Records、Dropped、Files、SHA256）",
+    "correlation": "sample.Input/Label 分别对应同 invocation/同 episode 的 TypeExternalInput/TypeAgentOutput 事实；output.DecisionID 对应唯一 AttemptRecord.DecisionID；manifest 的 Records 与导出的 attempt 数逐项相等"
+  },
+  "red_lines": {
+    "formal_boot_capture_only": "capture 由 tagent.Boot 的 openHostCapture 建立；测试未手工构造 CaptureSink/TrajectoryCapture，也未手工写 attempts.jsonl。",
+    "public_export_only": "仅调用公开 rl.NewChainExporter/ChainExporter.Export/WriteSamples；未新增 CLI，未接 Boot 自动导出，未在测试里伪造导出结果。",
+    "no_product_change": "写集内产品文件均无 diff；OBS-E8 取证后判定现有 sink ledger/manifest 已提供非静默账目，未做最小修复。",
+    "no_root_hot_path": "未改 host.go、run.go、loop 等根热点，未改任务/审批/微信面。",
+    "no_manual_wiring": "真实回合经 Host.Invoke，委派经 Boot 文档的 agent tool 声明；测试没有手工调用 capturedModel、CaptureScope.Record 或 SessionFacts 补挂产品接线。"
+  },
+  "subtests": [
+    {
+      "name": "requests_and_attempts_match_records",
+      "anchor": "positive",
+      "line": 60,
+      "asserts": [
+        "Boot 后一次委派回合加 settle follow-up 真实产生 4 个模型请求（3 个 entry + 1 个 worker），脚本步骤各恰一次。",
+        "4 个请求对应 4 条 AttemptRecord；entry decisions 的 attempt 与 DecisionID 一一对应，worker decision 以 worker-worker- 前缀标识且 attempt ID 为 attempt-worker-worker-*。",
+        "worker attempt 的 EpisodeID 为空（委派回合没有 application episode）；settle follow-up attempt 也为空（host notice turn），entry attempt 为 episode-integrity-delegate。",
+        "所有 attempt 均为 completed、Error 为空，decision 不重复；RecordingLosses 为空；seal 的 CaptureID=host-trajectory、Records=4、Files 摘要/字节复核通过。"
+      ]
+    },
+    {
+      "name": "failed_attempt_recorded_as_failure",
+      "anchor": "negative",
+      "line": 61,
+      "asserts": [
+        "entry provider 400 的失败 attempt 记录 Terminal=Failed，Error 含 integrity-entry-refusal-sentinel；未把失败吞成 completed。",
+        "委派 worker 的 provider 400 失败 attempt 同样 Terminal=Failed 且 Error 含 integrity-worker-refusal-sentinel，证明 capturedModel 的 observation 路径保留了 delegated provider 原因。",
+        "失败任务各自触发 host settle follow-up；accepted/ follow-up 等成功 attempt 仍为 completed。",
+        "5 个真实请求对应 5 条记录、恰好 2 条 Failed、无 RecordingLosses；seal Records=5 且无 Dropped。"
+      ]
+    },
+    {
+      "name": "rejected_admission_in_loss_ledger",
+      "anchor": "negative",
+      "line": 62,
+      "asserts": [
+        "entry 的 2MiB 回答超过 sink 默认 1MiB MaxRecordBytes：Run.RecordingLosses 恰 1 条，Kind=capture-attempt、ID=attempt-<decision>、errors.Is(ErrCaptureRefused)、错误文本含 record_size。",
+        "被拒的 entry capture seal 仍 Sealed=true/Partial=true、Records=0/Dropped=1/InFlight=0、Files 为空，且 attempts.jsonl 不存在；拒绝不是静默丢失。",
+        "委派 worker 的 2MiB 回答被同一 sink 拒绝：worker decision 不写入记录（3 条 attempt 全为 entry/follow-up），Run.RecordingLosses 为空，但 manifest Records=3/Dropped=1、Reasons 含 refused under an admission bound、Files[0].Records=3。",
+        "该子测试把 OBS-E8 的“weight wrapper 忽略 Record 错误”限定为 loop-level 不可见；sink ledger/manifest 仍是可审计的非静默账目，测试注释明确记录此边界。"
+      ]
+    },
+    {
+      "name": "no_request_no_record",
+      "anchor": "negative",
+      "line": 63,
+      "asserts": [
+        "Host.Invoke 的地址缺少 session 时返回 ErrHostAddressMissing，未进入模型请求。",
+        "provider 记录 0 个请求；Run.RecordingLosses 为空。",
+        "Close 后 seal 为 Sealed=true/Partial=false、Records=0/Dropped=0/InFlight=0、Files 为空，attempts.jsonl 不存在。"
+      ]
+    },
+    {
+      "name": "export_correlation_is_not_reward",
+      "anchor": "negative",
+      "line": 64,
+      "asserts": [
+        "同一 session/episode 的两轮真实回合导出恰好 2 个 SFTSample（Turn 1/2），Input/Label/EpisodeID 与事实链一致；导出前后 SessionFacts reflect.DeepEqual 不变。",
+        "SFTSample 的反射字段恰为 SessionID/Turn/Input/Label/EpisodeID；WriteSamples 的 JSONL 行只含 session_id/turn/input/label/episode_id，不含 reward/rewards/rating/score/preference/labeler/weight/advantage。",
+        "两轮均无 rating 仍被导出，证明 unrated 保留；每个 sample 的 output fact DecisionID 对应唯一存储 attempt，episode/label 一致。",
+        "seal Records=2 且 Digest 复核通过。"
+      ]
+    },
+    {
+      "name": "formal_capture_then_offline_export",
+      "anchor": "consumer",
+      "line": 65,
+      "asserts": [
+        "Boot 两个 session A/B 真实回合产 capture；Close 前整轮 seal 仍 Sealed=false（per-turn seal 是 no-op），导出可显式离线读取打开的 capture。",
+        "Export 只选 A 时恰 1 个 sample；选 A+B 时恰 2 个 sample，Turn 按 episode 内顺序为 1/2。",
+        "逐个 sample 回查 SessionFacts：TypeExternalInput 与 TypeAgentOutput 同 InvocationID，且分别等于正式 inv-integrity-export-a/b；episode 与 sample 一致；output.DecisionID 非空。",
+        "每个 output.DecisionID 在 attempts.jsonl 中恰一个 attempt，episode/label 与 sample 一致且 completed/Error 为空；consumed DecisionID 数等于全部 2 条 attempt。",
+        "Close 后 seal CaptureID=host-trajectory、Records=2、Dropped=0、file SHA256 复核通过；RecordingLosses 为空。"
+      ]
+    }
+  ],
+  "commands": {
+    "baseline_before_change": {
+      "command": "go test ./tests/integration/learning -run '^Test(ChainExporter|Causal|Capture|Declared|Failed|Formal|Model|Replacement|Scenario)' -count=1 -race -json",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "summary": "13 个既有 learning 测试全部 pass；先验 TestBootMountsCapture/TestChainExporterProducesSamples/TestCaptureAdmissionAndSeal/TestCaptureFidelityAndRedaction 均绿，未改产品。",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/baseline-existing.json",
+      "log_sha256": "69c817ee00e0d979a0c35252e3f1438fa7177c2f03390358b187e0891fadcc51",
+      "log_bytes": 87889
+    },
+    "single": {
+      "command": "go test ./tests/integration/learning -run '^TestEventIntegrityCapture$' -count=1 -race -json",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "parsed": {
+        "parent": "TestEventIntegrityCapture run=1 pass=1",
+        "named_subtests_run_pass": 6,
+        "children": [
+          "requests_and_attempts_match_records",
+          "failed_attempt_recorded_as_failure",
+          "rejected_admission_in_loss_ledger",
+          "no_request_no_record",
+          "export_correlation_is_not_reward",
+          "formal_capture_then_offline_export"
+        ],
+        "skip": 0,
+        "fail": 0
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/single.json",
+      "log_sha256": "590cfd4c81a4b574459b57c47daf0224d6853dc478f1904e4abdb478eafca6d6",
+      "log_bytes": 30782
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/02.7\"; mkdir -p \"$E\"; for i in $(seq 1 10); do go test ./tests/integration/learning -run '^TestEventIntegrityCapture$' -count=1 -race -json > \"$E/run-$i.json\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$E/exits.txt\"; if [ \"$rc\" -ne 0 ]; then exit \"$rc\"; fi; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "exits": "10/10 exit=0",
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/exits.txt",
+      "exits_sha256": "2b436b67ce1a50322b0e4e6ae3d4b36e5aa7ef31342793d0b0cceb21623ed288",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-1.json", "log_sha256": "1711a16b18c615e5714b0576235f1d00e1321e71ec03e80397b9997eea5fe2cf", "log_bytes": 30777, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-2.json", "log_sha256": "defc75190a47e1a30221aeacd5ad6717b9e918500a33ca61fef1b8589303e12b", "log_bytes": 30778, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-3.json", "log_sha256": "a37b6ffba544865f3e0172da9e589740020af763bccea3779a10b961c7266986", "log_bytes": 30784, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-4.json", "log_sha256": "98861a93d2da4511b6c0b06eb4074f075ff8a33e37b4b482a945fdb5c52ce442", "log_bytes": 30788, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-5.json", "log_sha256": "75f86636777ada52d5deb3bf70e66fa9a3ce6221585e3a99bb2109f2613f1122", "log_bytes": 30779, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-6.json", "log_sha256": "10b971b6c4af3ca402270ca5c48f246130f8978bb7f8f06fa1c5c3a73e161b01", "log_bytes": 30779, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-7.json", "log_sha256": "840f0e3e59256d8b5f765a964ece7952f2cb1330a27ff2e588b58e81197ee810", "log_bytes": 30781, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-8.json", "log_sha256": "03fbfe5dedd5fb57036cac0554ba9161d55bdc300155a1c1ef74c9d538d2b040", "log_bytes": 30783, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-9.json", "log_sha256": "85c93a06f34c023780ad9f4e6bf509752a8a4fe8ba3b845c340c5b8ef234a4e4", "log_bytes": 30781, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/run-10.json", "log_sha256": "2481541a22980e33626502f812523d91a99c27aae73bee732c4769f2ab02a764", "log_bytes": 30782, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 <log_dir>/check.py 逐轮严格解析 JSONL：拒绝非 JSON 截断行、错误 package、skip/fail、父或子测试零匹配/重复 run/多于一个终态、额外测试、父 pass 早于任一子测试终局；同时核验 exits.txt 恰 10 行且逐行 run-i exit=0、10 份日志字节不复用。",
+      "parser_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/check.py",
+      "parsed_result": "ALL_TEN_OK=True",
+      "parse_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/ten-round-check.json",
+      "parse_sha256": "4866caedf18a7b66bdf99413cd5a27ad325e5b21829c56b18b733f1df18eee8c"
+    },
+    "regression": {
+      "learning_all": {
+        "command": "go test ./tests/integration/learning -count=1 -race -json",
+        "exit_code": 0,
+        "summary": "14 个顶层测试全部 pass（13 个既有 + TestEventIntegrityCapture）",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/regression-learning.json",
+        "log_sha256": "fc91c32c937dff4292fbe8fac6a7d67505a281e9db7f53237c8ba72fa2fc9f62",
+        "log_bytes": 117999
+      },
+      "host_spot_check": {
+        "command": "go test ./tests/integration/host -run '^(TestBootMountsCapture|TestSettledNoticeDrivesFollowUpTurn)$' -count=1 -race -json",
+        "exit_code": 0,
+        "summary": "TestBootMountsCapture 与 TestSettledNoticeDrivesFollowUpTurn 均 pass；未触碰 host 包文件。",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/regression-host.json",
+        "log_sha256": "796617113e4a6efc8c1d548e2a4239d45580be8203659adaf06e5123ae2c49a4",
+        "log_bytes": 8469
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go vet ./tests/integration/learning",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/vet.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l tests/integration/learning/event_integrity_test.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.7/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      }
+    }
+  },
+  "observations": [
+    "任务行与任务表列六个具名子测试（1 正 + 4 负 + 1 消费者锚）；十轮逐项 run=1/pass=1，未跳过任一负锚。",
+    "OBS-E8 取证：tool/subagent/capture.go 的 capturedModel.observe 忽略 scoped.Snapshot 错误，observation.admit 忽略 capture.Record 错误；builder.sealCapture 忽略 Seal 错误。Record 拒绝并非完全静默：CaptureSink ledger/manifest 记 Dropped=1 与 admission bound reason（rejected_admission_in_loss_ledger 的委派 worker 场景）。该 wrapper 的注释/红线明确采集拒绝不得改变 worker 决策；把 worker 拒绝上报到 Run.RecordingLosses 需改 loop/run 或新增 capture 到 loop 的接缝，超出 02.7 写集，故未做产品修复。",
+    "entry 超限 record 的拒绝由 loop 的 RecordingLosses 以 kind=capture-attempt 记账；委派 worker 超限 record 的拒绝只在 sink ledger/manifest 可见，Run.RecordingLosses 为空。这是当前 delegated wrapper 的既有边界，测试已在断言与注释中如实记录，没有把它说成 loop-level 损失。",
+    "settle follow-up 是 Host 自己的 notice turn：Host.fireNoticeTurn 用 host-owned InvocationID 调 run.driveLocked，InvokeRequest 不带 Episode；因此 follow-up attempt 的 EpisodeID 为空。该行为不影响请求/记录逐项对应，本叶未把它判为缺陷。",
+    "provider 返回 400 时，OpenAI-compatible adapter 的失败原因经 observation trace 保留，AttemptRecord.Response.Error 可能为空；AttemptOf/AttemptError 将 trace 原因写入 AttemptRecord.Error。failed_attempt_recorded_as_failure 断言的是契约要求的 Error 文本，未把 Response.Error 的非空当作额外要求。",
+    "导出关联不是奖励：SFTSample 只有 SessionID/Turn/Input/Label/EpisodeID 五个字段；WriteSamples 的 JSONL 不含任何 reward/rating/score/preference/labeler/weight/advantage 键；无 rating 的两轮仍导出，unrated 未被过滤。",
+    "消费者锚只用公开 rl.NewChainExporter/Export 读取 Boot 产生的 capture；测试没有新增 CLI、没有接 Boot 自动导出、没有手工写 attempts.jsonl 或样本。",
+    "02.7 的 verify_after=[01.5]：本叶产物 ready，但未到勾选时机；tasks.md 的 `- [ ]` 保持不变，等待 01.5 根装配后的正式证据回验。"
+  ],
+  "limitations": [
+    "未验证真实 tokenizer/chat template/collator 或训练资格；任务行把 offline-training-export 作为纯引用，只验来源关联。",
+    "未触发 Snapshot 拒绝路径；当前 Boot/公开 API 难以可重复构造 scoped.Snapshot 错误，且 capture manifest 没有 snapshot 损失字段。该观察不等同于已验 Snapshot 错误账目。",
+    "委派 worker 的 Record 拒绝不进入 Run.RecordingLosses，只在 CaptureSink ledger/manifest 可见；本叶未越界修改 loop/run 或新增产品接缝。",
+    "未使用真实模型/网络；provider 是脚本化 OpenAI-compatible httptest endpoint，覆盖的是该 adapter 的请求/错误路径。",
+    "Export 的权限面以显式 ExportOptions.SessionIDs 表达；本叶未验证额外的外部授权层，只验证公开 API 对指定 session 的只读关联。",
+    "未做产品变异证伪；负锚通过真实拒绝/错误/零请求/超限路径触发，测试没有空转。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+    "line": "02.7 (line 282)",
+    "action": "保持 `- [ ]` 未勾选：verify_after=01.5，根装配正式证据回验通过后才可勾选；本摘要只证明产物 ready 与三锚/十轮证据。"
+  }
+}

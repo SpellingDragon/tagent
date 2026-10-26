@@ -43,6 +43,32 @@ func (f finding) String() string {
 // entry numbers, round numbers, dates and replacement narration.
 var auditMarker = regexp.MustCompile(`(?i)(§[0-9]|\b轮[0-9]+\b|\b20[0-9]{2}-[0-9]{2}|已移除|已废弃|已删除|不再|曾经|历史上|教训|审阅发现|原计划|第一版|旧实现|旧版|本次变更|上一轮|这一轮|修复于|重构于|取代原|\blegacy\b|\bpreviously\b|\bno longer\b|\bdeprecated in\b|\bwas removed\b)`)
 
+// legacySymbolName matches a Go symbol whose name embeds the residue word: a symbol cannot
+// be renamed without changing the API, and its name is the concept rather than a comment
+// about one (SchemaLegacyV2, SchemaLegacyV1, legacyMarkerFields, ErrLegacySchemaLine).
+// The unqualified word is left alone — the declared-name mask covers the one case where it
+// is the documented symbol.
+var legacySymbolName = regexp.MustCompile(`\b(?:[A-Za-z0-9_]+[Ll]egacy|[Ll]egacy[A-Za-z0-9_]+)[A-Za-z0-9_]*\b`)
+
+// legacyFormatPhrase matches the noun phrases that name the format itself: a row, line,
+// schema, capture, shape or dump of it, its v1 and v2 versions, its JSONL import and its
+// field set. A doc group joins wrapped lines with a space, so a phrase may straddle a break.
+var legacyFormatPhrase = regexp.MustCompile(`(?i)\blegacy\s+(?:rows?|lines?|imports?|schemas?|captures?|shapes?|formats?|structures?|trajector(?:y|ies)|dumps?|fields?|v1|v2|one|jsonl)\b`)
+
+// maskDomainVocabulary replaces the record vocabulary that names the legacy formats with a
+// placeholder before the residue rules read the prose: the v1 dump and v2 capture schemas
+// are declared format names, so a doc comment stating which format a value belongs to
+// states a contract rather than narrating a change. The mask is a closed list on
+// purpose — an unqualified residue word still matches, so narration outside these shapes is
+// still reported, a masked shape cannot carry a change story, and a domain phrase never
+// shields the narration beside it in the same group.
+func maskDomainVocabulary(prose string) string {
+	for _, re := range []*regexp.Regexp{legacySymbolName, legacyFormatPhrase} {
+		prose = re.ReplaceAllString(prose, "____")
+	}
+	return prose
+}
+
 // rationale matches design reasoning: why a shape was chosen over another.
 var rationale = regexp.MustCompile(`(?i)(之所以|理由[:：]|因为.{0,80}(所以|故)|选择.{0,40}(而|但)排[除]|权衡|否决|(排除|摒弃).{0,20}方案|为了避免|为防止|这是关键|关键是|教训是)`)
 
@@ -148,6 +174,7 @@ func main() {
 		sort.Strings(names)
 		fmt.Fprintf(os.Stderr, "comment_policy: %d git-ignored Go file(s) are outside the ratchet, absent from any checkout: %s\n", n, strings.Join(names, " "))
 	}
+	seenFile := map[string]bool{}
 	for _, d := range dirs {
 		files, err := repoGoFiles(".", d, ignored)
 		if err != nil {
@@ -155,6 +182,10 @@ func main() {
 			os.Exit(1)
 		}
 		for _, f := range files {
+			if seenFile[f] {
+				continue
+			}
+			seenFile[f] = true
 			fs2, err := checkFile(f)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: %v\n", f, err)
@@ -447,6 +478,9 @@ func writeBaseline(path string, counts map[string]int, dirs []string, allowRaise
 }
 
 // collectGoFiles walks dir for Go files, not descending into nested modules.
+// collectGoFiles walks one scan directory. Files under overlapping scan
+// directories are checked once each: a nested spelling and its enclosing root
+// name the same file, and counting it twice would report a file against itself.
 func collectGoFiles(dir string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -662,6 +696,13 @@ func mirrorsProduction(path string) bool {
 // files keep the test-family-to-production-family correspondence the same contract
 // demands, so the finding's exits are merge, rename, or docs-side anchor convergence —
 // never a forced merge of mirrors.
+//
+// A directory holding no production file is out of the rule's scope: an integration test
+// tree mirrors no production family, so the rename exit names nothing there, and the
+// docs-side exit lost its object when the wiki tree was frozen as a historical snapshot
+// (adding sections to a snapshot is not an edit the repository allows). The rule exists to
+// keep a test family beside the production family it guards; where no family exists, the
+// only reportable exit is none, so reporting would be a debt no edit could clear.
 func checkResponsibilityCoLocation(facts []*fileFact) []finding {
 	type groupKey struct{ dir, pkg, tag, anchor string }
 	groups := map[groupKey][]*fileFact{}
@@ -675,6 +716,9 @@ func checkResponsibilityCoLocation(facts []*fileFact) []finding {
 	var out []finding
 	for k, members := range groups {
 		if len(members) < 2 {
+			continue
+		}
+		if !dirHasProduction(k.dir) {
 			continue
 		}
 		var mirrors []string
@@ -698,6 +742,34 @@ func checkResponsibilityCoLocation(facts []*fileFact) []finding {
 		}
 	}
 	return out
+}
+
+// productionDirs caches the per-directory verdict of dirHasProduction: a scan visits
+// every file of a directory once, so the listing is paid once.
+var productionDirs = map[string]bool{}
+
+// dirHasProduction reports whether a directory holds a Go file that is not a test file:
+// the production family a co-located test family would mirror. An unreadable directory
+// counts as production-bearing, so a broken listing keeps the stricter verdict instead of
+// excusing the group.
+func dirHasProduction(dir string) bool {
+	if has, ok := productionDirs[dir]; ok {
+		return has
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true
+	}
+	has := false
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		has = true
+		break
+	}
+	productionDirs[dir] = has
+	return has
 }
 
 // coLocationNote states the three exits with their concrete targets: the mirrored
@@ -966,7 +1038,9 @@ func isIgnored(ignored map[string]bool, rel string) bool {
 // checkDocGroup applies content rules to one documentation comment.
 // A declared identifier may itself embed a residue word, and quoting that name at the
 // head of its own doc is the symbol being documented rather than change narration, so
-// the residue rules run over the text with the declared name masked out.
+// the residue rules run over the text with the declared name masked out. The repository's
+// own domain vocabulary is masked the same way: naming the format a value belongs to is
+// the contract, not the story of how the code got here.
 func checkDocGroup(path string, fset *token.FileSet, g *ast.CommentGroup, text string, isTest bool, declName string) []finding {
 	var out []finding
 	line := fset.Position(g.Pos()).Line
@@ -977,6 +1051,7 @@ func checkDocGroup(path string, fset *token.FileSet, g *ast.CommentGroup, text s
 	if declName != "" && declName != "_" {
 		prose = strings.ReplaceAll(prose, declName, "____")
 	}
+	prose = maskDomainVocabulary(prose)
 	switch {
 	case auditMarker.MatchString(prose):
 		add("audit-marker", fmt.Sprintf("doc comment carries change/iteration residue: %q", auditMarker.FindString(prose)))

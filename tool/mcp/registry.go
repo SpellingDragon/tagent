@@ -1,327 +1,312 @@
-// 契约: docs/wiki/tool/tool-architecture.md#mcp-live-registry
 package mcp
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"reflect"
+	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
-	"gopkg.in/yaml.v3"
-	"trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-
-	"github.com/SpellingDragon/tagent/internal/strictyaml"
-
-	tagenttool "github.com/SpellingDragon/tagent/tool"
+	trpcmcp "trpc.group/trpc-go/trpc-agent-go/tool/mcp"
 )
 
-// Verify Registry satisfies the read interface consumed by tools.
-var _ tagenttool.MCPRegistry = (*Registry)(nil)
+// ErrNameMissing and the other named failures of the live registry face each name the state they
+// report, so a caller can tell a duplicate registration from a missing one and a shut-down table from
+// an empty one.
+var (
+	// ErrNameMissing reports a registration under no server name.
+	ErrNameMissing = errors.New("mcp: a server name is required")
 
-// entry tracks a registered toolset plus the metadata hot-sync needs.
-type entry struct {
-	ts trpctool.ToolSet
-	// spec is the declaration that produced ts (zero for manual entries).
-	spec ServerConfig
-	// fromConfig marks entries managed by config hot-sync; manual entries
-	// (Go API / WithMCPToolSets) are never removed by a config re-sync.
-	fromConfig bool
-}
+	// ErrServerExists reports a registration under a name already taken.
+	ErrServerExists = errors.New("mcp: a server is already registered under that name")
 
-// Registry is a concurrency-safe MCP server registry. Reads (Get/List/
-// Names) reflect the CURRENT content: when a config path is bound, each
-// read lazily checks the file mtime and diff-applies the mcp_servers
-// section first (same pattern as prompt.Source hot-reload).
+	// ErrServerUnknown reports a removal of, or a lookup by, a name the table
+	// does not hold.
+	ErrServerUnknown = errors.New("mcp: no server is registered under that name")
+
+	// ErrRegistryClosed reports a registration attempted after the shutdown
+	// released the table.
+	ErrRegistryClosed = errors.New("mcp: the registry is shut down")
+)
+
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 //
-// Registry mutations never change any agent's tool declaration set — only
-// what mcp_discover/mcp_call can resolve at call time.
-type Registry struct {
-	mu         sync.Mutex
-	entries    map[string]*entry
-	configPath string
-	lastMod    time.Time
-	closed     bool
+// ServerRegistry is the concurrent-safe table from server name to the live
+// native tool set registered under it — the one table the call gateway and the
+// discovery read at call time. Registration moves live connections only: no
+// method here changes any agent's declared tool set, because the gateway tools
+// declare fixed schemas and read this table when they are called.
+//
+// The wire protocol stays inside the locked framework: this registry hands out
+// and releases the native trpc.group/trpc-go/trpc-agent-go/tool/mcp tool sets
+// and speaks no MCP message of its own. A release runs the tool set's Close
+// exactly once — a removal or the shutdown of a server whose call is still in
+// flight waits for that call to end before the connection closes, and the
+// registry keeps every release error on its close ledger to read back through
+// Close.
+type ServerRegistry struct {
+	mu       sync.Mutex
+	entries  map[string]*registryEntry
+	closed   bool
+	closeErr error
 }
 
-// Option configures a Registry.
-type Option func(*Registry)
-
-// WithConfigPath binds the registry to a config file whose mcp_servers
-// section is lazily hot-synced on each read. Empty disables hot-sync.
-func WithConfigPath(path string) Option {
-	return func(r *Registry) { r.configPath = path }
+// registryEntry is one registered live tool set beside its release bookkeeping:
+// the borrows still in flight, whether the name has been unregistered, and
+// whether the tool set's Close already ran.
+type registryEntry struct {
+	name     string
+	toolset  trpctool.ToolSet
+	refs     int
+	unlisted bool
+	closed   bool
 }
 
-// NewRegistry creates an empty registry.
-func NewRegistry(opts ...Option) *Registry {
-	r := &Registry{entries: map[string]*entry{}}
-	for _, opt := range opts {
-		opt(r)
-	}
-	return r
+// NewServerRegistry opens an empty live registry.
+func NewServerRegistry() *ServerRegistry {
+	return &ServerRegistry{entries: map[string]*registryEntry{}}
 }
 
-// Seed registers config-declared servers at build time. Invalid specs are
-// skipped with a warning (Config.Validate reports them earlier on the
-// LoadConfig path). Seeding baselines the bound config file's mtime so the
-// next read does not immediately re-sync the file it was seeded from.
-func (r *Registry) Seed(servers map[string]ServerConfig) {
+// Get returns the tool set registered under name and reports whether the table
+// still holds it. A server whose release is pending on an in-flight call is
+// already gone from the table.
+func (r *ServerRegistry) Get(_ context.Context, name string) (trpctool.ToolSet, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed {
-		return
-	}
-	for name, spec := range servers {
-		if err := spec.Validate(name); err != nil {
-			log.Warnf("[mcp] registry seed: skipping invalid server: %v", err)
-			continue
-		}
-		r.entries[name] = &entry{ts: newToolSet(name, spec), spec: spec, fromConfig: true}
-	}
-	if r.configPath != "" {
-		if info, err := os.Stat(r.configPath); err == nil {
-			r.lastMod = info.ModTime()
-		}
-	}
-}
-
-// Add registers (or replaces) a toolset under name at runtime. Entries
-// added here are manual: config hot-sync never removes them, but a config
-// declaration with the same name takes precedence (declared source of
-// truth) with a warning.
-func (r *Registry) Add(name string, ts trpctool.ToolSet) {
-	if name == "" || ts == nil {
-		return
-	}
-	r.mu.Lock()
-	var old trpctool.ToolSet
-	if !r.closed {
-		if e, ok := r.entries[name]; ok {
-			old = e.ts
-		}
-		r.entries[name] = &entry{ts: ts}
-	}
-	r.mu.Unlock()
-	if old != nil {
-		closeToolSets([]trpctool.ToolSet{old})
-	}
-}
-
-// Remove unregisters name and closes its toolset. Returns true if removed.
-func (r *Registry) Remove(name string) bool {
-	r.mu.Lock()
-	e, ok := r.entries[name]
-	if ok {
-		delete(r.entries, name)
-	}
-	r.mu.Unlock()
+	entry, ok := r.entries[name]
 	if !ok {
-		return false
+		return nil, false
 	}
-	closeToolSets([]trpctool.ToolSet{e.ts})
-	return true
+	return entry.toolset, true
 }
 
-// Get returns the toolset registered under name.
-func (r *Registry) Get(name string) (trpctool.ToolSet, bool) {
+// List returns the live tool sets of the table in ascending name order, so a
+// caller that only wants the sets sees the same order the names read in.
+func (r *ServerRegistry) List(_ context.Context) []trpctool.ToolSet {
 	r.mu.Lock()
-	toClose := r.maybeSyncLocked()
-	var ts trpctool.ToolSet
-	e, ok := r.entries[name]
-	if ok {
-		ts = e.ts
+	defer r.mu.Unlock()
+	toolsets := make([]trpctool.ToolSet, 0, len(r.entries))
+	for _, name := range r.sortedNames() {
+		toolsets = append(toolsets, r.entries[name].toolset)
 	}
-	r.mu.Unlock()
-	closeToolSets(toClose)
-	return ts, ok
+	return toolsets
 }
 
-// List returns all registered toolsets, sorted by name (deterministic
-// discover output and error listings).
-func (r *Registry) List() []trpctool.ToolSet {
+// Names returns the registered server names in ascending order.
+func (r *ServerRegistry) Names(_ context.Context) []string {
 	r.mu.Lock()
-	toClose := r.maybeSyncLocked()
+	defer r.mu.Unlock()
+	return r.sortedNames()
+}
+
+// sortedNames reports the registered names in ascending order. The caller
+// holds the lock.
+func (r *ServerRegistry) sortedNames() []string {
 	names := make([]string, 0, len(r.entries))
-	for n := range r.entries {
-		names = append(names, n)
+	for name := range r.entries {
+		names = append(names, name)
 	}
-	sort.Strings(names)
-	out := make([]trpctool.ToolSet, 0, len(names))
-	for _, n := range names {
-		out = append(out, r.entries[n].ts)
-	}
-	r.mu.Unlock()
-	closeToolSets(toClose)
-	return out
-}
-
-// Names returns all registered server names, sorted.
-func (r *Registry) Names() []string {
-	r.mu.Lock()
-	toClose := r.maybeSyncLocked()
-	names := make([]string, 0, len(r.entries))
-	for n := range r.entries {
-		names = append(names, n)
-	}
-	r.mu.Unlock()
-	closeToolSets(toClose)
 	sort.Strings(names)
 	return names
 }
 
-// Close closes all registered toolsets. Idempotent; the registry rejects
-// further mutations afterwards. Registered on the entry agent via
-// RegisterCloser for graceful shutdown.
-func (r *Registry) Close() error {
+// Add registers one live tool set under name. Registration is lazy: it moves
+// the connection the caller already holds and performs no MCP traffic of its
+// own, so a server whose connection fails later fails at its first use and
+// never blocks a sibling.
+func (r *ServerRegistry) Add(_ context.Context, name string, toolset trpctool.ToolSet) error {
+	if strings.TrimSpace(name) == "" {
+		return ErrNameMissing
+	}
+	if toolset == nil {
+		return fmt.Errorf("mcp: server %q carries no tool set", name)
+	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.closed {
-		r.mu.Unlock()
-		return nil
+		return fmt.Errorf("%w: %q was offered after the shutdown", ErrRegistryClosed, name)
 	}
-	r.closed = true
-	toClose := make([]trpctool.ToolSet, 0, len(r.entries))
-	for _, e := range r.entries {
-		toClose = append(toClose, e.ts)
+	if _, ok := r.entries[name]; ok {
+		return fmt.Errorf("%w: %q", ErrServerExists, name)
 	}
-	r.entries = map[string]*entry{}
-	r.mu.Unlock()
-	closeToolSets(toClose)
+	r.entries[name] = &registryEntry{name: name, toolset: toolset}
 	return nil
 }
 
-// maybeSyncLocked hot-syncs config-origin entries from the bound config
-// file when its mtime changed. Returns toolsets to close AFTER the lock is
-// released (Close may block on network). Parse failures keep the current
-// registry content (graceful degradation, same as prompt.Source).
-func (r *Registry) maybeSyncLocked() []trpctool.ToolSet {
-	if r.closed || r.configPath == "" {
+// Remove unregisters name and releases its tool set. A release whose call is
+// still in flight waits for that call to end before the connection closes, so
+// the call keeps the connection it was handed; however the release lands, the
+// tool set's Close runs exactly once.
+func (r *ServerRegistry) Remove(_ context.Context, name string) error {
+	r.mu.Lock()
+	entry, ok := r.entries[name]
+	if !ok {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: %q", ErrServerUnknown, name)
+	}
+	delete(r.entries, name)
+	entry.unlisted = true
+	closeNow := entry.refs == 0 && !entry.closed
+	if closeNow {
+		entry.closed = true
+	}
+	toolset := entry.toolset
+	r.mu.Unlock()
+	if !closeNow {
 		return nil
 	}
-	info, err := os.Stat(r.configPath)
-	if err != nil {
-		return nil
-	}
-	mt := info.ModTime()
-	if !mt.After(r.lastMod) {
-		return nil
-	}
-	r.lastMod = mt
-
-	desired, err := parseServersFile(r.configPath)
-	if err != nil {
-		log.Warnf("[mcp] registry hot-sync: parse %s failed, keeping current servers: %v", r.configPath, err)
-		return nil
-	}
-
-	var toClose []trpctool.ToolSet
-	for name, e := range r.entries {
-		if !e.fromConfig {
-			continue
-		}
-		if _, ok := desired[name]; !ok {
-			toClose = append(toClose, e.ts)
-			delete(r.entries, name)
-			log.Infof("[mcp] registry hot-sync: removed server %q", name)
-		}
-	}
-	for name, spec := range desired {
-		if err := spec.Validate(name); err != nil {
-			log.Warnf("[mcp] registry hot-sync: skipping invalid server: %v", err)
-			continue
-		}
-		if e, ok := r.entries[name]; ok {
-			if e.fromConfig && reflect.DeepEqual(e.spec, spec) {
-				continue
-			}
-			if !e.fromConfig {
-				log.Warnf("[mcp] registry hot-sync: config declaration %q replaces manually registered toolset", name)
-			}
-			toClose = append(toClose, e.ts)
-			log.Infof("[mcp] registry hot-sync: rebuilding server %q", name)
-		} else {
-			log.Infof("[mcp] registry hot-sync: added server %q", name)
-		}
-		r.entries[name] = &entry{ts: newToolSet(name, spec), spec: spec, fromConfig: true}
-	}
-	return toClose
+	return r.recordClose(toolset.Close())
 }
 
-// configFileServers extracts just the mcp_servers section of a config file.
-type configFileServers struct {
-	MCPServers map[string]ServerConfig `json:"mcp_servers" yaml:"mcp_servers"`
-}
+// Borrow hands out the tool set registered under name beside the release that
+// ends one use of it: from the borrow until its release the connection stays
+// alive even if the name is removed or the registry shuts down, so an in-flight
+// call never loses the connection it is running on. The release runs no more
+// than once, and a release that performs the deferred close keeps that close's
+// error on the close ledger.
+func (r *ServerRegistry) Borrow(_ context.Context, name string) (trpctool.ToolSet, func(), bool) {
+	r.mu.Lock()
+	entry, ok := r.entries[name]
+	if !ok {
+		r.mu.Unlock()
+		return nil, nil, false
+	}
+	entry.refs++
+	toolset := entry.toolset
+	r.mu.Unlock()
 
-// parseServersFile reads the mcp_servers section from a YAML or JSON
-// config file (extension-detected, mirroring tagent.LoadConfig).
-// registry 绑定的是**完整项目配置文件**（entry/
-// agents/providers/mcp_servers 共存）——严格解码必须只作用于 mcp_servers 子树，
-// 否则其余合法根字段被判 unknown，热同步静默失败并永远保留旧 registry。
-// 两段式：宽松解析整文档定位子树 → 对子树严格解码（strict 校验不放松）。
-func parseServersFile(path string) (map[string]ServerConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var subtree []byte
-	if strings.ToLower(filepath.Ext(path)) == ".json" {
-		var full map[string]json.RawMessage
-		if err := json.Unmarshal(data, &full); err != nil {
-			return nil, err
-		}
-		raw, ok := full["mcp_servers"]
-		if !ok {
-			return map[string]ServerConfig{}, nil
-		}
-		// cold-eyes P1-3：子树本身即 servers 映射，直接严格解码到 map——
-		// 曾误用 configFileServers 包装（顶层 "alpha" 被判 unknown，任何带
-		// mcp_servers 段的 JSON 配置必然解析失败）。
-		var servers map[string]ServerConfig
-		if err := strictyaml.DecodeJSON(raw, &servers); err != nil {
-			return nil, err
-		}
-		return servers, nil
-	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, err
-	}
-	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
-		root = *root.Content[0]
-	}
-	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value == "mcp_servers" {
-			node := root.Content[i+1]
-			subtree, err = yaml.Marshal(node)
-			if err != nil {
-				return nil, err
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			r.mu.Lock()
+			entry.refs--
+			closeNow := entry.unlisted && entry.refs == 0 && !entry.closed
+			if closeNow {
+				entry.closed = true
 			}
-			break
-		}
+			r.mu.Unlock()
+			if closeNow {
+				_ = r.recordClose(toolset.Close())
+			}
+		})
 	}
-	if subtree == nil {
-		return map[string]ServerConfig{}, nil
-	}
-	// 子树本身即 servers 映射（非 configFileServers 包装）。
-	var servers map[string]ServerConfig
-	if err := strictyaml.DecodeYAML(subtree, &servers); err != nil {
-		return nil, err
-	}
-	return servers, nil
+	return toolset, release, true
 }
 
-// closeToolSets closes toolsets outside the registry lock.
-func closeToolSets(sets []trpctool.ToolSet) {
-	for _, ts := range sets {
-		if ts == nil {
-			continue
-		}
-		if err := ts.Close(); err != nil {
-			log.Warnf("[mcp] close toolset %q: %v", ts.Name(), err)
+// Close shuts the registry down and releases every registered tool set: a
+// release whose call is still in flight waits for that call to end, and every
+// tool set's Close runs exactly once. Close is idempotent — a repeated call
+// releases nothing anew and answers with the release errors accumulated so far,
+// so a close a late release performed stays readable through it.
+func (r *ServerRegistry) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		err := r.closeErr
+		r.mu.Unlock()
+		return err
+	}
+	r.closed = true
+	var pending []trpctool.ToolSet
+	for name, entry := range r.entries {
+		delete(r.entries, name)
+		entry.unlisted = true
+		if entry.refs == 0 && !entry.closed {
+			entry.closed = true
+			pending = append(pending, entry.toolset)
 		}
 	}
+	r.mu.Unlock()
+	err := r.closeErr
+	for _, toolset := range pending {
+		err = errors.Join(err, r.recordClose(toolset.Close()))
+	}
+	return err
+}
+
+// recordClose keeps one release error on the close ledger and reports it back
+// to the caller that performed the release.
+func (r *ServerRegistry) recordClose(err error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeErr = errors.Join(r.closeErr, err)
+	return err
+}
+
+// borrower is the pinning face of a live registry: one use of a server borrows
+// its tool set, and the connection stays alive until the borrow is released
+// even when the name is removed or the registry shuts down meanwhile. A
+// registry that does not offer this face is read straight through Get and pins
+// nothing of its own.
+type borrower interface {
+	Borrow(ctx context.Context, name string) (trpctool.ToolSet, func(), bool)
+}
+
+// borrowServer borrows the named tool set for one use and reports whether the
+// registry still holds the name. The release must run on every path.
+func borrowServer(ctx context.Context, registry Registry, name string) (trpctool.ToolSet, func(), bool) {
+	if registry == nil {
+		return nil, nil, false
+	}
+	if pinning, ok := registry.(borrower); ok {
+		return pinning.Borrow(ctx, name)
+	}
+	toolset, ok := registry.Get(ctx, name)
+	if !ok {
+		return nil, nil, false
+	}
+	return toolset, func() {}, true
+}
+
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
+//
+// NativeConnector builds one native MCP tool set from its connection
+// declaration and brings its session up before the tool set is handed out: the
+// handshake and the tool listing run through the locked framework types the
+// connector returns, and nothing here implements the wire protocol. A session
+// that fails to come up is released before the failure is reported, so a
+// refused connection never leaks a client.
+type NativeConnector struct{}
+
+// NewNativeConnector returns the connector over the locked framework tool set.
+func NewNativeConnector() *NativeConnector {
+	return &NativeConnector{}
+}
+
+// Connect creates the native tool set described by config and initializes its
+// session. The transport spellings the configuration layer accepts are folded
+// onto the spellings the locked framework knows before the tool set is built:
+// the remote spellings collapse onto streamable while the framework's own
+// spellings pass through unchanged.
+func (c *NativeConnector) Connect(ctx context.Context, config trpcmcp.ConnectionConfig, opts ...trpcmcp.ToolSetOption) (*trpcmcp.ToolSet, error) {
+	config.Transport = normalizeTransport(config.Transport)
+	toolset := trpcmcp.NewMCPToolSet(config, opts...)
+	if err := toolset.Init(ctx); err != nil {
+		return nil, errors.Join(fmt.Errorf("mcp: connect to %s: %w", connectionTarget(config), err), toolset.Close())
+	}
+	return toolset, nil
+}
+
+// normalizeTransport folds the transport spellings the connection declaration
+// allows onto the ones the locked framework accepts.
+func normalizeTransport(transport string) string {
+	switch transport {
+	case "streamable-http", "streamable_http", "http":
+		return "streamable"
+	default:
+		return transport
+	}
+}
+
+// connectionTarget names the endpoint one connection declaration points at, for
+// a failure to name what it could not reach.
+func connectionTarget(config trpcmcp.ConnectionConfig) string {
+	if config.ServerURL != "" {
+		return fmt.Sprintf("%q", config.ServerURL)
+	}
+	if config.Command != "" {
+		return fmt.Sprintf("command %q", config.Command)
+	}
+	return config.Transport
 }

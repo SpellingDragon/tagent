@@ -1,0 +1,700 @@
+{
+  "leaf": "01.10b",
+  "title": "执行状态事件生产与通知接线",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "status": "complete",
+  "outcome": "implemented_and_verified",
+  "checkbox": "[x]",
+  "generated_at": "2026-10-24T12:00:00Z",
+  "completed_at": "2026-10-24T11:56:30Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "叶 01.10b：在 01.10a 已落查询面之上，产出调用返回后的执行状态事件（stable/suspect/exited/released/retained），把事件接到既有通知/随动链（Host.fireNoticeTurn，与 SettleDriver 同一入口），让续租归 Manager 生命周期，并让 Host.Close 经同一 Manager 释放资源（生产 Sweep 调用点）。本文件在实施前先列最小 API 面；实施后回填声明-实现对照与验证凭据。未新增持久化格式，未新建第二套资源仓或第二套通知身份，未新增最小面之外的导出符号。",
+  "shared_input": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10-summary.json（五态归因与 G1—G6；三缺口：续租随返回终止、生产 Sweep 调用者 0、Host.Close 不触达 exec 资源泄漏实证）",
+  "gate": {
+    "id": "public_api_or_format_change.plan_revision_04_exec_lifecycle",
+    "source": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.{md,json}",
+    "ruling": "用户裁定 C（计划回写④）认可 01.10 拆为 01.10a/01.10b 及最终完整验收面；授权 01.10b 在实施单先列明最小 API 面（签名、消费者、失败窗口、恢复路径、回退）后再动，超出最小面即停报。",
+    "declared_before_implementation": true,
+    "declared_at": "2026-10-24T12:00:00Z",
+    "surface_rule": "只实现本文件 minimal_api_face 列明的符号；实施中未新增未列符号。",
+    "surface_check": "导出面复核：tool/exec/state.go 新增 6 个导出符号（Owner/OwnerResolver/StatePhase+5 consts/StateEvent/StateObserver/WithStateObserver），tool/exec 新增 Manager.Close 与 WithRunOwner，NewPreset 变参向后兼容，根新增 Run.ExecState；与 minimal_api_face 一一对应，无第 11 个导出符号。"
+  },
+  "minimal_api_face": [
+    {
+      "symbol": "tool/exec: type Owner struct { Address event.Address; TaskID event.TaskID }",
+      "kind": "new type",
+      "consumer": "StateEvent.Owner；root 的 Run.execOwner 解析后经 WithRunOwner 注入；Host.observeExecState 只对完整地址+任务身份驱动随动回合。",
+      "failure_window": "调用帧缺失或 admission 反查不到任务时无 owner：事件仍可产生但 Host 不驱动回合，显式 exec_release / Run.ExecState 仍是出口。",
+      "recovery": "同一资源下一次 RunTool.Call 会刷新 owner；显式释放/关闭不受 owner 缺失影响。",
+      "rollback": "删除 Owner 与全部使用点，回到 01.10a 状态；无持久化影响。"
+    },
+    {
+      "symbol": "tool/exec: type OwnerResolver func(context.Context) (Owner, bool)",
+      "kind": "new type",
+      "consumer": "WithRunOwner 的入参；root 用 task.CallFrameFrom + MemoryAdmission.Lookup 实现，禁止 tool/exec 反向依赖 runtime/task（架构 import 门）。",
+      "failure_window": "resolver 返回 false 时不写 owner；不阻断调用。",
+      "recovery": "无状态，下一次调用重新解析。",
+      "rollback": "删除类型与 WithRunOwner。"
+    },
+    {
+      "symbol": "tool/exec: type StatePhase string; const StateStable|StateSuspect|StateExited|StateReleased|StateRetained",
+      "kind": "new type + 5 consts",
+      "values": ["stable", "suspect", "exited", "released", "retained"],
+      "consumer": "StateEvent.Phase；Host 只对 stable/suspect/exited 驱动随动回合，released/retained 供观察者与显式调用答案消费。",
+      "failure_window": "未知阶段不会产生（构造点封闭）；观察者收到未知阶段应忽略。",
+      "recovery": "事件面是旁路，不影响资源持有与释放。",
+      "rollback": "删除 state.go 中的阶段常量。"
+    },
+    {
+      "symbol": "tool/exec: type StateEvent struct { Resource ResourceKey; Phase StatePhase; ExitCode int; Confirmed bool; Released bool; Detail string; Owner Owner; At time.Time }",
+      "kind": "new type",
+      "consumer": "StateObserver 回调载荷；Host.observeExecState 读取 Phase/Resource/ExitCode/Owner 生成通知材料。",
+      "failure_window": "ExitCode 仅在 Confirmed/Released 为真时有意义（与 StopEvidence 同语义）；未确认时 Detail 携带原因。",
+      "recovery": "显式 exec_release 仍返回完整 ReleaseEvidence。",
+      "rollback": "删除类型与全部发送点。"
+    },
+    {
+      "symbol": "tool/exec: type StateObserver func(StateEvent)",
+      "kind": "new type",
+      "consumer": "Manager 观察者；root Boot 注入 Host.observeExecState。",
+      "failure_window": "观察者不得同步回调 Manager（文档约束）；观察者 panic 会终止跟踪 goroutine，但资源仍由 Close/Sweep 释放。",
+      "recovery": "资源生命周期不依赖观察者成功：emit 失败不改变 held/released 结果。",
+      "rollback": "删除观察者字段与选项。"
+    },
+    {
+      "symbol": "tool/exec: func WithStateObserver(observer StateObserver) ManagerOption",
+      "kind": "new function",
+      "consumer": "host.go Boot 的 exec manager 装配点（唯一生产消费者）。未配置观察者的 Manager（capabilities/包内测试/Assemble 直用）行为与 01.10a 完全一致：不启动返回后跟踪器。",
+      "failure_window": "nil observer 等价于未配置；跟踪器不启动，续租仍由调用期 renewForCall 承担（01.10a 语义）。",
+      "recovery": "重新装配 Manager 即可启用。",
+      "rollback": "删除选项与 observer 字段。"
+    },
+    {
+      "symbol": "tool/exec: func WithRunOwner(resolve OwnerResolver) RunToolOption",
+      "kind": "new function",
+      "consumer": "tools.go presetTools 的 exec 面装配（唯一生产消费者）；root 传 Run.execOwner。",
+      "failure_window": "nil resolver 时不写 owner，事件不驱动回合。",
+      "recovery": "下一次调用重试解析。",
+      "rollback": "删除选项与 RunTool.owner 字段。"
+    },
+    {
+      "symbol": "tool/exec: func NewPreset(manager *Manager, rhythm MonitorConfig, opts ...RunToolOption) []trpctool.Tool",
+      "kind": "signature change（新增变参，向后兼容）",
+      "consumer": "tools.go presetTools；既有调用点不传 opts 时行为不变。",
+      "failure_window": "无。变参为空即旧行为。",
+      "recovery": "无状态。",
+      "rollback": "恢复两参数签名并删除调用点实参。"
+    },
+    {
+      "symbol": "tool/exec: func (m *Manager) Close(ctx context.Context) []SweepReport",
+      "kind": "new method（生命周期入口）",
+      "consumer": "Host.Close（唯一生产调用者）：先停跟踪器并等待，再调用生产 Sweep（让 Sweep 获得生产调用点），最后释放仍持有的资源；未确认释放保留在账内并返回报告供宿主告警。",
+      "failure_window": "重复 Close 返回 nil 且不再释放；ctx 取消不阻止 Stop（release 用 context.WithoutCancel）；未确认 stop 时资源保持 held 并在报告中具名。",
+      "recovery": "报告中的 retained 资源仍可由显式 exec_release 重试；进程退出后由下一次 Close/Sweep 再试。",
+      "rollback": "删除 Close 方法与 Host.Close 调用。"
+    },
+    {
+      "symbol": "tagent: func (r *Run) ExecState(key tagentexec.ResourceKey) (tagentexec.Explanation, error)",
+      "kind": "new method（root 只读查询面）",
+      "consumer": "验收测试经 host.Run().ExecState 读取 Held/Renewed/LastStop，证明调用返回后仍在续租/持有；nil 或未装配 exec manager 时返回 ErrUnwired。",
+      "failure_window": "资源已释放/从未持有返回 ErrResourceUnknown（具名未知，与 Manager.Explain 一致）；不修改任何状态。",
+      "recovery": "同键再次 exec_run 重新获取后可读。",
+      "rollback": "删除方法；不影响 Manager.Explain。"
+    }
+  ],
+  "declared_vs_implemented": [
+    {
+      "symbol": "Owner",
+      "declared": "struct { Address event.Address; TaskID event.TaskID }",
+      "implemented": "tool/exec/state.go:24，字段与声明一致；complete() 只认完整地址与非空 TaskID",
+      "match": true
+    },
+    {
+      "symbol": "OwnerResolver",
+      "declared": "func(context.Context) (Owner, bool)",
+      "implemented": "tool/exec/state.go:41；root Run.execOwner（run.go）用 task.CallFrameFrom + r.admission.Lookup 实现",
+      "match": true
+    },
+    {
+      "symbol": "StatePhase + 5 consts",
+      "declared": "stable|suspect|exited|released|retained",
+      "implemented": "tool/exec/state.go:47-75，五个常量值逐字一致",
+      "match": true
+    },
+    {
+      "symbol": "StateEvent",
+      "declared": "Resource/Phase/ExitCode/Confirmed/Released/Detail/Owner/At",
+      "implemented": "tool/exec/state.go:77，字段与类型逐项一致",
+      "match": true
+    },
+    {
+      "symbol": "StateObserver",
+      "declared": "func(StateEvent)",
+      "implemented": "tool/exec/state.go:102",
+      "match": true
+    },
+    {
+      "symbol": "WithStateObserver",
+      "declared": "func(StateObserver) ManagerOption",
+      "implemented": "tool/exec/state.go:108；Boot 在 host.go:331 注入 Host.observeExecState",
+      "match": true
+    },
+    {
+      "symbol": "WithRunOwner",
+      "declared": "func(OwnerResolver) RunToolOption",
+      "implemented": "tool/exec/tool.go:60；tools.go:269 传 r.execOwner",
+      "match": true
+    },
+    {
+      "symbol": "NewPreset",
+      "declared": "manager, rhythm, opts ...RunToolOption",
+      "implemented": "tool/exec/tool.go:89；既有调用点不传 opts 时行为不变",
+      "match": true
+    },
+    {
+      "symbol": "Manager.Close",
+      "declared": "func(context.Context) []SweepReport",
+      "implemented": "tool/exec/exec.go:431；停跟踪器并 join → m.Sweep(ctx)（exec.go:450）→ 释放剩余键；重复 Close 返回 nil",
+      "match": true
+    },
+    {
+      "symbol": "Run.ExecState",
+      "declared": "func(tagentexec.ResourceKey) (tagentexec.Explanation, error)",
+      "implemented": "run.go:887；nil/未装配返回 ErrUnwired，否则转 Manager.Explain",
+      "match": true
+    }
+  ],
+  "not_in_face": [
+    "不新增持久化格式：exec 资源仍为内存态，重启后具名未确认（ErrResourceUnknown），不冒充接管。",
+    "不新增第二套通知身份：复用 agent.NoticeFactKey + Host.fireNoticeTurn（与 SettleDriver 同一入口），不接回 IssueNotice/NoticeSequencer，不手写 mailbox 事实。",
+    "不新增通用进程监控框架：跟踪器复用既有 Monitor.Poll/Status 与 Executor.Probe/Capture/Stop。",
+    "不把 released/retained 变成新的随动回合：释放动作的调用答案（exec_release）就是该次释放的消费面；再起回合会为同一动作产生第二份消费面。Host 的随动门只收 stable/suspect/exited。"
+  ],
+  "gap_fixes": [
+    {
+      "gap": "G3 续租随调用返回终止（tool.go 旧 defer stopRenewing）",
+      "fix": "RunTool.Call 在 Capture 成功后调用 manager.watch(key)（tool.go:206）：仅当 Manager 配置了 StateObserver 时启动生命周期跟踪器，cadence=min(rhythm.Interval, ttl/2)；跟踪器每拍先 Renew 再 Observe/Poll，直到释放、退出、renew 具名失败或 Manager.Close。调用期 renewForCall 保留（覆盖 watcher 尚未启动的窗口）。",
+      "evidence": "tool/exec/state.go track()；子测试 lease_keeps_renewing_after_return 在调用返回后等待 450ms，读 ExecState.Renewed 严格增长且 Held=1、Deadline 在未来、tmux has-session 仍活；十轮均 pass。"
+    },
+    {
+      "gap": "G4a 生产 Sweep 调用者 0",
+      "fix": "Manager.Close 生产调用 m.Sweep(ctx)（tool/exec/exec.go:450），过期租约走既有显式停止处理；Host.Close 是生产调用点。",
+      "evidence": "grep -n 'm.Sweep(ctx)' tool/exec/exec.go → 450；grep -n 'h.execManager.Close(ctx)' host.go → 834；子测试 host_close_releases_exec_resources 经 Boot→RunTool.Call→Host.Close 实测资源被释放、ExecState 返回 ErrResourceUnknown。"
+    },
+    {
+      "gap": "G4b Host.Close 不触达 exec 资源（泄漏实证）",
+      "fix": "Host 持 execManager；Close 置 closed 后先 execManager.Close(ctx)，对未 Released 报告 assemblyWarn 具名保留，再 execWG.Wait()，最后 run.Close 排干。",
+      "evidence": "host.go:805-843；子测试 host_close_releases_exec_resources：Close 前 tmux 会话存活，Close 返回 nil 后 tmux has-session 失败、ExecState 返回 ErrResourceUnknown；十轮均 pass。"
+    },
+    {
+      "gap": "G1/G2 返回后无驱动、无状态通知生产",
+      "fix": "Manager 在 stable/suspect/exited/released/retained 时回调 StateObserver；Host 只对 stable/suspect/exited 以既有 Notice 身份（TaskID+Round+Kind+Seq，经 fresh invocation 前缀）与既有 fireNoticeTurn 提交 notice 事实并驱动原地址下一回合，下一轮 decision 经 progressNotes/NoticeFeed 读取状态材料。",
+      "evidence": "state.go emit/track；host.go:739-792 observeExecState；子测试 state_change_emits_followup_notice 的 stable 事件驱动随动请求并交付答案；next_turn_consumes_exec_state 的 exited 事件把 'exit code 7' 送入下一决策；十轮均 pass。"
+    },
+    {
+      "gap": "G6 退出码只在 release 答案",
+      "fix": "跟踪器观察到 ProbeDead（且此前至少两拍 Alive）时经私有 release 读 StopEvidence，StateEvent 携带 Confirmed/Released/ExitCode；Host 把 exit code 渲染进通知材料。",
+      "evidence": "state.go exitObserved/reportRelease；host.go execStateText 的 exited 分支输出 ': exit code N'；子测试 next_turn_consumes_exec_state 断言随动材料含 'exit code 7'，而 run 调用答案本身不含 exit=；十轮均 pass。"
+    }
+  ],
+  "fast_finish_guard": {
+    "rule": "跟踪器首拍为基线；仅当资源被连续两拍观察为 Alive 后再次看到 Dead 才产生 exited。首拍 Dead（命令在调用窗口内已结束）或第二拍即 Dead 时静默停止跟踪、保留资源，由调用答案与显式 exec_release 承担。",
+    "reason": "一次性命令（host_wiring 的 echo、微信 smoke 的 echo）在调用返回时通常已结束；若无此窗口，exited 会为每个一次性命令制造额外随动回合并破坏既有 3 请求装配断言。",
+    "cost": "在调用返回后一个 cadence 内结束的进程不产生 exited 事件；其退出码仍可由显式 exec_release 读取（01.10a 不回退）。",
+    "evidence": "host TestExecFaceWiredFromDocument 仍为 3 请求并通过；tool/exec 全包 01.10a 六锚与既有 exec-lifecycle 测试通过。"
+  },
+  "notification_chain": {
+    "identity": "observeExecState 构造 TypeFeedback 事实（trigger-source=task、event-summary/notice-kind=progress、task-id、user 消息材料）；fireNoticeTurn 由该事实派生 task.Notice{TaskID, Kind, Event}，并以 agent.NoticeFactKey(freshInvocation, notice) 作为提交键。通知自身身份仍是 TaskID+Round+Kind+Seq；每次事件 mint 新 invocation，故前缀互不相同，不撞键也不新建第二套身份。",
+    "entry": "Host.fireNoticeTurn（既有随动入口，与 SettleDriver 共用）：CommitToSession 提交 TypeFeedback notice 事实 → driveLocked。",
+    "read": "下一轮 decision 经 loop.progressNotes → Run.noticeProjection.NoticeBoundary/NoticesFrom 读取状态材料（user message），不依赖测试旁路。",
+    "no_second_identity": "未新增 notice 类型、未写 mailbox、未调用 IssueNotice；未改 NoticeFactKey/Notice.FactKey。",
+    "guard": "Host 只对 stable/suspect/exited 起回合；released/retained 只走显式调用答案，避免同一动作两份消费面。"
+  },
+  "frozen_anchors": [
+    {
+      "anchor": "lease_keeps_renewing_after_return",
+      "subtest": "lease_keeps_renewing_after_return",
+      "result": "pass（单轮 + 十轮）",
+      "proof": "长进程 sleep 30 + 100ms rhythm；回合结束后 ExecState.Renewed 等待 450ms 再读严格增长，Held=1，Deadline 在未来；独立 tmux has-session 证明仍活。"
+    },
+    {
+      "anchor": "state_change_emits_followup_notice",
+      "subtest": "state_change_emits_followup_notice",
+      "result": "pass（单轮 + 十轮）",
+      "proof": "长进程 + stable_duration 150ms；stable 事件经 fireNoticeTurn 产生随动请求，请求携带 'reports state stable' 材料；材料无 success/complete/done/finished/succeeded/passed 词；资源仍 Held 且 tmux 存活。"
+    },
+    {
+      "anchor": "next_turn_consumes_exec_state（兼消费者）",
+      "subtest": "next_turn_consumes_exec_state",
+      "result": "pass（单轮 + 十轮）",
+      "proof": "sh -c 'echo beta; sleep 1; exit 7'；exited 事件材料含 'exit code 7'，下一决策读取并交付答案；run 调用答案本身不含 exit=；事件后 ExecState 返回 ErrResourceUnknown，证明资源已被确认退出释放。"
+    },
+    {
+      "anchor": "host_close_releases_exec_resources",
+      "subtest": "host_close_releases_exec_resources",
+      "result": "pass（单轮 + 十轮）",
+      "proof": "长进程；Host.Close 返回 nil 后 tmux 会话消失、ExecState 返回 ErrResourceUnknown；Close 前会话存活，排除未启动即空转。"
+    },
+    {
+      "anchor": "restart_takes_over_or_names_unconfirmed",
+      "subtest": "restart_takes_over_or_names_unconfirmed",
+      "result": "pass（单轮 + 十轮）",
+      "proof": "两个正式 Boot 同时活（第二个 host 空账）：第二宿主 exec_release 同键得到 ErrResourceUnknown；第一宿主仍 Held；tmux 会话仍活。"
+    },
+    {
+      "anchor": "unconfirmed_restart_not_reported_stopped（负）",
+      "subtest": "unconfirmed_restart_not_reported_stopped",
+      "result": "pass（单轮 + 十轮）",
+      "proof": "同场景断言第二宿主模型会话文本含 ErrResourceUnknown.Error()，不含 released / confirmed stop / stopped，且无 success/complete/done/finished/succeeded/passed；会话仍活、第一宿主仍 Held。"
+    }
+  ],
+  "tests": {
+    "file": "tests/integration/execution/event_integrity_test.go",
+    "parent": "TestEventIntegrityExecStateEvents",
+    "parent_line": 1587,
+    "subtests": [
+      "lease_keeps_renewing_after_return",
+      "state_change_emits_followup_notice",
+      "next_turn_consumes_exec_state",
+      "host_close_releases_exec_resources",
+      "restart_takes_over_or_names_unconfirmed",
+      "unconfirmed_restart_not_reported_stopped"
+    ],
+    "guards": {
+      "cancel_or_stable_not_success": "eventIntegrityExecSuccessWords 覆盖 success/complete/done/finished/succeeded/passed；stable 材料与重启答案两处断言。",
+      "stable_is_not_success": "state_change_emits_followup_notice 对材料做成功词断言，且 Held=1 证明未释放。",
+      "exit_code_via_event": "next_turn_consumes_exec_state 断言 exited 材料含 exit code 7。",
+      "released_or_named_unknown": "host_close_releases_exec_resources 与两个 restart 子测试都断言 ErrResourceUnknown 具名未知。",
+      "restart_takeover_or_named_unconfirmed": "restart_takes_over_or_names_unconfirmed 与负锚共同覆盖；exec 资源内存态→重启后具名未确认，符合冻结语义。",
+      "consumer_anchor": "Boot 声明 exec 工具 → Host.Invoke → RunTool.Call → Manager/MonitorWatch → Host.observeExecState → fireNoticeTurn → 下一轮 decision 读取材料；测试未手工 CommitToSession 通知事实，未新建通知身份。"
+    }
+  },
+  "implementation": {
+    "artifacts": [
+      {
+        "path": "tool/exec/state.go",
+        "change": "new",
+        "lines": 323,
+        "sha256": "9f90e89f9f9163dd71affc044f798b79df0fd29153bd12c46b3011b81d6322ac"
+      },
+      {
+        "path": "tool/exec/exec.go",
+        "change": "modified",
+        "lines": 605,
+        "sha256": "7941fd66998d7d7c59b9526fe41107997305a5852ea6a51cd1e504bc9225a23b",
+        "leaf_symbols": "Manager.observer/closing；heldResource ttl/owner/stop/done；Acquisition declared/owner；Release→private release+reportRelease；Manager.Close"
+      },
+      {
+        "path": "tool/exec/tool.go",
+        "change": "modified",
+        "lines": 272,
+        "sha256": "951527d7a66169f8ca20978fc544389f4a44ddaa9c32f525849f79d7330e51fb",
+        "leaf_symbols": "RunTool.owner；WithRunOwner；NewPreset 变参；Call 解析 owner 并在 Capture 后 watch"
+      },
+      {
+        "path": "host.go",
+        "change": "modified",
+        "lines": 2239,
+        "sha256": "63fe7094de493c15b2811fbb1b58d978469aefe334f5a947ecdc3bd0721ab680",
+        "leaf_symbols": "Host.execManager/execWG；Boot 注入 WithStateObserver；observeExecState/execStateText；Close 调 execManager.Close + execWG.Wait"
+      },
+      {
+        "path": "run.go",
+        "change": "modified",
+        "lines": 1798,
+        "sha256": "4ab11e14112926ffab7f14a736d4ae111e6200df8f8396536c39b868242f58f2",
+        "leaf_symbols": "Run.ExecState；Run.execOwner（文件内另有 01.9 已落的 seedReplay 改动，非本叶）"
+      },
+      {
+        "path": "tools.go",
+        "change": "modified",
+        "lines": 947,
+        "sha256": "6c546cc61a096fb9430b92aab95c3a39e9839a5f1c28836eaa6a156b96bf8732",
+        "leaf_symbols": "presetTools 调用 NewPreset(..., WithRunOwner(r.execOwner))"
+      },
+      {
+        "path": "tests/integration/execution/event_integrity_test.go",
+        "change": "modified（01.1 已建文件上扩展）",
+        "lines": 2083,
+        "sha256": "c7af8a4afed4bc1de6219e390363ff9c33ad1c35e9946cc0ca3e608c8f5f5ca7",
+        "leaf_symbols": "TestEventIntegrityExecStateEvents 六子测试与 helper"
+      }
+    ],
+    "key_lines": {
+      "watch_after_capture": "tool/exec/tool.go:206 t.manager.watch(key)",
+      "sweep_production_caller": "tool/exec/exec.go:450 reports := m.Sweep(ctx)",
+      "host_close_reaches_manager": "host.go:834 h.execManager.Close(ctx)",
+      "observer_injection": "host.go:331 tagentexec.WithStateObserver(...)",
+      "owner_injection": "tools.go:269 tagentexec.WithRunOwner(r.execOwner)",
+      "state_query": "run.go:887 func (r *Run) ExecState(...)"
+    }
+  },
+  "method": "验收测试经 Boot 的正式装配（声明 exec 工具 + exec.monitor）与 Host.Invoke 驱动：exec_run → RunTool.Call → Manager.Acquire/Capture；调用返回后由 Manager 跟踪器续租，并经 StateObserver→Host.observeExecState→fireNoticeTurn 驱动下一决策；stable/exited 材料从 provider 实际请求读取；Host.Close 经 Manager.Close→Sweep/Release 释放资源，并由独立 tmux has-session 与 Run.ExecState 双证；restart 场景用第二个正式 Boot 的空账 manager 释放同键，断言 ErrResourceUnknown 且资源仍活。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "tmux": "tmux 3.6a",
+    "module": "github.com/SpellingDragon/tagent",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b"
+  },
+  "subtests": [
+    {
+      "name": "lease_keeps_renewing_after_return",
+      "anchor": "正①",
+      "assertion": "长时间 exec_run 的调用已返回；等待 450ms 后 ExecState.Renewed 严格增长、Held=1、Deadline 在未来；独立 tmux has-session 证明会话仍活。"
+    },
+    {
+      "name": "state_change_emits_followup_notice",
+      "anchor": "正②",
+      "assertion": "stable_duration 150ms 的活资源产生 stable 事件；随动请求携带 'reports state stable' 的 user 材料，材料无 success/complete/done/finished/succeeded/passed 词；资源仍 Held 且 tmux 仍活。"
+    },
+    {
+      "name": "next_turn_consumes_exec_state",
+      "anchor": "正③（兼消费者锚）",
+      "assertion": "sh -c 'echo beta; sleep 1; exit 7' 在调用返回后退出；exited 材料含 'exit code 7' 并由下一决策读取交付；run 调用答案不含 exit=；事件后 ExecState 返回 ErrResourceUnknown，证明确认退出后资源已释放。"
+    },
+    {
+      "name": "host_close_releases_exec_resources",
+      "anchor": "正④",
+      "assertion": "Close 前 tmux 会话存活、ExecState.Held=1；Host.Close 返回 nil 后会话消失、ExecState 返回 ErrResourceUnknown。"
+    },
+    {
+      "name": "restart_takes_over_or_names_unconfirmed",
+      "anchor": "正⑤",
+      "assertion": "两个正式 Boot 同时活；第二宿主（空账 manager）释放同键得到 ErrResourceUnknown，第一宿主仍 Held，tmux 会话仍活。"
+    },
+    {
+      "name": "unconfirmed_restart_not_reported_stopped",
+      "anchor": "负①",
+      "assertion": "第二宿主模型会话文本含 ErrResourceUnknown.Error()，不含 released / confirmed stop / stopped，且无成功/完成词；tmux 仍活、第一宿主仍 Held。"
+    }
+  ],
+  "negative_anchor_registration": {
+    "question": "执行状态事件面是否会把 stable/部分状态或未确认停止报成成功/已停止",
+    "answer": "不会。StateEvent 的 stable/suspect 只描述观察；exited 只在 Confirmed+Released 时携带 ExitCode；retained 明说 stays held；Host 材料用 'reports state' 措辞；空账宿主返回 ErrResourceUnknown，不冒充接管。",
+    "asserted_shape": "对 stable 材料与 restart 模型会话做成功/完成词扫描，对 restart 答案做 released/confirmed stop/stopped 扫描，并断言 tmux 仍活、第一宿主仍 Held。"
+  },
+  "product_changes": [
+    "tool/exec/state.go：Owner/OwnerResolver/StatePhase+5 consts/StateEvent/StateObserver/WithStateObserver；watch/track/exitObserved/emit/stopTracking",
+    "tool/exec/exec.go：Manager observer/closing；heldResource ttl/owner/stop/done；Acquisition declared/owner；Release→release+reportRelease；Manager.Close",
+    "tool/exec/tool.go：RunTool.owner；WithRunOwner；NewPreset 变参；Call 注入 owner 并在 Capture 后 watch",
+    "host.go：Host.execManager/execWG；Boot 注入 WithStateObserver；observeExecState/execStateText；Close 触达 Manager.Close 并等待 execWG",
+    "run.go：Run.ExecState；Run.execOwner（另含 01.9 已落的 seedReplay，非本叶）",
+    "tools.go：presetTools 传 WithRunOwner(r.execOwner)"
+  ],
+  "consumers": {
+    "formal_entry": "Boot（host.go:331）构造 exec Manager → presetTools（tools.go:269）→ exec_run/exec_release（tool/exec/tool.go）",
+    "followup_entry": "Manager.StateObserver → Host.observeExecState（host.go:739）→ Host.fireNoticeTurn（host.go:667，与 SettleDriver 同一入口）",
+    "read_path": "loop.progressNotes → Run.noticeProjection.NoticeBoundary/NoticesFrom → 下一 decision 的 user 消息",
+    "sweep_close": "Host.Close（host.go:805）→ Manager.Close（exec.go:431）→ m.Sweep（exec.go:450）→ Release 剩余键",
+    "restart": "第二个 Boot 的 Manager 空账 → exec_release 返回 ErrResourceUnknown；第一宿主 Held，tmux 仍活",
+    "separation": "测试未手工 CommitToSession 通知事实，未新建通知身份；材料读取自 provider 实际请求，资源存活性读取自独立 tmux has-session 与 Run.ExecState。"
+  },
+  "verification": {
+    "single": {
+      "command": "go test ./tests/integration/execution -run '^TestEventIntegrityExecStateEvents$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.10b/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/single.jsonl",
+      "log_sha256": "2ec8380d2e9ab79310567fc2e2b206a1d4626b219e6c3b7392f3a48b22fe1dbe",
+      "log_bytes": 31514,
+      "parsed": {
+        "parent": "TestEventIntegrityExecStateEvents run=1 pass=1",
+        "children_run_pass": 6,
+        "children": [
+          "lease_keeps_renewing_after_return",
+          "state_change_emits_followup_notice",
+          "next_turn_consumes_exec_state",
+          "host_close_releases_exec_resources",
+          "restart_takes_over_or_names_unconfirmed",
+          "unconfirmed_restart_not_reported_stopped"
+        ],
+        "fail": 0,
+        "skip": 0,
+        "zero_match": false
+      }
+    },
+    "ten_rounds": {
+      "command": "go test ./tests/integration/execution -run '^TestEventIntegrityExecStateEvents$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.10b/run-$i.jsonl\" 2>&1",
+      "independent_processes": 10,
+      "count_flag": "-count=1 每轮独立进程；未使用 -count=10，未合并日志",
+      "exit_codes": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/exit-codes.txt",
+      "exits_sha256": "2b436b67ce1a50322b0e4e6ae3d4b36e5aa7ef31342793d0b0cceb21623ed288",
+      "parsed_each_round": "7 run / 7 pass（父 + 6 子测试），0 fail，0 skip，0 zero-match；十轮逐轮 JSON 解析均 OK。",
+      "runs": [
+        {
+          "run": 1,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-1.jsonl",
+          "sha256": "be8c585c941f432b9e256fce5d3e4452cd90e18affba54dfb1ff3b25dce8ede7",
+          "bytes": 31515
+        },
+        {
+          "run": 2,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-2.jsonl",
+          "sha256": "fcf732f47634ec1d21b937bc030e3d4876bb20d598ddee4b6ef81886a71dd3fd",
+          "bytes": 31523
+        },
+        {
+          "run": 3,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-3.jsonl",
+          "sha256": "6d3694c75c1ad9eba117691c9a5c2b8dbbaa88787a5bfe09605d81d7f26fb966",
+          "bytes": 31513
+        },
+        {
+          "run": 4,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-4.jsonl",
+          "sha256": "bdb43bd5c4e4893e082b9bff24370960a8f2417634a369fd9a1c4ca2f052502c",
+          "bytes": 31513
+        },
+        {
+          "run": 5,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-5.jsonl",
+          "sha256": "0167ba410eb764b6866b9d3278c7f2ed5419cea83f1224613bc170198b69ed02",
+          "bytes": 31521
+        },
+        {
+          "run": 6,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-6.jsonl",
+          "sha256": "064bc47a839816309a506203af7cd1e6a796eb6cb3621e890d876c1bf575f494",
+          "bytes": 31516
+        },
+        {
+          "run": 7,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-7.jsonl",
+          "sha256": "e278629d26c09dc6f02c19d2aba9a3a2fc5aca906f5225f3b4303561fa66fedd",
+          "bytes": 31513
+        },
+        {
+          "run": 8,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-8.jsonl",
+          "sha256": "76449a5e46a6a4278b89271304cb2b0175227ea0c66a9e2d8bd35ff6acad26c2",
+          "bytes": 31512
+        },
+        {
+          "run": 9,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-9.jsonl",
+          "sha256": "c6ca98169be1ebe38ae193905f2b8138aabd8fc4987a2c28572ccce3b9c35216",
+          "bytes": 31516
+        },
+        {
+          "run": 10,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/run-10.jsonl",
+          "sha256": "9d90bd2f193a42ebe7ae796d18a0cabe23f9c1fea1c0ad57a1d47a1a4f18d260",
+          "bytes": 31511
+        }
+      ]
+    },
+    "regressions": [
+      {
+        "name": "01.10a tool/exec 六锚",
+        "command": "go test ./tool/exec -run '^TestEventIntegrityExecLifecycle$' -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-tool-exec.log",
+        "log_sha256": "22da6c539f6e5137972bf7400bab1d5b1839ec0c7d314d3bd284dd16c1baa242"
+      },
+      {
+        "name": "tool/exec 整包（含既有 exec-lifecycle）",
+        "command": "go test ./tool/exec -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-tool-exec-full.log",
+        "log_sha256": "71475c7083753f463c1e8b705819f8162da26fbc3b2fa665387502be345461e7"
+      },
+      {
+        "name": "execution 整包（01.1 与既有 25 个测试）",
+        "command": "go test ./tests/integration/execution -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-execution.log",
+        "log_sha256": "e9827078bdab4aad0bb6063ccbdd65c67bef04ef9ab092159681b9f093689956"
+      },
+      {
+        "name": "host 装配硬约束（3 请求）与正式装配",
+        "command": "go test ./tests/integration/host -run 'TestExecFaceWiredFromDocument|TestEventIntegrityFormalAssembly' -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-host.log",
+        "log_sha256": "71351111dd1250fa3a79e1168e4ca231a7acc0f401f0ed2b98d888fb666248fa"
+      },
+      {
+        "name": "host exec 声明拒绝",
+        "command": "go test ./tests/integration/host -run 'TestExecFaceDeclaredBesideNoTmuxRefusesTheBoot' -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-host-refusal.log",
+        "log_sha256": "59441c411bad8da574b69e52349c4b52340b997c23217f188affe1906abf84e8"
+      },
+      {
+        "name": "01.9 重启接管不回退",
+        "command": "go test ./tests/integration/history -run '^TestEventIntegrityRestart$' -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-history-restart.log",
+        "log_sha256": "9610f37df80efafbd9348f2145ccbefedb00fd0054cde06f8a2329ac3b6c8e88"
+      },
+      {
+        "name": "01.2/01.8 消费恢复不回退",
+        "command": "go test ./tests/integration/history -run '^TestEventIntegrityConsumptionRecovery$' -count=1 -race",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/regression-history-consumption.log",
+        "log_sha256": "7b792b40a309938fe7f97d8986ea0148e72f76d4dc671cd0064f446b9d793509"
+      }
+    ],
+    "gates": {
+      "build": {
+        "command": "go build ./...",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/gate-build.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "vet": {
+        "command": "go vet ./...",
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/gate-vet.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "gofmt": {
+        "command": "gofmt -l tool/exec run.go host.go tools.go tests/integration/execution/event_integrity_test.go",
+        "exit_code": 0,
+        "output_lines": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/gate-gofmt.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "ownership": {
+        "command": "python3 scripts/check_runtime_architecture.py --implementation --json",
+        "repo_tree": {
+          "exit_code": 1,
+          "ok": false,
+          "errors": [
+            "edge violation: evolution/meditation (evolution/meditation) imports runtime/task (runtime/task) not in allow list"
+          ],
+          "counts": {
+            "edge_violations": 1,
+            "event_ownership_uncovered": 4,
+            "event_ownership_unregistered": 0,
+            "event_ownership_unowned": 0,
+            "event_ownership_forbidden": 0
+          },
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/gate-ownership-final.json",
+          "log_sha256": "010e2e905cf69d094d4543881b2476ea381d58aeb97aa5f7def0d4b1a6db7176",
+          "attribution": "外部陈旧未提交改动：evolution/meditation/deliver.go 于 2026-10-23 22:12 加入 runtime/task（git diff 135+/28-），golden 的 evolution/meditation forbidden 明确含 runtime/task；HEAD 的 deliver.go 无该导入，本叶写集不触达 evolution/。"
+        },
+        "leaf_counterfactual": {
+          "method": "git worktree add --detach HEAD；应用 `git diff -- . ':(exclude)evolution/meditation'`；补入未跟踪的 tool/exec/state.go、scripts/codetools/event_ownership.go|_test.go、golden/runtime/event_integrity_scenarios.json；在同一工作树跑归属门",
+          "exit_code": 0,
+          "ok": true,
+          "counts": {
+            "edge_violations": 0,
+            "event_ownership_allowed": 14,
+            "event_ownership_uncovered": 4,
+            "event_ownership_unregistered": 0,
+            "event_ownership_unowned": 0,
+            "event_ownership_forbidden": 0,
+            "event_ownership_ambiguous": 0
+          },
+          "uncovered_notes": [
+            "run.go:320 Assemble deliver — method value of a frozen symbol is passed on as a callback; the call happens inside the port",
+            "tools.go:624 Run.wrap sink — method value of a frozen symbol is passed on as a callback; the call happens inside the port",
+            "runtime/agent/delegate.go:414 Delegator.complete Advance — a call with the frozen signature on an unregistered receiver cannot be proven not to reach it",
+            "runtime/agent/shutdown.go:192 Shutdown.Advance Advance — a call with the frozen signature on an unregistered receiver cannot be proven not to reach it"
+          ],
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.10b/gate-ownership-counterfactual.json",
+          "log_sha256": "cb5204228fe82320f1827021d4733b0885a7ff50ac07f7402843f70363893388",
+          "interpretation": "4 个 uncovered 均为基线既有的 method-value/未注册接收者提示，非本叶新增符号；本叶新增接线未触发新的 edge/unregistered/unowned/forbidden/uncovered。"
+        },
+        "verdict": "本叶范围 violations=0、新增 uncovered=0；仓库工作树因 evolution/meditation 的外部陈旧未提交改动仍红，已在本文与终报具名上报，待该文件所有者补 golden 边或撤回导入后，原样复跑即可转绿。"
+      }
+    }
+  },
+  "red_lines": [
+    "MUST 经 Boot/Host.Invoke 的正式装配驱动，不手工 CommitToSession 通知事实。",
+    "MUST 复用既有通知身份与 fireNoticeTurn 入口，不新建第二套通知身份、不接回 IssueNotice/NoticeSequencer。",
+    "MUST 不新建第二套执行资源仓、不把 exec 资源持久化；重启后只允许具名未确认。",
+    "MUST 不把 stable/partial 报成 success/complete，不把未确认 stop 报成 released/stopped。",
+    "MUST 保持一次性命令的既有装配（host_wiring 3 请求）不因新增 follow-up 回退。"
+  ],
+  "errors_during_implementation": [
+    {
+      "phase": "compile",
+      "error": "tool/exec/state.go 使用未定义的 errorIs（编译失败）",
+      "resolution": "改为 errors.Is 并 import \"errors\"；gofmt/vet/build 恢复干净。"
+    },
+    {
+      "phase": "first full run",
+      "error": "state_change_emits_followup_notice / next_turn_consumes_exec_state 首次失败：matcher 用裸 resource 名，而通知材料携带 key.String()（tmux/<name>）",
+      "resolution": "eventIntegrityCarriesExecState/eventIntegrityExecStateMaterial 改收 ResourceKey 并用 key.String() 构造 marker；第二轮两子测试转绿。"
+    },
+    {
+      "phase": "first full run",
+      "error": "两个 restart 子测试从模型请求里按 ToolCallID 提取到的是同步 AdmissionReceipt（accepted task-N running），不是异步 observation；openai 线协议对 user 角色消息可能不带 tool_call_id",
+      "resolution": "新增 eventIntegrityModelConversation，按模型身份拼接全部消息文本并在 helper 内断言 ErrResourceUnknown；restart 两子测试转绿。"
+    }
+  ],
+  "self_decisions": [
+    "跟踪器只在 Manager 配置了 StateObserver 时启动：capabilities/包内测试/Assemble 直用不改变 01.10a 的精确 Renewed/stops 计数。",
+    "跟踪 cadence=min(rhythm.Interval, ttl/2)，避免续租在下一拍前过期；沿用 Monitor.Poll 的 stable/suspect 语义，不造第二套监控。",
+    "fast-finish guard：首拍为基线，需连续两拍 Alive 后再 Dead 才发 exited；一次性 echo 命令不为每个调用制造额外 follow-up（host_wiring 3 请求保持）。",
+    "Host 只对 stable/suspect/exited 起随动回合；released/retained 只走显式调用答案，避免同一释放动作产生第二份消费面。",
+    "owner 不完整（缺地址或 task-id）时仍发事件但不驱动回合：显式 exec_release/Run.ExecState 仍是出口。",
+    "restart 测试用 eventIntegrityModelConversation 而非 ToolCallID 提取 observation，因为任务工具同步返回 receipt、真实结果以 user 消息异步到达；断言仍读取生产请求，不读测试旁路。",
+    "Close 的 release 使用 context.WithoutCancel（既有 release 语义），ctx 取消不阻止停止；未确认 stop 保留在账内并具名报告。"
+  ],
+  "deviations": [
+    {
+      "point": "生产 Sweep 调用点位置",
+      "planned": "Close 时或定期",
+      "actual": "只在 Manager.Close 内调用一次 m.Sweep(ctx)，随后释放剩余资源；未新增定期 sweeper。",
+      "reason": "最小面只列 Manager.Close 为生命周期入口；定期 sweeper 会新增未列生命周期面与并发路径。"
+    },
+    {
+      "point": "通知身份描述",
+      "planned": "证据初稿写 Notice.Event 为合成事实键",
+      "actual": "fireNoticeTurn 由事实派生 Notice{TaskID, Kind, Event: fact.Key}，提交键为 agent.NoticeFactKey(freshInvocation, notice)；Notice.FactKey() 仍是 TaskID:Round:Kind:Seq，不含 Event。",
+      "reason": "按实际代码回填，避免把 Event 引用误写成身份的一部分；未改身份函数。"
+    },
+    {
+      "point": "restart 场景的产物读取",
+      "planned": "按 native call 结果读取 release 答案",
+      "actual": "按模型会话文本读取；release 的同步 receipt 与异步 observation 分属两条消息，ToolCallID 在 user 消息上不可靠。",
+      "reason": "测试仍读生产 provider 请求；未手工提交事实或新建旁路。"
+    }
+  ],
+  "limitations": [
+    "exec 账本仍是内存态：重启后同键释放返回 ErrResourceUnknown（具名未确认），不冒充接管；这是 00.3 冻结语义。",
+    "调用返回后一个 cadence 内结束的进程可能不产生 exited（fast-finish guard）；显式 exec_release 仍能读到退出码（01.10a 面不回退）。",
+    "仓库工作树归属门仍因 evolution/meditation 的外部陈旧未提交改动报红；本叶反事实门已证明新增接线 0 违规，需该文件所有者处理后才可在原树复跑转绿。"
+  ],
+  "external_blockers": [
+    {
+      "item": "仓库工作树归属门 edge violation（非本叶）",
+      "detail": "evolution/meditation/deliver.go 的未提交改动新增 import runtime/task，而 golden 的 evolution/meditation forbidden 明确含 runtime/task；文件 mtime 2026-10-23 22:12，HEAD 版本无该导入。",
+      "impact": "python3 scripts/check_runtime_architecture.py --implementation 在原树 exit 1；不阻断本叶测试与构建，但阻断“原树 violations=0”的字面硬门。",
+      "options": [
+        "该文件所有者补齐 golden 允许边（若设计确实需要 runtime/task），或在 golden 维持禁入时撤回该导入",
+        "由编排者在干净树（仅含本叶写集）复跑归属门；本叶已用同源 worktree 反事实验证 edge_violations=0"
+      ]
+    }
+  ],
+  "tasks_md_update": {
+    "path": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.10b（文件第 29 行）",
+    "from": "- [ ] 01.10b **执行状态事件生产与通知接线**",
+    "to": "- [x] 01.10b **执行状态事件生产与通知接线**",
+    "checked_at": "2026-10-24T11:56:30Z",
+    "evidence_ref": "evidence/01.10b-summary.json",
+    "header_sync": "域头‘01.10a 已实施勾选，01.10b 尚未实施’同步为‘01.10a/01.10b 均已实施勾选’。",
+    "verify_after": []
+  },
+  "verify_after": [],
+  "status_note": "六锚单轮 + 十轮独立进程全绿；tool/exec、execution、host、history 回归全绿；build/vet/gofmt 绿；归属门本叶范围 violations=0（反事实证），原树唯一违规为外部陈旧未提交改动，已具名上报。"
+}

@@ -1,0 +1,3299 @@
+{
+  "schema_version": 1,
+  "change": "event-consumption-integrity",
+  "domain_profile": "event-integrity",
+  "baseline": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "scope": "whole-change-planning-materialization",
+  "purpose": "机器可读的 42 叶任务图：登记执行就绪 depends_on、正式集成后验收 verify_after、每叶 ready/verified 展开的 84 个 phase 节点与单一判环图、精确写入候选、测试 selector/tier、registry 唯一 id 与 contract_id 固定映射；不替代各域 tasks.md 正文，不表示任何叶已完成。",
+  "generated_from": [
+    "openspec/changes/event-consumption-integrity/design.md",
+    "openspec/changes/event-consumption-integrity/proposal.md",
+    "openspec/changes/event-consumption-integrity/tasks.md",
+    "openspec/changes/event-consumption-integrity/ORCHESTRATION.md",
+    "openspec/changes/event-consumption-integrity/findings.md",
+    "openspec/changes/event-consumption-integrity/specs/orchestration/spec.md",
+    "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/{tasks,design}.md",
+    "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/{tasks,design}.md",
+    "openspec/changes/event-consumption-integrity/changes/02-event-consumers/{tasks,design}.md",
+    "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/{tasks,design}.md",
+    "openspec/changes/event-consumption-integrity/changes/04-regression-gates/{tasks,design}.md",
+    "openspec/changes/event-consumption-integrity/changes/05-mr-integration/{tasks,design}.md",
+    "openspec/changes/event-consumption-integrity/changes/*/specs/*/spec.md"
+  ],
+  "authorization": {
+    "round": "plan-revision-04-split-exec-lifecycle",
+    "user_authorized_scope": "用户 2026-10-24 裁定 C（计划回写④）：01.10 外部执行资源生命周期拆为 01.10a 执行资源查询面生命周期（tool/exec 包内测试，现存写集内可做）与 01.10b 执行状态事件生产与通知接线（需最小 public API + 根装配接线，按 00.3 流程在实施单先列最小 API 面，超面停报）；01 域 10→11 叶、总 41→42 叶；01.10-summary 归档为两叶共引；勾选保持 32；除合同/checker 计数同步外不改产品/测试代码",
+    "planning_artifacts": [
+      "openspec/changes/event-consumption-integrity/**"
+    ],
+    "current_pass_edits": [
+      "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/{proposal,design,tasks}.md",
+      "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/specs/execution-resource-lifecycle/spec.md",
+      "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.{json,md}",
+      "openspec/changes/event-consumption-integrity/changes/04-regression-gates/{tasks,design,proposal}.md",
+      "openspec/changes/event-consumption-integrity/{proposal,design,tasks,findings,coverage,ORCHESTRATION}.md",
+      "openspec/changes/event-consumption-integrity/task-graph.json",
+      "golden/runtime/event_integrity_scenarios.json",
+      "scripts/check_runtime_evidence.py",
+      "scripts/check_runtime_plan.py",
+      "scripts/runtime_checklib.py",
+      "scripts/test_check_runtime_evidence.py",
+      "scripts/check_event_integrity_mutations.py"
+    ],
+    "current_pass_note": "计划回写④：42 叶（00:4/01:11/02:7/03:11/04:5/05:4），parent tests 29（28 green+1 diagnostic），green named subtests 137、after all fixes 141、delta 140；phase 84 节点/154 边；勾选保持 32（01.10a/01.10b 均未勾选）。本轮回写不改产品/测试代码（04.1 合同、checker 与自测计数同步除外）。",
+    "writes": [
+      "openspec/changes/event-consumption-integrity/**"
+    ],
+    "forbidden": [
+      "apply",
+      "product-code",
+      "tests",
+      "ci",
+      "checkbox-flips",
+      "remote-actions",
+      "archive"
+    ],
+    "apply_executed": false,
+    "product_test_ci_changed": false,
+    "implementation_authorized": false,
+    "all_leaves_status": "planned",
+    "checked_leaves": 32,
+    "contract_checker_selftest_synced": true,
+    "checkbox_changes": [],
+    "checkbox_changes_note": "本轮无勾选变更：01.10 原为未勾选，拆分后 01.10a/01.10b 均为未勾选；当前 32 勾/10 未勾。"
+  },
+  "modules": {
+    "root": {
+      "dir": ".",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "registry_alias": "."
+    },
+    "wechat-bot": {
+      "dir": "examples/wechat-bot",
+      "module_path": "wechat-bot",
+      "registry_alias": "wechat-bot",
+      "replace": "github.com/SpellingDragon/tagent => ../.."
+    },
+    "tagent-cli-host": {
+      "dir": "examples/cli-host",
+      "module_path": "tagent-cli-host",
+      "registry_alias": "tagent-cli-host",
+      "replace": "github.com/SpellingDragon/tagent => ../.."
+    }
+  },
+  "dependency_semantics": {
+    "depends_on": "前置产物集成就绪（artifact ready）才可开工；不是前置 checkbox 完成。产物 ready 不等于本叶完成，也不等于前置叶可勾选。",
+    "verify_after": "本叶最终勾选前必须完成的正式集成复验；不阻塞下游开发，但缺此证据不得勾选。",
+    "phase_expansion": "每叶展开 ready 与 verified 两个 phase 节点，共 84 节点。边规则：depends_on 前置 ready -> 本叶 ready；本叶 ready -> 本叶 verified；verify_after 前置 verified -> 本叶 verified。",
+    "cycle_judgment": "只对上述 84 节点、154 条边的单一展开图整体拓扑排序，必须 84 节点全部入序。不得拆图判环，也不得把跨阶段回边解释为正确。",
+    "ready_queue": "文件锁只按 ready 队列仲裁；锁不产生依赖边，不预设叶的固定先后。",
+    "examples": {
+      "02_to_01.5": "02.1—02.5、02.7 depends_on=00.3，verify_after=01.5；02.6 depends_on=00.3，verify_after=01.6。展开后 02.x/ready -> 01.5/ready -> 01.5/verified -> 02.x/verified；02.6/ready -> 01.6/ready -> 01.6/verified -> 02.6/verified；01.5/01.6 不等 02 的 checkbox。",
+      "01_assembly": "01.5 depends_on=01.4+02.1—02.5+02.7；01.6/01.7 depends_on=01.4。01.6 不含 02.6 前置，02.6 只在 verified 阶段回指 01.6，方向一致、无环。",
+      "03.2_03.3": "depends_on=03.1+00.3；verify_after=01.5。开发用 03.1 基座与冻结契约，最终绿证经 01.5/verified。",
+      "03.4": "depends_on=03.1+00.3；verify_after=01.5。开发用 03.1 基座与冻结契约，最终绿证经 01.5/verified。",
+      "04.2": "depends_on=04.1；verify_after=01.5+03.2—03.9。03 的验证是直接 go test，不调用 04.2；04.2 只消费 03/01.5/01.6/01.7 已就绪测试。",
+      "05.3": "depends_on=01.5+04.5；verify_after=05.2。草稿可先写，CI 段落等 05.2/verified 后才算完成。",
+      "00.2": "depends_on=03.1；verify_after=01.5。00.2/ready 的红证供 00.3/ready；01.5/verified 后回填 00.2/verified 绿证。",
+      "01_persistence": "01.8 depends_on=00.3；01.9 depends_on=01.8；01.10a depends_on=00.3（仅查询面）；01.10b depends_on=01.10a+00.3（生产接线在 01.10a 查询面验收之后）。补差不新增叶：01.2/01.3 验收面扩为含 handover_before_confirmation/notice_input_without_projection 的 pending anchors，补齐并过三锚+十轮后复勾。",
+      "04.4_mutations": "04.4 depends_on/verify_after 含 01.2（补差负锚）、01.8（存储伪成功负锚）、01.10a（进程仍活报完成负锚）；本轮只登记反例，实际变异实施在后续单。"
+    }
+  },
+  "phase_graph": {
+    "nodes_total": 84,
+    "edges_total": 154,
+    "edge_breakdown": {
+      "ready_to_verified": 42,
+      "depends_on_ready_to_ready": 77,
+      "verify_after_verified_to_verified": 35
+    },
+    "acyclic": true,
+    "topological_order": [
+      "05.4/verified",
+      "05.4/ready",
+      "05.3/verified",
+      "05.2/verified",
+      "05.2/ready",
+      "05.3/ready",
+      "05.1/verified",
+      "05.1/ready",
+      "04.5/verified",
+      "04.5/ready",
+      "04.4/verified",
+      "01.10a/verified",
+      "01.8/verified",
+      "01.2/verified",
+      "00.3/verified",
+      "04.4/ready",
+      "04.3/verified",
+      "04.3/ready",
+      "04.2/verified",
+      "03.9/verified",
+      "03.8/verified",
+      "03.8/ready",
+      "03.7/verified",
+      "03.7/ready",
+      "03.6/verified",
+      "03.6/ready",
+      "03.5/verified",
+      "03.5/ready",
+      "03.4/verified",
+      "03.4/ready",
+      "03.3/verified",
+      "03.2/verified",
+      "04.2/ready",
+      "04.1/verified",
+      "04.1/ready",
+      "03.11/verified",
+      "03.11/ready",
+      "03.9/ready",
+      "03.3/ready",
+      "03.2/ready",
+      "03.10/verified",
+      "03.10/ready",
+      "03.1/verified",
+      "02.7/verified",
+      "02.6/verified",
+      "01.6/verified",
+      "01.6/ready",
+      "02.6/ready",
+      "02.5/verified",
+      "02.4/verified",
+      "02.3/verified",
+      "02.2/verified",
+      "02.1/verified",
+      "01.10b/verified",
+      "01.10b/ready",
+      "01.10a/ready",
+      "01.9/verified",
+      "01.9/ready",
+      "01.8/ready",
+      "01.7/verified",
+      "01.7/ready",
+      "01.4/verified",
+      "01.3/verified",
+      "01.1/verified",
+      "00.4/verified",
+      "00.2/verified",
+      "01.5/verified",
+      "01.5/ready",
+      "02.7/ready",
+      "02.5/ready",
+      "02.4/ready",
+      "02.3/ready",
+      "02.2/ready",
+      "02.1/ready",
+      "01.4/ready",
+      "01.3/ready",
+      "01.2/ready",
+      "01.1/ready",
+      "00.3/ready",
+      "00.4/ready",
+      "00.2/ready",
+      "03.1/ready",
+      "00.1/verified",
+      "00.1/ready"
+    ],
+    "cycle_check": "python3 -c \"import json,graphlib;g=json.load(open('task-graph.json'));p={x['id']+'/ready':[d+'/ready' for d in x['depends_on']] for x in g['leaves']};p.update({x['id']+'/verified':[x['id']+'/ready']+[d+'/verified' for d in x['verify_after']] for x in g['leaves']});s=list(graphlib.TopologicalSorter(p).static_order());assert len(s)==2*len(g['leaves']);print('nodes',len(s),'edges',sum(map(len,p.values())))\""
+  },
+  "file_locks": {
+    "arbitration": "ready-queue-only",
+    "rules": [
+      "锁只排除同时写同一文件簇，不表达业务依赖，不生成额外顺序边。",
+      "持有者=当时 ready 队列中被选中的单写叶；释放后立即重算 ready 队列。",
+      "同一文件簇的叶不得并发；不同文件簇且构建闭包零交叉才可并发。"
+    ],
+    "clusters": {
+      "host-event-integrity-test": {
+        "files": [
+          "tests/integration/host/event_integrity_test.go"
+        ],
+        "leaves": [
+          "00.2",
+          "01.3",
+          "01.4",
+          "01.5",
+          "02.2",
+          "02.4",
+          "03.2",
+          "03.3"
+        ]
+      },
+      "history-event-integrity-test": {
+        "files": [
+          "tests/integration/history/event_integrity_test.go"
+        ],
+        "leaves": [
+          "01.2",
+          "01.8",
+          "01.9",
+          "02.3",
+          "03.9"
+        ]
+      },
+      "wechat-smoke": {
+        "files": [
+          "examples/wechat-bot/smoke_test.go",
+          "examples/wechat-bot/smoke_harness_test.go"
+        ],
+        "leaves": [
+          "01.6",
+          "03.4",
+          "03.5",
+          "03.6",
+          "03.7",
+          "03.8",
+          "03.10",
+          "03.11"
+        ]
+      },
+      "golden-runtime": {
+        "files": [
+          "golden/runtime/event_integrity_scenarios.json",
+          "golden/runtime/architecture.json",
+          "scripts/check_runtime_evidence.py"
+        ],
+        "leaves": [
+          "04.1",
+          "04.2",
+          "04.3",
+          "04.5"
+        ]
+      },
+      "ci-workflow": {
+        "files": [
+          ".github/workflows/ci.yml",
+          "scripts/test_check_runtime_workflow.py"
+        ],
+        "leaves": [
+          "05.1",
+          "05.2"
+        ]
+      },
+      "meditation-core": {
+        "files": [
+          "evolution/meditation/driver.go",
+          "evolution/meditation/reflection.go",
+          "evolution/meditation/watermark.go",
+          "evolution/meditation/deliver.go"
+        ],
+        "leaves": [
+          "02.1",
+          "02.2"
+        ]
+      },
+      "root-package-tagent": {
+        "files": [
+          "runtime/task/wrapper.go",
+          "runtime/task/manager.go",
+          "runtime/agent/delegate.go",
+          "runtime/agent/loop.go",
+          "tools.go",
+          "facts.go",
+          "run.go",
+          "invoke.go",
+          "host.go",
+          "runtime/task/registry.go",
+          "runtime/task/fact.go",
+          "runtime/task/commit.go",
+          "runtime/task/handoff.go",
+          "runtime/state/mailbox.go",
+          "runtime/state/durable.go",
+          "runtime/state/session.go",
+          "runtime/state/memory.go",
+          "runtime/task/restore.go",
+          "runtime/task/lifecycle.go",
+          "prepare.go",
+          "settle_turn.go",
+          "request.go",
+          "host_reload.go",
+          "host_model.go",
+          "rl/replacement.go",
+          "rl/lease_model.go",
+          "rl/lease_observer.go",
+          "host_capture.go",
+          "rl/capture_wiring.go",
+          "rl/sink.go",
+          "rl/produce.go",
+          "rl/export_chain.go",
+          "tool/subagent/capture.go",
+          "tool/subagent/builder.go"
+        ],
+        "leaves": [
+          "01.1",
+          "01.2",
+          "01.3",
+          "01.4",
+          "01.5",
+          "01.8",
+          "01.9",
+          "02.4",
+          "02.7",
+          "01.10b"
+        ]
+      },
+      "approval-surface": {
+        "files": [
+          "evolution/governance/policy.go",
+          "runtime/task/approval/approval.go",
+          "runtime/task/approval/approval_store.go",
+          "examples/wechat-bot/wechat_approval.go"
+        ],
+        "leaves": [
+          "02.5",
+          "01.5",
+          "01.6",
+          "02.6"
+        ],
+        "note": "approval-surface：02.5 根审批 + 01.5 根装配为原裁定归属；拆分后 wechat_approval.go 的实际写者为 01.6（微信装配）与 02.6（微信审批），一并纳入本簇避免并发写，锁不产生依赖边。"
+      },
+      "execution-event-integrity-test": {
+        "files": [
+          "tests/integration/execution/event_integrity_test.go"
+        ],
+        "leaves": [
+          "01.1",
+          "01.10b"
+        ]
+      },
+      "memory-recall": {
+        "files": [
+          "memory/recall.go",
+          "memory/store_query.go",
+          "memory/search/store_searcher.go",
+          "memory/ledger/tier_facts.go",
+          "memory/ledger/localfile.go",
+          "memory/ledger/segment_store.go",
+          "memory/event_body.go"
+        ],
+        "leaves": [
+          "01.8",
+          "01.9"
+        ]
+      },
+      "exec-lifecycle": {
+        "files": [
+          "tool/exec/tool.go",
+          "tool/exec/exec.go",
+          "tool/exec/monitor.go",
+          "tool/exec/tmux.go",
+          "tool/exec/tmux_executor.go",
+          "tool/exec/stop.go",
+          "tool/exec/decl.go"
+        ],
+        "leaves": [
+          "01.10a",
+          "01.10b"
+        ]
+      },
+      "exec-package-test": {
+        "files": [
+          "tool/exec/event_integrity_test.go"
+        ],
+        "leaves": [
+          "01.10a"
+        ],
+        "note": "01.10a 在 tool/exec 包内新增测试文件；与 exec-lifecycle 产品文件同包不同文件，写后读回，不建第二套执行资源仓。"
+      }
+    }
+  },
+  "counts": {
+    "leaves_total": 42,
+    "leaves_by_domain": {
+      "00-contract-evidence": 4,
+      "01-runtime-consumption": 11,
+      "02-event-consumers": 7,
+      "03-formal-simulation": 11,
+      "04-regression-gates": 5,
+      "05-mr-integration": 4
+    },
+    "leaves_by_kind": {
+      "product": 29,
+      "non_product": 13
+    },
+    "parent_tests_total": 29,
+    "product_parent_tests_green": 28,
+    "diagnostic_parent_tests": 1,
+    "named_green_subtests_current": 137,
+    "named_green_subtests_unique": 139,
+    "named_green_subtests_unique_key": "(parent, subtest_name)",
+    "named_green_subtests_current_note": "按 (parent, subtest_name) 去重；计划回写④后 = 原 112 + 01.8 六 + 01.9 五 + 01.10a 六 + 01.10b 六 + 01.2/01.3 补差二；consumer 可引用 positive 同名 subtest，不重复加入 subtests[]；不是允许删项上限",
+    "diagnostic_named_anchors": 4,
+    "named_anchors_after_all_fixes": 143,
+    "named_anchors_after_all_fixes_note": "29 父测试全部修复后 = 137 + 00.2 四锚；137/141 都是清单，不是允许删项上限",
+    "named_anchor_count_basis": "137/141 均为 (parent, subtest_name) 唯一键并集；consumer 可引用 positive 同名 subtest，不重复加入 subtests[]；CI 合同分别记录 roles 与引用，计数不是 raw role list 长度",
+    "long_parent_anchors": 3,
+    "long_matrix_runs_once": true,
+    "long_anchor_note": "long 一父 3 锚共用同一次 6 组合矩阵，不按 3 倍运行",
+    "anchor_count_is_not_a_ceiling": true,
+    "diagnostic_min_subtests": 4,
+    "delta_scenarios_total": 140,
+    "delta_scenarios_by_spec": {
+      "orchestration": 10,
+      "committed-event-attribution": 3,
+      "event-metadata-contract": 7,
+      "async-task-execution": 3,
+      "delivery-dispatch-receipts": 4,
+      "persistent-event-loop": 12,
+      "telemetry-channel": 4,
+      "approval-channels": 4,
+      "config-hot-reload": 4,
+      "decision-capture": 4,
+      "event-sourced-projection": 3,
+      "meditation-delivery-tool": 3,
+      "meditation-idle-gating": 4,
+      "evals-harness": 17,
+      "architecture-guardrails": 17,
+      "resident-release-evidence": 19,
+      "session-fact-lifecycle": 10,
+      "execution-resource-lifecycle": 12
+    },
+    "short_policy": {
+      "runs": 10,
+      "independent": true,
+      "count": 1,
+      "race": true,
+      "forbid_count_flag": 10,
+      "includes_00.2_final_green": true
+    },
+    "long_matrix": {
+      "combos": 6,
+      "sessions_per_host": 4,
+      "inputs_per_session": 300,
+      "inputs_per_combo": 1200,
+      "restarts_per_session": 30,
+      "restarts_per_combo": 120,
+      "inputs_total": 7200,
+      "restarts_total": 720,
+      "single_shard": "1200/120",
+      "repeat_per_combo": 1,
+      "matrix_total_runs": 6,
+      "delivery_stability_runs_per_combo": 10,
+      "delivery_stability_total_runs": 60,
+      "delivery_stability_inputs_total": 72000,
+      "delivery_stability_restarts_total": 7200,
+      "delivery_stability_phase": "implementation-stability",
+      "delivery_stability_is_mr_gate": false,
+      "delivery_stability_budget": "separate from MR matrix",
+      "race": true
+    },
+    "named_green_subtests_current_source": "04.1 manifest 当前登记口径（不含 00.2 四个诊断锚）；计划回写④后登记 137 个绿具名子场景，其中 2 个补差锚由 pending_anchors 门控（已随既有实施波次落源码；回归缺失时重新按 pending 处理）；按 (parent, subtest_name) 去重，consumer 可引用 positive 同名 subtest 而不重复加入 subtests[]；137/141 是清单不是上限",
+    "pending_anchors_gated": 2,
+    "pending_anchors_note": "01.2/handover_before_confirmation 与 01.3/notice_input_without_projection 由 graph verification.pending_anchors 门控；两锚已随既有实施波次落入源码（checker 实测 pending 仅余 02.3 的 G4 hard_gate），回归缺失时重新按 pending 处理；补齐并过三锚+十轮后复勾",
+    "event_green_subtests": 139
+  },
+  "test_registry": [
+    {
+      "id": "T00.2",
+      "leaf": "00.2",
+      "parent": "TestEventIntegrityReproduction",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityReproduction$",
+      "tags": [],
+      "tier": [
+        "diagnostic-baseline",
+        "event-short-final"
+      ],
+      "repeat": "1 red (expected nonzero) + 10 independent green; final green included in event-short",
+      "state": "to_be_added",
+      "contract_id": "00.2/TestEventIntegrityReproduction",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.1",
+      "leaf": "01.1",
+      "parent": "TestEventIntegrityNoticeIdentity",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/execution",
+      "file": "tests/integration/execution/event_integrity_test.go",
+      "selector": "^TestEventIntegrityNoticeIdentity$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.1/TestEventIntegrityNoticeIdentity",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.2",
+      "leaf": "01.2",
+      "parent": "TestEventIntegrityConsumptionRecovery",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/history",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityConsumptionRecovery$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.2/TestEventIntegrityConsumptionRecovery",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.3",
+      "leaf": "01.3",
+      "parent": "TestEventIntegrityTaskContinuation",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityTaskContinuation$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.3/TestEventIntegrityTaskContinuation",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.4",
+      "leaf": "01.4",
+      "parent": "TestEventIntegrityDelivery",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityDelivery$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.4/TestEventIntegrityDelivery",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.5",
+      "leaf": "01.5",
+      "parent": "TestEventIntegrityFormalAssembly",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityFormalAssembly$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.5/TestEventIntegrityFormalAssembly",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.6",
+      "leaf": "01.6",
+      "parent": "TestEventIntegrityHostAdapters",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_harness_test.go",
+      "selector": "^TestEventIntegrityHostAdapters$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.6/TestEventIntegrityHostAdapters",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T01.7",
+      "leaf": "01.7",
+      "parent": "TestEventIntegrityCLIAdapter",
+      "module": "tagent-cli-host",
+      "dir": "examples/cli-host",
+      "package": ".",
+      "file": "examples/cli-host/main_test.go",
+      "selector": "^TestEventIntegrityCLIAdapter$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.7/TestEventIntegrityCLIAdapter",
+      "module_path": "tagent-cli-host"
+    },
+    {
+      "id": "T01.8",
+      "leaf": "01.8",
+      "parent": "TestEventIntegrityPersistence",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/history",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityPersistence$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.8/TestEventIntegrityPersistence",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.9",
+      "leaf": "01.9",
+      "parent": "TestEventIntegrityRestoreUse",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/history",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityRestoreUse$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.9/TestEventIntegrityRestoreUse",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.10a",
+      "leaf": "01.10a",
+      "parent": "TestEventIntegrityExecLifecycle",
+      "module": ".",
+      "dir": ".",
+      "package": "./tool/exec",
+      "file": "tool/exec/event_integrity_test.go",
+      "selector": "^TestEventIntegrityExecLifecycle$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.10a/TestEventIntegrityExecLifecycle",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T01.10b",
+      "leaf": "01.10b",
+      "parent": "TestEventIntegrityExecStateEvents",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/execution",
+      "file": "tests/integration/execution/event_integrity_test.go",
+      "selector": "^TestEventIntegrityExecStateEvents$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "01.10b/TestEventIntegrityExecStateEvents",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.1",
+      "leaf": "02.1",
+      "parent": "TestEventIntegrityMeditationSchedule",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/evolution",
+      "file": "tests/integration/evolution/event_integrity_test.go",
+      "selector": "^TestEventIntegrityMeditationSchedule$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.1/TestEventIntegrityMeditationSchedule",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.2",
+      "leaf": "02.2",
+      "parent": "TestEventIntegrityReflectionDelivery",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityReflectionDelivery$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.2/TestEventIntegrityReflectionDelivery",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.3",
+      "leaf": "02.3",
+      "parent": "TestEventIntegrityProjection",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/history",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityProjection$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.3/TestEventIntegrityProjection",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.4",
+      "leaf": "02.4",
+      "parent": "TestEventIntegrityReplacement",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityReplacement$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.4/TestEventIntegrityReplacement",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.5",
+      "leaf": "02.5",
+      "parent": "TestEventIntegrityApproval",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/capabilities",
+      "file": "tests/integration/capabilities/event_integrity_test.go",
+      "selector": "^TestEventIntegrityApproval$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.5/TestEventIntegrityApproval",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.6",
+      "leaf": "02.6",
+      "parent": "TestEventIntegrityApprovalWeChat",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/wechat_test.go",
+      "selector": "^TestEventIntegrityApprovalWeChat$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.6/TestEventIntegrityApprovalWeChat",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T02.7",
+      "leaf": "02.7",
+      "parent": "TestEventIntegrityCapture",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/learning",
+      "file": "tests/integration/learning/event_integrity_test.go",
+      "selector": "^TestEventIntegrityCapture$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.7/TestEventIntegrityCapture",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T03.1",
+      "leaf": "03.1",
+      "parent": "TestEventIntegrityHarness",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/scripted_provider_test.go",
+      "selector": "^TestEventIntegrityHarness$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "extend_existing_fixture",
+      "contract_id": "03.1/TestEventIntegrityHarness",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "fixture_files": [
+        "tests/integration/host/scripted_provider_test.go",
+        "tests/integration/host/meditation_boot_test.go",
+        "tests/integration/host/public_runtime_entry_test.go"
+      ]
+    },
+    {
+      "id": "T03.2",
+      "leaf": "03.2",
+      "parent": "TestEventIntegrityIdentityMatrix",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityIdentityMatrix$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.2/TestEventIntegrityIdentityMatrix",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T03.3",
+      "leaf": "03.3",
+      "parent": "TestEventIntegrityDecisionFlowMatrix",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/event_integrity_test.go",
+      "selector": "^TestEventIntegrityDecisionFlowMatrix$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.3/TestEventIntegrityDecisionFlowMatrix",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T03.4",
+      "leaf": "03.4",
+      "parent": "TestEventIntegrityApprovalControl",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityApprovalControl$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.4/TestEventIntegrityApprovalControl",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T03.5",
+      "leaf": "03.5",
+      "parent": "TestEventIntegrityReflectionDeliveryControl",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityReflectionDeliveryControl$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.5/TestEventIntegrityReflectionDeliveryControl",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T03.6",
+      "leaf": "03.6",
+      "parent": "TestEventIntegrityFoldControl",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityFoldControl$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.6/TestEventIntegrityFoldControl",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T03.7",
+      "leaf": "03.7",
+      "parent": "TestEventIntegrityReplacementControl",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityReplacementControl$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.7/TestEventIntegrityReplacementControl",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T03.8",
+      "leaf": "03.8",
+      "parent": "TestEventIntegrityCaptureControl",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityCaptureControl$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.8/TestEventIntegrityCaptureControl",
+      "module_path": "wechat-bot"
+    },
+    {
+      "id": "T03.9",
+      "leaf": "03.9",
+      "parent": "TestEventIntegrityRestart",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/history",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "selector": "^TestEventIntegrityRestart$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "03.9/TestEventIntegrityRestart",
+      "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T03.11",
+      "leaf": "03.11",
+      "parent": "TestEventIntegrityLongRun",
+      "module": "wechat-bot",
+      "dir": "examples/wechat-bot",
+      "package": ".",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityLongRun$",
+      "tags": [
+        "smoke"
+      ],
+      "tier": "event-long",
+      "repeat": "6 combos x 1 (matrix once; 3 anchors share it) + delivery stability 10 per combo (implementation phase 72000/7200, not MR x10)",
+      "state": "to_be_added",
+      "contract_id": "03.11/TestEventIntegrityLongRun",
+      "module_path": "wechat-bot"
+    }
+  ],
+  "source_only_tests": [
+    {
+      "parent": "TestEventIntegrityControls",
+      "leaf": "03.3",
+      "module": "wechat-bot",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityControls$",
+      "status": "superseded",
+      "superseded_by": [
+        "03.4/TestEventIntegrityApprovalControl",
+        "03.5/TestEventIntegrityReflectionDeliveryControl",
+        "03.6/TestEventIntegrityFoldControl",
+        "03.7/TestEventIntegrityReplacementControl",
+        "03.8/TestEventIntegrityCaptureControl"
+      ],
+      "note": "旧 03.3 控制 monolith，十轮绿凭据已入账；按裁定拆为 03.4—03.8 五个父测试后代码保留，不进入 event 合同、选择器与父测试/锚计数；删除须另获授权"
+    },
+    {
+      "parent": "TestEventIntegrityLongRunCalibration",
+      "leaf": "03.10",
+      "module": "wechat-bot",
+      "file": "examples/wechat-bot/smoke_test.go",
+      "selector": "^TestEventIntegrityLongRunCalibration$",
+      "status": "off_contract",
+      "note": "一次性只读校准父测试（03.10 non_product）；三锚记在叶 verification，不进入 event 合同与父测试/锚计数，避免每 MR 重复付校准成本"
+    }
+  ],
+  "leaves": [
+    {
+      "id": "00.1",
+      "domain": "00-contract-evidence",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+      "depends_on": [],
+      "verify_after": [],
+      "write_files": [
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.json",
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.md"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "doc_checker",
+        "tier": "planning-checker",
+        "commands": [
+          "python3 -c \"import json,sys; d=json.load(open(sys.argv[1])); m=d['mechanisms']; assert [x['id'] for x in m]==[f'E{i}' for i in range(1,9)]; assert all(all(x.get(k) for k in ['id','mechanism','production_entry','fact_identity','consumers','confirmation_or_retention','unverified_assertion','spec_refs']) for x in m)\" openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.1-contract-inventory.json"
+        ],
+        "positive": [
+          "id 恰为 E1—E8 且顺序一致",
+          "E1-E8 八项字段非空",
+          "production_entry 逐项有 file:line 反查"
+        ],
+        "negative": [
+          "inventory_missing_mechanism"
+        ],
+        "consumer": [
+          "00.3 冻结件逐项引用 00.1 清单"
+        ],
+        "evidence": "evidence/00.1-contract-inventory.json"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "00.2",
+      "domain": "00-contract-evidence",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+      "depends_on": [
+        "03.1"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go",
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.json",
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.md"
+      ],
+      "tests": [
+        "T00.2"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": [
+          "diagnostic-baseline",
+          "event-short-final"
+        ],
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityReproduction$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "baseline_runs": 1,
+          "baseline_expected_exit": "nonzero: named business assertion failure",
+          "final_runs": 10,
+          "final_count": 1,
+          "race": true,
+          "independent": true,
+          "final_short_included": true
+        },
+        "positive": [
+          "TestEventIntegrityReproduction/control_normal_path"
+        ],
+        "negative": [
+          "TestEventIntegrityReproduction/duplicate_notice_material",
+          "TestEventIntegrityReproduction/busy_notice_loss"
+        ],
+        "consumer": [
+          "TestEventIntegrityReproduction/request_and_send_identity_correlation"
+        ],
+        "consumer_path": [
+          "Boot 实际 provider 请求与 sender 记录按通知身份逐条关联；不得手工 CommitToSession"
+        ],
+        "modes": [
+          "diagnostic-baseline: 红证单列，预期非零，不纳入十轮绿证",
+          "event-short-final: 修复后同一父测试十轮独立绿证，纳入 event-short，不因诊断角色永久排除"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/00.2/reproduction.jsonl + ${TMPDIR:-/tmp}/event-consumption-integrity/event-short/00.2/run-1..10.jsonl；change 内 evidence/00.2-reproduction.json|md 只留摘要与 log_ref",
+        "basis": {
+          "original_case_reproduced": false,
+          "static_risk": true,
+          "original_root_cause": false,
+          "note": "原微信案例未稳定复现；四个固定具名子测试以已确认静态风险为证据基础，不得声称复现原案例根因。",
+          "new_scenario_rule": "未来确需新增静态风险场景时，先同步 04.1 manifest 与 test_registry，再加固定具名子测试；禁止以动态通配子测试替代固定具名子测试。"
+        },
+        "subtests": [
+          "control_normal_path",
+          "duplicate_notice_material",
+          "busy_notice_loss",
+          "request_and_send_identity_correlation"
+        ],
+        "subtests_fixed": true
+      },
+      "status": "planned"
+    },
+    {
+      "id": "00.3",
+      "domain": "00-contract-evidence",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+      "depends_on": [
+        "00.1",
+        "00.2",
+        "00.4"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json",
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.md"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "doc_checker",
+        "tier": "planning-checker",
+        "commands": [
+          "python3 -c \"import json,sys; d=json.load(open(sys.argv[1])); assert len(d['axes'])==5 and len(d['mechanisms'])==8; assert 'confirmed' not in d; defects=d['defects']; assert all(isinstance(x.get('confirmed'),bool) for x in defects); assert all(x.get('repair_leaf') and x.get('negative_anchor') for x in defects if x.get('confirmed')); unresolved=d['unresolved']; assert all(x.get('blocked_leaves') and x.get('blocked') is True for x in unresolved)\" openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json"
+        ],
+        "positive": [
+          "axes 恰 5 项",
+          "mechanisms 恰 E1—E8",
+          "defects[] 每项有 confirmed 布尔；confirmed=true 有 repair_leaf/negative_anchor；confirmed=false 有非空 blocked_leaves 且 blocked=true"
+        ],
+        "negative": [
+          "unresolved_without_blocked_leaf",
+          "top_level_confirmed_array_rejected"
+        ],
+        "consumer": [
+          "01.1/01.3/04.1 读取冻结件"
+        ],
+        "gate": "defects[].confirmed=false 或 invocation_version_conflict=blocked 时，对应 repair_leaf 的 01.1/01.3 blocked，不得新建 invocation 绕过",
+        "evidence": "evidence/00.3-frozen-contract.json"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "00.4",
+      "domain": "00-contract-evidence",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+      "depends_on": [
+        "00.1"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.json",
+        "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.4-baseline.md"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "doc_checker",
+        "tier": "baseline",
+        "commands": [
+          "go test -count=1 ./...",
+          "go -C examples/wechat-bot test -tags smoke -count=1 ./...",
+          "go -C examples/cli-host test -count=1 ./...",
+          "python3 scripts/run_runtime_scenarios.py --scope deterministic"
+        ],
+        "positive": [
+          "既有 deterministic 场景全部有记录",
+          "三模块命令均有原始退出码"
+        ],
+        "negative": [
+          "baseline_red_without_isolated_rerun"
+        ],
+        "consumer": [
+          "05.1/05.4/F2 复用该基线"
+        ],
+        "isolation": "基线提交独立工作树/副本；干净基线先测，不与新测试同树；不得以 skip 过滤排除新测试",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/00.4/{root-all,wechat-all,cli-all,deterministic}.jsonl；change 内 evidence/00.4-baseline.json|md 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.1",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/execution/event_integrity_test.go",
+        "runtime/task/wrapper.go",
+        "runtime/task/manager.go",
+        "runtime/agent/delegate.go",
+        "runtime/agent/loop.go",
+        "tools.go",
+        "facts.go",
+        "run.go",
+        "invoke.go",
+        "host.go",
+        "runtime/task/registry.go",
+        "runtime/task/fact.go",
+        "runtime/task/commit.go",
+        "runtime/task/handoff.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.1-summary.json"
+      ],
+      "tests": [
+        "T01.1"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/execution -run '^TestEventIntegrityNoticeIdentity$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityNoticeIdentity/tool_and_subagent_notice_reaches_original_invocation",
+          "TestEventIntegrityNoticeIdentity/multiple_progress_ordered_by_seq",
+          "TestEventIntegrityNoticeIdentity/handoff_preserves_issued_target"
+        ],
+        "negative": [
+          "TestEventIntegrityNoticeIdentity/duplicate_delivery",
+          "TestEventIntegrityNoticeIdentity/conflicting_body_same_identity",
+          "TestEventIntegrityNoticeIdentity/cross_invocation_not_merged"
+        ],
+        "consumer": [],
+        "consumer_path": [
+          "Boot -> Host.Invoke -> 声明工具/子代理 -> runtime/task -> Run.deliver -> facts.go sink/bookNotice/noticeProjection"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.1/run-1..10.jsonl + exits.txt；change 内 evidence/01.1-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.2",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.1"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/history/event_integrity_test.go",
+        "runtime/state/mailbox.go",
+        "runtime/state/durable.go",
+        "runtime/state/session.go",
+        "runtime/state/memory.go",
+        "runtime/task/restore.go",
+        "runtime/task/commit.go",
+        "runtime/task/lifecycle.go",
+        "runtime/agent/loop.go",
+        "host.go",
+        "prepare.go",
+        "run.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.2-summary.json"
+      ],
+      "tests": [
+        "T01.2"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/history -run '^TestEventIntegrityConsumptionRecovery$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityConsumptionRecovery/claim_then_commit_retry_recovers",
+          "TestEventIntegrityConsumptionRecovery/consume_only_after_durable_commit",
+          "TestEventIntegrityConsumptionRecovery/independent_process_restart"
+        ],
+        "negative": [
+          "TestEventIntegrityConsumptionRecovery/claim_does_not_confirm_early",
+          "TestEventIntegrityConsumptionRecovery/no_skip_over_gap",
+          "TestEventIntegrityConsumptionRecovery/consumed_entry_not_reprocessed",
+          "TestEventIntegrityConsumptionRecovery/handover_before_confirmation"
+        ],
+        "consumer": [],
+        "consumer_path": [
+          "既有 task 提交/恢复 + mailbox Claim/Consume；Boot 恢复读取同一 durable 根；父子进程真实重启"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.2/run-1..10.jsonl + exits.txt；change 内 evidence/01.2-summary.json 只留摘要与 log_ref",
+        "pending_anchors": [
+          "TestEventIntegrityConsumptionRecovery/handover_before_confirmation"
+        ]
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.3",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.2",
+        "03.1"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go",
+        "host.go",
+        "invoke.go",
+        "settle_turn.go",
+        "facts.go",
+        "runtime/agent/loop.go",
+        "runtime/task/registry.go",
+        "runtime/task/handoff.go",
+        "runtime/state/mailbox.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.3-summary.json"
+      ],
+      "tests": [
+        "T01.3"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityTaskContinuation$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityTaskContinuation/idle_notice_drives_next_decision",
+          "TestEventIntegrityTaskContinuation/busy_notice_retained_and_consumed",
+          "TestEventIntegrityTaskContinuation/two_tasks_same_host_each_continuation",
+          "TestEventIntegrityTaskContinuation/multi_session_same_host_isolated",
+          "TestEventIntegrityTaskContinuation/late_notice_not_dropped",
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection",
+          "TestEventIntegrityTaskContinuation/notice_visible_under_small_window"
+        ],
+        "negative": [
+          "TestEventIntegrityTaskContinuation/no_duplicate_input_for_same_notice",
+          "TestEventIntegrityTaskContinuation/busy_notice_not_dropped",
+          "TestEventIntegrityTaskContinuation/no_new_invocation_for_notice"
+        ],
+        "consumer": [],
+        "consumer_path": [
+          "Boot -> Host.Invoke/fireNoticeTurn -> SettleDriver.ObserveCommit -> Loop.Backflow -> 原 invocation 下一步 decision"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.3/run-1..10.jsonl + exits.txt；change 内 evidence/01.3-summary.json 只留摘要与 log_ref",
+        "pending_anchors": [
+          "TestEventIntegrityTaskContinuation/notice_input_without_projection"
+        ]
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.4",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go",
+        "host.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.4-summary.json"
+      ],
+      "tests": [
+        "T01.4"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityDelivery$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityDelivery/all_legal_actions_delivered",
+          "TestEventIntegrityDelivery/confirmed_action_reentry_no_resend",
+          "TestEventIntegrityDelivery/unknown_result_retained",
+          "TestEventIntegrityDelivery/explicit_retry_keeps_link"
+        ],
+        "negative": [
+          "TestEventIntegrityDelivery/confirmed_action_not_resent",
+          "TestEventIntegrityDelivery/unknown_result_not_auto_resent",
+          "TestEventIntegrityDelivery/distinct_actions_not_merged"
+        ],
+        "consumer": [],
+        "consumer_path": [
+          "Boot 声明式 send 工具 -> MessageSender；用户 turn -> deliverFresh；记录型 sender 观察实际动作次数与动作身份"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.4/run-1..10.jsonl + exits.txt；change 内 evidence/01.4-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.5",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.4",
+        "02.1",
+        "02.2",
+        "02.3",
+        "02.4",
+        "02.5",
+        "02.7"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go",
+        "host.go",
+        "run.go",
+        "prepare.go",
+        "tools.go",
+        "facts.go",
+        "request.go",
+        "invoke.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.5-summary.json"
+      ],
+      "tests": [
+        "T01.5"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityFormalAssembly$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityFormalAssembly/formal_boot_delivers_turn"
+        ],
+        "negative": [
+          "TestEventIntegrityFormalAssembly/missing_sender_fails_closed"
+        ],
+        "consumer": [
+          "TestEventIntegrityFormalAssembly/formal_boot_delivers_turn"
+        ],
+        "consumer_path": [],
+        "consumer_note": "根 Boot -> Host.Invoke；声明式 send 工具与 deliverFresh 由产品入口完成真实回合",
+        "boundary": "汇入 02 域根接线：消费 02.1—02.5、02.7 的根接线产物 ready 并完成正式装配；微信宿主装配归 01.6，CLI 宿主装配归 01.7；02.6 微信审批经 01.6 回验，不并入本叶前置。",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.5/run-1..10.jsonl + exits.txt；change 内 evidence/01.5-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.6",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.4"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "examples/wechat-bot/smoke_harness_test.go",
+        "examples/wechat-bot/main.go",
+        "examples/wechat-bot/wechat.go",
+        "examples/wechat-bot/wechat_approval.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.6-summary.json"
+      ],
+      "tests": [
+        "T01.6"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -tags smoke -run '^TestEventIntegrityHostAdapters$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "per_module": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityHostAdapters/formal_channel_turn"
+        ],
+        "negative": [
+          "TestEventIntegrityHostAdapters/missing_entry_fails_closed"
+        ],
+        "consumer": [
+          "TestEventIntegrityHostAdapters/formal_channel_turn"
+        ],
+        "consumer_path": [],
+        "consumer_note": "微信 newWechatApp -> Boot -> bindWechat -> bindChannel -> registerHandlers；由产品入口完成真实回合",
+        "boundary": "微信宿主装配：02.6 微信审批经本叶回验；根正式装配归 01.5，CLI 宿主装配归 01.7。",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.6/run-1..10.jsonl + exits.txt；change 内 evidence/01.6-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.7",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.4"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "examples/cli-host/main_test.go",
+        "examples/cli-host/main.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.7-summary.json"
+      ],
+      "tests": [
+        "T01.7"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/cli-host test -run '^TestEventIntegrityCLIAdapter$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityCLIAdapter/formal_cli_turn"
+        ],
+        "negative": [
+          "TestEventIntegrityCLIAdapter/missing_model_key_fails_closed"
+        ],
+        "consumer": [
+          "TestEventIntegrityCLIAdapter/formal_cli_turn"
+        ],
+        "consumer_path": [],
+        "consumer_note": "CLI run；由产品入口完成真实回合",
+        "boundary": "CLI 宿主装配；根正式装配归 01.5，微信宿主装配归 01.6。",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.7/run-1..10.jsonl + exits.txt；change 内 evidence/01.7-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.8",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/history/event_integrity_test.go",
+        "facts.go",
+        "run.go",
+        "prepare.go",
+        "request.go",
+        "memory/recall.go",
+        "memory/store_query.go",
+        "memory/ledger/tier_facts.go",
+        "memory/ledger/localfile.go",
+        "memory/search/store_searcher.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.8-summary.json"
+      ],
+      "tests": [
+        "T01.8"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/history -run '^TestEventIntegrityPersistence$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityPersistence/new_fact_recalled_same_turn",
+          "TestEventIntegrityPersistence/original_text_matches_committed_bytes",
+          "TestEventIntegrityPersistence/formal_recall_tool_returns_new_fact"
+        ],
+        "negative": [
+          "TestEventIntegrityPersistence/storage_failure_not_reported_as_success",
+          "TestEventIntegrityPersistence/index_failure_leaves_recoverable_debt",
+          "TestEventIntegrityPersistence/new_fact_keeps_old_reachable"
+        ],
+        "consumer": [
+          "TestEventIntegrityPersistence/formal_recall_tool_returns_new_fact"
+        ],
+        "consumer_path": [
+          "Boot/Host.Invoke 正式回合 -> commitFact/durable 载体 -> 检索索引/StoreQuerySource -> host.go recall.New -> tool/subagent 声明式 recall -> Run.RecallReads()"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.8/run-1..10.jsonl + exits.txt；change 内 evidence/01.8-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.9",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.8"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/history/event_integrity_test.go",
+        "run.go",
+        "prepare.go",
+        "request.go",
+        "memory/recall.go",
+        "memory/store_query.go",
+        "memory/ledger/tier_facts.go",
+        "memory/ledger/localfile.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.9-summary.json"
+      ],
+      "tests": [
+        "T01.9"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/history -run '^TestEventIntegrityRestoreUse$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityRestoreUse/restart_restores_original_text",
+          "TestEventIntegrityRestoreUse/restart_restores_invocation_attribution",
+          "TestEventIntegrityRestoreUse/restart_restores_tool_call_result_pairing",
+          "TestEventIntegrityRestoreUse/next_request_uses_restored_material"
+        ],
+        "negative": [
+          "TestEventIntegrityRestoreUse/restore_only_ledger_is_not_completion"
+        ],
+        "consumer": [
+          "TestEventIntegrityRestoreUse/next_request_uses_restored_material"
+        ],
+        "consumer_path": [
+          "Boot 重开同一 durable 根 -> 恢复原文/归属/工具配对 -> Host.Invoke 下一实际请求"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.9/run-1..10.jsonl + exits.txt；change 内 evidence/01.9-summary.json 只留摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.10a",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tool/exec/event_integrity_test.go",
+        "tool/exec/tool.go",
+        "tool/exec/exec.go",
+        "tool/exec/monitor.go",
+        "tool/exec/tmux_executor.go",
+        "tool/exec/stop.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10a-summary.json"
+      ],
+      "tests": [
+        "T01.10a"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tool/exec -run '^TestEventIntegrityExecLifecycle$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityExecLifecycle/returned_call_does_not_prove_exit",
+          "TestEventIntegrityExecLifecycle/same_key_capture_sees_more_output",
+          "TestEventIntegrityExecLifecycle/release_reports_exit_code",
+          "TestEventIntegrityExecLifecycle/released_or_named_unknown"
+        ],
+        "negative": [
+          "TestEventIntegrityExecLifecycle/stable_is_not_success",
+          "TestEventIntegrityExecLifecycle/partial_output_is_not_completion"
+        ],
+        "consumer": [
+          "TestEventIntegrityExecLifecycle/returned_call_does_not_prove_exit"
+        ],
+        "consumer_path": [
+          "RunTool.Call（tool/exec 正式执行入口）→ Manager(Acquire/Renew/Observe/Capture/Release/Explain) → Capture/Held 与 Release(exit=N)/retained/ErrResourceUnknown 查询面；Capture 答案不证明进程结束"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.10a/run-1..10.jsonl + exits.txt；change 内 evidence/01.10a-summary.json 只留摘要与 log_ref；共同输入 evidence/01.10-summary.json（停报五态归因与泄漏实证）"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "01.10b",
+      "domain": "01-runtime-consumption",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+      "depends_on": [
+        "01.10a",
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/execution/event_integrity_test.go",
+        "tool/exec/tool.go",
+        "tool/exec/exec.go",
+        "tool/exec/monitor.go",
+        "tool/exec/tmux_executor.go",
+        "tool/exec/stop.go",
+        "host.go",
+        "run.go",
+        "prepare.go",
+        "tools.go",
+        "facts.go",
+        "request.go",
+        "invoke.go",
+        "settle_turn.go",
+        "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.10b-summary.json"
+      ],
+      "tests": [
+        "T01.10b"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/execution -run '^TestEventIntegrityExecStateEvents$' -count=1 -race -json -timeout 5m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityExecStateEvents/lease_keeps_renewing_after_return",
+          "TestEventIntegrityExecStateEvents/state_change_emits_followup_notice",
+          "TestEventIntegrityExecStateEvents/next_turn_consumes_exec_state",
+          "TestEventIntegrityExecStateEvents/host_close_releases_exec_resources",
+          "TestEventIntegrityExecStateEvents/restart_takes_over_or_names_unconfirmed"
+        ],
+        "negative": [
+          "TestEventIntegrityExecStateEvents/unconfirmed_restart_not_reported_stopped"
+        ],
+        "consumer": [
+          "TestEventIntegrityExecStateEvents/next_turn_consumes_exec_state"
+        ],
+        "consumer_path": [
+          "Boot 声明工具 → RunTool.Call → Manager/MonitorWatch → 既有通知消费链（sink/Backflow）→ 状态变化后续通知；生产 Sweep 与 Host.Close 经同一 exec Manager 触达资源"
+        ],
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/01.10b/run-1..10.jsonl + exits.txt；change 内 evidence/01.10b-summary.json 只留摘要与 log_ref；共同输入 evidence/01.10-summary.json（停报五态归因与泄漏实证）"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.1",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/evolution/event_integrity_test.go",
+        "evolution/meditation/reflection.go",
+        "evolution/meditation/driver.go",
+        "evolution/meditation/watermark.go"
+      ],
+      "tests": [
+        "T02.1"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/evolution -run '^TestEventIntegrityMeditationSchedule$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityMeditationSchedule/new_material_on_cadence",
+          "TestEventIntegrityMeditationSchedule/cold_start_passes_through"
+        ],
+        "negative": [
+          "TestEventIntegrityMeditationSchedule/non_completed_terminal_defers",
+          "TestEventIntegrityMeditationSchedule/busy_observation_holds_watermark",
+          "TestEventIntegrityMeditationSchedule/own_product_no_reentry"
+        ],
+        "consumer": [
+          "TestEventIntegrityMeditationSchedule/formal_reflection_consumer"
+        ],
+        "consumer_note": "tagent.Boot 装配 meditation.Driver/NewReflection -> Run.ReflectionInput",
+        "evidence": "/tmp/event-consumption-integrity/02.1/run-1..10.json + exits.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.2",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go",
+        "evolution/meditation/deliver.go"
+      ],
+      "tests": [
+        "T02.2"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityReflectionDelivery$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityReflectionDelivery/explicit_call_reaches_target_session",
+          "TestEventIntegrityReflectionDelivery/same_batch_yield_is_legal_success"
+        ],
+        "negative": [
+          "TestEventIntegrityReflectionDelivery/zero_live_target_not_success",
+          "TestEventIntegrityReflectionDelivery/partial_commit_failure_not_success",
+          "TestEventIntegrityReflectionDelivery/wrong_target_no_extra_write",
+          "TestEventIntegrityReflectionDelivery/empty_whitelist_fail_closed",
+          "TestEventIntegrityReflectionDelivery/unknown_target_named_refusal",
+          "TestEventIntegrityReflectionDelivery/target_not_running_named_refusal",
+          "TestEventIntegrityReflectionDelivery/delivery_does_not_rearm_novelty",
+          "TestEventIntegrityReflectionDelivery/replay_identity"
+        ],
+        "consumer": [
+          "TestEventIntegrityReflectionDelivery/boot_deliver_to_target_request"
+        ],
+        "consumer_note": "Boot -> toolsFor 授予 deliver_summary -> NewDeliverSummaryTool -> CommitToSession -> 目标会话下一次真实请求",
+        "hard_gate": "G2 replay 身份未验则本叶不勾选；不得以内容摘要/时间窗代替动作身份",
+        "evidence": "/tmp/event-consumption-integrity/02.2/run-1..10.json + exits.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.3",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/history/event_integrity_test.go",
+        "age_fold.go",
+        "memory/replay/age_segments.go",
+        "memory/replay/replay_budget.go",
+        "memory/replay/fold.go",
+        "memory/replay/projection.go",
+        "memory/replay/replay_settle.go"
+      ],
+      "tests": [
+        "T02.3"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/history -run '^TestEventIntegrityProjection$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityProjection/small_window_fold_and_restore",
+          "TestEventIntegrityProjection/rebuild_refolds_from_wal"
+        ],
+        "negative": [
+          "TestEventIntegrityProjection/unconsumed_not_lost",
+          "TestEventIntegrityProjection/rebuild_does_not_refold",
+          "TestEventIntegrityProjection/fold_product_no_self_trigger",
+          "TestEventIntegrityProjection/notice_visible_under_fold"
+        ],
+        "consumer": [
+          "TestEventIntegrityProjection/actual_request_assembly"
+        ],
+        "consumer_note": "AgeFoldPlugin.ObserveCommit -> ReplayProjection.FoldByAge -> request.projectedSegment；RebuildProjectionFromWAL 只复原投影",
+        "evidence": "/tmp/event-consumption-integrity/02.3/run-1..10.json + exits.txt",
+        "note": "G4 user ruling: fold is a projection form of events; rebuild refolds from WAL by the same rule; no new fold write after rebuild; EVID-04 negative anchor notice_visible_under_fold"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.4",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go",
+        "host_reload.go",
+        "host_model.go",
+        "rl/replacement.go",
+        "rl/lease_model.go",
+        "rl/lease_observer.go"
+      ],
+      "tests": [
+        "T02.4"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityReplacement$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityReplacement/new_request_gets_new_version",
+          "TestEventIntegrityReplacement/inflight_stream_keeps_start_version"
+        ],
+        "negative": [
+          "TestEventIntegrityReplacement/duplicate_same_version_not_reinstalled",
+          "TestEventIntegrityReplacement/failed_replacement_not_installed"
+        ],
+        "consumer": [
+          "TestEventIntegrityReplacement/formal_reload_entry"
+        ],
+        "consumer_note": "Host.Reload / POST /reload -> Run.NoteModelChange -> rl.NewLeaseModel/ModelLease.Replace -> 请求侧版本",
+        "semantics": "重复替换只要求不重复发布/安装且结果可判定；不要求公共 Reload 必须报错",
+        "evidence": "/tmp/event-consumption-integrity/02.4/run-1..10.json + exits.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.5",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/capabilities/event_integrity_test.go",
+        "evolution/governance/policy.go",
+        "runtime/task/approval/approval.go",
+        "runtime/task/approval/approval_store.go"
+      ],
+      "tests": [
+        "T02.5"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/capabilities -run '^TestEventIntegrityApproval$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityApproval/approved_then_executes_once"
+        ],
+        "negative": [
+          "TestEventIntegrityApproval/unapproved_never_executes",
+          "TestEventIntegrityApproval/rejected_never_executes",
+          "TestEventIntegrityApproval/expired_response_refused",
+          "TestEventIntegrityApproval/changed_args_requires_new_approval",
+          "TestEventIntegrityApproval/duplicate_response_no_second_execution",
+          "TestEventIntegrityApproval/wrong_target_no_overreach",
+          "TestEventIntegrityApproval/channel_delivery_failure_does_not_block"
+        ],
+        "consumer": [
+          "TestEventIntegrityApproval/formal_governance_task_wrapper"
+        ],
+        "consumer_note": "治理策略 -> runtime/task/wrapper.go -> 执行",
+        "boundary": "根 CLI `tagent approve <digest>` 保留为独立待验项；微信审批（runApprovalCLI/approvalGateway.Resolve）归 02.6。",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/02.5/run-1..10.json + exits.txt；摘要回填根 ORCHESTRATION 台账"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.6",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.6"
+      ],
+      "write_files": [
+        "examples/wechat-bot/wechat_test.go",
+        "examples/wechat-bot/wechat_approval.go"
+      ],
+      "tests": [
+        "T02.6"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -run '^TestEventIntegrityApprovalWeChat$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "per_module": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityApprovalWeChat/parse_approve_reject",
+          "TestEventIntegrityApprovalWeChat/approval_request_fanout"
+        ],
+        "negative": [
+          "TestEventIntegrityApprovalWeChat/ambiguous_prefix_refused",
+          "TestEventIntegrityApprovalWeChat/unknown_digest_refused",
+          "TestEventIntegrityApprovalWeChat/non_approver_refused"
+        ],
+        "consumer": [
+          "TestEventIntegrityApprovalWeChat/wechat_cli_entry"
+        ],
+        "consumer_note": "runApprovalCLI 写回应文件；approvalGateway.Resolve -> ApprovalManager",
+        "boundary": "微信审批测试只扩展既有 examples/wechat-bot/wechat_test.go；端到端微信往返归 01.6/03.4 复验；根 CLI `tagent approve <digest>` 仍为独立待验项。",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/02.6/run-1..10.json + exits.txt；摘要回填根 ORCHESTRATION 台账"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "02.7",
+      "domain": "02-event-consumers",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/learning/event_integrity_test.go",
+        "host_capture.go",
+        "rl/capture_wiring.go",
+        "rl/sink.go",
+        "rl/produce.go",
+        "rl/export_chain.go",
+        "tool/subagent/capture.go",
+        "tool/subagent/builder.go"
+      ],
+      "tests": [
+        "T02.7"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/learning -run '^TestEventIntegrityCapture$' -count=1 -race -json"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityCapture/requests_and_attempts_match_records"
+        ],
+        "negative": [
+          "TestEventIntegrityCapture/failed_attempt_recorded_as_failure",
+          "TestEventIntegrityCapture/rejected_admission_in_loss_ledger",
+          "TestEventIntegrityCapture/no_request_no_record",
+          "TestEventIntegrityCapture/export_correlation_is_not_reward"
+        ],
+        "consumer": [
+          "TestEventIntegrityCapture/formal_capture_then_offline_export"
+        ],
+        "consumer_note": "Boot -> openHostCapture/hostRunCapture.Record -> Run.SessionFacts -> rl.NewChainExporter/Export -> manifest/attempt/sample 逐项关联",
+        "hard_gate": "G6 导出关联未验则本叶不勾选；零生产引用不等于必须新增 CLI，不自动接 Boot 导出",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/02.7/run-1..10.json + exits.txt；摘要回填根 ORCHESTRATION 台账"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.1",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [],
+      "verify_after": [],
+      "write_files": [
+        "tests/integration/host/scripted_provider_test.go",
+        "tests/integration/host/meditation_boot_test.go",
+        "tests/integration/host/public_runtime_entry_test.go"
+      ],
+      "tests": [
+        "T03.1"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityHarness$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityHarness/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityHarness/negative"
+        ],
+        "scenario_notes": {
+          "positive": "合法多决策脚本全链跑通，动作逐身份可读",
+          "negative": "未预期模型请求/缺结果/重复动作必须失败；不得以 sleep 后暂无消息作为无重复证据"
+        },
+        "consumer": [
+          "TestEventIntegrityHarness/consumer"
+        ],
+        "consumer_note": "Boot 装配消费真实请求",
+        "fixture": "扩展现有 scripted_provider_test.go：保留 answer(index)，补内容/身份选择、记录型 sender、模型/工具屏障、可确认排空点与只读原始观测；复用 meditation_boot_test.go/public_runtime_entry_test.go 的 Boot/公开 Run 入口，不另建第二套基座",
+        "evidence": "/tmp/event-consumption-integrity/03.1/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.2",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go"
+      ],
+      "tests": [
+        "T03.2"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityIdentityMatrix$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityIdentityMatrix/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityIdentityMatrix/negative"
+        ],
+        "scenario_notes": {
+          "positive": "同正文不同身份两条输入均保留；同身份重送只消费一次；两会话通知与动作各归其身份、互不串",
+          "negative": "按正文去重、跨会话串身份、重送二次消费、身份/目标错配即失败"
+        },
+        "consumer": [
+          "TestEventIntegrityIdentityMatrix/consumer"
+        ],
+        "consumer_note": "Run.Invoke/Host.Invoke/Boot 装配驱动，观测来自实际请求与发送记录",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.2/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.3",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/host/event_integrity_test.go"
+      ],
+      "tests": [
+        "T03.3"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/host -run '^TestEventIntegrityDecisionFlowMatrix$' -count=1 -race -json -timeout 10m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityDecisionFlowMatrix/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityDecisionFlowMatrix/negative"
+        ],
+        "scenario_notes": {
+          "positive": "send 后原 invocation 继续决策；忙时通知保留并空闲续转；工具与子代理通知各自续转且合法动作全保留",
+          "negative": "忙时丢通知、续转新建 invocation、同一通知二次生成输入、子代理通知丢结果即失败"
+        },
+        "consumer": [
+          "TestEventIntegrityDecisionFlowMatrix/consumer"
+        ],
+        "consumer_note": "根公开入口驱动，动作与请求由实际观测派生",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.3/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.4",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [
+        "T03.4"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityApprovalControl$' -count=1 -race -json -timeout 30m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityApprovalControl/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityApprovalControl/negative"
+        ],
+        "scenario_notes": {
+          "positive": "held -> approved -> executed once；批准后同一 digest 不二次执行",
+          "negative": "错误裁决不驱动请求；过期/改参回应不沿用旧批准；审批人会话零出站；无会话 /task 503"
+        },
+        "consumer": [
+          "TestEventIntegrityApprovalControl/consumer"
+        ],
+        "consumer_note": "配置 -> Boot -> 渠道绑定 -> registerHandlers -> HTTP /task 审批重试全链；动作归审批人会话",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.4/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.5",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [
+        "T03.5"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReflectionDeliveryControl$' -count=1 -race -json -timeout 30m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityReflectionDeliveryControl/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityReflectionDeliveryControl/negative"
+        ],
+        "scenario_notes": {
+          "positive": "回流落授权目标一次，下一次正式请求可见且只一次",
+          "negative": "越权目标具名拒绝可读、拒绝后合法路径仍通、回流不重置目标新颖度（不重入新颖门）"
+        },
+        "consumer": [
+          "TestEventIntegrityReflectionDeliveryControl/consumer"
+        ],
+        "consumer_note": "deliver_summary -> InjectReflection -> 目标下一次请求",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.5/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.6",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [
+        "T03.6"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -race -json -timeout 30m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityFoldControl/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityFoldControl/negative"
+        ],
+        "scenario_notes": {
+          "positive": "256 窗口折叠实际触发、原文票据可达、综述进入下一次正式请求装配",
+          "negative": "折叠产物自激、重建再折叠、原文票据不可达即失败"
+        },
+        "consumer": [
+          "TestEventIntegrityFoldControl/consumer"
+        ],
+        "consumer_note": "正式请求装配（request.projectedSegment）消费折叠产物",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.6/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.7",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [
+        "T03.7"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReplacementControl$' -count=1 -race -json -timeout 30m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityReplacementControl/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityReplacementControl/negative"
+        ],
+        "scenario_notes": {
+          "positive": "/reload 安装新版本、下一 /task 请求取新版本、在途流保持开始版本",
+          "negative": "同版本重复安装、替换失败仍安装、在途请求版本漂移被接受即失败"
+        },
+        "consumer": [
+          "TestEventIntegrityReplacementControl/consumer"
+        ],
+        "consumer_note": "/reload -> /task 正式 HTTP 链",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.7/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.8",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [
+        "T03.8"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityCaptureControl$' -count=1 -race -json -timeout 30m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityCaptureControl/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityCaptureControl/negative"
+        ],
+        "scenario_notes": {
+          "positive": "attempts.jsonl 记录数与实际模型请求数逐项相等，seal 后 dropped=0、in-flight=0",
+          "negative": "未发生请求产生记录、失败尝试记为成功、准入拒绝不入损失账目、seal 后仍有在途即失败"
+        },
+        "consumer": [
+          "TestEventIntegrityCaptureControl/consumer"
+        ],
+        "consumer_note": "attempts.jsonl 正式读取路径核对（测试只读消费）",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.8/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.9",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "01.2"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "tests/integration/history/event_integrity_test.go"
+      ],
+      "tests": [
+        "T03.9"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-short",
+        "commands": [
+          "go test ./tests/integration/history -run '^TestEventIntegrityRestart$' -count=1 -race -json -timeout 30m"
+        ],
+        "repeat": {
+          "runs": 10,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityRestart/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityRestart/negative"
+        ],
+        "scenario_notes": {
+          "positive": "提交前/后、领取后、完成确认前/后中断，重启后义务恢复、已确认不重做、未确认不丢",
+          "negative": "已确认动作重入再发、未确认义务丢失、跨边界误判均失败"
+        },
+        "consumer": [
+          "TestEventIntegrityRestart/consumer"
+        ],
+        "consumer_note": "新子进程正式 Boot 后首次实际请求与发送记录",
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.9/run-1..10.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.10",
+      "domain": "03-formal-simulation",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.1",
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "go_test_calibration",
+        "tier": "calibration",
+        "commands": [
+          "for window in 256 32768; do go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRunCalibration$' -count=1 -race -json -timeout 60m -args -window=$window || exit 1; done"
+        ],
+        "repeat": {
+          "windows": [
+            256,
+            32768
+          ],
+          "runs_per_window": 1,
+          "independent": true,
+          "count": 1,
+          "race": true,
+          "forbid_count_flag": 10
+        },
+        "positive": [
+          "TestEventIntegrityLongRunCalibration/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityLongRunCalibration/negative"
+        ],
+        "scenario_notes": {
+          "positive": "六项成本（冷构建/热运行/120 重启/-race/存储增长/峰值资源）均有实测值，两窗口各自成样本",
+          "negative": "缺项、以固定超时冒充成本、少量样本宣称 p95、超预算未上报即失败"
+        },
+        "consumer": [
+          "TestEventIntegrityLongRunCalibration/consumer"
+        ],
+        "consumer_note": "校准报告被 05.1 预算冻结与 timeout-minutes 消费（同一 JSON 字段）",
+        "off_contract": "non_product 叶；父测试登记在 source_only_tests（off_contract），不进 event 合同/选择器与父测试/锚计数；被否方案见 design D8.1",
+        "invariants": [
+          "一次性只读校准，不是每 MR 绿测",
+          "两窗口各自测量一次单组合成本",
+          "报告是 05.1 预算冻结的唯一输入，不另建第二份预算表"
+        ],
+        "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
+        "evidence": "/tmp/event-consumption-integrity/03.10/calibration-window256.jsonl + calibration-window32768.jsonl + run-ids.txt"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "03.11",
+      "domain": "03-formal-simulation",
+      "kind": "product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+      "depends_on": [
+        "03.2",
+        "03.3",
+        "03.9",
+        "03.10"
+      ],
+      "verify_after": [
+        "01.5"
+      ],
+      "write_files": [
+        "examples/wechat-bot/smoke_test.go",
+        "examples/wechat-bot/smoke_harness_test.go"
+      ],
+      "tests": [
+        "T03.11"
+      ],
+      "verification": {
+        "kind": "go_test",
+        "tier": "event-long",
+        "commands": [
+          "for seed in 1 7 42; do for window in 256 32768; do go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRun$' -count=1 -race -json -timeout 45m -args -seed=$seed -window=$window || exit 1; done; done",
+          "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/03.11/delivery\"; mkdir -p \"$E\"; for s in 1 7 42; do for w in 256 32768; do mkdir -p \"$E/seed-$s-window-$w\"; for i in $(seq 1 10); do go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRun$' -count=1 -race -json -timeout 45m -args -seed=$s -window=$w > \"$E/seed-$s-window-$w/run-$i.jsonl\" 2>&1 || exit 1; done; done; done"
+        ],
+        "repeat": {
+          "combos": 6,
+          "per_combo_runs": 1,
+          "count": 1,
+          "race": true,
+          "matrix_total_runs": 6,
+          "delivery_stability_runs_per_combo": 10,
+          "delivery_stability_total_runs": 60,
+          "delivery_stability_phase": "implementation-stability",
+          "delivery_stability_is_mr_gate": false,
+          "delivery_stability_budget": "separate from MR matrix",
+          "forbid_count_flag": 10
+        },
+        "matrix": {
+          "seeds": [
+            1,
+            7,
+            42
+          ],
+          "windows": [
+            256,
+            32768
+          ],
+          "sessions_per_host": 4,
+          "inputs_per_session": 300,
+          "inputs_per_combo": 1200,
+          "restarts_per_session": 30,
+          "restarts_per_combo": 120,
+          "inputs_total": 7200,
+          "restarts_total": 720,
+          "single_shard": "1200/120",
+          "matrix_total_runs": 6,
+          "anchor_count": 3,
+          "matrix_runs_once": true,
+          "no_tripling": true
+        },
+        "positive": [
+          "TestEventIntegrityLongRun/positive"
+        ],
+        "negative": [
+          "TestEventIntegrityLongRun/negative"
+        ],
+        "scenario_notes": {
+          "positive": "逐输入/通知/动作身份对账且终态排空或具名未确认",
+          "negative": "存储拒写、模型/渠道替身失败、替换与压缩交错、多会话同时完成零静默丢弃"
+        },
+        "consumer": [
+          "TestEventIntegrityLongRun/consumer"
+        ],
+        "consumer_note": "正式宿主 + 本地 /task",
+        "invariants": [
+          "同一 Host 4 会话共享，不得 4 个独立 Host",
+          "冥想保持启用，fsync 不削",
+          "不得缩输入/重启/seed/window",
+          "单 long 分片是 1200/120，不是 7200/720",
+          "45m 仅为提议，用 03.10 校准值加余量冻结",
+          "long 一父 3 锚共用同一次 6 组合矩阵，不按 3 倍运行",
+          "交付稳定性 6 组合各 10 次为实施期研究（72000 输入/7200 重启），非 MR ×10，预算另计"
+        ],
+        "evidence": "/tmp/event-consumption-integrity/03.11/run-seed*-window*.jsonl + delivery/run-1..10.jsonl + run-ids.txt",
+        "delivery_stability": {
+          "runs_per_combo": 10,
+          "combos": 6,
+          "total_runs": 60,
+          "inputs_total": 72000,
+          "restarts_total": 7200,
+          "phase": "implementation-stability",
+          "is_mr_gate": false,
+          "budget": "separate from MR matrix"
+        }
+      },
+      "status": "planned"
+    },
+    {
+      "id": "04.1",
+      "domain": "04-regression-gates",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "golden/runtime/event_integrity_scenarios.json",
+        "scripts/check_runtime_evidence.py",
+        "scripts/test_check_runtime_evidence.py"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "checker",
+        "tier": "event-contract",
+        "commands": [
+          "python3 scripts/check_runtime_evidence.py --check-contract --contract golden/runtime/event_integrity_scenarios.json --json",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'"
+        ],
+        "positive": [
+          "test_event_contract_matches_graph_registry_and_sources",
+          "test_whole_chain_entries_are_aggregate_only",
+          "test_event_contract_dual_role_consumer_is_accepted"
+        ],
+        "negative": [
+          "test_event_contract_missing_family_is_rejected",
+          "test_event_contract_missing_negative_anchor_is_rejected",
+          "test_event_contract_duplicate_test_or_subtest_is_rejected",
+          "test_event_contract_empty_selector_is_rejected",
+          "test_event_contract_deleting_graph_entry_is_rejected",
+          "test_event_contract_matrix_shrink_is_rejected"
+        ],
+        "consumer": [
+          "04.2 runner 与 05.1/05.2 读取同一合同"
+        ],
+        "manifest_note": "显式清单必须覆盖全部父测试与完整正负子场景；计划回写④后清单 137 个绿具名锚（不含 00.2 四个诊断锚），全部测试修复后为 29 父/141 锚；137/141 是清单不是允许删项上限，禁止以任何整数上限裁剪。计数唯一键为 (parent, subtest_name)，consumer 可引用 positive 同名 subtest 而不重复加入 subtests[]；CI 合同分别记录 roles 与引用，不以 raw role list 长度求和。EI01-EI10 仅 aggregate_only",
+        "evidence": "golden/runtime/event_integrity_scenarios.json"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "04.2",
+      "domain": "04-regression-gates",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+      "depends_on": [
+        "04.1"
+      ],
+      "verify_after": [
+        "01.5",
+        "03.2",
+        "03.3",
+        "03.4",
+        "03.5",
+        "03.6",
+        "03.7",
+        "03.8",
+        "03.9"
+      ],
+      "write_files": [
+        "scripts/run_runtime_scenarios.py",
+        "scripts/runtime_checklib.py",
+        "scripts/check_runtime_evidence.py",
+        "scripts/test_run_runtime_scenarios.py",
+        "scripts/test_check_runtime_evidence.py"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "checker+production_acceptance",
+        "tier": "event-short+event-long-runner",
+        "commands": [
+          "python3 -m unittest discover -s scripts -p 'test_run_runtime_scenarios.py'",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'",
+          "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --test-id 01.5/TestEventIntegrityFormalAssembly --test-id 01.6/TestEventIntegrityHostAdapters --test-id 01.7/TestEventIntegrityCLIAdapter --test-id 03.2/TestEventIntegrityIdentityMatrix --test-id 03.3/TestEventIntegrityDecisionFlowMatrix --test-id 03.4/TestEventIntegrityApprovalControl --test-id 03.5/TestEventIntegrityReflectionDeliveryControl --test-id 03.6/TestEventIntegrityFoldControl --test-id 03.7/TestEventIntegrityReplacementControl --test-id 03.8/TestEventIntegrityCaptureControl --test-id 03.9/TestEventIntegrityRestart --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short"
+        ],
+        "positive": [
+          "test_v2_contract_runs_each_module_with_tags_and_race",
+          "test_repeat_runs_are_independent_and_all_required",
+          "test_six_combo_matrix_is_enumerated_once",
+          "test_v1_command_shape_is_unchanged"
+        ],
+        "negative": [
+          "test_skipped_subtest_is_rejected",
+          "test_missing_package_terminal_is_rejected",
+          "test_failed_process_exit_is_rejected",
+          "test_missing_run_is_rejected",
+          "test_zero_match_with_exit_zero_is_rejected",
+          "test_fabricated_record_is_rejected",
+          "test_duplicate_run_is_rejected",
+          "test_five_of_six_combos_fail",
+          "test_nine_of_ten_runs_fail",
+          "test_unknown_test_id_is_rejected"
+        ],
+        "production_acceptance": {
+          "real_tests": [
+            "01.5/TestEventIntegrityFormalAssembly",
+            "01.6/TestEventIntegrityHostAdapters",
+            "01.7/TestEventIntegrityCLIAdapter",
+            "03.2/TestEventIntegrityIdentityMatrix",
+            "03.3/TestEventIntegrityDecisionFlowMatrix",
+            "03.4/TestEventIntegrityApprovalControl",
+            "03.5/TestEventIntegrityReflectionDeliveryControl",
+            "03.6/TestEventIntegrityFoldControl",
+            "03.7/TestEventIntegrityReplacementControl",
+            "03.8/TestEventIntegrityCaptureControl",
+            "03.9/TestEventIntegrityRestart"
+          ],
+          "repeat": 10,
+          "requires": "real-short/repeat-1..10/evidence.json 十份、run-id 互异、全部 exit 0；checker 合成 fixture 不顶替"
+        },
+        "production_acceptance_command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --test-id 01.5/TestEventIntegrityFormalAssembly --test-id 01.6/TestEventIntegrityHostAdapters --test-id 01.7/TestEventIntegrityCLIAdapter --test-id 03.2/TestEventIntegrityIdentityMatrix --test-id 03.3/TestEventIntegrityDecisionFlowMatrix --test-id 03.4/TestEventIntegrityApprovalControl --test-id 03.5/TestEventIntegrityReflectionDeliveryControl --test-id 03.6/TestEventIntegrityFoldControl --test-id 03.7/TestEventIntegrityReplacementControl --test-id 03.8/TestEventIntegrityCaptureControl --test-id 03.9/TestEventIntegrityRestart --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short",
+        "consumer": [
+          "04.5/05.2 同一 checker 消费真实 short 证据"
+        ],
+        "no_cycle": "03 的验证是直接 go test，不依赖 04.2；04.2 只消费 03/01.5/01.6/01.7 已就绪测试",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short",
+        "test_id_scheme": "registry[].id 是唯一注册 id；04 合同 --test-id 使用 registry[].contract_id（=<leaf>/<ParentTest>）；两者固定映射，不得悬空或改名不同步"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "04.3",
+      "domain": "04-regression-gates",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+      "depends_on": [
+        "00.3"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "golden/runtime/architecture.json",
+        "scripts/codetools/main.go",
+        "scripts/codetools/event_ownership.go",
+        "scripts/codetools/event_ownership_test.go",
+        "scripts/check_runtime_architecture.py",
+        "scripts/test_check_runtime_architecture.py",
+        "scripts/lint.sh"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "checker",
+        "tier": "architecture",
+        "commands": [
+          "go -C . test ./scripts/codetools -run '^TestEventOwnership$' -count=1 -json",
+          "go -C . run ./scripts/codetools event-ownership --check",
+          "python3 scripts/check_runtime_architecture.py --implementation --json",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_architecture.py'"
+        ],
+        "positive": [
+          "TestEventOwnership/positive"
+        ],
+        "negative": [
+          "TestEventOwnership/negative",
+          "TestEventOwnership/uncovered"
+        ],
+        "scenario_notes": {
+          "positive": "合法直接调用通过、包边检查仍绿、名字相似但非目标不被误判",
+          "negative": "对冻结 owner 的禁止直接调用被拒；uncovered 如实列出且不计数为覆盖；冻结 owner 无法解析时失败"
+        },
+        "parent_test": "TestEventOwnership",
+        "test_file": "scripts/codetools/event_ownership_test.go",
+        "consumer": [
+          "scripts/lint.sh 正式调用"
+        ],
+        "boundary": "只判可解析直接调用点；不声称完整调用图，不声称静态识别任意第二状态仓语义",
+        "evidence": "原始归属检查报告写仓库外临时目录；编排者在根 ORCHESTRATION.md 回填 uncovered 复核摘要与 log_ref"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "04.4",
+      "domain": "04-regression-gates",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+      "depends_on": [
+        "04.1",
+        "04.2",
+        "00.3",
+        "03.2",
+        "03.3",
+        "03.9",
+        "01.5",
+        "01.2",
+        "01.8",
+        "01.10a"
+      ],
+      "verify_after": [
+        "00.3",
+        "03.2",
+        "03.3",
+        "03.9",
+        "01.5",
+        "01.2",
+        "01.8",
+        "01.10a"
+      ],
+      "write_files": [
+        "scripts/check_event_integrity_mutations.py",
+        "scripts/test_check_event_integrity_mutations.py"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "checker",
+        "tier": "mutations",
+        "commands": [
+          "python3 scripts/check_event_integrity_mutations.py --all --json --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.4/mutations",
+          "python3 -m unittest discover -s scripts -p 'test_check_event_integrity_mutations.py'"
+        ],
+        "positive": [
+          "test_control_tree_green_then_every_confirmed_mutation_killed_by_named_assertion",
+          "test_every_confirmed_defect_has_mutation",
+          "test_unconfirmed_candidate_is_not_claimed_killed"
+        ],
+        "negative": [
+          "test_compile_failure_is_not_a_kill",
+          "test_timeout_is_not_a_kill",
+          "test_zero_test_match_is_not_a_kill",
+          "test_panic_without_expect_assertion_is_not_a_kill",
+          "test_unknown_or_stale_mutation_fails_gate",
+          "test_red_control_tree_fails_gate"
+        ],
+        "consumer": [
+          "04.5 lint 与 05.1 event-integrity-mutations job"
+        ],
+        "gate": "五类候选仅在 00.3 或后续复现证实后启用；未证实形态不得凑数。计划回写③登记三个新反例（实际变异实施在后续单）：storage_failure_reported_as_success（锚 01.8/storage_failure_not_reported_as_success）、confirm_before_handover（锚 01.2/handover_before_confirmation）、alive_process_reported_complete（锚 01.10a/partial_output_is_not_completion；生产行为在 01.10b 接线）。",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/04.4/mutations",
+        "future_mutations": [
+          "storage_failure_reported_as_success -> 01.8/TestEventIntegrityPersistence/storage_failure_not_reported_as_success",
+          "confirm_before_handover -> 01.2/TestEventIntegrityConsumptionRecovery/handover_before_confirmation",
+          "alive_process_reported_complete -> 01.10a/TestEventIntegrityExecLifecycle/partial_output_is_not_completion"
+        ]
+      },
+      "status": "planned"
+    },
+    {
+      "id": "04.5",
+      "domain": "04-regression-gates",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/04-regression-gates/tasks.md",
+      "depends_on": [
+        "04.1",
+        "04.2",
+        "04.3",
+        "04.4"
+      ],
+      "verify_after": [],
+      "write_files": [
+        "scripts/check_runtime_plan.py",
+        "scripts/check_runtime_evidence.py",
+        "scripts/lint.sh",
+        "scripts/test_check_runtime_evidence.py",
+        "scripts/test_check_runtime_plan.py"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "checker",
+        "tier": "plan+evidence+lint",
+        "commands": [
+          "python3 scripts/check_runtime_plan.py --change-dir openspec/changes/event-consumption-integrity --json",
+          "python3 scripts/check_runtime_evidence.py --check-contract --contract golden/runtime/event_integrity_scenarios.json --plan-graph openspec/changes/event-consumption-integrity/task-graph.json --json",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_plan.py'",
+          "bash scripts/lint.sh"
+        ],
+        "positive": [
+          "test_domain_profile_accepts_six_domains_and_35_leaves",
+          "test_every_leaf_is_covered_by_test_or_non_product_evidence",
+          "test_anchor_selectors_exist_in_test_files",
+          "test_active_graph_is_checked_not_archive",
+          "test_bundle_accepts_ten_short_six_long_one_mutation"
+        ],
+        "negative": [
+          "test_renamed_leaf_fails",
+          "test_missing_leaf_fails",
+          "test_missing_mandatory_subtest_fails",
+          "test_missing_non_product_mapping_fails",
+          "test_empty_selector_fails",
+          "test_execution_credential_impersonation_fails",
+          "test_five_of_six_combos_fail",
+          "test_nine_of_ten_runs_fail",
+          "test_archive_graph_object_mismatch_fails",
+          "test_legacy_ten_domain_rules_are_not_relaxed"
+        ],
+        "consumer": [
+          "05.1/05.2 合同与 --bundle 证据门"
+        ],
+        "boundary": "旧十域/旧 15 场景规则保留；活动 graph 存在时不得检查归档 graph",
+        "evidence": "golden/runtime/event_integrity_scenarios.json + task-graph.json"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "05.1",
+      "domain": "05-mr-integration",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md",
+      "depends_on": [
+        "03.11",
+        "04.5"
+      ],
+      "verify_after": [],
+      "write_files": [
+        ".github/workflows/ci.yml",
+        "scripts/preflight.sh",
+        "scripts/test_check_runtime_workflow.py"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "workflow_checker",
+        "tier": "ci-producer",
+        "commands": [
+          "python3 -c \"import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))\"",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_workflow.py'",
+          "go -C . test -list '^TestSoak' ./tests/integration/host",
+          "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/05.1/event-short",
+          "for s in 1 7 42; do for w in 256 32768; do python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed $s --window $w --repeat 1 --out ${TMPDIR:-/tmp}/event-consumption-integrity/05.1/event-long/seed-$s-window-$w || exit 1; done; done",
+          "python3 scripts/check_event_integrity_mutations.py --all --json --out ${TMPDIR:-/tmp}/event-consumption-integrity/05.1/mutations",
+          "bash scripts/preflight.sh --skip-smoke"
+        ],
+        "soak_command": "go -C . test ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -v -timeout 45m -args -rounds=30 -events-per-round=30",
+        "positive": [
+          "CiWorkflowTest.test_event_producer_jobs_present_with_contract_commands",
+          "CiWorkflowTest.test_long_matrix_is_three_seeds_by_two_windows",
+          "CiWorkflowTest.test_event_jobs_have_no_skip_hatch",
+          "CiWorkflowTest.test_soak_command_matches_real_test",
+          "CiWorkflowTest.test_preflight_runs_event_short_long_mutations_by_default"
+        ],
+        "negative": [
+          "CiWorkflowTest.test_negative_control_removing_event_job_turns_check_red",
+          "CiWorkflowTest.test_negative_control_adding_path_filter_turns_check_red",
+          "CiWorkflowTest.test_negative_control_continue_on_error_turns_check_red",
+          "CiWorkflowTest.test_negative_control_single_count_amplification_turns_check_red",
+          "CiWorkflowTest.test_negative_control_preflight_opt_in_long_turns_check_red",
+          "CiWorkflowTest.test_negative_control_race_set_shrunk_to_host_history_turns_check_red"
+        ],
+        "consumer": [
+          "GitHub Actions pull_request + push main/dev 调度四 job；scripts/preflight.sh 调同一入口（远端 L2 待授权）"
+        ],
+        "ci_jobs": [
+          "event-integrity-short: --repeat 10, 10 份独立日志/UUID run-id/repeat_index",
+          "event-integrity-long: matrix seed[1,7,42] x window[256,32768], fail-fast false, 单片 1200/120、六片 7200/720",
+          "event-integrity-mutations: 只启用 00.3 已证实形态",
+          "event-integrity-required: 05.2 新增，不替代旧检查"
+        ],
+        "soak": "TestSoakContinuity 当前位于 tests/integration/host/soak_continuity_test.go；-rounds/-events-per-round flag 已存在；命令仍需实跑核验",
+        "preflight": "默认 short/long/mutations；--skip-smoke 只跳微信 smoke，事件 long 仍默认运行并打印不具备完整 MR 等价证据",
+        "evidence": "ci.yml + workflow 自测 + 本地同命令真实输出"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "05.2",
+      "domain": "05-mr-integration",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md",
+      "depends_on": [
+        "05.1"
+      ],
+      "verify_after": [],
+      "write_files": [
+        ".github/workflows/ci.yml",
+        "scripts/test_check_runtime_workflow.py"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "workflow_checker",
+        "tier": "ci-required",
+        "commands": [
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_workflow.py'",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'",
+          "python3 scripts/check_runtime_evidence.py --bundle ${TMPDIR:-/tmp}/event-consumption-integrity/05.2/bundle --contract golden/runtime/event_integrity_scenarios.json --json"
+        ],
+        "positive": [
+          "CiWorkflowTest.test_required_always_needs_all_three",
+          "CiWorkflowTest.test_required_downloads_and_uses_same_checker",
+          "CiWorkflowTest.test_all_artifacts_uploaded_on_failure",
+          "CiWorkflowTest.test_required_is_event_summary_not_replacement_for_old_jobs"
+        ],
+        "negative": [
+          "CiWorkflowTest.test_negative_control_dropping_a_need_turns_red",
+          "CiWorkflowTest.test_negative_control_removing_always_turns_red",
+          "CiWorkflowTest.test_cancelled_or_skipped_upstream_fails",
+          "CiWorkflowTest.test_missing_artifact_or_combo_or_short_run_fails",
+          "CiWorkflowTest.test_mixed_baseline_digest_fails",
+          "CiWorkflowTest.test_duplicate_run_is_rejected",
+          "CiWorkflowTest.test_past_fail_cannot_be_covered_by_later_pass",
+          "CiWorkflowTest.test_skipped_subtest_is_rejected"
+        ],
+        "consumer": [
+          "分支保护把 event-integrity-required 作为新增事件汇总检查；旧检查名同时保留（F4/L2 待授权）"
+        ],
+        "bundle": "short 恰 10 份互异 run-id；long 六组合齐全且每片 1200/120；mutations 控制树绿且每个登记变异由具名断言杀死；基线源树摘要一致；run-id/日志不复用；缺件/空目录/截断/skip/重复 run/后补 pass 覆盖先 fail 均失败",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/05.2/bundle"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "05.3",
+      "domain": "05-mr-integration",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md",
+      "depends_on": [
+        "01.5",
+        "04.5"
+      ],
+      "verify_after": [
+        "05.2"
+      ],
+      "write_files": [
+        "README.md",
+        "docs/OPERATION.md",
+        "docs/FACT-VOCABULARY.md",
+        "docs/GLOSSARY.md"
+      ],
+      "tests": [],
+      "verification": {
+        "kind": "docs",
+        "tier": "docs+doc-budget",
+        "commands": [
+          "python3 scripts/check_doc_budget.py --json",
+          "python3 -m unittest discover -s scripts -p 'test_check_doc_budget.py'",
+          "go -C . run ./scripts/codetools doc-refs docs/wiki docs/*.md",
+          "bash scripts/lint.sh"
+        ],
+        "positive": [
+          "test_baseline_matches_live_tree",
+          "doc-refs 无缺失",
+          "lint 绿",
+          "四篇中事件命令与 05.1/05.2 真实落地状态一致"
+        ],
+        "negative": [
+          "test_extra_file_fails",
+          "test_extra_lines_fail",
+          "test_tighten_refuses_to_raise_and_leaves_the_file_alone"
+        ],
+        "consumer": [
+          "README 导航与 OPERATION 运行手册是接手者入口，命令可复跑"
+        ],
+        "scope": [
+          "每 MR 事件双档与变异门",
+          "四个 job/artifact 名",
+          "short 十次独立",
+          "long 六组合：单分片 1200/120、六片 7200/720",
+          "killed/uncovered 判据",
+          "required 只是新增事件三档汇总且旧检查保留",
+          "preflight 默认完整入口与 --skip-smoke 边界",
+          "本地/远端/72h 三层证据边界与失败处置"
+        ],
+        "doc_budget": "baseline 206 files/21934 lines；不上调，净增行用同篇删减置换",
+        "no_new_docs": "不新增 .md 篇目；历史结论只就地勘误；05.2 前 CI 段落只能标拟新增/未启用",
+        "evidence": "docs/*.md + check_doc_budget 输出"
+      },
+      "status": "planned"
+    },
+    {
+      "id": "05.4",
+      "domain": "05-mr-integration",
+      "kind": "non_product",
+      "task_file": "openspec/changes/event-consumption-integrity/changes/05-mr-integration/tasks.md",
+      "depends_on": [
+        "05.2",
+        "05.3"
+      ],
+      "verify_after": [],
+      "write_files": [],
+      "write_files_note": "只读最终树；证据仅写 ${TMPDIR:-/tmp}/event-consumption-integrity/05.4 或 CI runner.temp，不写仓库",
+      "tests": [],
+      "verification": {
+        "kind": "integration_acceptance",
+        "tier": "L1-local",
+        "commands": [
+          "bash scripts/lint.sh",
+          "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/05.4/event-short",
+          "bash scripts/check-openspec.sh",
+          "python3 scripts/check_doc_budget.py --json",
+          "bash scripts/preflight.sh --skip-smoke",
+          "for s in 1 7 42; do for w in 256 32768; do python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed $s --window $w --repeat 1 --out ${TMPDIR:-/tmp}/event-consumption-integrity/05.4/event-long/seed-$s-window-$w || exit 1; done; done",
+          "python3 scripts/check_event_integrity_mutations.py --all --json --out ${TMPDIR:-/tmp}/event-consumption-integrity/05.4/mutations",
+          "go -C . build ./...",
+          "go -C . vet ./...",
+          "go -C . test ./... -count=1",
+          "go -C examples/wechat-bot build ./...",
+          "go -C examples/wechat-bot vet ./...",
+          "go -C examples/wechat-bot test ./... -count=1",
+          "go -C examples/cli-host build ./...",
+          "go -C examples/cli-host vet ./...",
+          "go -C examples/cli-host test ./... -count=1",
+          "./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/ ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...",
+          "python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'",
+          "python3 scripts/check_runtime_evidence.py --bundle ${TMPDIR:-/tmp}/event-consumption-integrity/05.4 --contract golden/runtime/event_integrity_scenarios.json --json"
+        ],
+        "positive": [
+          "十次 short 互异 run-id",
+          "六组合证据齐全且每片 1200/120、汇总 7200/720",
+          "变异全部具名杀死",
+          "bundle 通过"
+        ],
+        "negative": [
+          "独立验收者在副本中删除任一片证据/改名场景/复用 run-id 后 bundle 必红",
+          "preflight --skip-smoke 输出不具备完整 MR 等价证据且事件 long 仍执行",
+          "L2/L3 未授权不得勾选"
+        ],
+        "consumer": [
+          "与 CI job 完全相同的命令、job 名与稳定检查名"
+        ],
+        "layers": {
+          "L1": "本地完整命令 + bundle + lint；本叶唯一可完成层",
+          "L2": "远端 MR/required 生效；F4 待授权",
+          "L3": "72h/真实服务；待授权"
+        },
+        "read_only": "只读最终树与证据；不提交/推送/建 MR/改保护/打 tag",
+        "evidence": "${TMPDIR:-/tmp}/event-consumption-integrity/05.4"
+      },
+      "status": "planned"
+    }
+  ]
+}

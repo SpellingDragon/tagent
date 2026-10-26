@@ -1,0 +1,299 @@
+{
+  "leaf": "02.5",
+  "title": "根审批（approval-channels）",
+  "change": "event-consumption-integrity",
+  "domain": "02-event-consumers",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T13:44:05Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "根审批面取证：新增 tests/integration/capabilities/event_integrity_test.go 的父测试 TestEventIntegrityApproval，下辖 9 个具名子测试（1 正 + 7 负 + 1 消费者锚）。正负锚经真实 evolution/governance.Policy 与真实 runtime/task.Wrapper（复用既有 govRig，与 TestGovernanceBeforeExecution 同一装配）驱动；消费者锚经公开装配入口 tagent.Assemble（WithGovernance + WithPolicy）驱动治理策略 → runtime/task/wrapper.go → 执行的正式链，不改 wrapper.go。未改任何产品文件（green baseline：现有审批实现满足验收面），未触碰微信审批（02.6）与根 CLI tagent approve。",
+  "method": "每个子测试从正式入口发起：rig.call 走 governance.Policy.Judge → task.Wrapper.Call → 发布 HoldReceipt/HoldBook 等待；审批响应经 ApprovalManager.Request/Decide/Lookup/Pending 与 task.HoldBook.Resolve 落地。断言读执行副作用（govTool.executions/last）、记录结果（awaitRecorded/recordedSnapshot）、裁定（policyRulingHolder）与磁盘回应文件 approvals/<id>.json，不以内部调用次数代替行为。过期锚用 govClock 推进 31 分钟；改参锚读取新 digest 的磁盘请求；错目标锚用两个真实 hold 与无 hold taskID 验证 Resolve 绑定；渠道失败锚用 failing+working 双通道读 DeliveryGaps。消费者锚用 scripted provider 三轮驱动 tagent.Assemble 装配的正式 Runtime：轮 1 持有调用，轮 2 从 approvals.Pending() 取正式注册请求并 Decide，轮 3 收口；断言执行恰一次、pair/receipt/observation、rulings 与 Query 的 awaiting-approval 读数。",
+  "environment": {
+    "os": "Darwin arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5",
+    "note": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/capabilities/event_integrity_test.go",
+      "state": "added (untracked new file)",
+      "lines": 599,
+      "sha256": "026d61c7a1abc1f003300cb930245abe086d5d8b4396cf3c088a5b0204e347b5"
+    }
+  ],
+  "product_changes": [],
+  "consumers": {
+    "formal_entry": "tagent.Assemble(ctx, declaration, agents, tagent.WithGovernance(...), tagent.WithPolicy(...)) → run.Invoke（公开装配入口；与 TestPublicRuntimeEntry/TestCriticalCallsHoldThroughFormalPath 同一入口）",
+    "governance_entry": "evolution/governance/policy.go#Judge：critical 工具未响应时 Hold，已批准时 DispositionRecord，已拒绝时 Denial；hold 且 req==nil 时 ApprovalManager.Request 注册审批请求",
+    "task_side": "runtime/task/wrapper.go#Call（未改）按 Ruling 分派 run/hold/deny：hold 经 HoldBook.Record 登记等待并回 HoldReceipt，run 经 execute 记录 Result 后 settle，deny 记录具名配对结果并回 ErrDenied",
+    "chain": "tagent.Assemble → policyRuling → governance.Policy.Judge → task.Wrapper.Call → HoldBook.Record/execute → ApprovalManager.Pending/Lookup/Decide ↔ approvals/<id>.json",
+    "consumer_subtest": "formal_governance_task_wrapper 从 approvals.Pending() 读取由正式 governance 路径注册的请求（断言 digest 绑定），Decide 后由 retry 走正式 wrapper 执行；probe.calls()==1、turn 3 decisions、rulings 2 条（Hold + Record）、Query 恰 1 个 task.StatusAwaitingApproval"
+  },
+  "red_lines": {
+    "no_wrapper_change": "runtime/task/wrapper.go 无 diff（git status --porcelain 空）；本叶不改 P1 禁改文件。",
+    "no_product_change": "evolution/governance/policy.go、runtime/task/approval/* 零改动（product-status.txt 空，PRODUCT_DIFF_LINES=0）。全绿基线按「全绿则保留可证伪回归不改产品」处理。",
+    "formal_entries_only": "正负锚均由真实 governance.Policy + 真实 task.Wrapper 驱动（newGovRig 与既有 TestGovernanceBeforeExecution 相同装配）；消费者锚经 tagent.Assemble 公开入口。未在测试里手工补产品接线：请求走 Request/Decide，hold 走 HoldBook，执行走 wrapper。",
+    "no_wechat_no_cli": "微信审批归 02.6，未触碰；根 CLI `tagent approve <digest>` 保留为独立待验项，不据此补产品。",
+    "g7_caliber": "G7（过期回应已有实现）按实测断言：Decide 返回 errors.Is(err, approval.ErrApprovalExpired)，Lookup 有效状态 approval.ApprovalExpired 且 ID 一致；不写死规格前缀。"
+  },
+  "subtests": [
+    {
+      "name": "approved_then_executes_once",
+      "anchor": "positive",
+      "line": 43,
+      "asserts": [
+        "初次调用返回 HoldReceipt、注册请求为 pending 且 digest 同时等于 task.DigestArgs 与 approval.ArgsDigest",
+        "同一批准响应被 8 个 goroutine 并发 Decide：全部无错且读到 approved，裁决前零执行",
+        "批准后 retry 返回 AdmissionReceipt，记录结果 CallID=call-approved-retry、Tool 一致、Output 非空、Denied 为空",
+        "工具恰执行 1 次且参数为 held args；裁定为 DispositionRecord、未拒绝、reason 含 approved",
+        "DenialLedger 恰 2 条（wait + approved execution），每条 ArgsDigest 与请求 digest 对账一致",
+        "重复 call 身份（dedup）与重复 Decide 之后 executions 仍为 1、recorded 仍为 1"
+      ]
+    },
+    {
+      "name": "unapproved_never_executes",
+      "anchor": "negative",
+      "line": 129,
+      "asserts": [
+        "HoldReceipt 携带非空 ApprovalID 且 ExpectedDigest=task.DigestArgs(held args)",
+        "HoldBook.Waiting 能读到该等待任务，ApprovalID 与 digest 与 receipt 一致",
+        "零执行、无 refusal 记录；裁定为 DispositionHold 且未拒绝、Denial 为空（hold 是等待不是拒绝）",
+        "审批请求为 pending 且出现在 ApprovalManager.Pending() 等待面"
+      ]
+    },
+    {
+      "name": "rejected_never_executes",
+      "anchor": "negative",
+      "line": 163,
+      "asserts": [
+        "Decide(denied) 后 retry 返回 errors.Is(err, task.ErrDenied)，answer 为 nil，零执行",
+        "记录结果为具名配对结果：CallID=call-rejected-retry、Tool 一致、Denied.Tool=shell_exec、Denied.Reason 含 denied",
+        "裁定为终止拒绝（Refused() 为真且 Denial 非空）"
+      ]
+    },
+    {
+      "name": "expired_response_refused",
+      "anchor": "negative",
+      "line": 198,
+      "asserts": [
+        "ttl=30m，clock.advance(31m) 后 Decide(approved) 返回 errors.Is(err, approval.ErrApprovalExpired)",
+        "Lookup(tool, digest) 读到 Status=ApprovalExpired 且 ID=req.ID；Pending() 为空",
+        "retry 不得沿用过期请求：再次返回 HoldReceipt，零执行、无 execution 记录，裁定为 Hold"
+      ]
+    },
+    {
+      "name": "changed_args_requires_new_approval",
+      "anchor": "negative",
+      "line": 238,
+      "asserts": [
+        "argsA 批准后改参 argsB 的 retry 再次 hold，零执行",
+        "按 argsB digest Lookup 到新的 pending 请求，ID≠argsA 请求 ID（旧批准不沿用）",
+        "磁盘 approvals/<new-id>.json 的 ArgsDigest=digestB、Status=pending",
+        "改参裁定为 Hold 且未拒绝",
+        "批准新请求后 argsB retry 执行恰 1 次且 last=argsB"
+      ]
+    },
+    {
+      "name": "duplicate_response_no_second_execution",
+      "anchor": "negative",
+      "line": 302,
+      "asserts": [
+        "首次 Decide(approved) 生效；重复 Decide(denied) 仍返回首个 approved 与 DecidedBy=operator",
+        "HoldBook.Resolve 首次 granted；重复 Resolve(denied) 仍返回首个 granted/Reason=operator（不消费第二个响应）",
+        "批准后 retry 执行恰 1 次",
+        "重复 call 身份 + 重复 Decide + 重复 Resolve 之后 executions 仍 1、recorded 仍 1"
+      ]
+    },
+    {
+      "name": "wrong_target_no_overreach",
+      "anchor": "negative",
+      "line": 368,
+      "asserts": [
+        "两个 hold 的 TaskID 与 ApprovalID 均不同",
+        "holdA 收到 holdB 的 ApprovalID → errors.Is(err, task.ErrApprovalIdentityMismatch)",
+        "holdA 收到自己的 ApprovalID + 其它 digest → errors.Is(err, task.ErrApprovalDigestMismatch)",
+        "无 hold 的 taskID → errors.Is(err, task.ErrApprovalIdentityMismatch)",
+        "批准 reqB 后 reqA 仍 pending（不越权到另一目标）",
+        "holdA 未被消费仍 waiting；绑定正确的响应可生效；零执行（响应本身不执行）"
+      ]
+    },
+    {
+      "name": "channel_delivery_failure_does_not_block",
+      "anchor": "negative",
+      "line": 431,
+      "asserts": [
+        "failing+working 双通道下 hold 成功、请求 pending（投递失败不阻塞审批门）",
+        "DeliveryGaps 恰 1 条：Request=req.ID、Err 非空；working 通道投递 count=1",
+        "请求文件 approvals/<id>.json 已落盘且非空",
+        "零执行；经 Decide 另一入口批准后 retry 执行恰 1 次"
+      ]
+    },
+    {
+      "name": "formal_governance_task_wrapper",
+      "anchor": "consumer",
+      "line": 483,
+      "asserts": [
+        "tagent.Assemble + WithGovernance(passPolicy{}) + WithPolicy(governance.Open(WithRiskRules(approval_tool→critical), WithApprovals(approvals))) 装配成功并 Invoke",
+        "轮 1 的 approval_tool 调用被正式治理路径 hold；轮 2 从 approvals.Pending() 读到正式注册的请求（digest 与 held args 一致）并 Decide(approved, operator)",
+        "轮 2 的 retry 执行：probe.calls()==1（恰一次）；turn.Terminal=completed、Decisions=3；provider 记录 3 个请求",
+        "轮 1 请求中 call-approval-1 的配对结果为 parked awaiting approval；轮 2 请求中 call-approval-2 有 receipt 与 settled observation（probe-out:approval_tool）",
+        "rulings 恰 2 条：第 1 条 DispositionHold 无 Denial；第 2 条 DispositionRecord 含 approved 且未拒绝",
+        "ApprovalManager.Lookup 读到 approved by operator 且 ID=轮 2 取到的正式请求 ID；Query 恰 1 个 task.StatusAwaitingApproval"
+      ]
+    }
+  ],
+  "commands": {
+    "baseline_before_change": {
+      "command": "go test ./tests/integration/capabilities -run '^TestGovernanceBeforeExecution$' -count=1 -race",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "summary": "ok github.com/SpellingDragon/tagent/tests/integration/capabilities 1.513s",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/baseline-governance.txt",
+      "log_sha256": "4abf2ac0a6d6a095880f75f7e138814665330ee6b2144ae56c23b841aeccc626",
+      "log_bytes": 76
+    },
+    "single": {
+      "command": "go test ./tests/integration/capabilities -run '^TestEventIntegrityApproval$' -count=1 -race -json",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "parsed": {
+        "parent": "TestEventIntegrityApproval run=1 pass=1",
+        "named_subtests_run_pass": 9,
+        "children": [
+          "approved_then_executes_once",
+          "unapproved_never_executes",
+          "rejected_never_executes",
+          "expired_response_refused",
+          "changed_args_requires_new_approval",
+          "duplicate_response_no_second_execution",
+          "wrong_target_no_overreach",
+          "channel_delivery_failure_does_not_block",
+          "formal_governance_task_wrapper"
+        ],
+        "extra_tests": 0,
+        "skip": 0,
+        "fail": 0
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/single.json",
+      "log_sha256": "ab1a9812795011bd5388595b63cf652a3e43ee49bcf226cbc4b21b3abedfe15b",
+      "log_bytes": 16152
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/02.5\"; mkdir -p \"$E\"; for i in $(seq 1 10); do go test ./tests/integration/capabilities -run '^TestEventIntegrityApproval$' -count=1 -race -json > \"$E/run-$i.json\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$E/exits.txt\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "exits": "10/10 exit=0",
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/exits.txt",
+      "exits_sha256": "2b436b67ce1a50322b0e4e6ae3d4b36e5aa7ef31342793d0b0cceb21623ed288",
+      "exits_bytes": 131,
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-1.json", "log_sha256": "8c368994716c648c8e3bb342cd02051906e446c513d5a1b028dcf8da8860c184", "log_bytes": 16152, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-2.json", "log_sha256": "a4938694fdd0c74c92c86495adcba2c09855587fe20088a4a77d6632dc945cf3", "log_bytes": 16153, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-3.json", "log_sha256": "bc15e6ac2dd6d2e814dc1884a5a97bfeabb032336bf3edaedebbb485d601320d", "log_bytes": 16171, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-4.json", "log_sha256": "87b460cbdc726594b58203fa5c7625212f89c75ec943cc9bf61b27f8285a7f7f", "log_bytes": 16165, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-5.json", "log_sha256": "c9e8ec6d93703d9b45a3365325b9238eda12ad08be179a6e5755b75396921a11", "log_bytes": 16154, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-6.json", "log_sha256": "52faba4705fea3309495d152ee19c012e927e3a3e4edf2522e51fc2004c7d886", "log_bytes": 16153, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-7.json", "log_sha256": "3236ea97260f09990b2153db7509d04a2dc51d79d262f7b024a1dafef4caa69f", "log_bytes": 16147, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-8.json", "log_sha256": "178e0177e9ff0986d63eaddf5b7f332ceb6b2e0c3a45a8bc503f4f77c32ecf4a", "log_bytes": 16154, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-9.json", "log_sha256": "84216347f9411724a1bcb938697d0948a091504d1e63db28963026fe6a4712df", "log_bytes": 16167, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/run-10.json", "log_sha256": "e6345828b9d55288eb709a8f4fa2f672a06e34ce30dc9928f740f07533f23350", "log_bytes": 16156, "parent_run_pass": true, "named_subtests_run_pass": 9, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐行 json.loads；按 Test 归集 run/pass/fail/skip；要求父测试与全部 9 个具名子测试各 run=1、pass=1、fail=0、skip=0，且无其它测试记录、无包级 fail、无截断 JSON；不使用 grep -c。",
+      "parsed_result": "ALL_LOGS_OK=True（single + 10 轮共 11/11 份日志，每份父与 9 子测试均 run=1/pass=1）",
+      "parse_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/parse-output.txt",
+      "parse_sha256": "cac3274d8144f53fa85afe5275ec59d5212f0415d08fe0d39e0944203b090cbb",
+      "parse_bytes": 6481
+    },
+    "regression": {
+      "capabilities_all": {
+        "command": "go test ./tests/integration/capabilities -count=1 -v",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "summary": "PASS=21 SKIP=0 FAIL=0；含既有 20 个测试与新增 TestEventIntegrityApproval；TestGovernanceBeforeExecution、TestCriticalCallsHoldThroughFormalPath、TestFormalWrapperAdmission、TestGovernanceRecovery 全绿",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/regress-capabilities-v.txt",
+        "log_sha256": "565ba457b283860e9d84260c3f81ef9c7888008829325d4724cd070bb262d5b7",
+        "log_bytes": 46612,
+        "plain_log": {
+          "command": "go test ./tests/integration/capabilities -count=1",
+          "exit_code": 0,
+          "summary": "ok github.com/SpellingDragon/tagent/tests/integration/capabilities 1.034s",
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/regress-capabilities.txt",
+          "log_sha256": "b9ba4afa9cd6f947b74c13c73dab6f9956c84eb5c499f1173fcd8feb77f554c0",
+          "log_bytes": 76
+        }
+      },
+      "host_sample": {
+        "command": "go test ./tests/integration/host -run '^(TestPublicRuntimeEntry|TestFormalAssemblyRequiresGovernance|TestRiskRulesFlowFromDocument|TestQueryShowsPublishedAgentState)$' -count=1 -v",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "summary": "4/4 PASS；TestRiskRulesFlowFromDocument 5.05s，其余用例 <0.01s；ok 5.424s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/regress-host-sample.txt",
+        "log_sha256": "38fc2eaec8a8ec68657b07c9372e91784c925ba9504078081bbf2bc5878846c7",
+        "log_bytes": 7279
+      }
+    },
+    "hygiene": {
+      "vet_capabilities": {
+        "command": "go vet ./tests/integration/capabilities",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/vet-capabilities.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "vet_host": {
+        "command": "go vet ./tests/integration/host",
+        "exit_code": 0,
+        "output": "",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/vet-host.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l tests/integration/capabilities/event_integrity_test.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "product_files_untouched": {
+        "command": "git status --porcelain -- evolution/governance/policy.go runtime/task/approval runtime/task/wrapper.go",
+        "exit_code": 0,
+        "output": "",
+        "result": "PRODUCT_DIFF_LINES=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.5/product-status.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      }
+    }
+  },
+  "observations": [
+    "派发说明写「父+8子测试」，但 02.5 任务行、任务表与 golden/runtime/event_integrity_scenarios.json（04 域 design 同）均列 9 个具名子测试（1 正 + 7 负 + 1 消费者锚）；本叶按 9 个核验，单轮与十轮逐子测试均 run=1/pass=1。与 02.6 对派发说明差异的处理一致。",
+    "全绿基线：既有审批实现已满足验收面，未发现产品缺陷；evolution/governance/policy.go、runtime/task/approval/{approval,approval_store}.go、runtime/task/wrapper.go 零改动（product-status.txt 为空）。按「全绿则保留可证伪回归不改产品」处理，写集内的产品候选文件未被触碰。",
+    "G7（过期回应已有实现）按实测断言：30m ttl 下 clock.advance(31m)，Decide 返回 errors.Is(err, approval.ErrApprovalExpired)，Lookup 读到 ApprovalExpired 有效状态且 ID 一致，Pending 为空，retry 再次 hold 且零执行——不是以规格文本代替实测。",
+    "approved_then_executes_once 的 DenialLedger 恰 2 条：hold 的 wait 记录与 approved 执行记录；每条 ArgsDigest 与审批请求 digest 对账，证明执行与批准绑定同一参数。8 个并发 Decide 在 -race 下全部通过且只产生一次执行。",
+    "渠道失败锚按实测语义断言：DeliveryGaps 恰 1 条（Request=req.ID、Err 非空），working 通道仍收到 1 次投递，请求文件已落盘，审批门保持等待且任务面可在另一入口批准后执行一次。",
+    "消费者锚的 provider 是 scripted（ntModel 三轮），但装配入口、governance.Policy、task.Wrapper、ApprovalManager、Query 均为产品正式实现；请求由正式 governance 路径注册、从 Pending() 读取并 Decide，不是测试手工写回应文件或手工补接线。",
+    "02.5 的 verify_after=01.5：本叶产物（测试文件 + 本摘要）已 ready，但未到勾选时机。按任务指令与 tasks.md 口径，02.5 保持 `- [ ]`，不提前勾选；01.5 正式装配回验通过后再回填。",
+    "并行单正在改根产品（git status 可见 host.go、run.go、facts.go、settle_turn.go、runtime/state/* 等 modified，host/evolution/execution/history 下另有 event_integrity_* 新增）。本叶的 capabilities 与 host 验证窗口内均编译通过，十轮 10/10 exit=0，未撞中间态，无需重试；若后续复跑撞到并行单中间态，应按任务口径重试并记录，不应记为本叶失败。"
+  ],
+  "limitations": [
+    "本叶未做临时变异取证（未临时改产品制造红灯来证明负锚可证伪）。原因：产品候选文件处于 P1 保护面且并行单正在跑根产品验证，临时变异会互踩；负锚的可证伪性由真实治理/包装路径与具名错误断言承载，十轮稳定复跑作为回归证据。",
+    "消费者锚使用测试内 scripted provider 驱动正式 Assemble，不涉及真实 LLM 或网络；正式装配链、治理策略、任务包装、审批存储与查询均为产品实现。",
+    "未验证根 `tagent approve <digest>` CLI 的历史描述，不据此补产品；该项为独立待验项。",
+    "微信审批（approval-channels 的微信面）归 02.6，本叶不重复取证。",
+    "未改动 runtime/task/wrapper.go（P1 禁改），因此不声称验证 wrapper 内部超出其公开行为的实现细节。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+    "line": "02.5",
+    "action": "保持 `- [ ]` 未勾选：verify_after=01.5，根正式装配回验通过且三锚齐全后才可勾选；本摘要只证明产物 ready 与正/负/消费者锚及十轮证据。"
+  }
+}

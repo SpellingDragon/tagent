@@ -1,0 +1,42 @@
+F1 契约零改动断言（收尾 F1）
+工作树：/Users/pengweiye/Documents/codes/tagent
+基线：e6b67aa（docs(api): regenerate the delivery ruler page，本变更首个实现提交 4911479 的父提交）
+HEAD：0cf8438（docs(openspec): the delivery review binds the outlet and records its ledger）
+采集：2026-10-26 13:24 CST
+
+--------------------------------------------------------------------------------
+[F1-a] 两份 golden 合同 —— 期望 diff 为空（v1/v2 均零改）
+$ git diff e6b67aa..HEAD -- golden/runtime/scenarios.json golden/runtime/event_integrity_scenarios.json | wc -c
+0
+结论：PASS（0 字节；v1 scenarios.json 与 v2 event_integrity_scenarios.json 自 e6b67aa 起零改）
+
+--------------------------------------------------------------------------------
+[F1-b] 主规格变更仅限本变更声明的 delta（persistent-event-loop 投递前审核场景 +4 行）
+$ git diff --stat e6b67aa..HEAD -- openspec/specs/
+ openspec/specs/persistent-event-loop/spec.md | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+$ git diff --numstat e6b67aa..HEAD -- openspec/specs/
+4	0	openspec/specs/persistent-event-loop/spec.md
+
+$ git diff --name-status e6b67aa..HEAD -- openspec/specs/ golden/
+M	openspec/specs/persistent-event-loop/spec.md
+（openspec/specs 面只有这一个文件被改；golden/ 面零文件）
+
+diff 正文（逐行核对：只加一个 Scenario，未改既有 Requirement/Scenario）：
+@@ -517,3 +517,7 @@
+ #### Scenario: 投递前审核是投递的必要条件
++- **WHEN** 宿主把一条正文（回合正文、失败告知或跨代理 send 的正文）投递到目标会话
++- **THEN** 该投递 SHALL 在到达渠道前把投递语义（正文、血统、目标）交审核插件裁决：allow/record SHALL 恰好投递一次；hold MUST NOT 投递、SHALL 挂起并在批准后原样补投恰好一次且 MUST NOT 被报告为投递；拒绝 MUST NOT 投递并 SHALL 留下无载荷审计事实（投递身份、血统、目标与字节数可查）；未配置审核时 SHALL 照常投递（默认 allow）
+
+结论：PASS（+4/-0，仅 persistent-event-loop 的投递前审核场景，与 2.3 记账一致）
+
+--------------------------------------------------------------------------------
+[F1-c] 变更自身 strict 校验
+$ openspec validate delivery-review-plugins --strict
+Change 'delivery-review-plugins' is valid
+VALIDATE_EXIT=0
+结论：PASS
+
+--------------------------------------------------------------------------------
+F1 总判：PASS（a: v1/v2 合同 0 字节；b: 主规格仅 +4 行投递前审核场景；c: strict 绿）
