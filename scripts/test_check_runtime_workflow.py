@@ -269,7 +269,9 @@ SMOKE_TEST_DIR = REPO / "examples" / "wechat-bot"
 SYMPTOM_PARENTS = ("TestLocalSmokeSymptomAcceptedSilent",
                    "TestLocalSmokeSymptomSettledOnce",
                    "TestLocalSmokeSymptomFailureNotice",
-                   "TestLocalSmokeSymptomExecStateSilent")
+                   "TestLocalSmokeSymptomExecStateSilent",
+                   "TestLocalSmokeSymptomNoSendTool",
+                   "TestLocalSmokeSymptomDeliveryHold")
 
 # The race set is mapped from every modified product package and every formal
 # integration suite. host/history alone is the shrunken set the negative control
