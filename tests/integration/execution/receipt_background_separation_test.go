@@ -24,6 +24,7 @@ import (
 // - the settled body enters the next decision as its own observation: call identity preserved, body byte-identical, no second synchronous tool response
 // - the next invocation of the session reads the shared history the drives already ended committed
 // - the settled notification is booked acceptance, claim and consumption in the state mailbox
+// - R23 迁移：requests[2] 断言随 RoleOf 契约（request_assembly.go "a replayed settled fact renders under the tool role"），意图保留于 requests[1]
 // 契约: docs/wiki/agent/execution-generations.md#turn-local-execution-face
 func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -176,11 +177,16 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		t.Fatalf("requests = %d, want one request per decision of both invocations", len(requests))
 	}
 	shared := requests[2].Messages
-	if len(shared) != 8 {
-		t.Fatalf("second invocation messages = %d (%+v), want the committed history of the first drive beside its own input", len(shared), shared)
+	if len(shared) != 6 {
+		t.Fatalf("second invocation messages = %d (%+v), want the committed history of the first drive restored beside its own input", len(shared), shared)
 	}
 	if tail := shared[len(shared)-1]; tail.Role != model.RoleUser || tail.Content != "turn-2" {
 		t.Fatalf("second invocation tail = %+v, want its own input at the end beside no neighbour input", tail)
+	}
+	for _, msg := range shared {
+		if msg.Content == "ok" {
+			t.Fatalf("restored message = %+v, want no admission receipt restored on the projection face: the receipt is the in-flight confirmation requests[1] holds, not a committed fact", msg)
+		}
 	}
 	counts := map[string]int{}
 	for _, msg := range shared {
@@ -191,19 +197,17 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 			counts["second input"]++
 		case msg.Role == model.RoleAssistant && len(msg.ToolCalls) == 2:
 			counts["tool call turn"]++
-		case msg.Role == model.RoleTool && msg.Content == "ok":
-			counts["receipt"]++
-		case msg.Content == "bg-slow":
-			counts["slow observation"]++
-		case msg.Content == "bg-fast":
-			counts["fast observation"]++
+		case msg.Role == model.RoleTool && msg.ToolID == "call-a" && msg.ToolName == "slow-tool" && msg.Content == "bg-slow":
+			counts["slow settled body"]++
+		case msg.Role == model.RoleTool && msg.ToolID == "call-b" && msg.ToolName == "fast-tool" && msg.Content == "bg-fast":
+			counts["fast settled body"]++
 		case msg.Role == model.RoleAssistant && msg.Content == "done-a":
 			counts["final answer"]++
 		default:
 			counts["unexpected"]++
 		}
 	}
-	wantCounts := map[string]int{"first input": 1, "second input": 1, "tool call turn": 1, "receipt": 2, "slow observation": 1, "fast observation": 1, "final answer": 1}
+	wantCounts := map[string]int{"first input": 1, "second input": 1, "tool call turn": 1, "slow settled body": 1, "fast settled body": 1, "final answer": 1}
 	if !reflect.DeepEqual(counts, wantCounts) {
 		t.Fatalf("second invocation message ledger = %v, want the full history of the first drive read back exactly once each", counts)
 	}

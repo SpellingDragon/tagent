@@ -1,0 +1,25 @@
+F1 契约零改动断言 — fidelity-and-recovery 收尾
+日期：2026-10-27；基线：8afa6cf..HEAD（HEAD=a3e7441，工作区含并行未跟踪残留，未入账）
+
+1) golden/ 契约零改动
+$ git diff 8afa6cf..HEAD -- golden/ | wc -c
+0
+→ 空 diff：golden 契约（golden/runtime/event_integrity_scenarios.json 等）自基线起零改动。
+
+2) 主规格修订仅本变更声明（persistent-event-loop 等 delta 核对）
+$ git diff 8afa6cf..HEAD --name-only -- openspec/specs/ | wc -l
+0
+$ git diff 8afa6cf..HEAD --name-only -- openspec/ | grep -v 'changes/fidelity-and-recovery' | wc -l
+0
+→ openspec/specs/ 主规格自基线起零改动：persistent-event-loop / context-assembly /
+  delivery-plugin / execution-resource-lifecycle / memory-retrieval（proposal Modified
+  Capabilities 所列五能力）的主规格文件均未被本变更实现提交触碰，无声明外修订；
+  本变更携带的声明面 = specs/orchestration/spec.md（ADDED 编排契约）+ 本变更目录内产物。
+申报（非 F1 阻断，F4 归档前须裁）：proposal Modified Capabilities 五能力的主规格 delta
+文件尚未成文（变更目录仅 specs/orchestration/）——契约修订如需随归档落主规格，须在 F4
+补写 delta 或由编排者改裁声明面。本次不自行推进（F4 留授权）。
+
+3) openspec validate --strict
+$ openspec validate fidelity-and-recovery --strict
+Change 'fidelity-and-recovery' is valid
+→ exit 0。

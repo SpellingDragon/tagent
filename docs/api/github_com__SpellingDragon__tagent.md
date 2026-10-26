@@ -66,7 +66,7 @@ single reduction entry.
 
 SettleDriver is the event-driven face of one unattended settle: it observes the
 delivery facts this run commits for a terminal task notification and drives one
-follow-up turn at the user session the task belongs to.
+follow-up turn at the address the notification froze its routing to.
 
 The trigger surface is closed, and the anti-loop is semantic rather than a
 blacklist:
@@ -77,8 +77,10 @@ blacklist:
     settle never fires.
   - The fired turn commits no settle fact with a lineage, so it can never fire
     itself again.
-  - A notice that arrives while a follow-up is in flight is retained, in arrival
-    order, and re-evaluated when that turn ends: it is never dropped.
+  - The mailbox is the one account that answers whether work waits:
+    a notification waits there until a turn claims it, drives it and consumes it
+    on that same account, so one notification starts one turn however often it
+    is observed.
 
 Package tagent is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
@@ -211,6 +213,13 @@ var ErrMemoryEngine = errors.New("tagent: the memory engine declaration is inval
     assemble: an unknown backend, a negative retrieval bound, or an embedding
     connection that does not name what its provider needs.
 
+var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not complete its delivery")
+    ErrNoticeTurnIncomplete reports a follow-up turn that ended without the
+    completed delivery its notification owed: a stopped or failed turn hands
+    its mailbox entry back unconsumed, so the work stays owed and the next wake
+    drives it again, while only a turn that really delivered closes the entry
+    beside its consumption receipt.
+
 var ErrObservationUnwired = errors.New("tagent: the run is assembled beside no observable storage tier")
     ErrObservationUnwired reports an observation read attempted on a run
     assembled beside no storage tier: the face is refused by name rather than
@@ -225,8 +234,8 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 
 var ErrSettleDriverUnwired = errors.New("tagent: the settle driver is not wired")
     ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
-    user-address memory or follow-up face was never wired: a gap by name instead
-    of a silent no-op that reads as a delivered turn.
+    mailbox account or follow-up face was never wired: a gap by name instead of
+    a silent no-op that reads as a delivered turn.
 
 var ErrUnknownAgentReference = errors.New("tagent: the agent reference names no declared agent")
     ErrUnknownAgentReference reports an agent reference that names no declared
@@ -1206,40 +1215,74 @@ type SettleDriver struct {
 	// Has unexported fields.
 }
     SettleDriver is the fact->observation face of the one turn a terminal notice
-    fires at the session it belongs to. It reads the fact one commit identity
-    names, judges it against the terminal table above, and runs the injected
-    follow-up face when the owning session carries a remembered user address.
+    fires at the address its routing froze. An observation wakes the pump,
+    and the pump reads the mailbox account: every entry there is claimed, driven
+    beside the committed fact its notification points at, and consumed on that
+    same account once the turn returned. The driver keeps no queue of its own,
+    so nothing it holds can be lost by a stop or a restart.
 
 func NewSettleDriver(
 	lookup func(context.Context, event.EventID) (event.Event, error),
-	userAddressOf func(event.SessionID) (event.Address, bool),
+	wake func() SettleWake,
 	fire func(context.Context, event.Address, event.Event) error,
 ) *SettleDriver
     NewSettleDriver assembles the settle face over the fact lookup of one run,
-    the user-address memory of one host and the follow-up drive of that host.
+    the mailbox account of that run and the follow-up drive of its host.
+    The pump starts beside the driver and rests until a wake or an observation
+    asks it to read the account.
 
 func (d *SettleDriver) Name() string
     Name reports the stable name of this plugin instance.
 
 func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) error
-    ObserveCommit reads the fact one commit wrote and fires the follow-up turn
-    the terminal notice asks for.
-
-    The turn itself runs detached from the committing delivery: a follow-up
-    spends a model turn, and the flush that delivered the notification never
-    waits for it. A notice that arrives while a turn is in flight joins the
-    driver's retained queue and is re-evaluated as soon as that turn ends,
-    so the busy window defers the turn instead of dropping the notice. A fact
-    that is not a terminal delivery fact, or whose session carries no remembered
-    user address, is ignored in silence: those are not settles nobody drives,
-    they are settles somebody already read or addresses the host was never asked
-    to turn. A failed read is reported back and never rolls the committed fact
-    back.
+    ObserveCommit reads the fact one commit wrote and wakes the pump when the
+    fact is one the settle trigger table fires on. The observation itself starts
+    nothing: the mailbox is the one account that answers whether work waits,
+    so a repeated observation of one delivered notification claims no second
+    turn — the entry is either consumed already or claimed by the turn it
+    started. A fact that is not a terminal delivery fact is ignored in silence:
+    those are not settles nobody drives, they are settles somebody already read.
+    A failed read is reported back and never rolls the committed fact back.
 
 func (d *SettleDriver) Port() plugin.Port
     Port reports the consumption this driver serves: one committed fact in, one
     observation out. The observation is the follow-up turn the fact may fire.
 
 func (d *SettleDriver) Stop()
-    Stop ends the driver: no further commit fires a turn, a turn in flight is
-    cancelled, and Stop waits for it to return. A repeated stop is a no-op.
+    Stop ends the driver: no further commit wakes the pump, the turn in flight
+    is cancelled, and Stop waits for the pump to return. What the mailbox
+    still holds is kept as it stands — an unconsumed notice outlives the stop,
+    so the next process resumes the turn it owes. A repeated stop is a no-op.
+
+func (d *SettleDriver) Wake()
+    Wake asks the pump to read the mailbox account again. The boot calls it once
+    the restored account is in place, and any number of wakes collapse into the
+    work the account already carries: a wake starts no turn of its own.
+
+type SettleWake interface {
+	// RestoreOwed folds the unconsumed work a durable account still owes back
+	// into the mailbox, so a stopped run's notices wait for the next decision
+	// instead of dying with the process that accepted them.
+	RestoreOwed(ctx context.Context) error
+	// Unconsumed reports every mailbox entry whose consumption has not
+	// completed, in the one order the account answers in.
+	Unconsumed() []state.WorkSeat
+	// Claim takes one pending entry for this executor alone, so one
+	// notification starts one turn however often it is observed.
+	Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+	// Release hands one claimed entry back to the pending pool, so an executor
+	// that stopped beside a claim keeps the work owed instead of holding it.
+	Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+	// Consume records the completed consumption of one claimed entry, on the
+	// same account the claim was taken from.
+	Consume(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+}
+    SettleWake is the mailbox account the settle pump drives its turns from:
+    one face that answers whether work waits and moves one entry through claim,
+    release and consumption on the same ledger. The state store behind one run
+    satisfies it.
+
+    The redline list (3 rules): MUST start exactly one follow-up turn per
+    claimed entry and close it only beside its consumption receipt. MUST NOT
+    replay an entry whose consumption receipt is already recorded. MUST NOT hold
+    a claimed entry beside a turn that stopped before its delivery.

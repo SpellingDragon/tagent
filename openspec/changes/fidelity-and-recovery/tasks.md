@@ -19,7 +19,7 @@ graph LR
 
 ## W0（麻雀）
 
-- [ ] 1.0 G1 协议保真红转绿：投影恢复完整调用-结果配对（tool_call_id/ToolCalls/工具名），工具调用后下一轮/压缩后/冷启动后三场景过协议校验 —— 验证：`go test ./tests/integration/host -run 'RequestFidelity' -count=1`（红证先行）；正锚三场景配对校验；负锚（拆掉 ToolCallID→400）；消费者锚=Boot→Invoke 真实请求
+- [x] 1.0 G1 协议保真红转绿：投影恢复完整调用-结果配对（tool_call_id/ToolCalls/工具名），工具调用后下一轮/压缩后/冷启动后三场景过协议校验 —— 验证：`go test ./tests/integration/host -run 'RequestFidelity' -count=1`（红证先行）；正锚三场景配对校验；负锚（拆掉 ToolCallID→400）；消费者锚=Boot→Invoke 真实请求 —— 补勾（2026-10-27 收尾）：①② W0 红转绿、③ 由 1.2 兑现（request_after_cold_boot PASS、Skip 解除）；三场景+ProtocolGate 负锚复跑 3×绿
 - [x] 1.1 G10 测试去假设：NoSendTool 按模型身份+标记定位请求，单跑 10 次全绿 —— 验证：`go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptomNoSendTool$' -count=10 -tags smoke`；负锚（注入乱序请求→仍定位正确）
 - [x] 1.2 调用事实入链（Q5 裁定：1.0 ③ 冷启动协议合法的前置）：assistant 工具调用消息（ToolCalls/ToolCallID/逐字参数）由 commitCalls 提交为调用事实、先于 result 入链；seedReplay 将存储事实回填活账本（seedFact），恢复即重配对 —— 验证：`TAGENT_FIDELITY_COLD_BOOT=1 go test ./tests/integration/host -run 'RequestFidelity' -count=1`（红证先行→修后解除 Skip 转绿）；正锚 request_after_cold_boot 冷启动后完整配对（含逐字参数）；负锚拆 ToolCallID→400（既有协议门）；消费者锚=Boot→Invoke 真实请求
 
@@ -37,15 +37,15 @@ graph LR
 
 ## W3
 
-- [ ] 4.1 G7 历史恢复与预算解耦（max_tokens=0 仍恢复旧历史）
+- [x] 4.1 G7 历史恢复与预算解耦（max_tokens=0 仍恢复旧历史）—— 裁定 (a) 落地（R23 骨架断言错位）：`TestReceiptAndBackgroundStaySeparate` requests[2] 断言随 RoleOf 契约迁移（settled body 以 tool 角色呈现；receipt 是 in-flight 面产物、投影面不恢复=合法），receipt/背景分离意图保留于 requests[1]；`go test ./tests/integration/execution -run 'ReceiptAndBackground' -count=3` 3×绿
 - [x] 4.2 G8 向量候选完整检索（不按 recent 预截断）
 - [x] 4.3 G9 完整请求预算（呈现决定条件重用+硬约束）
 
 ## F
 
-- [ ] F1 契约零改动断言（主规格修订仅本变更声明）
-- [ ] F2 全量门禁（lint/三模块/short 十轮/long 六片/mutations/症状 job）
-- [ ] F3 DoD + G1–G10 回滚即红双证据（定点破坏各修复点）
+- [x] F1 契约零改动断言（主规格修订仅本变更声明）—— golden/ diff 空断言 + 主规格 delta 核对 + `openspec validate fidelity-and-recovery --strict` 全过；凭据 evidence/F1-contract.txt
+- [x] F2 全量门禁（lint/三模块/short 十轮/long 六片/mutations/症状 job）—— 九门全跑完、逐条原始退出码入 evidence/F2-gates.txt；勾选=门禁执行面完成（非门门绿）：short 十轮 0/10（确定性回归归因 0f96892/a3e7441）、long 6/6（工作树混杂红）、mutations registry stale、bundle 透传红，红门清障超收尾授权、待编排者裁
+- [x] F3 DoD + G1–G10 回滚即红双证据（定点破坏各修复点）—— G1–G10 全 PASS（红→还原三重→绿闭环；G7/G10 第一版破坏未咬合、改点后咬合，如实留痕）；凭据 evidence/F3-redgreen.txt
 - [ ] F4 归档 + 导览
 
 ## 粒度统计

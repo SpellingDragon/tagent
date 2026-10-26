@@ -72,6 +72,11 @@ var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not com
 // face that answers whether work waits and moves one entry through claim,
 // release and consumption on the same ledger. The state store behind one run
 // satisfies it.
+//
+// The redline list (3 rules):
+// MUST start exactly one follow-up turn per claimed entry and close it only beside its consumption receipt.
+// MUST NOT replay an entry whose consumption receipt is already recorded.
+// MUST NOT hold a claimed entry beside a turn that stopped before its delivery.
 type SettleWake interface {
 	// RestoreOwed folds the unconsumed work a durable account still owes back
 	// into the mailbox, so a stopped run's notices wait for the next decision

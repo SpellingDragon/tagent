@@ -96,7 +96,7 @@ BASELINE = (
     ("struct-fields", "memory/replay/age_segments.go:AgeFoldReport", 7),
     ("struct-fields", "runtime/task/registry.go:Obligations", 6),
     ("struct-fields", "tool/subagent/target.go:TargetOptions", 8),
-    # S1 iface-methods — 9 项（observed=实测接口方法数）
+    # S1 iface-methods — 10 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "runtime/agent/loop.go:Recorder", 3),
     ("iface-methods", "rl/produce.go:Recorder", 3),
@@ -106,6 +106,10 @@ BASELINE = (
     ("iface-methods", "runtime/task/registry.go:Registry", 4),
     ("iface-methods", "tool/exec/stop.go:Executor", 4),
     ("iface-methods", "tool/mcp/adapter.go:Registry", 5),
+    # SettleWake 5m（2026-10-27: 邮箱账面本体＝唤醒账户，五格分别是欠账回折、未消费盘面、
+    # 认领、退回与消费回执；账面是一个账户的五种动作，拆窄口会把“同一账”切碎；
+    # 窄口收敛留作后续，ratchet 警示保持可见）
+    ("iface-methods", "settle_turn.go:SettleWake", 5),
     # S2 struct-fields — 43 项（observed=实测导出字段数）
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
