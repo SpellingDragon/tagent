@@ -179,11 +179,11 @@ type Host struct {
 	// delivered a turn answer or a declared send tool delivered its own body.
 	deliveries *hostDeliveryMeter
 	// deliveryRuler rules every turn body before the sender is called; a nil
-	// ruler keeps every delivery allowed. pendingDeliveries holds the bodies the
-	// ruler held, keyed by the identity an approval or refusal names, and heldSeq
-	// orders the identities.
+	// ruler keeps every delivery allowed.
 	deliveryRuler plugin.DeliveryRuler
-	// TODO(delivery-review): persist pendingDeliveries across a restart.
+	// pendingDeliveries holds the bodies the review waits on, keyed by the
+	// identity an approval or refusal names, and heldSeq orders the identities.
+	// TODO(delivery-review): persist the holds across a restart.
 	pendingDeliveries map[string]*heldDelivery
 	heldSeq           uint64
 
