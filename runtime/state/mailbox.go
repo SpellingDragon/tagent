@@ -31,8 +31,10 @@ var (
 	// ErrNotClaimed reports a consumption of a mailbox entry no executor has
 	// claimed yet.
 	ErrNotClaimed = errors.New("state: the mailbox entry is not claimed yet")
-	// ErrClaimSettled reports the reclaiming of a mailbox entry whose consumption
-	// has already completed.
+	// ErrClaimSettled reports the reclaiming or the repeated consumption of a
+	// mailbox entry whose consumption has already completed: the receipt stands
+	// as the settled record, and the repeat is refused by name instead of
+	// answering the success the first consumption already recorded.
 	ErrClaimSettled = errors.New("state: the mailbox entry is already consumed")
 )
 
@@ -42,6 +44,15 @@ var (
 // record of the consumption there.
 type consumptionRecorder interface {
 	recordConsumption(ctx context.Context, notice task.Notice) error
+}
+
+// durableConsumption is the durable account one mailbox may be opened over: the
+// receipt of each completed logical consumption beside the open obligations a
+// restore folds back into the mailbox, so the same carrier answers both the
+// consumption the account records and the work it still owes.
+type durableConsumption interface {
+	consumptionRecorder
+	OwedNotices() []task.OutboxNotice
 }
 
 // noticeKey is the stable identity of one notification: the task, the execution
@@ -204,7 +215,9 @@ func (m *MemoryStore) Claim(ctx context.Context, addr event.Address, instance ev
 // and the consumption position advances over the longest contiguous completed
 // prefix of the acceptance sequences. A completion beside an earlier unfinished
 // entry is recorded on its own entry while the position stays before the hole
-// it leaves. An entry already consumed stays as it is, and an entry no executor
+// it leaves. An entry already consumed is refused by name — the receipt of the
+// completed consumption stands as the settled record, and a repeat adds nothing
+// the first consumption did not already record — and an entry no executor
 // claimed is refused.
 func (m *MemoryStore) Consume(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error {
 	m.mu.Lock()
@@ -218,7 +231,7 @@ func (m *MemoryStore) Consume(ctx context.Context, addr event.Address, instance 
 		return ErrEntryUnknown
 	}
 	if entry.Claim == ClaimConsumed {
-		return nil
+		return ErrClaimSettled
 	}
 	if entry.Claim != ClaimClaimed {
 		return ErrNotClaimed
@@ -263,6 +276,33 @@ func (m *MemoryStore) Reclaim(ctx context.Context, addr event.Address, instance 
 	case ClaimPending:
 		return ErrNotClaimed
 	}
+	return nil
+}
+
+// Release returns one claimed input to the pending pool of the mailbox of the
+// site named, so an executor that stopped beside a claim hands the work back
+// instead of holding it forever: the next claim picks the same input up again
+// and finishes it. An entry still pending is refused as not claimed, and an
+// entry whose consumption completed is refused by name: a settled entry never
+// returns to work.
+func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	held, err := m.openSite(addr, instance)
+	if err != nil {
+		return err
+	}
+	entry := entryAt(&held.session, seq)
+	if entry == nil {
+		return ErrEntryUnknown
+	}
+	switch entry.Claim {
+	case ClaimConsumed:
+		return ErrClaimSettled
+	case ClaimPending:
+		return ErrNotClaimed
+	}
+	entry.Claim = ClaimPending
 	return nil
 }
 

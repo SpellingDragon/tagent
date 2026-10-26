@@ -356,3 +356,53 @@ G8：vectorLeg 不再按 recent 预截断检索候选——候选完整读、完
 ## 白名单
 
 全部改动在白名单内：memory/search/**、memory/replay/**、openspec/changes/fidelity-and-recovery/**、docs/api/**。
+
+# 3.2（G6b 唤醒统一：SettleDriver retained 降解为 mailbox 统一待消费，Q6/Q8 裁定）
+
+## 结论
+
+retained/firing/rearm 三态内存队列删除，通知待消费责任归 mailbox 统一账：通知本体持久化于 durable owed（task.CommitRecord.Outbox）、消费动作=启动回合 Claim→drive→Consume 同账（durable consume 回执为完成证据）、被停/失败回合 Release 回 pending 由下次 wake 重试（回调重试=事件驱动非定时轮询）、未消费通知跨 Stop 与重启保留。「还有没有工作」由 mailbox 一处判断（Unconsumed），driver 只做 pump。
+
+## 红证（先于修复，症状逐字）
+
+- evidence/3-2-wake-unified-red.txt：`entry model turns = 3, want the delegating decision beside exactly one follow-up turn`（①重复 fire 双回合，retained 语义）；`timed out waiting for the resumed follow-up to deliver its answer`（②重启后续跑不起来，内存队列丢）；`timed out waiting for both retained notices to resume`（③Stop 清队=丢）。
+- evidence/3-2-consume-repeat-red.txt：`repeat the consumption = <nil>, want … refusing the repeat by name`（重复 Consume 幂等通过，无具名拒绝）。
+- ②③ 排查期根因铁证（DBG 诊断行已删）：`DBG receipt task-2:1:settled:0` 落在 `turn end #2 terminal=cancelled` 之后——被取消的随动回合 driveLocked 返回 err==nil（Terminal=KindCancelled 无错误），fireNoticeTurn 原样 return nil，driveSeat 误判成功落消费回执，boot2 账空。
+
+## 实现要点
+
+- `settle_turn.go`：retained/firing/rearm/userAddressOf 全删；pump 单 goroutine 从 `wake.Unconsumed()` 读待消费席位，Claim 独占后 `driveSeat`（lookup settle fact→fire→Consume）；同轮 `tried` map 防重复尝试；失败/被停回合 `releaseSeat`（Release 回 pending）；Consume 用 `context.WithoutCancel` 写回执（完成证据不停机丢）。
+- `runtime/state/mailbox.go`：Consume 具名拒绝（consumed→`ErrClaimSettled`、非 claimed→`ErrNotClaimed`）；Release（consumed→`ErrClaimSettled`、pending→`ErrNotClaimed`）；durableConsumption 接口（回执落盘后才改内存态）。
+- `runtime/state/memory.go`：WorkSeat/Unconsumed/RestoreOwed/restoreSeat（启动时 durable owed 折回席位）。
+- `runtime/state/durable.go`：OwedNotices（load 自 record.Outbox 建 owed、按 consume 回执剥除）——回执族复用既有 consume: 语义，**未扩持久语义、无新回执族**（任务书申报问的答复）。
+- `host.go`（白名单外触点，申报）：fireNoticeTurn 消费完成点=回合真正交付（`turn.Terminal != model.KindCompleted` → `ErrNoticeTurnIncomplete`，不落回执）。
+
+## 删并三问（3.2 收尾必答）
+
+1. **删了什么状态**：SettleDriver.retained（完整 event.Event 队列）、firing、rearm 三态内存队列与 Stop 清队点、userAddressOf 路由判门。通知本体唯一承载=durable owed（Outbox 持久化）+ mailbox 三态（pending/claimed/consumed）。
+2. **责任归谁**：mailbox 一处判「还有没有工作」（Unconsumed 唯一问询点）；Claim 独占保证一通知一回合；Consume+durable 回执=完成证据（不变量3 的「完成证据」面）；Release=未完成回合的可恢复未结状态（不变量3 的另一面）；driver 只做 pump。
+3. **验收仍成立**：三锚全绿（重复 fire 不双回合/跨重启可恢复/Stop 保留）+ 负锚全绿（已消费不重放、重复 Consume→`ErrClaimSettled`），具名测试见下。
+
+## 自行决策与已知边界（申报）
+
+- 消费完成点解读：裁定「Claim→drive→Consume 同账」中 drive 完成=回合真正交付（Terminal==KindCompleted）；被停/失败回合不落回执、Release 重试——与 durable consume 语义一致（「the receipt MUST follow the handover, and a stop between the two leaves the notification owed」）。
+- fire 失败重试=下次 wake（事件驱动），未引入定时轮询。
+- wrapper 包装任务（task-1）的 sink 同步 Consume（bookNotice→Backflow→Consume）是 G1-G4 既有语义，非本单面，不动。
+- `runtime/state/durable_test.go` 冻结断言改造（申报）：重复消费原期待幂等通过→改为期待 `ErrClaimSettled`（与任务书负锚一致，R23 骨架断言改写、验收意图保留）。
+- userAddressOf 门随 retained 删除：fire 直接用 seat.Address（路由冻结于 notice 本体）。
+
+## 三锚与绿证（可复跑）
+
+- 红→绿锚：`go test ./tests/integration/host -run '^TestSettleWakeUnified$' -count=1` → 4 子测 PASS（重复 fire 恒一回合/重启续跑 0.23s/Stop 保留 0.24s/不重放 guard）；红证见 evidence/3-2-wake-unified-red.txt。
+- driver 级三锚：`go test ./tests/integration/execution -run '^TestSettleWakeAccount$' -count=1` → 3 子测 PASS（真实 durable 账：Write 工具一次报错重试成功）。
+- 负锚：`a consumed notice never replays and the repeated consumption is refused by name`（`state.ErrClaimSettled`）+ host 级 `a consumed notice never replays`（guard 回合数 0）。
+- 消费者锚：正式入口 `tagent.Boot(configPath, WithSender)`→`Host.Invoke` 委派→deliver（TrackDelivery+AcceptNotice）→settle fact→Wake→driver→fireNoticeTurn→driveLocked 真回合→Consume（TestSettleWakeUnified 全链实测；TestSettleWakeAccount 经 ledger.OpenTier→NewDurableCommit→Commit 真账）。
+- 门禁：`go test ./tests/integration/execution ./tests/integration/host ./runtime/... -count=1` 与 `-race` 一次（结果见战报/提交说明）；`go build ./...`、`go vet ./...` 干净；`./scripts/lint.sh` 全绿（comment_policy 0 findings）；症状全家 `go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom'` → ok 12.4s；clone 级见提交后复验。
+
+## 回归红（既有，归因 G7，非本单面）
+
+`tests/integration/execution/TestReceiptAndBackgroundStaySeparate`：/tmp worktree 检出 0f96892（无本单改动）同测红、失败形态逐字一致（`second invocation messages = 6 …`），5f78bdf（G7 前）通过——G7 提交引入的既有红，未触碰、待裁面同 4.1 节。
+
+## 白名单
+
+白名单内：settle_turn.go、runtime/state/{mailbox,memory,durable}.go、tests/integration/{host,execution}/**、openspec/changes/fidelity-and-recovery/**。白名单外触点（申报）：host.go（fireNoticeTurn 终态检查与 doc 合并、Boot 恢复后 Wake）、runtime/state/durable_test.go（冻结断言改造）。

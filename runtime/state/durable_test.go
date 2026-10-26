@@ -346,8 +346,8 @@ func TestMailboxSnapshotInvariants(t *testing.T) {
 		if err := store.Consume(ctx, invariantAddress, "instance-a", 1); err != nil {
 			t.Fatalf("consume the claimed entry: %v", err)
 		}
-		if err := store.Consume(ctx, invariantAddress, "instance-a", 1); err != nil {
-			t.Fatalf("repeat the consumption: %v", err)
+		if err := store.Consume(ctx, invariantAddress, "instance-a", 1); !errors.Is(err, ErrClaimSettled) {
+			t.Fatalf("repeat the consumption = %v, want %v beside a settled entry refusing the repeat by name", err, ErrClaimSettled)
 		}
 		if err := store.Reclaim(ctx, invariantAddress, "instance-a", 1); !errors.Is(err, ErrClaimSettled) {
 			t.Fatalf("reclaim a settled entry = %v, want %v", err, ErrClaimSettled)

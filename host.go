@@ -426,7 +426,12 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		}
 		settleDriver = NewSettleDriver(
 			run.CommittedEvent,
-			func(session event.SessionID) (event.Address, bool) { return host.userAddressOf(session) },
+			func() SettleWake {
+				if run.store == nil {
+					return nil
+				}
+				return run.store
+			},
 			func(ctx context.Context, addr event.Address, fact event.Event) error {
 				return host.fireNoticeTurn(ctx, addr, fact)
 			},
@@ -473,6 +478,9 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if err := host.restorePendingDeliveries(ctx); err != nil {
 		cancel()
 		return nil, host.abortBoot(err)
+	}
+	if settleDriver != nil {
+		settleDriver.Wake()
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -705,7 +713,10 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 // The fact it commits is a feedback fact, never a terminal settle with a settle
 // lineage, so the driver that fired this turn never fires on its output. The
 // assistant body the turn produces is delivered through the message sender by
-// the ordinary drive path, exactly as a user turn's output is.
+// the ordinary drive path, exactly as a user turn's output is. Only a turn that
+// really delivered its answer closes the mailbox entry it drove from: a stopped
+// or failed turn reports the incomplete delivery by name, so the entry stays
+// owed for the next wake instead of a receipt recording a turn nobody read.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {
 		return ErrHostClosed
@@ -747,12 +758,18 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 	}); err != nil {
 		return err
 	}
-	_, err = h.driveLocked(ctx, InvokeRequest{
+	turn, err := h.driveLocked(ctx, InvokeRequest{
 		InvocationID:  invocationID,
 		Address:       addr,
 		TriggerSource: "task",
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if turn.Terminal != model.KindCompleted {
+		return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, invocationID, turn.Terminal)
+	}
+	return nil
 }
 
 // settleNoticeText renders the input material one unattended settle reads as:

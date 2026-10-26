@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -71,7 +72,7 @@ type MemoryStore struct {
 	current      map[event.Address]event.InstanceID
 	deliveries   map[event.TaskID]task.HandoffTarget
 	accepted     map[noticeKey]acceptedNotice
-	consumptions consumptionRecorder
+	consumptions durableConsumption
 }
 
 // MemoryStore satisfies the Store face.
@@ -197,4 +198,122 @@ func snapshot(s *Session) *Session {
 		Mailbox:  append([]MailboxEntry(nil), s.Mailbox...),
 	}
 	return out
+}
+
+// WorkSeat is one input the mailbox still owes a decision for: the site it sits
+// at, the acceptance sequence it took there, and the notification it accepted
+// beside the claim an executor may hold it under. A seat is the one account a
+// driven turn is started from, so the question whether work waits is answered
+// in one place.
+type WorkSeat struct {
+	// Address is the explicit address of the site the entry sits at.
+	Address event.Address
+	// Instance is the runtime instance that owns that site.
+	Instance event.InstanceID
+	// AcceptSeq is the acceptance sequence the entry took at its site.
+	AcceptSeq AcceptSeq
+	// Notice is the stable identity of the notification the entry accepted.
+	Notice task.Notice
+	// Claim is the claim state the entry stands at.
+	Claim ClaimState
+}
+
+// Unconsumed reports every mailbox entry whose consumption has not completed,
+// across every site this store holds, ordered by address, instance and
+// acceptance sequence so the same account always answers in the same order. An
+// entry an executor claimed but has not consumed yet still owes its work and
+// stays listed until its consumption completes.
+func (m *MemoryStore) Unconsumed() []WorkSeat {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var seats []WorkSeat
+	for key, held := range m.sites {
+		for i := range held.session.Mailbox {
+			entry := &held.session.Mailbox[i]
+			if entry.Claim == ClaimConsumed {
+				continue
+			}
+			seats = append(seats, WorkSeat{
+				Address:   key.addr,
+				Instance:  key.instance,
+				AcceptSeq: entry.AcceptSeq,
+				Notice:    entry.Notice,
+				Claim:     entry.Claim,
+			})
+		}
+	}
+	sort.Slice(seats, func(i, j int) bool {
+		left, right := seats[i], seats[j]
+		if left.Address.AgentID != right.Address.AgentID {
+			return left.Address.AgentID < right.Address.AgentID
+		}
+		if left.Address.SessionID != right.Address.SessionID {
+			return left.Address.SessionID < right.Address.SessionID
+		}
+		if left.Instance != right.Instance {
+			return left.Instance < right.Instance
+		}
+		return left.AcceptSeq < right.AcceptSeq
+	})
+	return seats
+}
+
+// RestoreOwed folds the notifications the durable account behind this mailbox
+// still owes back into the mailbox: the target site each notification's frozen
+// routing names is opened beside the instance that froze it, so the work a
+// stopped run left unconsumed waits for the next decision instead of being lost
+// with the process. The restore is idempotent — a notification already sitting
+// in its mailbox is accepted once and never appended twice — and the site it
+// opens beside a frozen instance never takes the address over from the
+// instance currently serving it. A mailbox beside no durable account restores
+// nothing, because nothing outside the process owes it work.
+func (m *MemoryStore) RestoreOwed(ctx context.Context) error {
+	if m.consumptions == nil {
+		return nil
+	}
+	owed := m.consumptions.OwedNotices()
+	for _, owed := range owed {
+		envelope := owed.Notice
+		if err := m.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{
+			Target:         envelope.Target,
+			TargetInstance: envelope.TargetInstance,
+		}); err != nil {
+			return err
+		}
+		if err := m.restoreSeat(envelope.Target, envelope.TargetInstance); err != nil {
+			return err
+		}
+		if err := m.AcceptNotice(ctx, envelope.Notice); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// restoreSeat opens the site one frozen routing names beside the instance that
+// froze it, so an acceptance recorded under a stopped instance lands in the
+// mailbox account instead of being refused as unknown. The site is opened
+// without touching the instance currently serving the address, so the
+// retirement bookkeeping of a live instance is never rewritten by a restore.
+func (m *MemoryStore) restoreSeat(addr event.Address, instance event.InstanceID) error {
+	if !addr.IsComplete() {
+		return ErrIncompleteAddress
+	}
+	if instance == "" {
+		return ErrInstanceMissing
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := siteKey{addr: addr, instance: instance}
+	if held, ok := m.sites[key]; ok {
+		if held.closed {
+			return ErrSessionClosed
+		}
+		return nil
+	}
+	m.sites[key] = &site{
+		session: Session{Address: addr, Instance: instance},
+		nextSeq: 1,
+	}
+	return nil
 }

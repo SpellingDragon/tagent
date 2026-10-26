@@ -379,6 +379,33 @@ func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice {
 	return owed
 }
 
+// OwedNotices reports every notification the carrier still owes delivery on,
+// in the stable task, round, kind and sequence order: the open obligations of
+// the account, beside which the ones a consumption receipt confirms never
+// appear again.
+func (d *DurableCommit) OwedNotices() []task.OutboxNotice {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	owed := make([]task.OutboxNotice, 0, len(d.owed))
+	for _, entry := range d.owed {
+		owed = append(owed, entry)
+	}
+	sort.Slice(owed, func(i, j int) bool {
+		left, right := owed[i].Notice.Notice, owed[j].Notice.Notice
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if left.Round != right.Round {
+			return left.Round < right.Round
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return left.Seq < right.Seq
+	})
+	return owed
+}
+
 // TaskIDs returns every task the carrier holds facts for, in numeric order.
 func (d *DurableCommit) TaskIDs() []event.TaskID {
 	d.mu.Lock()

@@ -32,7 +32,7 @@ graph LR
 ## W2
 
 - [x] 3.1 G5 交付恢复：pendingDeliveries 持久化（跨重启可批准/拒绝）+ 发送失败持久重试义务 —— 前置：2.2（同 host.go 簇）
-- [ ] 3.2 G6b 唤醒统一（Q6/Q8 裁定改写）：SettleDriver retained 降解为 mailbox 未消费通知（Claim→drive→Consume 同账；通知本体持久化+durable 消费回执+回调重试；未消费通知跨 Stop 保留）—— 前置：2.2；验收：重复 fire 不双回合、跨重启可恢复、Stop 保留
+- [x] 3.2 G6b 唤醒统一（Q6/Q8 裁定改写）：SettleDriver retained 降解为 mailbox 未消费通知（Claim→drive→Consume 同账；通知本体持久化+durable 消费回执+回调重试；未消费通知跨 Stop 保留）—— 前置：2.2；验收：重复 fire 不双回合、跨重启可恢复、Stop 保留
 - [x] 3.3 G6 执行最终输出：退出释放前保存最终输出（可读）+ 接管测试升级（unknown→查询→接管或具名报告） —— 前置：无
 
 ## W3

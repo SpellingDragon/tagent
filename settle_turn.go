@@ -2,7 +2,8 @@
 //
 // SettleDriver is the event-driven face of one unattended settle: it observes
 // the delivery facts this run commits for a terminal task notification and
-// drives one follow-up turn at the user session the task belongs to.
+// drives one follow-up turn at the address the notification froze its routing
+// to.
 //
 // The trigger surface is closed, and the anti-loop is semantic rather than a
 // blacklist:
@@ -10,7 +11,7 @@
 //   - Only the terminal kinds settled, failed and cancelled fire; accepted and progress do not.
 //   - Only a delivery fact carries the settle-lineage meta key, so a backflow settle never fires.
 //   - The fired turn commits no settle fact with a lineage, so it can never fire itself again.
-//   - A notice that arrives while a follow-up is in flight is retained, in arrival order, and re-evaluated when that turn ends: it is never dropped.
+//   - The mailbox is the one account that answers whether work waits: a notification waits there until a turn claims it, drives it and consumes it on that same account, so one notification starts one turn however often it is observed.
 package tagent
 
 import (
@@ -20,6 +21,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -55,33 +57,55 @@ func noticeTaskIDOf(fact event.Event) event.TaskID {
 }
 
 // ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
-// user-address memory or follow-up face was never wired: a gap by name instead
-// of a silent no-op that reads as a delivered turn.
+// mailbox account or follow-up face was never wired: a gap by name instead of
+// a silent no-op that reads as a delivered turn.
 var ErrSettleDriverUnwired = errors.New("tagent: the settle driver is not wired")
 
-// settleNotice is one observation this driver owes a turn: the address the
-// follow-up runs at beside the fact that asked for it. A notice retained while
-// a turn is in flight keeps its fact, so the turn that re-evaluates it reads the
-// very fact the delivery committed instead of a reconstruction of it.
-type settleNotice struct {
-	addr event.Address
-	fact event.Event
+// ErrNoticeTurnIncomplete reports a follow-up turn that ended without the
+// completed delivery its notification owed: a stopped or failed turn hands its
+// mailbox entry back unconsumed, so the work stays owed and the next wake drives
+// it again, while only a turn that really delivered closes the entry beside its
+// consumption receipt.
+var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not complete its delivery")
+
+// SettleWake is the mailbox account the settle pump drives its turns from: one
+// face that answers whether work waits and moves one entry through claim,
+// release and consumption on the same ledger. The state store behind one run
+// satisfies it.
+type SettleWake interface {
+	// RestoreOwed folds the unconsumed work a durable account still owes back
+	// into the mailbox, so a stopped run's notices wait for the next decision
+	// instead of dying with the process that accepted them.
+	RestoreOwed(ctx context.Context) error
+	// Unconsumed reports every mailbox entry whose consumption has not
+	// completed, in the one order the account answers in.
+	Unconsumed() []state.WorkSeat
+	// Claim takes one pending entry for this executor alone, so one
+	// notification starts one turn however often it is observed.
+	Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+	// Release hands one claimed entry back to the pending pool, so an executor
+	// that stopped beside a claim keeps the work owed instead of holding it.
+	Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+	// Consume records the completed consumption of one claimed entry, on the
+	// same account the claim was taken from.
+	Consume(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
 }
 
 // SettleDriver is the fact->observation face of the one turn a terminal notice
-// fires at the session it belongs to. It reads the fact one commit identity
-// names, judges it against the terminal table above, and runs the injected
-// follow-up face when the owning session carries a remembered user address.
+// fires at the address its routing froze. An observation wakes the pump, and
+// the pump reads the mailbox account: every entry there is claimed, driven
+// beside the committed fact its notification points at, and consumed on that
+// same account once the turn returned. The driver keeps no queue of its own,
+// so nothing it holds can be lost by a stop or a restart.
 type SettleDriver struct {
 	// lookup reads the fact one commit identity names: the commit notice
 	// carries an identity, and the fact itself is read back through the chain
 	// the run already holds.
 	lookup func(ctx context.Context, id event.EventID) (event.Event, error)
 
-	// userAddressOf reports the user address the host remembered for one
-	// session: the follow-up turn runs at that explicit address and never at a
-	// most-recent one.
-	userAddressOf func(session event.SessionID) (event.Address, bool)
+	// wake resolves the mailbox account the pump drives: the store one run
+	// assembles, resolved when the turn is driven and never before.
+	wake func() SettleWake
 
 	// fire drives the one follow-up turn the settle asks for.
 	fire func(ctx context.Context, addr event.Address, fact event.Event) error
@@ -90,13 +114,12 @@ type SettleDriver struct {
 	stopCancel context.CancelFunc
 
 	mu      sync.Mutex
-	firing  bool
 	stopped bool
-	// retained holds the notices that arrived while a follow-up was in flight,
-	// in arrival order: the rearm after that turn takes the next one, so a
-	// notice is deferred by a turn and never lost to one.
-	retained []settleNotice
-	wg       sync.WaitGroup
+	// wakeCh carries the wake signals the observations leave behind; one slot
+	// is enough, because a wake only asks the pump to read the account again
+	// and the account itself never lies about the work it holds.
+	wakeCh chan struct{}
+	wg     sync.WaitGroup
 }
 
 var (
@@ -106,18 +129,23 @@ var (
 )
 
 // NewSettleDriver assembles the settle face over the fact lookup of one run,
-// the user-address memory of one host and the follow-up drive of that host.
+// the mailbox account of that run and the follow-up drive of its host. The
+// pump starts beside the driver and rests until a wake or an observation asks
+// it to read the account.
 func NewSettleDriver(
 	lookup func(context.Context, event.EventID) (event.Event, error),
-	userAddressOf func(event.SessionID) (event.Address, bool),
+	wake func() SettleWake,
 	fire func(context.Context, event.Address, event.Event) error,
 ) *SettleDriver {
 	d := &SettleDriver{
-		lookup:        lookup,
-		userAddressOf: userAddressOf,
-		fire:          fire,
+		lookup: lookup,
+		wake:   wake,
+		fire:   fire,
+		wakeCh: make(chan struct{}, 1),
 	}
 	d.stopCtx, d.stopCancel = context.WithCancel(context.Background())
+	d.wg.Add(1)
+	go d.pump()
 	return d
 }
 
@@ -130,23 +158,19 @@ func (d *SettleDriver) Port() plugin.Port {
 	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
 }
 
-// ObserveCommit reads the fact one commit wrote and fires the follow-up turn the
-// terminal notice asks for.
-//
-// The turn itself runs detached from the committing delivery: a follow-up
-// spends a model turn, and the flush that delivered the notification never waits
-// for it. A notice that arrives while a turn is in flight joins the driver's
-// retained queue and is re-evaluated as soon as that turn ends, so the busy
-// window defers the turn instead of dropping the notice. A fact that is not a
-// terminal delivery fact, or whose session carries no remembered user address,
-// is ignored in silence: those are not settles nobody drives, they are settles
-// somebody already read or addresses the host was never asked to turn. A failed
+// ObserveCommit reads the fact one commit wrote and wakes the pump when the
+// fact is one the settle trigger table fires on. The observation itself starts
+// nothing: the mailbox is the one account that answers whether work waits, so
+// a repeated observation of one delivered notification claims no second turn
+// — the entry is either consumed already or claimed by the turn it started. A
+// fact that is not a terminal delivery fact is ignored in silence: those are
+// not settles nobody drives, they are settles somebody already read. A failed
 // read is reported back and never rolls the committed fact back.
 func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) error {
-	if d == nil || !d.live() {
+	if d == nil || d.stoppedNow() {
 		return nil
 	}
-	if d.lookup == nil || d.userAddressOf == nil || d.fire == nil {
+	if d.lookup == nil || d.wake == nil || d.fire == nil {
 		return ErrSettleDriverUnwired
 	}
 	fact, err := d.lookup(ctx, id)
@@ -159,94 +183,149 @@ func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) erro
 	if !terminalSettleKinds[noticeKindOf(fact)] {
 		return nil
 	}
-	addr, ok := d.userAddressOf(fact.Owner.SessionID)
-	if !ok || !addr.IsComplete() {
-		return nil
-	}
-	notice := settleNotice{addr: addr, fact: fact}
-
-	d.mu.Lock()
-	if d.stopped {
-		d.mu.Unlock()
-		return nil
-	}
-	if d.firing {
-		d.retained = append(d.retained, notice)
-		d.mu.Unlock()
-		return nil
-	}
-	d.firing = true
-	d.wg.Add(1)
-	d.mu.Unlock()
-
-	go d.fireFact(ctx, notice)
+	d.Wake()
 	return nil
 }
 
-// fireFact runs the follow-up turns this driver owes, one after another, and
-// settles the driver's firing state when the queue runs dry. A turn outlives
-// the delivery that observed it but not the driver: a stop cancels it, and Stop
-// waits for it to return. Every turn after the first is one the rearm took from
-// the retained queue, so a notice that arrived while a turn was in flight is
-// re-evaluated here instead of being dropped by it.
-func (d *SettleDriver) fireFact(ctx context.Context, first settleNotice) {
-	defer d.wg.Done()
-
-	if ctx != nil {
-		ctx = context.WithoutCancel(ctx)
-	} else {
-		ctx = context.Background()
+// Wake asks the pump to read the mailbox account again. The boot calls it once
+// the restored account is in place, and any number of wakes collapse into the
+// work the account already carries: a wake starts no turn of its own.
+func (d *SettleDriver) Wake() {
+	if d == nil {
+		return
 	}
-	for notice := first; ; {
-		d.fireOne(ctx, notice)
-		next, again := d.rearm()
-		if !again {
-			return
-		}
-		notice = next
+	select {
+	case d.wakeCh <- struct{}{}:
+	default:
 	}
 }
 
-// fireOne drives one follow-up turn under its own cancellation: a stop ends the
-// turn in flight, and the next retained notice is only taken after this one
-// returned.
-func (d *SettleDriver) fireOne(ctx context.Context, notice settleNotice) {
-	ctx, cancel := context.WithCancel(ctx)
+// pump is the one goroutine that drives the follow-up turns of this driver,
+// one after another: a wake signal asks it to read the mailbox account, and
+// every entry it finds there is driven on the account itself. A stop ends the
+// pump and the turn in flight beside it, and the account keeps everything the
+// turns did not consume.
+func (d *SettleDriver) pump() {
+	defer d.wg.Done()
+	for {
+		select {
+		case <-d.stopCtx.Done():
+			return
+		case <-d.wakeCh:
+		}
+		d.drain()
+	}
+}
+
+// seatKey is the account position one drive takes its entry from: the site and
+// the acceptance sequence, which name one entry and nothing else.
+type seatKey struct {
+	addr     event.Address
+	instance event.InstanceID
+	seq      state.AcceptSeq
+}
+
+// drain drives every turn the mailbox owes until it answers no more work. Each
+// entry is claimed for this executor alone, driven beside the fact its
+// notification points at, and consumed on the same account once the turn
+// returned. A claim another consumer holds is skipped rather than stolen, so
+// one notification starts one turn however often it is observed, and an entry
+// a failed turn handed back is left to the next wake instead of retried in a
+// tight loop beside the failure it just reported.
+func (d *SettleDriver) drain() {
+	ctx := d.stopCtx
+	tried := map[seatKey]bool{}
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		wake := d.wake()
+		if wake == nil {
+			return
+		}
+		if err := wake.RestoreOwed(ctx); err != nil {
+			assemblyWarn("tagent: the settle restore of the mailbox reported: %v", err)
+		}
+		seats := wake.Unconsumed()
+		worked := false
+		for _, seat := range seats {
+			if ctx.Err() != nil {
+				return
+			}
+			if !terminalSettleKinds[seat.Notice.Kind] || seat.Claim != state.ClaimPending {
+				continue
+			}
+			key := seatKey{addr: seat.Address, instance: seat.Instance, seq: seat.AcceptSeq}
+			if tried[key] {
+				continue
+			}
+			if err := wake.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+				continue
+			}
+			tried[key] = true
+			worked = true
+			d.driveSeat(ctx, wake, seat)
+		}
+		if !worked {
+			return
+		}
+	}
+}
+
+// driveSeat drives the one follow-up turn one mailbox seat owes and settles the
+// entry on the same account its claim was taken from: the turn runs beside the
+// committed fact the notification points at, a turn that returned settles the
+// entry as consumed, and a turn that failed hands the entry back so the next
+// wake retries it. A stop ends the turn in flight and leaves the entry
+// unconsumed, so the work survives the stop instead of dying with it; beside a
+// turn that completed, the consumption receipt is written without the pump's
+// cancellation and closes the entry even as the driver stops.
+func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat state.WorkSeat) {
+	fact, err := d.lookup(ctx, settleDeliveryKey(seat.Notice))
+	if err != nil {
+		assemblyWarn("tagent: the settle fact of %s could not be read: %v", seat.Notice.FactKey(), err)
+		d.releaseSeat(wake, seat)
+		return
+	}
+	if fact.Type != event.TypeTaskSettled || noticeTaskIDOf(fact) == "" || !terminalSettleKinds[noticeKindOf(fact)] {
+		d.releaseSeat(wake, seat)
+		return
+	}
+
+	fireCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(d.stopCtx, cancel)
 	defer stop()
 
-	if err := d.fire(ctx, notice.addr, notice.fact); err != nil {
-		assemblyWarn("tagent: the settle follow-up of %s ended by error: %v", notice.addr.SessionID, err)
+	if err := d.fire(fireCtx, seat.Address, fact); err != nil {
+		assemblyWarn("tagent: the settle follow-up of %s ended by error: %v", seat.Address.SessionID, err)
+		d.releaseSeat(wake, seat)
+		return
+	}
+	if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+		assemblyWarn("tagent: the settle consumption of %s beside the finished turn reported: %v", seat.Notice.FactKey(), err)
 	}
 }
 
-// rearm reports the next retained notice of this driver, and whether one is
-// owed at all. The queue is drained in arrival order; a stop or an empty queue
-// ends the firing and clears what a stop left behind, so the driver rests until
-// the next commit.
-func (d *SettleDriver) rearm() (settleNotice, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.stopped || len(d.retained) == 0 {
-		d.firing = false
-		d.retained = nil
-		return settleNotice{}, false
+// releaseSeat hands one entry this drive claimed back to the pending pool, so
+// the work stays owed and the next wake picks it up again.
+func (d *SettleDriver) releaseSeat(wake SettleWake, seat state.WorkSeat) {
+	if err := wake.Release(context.WithoutCancel(context.Background()), seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+		assemblyWarn("tagent: the settle release of %s reported: %v", seat.Notice.FactKey(), err)
 	}
-	next := d.retained[0]
-	d.retained = d.retained[1:]
-	return next, true
 }
 
-// live reports whether the driver still accepts commits.
-func (d *SettleDriver) live() bool {
+// stoppedNow reports whether the driver has been stopped.
+func (d *SettleDriver) stoppedNow() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return !d.stopped
+	return d.stopped
 }
 
-// Stop ends the driver: no further commit fires a turn, a turn in flight is
-// cancelled, and Stop waits for it to return. A repeated stop is a no-op.
+// Stop ends the driver: no further commit wakes the pump, the turn in flight
+// is cancelled, and Stop waits for the pump to return. What the mailbox still
+// holds is kept as it stands — an unconsumed notice outlives the stop, so the
+// next process resumes the turn it owes. A repeated stop is a no-op.
 func (d *SettleDriver) Stop() {
 	if d == nil {
 		return
@@ -257,7 +336,6 @@ func (d *SettleDriver) Stop() {
 		return
 	}
 	d.stopped = true
-	d.retained = nil
 	d.mu.Unlock()
 	d.stopCancel()
 	d.wg.Wait()
