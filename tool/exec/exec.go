@@ -22,17 +22,21 @@ import (
 //
 // 契约: docs/wiki/agent/task-lifecycle.md#ttl-reclaim
 type Manager struct {
-	mu          sync.Mutex
-	backend     Executor
-	now         func() time.Time
-	available   func(ResourceKey) bool
-	defaultTTL  time.Duration
-	resources   map[ResourceKey]*heldResource
-	acquired    int
-	adopted     int
-	reused      int
-	released    int
-	escalations int
+	mu         sync.Mutex
+	backend    Executor
+	now        func() time.Time
+	available  func(ResourceKey) bool
+	defaultTTL time.Duration
+	resources  map[ResourceKey]*heldResource
+	final      map[ResourceKey]FinalOutput
+	// finalCaptureWindow bounds the final-output capture one release drives.
+	// It is fixed at construction and read without the lock.
+	finalCaptureWindow time.Duration
+	acquired           int
+	adopted            int
+	reused             int
+	released           int
+	escalations        int
 	// observer is the optional lifecycle observer of this manager and the only
 	// thing that starts the post-return tracker; closing reports that the
 	// manager close began, so no tracker starts behind it.
@@ -69,6 +73,20 @@ var ErrLeaseInvalid = errors.New("exec: the lease must not be negative")
 // explicit stop handling of a sweep, so a late renewal never revives it beside
 // a settlement already in flight.
 var ErrLeaseExpired = errors.New("exec: the lease reached its deadline before this renewal")
+
+// ErrFinalOutputUnsettled reports a final-output read refused because the
+// resource is still held: its execution may still produce output, so no final
+// frame exists yet.
+var ErrFinalOutputUnsettled = errors.New("exec: the resource is still held, no final output is settled")
+
+// ErrFinalOutputUnrecorded reports a final-output read over a key whose release
+// saved no final frame, so there is nothing recorded to read beside it.
+var ErrFinalOutputUnrecorded = errors.New("exec: no final output is recorded under that key")
+
+// finalOutputCaptureWindow bounds the final-output capture one release drives:
+// the save is best-effort beside the release, so a capture that never answers
+// loses its record instead of holding the release of the resource hostage.
+const finalOutputCaptureWindow = 5 * time.Second
 
 // heldResource is one held execution resource: the declaration it was started
 // under, the lease keeping it held, the probe observations recorded against it
@@ -142,14 +160,24 @@ func WithDefaultTTL(ttl time.Duration) ManagerOption {
 	return func(m *Manager) { m.defaultTTL = ttl }
 }
 
+// WithFinalOutputCaptureWindow bounds the final-output capture one release
+// drives, beside the package default: the save is best-effort, so a capture
+// that never answers inside the window loses its record instead of holding the
+// release of the resource hostage.
+func WithFinalOutputCaptureWindow(window time.Duration) ManagerOption {
+	return func(m *Manager) { m.finalCaptureWindow = window }
+}
+
 // NewManager returns the execution resource manager over one executor: every
 // acquisition, probe, sweep and release runs through the executor behind it.
 func NewManager(backend Executor, opts ...ManagerOption) *Manager {
 	m := &Manager{
-		backend:    backend,
-		now:        time.Now,
-		defaultTTL: DefaultLeaseTTL,
-		resources:  map[ResourceKey]*heldResource{},
+		backend:            backend,
+		now:                time.Now,
+		defaultTTL:         DefaultLeaseTTL,
+		resources:          map[ResourceKey]*heldResource{},
+		final:              map[ResourceKey]FinalOutput{},
+		finalCaptureWindow: finalOutputCaptureWindow,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -354,8 +382,17 @@ func (m *Manager) Release(ctx context.Context, key ResourceKey) (ReleaseEvidence
 // release performs the stop and, beside a confirmed stop, the freeing of one
 // held resource, without touching the tracker and without reporting the
 // outcome: it is the shared middle of the explicit release and of the tracker
-// that observed the ending itself.
+// that observed the ending itself. The final output of the execution is saved
+// before the stop takes the resource away, so the frame an exit produced stays
+// readable after the resource is freed.
 func (m *Manager) release(ctx context.Context, key ResourceKey) (ReleaseEvidence, error) {
+	window := m.finalCaptureWindow
+	if window <= 0 {
+		window = finalOutputCaptureWindow
+	}
+	captureCtx, cancelCapture := context.WithTimeout(context.WithoutCancel(ctx), window)
+	finalFrame, captureErr := m.backend.Capture(captureCtx, key)
+	cancelCapture()
 	stop, err := m.backend.Stop(context.WithoutCancel(ctx), key)
 	evidence := ReleaseEvidence{Resource: key, Stop: stop}
 	if err != nil {
@@ -373,6 +410,9 @@ func (m *Manager) release(ctx context.Context, key ResourceKey) (ReleaseEvidence
 	if _, held := m.resources[key]; held {
 		delete(m.resources, key)
 		m.released++
+	}
+	if captureErr == nil {
+		m.final[key] = FinalOutput{Resource: key, Output: finalFrame, ExitCode: stop.ExitCode, At: m.now()}
 	}
 	evidence.Released = true
 	return evidence, nil
@@ -566,6 +606,58 @@ func (m *Manager) Held() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.resources)
+}
+
+// FinalOutput is the output one released execution recorded beside its ending:
+// the frame saved before the release freed the resource, kept readable after
+// the resource itself is gone. It is an observation of what the execution
+// produced before it ended, never a completion verdict on the work it was
+// asked to do. The record is held inside the manager that settled the release,
+// one last record per key.
+type FinalOutput struct {
+	// Resource is the released resource the final output was saved for.
+	Resource ResourceKey
+	// Output is the frame observed before the release freed the resource.
+	Output []byte
+	// ExitCode is the exit status observed beside the confirmed stop.
+	ExitCode int
+	// At is the time the release settled the resource.
+	At time.Time
+}
+
+// FinalOutput reports the output one released execution recorded beside its
+// ending. A resource still held answers ErrFinalOutputUnsettled, because its
+// execution may still produce output and no final frame exists yet; a key no
+// release settled beside this manager answers ErrFinalOutputUnrecorded,
+// because nothing was saved for it.
+func (m *Manager) FinalOutput(key ResourceKey) (FinalOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, held := m.resources[key]; held {
+		return FinalOutput{Resource: key}, fmt.Errorf("%w: %s", ErrFinalOutputUnsettled, key)
+	}
+	recorded, ok := m.final[key]
+	if !ok {
+		return FinalOutput{Resource: key}, fmt.Errorf("%w: %s", ErrFinalOutputUnrecorded, key)
+	}
+	return recorded, nil
+}
+
+// Query reports what one probe observed behind key, held or not: it is the
+// consult the restart path runs before it decides whether to take a running
+// resource over, to report a state it cannot confirm by name, or to open a new
+// execution. A probe that could not decide is answered as unknown and never as
+// an absence, so no caller takes over a resource on undeterminable evidence.
+func (m *Manager) Query(ctx context.Context, key ResourceKey) (ProbeResult, error) {
+	return m.backend.Probe(ctx, key)
+}
+
+// held reports whether a resource is currently held under key.
+func (m *Manager) held(key ResourceKey) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.resources[key]
+	return ok
 }
 
 // Acquired reports how many resources the manager started.

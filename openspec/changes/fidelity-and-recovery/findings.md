@@ -133,3 +133,43 @@ replays 索引键由 `event.SessionID` 单键改完整地址 `event.Address{Agen
 - 负锚：replayAddressOf 临时还原 `event.Address{SessionID: sessionOf(evt)}` 单键 → `requests_stay_scoped` 红（`request 2 (model model-beta) carries the foreign markers [alpha-history-marker-A11 alpha-answer-marker]`）→ 恢复后绿。
 - 消费者锚：Boot→Invoke 真实请求（bootIntegrityHostWithAgents + driveIntegrityTurn→host.Invoke，scriptedProvider servedRequests 读回 wire 形态；标记从 provider 真实收到的请求文本读出，非测试手工接线）。
 - 回归：`go test ./tests/integration/host ./memory/... ./runtime/... -count=1` → 9 包全 ok（host 26.8s）；`go build ./...`、`go vet ./...` 干净；全量 `go test ./tests/... -count=1` 除上述 3 处并发单红证外包 ok（acceptance/config/evolution/execution/host/journey/learning/state）。
+
+## 3.3 G6 执行最终输出保存与接管（D6-4 三态树）
+
+### 症状与修复
+
+- G6 缺陷钉在 state.go:241 `exitObserved` → `release()`：退出释放前不保存最终输出，退出后捕获 0 次、再读 ErrResourceUnknown。修后 `release()` 在 `backend.Stop` **前**有界捕获最终帧（窗口 `finalOutputCaptureWindow` 5s 默认，`WithFinalOutputCaptureWindow` 可调），确认停止后写入 `m.final[key]`（进程内 map、每键最后一条）。
+- 读面：`Manager.FinalOutput(key)`（held→ErrFinalOutputUnsettled；无记录→ErrFinalOutputUnrecorded）、`Manager.Query(ctx,key)`（直通 Probe）、`Manager.held(key)`；docs/api 已随 `gen_godoc.sh` 再生成。
+- 消费路径：`ReleaseTool` 答案追加 `final output: ...`；`RunTool.Call` 三态树（插在 Acquire **前**）：未 held 且可服务的键 → Query → ProbeAlive=接管（Adopt+Capture+`reattached`）、ProbeUnknown=ErrAdoptUnconfirmed 具名拒绝（不盲目接管/不新开/不宣称结束）、ProbeDead+记录=`settled` 报告（不重跑不覆盖）、ProbeDead 无记录=Acquire 新开（原语义）。三态树只放 RunTool.Call 不放 Manager.Acquire：capabilities 白名单外冻结测试 pin 了 Acquire 在 Unknown 探针后成功的语义。
+
+### 红证先行与文件归并
+
+- evidence/3-3-final-output-red.txt：修复前「最终输出捕获次数 = 0」、exec_release 答案无 omega——与 G6 症状逐字吻合；修后绿。该红证行号指向原 tool/exec/final_output_test.go，已按 lint responsibility-fragmentation 出口(1) 并入 tool/exec/exec_test.go（行号失效，测试本体逐字在 exec_test.go 尾部）。
+
+### 回归发现与修复（均为本单实现缺陷）
+
+- release() 初版用 `context.WithoutCancel(ctx)` 调 backend.Capture → leaseExecutor.Capture 阻塞等 gate 的场景把释放无限挂起（TestRenewRefusesExpiredLease 挂死，-timeout dump 证实）→ 修：有界捕获窗口 + 负锚 `a_hung_capture_never_holds_the_release`（hangCaptures+窗口 50ms → 释放照常、ErrFinalOutputUnrecorded 不谎报）。
+- 测试替身 exitFrameExecutor.Capture 正常路径漏 unlock 致死锁（dump：Probe/finalFrames 全等互斥锁）→ 补 `defer e.mu.Unlock()`。
+
+### 设计决策（自行决策，申报）
+
+- settled 不重跑：同键已结算永远报告旧记录（记录永存、读回可靠），引导模型换键重跑；未采用「decl 一致性才报告、decl 不同则新开覆盖」（会覆盖记录丢最终输出）。
+- final 记录为进程内 map：G6 症状是同进程「执行进程退出」而非 tagent 重启；跨重启最终输出持久化归 3.2/主规格持久层，不在本单。
+- 接管可读性走 run.go 既有 `ExecState(key)→Explanation.Adopted`，未动 host.go（白名单未扩）。
+
+### lint 与形态
+
+- comment policy 6 处违规（free-standing ×4 + test-doc ×2，并入 exec_test.go 带入）已修归零：函数体内/游离注释并入 Call doc bullets 与测试 doc bullets（带 `契约: docs/wiki/tool/tool-architecture.md#action-tool` 索引行），`default: // ProbeDead` 改显式 `case ProbeDead:`。
+- 当前 `bash scripts/lint.sh` 在 concept budget 阶段 exit=1：`memory/event_body.go:EventBody` 20 exported fields 超基线 8——属并发 2.2「EventBody 全字段」在途改动（非本单面，白名单外勿碰）。
+
+### 环境与断言形态
+
+- 本地 tmux 可用（new-session/kill/has-session 全通），真实 tmux 双宿主接管测试本地实跑绿，与派单预期「Operation not permitted」不符；tmux 路径测试保留（CI 有 tmux）。
+- 该宿主 wire 形态：当轮工具结果=`ok`（受理回执），工具输出以 user 消息到达、下回合历史回放完整文本（前序 findings 已记的既有断裂形态）——集成断言按 `LastIndex` 于模型会话文本定位 settled 报告，不改宿主。
+
+### 三锚与绿证（可复跑）
+
+- 正锚：`go test ./tests/integration/execution ./tool/exec -count=1` → execution ok 22.2s（TestEventIntegrityExecStateEvents 8 子测，含 `restart_takes_over_the_running_session` 真实 tmux 双宿主接管与 `final_output_survives_the_exit`）、tool/exec ok 12.5s（TestExecFinalOutputSurvivesTheExit×3 + TestExecTakeoverOrNamedReport×4）；`-race` 一次两包 ok（13.9s/23.4s）。
+- 负锚：`a_hung_capture_never_holds_the_release`（挂起捕获不得拖延释放）绿；`names_the_unconfirmed_state_without_taking_over`（未知探针只具名拒绝、零接管零新开、错误不含 released/stopped/exit=）绿；既有 `unconfirmed_restart_not_reported_stopped` 保留绿。
+- 消费者锚：ReleaseTool 正式入口答案携带 `final output: omega`；`runEventIntegrityExecFinalOutputSurvives` 经 host.Invoke 真实模型回合读回 settled 报告（LastIndex 定位防第一回合误报）；`runEventIntegrityExecRestartTakesOver` 回合文本含 `reattached `+key 且 `restarted.Run().ExecState(key)`→Held&&Adopted。
+- clone 级：`git clone` 干净树（本提交，无共享工作区并发在途改动）→ `go build ./...` 好；两包 ok（execution 21.5s / tool/exec 12.0s）；并发面 3 红证测试（capabilities TestFormalLoopEnforcesPolicy、history TestEventIntegrityRestoreUse|next_request_uses_restored_material、inspection TestObservationReachDiagnostics）在同一 clone 全绿 → 三红归共享工作区并发在途改动，非本单。

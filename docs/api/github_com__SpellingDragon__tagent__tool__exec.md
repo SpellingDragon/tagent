@@ -47,6 +47,16 @@ var ErrAdoptUnconfirmed = errors.New("exec: the resource behind that key was not
     ErrAdoptUnconfirmed reports an adoption refused because the resource behind
     the key was not observed alive. An undeterminable probe is not an absence.
 
+var ErrFinalOutputUnrecorded = errors.New("exec: no final output is recorded under that key")
+    ErrFinalOutputUnrecorded reports a final-output read over a key whose
+    release saved no final frame, so there is nothing recorded to read beside
+    it.
+
+var ErrFinalOutputUnsettled = errors.New("exec: the resource is still held, no final output is settled")
+    ErrFinalOutputUnsettled reports a final-output read refused because the
+    resource is still held: its execution may still produce output, so no final
+    frame exists yet.
+
 var ErrKeyMissing = errors.New("exec: the declaration names no resource key")
     ErrKeyMissing reports a declaration that names no resource key, so no
     resource identity could be compared or held.
@@ -217,6 +227,23 @@ type Explanation struct {
     monitor rhythm of its generation, the probe unknowns recorded against it and
     the obligations kept open beside it.
 
+type FinalOutput struct {
+	// Resource is the released resource the final output was saved for.
+	Resource ResourceKey
+	// Output is the frame observed before the release freed the resource.
+	Output []byte
+	// ExitCode is the exit status observed beside the confirmed stop.
+	ExitCode int
+	// At is the time the release settled the resource.
+	At time.Time
+}
+    FinalOutput is the output one released execution recorded beside its ending:
+    the frame saved before the release freed the resource, kept readable after
+    the resource itself is gone. It is an observation of what the execution
+    produced before it ended, never a completion verdict on the work it was
+    asked to do. The record is held inside the manager that settled the release,
+    one last record per key.
+
 type Manager struct {
 	// Has unexported fields.
 }
@@ -276,6 +303,13 @@ func (m *Manager) Explain(key ResourceKey) (Explanation, error)
     Explain reports the retained state of one held resource beside the facts it
     is held on. A key nothing is held under answers as not held.
 
+func (m *Manager) FinalOutput(key ResourceKey) (FinalOutput, error)
+    FinalOutput reports the output one released execution recorded beside its
+    ending. A resource still held answers ErrFinalOutputUnsettled, because its
+    execution may still produce output and no final frame exists yet; a key
+    no release settled beside this manager answers ErrFinalOutputUnrecorded,
+    because nothing was saved for it.
+
 func (m *Manager) Held() int
     Held reports how many resources the manager currently holds.
 
@@ -284,6 +318,13 @@ func (m *Manager) Observe(ctx context.Context, key ResourceKey) (ProbeResult, er
     that could not decide extends the unknown run of the resource and raises one
     diagnosis escalation: unknown observations never free the resource and never
     decide its death. A probe that does decide resets the unknown run.
+
+func (m *Manager) Query(ctx context.Context, key ResourceKey) (ProbeResult, error)
+    Query reports what one probe observed behind key, held or not: it is the
+    consult the restart path runs before it decides whether to take a running
+    resource over, to report a state it cannot confirm by name, or to open a new
+    execution. A probe that could not decide is answered as unknown and never as
+    an absence, so no caller takes over a resource on undeterminable evidence.
 
 func (m *Manager) Release(ctx context.Context, key ResourceKey) (ReleaseEvidence, error)
     Release frees one held resource beside a confirmed stop and reports the
@@ -324,6 +365,12 @@ func WithClock(now func() time.Time) ManagerOption
 
 func WithDefaultTTL(ttl time.Duration) ManagerOption
     WithDefaultTTL sets the floor lease of an acquisition that declares no TTL.
+
+func WithFinalOutputCaptureWindow(window time.Duration) ManagerOption
+    WithFinalOutputCaptureWindow bounds the final-output capture one release
+    drives, beside the package default: the save is best-effort, so a capture
+    that never answers inside the window loses its record instead of holding the
+    release of the resource hostage.
 
 func WithStateObserver(observer StateObserver) ManagerOption
     WithStateObserver attaches the lifecycle observer of one manager. Only a
@@ -531,12 +578,18 @@ func NewRunTool(manager *Manager, opts ...RunToolOption) *RunTool
     and the rhythm its declaration fixes.
 
 func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error)
-    Call acquires the declared execution resource and reports what its execution
-    recorded. A resource already held under the key is reused rather than
-    started a second time, and a declared kind the system cannot serve answers
-    as the named degrade refusal beside the rhythm of the call. The lease
-    is kept alive at the cadence of the call's own monitor rhythm until the
-    execution behind it returns, and the renewing ends beside the call.
+    Call acquires the declared execution resource and reports what its
+    execution recorded. A resource already held under the key is reused rather
+    than started a second time, and a declared kind the system cannot serve
+    answers as the named degrade refusal beside the rhythm of the call. The
+    lease is kept alive at the cadence of the call's own monitor rhythm until
+    the execution behind it returns, and the renewing ends beside the call.
+    The restart decision of a key nothing is held under runs unknown -> query ->
+    take over or report by name: - a resource observed alive is taken over and
+    its frame reported under the key - a probe that could not decide is refused
+    by name beside the unconfirmed evidence - a settled key reports the saved
+    final output instead of rerunning over it - a dead key beside no record
+    opens a new execution exactly as before
 
 func (t *RunTool) Declaration() *trpctool.Declaration
     Declaration returns the fixed declaration of the run tool.

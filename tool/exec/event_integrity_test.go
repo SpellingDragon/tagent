@@ -247,6 +247,9 @@ func TestEventIntegrityExecLifecycle(t *testing.T) {
 
 		backend := &scriptedExecutor{
 			captureFn: func() ([]byte, error) { return []byte("partial frame"), nil },
+			probeFn: func() (ProbeResult, error) {
+				return ProbeResult{State: ProbeDead, Detail: "the scripted execution is absent"}, nil
+			},
 			stopFn: func(context.Context) (StopEvidence, error) {
 				return StopEvidence{Confirmed: false, Reason: "the executor did not observe an ending"}, nil
 			},
