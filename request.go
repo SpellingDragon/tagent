@@ -597,7 +597,7 @@ func skillLoadsOf(agent event.AgentID) []knowledge.LoadedSkill {
 // as the main context of the request: the window assembly of the registration
 // the chain fixed, bounded to the entries that already ended.
 func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
-	return projectedSegment(ctx, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
+	return projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
 }
 
 // environmentSegment contributes the dynamic environment material of the
@@ -616,7 +616,12 @@ func (a *requestAssembly) environmentSegment(ctx context.Context) ([]model.Messa
 // assembly of its own. The token budget is read off the one window the
 // registration carries, so the request side never receives a second budget the
 // registration does not know. A negative prefix assembles the whole projection.
-func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow, prefix int) ([]model.Message, error) {
+//
+// The projection carries one entry per fact and keeps no call pairing, so the
+// segment restores the pairing the wire requires before the request leaves:
+// every tool entry gains the tool_call_id its fact answers under beside the
+// assistant tool_calls message that issued the call (see restoreCallPairing).
+func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayProjection, window FoldWindow, prefix int) ([]model.Message, error) {
 	if projection == nil {
 		return nil, nil
 	}
@@ -625,14 +630,134 @@ func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, 
 		return nil, err
 	}
 	messages := make([]model.Message, 0, len(entries))
+	paired := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		role, err := agent.RoleOf(entry.Type)
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, model.Message{Role: role, Content: presentedProjectionContent(entry)})
+		message := model.Message{Role: role, Content: presentedProjectionContent(entry)}
+		if run != nil {
+			run.restoreCallPairing(&messages, &message, entry, paired)
+		}
+		messages = append(messages, message)
 	}
 	return messages, nil
+}
+
+// restoreCallPairing restores the call-result pairing one projected entry lost
+// at the projection boundary. A tool entry arrives with its result text alone:
+// the restore reads the fact the entry was minted from and repairs the message
+// the wire requires — the tool_call_id and tool name the result answers under,
+// beside the assistant tool_calls message that issued the call, emitted once
+// per call right before the first tool entry answering it and carrying the
+// arguments the model actually issued (see callArgumentsOf). An assistant entry
+// whose fact committed native tool calls gains them back and marks the calls as
+// paired, so no second assistant message is minted beside them. Material no
+// live fact recovers — a restarted run whose facts left with its process —
+// presents as it stands: the entry keeps no pairing and the protocol gate names
+// the break rather than the request silently carrying a broken pair.
+func (r *Run) restoreCallPairing(out *[]model.Message, message *model.Message, entry replay.ProjectionEntry, paired map[string]bool) {
+	fact, held := r.factOf(entry.Key)
+	switch message.Role {
+	case model.RoleAssistant:
+		if held && len(fact.Message.ToolCalls) > 0 {
+			message.ToolCalls = fact.Message.ToolCalls
+			for _, call := range fact.Message.ToolCalls {
+				paired[call.ID] = true
+			}
+		}
+		return
+	case model.RoleTool:
+	default:
+		return
+	}
+	callID, toolName := r.callIdentityOf(fact)
+	if callID == "" {
+		return
+	}
+	message.ToolID = callID
+	message.ToolName = toolName
+	if paired[callID] {
+		return
+	}
+	paired[callID] = true
+	*out = append(*out, model.Message{
+		Role: model.RoleAssistant,
+		ToolCalls: []model.ToolCall{{
+			Type: "function",
+			ID:   callID,
+			Function: model.FunctionDefinitionParam{
+				Name:      toolName,
+				Arguments: []byte(r.callArgumentsOf(callID)),
+			},
+		}},
+	})
+}
+
+// callIdentityOf reports the call identity one tool fact answers under: the
+// tool message a result fact committed carries the identity directly, and a
+// settled delivery answers under the identity its result fact answered a call
+// with — exactly the tool role the frozen event-type→role table renders a
+// replayed settle under. A fact carrying no recoverable identity answers none.
+func (r *Run) callIdentityOf(fact event.Event) (callID, toolName string) {
+	if fact.Message.ToolID != "" {
+		return fact.Message.ToolID, fact.Message.ToolName
+	}
+	if fact.Type != event.TypeTaskSettled {
+		return "", ""
+	}
+	taskID := fact.TaskID
+	if taskID == "" {
+		taskID = event.TaskID(fact.Meta[event.MetaKeyTaskID])
+	}
+	if taskID == "" {
+		return "", ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range r.factOrder {
+		result, held := r.facts[id]
+		if !held || result.Type != event.TypeActionCommand || result.TaskID != taskID {
+			continue
+		}
+		if result.Message.ToolID != "" {
+			return result.Message.ToolID, result.Message.ToolName
+		}
+	}
+	return "", ""
+}
+
+// callArgumentsOf reports the arguments one call was issued with, read from the
+// request snapshot whose transcript carried the assistant tool_calls message of
+// that call: the projection keeps no arguments and the snapshot is the record
+// of what the model actually saw. A call no snapshot carried reads as the empty
+// argument object, so the pair stays complete on the wire instead of breaking
+// the conversation the call opened.
+func (r *Run) callArgumentsOf(callID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, record := range r.snapshots {
+		for _, message := range record.Snapshot.Messages {
+			for _, call := range message.ToolCalls {
+				if call.ID == callID && len(call.Function.Arguments) > 0 {
+					return string(call.Function.Arguments)
+				}
+			}
+		}
+	}
+	return "{}"
+}
+
+// factOf reports the fact one projected entry was minted from, as this run
+// committed it, and whether the run still holds it: a restarted run reads a
+// projection its facts left behind, and an identity it cannot resolve recovers
+// no pairing.
+func (r *Run) factOf(id event.EventID) (event.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fact, held := r.facts[id]
+	return fact, held
 }
 
 // presentedProjectionContent renders one assembled entry as the message the

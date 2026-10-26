@@ -589,7 +589,10 @@ func runBusyNoticeLoss(t *testing.T) {
 // maps the Boot requests and sender records back to the notice identity, one by
 // one: the settled delivery fact, the follow-up fact key, the unique request
 // that carries the material and the unique action the notice answers. The check
-// commits nothing by hand; every fact it reads was committed by Boot.
+// commits nothing by hand; every fact it reads was committed by Boot. The
+// delegation result probe pins its first carrier: the replayed chain repeats
+// the pairing in every later request, so the first carrier is the accept
+// decision the probe maps back.
 func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	const (
 		input       = "delegate the correlated task"
@@ -674,7 +677,7 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	acceptIndex := -1
 	workerIndex := -1
 	for index, request := range requests {
-		if requestCarriesToolResult("call-correlation")(request) {
+		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
 			acceptIndex = index
 		}
 		if request.Model == "model-worker" && requestTail(workerInput)(request) {
