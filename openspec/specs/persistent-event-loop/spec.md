@@ -517,3 +517,7 @@ progress 通知 SHALL 只作为其 range 的事实落链（通知身份与稳定
 #### Scenario: exec 中间态不构成模型材料、不驱动回合
 - **WHEN** 执行资源管理器在调用返回后观察到执行资源的中间态（stable、suspect 或 exited）
 - **THEN** 该观察 MUST NOT 驱动 follow-up 回合，模型请求数 MUST NOT 因此增加，且 SHALL 只落无载荷审计事实（无消息正文、无通知分类与任务号）、MUST NOT 作为说话素材或进入下一轮 decision 的模型请求
+
+#### Scenario: 投递前审核是投递的必要条件
+- **WHEN** 宿主把一条正文（回合正文、失败告知或跨代理 send 的正文）投递到目标会话
+- **THEN** 该投递 SHALL 在到达渠道前把投递语义（正文、血统、目标）交审核插件裁决：allow/record SHALL 恰好投递一次；hold MUST NOT 投递、SHALL 挂起并在批准后原样补投恰好一次且 MUST NOT 被报告为投递；拒绝 MUST NOT 投递并 SHALL 留下无载荷审计事实（投递身份、血统、目标与字节数可查）；未配置审核时 SHALL 照常投递（默认 allow）
