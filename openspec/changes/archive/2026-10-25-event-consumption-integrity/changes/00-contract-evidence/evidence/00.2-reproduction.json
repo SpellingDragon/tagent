@@ -1,0 +1,523 @@
+{
+  "leaf": "00.2",
+  "title": "行为复现：TestEventIntegrityReproduction 四个固定子测试（诊断红证）",
+  "change": "event-consumption-integrity",
+  "domain": "00-contract-evidence",
+  "artifact": "reproduction",
+  "generated_at": "2026-10-23T09:52:01Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "只复现、不修产品：用 03.1 同包 provider/sender/屏障基座驱动 Boot 正式入口，固定四个子测试；正常对照与消费者锚必须绿，候选缺陷以业务断言 FAIL 呈现红证。原微信运输层未在本叶执行，红证对象是已确认静态风险 EVID-02/EVID-03 在 Boot 正式路径上的行为化，不声称复现原微信案例根因。",
+  "method": "tests/integration/host/event_integrity_test.go 内 TestEventIntegrityReproduction 的四个具名子测试；Provider 用 03.1 scripted_provider_test.go，Sender 用 03.1 meditation_boot_test.go 的 recordingSender，模型屏障与 violation 账用 03.1 event_integrity_harness_test.go；跟随轮一律由 Boot 的交付事实经 SettleDriver.ObserveCommit -> fireNoticeTurn 触发，测试不调用 CommitToSession（grep 本文件与基座均为 0 命中）。诊断命令原样执行两次，两次分别保留原始退出码与原始 jsonl。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.2",
+    "log_ref_template": "${TMPDIR:-/tmp}/event-consumption-integrity/00.2/<name>",
+    "notes": "原始 jsonl 只落临时目录，未写入规划目录；本文件仅留摘要、哈希与 log_ref。"
+  },
+  "harness": {
+    "test_file": "tests/integration/host/event_integrity_test.go",
+    "test_file_sha256": "75ecf92aca02c0d6f3887559034860adef3762426ce9302185bd87dc4cbb2876",
+    "test_file_lines": 711,
+    "provider_base": "tests/integration/host/scripted_provider_test.go（03.1：decide / servedRequests / 严格匹配与 400 拒绝）",
+    "sender_base": "tests/integration/host/meditation_boot_test.go（03.1：recordingSender / senderLedger / senderGate）",
+    "barrier_base": "tests/integration/host/event_integrity_harness_test.go（03.1：integrityScript / violation 账 / 屏障 / 排空点 / bootIntegrityHostWithAgents / closeIntegrityHost）",
+    "boot_entry": "bootIntegrityHostWithAgents -> tagent.Boot；用户轮 driveIntegrityTurn -> Host.Invoke；跟随轮由交付事实 -> SettleDriver.ObserveCommit -> Host.fireNoticeTurn -> Run.Invoke",
+    "hand_commit_used": false,
+    "hand_commit_probe": "grep -n CommitToSession tests/integration/host/event_integrity_test.go tests/integration/host/event_integrity_harness_test.go => 0 命中（exit 1）",
+    "second_framework_created": false,
+    "agent_document": "user: model-entry + max_tokens: 32000 + tools: [send, {kind: agent, agent: worker}]；worker: model-worker。max_tokens 是 attach replay projection / notice feed 的前提，与 03.1 基座一致。"
+  },
+  "command": "go test ./tests/integration/host -run '^TestEventIntegrityReproduction$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/00.2/reproduction.jsonl\" 2>&1",
+  "command_cwd": "/Users/pengweiye/Documents/codes/tagent",
+  "command_note": "命令原样执行，未追加 echo、|| true、skip 或任何把失败变 0 的包装；exit_code 为进程原始退出码。执行环境定位（cd 仓库根）与 E/mkdir 属于任务行给出的前置，不改变 go test 参数。",
+  "exit_code": 1,
+  "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.2/reproduction.jsonl",
+  "log_sha256": "bb22d82d4283b2549583fc39cd1eb998f3e0ac3e3a9ae3e6bf91c08f83a22e18",
+  "log_bytes": 24862,
+  "runs": [
+    {
+      "run_id": "run-1",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.2/reproduction-run-1.jsonl",
+      "log_sha256": "6dc70a4aa6f9a269a2a7774d485ae741a035cad5fb52e7f8d55d281c42820233",
+      "log_bytes": 24864,
+      "exit_code": 1,
+      "parent_elapsed_s": 30.33,
+      "terminal": {
+        "TestEventIntegrityReproduction": "fail",
+        "TestEventIntegrityReproduction/control_normal_path": "pass",
+        "TestEventIntegrityReproduction/duplicate_notice_material": "fail",
+        "TestEventIntegrityReproduction/busy_notice_loss": "fail",
+        "TestEventIntegrityReproduction/request_and_send_identity_correlation": "pass"
+      }
+    },
+    {
+      "run_id": "run-2",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.2/reproduction.jsonl",
+      "log_sha256": "bb22d82d4283b2549583fc39cd1eb998f3e0ac3e3a9ae3e6bf91c08f83a22e18",
+      "log_bytes": 24862,
+      "exit_code": 1,
+      "parent_elapsed_s": 30.37,
+      "terminal": {
+        "TestEventIntegrityReproduction": "fail",
+        "TestEventIntegrityReproduction/control_normal_path": "pass",
+        "TestEventIntegrityReproduction/duplicate_notice_material": "fail",
+        "TestEventIntegrityReproduction/busy_notice_loss": "fail",
+        "TestEventIntegrityReproduction/request_and_send_identity_correlation": "pass"
+      }
+    }
+  ],
+  "reproduced": true,
+  "basis": "static_risk",
+  "original_case_reproduced": false,
+  "original_root_cause": false,
+  "blocked": false,
+  "blocked_fix_items": [],
+  "reproduced_basis": "两个红证都以业务断言失败呈现（非编译失败、非超时、非 panic、非零匹配、非 skip），且 control_normal_path 先绿；因此 reproduced=true。但红证建立在 00.1/design 已确认的静态风险路径 EVID-02/EVID-03 之上，运行入口是 Boot 正式装配而非微信运输层，故 basis=static_risk、original_case_reproduced=false、original_root_cause=false，只把对应修复叶作为待修项，不声称复现原微信案例根因。",
+  "subtests": [
+    {
+      "name": "control_normal_path",
+      "manifest_role": "normal_control",
+      "expectation": "正常单路：用户输入 -> send 工具 -> 最终答复；一次决策材料只进一次；sender 记录与请求身份一一对应；必须 PASS",
+      "terminal": "pass",
+      "elapsed_s": [
+        0.06,
+        0.06
+      ],
+      "red": false,
+      "assertions": [
+        "entry turn terminal=completed、decisions=2",
+        "request#1 以用户输入为 tail，且该输入恰 1 份",
+        "request#2 恰 1 条 call-control-1 工具结果，历史含 send(call-control-1) 调用，用户输入在历史中恰 1 份",
+        "决策前后 sender 动作 = [control note, control answer]，target 均为用户会址且均 confirmed",
+        "script.actionBodies() 与 sender.bodies() 完全一致",
+        "integrityScript.audit() 无 violation",
+        "closeIntegrityHost 断言 Drained=0、Unsettled=0 后关闭"
+      ]
+    },
+    {
+      "name": "duplicate_notice_material",
+      "manifest_role": "red_candidate_duplicate",
+      "mapped_static_risk": "EVID-02",
+      "expectation": "同一通知身份只生成 1 条新用户输入事实、只进入 1 次新 invocation 输入；该通知驱动的发送动作恰 1。正文在历史中合法重现不算重复。",
+      "terminal": "fail",
+      "elapsed_s": [
+        0.05,
+        0.06
+      ],
+      "red": true,
+      "failure_kind": "business_assertion_fail",
+      "fail_line": "tests/integration/host/event_integrity_test.go:438",
+      "failure_message": "the follow-up notice identity task-2:0:settled:0 (task task-2 kind settled) generated 2 new user-input facts in invocation session-reproduction-duplicate#2, want exactly 1: [key=6e6f746963650033320073657373696f6e2d726570726f64756374696f6e2d6475706c69636174652332007461736b2d323a303a736574746c65643a30 type=feedback role=user invocation=session-reproduction-duplicate#2 task=task-2 content=\"tagent: task task-2 settled\nresult:\nthe duplicate notice worker reports 42\"; key=5-<per-run-hash> type=external_input role=user invocation=session-reproduction-duplicate#2 task= content=\"tagent: task task-2 settled\nresult:\nthe duplicate notice worker reports 42\"]; the follow-up decision carried 2 user copies of the material, so the same settled notice entered the model twice",
+      "observed": {
+        "notice_identity": "task-2:0:settled:0",
+        "notice_task_id": "task-2",
+        "notice_kind": "settled",
+        "follow_up_invocation": "session-reproduction-duplicate#2",
+        "new_user_input_facts": 2,
+        "expected_new_user_input_facts": 1,
+        "facts": [
+          {
+            "order": 1,
+            "type": "feedback",
+            "role": "user",
+            "task_id": "task-2",
+            "key_shape": "hex(\"notice\\x00\" + len(inv) + \"\\x00\" + inv + \"\\x00\") + hex(\"task-2:0:settled:0\")",
+            "key_literal": "6e6f746963650033320073657373696f6e2d726570726f64756374696f6e2d6475706c69636174652332007461736b2d323a303a736574746c65643a30",
+            "causal_attribution": "notice-range feedback fact of the follow-up invocation"
+          },
+          {
+            "order": 2,
+            "type": "external_input",
+            "role": "user",
+            "task_id": "",
+            "key_shape": "minted input fact key 5-<hash>",
+            "key_literal": "5-<per-run-hash>",
+            "causal_attribution": "InvokeRequest.Input committed by the same follow-up invocation"
+          }
+        ],
+        "follow_up_decision_user_copies_of_material": 2,
+        "requests_carrying_material": 1,
+        "notice_fact_key_count_in_chain": 1,
+        "formal_path_checks_passed_before_red": [
+          "settled delivery facts carrying the worker body = 1（正式交付路径）",
+          "settle material 与通知身份一一对应（task-2 / settled）",
+          "所有同正文输入事实属于同一 follow-up invocation",
+          "链中 notice fact key 恰 1（重试幂等键本身未重复）"
+        ]
+      },
+      "defect_statement": "同一通知身份在同一 follow-up invocation 内生成了两条新用户输入事实（反馈事实 + 外部输入事实），两条承载完全相同正文并同时进入该次决策；请求内出现 2 份该通知正文。同正文在更早历史或其它 invocation 的重现不计入本判定。",
+      "post_red_path": "红位于放行屏障之前，脚本进入 Cleanup 的 releaseAll；该轮未走到发送动作断言。"
+    },
+    {
+      "name": "busy_notice_loss",
+      "manifest_role": "red_candidate_loss",
+      "mapped_static_risk": "EVID-03",
+      "expectation": "第一个通知驱动回合被模型屏障 park 期间，第二个任务终态通知到达；该通知必须被保留并在后续被消费（义务/待办可恢复、后续回合可观测），不得静默丢失。",
+      "terminal": "fail",
+      "elapsed_s": [
+        30.13,
+        30.14
+      ],
+      "red": true,
+      "failure_kind": "business_assertion_fail",
+      "fail_line": "tests/integration/host/event_integrity_test.go:570",
+      "failure_message": "the settled delivery fact settle-7461736b2d343a313a736574746c65643a30 (task task-4 kind settled) was recorded while the first follow-up was parked at the model, but no later decision consumed it within 30s: model requests = 7, sender bodies = [\"the first background task was accepted\" \"the second background task was accepted\" \"the first background notice reached the user\"], facts of task task-4 = 1 with 0 feedback notice fact(s), so the second notice was dropped instead of retained for the next turn",
+      "observed": {
+        "second_settle_fact_key": "settle-7461736b2d343a313a736574746c65643a30",
+        "second_settle_fact_key_decoded": "task-4:1:settled:0",
+        "second_settle_task_id": "task-4",
+        "second_settle_kind": "settled",
+        "arrival_window": "first notice-driven follow-up parked at the scripted model barrier",
+        "consumption_wait": "30s 轮询 provider.servedRequests()，无任何请求携带第二通知材料",
+        "model_requests": 7,
+        "sender_bodies": [
+          "the first background task was accepted",
+          "the second background task was accepted",
+          "the first background notice reached the user"
+        ],
+        "facts_of_second_task": 1,
+        "feedback_notice_facts_of_second_task": 0,
+        "expected": "第二通知被保留，并在第一个 follow-up 让出后由后续决策消费；至少应出现可恢复义务/待办与后续请求。"
+      },
+      "defect_statement": "第二终态通知的交付事实已在第一个 follow-up 执行期间提交（task-4 settled），但此后 30s 内既无新决策携带其材料、也无该通知的反馈事实被提交；链上该任务只有交付事实 1 条、0 条通知反馈事实，发送侧也没有第二通知驱动的动作。即忙时到达的通知被静默丢弃，未形成可恢复的待办。",
+      "post_red_path": "红位于 release(followStepB) 之前，脚本进入 Cleanup 的 releaseAll；第二 follow-up 的发送断言未执行。"
+    },
+    {
+      "name": "request_and_send_identity_correlation",
+      "manifest_role": "consumer_anchor",
+      "expectation": "Boot 实际 provider 请求与 sender 记录按通知身份逐条关联；不使用测试手工 CommitToSession。",
+      "terminal": "pass",
+      "elapsed_s": [
+        0.1,
+        0.1
+      ],
+      "red": false,
+      "assertions": [
+        "settled delivery facts carrying the worker body 恰 1，且 settle_trigger_source=settled（来自正式交付路径，非手工提交）",
+        "settle material 同时含通知身份的 task id 与 kind",
+        "同正文新输入事实非空且同属一个 follow-up invocation",
+        "该 follow-up invocation 的 notice fact key 在链中恰 1",
+        "携带通知材料的请求恰 1，且是最后一个请求；model=model-entry（remembered user 会址）",
+        "该请求索引晚于委托工具结果请求与 worker 决策请求",
+        "该通知驱动的 sender 动作恰 1，target=用户会址且 confirmed",
+        "script.actionBodies() 与 sender.bodies() 完全一致",
+        "integrityScript.audit() 无 violation",
+        "closeIntegrityHost 断言 Drained=0、Unsettled=0 后关闭"
+      ],
+      "consumer_anchor_detail": "请求、发送与通知身份的三方关联全部来自 Boot 装配：Boot 提交交付事实 -> SettleDriver.ObserveCommit 触发 fireNoticeTurn -> provider 收到携带该通知材料的请求 -> sender 记录该通知驱动的发送。测试文件与基座均无 CommitToSession 调用。"
+    }
+  ],
+  "subtests_manifest": {
+    "fixed": true,
+    "count": 4,
+    "names": [
+      "control_normal_path",
+      "duplicate_notice_material",
+      "busy_notice_loss",
+      "request_and_send_identity_correlation"
+    ],
+    "dynamic_wildcard_subtests": false,
+    "static_risk_wildcard_used": false,
+    "new_or_renamed_subtests": false,
+    "note": "四个子测试名与任务行逐字符一致；本文件 subtests 与父测试 t.Run 一一对应。"
+  },
+  "red_evidence_quality": {
+    "business_assertion_fail": true,
+    "compile_failure": false,
+    "package_failure_only": false,
+    "timeout": false,
+    "panic": false,
+    "data_race": false,
+    "zero_match": false,
+    "skip": false,
+    "repeatable": true,
+    "repeatability_note": "两轮独立 -count=1 -race 运行的四个子测试终局完全一致；红证消息的行号与语义一致，仅随机事实键/耗时不同。父测试耗时约 30.3s，低于 5m timeout。",
+    "probes": {
+      "data_race": "两轮 jsonl 均不含 DATA RACE 字符串",
+      "panic": "两轮 jsonl 均不含 panic: 字符串",
+      "timeout": "两轮 jsonl 均不含 test timed out 字符串",
+      "build": "两轮 jsonl 均不含 build failed 字符串"
+    }
+  },
+  "gates": {
+    "gofmt": {
+      "command": "gofmt -l tests/integration/host",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "output": "",
+      "exit_code": 0
+    },
+    "go_vet": {
+      "command": "go vet ./tests/integration/host",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "output": "",
+      "exit_code": 0
+    },
+    "short_package": {
+      "command": "go test ./tests/integration/host -count=1 -short",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 1,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.2/short-all.log",
+      "log_sha256": "6a4af93685e644561c390dfaffaf86b3918ff310f05f26651445f18aaddc1c6f",
+      "log_bytes": 62939,
+      "failing_tests": [
+        "TestEventIntegrityReproduction"
+      ],
+      "note": "退出 1 的唯一来源是按设计红的诊断父测试；plain 输出只有 --- FAIL: TestEventIntegrityReproduction。未给新测试加 -short skip（skip 仅限预存在），因此该精确命令在本叶诊断阶段必然非零，不能计作既有用例回归。"
+    },
+    "short_package_existing": {
+      "command": "go test ./tests/integration/host -count=1 -short -json -skip '^TestEventIntegrityReproduction$'",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/00.2/short-existing.jsonl",
+      "log_sha256": "a675db88d9e5b0eb4dda34eddb676a08b5aec0a82d53a1ff569fbcbf50a0cef8",
+      "log_bytes": 217997,
+      "terminal_entries": 105,
+      "pass": 104,
+      "fail": 0,
+      "skip": 1,
+      "skips": [
+        {
+          "test": "TestSoakContinuity",
+          "preexisting": true,
+          "reason": "tests/integration/host/soak_continuity_test.go:112 在 testing.Short() 下 t.Skip；该文件不在本叶写集且 git status 无改动"
+        }
+      ],
+      "note": "既有用例 104 通过、0 失败；唯一 skip 是预存在的 soak 用例。此运行证明包可编译且既有用例未被破坏。"
+    }
+  },
+  "write_set": {
+    "added": [
+      "tests/integration/host/event_integrity_test.go",
+      "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.json",
+      "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.2-reproduction.md"
+    ],
+    "modified": [],
+    "product_source_touched": false,
+    "leaf_03_1_files_touched": false,
+    "other_domains_touched": false,
+    "note": "工作树中 03.1 的 M tests/integration/host/meditation_boot_test.go、M tests/integration/host/scripted_provider_test.go、?? tests/integration/host/event_integrity_harness_test.go 为本叶之前的既有改动，本叶未编辑。"
+  },
+  "tasks_md_state": {
+    "file": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/tasks.md",
+    "line": 11,
+    "checkbox": "- [x]",
+    "checked": true,
+    "reason": "01.5 勾选后同一 TestEventIntegrityReproduction 已完成十轮独立绿证（final_ten_rounds_after_01_5），且 04.2 event-short 合同包含该测试；按勾选门回填。",
+    "checked_at": "2026-10-24T00:30:00+08:00"
+  },
+  "limitations": [
+    "未执行微信运输层；model 与 sender 是 03.1 的本地脚本替身。红证对象是 Boot 正式装配上的行为，故 original_case_reproduced=false、original_root_cause=false。",
+    "busy_notice_loss 的 30s 等待是上限观测窗；在本实现下该窗口内无消费，且 task-4 的反馈事实为 0，支持“未保留”而非“慢”。",
+    "duplicate_notice_material 只判定同一通知身份新生成的用户输入事实数，不把正文在历史中的合法重现计为重复。"
+  ],
+  "rechecked_at": "2026-10-24T00:30:00+08:00",
+  "final_ten_rounds_after_01_5": {
+    "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/event-short/00.2\"; mkdir -p \"$E\"; : > \"$E/exits.txt\"; for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityReproduction$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$E/exits.txt\"; [ \"$rc\" -eq 0 ] || exit \"$rc\"; done",
+    "cwd": "/Users/pengweiye/Documents/codes/tagent",
+    "independent_processes": true,
+    "count_flag": "-count=1",
+    "exits": "10 行全 exit=0（exits.txt）",
+    "checker": "python3 $E/check.py（复用 scripts/runtime_checklib.py + check_runtime_evidence.py 的 index_test_log/check_selector）：逐轮父测试与四个固定子测试各恰一次 run 且终局 pass，无 fail/skip/零匹配/额外测试 → 10/10 轮 ok=True",
+    "checker_exit": 0,
+    "checker_log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/check.out",
+    "log_ref_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2",
+    "red_and_green_separated": true,
+    "red_evidence_untouched": "诊断期红证（reproduction.jsonl）未被覆盖或改写；本字段只追加最终绿证。",
+    "rounds": [
+      {
+        "round": 1,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-1.jsonl",
+        "log_sha256": "2443dccf8df380e42e9a0dcc3f48507facf4c07956456fe821bcb88335199bde",
+        "log_bytes": 22505,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 2,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-2.jsonl",
+        "log_sha256": "ecdf0d31fbdb8c3eef2fe69989b21fa7d6cc78375545160e9b8ef5d765c5ce66",
+        "log_bytes": 22515,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 3,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-3.jsonl",
+        "log_sha256": "0a93ece105744ac7a3a410db28c1a8e27bd9e71b93fedbae9023702a27c24517",
+        "log_bytes": 22507,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 4,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-4.jsonl",
+        "log_sha256": "fdcca38487f80b52d03f72f8c2aaa0a6028596cea00d5e46afaf7e6000e5e3e5",
+        "log_bytes": 22500,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 5,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-5.jsonl",
+        "log_sha256": "8a5ba5bb8480e2ba4f2f133565e9b4505b8de29eec3e1cdd380858ec97957fa7",
+        "log_bytes": 22505,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 6,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-6.jsonl",
+        "log_sha256": "90101c0ef1a23825dd33977805d484ccc25041f2781cd5ef2653d7d5e3c00da7",
+        "log_bytes": 22513,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 7,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-7.jsonl",
+        "log_sha256": "8a05823a300a96918b365ac112378db1b5d0057bed68a83a85b6452474a4d142",
+        "log_bytes": 22500,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 8,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-8.jsonl",
+        "log_sha256": "ee36b900315ebfaccde5fef66fb4789f37733b533fb354fe6eecfa8f2f5e2484",
+        "log_bytes": 22514,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 9,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-9.jsonl",
+        "log_sha256": "98e23e2d8f9a6fcb9793a33c5dc954f6eef7b9a27e94d9f11afb70234797eb0c",
+        "log_bytes": 22510,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      },
+      {
+        "round": 10,
+        "exit_code": 0,
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/event-short/00.2/run-10.jsonl",
+        "log_sha256": "56ebc8035a14f37965efb6320a9eb06c7675cb4c7f58b414ce689713f34ea187",
+        "log_bytes": 22505,
+        "parsed": {
+          "parent": "TestEventIntegrityReproduction run=1 pass=1 fail=0 skip=0",
+          "children": [
+            "control_normal_path",
+            "duplicate_notice_material",
+            "busy_notice_loss",
+            "request_and_send_identity_correlation"
+          ],
+          "named_subtests_run_pass": 4,
+          "fail": 0,
+          "skip": 0
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,172 @@
+{
+  "leaf": "01.10",
+  "title": "外部执行资源生命周期",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "status": "blocked",
+  "outcome": "stop_report",
+  "completion": false,
+  "checkbox": "unchecked",
+  "generated_at": "2026-10-24T09:00:21Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "实施叶 01.10 前先归因 tool/exec 的 manager/monitor 面，并以正式查询面（Boot + Host.Invoke + 声明工具 + RunTool/ReleaseTool）验证五态可达性；判定“返回后跟踪/状态事件生产”是否需要新增 public API。未改任何产品文件、未落验收测试、未勾选 01.10、未执行单轮/十轮验收命令。",
+  "gate": {
+    "id": "public_api_or_format_change",
+    "source": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.{md,json}",
+    "ruling": "public_api_or_format_change = authorized_narrow，仅限 FactLog `consume:` 键；其余新增 public API 或持久化格式须另获单独授权",
+    "trigger": "冻结验收面中的 output_stable_emits_followup_notice 与 next_turn_consumes_exec_state 要求 tool/exec 在调用返回后把“稳定/退出/释放/可疑”作为通知生产进既有通知消费链。当前 tool/exec 无 notice sink、无通知生产点；runtime/task 仅在调用结算时产 NoticeSettled/Failed（Seq:0），NoticeProgress 无生产。实现须新增 public API（生命周期 sink/驱动或等价）并在根装配（runtime/task 或 host/run）接线，超出本叶写集与本轮授权。"
+  },
+  "attribution": {
+    "method": "在 tool/exec 内以 package exec_test 写临时探针（不入库），经 tagent.Boot + Host.Invoke 声明 exec 面，配脚本化 OpenAI 兼容 provider 与记录型 sender，真实 tmux 执行；另用 public Manager/RunTool + fake executor 验证续租。原始日志见 probe.log_ref。",
+    "five_states": [
+      {
+        "state": "调用已返回",
+        "formal_face": "RunTool.Call（tool/exec/tool.go:171-181）：Acquire -> renewForCall -> Capture 一次 -> 返回 `executed <kind>/<key>: <frame>`；答案经 runtime/task wrapper 落为工具事实",
+        "evidence": "probe.log line 8: STATE call-returned: \"executed tmux/probe-a-...: alpha...\"",
+        "reachable": true,
+        "note": "只证明本次调用的返回，不证明外部进程结束。"
+      },
+      {
+        "state": "进程仍在运行",
+        "formal_face": "无独立 Status/Probe public 查询面。间接可达：同键再次 exec_run 由 Manager.Acquire 复用同一资源并 Capture 到后续帧；exec_release 对活进程走 Stop 的 kill 分支返回 exit=-1；Manager.Held/Explain 可读 held/deadline/renewed",
+        "evidence": "probe.log line 9: tmux session ... still alive after the call returned; line 15: STATE observed-after-return: \"... alpha\\nomega ...\"; line 20: STATE released-live: \"... after confirmed stop: exit=-1\"",
+        "reachable": true,
+        "note": "可达但是“再调用/释放/Explain”副作用式的间接观测；无只读的运行态查询面。"
+      },
+      {
+        "state": "输出进入稳定状态",
+        "formal_face": "Monitor.Poll（tool/exec/monitor.go:65-88）先 Capture 再 Probe，按 frame 静默与 ProbeState 分类 watch/stable/suspect；Monitor.Status（monitor.go:92-100）读最后一次分类。仅包级 API。",
+        "evidence": "probe.log line 10: STATE output-stable: monitor reports \"stable\" while the process is alive",
+        "reachable": false,
+        "note": "包级可计算（探针直接 NewMonitor/Poll），但 NewMonitor/Poll/Status 的生产调用者为 0（grep 仅命中 tool/exec 测试）；无持久状态字段、无后续通知。正式运行不可观测。"
+      },
+      {
+        "state": "进程真正退出及退出码",
+        "formal_face": "仅 ReleaseTool.Call（tool/exec/tool.go:227-246）在确认停止后返回 `released ... after confirmed stop: exit=N`；退出码由 tmux_executor.Stop 读 pane_dead_status。Probe 只给 Alive/Dead/Unknown 不携带退出码，Capture 不判死。",
+        "evidence": "probe.log line 29: STATE exit-code: \"released tmux/probe-b-... after confirmed stop: exit=7\"",
+        "reachable": true,
+        "note": "退出码只在“释放”动作的答案里可读；无可查询的退出码面。"
+      },
+      {
+        "state": "资源停止释放或状态未知",
+        "formal_face": "释放确认：ReleaseTool.Call -> `released ... after confirmed stop: exit=N`；未确认：`retained ... stop unconfirmed: <reason>`；状态未知：Manager.Release 返回具名 ErrResourceUnknown（`exec: no execution resource is held under that key`）",
+        "evidence": "probe.log line 40: STATE restart-unknown: \"exec: no execution resource is held under that key: tmux/probe-c-...\"; line 45: released-after-restart exit=-1",
+        "reachable": true,
+        "note": "具名未知/未确认语义已由既有 capabilities 测试覆盖（retained ... stop unconfirmed）。"
+      }
+    ],
+    "notification_chain": {
+      "tool_exec": "无 notice sink / 无通知生产点（grep Notice/Sink 在 tool/exec 无生产命中）",
+      "runtime_task": "runtime/task/wrapper.go:293-306 是唯一 settle notice 生产点（Notice{TaskID,Round,Kind,Seq:0,Event}）；NoticeProgress 无生产",
+      "delivery": "Run.sink -> bookNotice -> TrackDelivery/AcceptNotice/Site/mailboxSeqOf/Claim/Consume -> Loop.Backflow (facts.go:297-388)",
+      "verdict": "exec 状态无法进入既有通知消费链；要满足 output_stable_emits_followup_notice / next_turn_consumes_exec_state，必须新增生产端并接线根装配。"
+    }
+  },
+  "lease_and_restart": {
+    "renewal_during_call": "probe.log line 57: renewal-at-return: renewed=6（调用期间按 min(interval, lease/2) 续租）",
+    "renewal_after_return": "调用返回时 defer stopRenewing()（tool.go:176）关闭续租 goroutine；probe.log line 58: renewed 冻结在 6",
+    "lease_expiry": "probe.log line 58: lease-expired: renewed=6 held=1 stops=0 —— 租约过期本身不触发停止，资源继续 held",
+    "sweep": "probe.log line 59: sweep: reports=[{Key:probe/renew-stop Expired:true Evidence:{Released:true Stop:{Confirmed:true ExitCode:0}}}] held=0 released=1 —— Sweep 覆盖“过期->Release->确认”",
+    "sweep_production_callers": "0（grep `\\.Sweep\\(` 仅命中 tool/exec/exec_test.go、tests/integration/capabilities/exec_lifecycle_test.go、tests/integration/execution/lease_renewal_test.go）",
+    "host_close": "probe.log line 54: host-close: the tmux session ... outlives the host close；Host.Close（host.go:713-758）不触达 execManager（run.go 仅在 157/160/257/714/861 引用，Close 路径无释放）",
+    "defect_or_design": "相对 01-runtime-consumption/specs/execution-resource-lifecycle/spec.md ‘取消与租约不随调用返回终止’ 属缺陷，不是设计；但修复需要决定‘返回后谁持有续租/谁在租约到期时释放’，与本叶 gate 是同一授权问题。",
+    "restart_takeover": "无持久资源记录：Manager 纯内存；生产 Adopt 调用者为 0（grep `\\.Adopt\\(` 仅命中测试）；第二次 Boot 对同一 tmux session 执行 exec_release 返回具名 ErrResourceUnknown（probe.log line 40）。结论：具名未确认，不冒充已接管。"
+  },
+  "probe": {
+    "status": "scratch_not_landed",
+    "source_copy": "${TMPDIR:-/tmp}/event-consumption-integrity/01.10/probe_lifecycle_test.go.txt",
+    "source_sha256": "4bbb11df4f6d993798b38883d259495f47bef5a84466a8f1061ae43a1dc9f834",
+    "log_ref": "${TMPDIR:-/tmp}/event-consumption-integrity/01.10/probe-reachability.log",
+    "log_sha256": "ae984eb7781c51998e0f95e41c64f18f71fa4b1bef3f02f5573dc23b599f3a09",
+    "command": "cp \"${TMPDIR:-/tmp}/event-consumption-integrity/01.10/probe_lifecycle_test.go.txt\" tool/exec/probe_lifecycle_test.go && go test ./tool/exec -run '^TestProbe' -count=1 -v -timeout 3m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.10/probe-reachability.log\" 2>&1; echo exit=$?",
+    "result": "exit=0; PASS TestProbeExecLifecycleReachability (3.28s), PASS TestProbeHostCloseLeavesExecResources (0.10s), PASS TestProbeRenewalStopsAtCallReturn (0.93s); ok github.com/SpellingDragon/tagent/tool/exec 4.671s",
+    "landed": false,
+    "why_not_landed": "探针缺少冻结子测试 output_stable_emits_followup_notice / next_turn_consumes_exec_state 的生产路径，不能冒充 TestEventIntegrityExecLifecycle；且 tmux 依赖不宜进默认包测试。"
+  },
+  "gaps": [
+    {
+      "id": "G1",
+      "gap": "返回后无持续跟踪驱动",
+      "detail": "Monitor.Poll/Status 无生产调用者；调用返回后没有 goroutine/ticker 继续观察；状态不落任何可查询字段。",
+      "needs": "tool/exec 内新增生命周期驱动（或等价）并在装配处启动/停止"
+    },
+    {
+      "id": "G2",
+      "gap": "exec 状态无通知生产",
+      "detail": "tool/exec 无 notice sink；runtime/task 只在调用结算产终态 notice；NoticeProgress 无生产。",
+      "needs": "新增 public 通知端口 + 根装配接线（超出本叶授权）"
+    },
+    {
+      "id": "G3",
+      "gap": "续租随调用返回终止",
+      "detail": "defer stopRenewing() 使返回后不再续租；租约过期后资源仍 held，只能等 Sweep；相对新 delta spec 属缺陷。",
+      "needs": "决定返回后的租约归属：延长到释放/取消，或租约到期即具名释放；与 G1 同一驱动"
+    },
+    {
+      "id": "G4",
+      "gap": "Sweep 无生产调用者 + Host.Close 泄漏",
+      "detail": "生产无 Sweep 调用；Host.Close 后 tmux session 仍存活（探针实证）。",
+      "needs": "在 host/run 关闭路径接 Sweep 或 Manager.Close；属根产品改动"
+    },
+    {
+      "id": "G5",
+      "gap": "重启接管无持久记录",
+      "detail": "Manager 纯内存，生产 Adopt 无调用者；重启后同名资源返回 ErrResourceUnknown。",
+      "needs": "若要求接管，须持久资源记录 + 启动 Adopt；否则在验收中具名未确认（当前语义）"
+    },
+    {
+      "id": "G6",
+      "gap": "退出码只在 release 答案可读",
+      "detail": "Probe 只给 Alive/Dead/Unknown；无查询退出码的只读面。",
+      "needs": "可接受则具名登记；若要 next_turn 读退出码，需状态/通知面"
+    }
+  ],
+  "adjudication_options": [
+    {
+      "id": "A",
+      "option": "授权新增 tool/exec 生命周期 public API + 根装配接线，完整实施 01.10",
+      "scope": "tool/exec（驱动、续租归属、Sweep/Close 挂钩、notice 端口）+ runtime/task 或 host/run 接线 + 冻结测试文件五个正锚与负锚",
+      "cost": "跨出本叶写集，触碰根热点；需排到合单A之后或单独授权"
+    },
+    {
+      "id": "B",
+      "option": "缩窄 01.10 验收面为“正式查询面可达性”",
+      "scope": "仅保留 returned_call_keeps_tracking_live_process / process_exit_records_code / restart_takes_over_or_names_unconfirmed / stable_is_not_success / partial_output_is_not_completion；把 output_stable_emits_followup_notice 与 next_turn_consumes_exec_state 拆为新叶",
+      "cost": "验收面缩水，按规则须上级显式裁定，不能由实施者自批"
+    },
+    {
+      "id": "C",
+      "option": "拆叶：01.10a 查询面生命周期 + 01.10b 状态事件到通知链",
+      "scope": "a 在本轮写集内可做（复用 Manager/Monitor 的查询面，不新增 public API）；b 依赖 A 的授权",
+      "cost": "任务图需回写；01.10 整体完成时间后移"
+    }
+  ],
+  "verification": {
+    "single_round": "未执行（无落地测试；按停止门停在归因阶段）",
+    "ten_rounds": "未执行（同上）",
+    "existing_tool_exec_tests": "go test ./tool/exec/ -count=1 -> ok github.com/SpellingDragon/tagent/tool/exec 2.170s",
+    "gofmt": "gofmt -l tool/exec/ -> 空",
+    "vet": "go vet ./tool/exec/ -> ok",
+    "build": "go build ./... -> exit 0",
+    "family_spot_check": "go test ./tests/integration/execution -run '^TestEventIntegrityNoticeIdentity$' -count=1 -timeout 5m -> ok 0.658s",
+    "workspace_state": "tool/exec 无 diff（git status --porcelain tool/exec/ 为空）；未修改 facts.go/run.go/host.go；未勾选 01.10"
+  },
+  "artifacts": [],
+  "product_changes": [],
+  "deviation": {
+    "write_set_conflict": "01 域 tasks.md 的 01.10 行要求扩展 tests/integration/execution/event_integrity_test.go（与 01.1 同文件单写、串行 01.1 -> 01.10）；本轮派发单写集为 tool/exec/ 包内文件 + 新测试（按包内既有 *_test.go 落位）。因触发停止门、未落地任何测试，该冲突未实际发生；恢复实施时须由上级确认落位：按任务行回到 tests/integration/execution/event_integrity_test.go（与 01.1 串行），或授权在 tool/exec 内以 package exec_test 落地。",
+    "no_product_change": "本轮未改任何产品文件；归因结论与探针仅作证据。"
+  },
+  "reopen": {
+    "condition": "上级对 A/B/C 作出裁定，且（若选 A/C-b）00.3 的 public_api_or_format_change 获得单独授权",
+    "first_steps": [
+      "按裁定确定测试落位（任务行文件或 tool/exec 包内）",
+      "若授权：在 tool/exec 增加生命周期驱动 + 通知端口，在根装配启动/停止，并补 Host.Close 的释放路径",
+      "落 TestEventIntegrityExecLifecycle 的全部冻结子测试，跑单轮 + 十轮独立（run-1..10.jsonl + exits.txt）",
+      "十轮通过后再勾选 01.10 并以本文件替换为完成态 summary"
+    ]
+  }
+}

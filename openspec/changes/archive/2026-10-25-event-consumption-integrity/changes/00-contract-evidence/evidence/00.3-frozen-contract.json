@@ -1,0 +1,189 @@
+{
+  "leaf": "00.3",
+  "baseline": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "inputs": {
+    "inventory": "evidence/00.1-contract-inventory.json",
+    "reproduction": "evidence/00.2-reproduction.json",
+    "baseline_evidence": "evidence/00.4-baseline.json"
+  },
+  "axes": [
+    {
+      "id": "responsibility_identity",
+      "frozen": "随动回合归属原会话责任范围（session address 不变），必须携带原任务因果（TaskID 与通知身份 TaskID/Round/Kind/Seq）；同会话不同 invocation 不合批、不互相合并身份；通知驱动的回合不得改投其他会话或实例（显式 Handoff 除外，届时未来通知转新目标并记录关联）。",
+      "evidence": "persistent-event-loop「Handoff 未来通知的目标、实例与稳定序号」「业务 turn 开始执行时绑定编排版本」；00.2 control/correlation 子测试通过的会址与因果观测。"
+    },
+    {
+      "id": "fact_reference",
+      "frozen": "事实引用（Event key）不代替通知身份；源消息、角色、ToolCallID、ContentParts 原样保真，摘要/卡片仅为有来源的投影视图；同一通知的重复运输落同一事实键（幂等），同身份异内容为具名冲突。",
+      "evidence": "event-metadata-contract「事件身份与原生载荷保真」「元数据 key 统一定义」；00.2 红证一中 NoticeFactKey 恰 1（排除重试重复）的观测。"
+    },
+    {
+      "id": "transport_retry",
+      "frozen": "运输层重试不改投目标、不重造通知、不为唤醒补写无关联的用户事实；HTTP 运输次数与业务输入身份分别计数。",
+      "evidence": "persistent-event-loop「重试不改投」场景；mailbox AcceptNotice 幂等（00.1 盘点 E2）。"
+    },
+    {
+      "id": "logical_consumption",
+      "frozen": "同一通知身份在一次逻辑消费中恰好作为一份新输入进入随动决策（Feedback/ExternalInput 等任一路径合计恰 1）；忙时到达的通知必须保留（义务/待办可恢复）并在后续被消费，不得静默丢弃；领取不提前确认、消费位置不跨空洞、已确认不重做；正文在历史投影中合法重现不算重复，判定只按通知/事实/动作身份与因果归属。",
+      "evidence": "00.2 红证一（同 invocation 内 Feedback+ExternalInput 双份新输入，期望恰 1）与红证二（忙时第二通知 0 保留 0 后续消费）；telemetry-channel「未消费通知不可丢」。"
+    },
+    {
+      "id": "external_send",
+      "frozen": "一次通知不机械对应一条外发：显式 send、最终答复、附件/分片为各自独立动作身份，全部合法送达；已确认动作重入不重发；发送结果未知时保留动作身份、目标与错误的未确认状态，不自动重发、不伪报成功；显式重试经既有正式入口并保留与原动作关联；无渠道幂等证据不承诺端到端恰好一次。",
+      "evidence": "用户裁定（本轮范围澄清）；host.go MessageSender 契约三红线；delivery-dispatch-receipts「已送达不回执」。"
+    }
+  ],
+  "mechanisms": [
+    {
+      "id": "E1",
+      "status": "obligations_frozen",
+      "note": "用户/HTTP 输入：已接收不丢不串；同正文不同身份不误去重。按 00.1 清单 E1 验收。"
+    },
+    {
+      "id": "E2",
+      "status": "defect_confirmed",
+      "note": "工具/子代理通知：双路材料与忙丢两项已证实（见 defects）；其余义务按 00.1 E2。"
+    },
+    {
+      "id": "E3",
+      "status": "obligations_frozen",
+      "note": "输出/发送按 external_send 轴；01.4 承载。"
+    },
+    {
+      "id": "E4",
+      "status": "obligations_frozen",
+      "note": "治理/审批按 approval-channels 既有条款与 02.5 取证。"
+    },
+    {
+      "id": "E5",
+      "status": "obligations_frozen",
+      "note": "冥想/回流按 gate_rulings G2/G3/G9 与 02.1/02.2。"
+    },
+    {
+      "id": "E6",
+      "status": "partially_blocked",
+      "note": "压缩/投影：重建不自触发、未消费不丢等义务冻结；compaction 事实生产写入点未证实（G4）；小窗口折叠后通知可见性丢失已证实（EVID-04，见 defects）。"
+    },
+    {
+      "id": "E7",
+      "status": "obligations_frozen",
+      "note": "替换：在途绑定稳定、失败不安装、重复不重装（结果可判定）。heldModelVersion 短路观察见 observations。"
+    },
+    {
+      "id": "E8",
+      "status": "obligations_frozen",
+      "note": "采集/观测：真实请求逐项有记录、错误可见、导出仅显式离线消费（G6）。"
+    }
+  ],
+  "defects": [
+    {
+      "id": "EVID-02-dual-material-input",
+      "confirmed": true,
+      "summary": "同一终态通知的随动回合内，材料经 Feedback 事实与 InvokeRequest.Input 双路提交，成为 2 份新输入事实进入同一决策请求。",
+      "evidence_ref": "evidence/00.2-reproduction.json（duplicate_notice_material 两轮业务断言 FAIL；通知身份 task-2:0:settled:0，NoticeFactKey 恰 1 排除重试）",
+      "repair_leaf": "01.3",
+      "negative_anchor": "TestEventIntegrityTaskContinuation/no_duplicate_input_for_same_notice",
+      "fix_obligation": "同一通知材料在一次逻辑消费中恰好一份新输入；消除哪一路（正文 Input 或 Feedback 正文）由实施按最小改动选择，00.3 不指定实现。"
+    },
+    {
+      "id": "EVID-03-busy-notice-loss",
+      "confirmed": true,
+      "summary": "随动回合执行期间（驱动器 firing 忙）到达的第二条终态通知被静默丢弃：交付事实已提交，其后 0 条请求携带材料、0 条通知事实、无待办保留、无后续消费。",
+      "evidence_ref": "evidence/00.2-reproduction.json（busy_notice_loss 两轮业务断言 FAIL；task-4:1:settled:0）",
+      "repair_leaf": "01.3",
+      "negative_anchor": "TestEventIntegrityTaskContinuation/busy_notice_not_dropped",
+      "fix_obligation": "忙时到达通知必须保留并可恢复消费；修复不得以新全局缓冲替代既有义务载体，优先核验 mailbox/待办接线。"
+    },
+    {
+      "id": "EVID-04-notice-visibility-loss",
+      "confirmed": true,
+      "summary": "小窗口（256）下折叠重写投影序列后，按切片位置记录的已结束边界失效：在途通知被 AssembleBudgetPrefix 并入预算前缀并降级为一行 summary（正文与通知身份对模型不可见），同时 NoticesFrom 的读取游标越过缩短后的序列末尾，通知作为本 range 的新输入也读不到。账本未丢，丢的是模型可见性；32768 窗口同一请求携带完整正文。",
+      "evidence_ref": "03.11 长程证据 ${TMPDIR}/event-consumption-integrity/03.11/1-256/provider-requests-failed.json requests[281]（messages=2，bodies=[history summary…, settled]）；最小复现 TestEventIntegrityProjection/notice_visible_under_fold（tests/integration/history/event_integrity_test.go，修复前红/修复后绿）；两红组合修复后重跑绿：seed=1 run-s1-w256-20261024-021128、seed=7 run-s7-w256-20261024-021331（notification_requests=47/47、consumer_turns=58/58，含 gen16）",
+      "repair_leaf": "N",
+      "repair_scope": [
+        "facts.go",
+        "request.go",
+        "tests/integration/history/event_integrity_test.go",
+        "tests/integration/host/event_integrity_test.go"
+      ],
+      "negative_anchor": "TestEventIntegrityProjection/notice_visible_under_fold",
+      "fix_obligation": "通知边界按事实身份记录、消费时对当前投影序列解析；折叠重写后通知的身份与正文仍须对模型可见可达（卡片或正文），不得因窗口压力静默消失；不改 32768 行为、不砍折叠。"
+    },
+    {
+      "id": "EVID-05-restart-refold-regression",
+      "confirmed": true,
+      "summary": "01.9 seedReplay 将折叠 synthetic 产物按原始事实平铺重建为已结束材料：256 窗口下占满 AssembleBudgetPrefix 使通知条目被 assembleBudgetLocked 静默跳过（03.11 三 seed gen8 通知不可见）；重启后折叠重新到期产生新 compress.request 与新 -hist- 产物、重启前早期输入重现于请求（03.6 FoldControl/negative 红）。",
+      "evidence_ref": "evidence/03.11-summary.json（3/6 红+归因）；04.2 诊断（/tmp/04.2-diag 重启前后投影 dump：4条含-hist-→8条原始+新-hist-/新cmp-）",
+      "repair_leaf": "AD",
+      "negative_anchor": "TestEventIntegrityFoldControl/negative",
+      "fix_obligation": "重启恢复遵循 G4 用户裁定：重放 WAL 后按同一规则恢复折叠形态（与在线折叠同形或等价），重建内重折属投影派生不产生新 compress.request 写入；通知条目在预算前缀中不可被静默跳过（telemetry-channel：未消费通知保持完整直到被消费）。不得以禁止重启后折叠呈现为修复（呈现既折叠态是合法的；禁止的是新写入与旧材料错形重现）。",
+      "anchor_ruling": "方案A（R23骨架错位归因，编排者裁定2026-10-25）：03.6 negative 的两处字面代理断言（禁重启请求含 history summary 前缀/禁 ReplayEntries 含旧材料 synthetic 条目）写于 G4 裁定前，以过宽形态代理'不新铸折叠产物'义务，与本缺陷 fix_obligation'呈现既折叠态合法'构造互斥（AA 单实测钉死：同形恢复后 1703 仍红）。对齐：代理断言改为键集断言——①重启后 synthetic key 集 ⊆ 重启前 synthetic key 集（不新铸）；②重启后不新增 compress.request 事实（不新写）；旧材料经恢复综述可达是 G4 裁定的合法呈现。非缩水：被换掉的字面禁令本身就是对已裁定义务的过宽代理。 追加裁定A1+扩权（2026-10-25，AC单实测后）：①03.6 negative 观测点移至恢复边界——重启后立即（下一回合前）断言恢复键集=重启前键集且恢复零 compress 事实提交；回合后仅保留原非折叠检查（keep_recent_tasks 重铸是在线规则自身，不构成重启判别面）。②扩权：runtime/agent/loop.go 的 intake.cursor 通知栅栏改身份解析（位置游标被折叠重写截断是 256 通知不可见的真根因——AC 决定性实验：游标每轮重置到边界后 256/seed1 全 121 代+121 重启全绿）。"
+    }
+  ],
+  "unresolved": [
+    {
+      "id": "G4-compaction-production-writer",
+      "blocked": false,
+      "summary": "全仓未证实 context_compress_summary/compaction 事实的生产写入点；RebuildProjectionFromWAL 无生产调用。若事实不落链，「恢复不重新触发」的验收对象未定。",
+      "blocked_leaves": [],
+      "resolution_path": "02.3 取证：确认折叠产物是否落事实链及恢复调用链；结论回填本件后解除；若需 01.5 接线，按接线需求单列。02.3 其余子锚（unconsumed_not_lost/rebuild_does_not_refold/fold_product_no_self_trigger/actual_request_assembly）可先取证实施，整叶勾选等回填。",
+      "resolution": "用户裁定（第三选项）：折叠视为事件的投影形式——CompactionFact 可纯内存（不落事实链），但系统 MUST 能通过重放事件 WAL 完成重新折叠（重建路径按同一规则恢复折叠形态；重建内重折属投影派生不算自激，重建后不得再触发新折叠写入）。02.3 验收面由 compaction_event_writer 改写为 rebuild_refolds_from_wal。",
+      "resolved_by": "user ruling"
+    }
+  ],
+  "invocation_version_conflict": {
+    "status": "resolved",
+    "ruling": "semantic-narrowing（义务不变量式收窄）",
+    "rationale": [
+      "persistent-event-loop 主规格内部两代术语并存：「该下一步 decision SHALL 归属原 invocation…MUST NOT 偷偷新建 invocation」与「task_settled 等一等事件触发的新顶层 turn 按开始执行时选择当前有效版本」；后者已承认新顶层 turn 形态。",
+      "基线 6cc4414 已把随动回合实现为新 invocation + 正文 ready input（提交语义即如此），主规格未同步 delta，属规格滞后而非实现偷偷新建。",
+      "00.2 红证证明的实际缺陷是材料双路与忙时丢弃，均与 invocation ID 字符串无关；两条候选路线下的修复与验收面一致。"
+    ],
+    "frozen_invariants": [
+      "随动回合归属原会话责任范围（会址不变）并携带原任务因果（TaskID/通知身份）；不得改投他会话。",
+      "同一通知材料在一次逻辑消费中恰好一份新输入（logical_consumption 轴）。",
+      "忙时通知保留可恢复；版本按回合开始时当前生效。"
+    ],
+    "rejected": [
+      "字面复用原 invocation ID（B 路线）：需改动 invocation 生命周期与 6cc4414 演进冲突，改动深且用户诉求（稳定只报告一次）不涉及 ID 字符串，否决。"
+    ],
+    "spec_sync": "01 域 persistent-event-loop delta（义务式措辞）承载本裁定；归档时按标准流程合并主规格，不得跳过。",
+    "user_override_cost": "若用户推翻为 B 路线：重写 01 域该 delta 并重开 01.3 实施方向；01.1 验收面（身份/幂等/合并禁止）不受影响。"
+  },
+  "gate_rulings": {
+    "G2": "回流目标以装配期 deliver_to 授权集合为准，工具参数按当前实现（content）；delta 已按「授权目标集合」措辞，不追认 {target,content} 旧参数形状。02.2 replay 身份子测试在动作身份可判定后启用，不得以内容摘要/时间窗替代。",
+    "G3": "主规格 InjectMessageWithSource 为历史入口名；当前正式入口为 Run.CommitToSession。02.2 按当前入口对四道门行为取证；cross-session-delivery 保持纯引用，不改写其条款文字，归档时以勘误注明入口演进。",
+    "G6": "02.6 消费者锚 = Boot 产真实 capture 后由公开 rl.NewChainExporter/Export 显式离线读取并逐项关联 manifest；零宿主自动调用不要求新增 CLI、不接 Boot 自动导出。",
+    "G9": "拒绝文本断言使用当前实现的具名拒绝字符串（deliver_summary 侧既有文本），delta 不写死前缀；若实现改名，同步更新断言与 delta 注记。",
+    "OBSERVER_FAILURE_SEMANTICS": "observer 失败语义分层（用户评审 v3 裁定）：日志/遥测继续旁路，可容忍缺口；任务推进（含 01.2 消费确认、01.8 事实持久化、01.10 外部执行状态）保存可恢复义务，失败不得记作处理完成；插件具体业务动作按各自契约处理，不把全部 observer 改为阻塞；消费确认与发送确认分开，未知送达不伪报成功。由根 design.md D1 增补同义段承载，01 域各叶按此取证。"
+  },
+  "observations_pending_verification": [
+    {
+      "id": "OBS-E7-held-version-short-circuit",
+      "where": "02.4",
+      "note": "heldModelVersion 在 current==name 返回 (\"\",true) 使 LeaseObserver from 校验短路（host_reload.go:231 附近）；02.4 取证 duplicate_same_version_not_reinstalled 时一并核实，不预定性。"
+    },
+    {
+      "id": "OBS-E2-seq-zero",
+      "where": "01.1",
+      "note": "生产点恒写 Seq:0 而 NoticeSequencer 仅恢复路径使用（00.1 盘点）；01.1 以同身份重送幂等/异内容冲突/多 progress 有序验收，若多 progress 实际不可达则如实记录并收敛验收面。"
+    },
+    {
+      "id": "OBS-E8-captured-model-errors",
+      "where": "02.6",
+      "note": "capturedModel 吞 Snapshot/Record 错误（00.1 盘点）；02.6 negative/failed_attempt_recorded_as_failure 取证。"
+    }
+  ],
+  "public_api_or_format_change": {
+    "status": "authorized_narrow",
+    "ruling": "用户于 01.2 停点裁定（候选A）：授权在既有 FactLog 新增 consume: 前缀键（按通知四元身份 TaskID/Round/Kind/Seq）持久化逻辑消费回执，与事实共用同一 Sync 屏障，load 时回填已确认集合；须定义回执写入与 mailbox Consume 的原子边界（先持久回执后确认内存，或同批屏障）；除此之外仍不新增其他 public API 或持久格式。",
+    "authorized_by": "user ruling at 01.2 stop point",
+    "scope": "runtime/state durable FactLog consume: 键空间；不新增导出 API",
+    "plan_revision_04_exec_lifecycle": {
+      "status": "authorized_narrow_delegated",
+      "ruling": "用户裁定 C（计划回写④）认可 01.10 拆为 01.10a/01.10b 及最终完整验收面；授权 01.10b 在实施单先列明最小 API 面（签名、消费者、失败窗口、恢复路径、回退）后再动，超出最小面即停报。",
+      "authorized_by": "user ruling C at plan-revision 04",
+      "scope": "01.10b 执行状态事件生产与通知/根装配接线所需的最小 public API；未列明或超面不实施"
+    }
+  }
+}

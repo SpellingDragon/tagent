@@ -29,7 +29,7 @@ TBD - created by archiving change host-send-tool. Update Purpose after archive.
 #### Scenario: 被动通道回归
 
 - **WHEN** 未声明 send 工具的既有部署运行
-- **THEN** 投递行为与本变更前逐字节一致
+- **THEN** 投递行为 SHALL 与未声明该工具时逐字节一致
 
 #### Scenario: 双通道并存
 

@@ -1,0 +1,26 @@
+# 1.0 red evidence — the delivery review hold loop
+# command: go test ./tests/integration/host/ -run ^TestDeliveryReviewHold$ -count=1 -v
+# HEAD: 28aa080 (worktree scaffold: Delivery/DeliveryRuler/WithDeliveryRuler declared, deliverFresh not yet consulting the ruler)
+# observed: the review returned hold, the turn body was delivered to the user channel, and no held entry existed.
+
+=== RUN   TestDeliveryReviewHold
+=== RUN   TestDeliveryReviewHold/hold_approves_exactly_one_delivery
+2026-10-26T11:27:24+08:00	[34mINFO[0m	tagent/run.go:300	tagent: storage tier opened tier=localfile durable=true root=/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestDeliveryReviewHoldhold_approves_exactly_one_delivery1627453411/001
+2026-10-26T11:27:24+08:00	[34mINFO[0m	tagent/run.go:588	tagent: restore folded chains=0 recovered=0 dropped=0 elapsed=1µs
+2026-10-26T11:27:24+08:00	[34mINFO[0m	telemetry/log_observer.go:74	tagent: turn start fact=1-fc45aacd9ecb531fedc888f9e343cd22 agent=user session=session-delivery-review-approve invocation=session-delivery-review-approve#1 payload=role=user content=5B calls=0
+2026-10-26T11:27:24+08:00	[34mINFO[0m	model/observe.go:80	tagent: model response model=model-entry@local/model-entry terminal=completed prompt_tokens=0 completion_tokens=0 total_tokens=0 responses=1 latency_ms=3
+2026-10-26T11:27:24+08:00	[34mINFO[0m	telemetry/log_observer.go:74	tagent: turn end fact=2-23e6b24194644acd8c1f3dcdf154f0d7 agent=user session=session-delivery-review-approve invocation=session-delivery-review-approve#1 task= payload=role=assistant content=34B calls=0
+    delivery_review_test.go:54: delivered bodies = ["the body the delivery review holds"], want none while the review holds the body
+=== RUN   TestDeliveryReviewHold/refusal_delivers_nothing_and_records_an_audit_fact
+2026-10-26T11:27:24+08:00	[34mINFO[0m	tagent/run.go:300	tagent: storage tier opened tier=localfile durable=true root=/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestDeliveryReviewHoldrefusal_delivers_nothing_and_records_an_a1345001603/001
+2026-10-26T11:27:24+08:00	[34mINFO[0m	tagent/run.go:588	tagent: restore folded chains=0 recovered=0 dropped=0 elapsed=1µs
+2026-10-26T11:27:24+08:00	[34mINFO[0m	telemetry/log_observer.go:74	tagent: turn start fact=1-dab17e6f7074caf66441aefef2ef2817 agent=user session=session-delivery-review-refuse invocation=session-delivery-review-refuse#1 payload=role=user content=5B calls=0
+2026-10-26T11:27:24+08:00	[34mINFO[0m	model/observe.go:80	tagent: model response model=model-entry@local/model-entry terminal=completed prompt_tokens=0 completion_tokens=0 total_tokens=0 responses=1 latency_ms=1
+2026-10-26T11:27:24+08:00	[34mINFO[0m	telemetry/log_observer.go:74	tagent: turn end fact=2-1c018d5af1519b81258471ef5550e251 agent=user session=session-delivery-review-refuse invocation=session-delivery-review-refuse#1 task= payload=role=assistant content=34B calls=0
+    delivery_review_test.go:112: held deliveries = [], want the one body the review held
+--- FAIL: TestDeliveryReviewHold (0.25s)
+    --- FAIL: TestDeliveryReviewHold/hold_approves_exactly_one_delivery (0.10s)
+    --- FAIL: TestDeliveryReviewHold/refusal_delivers_nothing_and_records_an_audit_fact (0.15s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/tests/integration/host	0.655s
+FAIL

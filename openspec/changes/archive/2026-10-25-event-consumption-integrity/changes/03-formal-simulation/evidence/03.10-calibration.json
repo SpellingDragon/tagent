@@ -1,0 +1,5409 @@
+{
+  "leaf": "03.10",
+  "title": "长程校准：03.11 驱动内核缩样 + 六项成本实测 + 外推预算建议",
+  "change": "event-consumption-integrity",
+  "domain": "03-formal-simulation",
+  "artifact": "calibration",
+  "status": "calibrated_pending_03.11_review",
+  "not_03_11_evidence": true,
+  "generated_at": "2026-10-23T16:19:44Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "non_product / off_contract：只读校准叶 03.10，产出测量与预算建议；不改产品，不新增父测试进 event 合同，不冒充 03.11 全量证据。",
+  "method": "同一测试二进制自执行为真实宿主子进程（TAGENT_HTTP_PORT=0），4 会话共享一台 Host，20 输入×2 重启/会话、每 10 轮轮流触发重启（初代 + 8 次 SIGKILL = 9 代）。父进程持有 scripted 模型端点并跨重启对账；每代 kill→ready 计重启成本；非 race 二进制跑同一场景作 -race 基线；磁盘目录前后 WalkDir 计存储增长；子进程 rusage 取峰值 RSS/CPU。缩样后按线性 + 历史斜率外推到单组合 1200 输入/120 重启，再按 03.11 的 6 组合（3 seed × 2 window）给出 long 作业建议；short/mutations 不由本校准测量。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10",
+    "notes": "冷构建用隔离 GOCACHE 外部计时（go test -c -tags smoke -race）；三次重复跑通过 TAGENT_CALIBRATION_COLD_BUILD_MS 复用该值，避免每次重编。原始 -json 日志只落仓库外 TMPDIR。"
+  },
+  "scale": {
+    "sessions": 4,
+    "shared_host": true,
+    "inputs_per_session": 20,
+    "inputs_total": 80,
+    "restarts_per_session": 2,
+    "restarts_total": 8,
+    "generations": 9,
+    "restart_every_inputs": 10,
+    "full_inputs": 1200,
+    "full_restarts": 120,
+    "matrix_combos": 6,
+    "seeds": [
+      1
+    ],
+    "windows": [
+      256,
+      32768
+    ]
+  },
+  "cold_build": {
+    "source": "external",
+    "method": "GOCACHE=<fresh dir> go test -c -tags smoke -race -o <tmp>/wechat-bot-cold.test .",
+    "samples_ms": [
+      23257.0,
+      23244.0
+    ],
+    "adopted_ms": 23257.0,
+    "spread_pct": 0.056,
+    "preliminary_self_measured_ms": [
+      24027.548417,
+      26697.0
+    ]
+  },
+  "preliminary_runs": [
+    {
+      "window": 256,
+      "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-000702",
+      "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-000702/report-window-256-seed-1.json",
+      "cold_build_ms": 24027.548417,
+      "cold_build_source": "self (isolated GOCACHE, harness-timed)",
+      "note": "单轮跑通验证（自测冷构建）；随后 3 次重复改用外部冷构建值，避免每次重编",
+      "hot_run_wall_ms": 1855.56525,
+      "per_input_ms": 2.862073975000001,
+      "verdicts": {
+        "short": "provisional_not_measured",
+        "long": "feasible",
+        "mutations": "provisional_not_measured"
+      }
+    },
+    {
+      "window": 32768,
+      "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001056",
+      "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001056/report-window-32768-seed-1.json",
+      "cold_build_ms": 26697.0,
+      "cold_build_source": "self (isolated GOCACHE, harness-timed)",
+      "note": "单轮跑通验证（自测冷构建）；随后 3 次重复改用外部冷构建值",
+      "hot_run_wall_ms": 1998.379625,
+      "per_input_ms": 4.278584400000001,
+      "verdicts": {
+        "short": "provisional_not_measured",
+        "long": "feasible",
+        "mutations": "provisional_not_measured"
+      }
+    }
+  ],
+  "windows": {
+    "256": {
+      "runs": [
+        {
+          "run_id": "w256-run1",
+          "exit_code": 0,
+          "elapsed_external_seconds": 11,
+          "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-001342",
+          "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-001342/report-window-256-seed-1.json",
+          "measurements": {
+            "cold_build_ms": 23257,
+            "cold_build_source": "external",
+            "initial_boot_ms": 60.810125,
+            "hot_run_wall_ms": 1902.4585,
+            "hot_run_source": "measured（首个 spawn → 末代关闭，冷构建在外）",
+            "per_input_ms": 3.2466448375,
+            "per_input_median_ms": 3.182854,
+            "per_input_p95_ms": 3.814375,
+            "input_samples": 80,
+            "input_samples_detail": [
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 0,
+                "marker": "SMOKE-R85000",
+                "ms": 4.407084
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 0,
+                "marker": "SMOKE-R85001",
+                "ms": 3.404542
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 0,
+                "marker": "SMOKE-R85002",
+                "ms": 2.711125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 0,
+                "marker": "SMOKE-R85003",
+                "ms": 3.161333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 1,
+                "marker": "SMOKE-R85004",
+                "ms": 2.998958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 1,
+                "marker": "SMOKE-R85005",
+                "ms": 3.729375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 1,
+                "marker": "SMOKE-R85006",
+                "ms": 2.890125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 1,
+                "marker": "SMOKE-R85007",
+                "ms": 2.747667
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 2,
+                "marker": "SMOKE-R85008",
+                "ms": 3.236167
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 2,
+                "marker": "SMOKE-R85009",
+                "ms": 3.020084
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 2,
+                "marker": "SMOKE-R85010",
+                "ms": 3.787167
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 2,
+                "marker": "SMOKE-R85011",
+                "ms": 2.948792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 3,
+                "marker": "SMOKE-R85012",
+                "ms": 2.812833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 3,
+                "marker": "SMOKE-R85013",
+                "ms": 2.956
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 3,
+                "marker": "SMOKE-R85014",
+                "ms": 3.575416
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 3,
+                "marker": "SMOKE-R85015",
+                "ms": 2.847041
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 4,
+                "marker": "SMOKE-R85016",
+                "ms": 2.969292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 4,
+                "marker": "SMOKE-R85017",
+                "ms": 2.793334
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 4,
+                "marker": "SMOKE-R85018",
+                "ms": 2.740292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 4,
+                "marker": "SMOKE-R85019",
+                "ms": 3.027042
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 5,
+                "marker": "SMOKE-R85020",
+                "ms": 2.943125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 5,
+                "marker": "SMOKE-R85021",
+                "ms": 3.324417
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 5,
+                "marker": "SMOKE-R85022",
+                "ms": 3.103584
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 5,
+                "marker": "SMOKE-R85023",
+                "ms": 3.325083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 6,
+                "marker": "SMOKE-R85024",
+                "ms": 3.174875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 6,
+                "marker": "SMOKE-R85025",
+                "ms": 3.200958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 6,
+                "marker": "SMOKE-R85026",
+                "ms": 2.998333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 6,
+                "marker": "SMOKE-R85027",
+                "ms": 3.78525
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 7,
+                "marker": "SMOKE-R85028",
+                "ms": 3.261708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 7,
+                "marker": "SMOKE-R85029",
+                "ms": 3.1055
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 7,
+                "marker": "SMOKE-R85030",
+                "ms": 3.113
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 7,
+                "marker": "SMOKE-R85031",
+                "ms": 3.552
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 8,
+                "marker": "SMOKE-R85032",
+                "ms": 3.363208
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 8,
+                "marker": "SMOKE-R85033",
+                "ms": 3.206334
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 8,
+                "marker": "SMOKE-R85034",
+                "ms": 3.625459
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 8,
+                "marker": "SMOKE-R85035",
+                "ms": 3.666916
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 9,
+                "marker": "SMOKE-R85036",
+                "ms": 3.120667
+              },
+              {
+                "generation": 1,
+                "session": "smoke-chat-b",
+                "index": 9,
+                "marker": "SMOKE-R85037",
+                "ms": 2.970833
+              },
+              {
+                "generation": 2,
+                "session": "smoke-chat-c",
+                "index": 9,
+                "marker": "SMOKE-R85038",
+                "ms": 2.973917
+              },
+              {
+                "generation": 3,
+                "session": "smoke-chat-d",
+                "index": 9,
+                "marker": "SMOKE-R85039",
+                "ms": 3.8205
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 10,
+                "marker": "SMOKE-R85040",
+                "ms": 3.643125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 10,
+                "marker": "SMOKE-R85041",
+                "ms": 2.751333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 10,
+                "marker": "SMOKE-R85042",
+                "ms": 2.743417
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 10,
+                "marker": "SMOKE-R85043",
+                "ms": 3.376792
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 11,
+                "marker": "SMOKE-R85044",
+                "ms": 3.412542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 11,
+                "marker": "SMOKE-R85045",
+                "ms": 2.936459
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 11,
+                "marker": "SMOKE-R85046",
+                "ms": 2.713709
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 11,
+                "marker": "SMOKE-R85047",
+                "ms": 3.373417
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 12,
+                "marker": "SMOKE-R85048",
+                "ms": 3.419417
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 12,
+                "marker": "SMOKE-R85049",
+                "ms": 3.238291
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 12,
+                "marker": "SMOKE-R85050",
+                "ms": 3.742917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 12,
+                "marker": "SMOKE-R85051",
+                "ms": 2.873833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 13,
+                "marker": "SMOKE-R85052",
+                "ms": 2.821
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 13,
+                "marker": "SMOKE-R85053",
+                "ms": 3.961166
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 13,
+                "marker": "SMOKE-R85054",
+                "ms": 3.022666
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 13,
+                "marker": "SMOKE-R85055",
+                "ms": 2.764333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 14,
+                "marker": "SMOKE-R85056",
+                "ms": 3.141584
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 14,
+                "marker": "SMOKE-R85057",
+                "ms": 3.064167
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 14,
+                "marker": "SMOKE-R85058",
+                "ms": 3.772084
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 14,
+                "marker": "SMOKE-R85059",
+                "ms": 3.1185
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 15,
+                "marker": "SMOKE-R85060",
+                "ms": 3.025416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 15,
+                "marker": "SMOKE-R85061",
+                "ms": 3.228917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 15,
+                "marker": "SMOKE-R85062",
+                "ms": 3.190833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 15,
+                "marker": "SMOKE-R85063",
+                "ms": 2.996416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 16,
+                "marker": "SMOKE-R85064",
+                "ms": 3.696792
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 16,
+                "marker": "SMOKE-R85065",
+                "ms": 3.2775
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 16,
+                "marker": "SMOKE-R85066",
+                "ms": 3.572292
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 16,
+                "marker": "SMOKE-R85067",
+                "ms": 3.006542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 17,
+                "marker": "SMOKE-R85068",
+                "ms": 3.460416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 17,
+                "marker": "SMOKE-R85069",
+                "ms": 3.589542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 17,
+                "marker": "SMOKE-R85070",
+                "ms": 3.6825
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 17,
+                "marker": "SMOKE-R85071",
+                "ms": 3.213583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 18,
+                "marker": "SMOKE-R85072",
+                "ms": 3.097125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 18,
+                "marker": "SMOKE-R85073",
+                "ms": 4.2885
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 18,
+                "marker": "SMOKE-R85074",
+                "ms": 3.814375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 18,
+                "marker": "SMOKE-R85075",
+                "ms": 3.635333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 19,
+                "marker": "SMOKE-R85076",
+                "ms": 3.431125
+              },
+              {
+                "generation": 5,
+                "session": "smoke-chat-b",
+                "index": 19,
+                "marker": "SMOKE-R85077",
+                "ms": 3.038917
+              },
+              {
+                "generation": 6,
+                "session": "smoke-chat-c",
+                "index": 19,
+                "marker": "SMOKE-R85078",
+                "ms": 3.21725
+              },
+              {
+                "generation": 7,
+                "session": "smoke-chat-d",
+                "index": 19,
+                "marker": "SMOKE-R85079",
+                "ms": 2.978125
+              }
+            ],
+            "per_restart_ms": 65.57442175,
+            "restart_samples_detail": [
+              {
+                "generation": 1,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 64.361,
+                "spawn_to_ready_ms": 59.213958,
+                "boot_ms": 19.736125,
+                "rebind_ms": 13.256292,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 2,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 65.086125,
+                "spawn_to_ready_ms": 59.84325,
+                "boot_ms": 19.648458,
+                "rebind_ms": 13.919166,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 3,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 69.8315,
+                "spawn_to_ready_ms": 65.641875,
+                "boot_ms": 21.700875,
+                "rebind_ms": 14.652041999999998,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 4,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 64.2065,
+                "spawn_to_ready_ms": 59.992958,
+                "boot_ms": 20.101458,
+                "rebind_ms": 13.976749,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 5,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 65.440208,
+                "spawn_to_ready_ms": 60.072125,
+                "boot_ms": 22.188208,
+                "rebind_ms": 13.233833,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 6,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 61.049708,
+                "spawn_to_ready_ms": 55.860042,
+                "boot_ms": 19.181833,
+                "rebind_ms": 12.448125,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 7,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 64.537708,
+                "spawn_to_ready_ms": 59.899542,
+                "boot_ms": 19.592708,
+                "rebind_ms": 14.316666999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 8,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 70.082625,
+                "spawn_to_ready_ms": 66.0695,
+                "boot_ms": 22.842625,
+                "rebind_ms": 13.374458999999998,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              }
+            ],
+            "rebind_samples": 36,
+            "rebind_mean_ms": 3.466619194444443,
+            "race": {
+              "enabled": true,
+              "baseline_wall_ms": 303.484042,
+              "baseline_per_input_ms": 0.4228005500000001,
+              "baseline_input_samples": 80,
+              "baseline_build_ms": 3191.727875,
+              "overhead_factor": 6.268726643623654,
+              "per_input_overhead_factor": 7.678904006865646,
+              "source": "same scenario, non-race test binary"
+            },
+            "storage": {
+              "root": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestEventIntegrityLongRunCalibration2827191360/001/storage",
+              "before_bytes": 0,
+              "after_bytes": 97461,
+              "growth_bytes": 97461,
+              "before_files": 0,
+              "after_files": 7,
+              "files_added": 7
+            },
+            "peak": {
+              "children": 9,
+              "max_child_rss_bytes": 81068032,
+              "max_child_cpu_millis": 173,
+              "total_child_cpu_millis": 653,
+              "max_child_open_fds": 9,
+              "max_child_goroutines": 11,
+              "max_child_heap_inuse_bytes": 6119424,
+              "parent_rss_bytes": 65601536,
+              "parent_cpu_millis": 147,
+              "parent_goroutines": 5
+            }
+          },
+          "extrapolation": {
+            "note": "外推值，03.11 全量首轮后复核",
+            "formula": "full_wall_ms = 1200×per_input_ms + 120×per_restart_ms + initial_boot_ms；full_storage = growth × (1200/80)；full_rss 线性值 = max_child_rss × (1200/80)，有界值 = ×1.5；full_cpu = 子进程 CPU 总和 × (1200/80)",
+            "input_growth_factor": 15,
+            "restart_growth_factor": 15,
+            "full_wall_ms": 11825.714539999999,
+            "full_wall_minutes": 0.1970952423333333,
+            "context_slope_ms_per_turn": 0.011408467105263352,
+            "context_adjusted_full_wall_ms": 13742.337013684242,
+            "full_storage_bytes": 1461915,
+            "full_rss_bytes_linear": 1216020480,
+            "full_rss_bytes_bounded": 121602048,
+            "rss_model": "non_linear_bounded",
+            "full_cpu_millis": 9795
+          },
+          "budget": {
+            "source": "measured",
+            "margin": 1.5,
+            "candidates": {
+              "short_minutes": 20,
+              "long_minutes": 45,
+              "mutations_minutes": 30
+            },
+            "recommended": {
+              "long_job_timeout_minutes": 12,
+              "go_test_timeout_seconds_per_long_shard": 60,
+              "short_job_timeout_minutes": 20,
+              "mutations_job_timeout_minutes": 30
+            },
+            "feasibility": [
+              {
+                "surface": "short",
+                "candidate_minutes": 20,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 20,
+                "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结"
+              },
+              {
+                "surface": "long",
+                "candidate_minutes": 45,
+                "measured": true,
+                "verdict": "feasible",
+                "required_minutes": 1.761850368035091,
+                "required_per_shard_minutes": 0.2290389502280707,
+                "recommended_minutes": 12,
+                "reason": "单组合外推（含历史增长修正）0.23 分钟 × 6 组合 + 冷构建 0.39 分钟 = 1.76 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）"
+              },
+              {
+                "surface": "mutations",
+                "candidate_minutes": 30,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 30,
+                "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结"
+              }
+            ],
+            "over_budget": false,
+            "over_budget_reported": false,
+            "p95": {
+              "claimed": true,
+              "samples": 80,
+              "per_input_ms": 3.814375,
+              "note": "基于 80 个缩样输入的 p95，不是 03.11 的 1200 输入 p95"
+            },
+            "notes": [
+              "外推值，03.11 全量首轮后复核",
+              "long 分片 go test 建议 = max(ceil(外推 wall×1.5), 60s)；long 作业建议 = ceil((6 分片 + 冷构建×1.5)/60)+5 分钟 runner 准备；候选 45m 的可行性按同一作业口径判断",
+              "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "RSS 由窗口与并发决定，不是输入数的线性函数：线性值只作上限参考，建议值取有界模型"
+            ]
+          },
+          "reconciliation": {
+            "expected_inputs": 80,
+            "driven_inputs": 80,
+            "missing_input_requests": null,
+            "duplicate_input_requests": null,
+            "expected_rebinds": 36,
+            "rebind_requests": 36,
+            "missing_rebind_requests": null,
+            "provider_requests": 118,
+            "reflect_requests": 2,
+            "restored_context_inputs": 10,
+            "restored_context_checks": 10
+          },
+          "scale": {
+            "sessions": 4,
+            "inputs_per_session": 20,
+            "inputs_total": 80,
+            "restarts_per_session": 2,
+            "restarts_total": 8,
+            "generations": 9,
+            "restart_every_inputs": 10,
+            "shared_host": true,
+            "meditation_enabled": true,
+            "fsync_dropped": false
+          }
+        },
+        {
+          "run_id": "w256-run2",
+          "exit_code": 0,
+          "elapsed_external_seconds": 6,
+          "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-001350",
+          "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-001350/report-window-256-seed-1.json",
+          "measurements": {
+            "cold_build_ms": 23257,
+            "cold_build_source": "external",
+            "initial_boot_ms": 49.396792,
+            "hot_run_wall_ms": 1772.157917,
+            "hot_run_source": "measured（首个 spawn → 末代关闭，冷构建在外）",
+            "per_input_ms": 3.005560900000001,
+            "per_input_median_ms": 2.967625,
+            "per_input_p95_ms": 3.562792,
+            "input_samples": 80,
+            "input_samples_detail": [
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 0,
+                "marker": "SMOKE-R85000",
+                "ms": 2.753583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 0,
+                "marker": "SMOKE-R85001",
+                "ms": 2.719959
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 0,
+                "marker": "SMOKE-R85002",
+                "ms": 3.412792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 0,
+                "marker": "SMOKE-R85003",
+                "ms": 2.597542
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 1,
+                "marker": "SMOKE-R85004",
+                "ms": 2.63425
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 1,
+                "marker": "SMOKE-R85005",
+                "ms": 3.734583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 1,
+                "marker": "SMOKE-R85006",
+                "ms": 2.968
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 1,
+                "marker": "SMOKE-R85007",
+                "ms": 3.354042
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 2,
+                "marker": "SMOKE-R85008",
+                "ms": 3.527125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 2,
+                "marker": "SMOKE-R85009",
+                "ms": 3.044167
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 2,
+                "marker": "SMOKE-R85010",
+                "ms": 3.052708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 2,
+                "marker": "SMOKE-R85011",
+                "ms": 2.704416
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 3,
+                "marker": "SMOKE-R85012",
+                "ms": 2.84625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 3,
+                "marker": "SMOKE-R85013",
+                "ms": 2.969625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 3,
+                "marker": "SMOKE-R85014",
+                "ms": 2.880583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 3,
+                "marker": "SMOKE-R85015",
+                "ms": 2.695125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 4,
+                "marker": "SMOKE-R85016",
+                "ms": 3.362792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 4,
+                "marker": "SMOKE-R85017",
+                "ms": 2.833292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 4,
+                "marker": "SMOKE-R85018",
+                "ms": 2.952125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 4,
+                "marker": "SMOKE-R85019",
+                "ms": 2.940541
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 5,
+                "marker": "SMOKE-R85020",
+                "ms": 2.83075
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 5,
+                "marker": "SMOKE-R85021",
+                "ms": 3.416833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 5,
+                "marker": "SMOKE-R85022",
+                "ms": 2.871125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 5,
+                "marker": "SMOKE-R85023",
+                "ms": 2.910041
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 6,
+                "marker": "SMOKE-R85024",
+                "ms": 3.093709
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 6,
+                "marker": "SMOKE-R85025",
+                "ms": 3.577917
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 6,
+                "marker": "SMOKE-R85026",
+                "ms": 3.069167
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 6,
+                "marker": "SMOKE-R85027",
+                "ms": 2.96725
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 7,
+                "marker": "SMOKE-R85028",
+                "ms": 3.192958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 7,
+                "marker": "SMOKE-R85029",
+                "ms": 3.378417
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 7,
+                "marker": "SMOKE-R85030",
+                "ms": 2.998708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 7,
+                "marker": "SMOKE-R85031",
+                "ms": 2.92725
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 8,
+                "marker": "SMOKE-R85032",
+                "ms": 3.181208
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 8,
+                "marker": "SMOKE-R85033",
+                "ms": 3.562792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 8,
+                "marker": "SMOKE-R85034",
+                "ms": 2.985208
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 8,
+                "marker": "SMOKE-R85035",
+                "ms": 3.113291
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 9,
+                "marker": "SMOKE-R85036",
+                "ms": 3.105958
+              },
+              {
+                "generation": 1,
+                "session": "smoke-chat-b",
+                "index": 9,
+                "marker": "SMOKE-R85037",
+                "ms": 2.608542
+              },
+              {
+                "generation": 2,
+                "session": "smoke-chat-c",
+                "index": 9,
+                "marker": "SMOKE-R85038",
+                "ms": 2.717875
+              },
+              {
+                "generation": 3,
+                "session": "smoke-chat-d",
+                "index": 9,
+                "marker": "SMOKE-R85039",
+                "ms": 2.667083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 10,
+                "marker": "SMOKE-R85040",
+                "ms": 2.741084
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 10,
+                "marker": "SMOKE-R85041",
+                "ms": 2.68775
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 10,
+                "marker": "SMOKE-R85042",
+                "ms": 3.281875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 10,
+                "marker": "SMOKE-R85043",
+                "ms": 2.470917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 11,
+                "marker": "SMOKE-R85044",
+                "ms": 2.735542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 11,
+                "marker": "SMOKE-R85045",
+                "ms": 2.905166
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 11,
+                "marker": "SMOKE-R85046",
+                "ms": 2.650083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 11,
+                "marker": "SMOKE-R85047",
+                "ms": 3.024666
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 12,
+                "marker": "SMOKE-R85048",
+                "ms": 2.809208
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 12,
+                "marker": "SMOKE-R85049",
+                "ms": 2.606958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 12,
+                "marker": "SMOKE-R85050",
+                "ms": 2.964625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 12,
+                "marker": "SMOKE-R85051",
+                "ms": 3.110459
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 13,
+                "marker": "SMOKE-R85052",
+                "ms": 2.639333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 13,
+                "marker": "SMOKE-R85053",
+                "ms": 2.68375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 13,
+                "marker": "SMOKE-R85054",
+                "ms": 3.107583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 13,
+                "marker": "SMOKE-R85055",
+                "ms": 2.646584
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 14,
+                "marker": "SMOKE-R85056",
+                "ms": 2.905666
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 14,
+                "marker": "SMOKE-R85057",
+                "ms": 2.755708
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 14,
+                "marker": "SMOKE-R85058",
+                "ms": 3.229083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 14,
+                "marker": "SMOKE-R85059",
+                "ms": 3.0785
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 15,
+                "marker": "SMOKE-R85060",
+                "ms": 2.77875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 15,
+                "marker": "SMOKE-R85061",
+                "ms": 2.663542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 15,
+                "marker": "SMOKE-R85062",
+                "ms": 3.677083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 15,
+                "marker": "SMOKE-R85063",
+                "ms": 2.933167
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 16,
+                "marker": "SMOKE-R85064",
+                "ms": 3.178416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 16,
+                "marker": "SMOKE-R85065",
+                "ms": 3.139833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 16,
+                "marker": "SMOKE-R85066",
+                "ms": 3.15275
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 16,
+                "marker": "SMOKE-R85067",
+                "ms": 3.467125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 17,
+                "marker": "SMOKE-R85068",
+                "ms": 3.050625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 17,
+                "marker": "SMOKE-R85069",
+                "ms": 2.994417
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 17,
+                "marker": "SMOKE-R85070",
+                "ms": 4.150916
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 17,
+                "marker": "SMOKE-R85071",
+                "ms": 2.849333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 18,
+                "marker": "SMOKE-R85072",
+                "ms": 3.289542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 18,
+                "marker": "SMOKE-R85073",
+                "ms": 3.118
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 18,
+                "marker": "SMOKE-R85074",
+                "ms": 2.796208
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 18,
+                "marker": "SMOKE-R85075",
+                "ms": 3.099459
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 19,
+                "marker": "SMOKE-R85076",
+                "ms": 2.941459
+              },
+              {
+                "generation": 5,
+                "session": "smoke-chat-b",
+                "index": 19,
+                "marker": "SMOKE-R85077",
+                "ms": 3.08375
+              },
+              {
+                "generation": 6,
+                "session": "smoke-chat-c",
+                "index": 19,
+                "marker": "SMOKE-R85078",
+                "ms": 3.030958
+              },
+              {
+                "generation": 7,
+                "session": "smoke-chat-d",
+                "index": 19,
+                "marker": "SMOKE-R85079",
+                "ms": 2.855417
+              }
+            ],
+            "per_restart_ms": 54.082849,
+            "restart_samples_detail": [
+              {
+                "generation": 1,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 52.678375,
+                "spawn_to_ready_ms": 49.185542,
+                "boot_ms": 13.384,
+                "rebind_ms": 13.925208,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 2,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 52.274416,
+                "spawn_to_ready_ms": 48.6915,
+                "boot_ms": 12.756375,
+                "rebind_ms": 13.199332,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 3,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 57.932625,
+                "spawn_to_ready_ms": 54.472541,
+                "boot_ms": 15.072041,
+                "rebind_ms": 16.567625,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 4,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 51.473833,
+                "spawn_to_ready_ms": 48.129958,
+                "boot_ms": 13.354,
+                "rebind_ms": 12.771543000000001,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 5,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 53.734417,
+                "spawn_to_ready_ms": 50.063,
+                "boot_ms": 14.612958,
+                "rebind_ms": 13.327625,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 6,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 52.975084,
+                "spawn_to_ready_ms": 49.260334,
+                "boot_ms": 12.912,
+                "rebind_ms": 12.604418,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 7,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 53.394,
+                "spawn_to_ready_ms": 49.682292,
+                "boot_ms": 15.538834,
+                "rebind_ms": 12.970374,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 8,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 58.200042,
+                "spawn_to_ready_ms": 54.557875,
+                "boot_ms": 14.346875,
+                "rebind_ms": 13.850582999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              }
+            ],
+            "rebind_samples": 36,
+            "rebind_mean_ms": 3.478680555555555,
+            "race": {
+              "enabled": true,
+              "baseline_wall_ms": 291.453417,
+              "baseline_per_input_ms": 0.442604225,
+              "baseline_input_samples": 80,
+              "baseline_build_ms": 1114.836,
+              "overhead_factor": 6.080415646662328,
+              "per_input_overhead_factor": 6.790628580194871,
+              "source": "same scenario, non-race test binary"
+            },
+            "storage": {
+              "root": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestEventIntegrityLongRunCalibration4246772630/001/storage",
+              "before_bytes": 0,
+              "after_bytes": 97456,
+              "growth_bytes": 97456,
+              "before_files": 0,
+              "after_files": 7,
+              "files_added": 7
+            },
+            "peak": {
+              "children": 9,
+              "max_child_rss_bytes": 83640320,
+              "max_child_cpu_millis": 166,
+              "total_child_cpu_millis": 619,
+              "max_child_open_fds": 9,
+              "max_child_goroutines": 11,
+              "max_child_heap_inuse_bytes": 6070272,
+              "parent_rss_bytes": 67960832,
+              "parent_cpu_millis": 132,
+              "parent_goroutines": 5
+            }
+          },
+          "extrapolation": {
+            "note": "外推值，03.11 全量首轮后复核",
+            "formula": "full_wall_ms = 1200×per_input_ms + 120×per_restart_ms + initial_boot_ms；full_storage = growth × (1200/80)；full_rss 线性值 = max_child_rss × (1200/80)，有界值 = ×1.5；full_cpu = 子进程 CPU 总和 × (1200/80)",
+            "input_growth_factor": 15,
+            "restart_growth_factor": 15,
+            "full_wall_ms": 10146.011752000002,
+            "full_wall_minutes": 0.1691001958666667,
+            "context_slope_ms_per_turn": 0.0019761180451123663,
+            "context_adjusted_full_wall_ms": 10477.99958357888,
+            "full_storage_bytes": 1461840,
+            "full_rss_bytes_linear": 1254604800,
+            "full_rss_bytes_bounded": 125460480,
+            "rss_model": "non_linear_bounded",
+            "full_cpu_millis": 9285
+          },
+          "budget": {
+            "source": "measured",
+            "margin": 1.5,
+            "candidates": {
+              "short_minutes": 20,
+              "long_minutes": 45,
+              "mutations_minutes": 30
+            },
+            "recommended": {
+              "long_job_timeout_minutes": 12,
+              "go_test_timeout_seconds_per_long_shard": 60,
+              "short_job_timeout_minutes": 20,
+              "mutations_job_timeout_minutes": 30
+            },
+            "feasibility": [
+              {
+                "surface": "short",
+                "candidate_minutes": 20,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 20,
+                "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结"
+              },
+              {
+                "surface": "long",
+                "candidate_minutes": 45,
+                "measured": true,
+                "verdict": "feasible",
+                "required_minutes": 1.4354166250245546,
+                "required_per_shard_minutes": 0.17463332639298132,
+                "recommended_minutes": 12,
+                "reason": "单组合外推（含历史增长修正）0.17 分钟 × 6 组合 + 冷构建 0.39 分钟 = 1.44 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）"
+              },
+              {
+                "surface": "mutations",
+                "candidate_minutes": 30,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 30,
+                "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结"
+              }
+            ],
+            "over_budget": false,
+            "over_budget_reported": false,
+            "p95": {
+              "claimed": true,
+              "samples": 80,
+              "per_input_ms": 3.562792,
+              "note": "基于 80 个缩样输入的 p95，不是 03.11 的 1200 输入 p95"
+            },
+            "notes": [
+              "外推值，03.11 全量首轮后复核",
+              "long 分片 go test 建议 = max(ceil(外推 wall×1.5), 60s)；long 作业建议 = ceil((6 分片 + 冷构建×1.5)/60)+5 分钟 runner 准备；候选 45m 的可行性按同一作业口径判断",
+              "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "RSS 由窗口与并发决定，不是输入数的线性函数：线性值只作上限参考，建议值取有界模型"
+            ]
+          },
+          "reconciliation": {
+            "expected_inputs": 80,
+            "driven_inputs": 80,
+            "missing_input_requests": null,
+            "duplicate_input_requests": null,
+            "expected_rebinds": 36,
+            "rebind_requests": 36,
+            "missing_rebind_requests": null,
+            "provider_requests": 118,
+            "reflect_requests": 2,
+            "restored_context_inputs": 10,
+            "restored_context_checks": 10
+          },
+          "scale": {
+            "sessions": 4,
+            "inputs_per_session": 20,
+            "inputs_total": 80,
+            "restarts_per_session": 2,
+            "restarts_total": 8,
+            "generations": 9,
+            "restart_every_inputs": 10,
+            "shared_host": true,
+            "meditation_enabled": true,
+            "fsync_dropped": false
+          }
+        },
+        {
+          "run_id": "w256-run3",
+          "exit_code": 0,
+          "elapsed_external_seconds": 6,
+          "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-001356",
+          "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-s1-20261024-001356/report-window-256-seed-1.json",
+          "measurements": {
+            "cold_build_ms": 23257,
+            "cold_build_source": "external",
+            "initial_boot_ms": 65.618916,
+            "hot_run_wall_ms": 1812.202667,
+            "hot_run_source": "measured（首个 spawn → 末代关闭，冷构建在外）",
+            "per_input_ms": 2.9648208249999985,
+            "per_input_median_ms": 2.949083,
+            "per_input_p95_ms": 3.391125,
+            "input_samples": 80,
+            "input_samples_detail": [
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 0,
+                "marker": "SMOKE-R85000",
+                "ms": 3.178333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 0,
+                "marker": "SMOKE-R85001",
+                "ms": 2.837834
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 0,
+                "marker": "SMOKE-R85002",
+                "ms": 2.938083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 0,
+                "marker": "SMOKE-R85003",
+                "ms": 3.391125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 1,
+                "marker": "SMOKE-R85004",
+                "ms": 2.825042
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 1,
+                "marker": "SMOKE-R85005",
+                "ms": 3.048292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 1,
+                "marker": "SMOKE-R85006",
+                "ms": 2.740833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 1,
+                "marker": "SMOKE-R85007",
+                "ms": 3.042416
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 2,
+                "marker": "SMOKE-R85008",
+                "ms": 3.042792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 2,
+                "marker": "SMOKE-R85009",
+                "ms": 2.85675
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 2,
+                "marker": "SMOKE-R85010",
+                "ms": 2.906959
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 2,
+                "marker": "SMOKE-R85011",
+                "ms": 3.348708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 3,
+                "marker": "SMOKE-R85012",
+                "ms": 2.774334
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 3,
+                "marker": "SMOKE-R85013",
+                "ms": 2.755375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 3,
+                "marker": "SMOKE-R85014",
+                "ms": 2.876667
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 3,
+                "marker": "SMOKE-R85015",
+                "ms": 3.189709
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 4,
+                "marker": "SMOKE-R85016",
+                "ms": 2.964583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 4,
+                "marker": "SMOKE-R85017",
+                "ms": 2.761792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 4,
+                "marker": "SMOKE-R85018",
+                "ms": 2.753791
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 4,
+                "marker": "SMOKE-R85019",
+                "ms": 2.959625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 5,
+                "marker": "SMOKE-R85020",
+                "ms": 3.085125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 5,
+                "marker": "SMOKE-R85021",
+                "ms": 2.808958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 5,
+                "marker": "SMOKE-R85022",
+                "ms": 3.121
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 5,
+                "marker": "SMOKE-R85023",
+                "ms": 2.981
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 6,
+                "marker": "SMOKE-R85024",
+                "ms": 3.13125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 6,
+                "marker": "SMOKE-R85025",
+                "ms": 3.267792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 6,
+                "marker": "SMOKE-R85026",
+                "ms": 2.990417
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 6,
+                "marker": "SMOKE-R85027",
+                "ms": 3.032291
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 7,
+                "marker": "SMOKE-R85028",
+                "ms": 3.247459
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 7,
+                "marker": "SMOKE-R85029",
+                "ms": 3.203792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 7,
+                "marker": "SMOKE-R85030",
+                "ms": 3.243792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 7,
+                "marker": "SMOKE-R85031",
+                "ms": 2.962333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 8,
+                "marker": "SMOKE-R85032",
+                "ms": 3.437083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 8,
+                "marker": "SMOKE-R85033",
+                "ms": 3.427583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 8,
+                "marker": "SMOKE-R85034",
+                "ms": 2.938875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 8,
+                "marker": "SMOKE-R85035",
+                "ms": 3.103166
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 9,
+                "marker": "SMOKE-R85036",
+                "ms": 3.190667
+              },
+              {
+                "generation": 1,
+                "session": "smoke-chat-b",
+                "index": 9,
+                "marker": "SMOKE-R85037",
+                "ms": 3.047042
+              },
+              {
+                "generation": 2,
+                "session": "smoke-chat-c",
+                "index": 9,
+                "marker": "SMOKE-R85038",
+                "ms": 2.910375
+              },
+              {
+                "generation": 3,
+                "session": "smoke-chat-d",
+                "index": 9,
+                "marker": "SMOKE-R85039",
+                "ms": 2.714125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 10,
+                "marker": "SMOKE-R85040",
+                "ms": 2.742958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 10,
+                "marker": "SMOKE-R85041",
+                "ms": 2.603
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 10,
+                "marker": "SMOKE-R85042",
+                "ms": 3.298583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 10,
+                "marker": "SMOKE-R85043",
+                "ms": 2.443375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 11,
+                "marker": "SMOKE-R85044",
+                "ms": 2.566917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 11,
+                "marker": "SMOKE-R85045",
+                "ms": 2.958416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 11,
+                "marker": "SMOKE-R85046",
+                "ms": 3.020333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 11,
+                "marker": "SMOKE-R85047",
+                "ms": 2.464917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 12,
+                "marker": "SMOKE-R85048",
+                "ms": 2.893167
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 12,
+                "marker": "SMOKE-R85049",
+                "ms": 2.685209
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 12,
+                "marker": "SMOKE-R85050",
+                "ms": 2.829459
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 12,
+                "marker": "SMOKE-R85051",
+                "ms": 3.252625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 13,
+                "marker": "SMOKE-R85052",
+                "ms": 2.650375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 13,
+                "marker": "SMOKE-R85053",
+                "ms": 2.685084
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 13,
+                "marker": "SMOKE-R85054",
+                "ms": 2.861
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 13,
+                "marker": "SMOKE-R85055",
+                "ms": 2.775875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 14,
+                "marker": "SMOKE-R85056",
+                "ms": 2.673375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 14,
+                "marker": "SMOKE-R85057",
+                "ms": 2.898333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 14,
+                "marker": "SMOKE-R85058",
+                "ms": 2.630125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 14,
+                "marker": "SMOKE-R85059",
+                "ms": 2.538458
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 15,
+                "marker": "SMOKE-R85060",
+                "ms": 3.444291
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 15,
+                "marker": "SMOKE-R85061",
+                "ms": 2.614708
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 15,
+                "marker": "SMOKE-R85062",
+                "ms": 2.678875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 15,
+                "marker": "SMOKE-R85063",
+                "ms": 3.085
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 16,
+                "marker": "SMOKE-R85064",
+                "ms": 2.876
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 16,
+                "marker": "SMOKE-R85065",
+                "ms": 2.93975
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 16,
+                "marker": "SMOKE-R85066",
+                "ms": 2.960083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 16,
+                "marker": "SMOKE-R85067",
+                "ms": 3.188583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 17,
+                "marker": "SMOKE-R85068",
+                "ms": 3.018541
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 17,
+                "marker": "SMOKE-R85069",
+                "ms": 3.377875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 17,
+                "marker": "SMOKE-R85070",
+                "ms": 2.897208
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 17,
+                "marker": "SMOKE-R85071",
+                "ms": 3.182708
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 18,
+                "marker": "SMOKE-R85072",
+                "ms": 3.3875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 18,
+                "marker": "SMOKE-R85073",
+                "ms": 3.135125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 18,
+                "marker": "SMOKE-R85074",
+                "ms": 3.140833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 18,
+                "marker": "SMOKE-R85075",
+                "ms": 2.888875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 19,
+                "marker": "SMOKE-R85076",
+                "ms": 3.5965
+              },
+              {
+                "generation": 5,
+                "session": "smoke-chat-b",
+                "index": 19,
+                "marker": "SMOKE-R85077",
+                "ms": 2.878959
+              },
+              {
+                "generation": 6,
+                "session": "smoke-chat-c",
+                "index": 19,
+                "marker": "SMOKE-R85078",
+                "ms": 2.723917
+              },
+              {
+                "generation": 7,
+                "session": "smoke-chat-d",
+                "index": 19,
+                "marker": "SMOKE-R85079",
+                "ms": 2.661583
+              }
+            ],
+            "per_restart_ms": 57.797171875,
+            "restart_samples_detail": [
+              {
+                "generation": 1,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 64.67025,
+                "spawn_to_ready_ms": 60.716125,
+                "boot_ms": 20.519083,
+                "rebind_ms": 14.181583,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 2,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 65.291125,
+                "spawn_to_ready_ms": 60.685292,
+                "boot_ms": 21.348875,
+                "rebind_ms": 13.343207999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 3,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 64.750625,
+                "spawn_to_ready_ms": 59.985708,
+                "boot_ms": 21.926333,
+                "rebind_ms": 12.853167,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 4,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 52.631333,
+                "spawn_to_ready_ms": 49.326417,
+                "boot_ms": 13.598875,
+                "rebind_ms": 12.089834,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 5,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 53.063792,
+                "spawn_to_ready_ms": 49.124958,
+                "boot_ms": 13.907125,
+                "rebind_ms": 12.595792,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 6,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 53.230625,
+                "spawn_to_ready_ms": 49.164083,
+                "boot_ms": 13.521375,
+                "rebind_ms": 12.505292,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 7,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 56.6455,
+                "spawn_to_ready_ms": 53.440792,
+                "boot_ms": 13.380542,
+                "rebind_ms": 14.198918,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 8,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 52.094125,
+                "spawn_to_ready_ms": 48.914417,
+                "boot_ms": 13.0305,
+                "rebind_ms": 13.279625,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              }
+            ],
+            "rebind_samples": 36,
+            "rebind_mean_ms": 3.3300313611111108,
+            "race": {
+              "enabled": true,
+              "baseline_wall_ms": 329.031583,
+              "baseline_per_input_ms": 0.43323803750000006,
+              "baseline_input_samples": 80,
+              "baseline_build_ms": 1148.757834,
+              "overhead_factor": 5.507686072190826,
+              "per_input_overhead_factor": 6.843399167137992,
+              "source": "same scenario, non-race test binary"
+            },
+            "storage": {
+              "root": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestEventIntegrityLongRunCalibration2162495842/001/storage",
+              "before_bytes": 0,
+              "after_bytes": 97466,
+              "growth_bytes": 97466,
+              "before_files": 0,
+              "after_files": 7,
+              "files_added": 7
+            },
+            "peak": {
+              "children": 9,
+              "max_child_rss_bytes": 81494016,
+              "max_child_cpu_millis": 164,
+              "total_child_cpu_millis": 612,
+              "max_child_open_fds": 9,
+              "max_child_goroutines": 11,
+              "max_child_heap_inuse_bytes": 6160384,
+              "parent_rss_bytes": 65568768,
+              "parent_cpu_millis": 133,
+              "parent_goroutines": 5
+            }
+          },
+          "extrapolation": {
+            "note": "外推值，03.11 全量首轮后复核",
+            "formula": "full_wall_ms = 1200×per_input_ms + 120×per_restart_ms + initial_boot_ms；full_storage = growth × (1200/80)；full_rss 线性值 = max_child_rss × (1200/80)，有界值 = ×1.5；full_cpu = 子进程 CPU 总和 × (1200/80)",
+            "input_growth_factor": 15,
+            "restart_growth_factor": 15,
+            "full_wall_ms": 10559.064530999998,
+            "full_wall_minutes": 0.17598440884999997,
+            "context_slope_ms_per_turn": -0.002453454511277724,
+            "context_adjusted_full_wall_ms": 10559.064530999998,
+            "full_storage_bytes": 1461990,
+            "full_rss_bytes_linear": 1222410240,
+            "full_rss_bytes_bounded": 122241024,
+            "rss_model": "non_linear_bounded",
+            "full_cpu_millis": 9180
+          },
+          "budget": {
+            "source": "measured",
+            "margin": 1.5,
+            "candidates": {
+              "short_minutes": 20,
+              "long_minutes": 45,
+              "mutations_minutes": 30
+            },
+            "recommended": {
+              "long_job_timeout_minutes": 12,
+              "go_test_timeout_seconds_per_long_shard": 60,
+              "short_job_timeout_minutes": 20,
+              "mutations_job_timeout_minutes": 30
+            },
+            "feasibility": [
+              {
+                "surface": "short",
+                "candidate_minutes": 20,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 20,
+                "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结"
+              },
+              {
+                "surface": "long",
+                "candidate_minutes": 45,
+                "measured": true,
+                "verdict": "feasible",
+                "required_minutes": 1.4435231197666665,
+                "required_per_shard_minutes": 0.17598440884999997,
+                "recommended_minutes": 12,
+                "reason": "单组合外推（含历史增长修正）0.18 分钟 × 6 组合 + 冷构建 0.39 分钟 = 1.44 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）"
+              },
+              {
+                "surface": "mutations",
+                "candidate_minutes": 30,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 30,
+                "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结"
+              }
+            ],
+            "over_budget": false,
+            "over_budget_reported": false,
+            "p95": {
+              "claimed": true,
+              "samples": 80,
+              "per_input_ms": 3.391125,
+              "note": "基于 80 个缩样输入的 p95，不是 03.11 的 1200 输入 p95"
+            },
+            "notes": [
+              "外推值，03.11 全量首轮后复核",
+              "long 分片 go test 建议 = max(ceil(外推 wall×1.5), 60s)；long 作业建议 = ceil((6 分片 + 冷构建×1.5)/60)+5 分钟 runner 准备；候选 45m 的可行性按同一作业口径判断",
+              "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "RSS 由窗口与并发决定，不是输入数的线性函数：线性值只作上限参考，建议值取有界模型"
+            ]
+          },
+          "reconciliation": {
+            "expected_inputs": 80,
+            "driven_inputs": 80,
+            "missing_input_requests": null,
+            "duplicate_input_requests": null,
+            "expected_rebinds": 36,
+            "rebind_requests": 36,
+            "missing_rebind_requests": null,
+            "provider_requests": 118,
+            "reflect_requests": 2,
+            "restored_context_inputs": 10,
+            "restored_context_checks": 10
+          },
+          "scale": {
+            "sessions": 4,
+            "inputs_per_session": 20,
+            "inputs_total": 80,
+            "restarts_per_session": 2,
+            "restarts_total": 8,
+            "generations": 9,
+            "restart_every_inputs": 10,
+            "shared_host": true,
+            "meditation_enabled": true,
+            "fsync_dropped": false
+          }
+        }
+      ],
+      "stability": {
+        "measurements.cold_build_ms": {
+          "median": 23257.0,
+          "min": 23257.0,
+          "max": 23257.0,
+          "spread_pct": 0.0,
+          "samples": 3
+        },
+        "measurements.hot_run_wall_ms": {
+          "median": 1812.202667,
+          "min": 1772.157917,
+          "max": 1902.4585,
+          "spread_pct": 7.19,
+          "samples": 3
+        },
+        "measurements.initial_boot_ms": {
+          "median": 60.810125,
+          "min": 49.396792,
+          "max": 65.618916,
+          "spread_pct": 26.68,
+          "samples": 3
+        },
+        "measurements.per_input_ms": {
+          "median": 3.005560900000001,
+          "min": 2.9648208249999985,
+          "max": 3.2466448375,
+          "spread_pct": 9.38,
+          "samples": 3
+        },
+        "measurements.per_input_median_ms": {
+          "median": 2.967625,
+          "min": 2.949083,
+          "max": 3.182854,
+          "spread_pct": 7.88,
+          "samples": 3
+        },
+        "measurements.per_input_p95_ms": {
+          "median": 3.562792,
+          "min": 3.391125,
+          "max": 3.814375,
+          "spread_pct": 11.88,
+          "samples": 3
+        },
+        "measurements.per_restart_ms": {
+          "median": 57.797171875,
+          "min": 54.082849,
+          "max": 65.57442175,
+          "spread_pct": 19.88,
+          "samples": 3
+        },
+        "measurements.rebind_mean_ms": {
+          "median": 3.466619194444443,
+          "min": 3.3300313611111108,
+          "max": 3.478680555555555,
+          "spread_pct": 4.29,
+          "samples": 3
+        },
+        "measurements.race.overhead_factor": {
+          "median": 6.080415646662328,
+          "min": 5.507686072190826,
+          "max": 6.268726643623654,
+          "spread_pct": 12.52,
+          "samples": 3
+        },
+        "measurements.race.baseline_wall_ms": {
+          "median": 303.484042,
+          "min": 291.453417,
+          "max": 329.031583,
+          "spread_pct": 12.38,
+          "samples": 3
+        },
+        "measurements.storage.growth_bytes": {
+          "median": 97461.0,
+          "min": 97456.0,
+          "max": 97466.0,
+          "spread_pct": 0.01,
+          "samples": 3
+        },
+        "measurements.peak.max_child_rss_bytes": {
+          "median": 81494016.0,
+          "min": 81068032.0,
+          "max": 83640320.0,
+          "spread_pct": 3.16,
+          "samples": 3
+        },
+        "measurements.peak.total_child_cpu_millis": {
+          "median": 619.0,
+          "min": 612.0,
+          "max": 653.0,
+          "spread_pct": 6.62,
+          "samples": 3
+        },
+        "extrapolation.full_wall_ms": {
+          "median": 10559.064530999998,
+          "min": 10146.011752000002,
+          "max": 11825.714539999999,
+          "spread_pct": 15.91,
+          "samples": 3
+        },
+        "extrapolation.context_adjusted_full_wall_ms": {
+          "median": 10559.064530999998,
+          "min": 10477.99958357888,
+          "max": 13742.337013684242,
+          "spread_pct": 30.92,
+          "samples": 3
+        },
+        "extrapolation.full_storage_bytes": {
+          "median": 1461915.0,
+          "min": 1461840.0,
+          "max": 1461990.0,
+          "spread_pct": 0.01,
+          "samples": 3
+        },
+        "extrapolation.full_rss_bytes_bounded": {
+          "median": 122241024.0,
+          "min": 121602048.0,
+          "max": 125460480.0,
+          "spread_pct": 3.16,
+          "samples": 3
+        },
+        "extrapolation.full_cpu_millis": {
+          "median": 9285.0,
+          "min": 9180.0,
+          "max": 9795.0,
+          "spread_pct": 6.62,
+          "samples": 3
+        },
+        "budget.feasibility.1.required_minutes": {
+          "median": 1.4435231197666665,
+          "min": 1.4354166250245546,
+          "max": 1.761850368035091,
+          "spread_pct": 22.61,
+          "samples": 3
+        },
+        "budget.recommended.go_test_timeout_seconds_per_long_shard": {
+          "median": 60.0,
+          "min": 60.0,
+          "max": 60.0,
+          "spread_pct": 0.0,
+          "samples": 3
+        },
+        "budget.recommended.long_job_timeout_minutes": {
+          "median": 12.0,
+          "min": 12.0,
+          "max": 12.0,
+          "spread_pct": 0.0,
+          "samples": 3
+        }
+      },
+      "headline_run": "w256-run3",
+      "headline": {
+        "cold_build_ms_external": 23257.0,
+        "hot_run_wall_ms": 1812.202667,
+        "per_input_ms": 3.005560900000001,
+        "per_input_p95_ms": 3.562792,
+        "per_restart_ms": 57.797171875,
+        "restart_cost_at_120_ms": 6935.6606249999995,
+        "race_overhead_factor": 6.080415646662328,
+        "storage_growth_bytes": 97461.0,
+        "peak_rss_bytes": 81494016.0,
+        "peak_cpu_millis": 619.0,
+        "extrapolated_full_wall_ms": 10559.064530999998,
+        "extrapolated_full_wall_minutes": 0.17598440884999997,
+        "extrapolated_storage_bytes": 1461915.0,
+        "extrapolated_rss_bounded_bytes": 122241024.0,
+        "extrapolated_cpu_millis": 9285.0
+      }
+    },
+    "32768": {
+      "runs": [
+        {
+          "run_id": "w32768-run1",
+          "exit_code": 0,
+          "elapsed_external_seconds": 6,
+          "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001402",
+          "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001402/report-window-32768-seed-1.json",
+          "measurements": {
+            "cold_build_ms": 23257,
+            "cold_build_source": "external",
+            "initial_boot_ms": 59.615,
+            "hot_run_wall_ms": 1884.510584,
+            "hot_run_source": "measured（首个 spawn → 末代关闭，冷构建在外）",
+            "per_input_ms": 3.6800114125000016,
+            "per_input_median_ms": 3.613542,
+            "per_input_p95_ms": 4.672416,
+            "input_samples": 80,
+            "input_samples_detail": [
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 0,
+                "marker": "SMOKE-R85000",
+                "ms": 2.637625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 0,
+                "marker": "SMOKE-R85001",
+                "ms": 3.157875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 0,
+                "marker": "SMOKE-R85002",
+                "ms": 3.0415
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 0,
+                "marker": "SMOKE-R85003",
+                "ms": 3.293083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 1,
+                "marker": "SMOKE-R85004",
+                "ms": 3.059292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 1,
+                "marker": "SMOKE-R85005",
+                "ms": 2.854083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 1,
+                "marker": "SMOKE-R85006",
+                "ms": 2.659209
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 1,
+                "marker": "SMOKE-R85007",
+                "ms": 3.697958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 2,
+                "marker": "SMOKE-R85008",
+                "ms": 2.978958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 2,
+                "marker": "SMOKE-R85009",
+                "ms": 2.928792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 2,
+                "marker": "SMOKE-R85010",
+                "ms": 3.492833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 2,
+                "marker": "SMOKE-R85011",
+                "ms": 2.819417
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 3,
+                "marker": "SMOKE-R85012",
+                "ms": 4.20675
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 3,
+                "marker": "SMOKE-R85013",
+                "ms": 3.127084
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 3,
+                "marker": "SMOKE-R85014",
+                "ms": 3.4185
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 3,
+                "marker": "SMOKE-R85015",
+                "ms": 3.136375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 4,
+                "marker": "SMOKE-R85016",
+                "ms": 3.748375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 4,
+                "marker": "SMOKE-R85017",
+                "ms": 3.647125
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 4,
+                "marker": "SMOKE-R85018",
+                "ms": 3.371042
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 4,
+                "marker": "SMOKE-R85019",
+                "ms": 3.500542
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 5,
+                "marker": "SMOKE-R85020",
+                "ms": 4.207708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 5,
+                "marker": "SMOKE-R85021",
+                "ms": 3.578833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 5,
+                "marker": "SMOKE-R85022",
+                "ms": 3.617292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 5,
+                "marker": "SMOKE-R85023",
+                "ms": 3.459875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 6,
+                "marker": "SMOKE-R85024",
+                "ms": 4.3935
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 6,
+                "marker": "SMOKE-R85025",
+                "ms": 3.591458
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 6,
+                "marker": "SMOKE-R85026",
+                "ms": 4.0035
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 6,
+                "marker": "SMOKE-R85027",
+                "ms": 3.68875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 7,
+                "marker": "SMOKE-R85028",
+                "ms": 4.349583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 7,
+                "marker": "SMOKE-R85029",
+                "ms": 3.831541
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 7,
+                "marker": "SMOKE-R85030",
+                "ms": 4.115959
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 7,
+                "marker": "SMOKE-R85031",
+                "ms": 4.262917
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 8,
+                "marker": "SMOKE-R85032",
+                "ms": 4.306375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 8,
+                "marker": "SMOKE-R85033",
+                "ms": 3.91275
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 8,
+                "marker": "SMOKE-R85034",
+                "ms": 4.278708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 8,
+                "marker": "SMOKE-R85035",
+                "ms": 4.263458
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 9,
+                "marker": "SMOKE-R85036",
+                "ms": 4.405916
+              },
+              {
+                "generation": 1,
+                "session": "smoke-chat-b",
+                "index": 9,
+                "marker": "SMOKE-R85037",
+                "ms": 2.994208
+              },
+              {
+                "generation": 2,
+                "session": "smoke-chat-c",
+                "index": 9,
+                "marker": "SMOKE-R85038",
+                "ms": 2.744083
+              },
+              {
+                "generation": 3,
+                "session": "smoke-chat-d",
+                "index": 9,
+                "marker": "SMOKE-R85039",
+                "ms": 2.971
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 10,
+                "marker": "SMOKE-R85040",
+                "ms": 2.951959
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 10,
+                "marker": "SMOKE-R85041",
+                "ms": 3.11375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 10,
+                "marker": "SMOKE-R85042",
+                "ms": 2.56775
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 10,
+                "marker": "SMOKE-R85043",
+                "ms": 2.690333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 11,
+                "marker": "SMOKE-R85044",
+                "ms": 2.847833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 11,
+                "marker": "SMOKE-R85045",
+                "ms": 2.783083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 11,
+                "marker": "SMOKE-R85046",
+                "ms": 2.983875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 11,
+                "marker": "SMOKE-R85047",
+                "ms": 2.902416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 12,
+                "marker": "SMOKE-R85048",
+                "ms": 2.999916
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 12,
+                "marker": "SMOKE-R85049",
+                "ms": 3.753041
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 12,
+                "marker": "SMOKE-R85050",
+                "ms": 3.031583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 12,
+                "marker": "SMOKE-R85051",
+                "ms": 2.940625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 13,
+                "marker": "SMOKE-R85052",
+                "ms": 3.499875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 13,
+                "marker": "SMOKE-R85053",
+                "ms": 6.460292
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 13,
+                "marker": "SMOKE-R85054",
+                "ms": 3.948833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 13,
+                "marker": "SMOKE-R85055",
+                "ms": 3.519375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 14,
+                "marker": "SMOKE-R85056",
+                "ms": 3.609792
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 14,
+                "marker": "SMOKE-R85057",
+                "ms": 5.029084
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 14,
+                "marker": "SMOKE-R85058",
+                "ms": 4.672416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 14,
+                "marker": "SMOKE-R85059",
+                "ms": 3.55325
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 15,
+                "marker": "SMOKE-R85060",
+                "ms": 3.823375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 15,
+                "marker": "SMOKE-R85061",
+                "ms": 4.170708
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 15,
+                "marker": "SMOKE-R85062",
+                "ms": 3.945541
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 15,
+                "marker": "SMOKE-R85063",
+                "ms": 4.357375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 16,
+                "marker": "SMOKE-R85064",
+                "ms": 3.993958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 16,
+                "marker": "SMOKE-R85065",
+                "ms": 4.372375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 16,
+                "marker": "SMOKE-R85066",
+                "ms": 4.082417
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 16,
+                "marker": "SMOKE-R85067",
+                "ms": 4.534333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 17,
+                "marker": "SMOKE-R85068",
+                "ms": 4.017834
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 17,
+                "marker": "SMOKE-R85069",
+                "ms": 4.666042
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 17,
+                "marker": "SMOKE-R85070",
+                "ms": 4.07725
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 17,
+                "marker": "SMOKE-R85071",
+                "ms": 4.465167
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 18,
+                "marker": "SMOKE-R85072",
+                "ms": 4.3005
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 18,
+                "marker": "SMOKE-R85073",
+                "ms": 4.977875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 18,
+                "marker": "SMOKE-R85074",
+                "ms": 4.406917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 18,
+                "marker": "SMOKE-R85075",
+                "ms": 4.817375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 19,
+                "marker": "SMOKE-R85076",
+                "ms": 4.418583
+              },
+              {
+                "generation": 5,
+                "session": "smoke-chat-b",
+                "index": 19,
+                "marker": "SMOKE-R85077",
+                "ms": 3.345
+              },
+              {
+                "generation": 6,
+                "session": "smoke-chat-c",
+                "index": 19,
+                "marker": "SMOKE-R85078",
+                "ms": 2.96375
+              },
+              {
+                "generation": 7,
+                "session": "smoke-chat-d",
+                "index": 19,
+                "marker": "SMOKE-R85079",
+                "ms": 3.051625
+              }
+            ],
+            "per_restart_ms": 59.033546875000006,
+            "restart_samples_detail": [
+              {
+                "generation": 1,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 53.867959,
+                "spawn_to_ready_ms": 50.011209,
+                "boot_ms": 13.647583,
+                "rebind_ms": 13.431501,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 2,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 53.4345,
+                "spawn_to_ready_ms": 49.42075,
+                "boot_ms": 15.06775,
+                "rebind_ms": 12.173958,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 3,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 54.108375,
+                "spawn_to_ready_ms": 49.603417,
+                "boot_ms": 13.369541,
+                "rebind_ms": 12.079667,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 4,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 51.483166,
+                "spawn_to_ready_ms": 47.947708,
+                "boot_ms": 15.45925,
+                "rebind_ms": 12.348125000000001,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 5,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 65.549459,
+                "spawn_to_ready_ms": 60.842375,
+                "boot_ms": 19.541583,
+                "rebind_ms": 14.355667,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 6,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 65.24325,
+                "spawn_to_ready_ms": 60.524792,
+                "boot_ms": 21.030834,
+                "rebind_ms": 14.489374,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 7,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 64.716375,
+                "spawn_to_ready_ms": 60.8985,
+                "boot_ms": 21.622917,
+                "rebind_ms": 13.426042,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 8,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 63.865291,
+                "spawn_to_ready_ms": 60.339458,
+                "boot_ms": 18.920375,
+                "rebind_ms": 14.877998999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              }
+            ],
+            "rebind_samples": 36,
+            "rebind_mean_ms": 3.399792833333333,
+            "race": {
+              "enabled": true,
+              "baseline_wall_ms": 320.102167,
+              "baseline_per_input_ms": 0.47104842500000005,
+              "baseline_input_samples": 80,
+              "baseline_build_ms": 1138.643416,
+              "overhead_factor": 5.887215952524308,
+              "per_input_overhead_factor": 7.812384496349821,
+              "source": "same scenario, non-race test binary"
+            },
+            "storage": {
+              "root": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestEventIntegrityLongRunCalibration1043680208/001/storage",
+              "before_bytes": 0,
+              "after_bytes": 97471,
+              "growth_bytes": 97471,
+              "before_files": 0,
+              "after_files": 7,
+              "files_added": 7
+            },
+            "peak": {
+              "children": 9,
+              "max_child_rss_bytes": 82018304,
+              "max_child_cpu_millis": 186,
+              "total_child_cpu_millis": 676,
+              "max_child_open_fds": 9,
+              "max_child_goroutines": 11,
+              "max_child_heap_inuse_bytes": 5382144,
+              "parent_rss_bytes": 66797568,
+              "parent_cpu_millis": 140,
+              "parent_goroutines": 5
+            }
+          },
+          "extrapolation": {
+            "note": "外推值，03.11 全量首轮后复核",
+            "formula": "full_wall_ms = 1200×per_input_ms + 120×per_restart_ms + initial_boot_ms；full_storage = growth × (1200/80)；full_rss 线性值 = max_child_rss × (1200/80)，有界值 = ×1.5；full_cpu = 子进程 CPU 总和 × (1200/80)",
+            "input_growth_factor": 15,
+            "restart_growth_factor": 15,
+            "full_wall_ms": 11559.654320000003,
+            "full_wall_minutes": 0.19266090533333338,
+            "context_slope_ms_per_turn": 0.05046859116541313,
+            "context_adjusted_full_wall_ms": 20038.37763578941,
+            "full_storage_bytes": 1462065,
+            "full_rss_bytes_linear": 1230274560,
+            "full_rss_bytes_bounded": 123027456,
+            "rss_model": "non_linear_bounded",
+            "full_cpu_millis": 10140
+          },
+          "budget": {
+            "source": "measured",
+            "margin": 1.5,
+            "candidates": {
+              "short_minutes": 20,
+              "long_minutes": 45,
+              "mutations_minutes": 30
+            },
+            "recommended": {
+              "long_job_timeout_minutes": 12,
+              "go_test_timeout_seconds_per_long_shard": 60,
+              "short_job_timeout_minutes": 20,
+              "mutations_job_timeout_minutes": 30
+            },
+            "feasibility": [
+              {
+                "surface": "short",
+                "candidate_minutes": 20,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 20,
+                "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结"
+              },
+              {
+                "surface": "long",
+                "candidate_minutes": 45,
+                "measured": true,
+                "verdict": "feasible",
+                "required_minutes": 2.3914544302456076,
+                "required_per_shard_minutes": 0.3339729605964902,
+                "recommended_minutes": 12,
+                "reason": "单组合外推（含历史增长修正）0.33 分钟 × 6 组合 + 冷构建 0.39 分钟 = 2.39 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）"
+              },
+              {
+                "surface": "mutations",
+                "candidate_minutes": 30,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 30,
+                "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结"
+              }
+            ],
+            "over_budget": false,
+            "over_budget_reported": false,
+            "p95": {
+              "claimed": true,
+              "samples": 80,
+              "per_input_ms": 4.672416,
+              "note": "基于 80 个缩样输入的 p95，不是 03.11 的 1200 输入 p95"
+            },
+            "notes": [
+              "外推值，03.11 全量首轮后复核",
+              "long 分片 go test 建议 = max(ceil(外推 wall×1.5), 60s)；long 作业建议 = ceil((6 分片 + 冷构建×1.5)/60)+5 分钟 runner 准备；候选 45m 的可行性按同一作业口径判断",
+              "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "RSS 由窗口与并发决定，不是输入数的线性函数：线性值只作上限参考，建议值取有界模型"
+            ]
+          },
+          "reconciliation": {
+            "expected_inputs": 80,
+            "driven_inputs": 80,
+            "missing_input_requests": null,
+            "duplicate_input_requests": null,
+            "expected_rebinds": 36,
+            "rebind_requests": 36,
+            "missing_rebind_requests": null,
+            "provider_requests": 118,
+            "reflect_requests": 2,
+            "restored_context_inputs": 10,
+            "restored_context_checks": 10
+          },
+          "scale": {
+            "sessions": 4,
+            "inputs_per_session": 20,
+            "inputs_total": 80,
+            "restarts_per_session": 2,
+            "restarts_total": 8,
+            "generations": 9,
+            "restart_every_inputs": 10,
+            "shared_host": true,
+            "meditation_enabled": true,
+            "fsync_dropped": false
+          }
+        },
+        {
+          "run_id": "w32768-run2",
+          "exit_code": 0,
+          "elapsed_external_seconds": 7,
+          "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001409",
+          "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001409/report-window-32768-seed-1.json",
+          "measurements": {
+            "cold_build_ms": 23257,
+            "cold_build_source": "external",
+            "initial_boot_ms": 59.948375,
+            "hot_run_wall_ms": 1818.413125,
+            "hot_run_source": "measured（首个 spawn → 末代关闭，冷构建在外）",
+            "per_input_ms": 3.5132739374999993,
+            "per_input_median_ms": 3.4096045000000004,
+            "per_input_p95_ms": 4.397458,
+            "input_samples": 80,
+            "input_samples_detail": [
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 0,
+                "marker": "SMOKE-R85000",
+                "ms": 3.048583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 0,
+                "marker": "SMOKE-R85001",
+                "ms": 2.939875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 0,
+                "marker": "SMOKE-R85002",
+                "ms": 2.659
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 0,
+                "marker": "SMOKE-R85003",
+                "ms": 2.773875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 1,
+                "marker": "SMOKE-R85004",
+                "ms": 2.91775
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 1,
+                "marker": "SMOKE-R85005",
+                "ms": 3.350083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 1,
+                "marker": "SMOKE-R85006",
+                "ms": 3.024083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 1,
+                "marker": "SMOKE-R85007",
+                "ms": 3.216875
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 2,
+                "marker": "SMOKE-R85008",
+                "ms": 3.114625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 2,
+                "marker": "SMOKE-R85009",
+                "ms": 3.067292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 2,
+                "marker": "SMOKE-R85010",
+                "ms": 3.1385
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 2,
+                "marker": "SMOKE-R85011",
+                "ms": 3.667917
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 3,
+                "marker": "SMOKE-R85012",
+                "ms": 3.144416
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 3,
+                "marker": "SMOKE-R85013",
+                "ms": 3.400292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 3,
+                "marker": "SMOKE-R85014",
+                "ms": 3.27225
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 3,
+                "marker": "SMOKE-R85015",
+                "ms": 2.868625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 4,
+                "marker": "SMOKE-R85016",
+                "ms": 3.502667
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 4,
+                "marker": "SMOKE-R85017",
+                "ms": 3.220792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 4,
+                "marker": "SMOKE-R85018",
+                "ms": 3.417959
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 4,
+                "marker": "SMOKE-R85019",
+                "ms": 3.879791
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 5,
+                "marker": "SMOKE-R85020",
+                "ms": 3.324208
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 5,
+                "marker": "SMOKE-R85021",
+                "ms": 3.675584
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 5,
+                "marker": "SMOKE-R85022",
+                "ms": 3.988583
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 5,
+                "marker": "SMOKE-R85023",
+                "ms": 3.814458
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 6,
+                "marker": "SMOKE-R85024",
+                "ms": 3.467
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 6,
+                "marker": "SMOKE-R85025",
+                "ms": 3.978334
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 6,
+                "marker": "SMOKE-R85026",
+                "ms": 3.958625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 6,
+                "marker": "SMOKE-R85027",
+                "ms": 3.702042
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 7,
+                "marker": "SMOKE-R85028",
+                "ms": 4.104542
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 7,
+                "marker": "SMOKE-R85029",
+                "ms": 3.9895
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 7,
+                "marker": "SMOKE-R85030",
+                "ms": 4.397458
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 7,
+                "marker": "SMOKE-R85031",
+                "ms": 4.947333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 8,
+                "marker": "SMOKE-R85032",
+                "ms": 4.270917
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 8,
+                "marker": "SMOKE-R85033",
+                "ms": 4.211
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 8,
+                "marker": "SMOKE-R85034",
+                "ms": 4.048833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 8,
+                "marker": "SMOKE-R85035",
+                "ms": 5.314917
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 9,
+                "marker": "SMOKE-R85036",
+                "ms": 4.089083
+              },
+              {
+                "generation": 1,
+                "session": "smoke-chat-b",
+                "index": 9,
+                "marker": "SMOKE-R85037",
+                "ms": 3.567542
+              },
+              {
+                "generation": 2,
+                "session": "smoke-chat-c",
+                "index": 9,
+                "marker": "SMOKE-R85038",
+                "ms": 2.72775
+              },
+              {
+                "generation": 3,
+                "session": "smoke-chat-d",
+                "index": 9,
+                "marker": "SMOKE-R85039",
+                "ms": 3.572959
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 10,
+                "marker": "SMOKE-R85040",
+                "ms": 3.566375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 10,
+                "marker": "SMOKE-R85041",
+                "ms": 3.36425
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 10,
+                "marker": "SMOKE-R85042",
+                "ms": 3.056
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 10,
+                "marker": "SMOKE-R85043",
+                "ms": 2.46225
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 11,
+                "marker": "SMOKE-R85044",
+                "ms": 3.187875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 11,
+                "marker": "SMOKE-R85045",
+                "ms": 2.733041
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 11,
+                "marker": "SMOKE-R85046",
+                "ms": 3.372666
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 11,
+                "marker": "SMOKE-R85047",
+                "ms": 3.008834
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 12,
+                "marker": "SMOKE-R85048",
+                "ms": 2.819917
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 12,
+                "marker": "SMOKE-R85049",
+                "ms": 2.970791
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 12,
+                "marker": "SMOKE-R85050",
+                "ms": 3.055042
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 12,
+                "marker": "SMOKE-R85051",
+                "ms": 2.894958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 13,
+                "marker": "SMOKE-R85052",
+                "ms": 3.444583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 13,
+                "marker": "SMOKE-R85053",
+                "ms": 3.280625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 13,
+                "marker": "SMOKE-R85054",
+                "ms": 3.025375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 13,
+                "marker": "SMOKE-R85055",
+                "ms": 3.367833
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 14,
+                "marker": "SMOKE-R85056",
+                "ms": 3.475834
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 14,
+                "marker": "SMOKE-R85057",
+                "ms": 3.40125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 14,
+                "marker": "SMOKE-R85058",
+                "ms": 3.305167
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 14,
+                "marker": "SMOKE-R85059",
+                "ms": 3.200125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 15,
+                "marker": "SMOKE-R85060",
+                "ms": 4.315625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 15,
+                "marker": "SMOKE-R85061",
+                "ms": 3.238583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 15,
+                "marker": "SMOKE-R85062",
+                "ms": 3.587125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 15,
+                "marker": "SMOKE-R85063",
+                "ms": 3.377
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 16,
+                "marker": "SMOKE-R85064",
+                "ms": 3.819625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 16,
+                "marker": "SMOKE-R85065",
+                "ms": 4.287166
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 16,
+                "marker": "SMOKE-R85066",
+                "ms": 3.5705
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 16,
+                "marker": "SMOKE-R85067",
+                "ms": 3.788667
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 17,
+                "marker": "SMOKE-R85068",
+                "ms": 4.293333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 17,
+                "marker": "SMOKE-R85069",
+                "ms": 3.977333
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 17,
+                "marker": "SMOKE-R85070",
+                "ms": 3.550542
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 17,
+                "marker": "SMOKE-R85071",
+                "ms": 3.950958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 18,
+                "marker": "SMOKE-R85072",
+                "ms": 4.582459
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 18,
+                "marker": "SMOKE-R85073",
+                "ms": 4.140208
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 18,
+                "marker": "SMOKE-R85074",
+                "ms": 3.750791
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 18,
+                "marker": "SMOKE-R85075",
+                "ms": 4.598083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 19,
+                "marker": "SMOKE-R85076",
+                "ms": 3.892125
+              },
+              {
+                "generation": 5,
+                "session": "smoke-chat-b",
+                "index": 19,
+                "marker": "SMOKE-R85077",
+                "ms": 2.697833
+              },
+              {
+                "generation": 6,
+                "session": "smoke-chat-c",
+                "index": 19,
+                "marker": "SMOKE-R85078",
+                "ms": 2.934125
+              },
+              {
+                "generation": 7,
+                "session": "smoke-chat-d",
+                "index": 19,
+                "marker": "SMOKE-R85079",
+                "ms": 2.941125
+              }
+            ],
+            "per_restart_ms": 53.97108862499999,
+            "restart_samples_detail": [
+              {
+                "generation": 1,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 53.179292,
+                "spawn_to_ready_ms": 49.133542,
+                "boot_ms": 14.167291,
+                "rebind_ms": 13.620624,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 2,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 52.443292,
+                "spawn_to_ready_ms": 48.925875,
+                "boot_ms": 12.561042,
+                "rebind_ms": 13.377457999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 3,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 54.951375,
+                "spawn_to_ready_ms": 49.956209,
+                "boot_ms": 14.185625,
+                "rebind_ms": 12.443000000000001,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 4,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 53.412666,
+                "spawn_to_ready_ms": 49.3555,
+                "boot_ms": 12.817584,
+                "rebind_ms": 13.033168,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 5,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 53.164917,
+                "spawn_to_ready_ms": 49.630417,
+                "boot_ms": 14.231583,
+                "rebind_ms": 12.5505,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 6,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 53.158375,
+                "spawn_to_ready_ms": 49.071834,
+                "boot_ms": 16.478458,
+                "rebind_ms": 12.455290999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 7,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 53.672584,
+                "spawn_to_ready_ms": 49.08425,
+                "boot_ms": 13.992708,
+                "rebind_ms": 12.270707999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 8,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 57.786208,
+                "spawn_to_ready_ms": 53.861833,
+                "boot_ms": 14.747709,
+                "rebind_ms": 13.072874,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              }
+            ],
+            "rebind_samples": 36,
+            "rebind_mean_ms": 3.2835763333333343,
+            "race": {
+              "enabled": true,
+              "baseline_wall_ms": 324.512833,
+              "baseline_per_input_ms": 0.5094468375,
+              "baseline_input_samples": 80,
+              "baseline_build_ms": 1176.673792,
+              "overhead_factor": 5.603516841505002,
+              "per_input_overhead_factor": 6.896252324856172,
+              "source": "same scenario, non-race test binary"
+            },
+            "storage": {
+              "root": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestEventIntegrityLongRunCalibration3085849814/001/storage",
+              "before_bytes": 0,
+              "after_bytes": 97456,
+              "growth_bytes": 97456,
+              "before_files": 0,
+              "after_files": 7,
+              "files_added": 7
+            },
+            "peak": {
+              "children": 9,
+              "max_child_rss_bytes": 83296256,
+              "max_child_cpu_millis": 183,
+              "total_child_cpu_millis": 653,
+              "max_child_open_fds": 9,
+              "max_child_goroutines": 11,
+              "max_child_heap_inuse_bytes": 5455872,
+              "parent_rss_bytes": 68763648,
+              "parent_cpu_millis": 141,
+              "parent_goroutines": 5
+            }
+          },
+          "extrapolation": {
+            "note": "外推值，03.11 全量首轮后复核",
+            "formula": "full_wall_ms = 1200×per_input_ms + 120×per_restart_ms + initial_boot_ms；full_storage = growth × (1200/80)；full_rss 线性值 = max_child_rss × (1200/80)，有界值 = ×1.5；full_cpu = 子进程 CPU 总和 × (1200/80)",
+            "input_growth_factor": 15,
+            "restart_growth_factor": 15,
+            "full_wall_ms": 10752.407734999997,
+            "full_wall_minutes": 0.17920679558333327,
+            "context_slope_ms_per_turn": 0.020196437781955207,
+            "context_adjusted_full_wall_ms": 14145.409282368473,
+            "full_storage_bytes": 1461840,
+            "full_rss_bytes_linear": 1249443840,
+            "full_rss_bytes_bounded": 124944384,
+            "rss_model": "non_linear_bounded",
+            "full_cpu_millis": 9795
+          },
+          "budget": {
+            "source": "measured",
+            "margin": 1.5,
+            "candidates": {
+              "short_minutes": 20,
+              "long_minutes": 45,
+              "mutations_minutes": 30
+            },
+            "recommended": {
+              "long_job_timeout_minutes": 12,
+              "go_test_timeout_seconds_per_long_shard": 60,
+              "short_job_timeout_minutes": 20,
+              "mutations_job_timeout_minutes": 30
+            },
+            "feasibility": [
+              {
+                "surface": "short",
+                "candidate_minutes": 20,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 20,
+                "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结"
+              },
+              {
+                "surface": "long",
+                "candidate_minutes": 45,
+                "measured": true,
+                "verdict": "feasible",
+                "required_minutes": 1.8021575949035138,
+                "required_per_shard_minutes": 0.23575682137280787,
+                "recommended_minutes": 12,
+                "reason": "单组合外推（含历史增长修正）0.24 分钟 × 6 组合 + 冷构建 0.39 分钟 = 1.80 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）"
+              },
+              {
+                "surface": "mutations",
+                "candidate_minutes": 30,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 30,
+                "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结"
+              }
+            ],
+            "over_budget": false,
+            "over_budget_reported": false,
+            "p95": {
+              "claimed": true,
+              "samples": 80,
+              "per_input_ms": 4.397458,
+              "note": "基于 80 个缩样输入的 p95，不是 03.11 的 1200 输入 p95"
+            },
+            "notes": [
+              "外推值，03.11 全量首轮后复核",
+              "long 分片 go test 建议 = max(ceil(外推 wall×1.5), 60s)；long 作业建议 = ceil((6 分片 + 冷构建×1.5)/60)+5 分钟 runner 准备；候选 45m 的可行性按同一作业口径判断",
+              "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "RSS 由窗口与并发决定，不是输入数的线性函数：线性值只作上限参考，建议值取有界模型"
+            ]
+          },
+          "reconciliation": {
+            "expected_inputs": 80,
+            "driven_inputs": 80,
+            "missing_input_requests": null,
+            "duplicate_input_requests": null,
+            "expected_rebinds": 36,
+            "rebind_requests": 36,
+            "missing_rebind_requests": null,
+            "provider_requests": 118,
+            "reflect_requests": 2,
+            "restored_context_inputs": 10,
+            "restored_context_checks": 10
+          },
+          "scale": {
+            "sessions": 4,
+            "inputs_per_session": 20,
+            "inputs_total": 80,
+            "restarts_per_session": 2,
+            "restarts_total": 8,
+            "generations": 9,
+            "restart_every_inputs": 10,
+            "shared_host": true,
+            "meditation_enabled": true,
+            "fsync_dropped": false
+          }
+        },
+        {
+          "run_id": "w32768-run3",
+          "exit_code": 0,
+          "elapsed_external_seconds": 6,
+          "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001415",
+          "report_path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-s1-20261024-001415/report-window-32768-seed-1.json",
+          "measurements": {
+            "cold_build_ms": 23257,
+            "cold_build_source": "external",
+            "initial_boot_ms": 54.285041,
+            "hot_run_wall_ms": 1823.822042,
+            "hot_run_source": "measured（首个 spawn → 末代关闭，冷构建在外）",
+            "per_input_ms": 3.4899561999999995,
+            "per_input_median_ms": 3.4764375000000003,
+            "per_input_p95_ms": 4.485041,
+            "input_samples": 80,
+            "input_samples_detail": [
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 0,
+                "marker": "SMOKE-R85000",
+                "ms": 2.707334
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 0,
+                "marker": "SMOKE-R85001",
+                "ms": 2.843625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 0,
+                "marker": "SMOKE-R85002",
+                "ms": 3.436833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 0,
+                "marker": "SMOKE-R85003",
+                "ms": 2.8605
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 1,
+                "marker": "SMOKE-R85004",
+                "ms": 2.741375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 1,
+                "marker": "SMOKE-R85005",
+                "ms": 3.617709
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 1,
+                "marker": "SMOKE-R85006",
+                "ms": 2.878625
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 1,
+                "marker": "SMOKE-R85007",
+                "ms": 2.957333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 2,
+                "marker": "SMOKE-R85008",
+                "ms": 3.339416
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 2,
+                "marker": "SMOKE-R85009",
+                "ms": 3.453834
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 2,
+                "marker": "SMOKE-R85010",
+                "ms": 3.380458
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 2,
+                "marker": "SMOKE-R85011",
+                "ms": 2.985083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 3,
+                "marker": "SMOKE-R85012",
+                "ms": 3.118292
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 3,
+                "marker": "SMOKE-R85013",
+                "ms": 4.439375
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 3,
+                "marker": "SMOKE-R85014",
+                "ms": 3.120834
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 3,
+                "marker": "SMOKE-R85015",
+                "ms": 3.471334
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 4,
+                "marker": "SMOKE-R85016",
+                "ms": 3.341042
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 4,
+                "marker": "SMOKE-R85017",
+                "ms": 3.82575
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 4,
+                "marker": "SMOKE-R85018",
+                "ms": 3.478416
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 4,
+                "marker": "SMOKE-R85019",
+                "ms": 3.172333
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 5,
+                "marker": "SMOKE-R85020",
+                "ms": 3.8465
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 5,
+                "marker": "SMOKE-R85021",
+                "ms": 3.932
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 5,
+                "marker": "SMOKE-R85022",
+                "ms": 3.771917
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 5,
+                "marker": "SMOKE-R85023",
+                "ms": 3.32475
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 6,
+                "marker": "SMOKE-R85024",
+                "ms": 4.2805
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 6,
+                "marker": "SMOKE-R85025",
+                "ms": 4.0685
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 6,
+                "marker": "SMOKE-R85026",
+                "ms": 3.794958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 6,
+                "marker": "SMOKE-R85027",
+                "ms": 3.686084
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 7,
+                "marker": "SMOKE-R85028",
+                "ms": 3.978666
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 7,
+                "marker": "SMOKE-R85029",
+                "ms": 4.679792
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 7,
+                "marker": "SMOKE-R85030",
+                "ms": 3.849708
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 7,
+                "marker": "SMOKE-R85031",
+                "ms": 3.817833
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 8,
+                "marker": "SMOKE-R85032",
+                "ms": 4.108417
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-b",
+                "index": 8,
+                "marker": "SMOKE-R85033",
+                "ms": 4.485041
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-c",
+                "index": 8,
+                "marker": "SMOKE-R85034",
+                "ms": 3.916958
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-d",
+                "index": 8,
+                "marker": "SMOKE-R85035",
+                "ms": 4.091083
+              },
+              {
+                "generation": 0,
+                "session": "smoke-chat-a",
+                "index": 9,
+                "marker": "SMOKE-R85036",
+                "ms": 4.712
+              },
+              {
+                "generation": 1,
+                "session": "smoke-chat-b",
+                "index": 9,
+                "marker": "SMOKE-R85037",
+                "ms": 2.79775
+              },
+              {
+                "generation": 2,
+                "session": "smoke-chat-c",
+                "index": 9,
+                "marker": "SMOKE-R85038",
+                "ms": 2.701708
+              },
+              {
+                "generation": 3,
+                "session": "smoke-chat-d",
+                "index": 9,
+                "marker": "SMOKE-R85039",
+                "ms": 2.872208
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 10,
+                "marker": "SMOKE-R85040",
+                "ms": 2.828416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 10,
+                "marker": "SMOKE-R85041",
+                "ms": 2.875125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 10,
+                "marker": "SMOKE-R85042",
+                "ms": 2.752042
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 10,
+                "marker": "SMOKE-R85043",
+                "ms": 2.493667
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 11,
+                "marker": "SMOKE-R85044",
+                "ms": 2.601416
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 11,
+                "marker": "SMOKE-R85045",
+                "ms": 2.903375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 11,
+                "marker": "SMOKE-R85046",
+                "ms": 2.833209
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 11,
+                "marker": "SMOKE-R85047",
+                "ms": 3.187916
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 12,
+                "marker": "SMOKE-R85048",
+                "ms": 3.167708
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 12,
+                "marker": "SMOKE-R85049",
+                "ms": 3.632625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 12,
+                "marker": "SMOKE-R85050",
+                "ms": 3.610125
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 12,
+                "marker": "SMOKE-R85051",
+                "ms": 3.004583
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 13,
+                "marker": "SMOKE-R85052",
+                "ms": 2.860292
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 13,
+                "marker": "SMOKE-R85053",
+                "ms": 3.280625
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 13,
+                "marker": "SMOKE-R85054",
+                "ms": 3.5865
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 13,
+                "marker": "SMOKE-R85055",
+                "ms": 3.175584
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 14,
+                "marker": "SMOKE-R85056",
+                "ms": 3.318292
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 14,
+                "marker": "SMOKE-R85057",
+                "ms": 3.232042
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 14,
+                "marker": "SMOKE-R85058",
+                "ms": 3.808541
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 14,
+                "marker": "SMOKE-R85059",
+                "ms": 3.114875
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 15,
+                "marker": "SMOKE-R85060",
+                "ms": 3.524958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 15,
+                "marker": "SMOKE-R85061",
+                "ms": 3.474459
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 15,
+                "marker": "SMOKE-R85062",
+                "ms": 3.927292
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 15,
+                "marker": "SMOKE-R85063",
+                "ms": 3.55475
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 16,
+                "marker": "SMOKE-R85064",
+                "ms": 3.521958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 16,
+                "marker": "SMOKE-R85065",
+                "ms": 4.057084
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 16,
+                "marker": "SMOKE-R85066",
+                "ms": 3.746166
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 16,
+                "marker": "SMOKE-R85067",
+                "ms": 3.748709
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 17,
+                "marker": "SMOKE-R85068",
+                "ms": 3.875291
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 17,
+                "marker": "SMOKE-R85069",
+                "ms": 3.833208
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 17,
+                "marker": "SMOKE-R85070",
+                "ms": 4.544958
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 17,
+                "marker": "SMOKE-R85071",
+                "ms": 3.992083
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 18,
+                "marker": "SMOKE-R85072",
+                "ms": 3.870167
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-b",
+                "index": 18,
+                "marker": "SMOKE-R85073",
+                "ms": 4.652375
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-c",
+                "index": 18,
+                "marker": "SMOKE-R85074",
+                "ms": 3.834041
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-d",
+                "index": 18,
+                "marker": "SMOKE-R85075",
+                "ms": 4.067458
+              },
+              {
+                "generation": 4,
+                "session": "smoke-chat-a",
+                "index": 19,
+                "marker": "SMOKE-R85076",
+                "ms": 4.461792
+              },
+              {
+                "generation": 5,
+                "session": "smoke-chat-b",
+                "index": 19,
+                "marker": "SMOKE-R85077",
+                "ms": 2.636291
+              },
+              {
+                "generation": 6,
+                "session": "smoke-chat-c",
+                "index": 19,
+                "marker": "SMOKE-R85078",
+                "ms": 2.977166
+              },
+              {
+                "generation": 7,
+                "session": "smoke-chat-d",
+                "index": 19,
+                "marker": "SMOKE-R85079",
+                "ms": 2.743458
+              }
+            ],
+            "per_restart_ms": 54.53622924999999,
+            "restart_samples_detail": [
+              {
+                "generation": 1,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 52.818458,
+                "spawn_to_ready_ms": 48.627542,
+                "boot_ms": 13.835875,
+                "rebind_ms": 12.564125,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 2,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 53.318,
+                "spawn_to_ready_ms": 49.578083,
+                "boot_ms": 13.51275,
+                "rebind_ms": 12.487123,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 3,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 58.29475,
+                "spawn_to_ready_ms": 54.855541,
+                "boot_ms": 19.6875,
+                "rebind_ms": 12.372959,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 4,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 52.6115,
+                "spawn_to_ready_ms": 49.132958,
+                "boot_ms": 14.586375,
+                "rebind_ms": 12.381376,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 5,
+                "trigger_session": "smoke-chat-a",
+                "kill_to_ready_ms": 53.273875,
+                "spawn_to_ready_ms": 49.236458,
+                "boot_ms": 13.586416,
+                "rebind_ms": 12.948915999999999,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 6,
+                "trigger_session": "smoke-chat-b",
+                "kill_to_ready_ms": 53.752459,
+                "spawn_to_ready_ms": 49.729125,
+                "boot_ms": 14.987709,
+                "rebind_ms": 12.414874000000001,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 7,
+                "trigger_session": "smoke-chat-c",
+                "kill_to_ready_ms": 58.473667,
+                "spawn_to_ready_ms": 54.375,
+                "boot_ms": 15.093542,
+                "rebind_ms": 13.230834,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              },
+              {
+                "generation": 8,
+                "trigger_session": "smoke-chat-d",
+                "kill_to_ready_ms": 53.747125,
+                "spawn_to_ready_ms": 50.022625,
+                "boot_ms": 14.175792,
+                "rebind_ms": 12.504625,
+                "recovered_tasks": 1,
+                "rebound_sessions": 4,
+                "restored_context_inputs": 0
+              }
+            ],
+            "rebind_samples": 36,
+            "rebind_mean_ms": 3.2137580833333335,
+            "race": {
+              "enabled": true,
+              "baseline_wall_ms": 319.454167,
+              "baseline_per_input_ms": 0.45530774999999996,
+              "baseline_input_samples": 80,
+              "baseline_build_ms": 1195.518209,
+              "overhead_factor": 5.709182193888866,
+              "per_input_overhead_factor": 7.665048969625489,
+              "source": "same scenario, non-race test binary"
+            },
+            "storage": {
+              "root": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/TestEventIntegrityLongRunCalibration2701692589/001/storage",
+              "before_bytes": 0,
+              "after_bytes": 97459,
+              "growth_bytes": 97459,
+              "before_files": 0,
+              "after_files": 7,
+              "files_added": 7
+            },
+            "peak": {
+              "children": 9,
+              "max_child_rss_bytes": 83263488,
+              "max_child_cpu_millis": 184,
+              "total_child_cpu_millis": 646,
+              "max_child_open_fds": 9,
+              "max_child_goroutines": 11,
+              "max_child_heap_inuse_bytes": 5242880,
+              "parent_rss_bytes": 65765376,
+              "parent_cpu_millis": 133,
+              "parent_goroutines": 5
+            }
+          },
+          "extrapolation": {
+            "note": "外推值，03.11 全量首轮后复核",
+            "formula": "full_wall_ms = 1200×per_input_ms + 120×per_restart_ms + initial_boot_ms；full_storage = growth × (1200/80)；full_rss 线性值 = max_child_rss × (1200/80)，有界值 = ×1.5；full_cpu = 子进程 CPU 总和 × (1200/80)",
+            "input_growth_factor": 15,
+            "restart_growth_factor": 15,
+            "full_wall_ms": 10786.579990999997,
+            "full_wall_minutes": 0.17977633318333328,
+            "context_slope_ms_per_turn": 0.017092156390977623,
+            "context_adjusted_full_wall_ms": 13658.062264684238,
+            "full_storage_bytes": 1461885,
+            "full_rss_bytes_linear": 1248952320,
+            "full_rss_bytes_bounded": 124895232,
+            "rss_model": "non_linear_bounded",
+            "full_cpu_millis": 9690
+          },
+          "budget": {
+            "source": "measured",
+            "margin": 1.5,
+            "candidates": {
+              "short_minutes": 20,
+              "long_minutes": 45,
+              "mutations_minutes": 30
+            },
+            "recommended": {
+              "long_job_timeout_minutes": 12,
+              "go_test_timeout_seconds_per_long_shard": 60,
+              "short_job_timeout_minutes": 20,
+              "mutations_job_timeout_minutes": 30
+            },
+            "feasibility": [
+              {
+                "surface": "short",
+                "candidate_minutes": 20,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 20,
+                "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结"
+              },
+              {
+                "surface": "long",
+                "candidate_minutes": 45,
+                "measured": true,
+                "verdict": "feasible",
+                "required_minutes": 1.7534228931350906,
+                "required_per_shard_minutes": 0.22763437107807064,
+                "recommended_minutes": 12,
+                "reason": "单组合外推（含历史增长修正）0.23 分钟 × 6 组合 + 冷构建 0.39 分钟 = 1.75 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）"
+              },
+              {
+                "surface": "mutations",
+                "candidate_minutes": 30,
+                "measured": false,
+                "verdict": "provisional_not_measured",
+                "required_minutes": 0,
+                "required_per_shard_minutes": 0,
+                "recommended_minutes": 30,
+                "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结"
+              }
+            ],
+            "over_budget": false,
+            "over_budget_reported": false,
+            "p95": {
+              "claimed": true,
+              "samples": 80,
+              "per_input_ms": 4.485041,
+              "note": "基于 80 个缩样输入的 p95，不是 03.11 的 1200 输入 p95"
+            },
+            "notes": [
+              "外推值，03.11 全量首轮后复核",
+              "long 分片 go test 建议 = max(ceil(外推 wall×1.5), 60s)；long 作业建议 = ceil((6 分片 + 冷构建×1.5)/60)+5 分钟 runner 准备；候选 45m 的可行性按同一作业口径判断",
+              "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+              "RSS 由窗口与并发决定，不是输入数的线性函数：线性值只作上限参考，建议值取有界模型"
+            ]
+          },
+          "reconciliation": {
+            "expected_inputs": 80,
+            "driven_inputs": 80,
+            "missing_input_requests": null,
+            "duplicate_input_requests": null,
+            "expected_rebinds": 36,
+            "rebind_requests": 36,
+            "missing_rebind_requests": null,
+            "provider_requests": 118,
+            "reflect_requests": 2,
+            "restored_context_inputs": 10,
+            "restored_context_checks": 10
+          },
+          "scale": {
+            "sessions": 4,
+            "inputs_per_session": 20,
+            "inputs_total": 80,
+            "restarts_per_session": 2,
+            "restarts_total": 8,
+            "generations": 9,
+            "restart_every_inputs": 10,
+            "shared_host": true,
+            "meditation_enabled": true,
+            "fsync_dropped": false
+          }
+        }
+      ],
+      "stability": {
+        "measurements.cold_build_ms": {
+          "median": 23257.0,
+          "min": 23257.0,
+          "max": 23257.0,
+          "spread_pct": 0.0,
+          "samples": 3
+        },
+        "measurements.hot_run_wall_ms": {
+          "median": 1823.822042,
+          "min": 1818.413125,
+          "max": 1884.510584,
+          "spread_pct": 3.62,
+          "samples": 3
+        },
+        "measurements.initial_boot_ms": {
+          "median": 59.615,
+          "min": 54.285041,
+          "max": 59.948375,
+          "spread_pct": 9.5,
+          "samples": 3
+        },
+        "measurements.per_input_ms": {
+          "median": 3.5132739374999993,
+          "min": 3.4899561999999995,
+          "max": 3.6800114125000016,
+          "spread_pct": 5.41,
+          "samples": 3
+        },
+        "measurements.per_input_median_ms": {
+          "median": 3.4764375000000003,
+          "min": 3.4096045000000004,
+          "max": 3.613542,
+          "spread_pct": 5.87,
+          "samples": 3
+        },
+        "measurements.per_input_p95_ms": {
+          "median": 4.485041,
+          "min": 4.397458,
+          "max": 4.672416,
+          "spread_pct": 6.13,
+          "samples": 3
+        },
+        "measurements.per_restart_ms": {
+          "median": 54.53622924999999,
+          "min": 53.97108862499999,
+          "max": 59.033546875000006,
+          "spread_pct": 9.28,
+          "samples": 3
+        },
+        "measurements.rebind_mean_ms": {
+          "median": 3.2835763333333343,
+          "min": 3.2137580833333335,
+          "max": 3.399792833333333,
+          "spread_pct": 5.67,
+          "samples": 3
+        },
+        "measurements.race.overhead_factor": {
+          "median": 5.709182193888866,
+          "min": 5.603516841505002,
+          "max": 5.887215952524308,
+          "spread_pct": 4.97,
+          "samples": 3
+        },
+        "measurements.race.baseline_wall_ms": {
+          "median": 320.102167,
+          "min": 319.454167,
+          "max": 324.512833,
+          "spread_pct": 1.58,
+          "samples": 3
+        },
+        "measurements.storage.growth_bytes": {
+          "median": 97459.0,
+          "min": 97456.0,
+          "max": 97471.0,
+          "spread_pct": 0.02,
+          "samples": 3
+        },
+        "measurements.peak.max_child_rss_bytes": {
+          "median": 83263488.0,
+          "min": 82018304.0,
+          "max": 83296256.0,
+          "spread_pct": 1.53,
+          "samples": 3
+        },
+        "measurements.peak.total_child_cpu_millis": {
+          "median": 653.0,
+          "min": 646.0,
+          "max": 676.0,
+          "spread_pct": 4.59,
+          "samples": 3
+        },
+        "extrapolation.full_wall_ms": {
+          "median": 10786.579990999997,
+          "min": 10752.407734999997,
+          "max": 11559.654320000003,
+          "spread_pct": 7.48,
+          "samples": 3
+        },
+        "extrapolation.context_adjusted_full_wall_ms": {
+          "median": 14145.409282368473,
+          "min": 13658.062264684238,
+          "max": 20038.37763578941,
+          "spread_pct": 45.11,
+          "samples": 3
+        },
+        "extrapolation.full_storage_bytes": {
+          "median": 1461885.0,
+          "min": 1461840.0,
+          "max": 1462065.0,
+          "spread_pct": 0.02,
+          "samples": 3
+        },
+        "extrapolation.full_rss_bytes_bounded": {
+          "median": 124895232.0,
+          "min": 123027456.0,
+          "max": 124944384.0,
+          "spread_pct": 1.53,
+          "samples": 3
+        },
+        "extrapolation.full_cpu_millis": {
+          "median": 9795.0,
+          "min": 9690.0,
+          "max": 10140.0,
+          "spread_pct": 4.59,
+          "samples": 3
+        },
+        "budget.feasibility.1.required_minutes": {
+          "median": 1.8021575949035138,
+          "min": 1.7534228931350906,
+          "max": 2.3914544302456076,
+          "spread_pct": 35.4,
+          "samples": 3
+        },
+        "budget.recommended.go_test_timeout_seconds_per_long_shard": {
+          "median": 60.0,
+          "min": 60.0,
+          "max": 60.0,
+          "spread_pct": 0.0,
+          "samples": 3
+        },
+        "budget.recommended.long_job_timeout_minutes": {
+          "median": 12.0,
+          "min": 12.0,
+          "max": 12.0,
+          "spread_pct": 0.0,
+          "samples": 3
+        }
+      },
+      "headline_run": "w32768-run2",
+      "headline": {
+        "cold_build_ms_external": 23257.0,
+        "hot_run_wall_ms": 1823.822042,
+        "per_input_ms": 3.5132739374999993,
+        "per_input_p95_ms": 4.485041,
+        "per_restart_ms": 54.53622924999999,
+        "restart_cost_at_120_ms": 6544.347509999999,
+        "race_overhead_factor": 5.709182193888866,
+        "storage_growth_bytes": 97459.0,
+        "peak_rss_bytes": 83263488.0,
+        "peak_cpu_millis": 653.0,
+        "extrapolated_full_wall_ms": 14145.409282368473,
+        "extrapolated_full_wall_minutes": 0.23575682137280787,
+        "extrapolated_storage_bytes": 1461885.0,
+        "extrapolated_rss_bounded_bytes": 124895232.0,
+        "extrapolated_cpu_millis": 9795.0
+      }
+    }
+  },
+  "budget_recommendation": {
+    "candidates": {
+      "short_minutes": 20,
+      "long_minutes": 45,
+      "mutations_minutes": 30
+    },
+    "recommended": {
+      "go_test_timeout_seconds_per_long_shard": 60,
+      "long_job_timeout_minutes": 12,
+      "short_job_timeout_minutes": 20,
+      "mutations_job_timeout_minutes": 30
+    },
+    "feasibility": [
+      {
+        "surface": "short",
+        "candidate_minutes": 20,
+        "measured": false,
+        "verdict": "provisional_not_measured",
+        "reason": "本校准只覆盖长程内核；short 的成本由 04.2 自己的校准提供，本轮沿用候选值，不据此冻结",
+        "required_job_minutes": 0,
+        "recommended_minutes": 20
+      },
+      {
+        "surface": "long",
+        "candidate_minutes": 45,
+        "measured": true,
+        "verdict": "feasible",
+        "reason": "单组合外推（含历史增长修正）0.33 分钟 × 6 组合 + 冷构建 0.39 分钟 = 2.39 分钟；候选 45 分钟足以覆盖，建议 12 分钟（分片 go test 60 秒）",
+        "required_per_shard_minutes": 0.334,
+        "required_job_minutes": 2.3915,
+        "recommended_minutes": 12,
+        "headroom_factor_vs_candidate": 18.82
+      },
+      {
+        "surface": "mutations",
+        "candidate_minutes": 30,
+        "measured": false,
+        "verdict": "provisional_not_measured",
+        "reason": "本校准只覆盖长程内核；mutations 的成本由 04.4 自己的校准提供，本轮沿用候选值，不据此冻结",
+        "required_job_minutes": 0,
+        "recommended_minutes": 30
+      }
+    ],
+    "over_budget": false,
+    "basis": "long 分片 = 03.11 单组合（1200 输入/120 重启）；long 作业 = 6 组合 + 一次冷构建 + 5 分钟 runner 准备；候选 45m 按作业口径判断。",
+    "formula": "go_test_timeout_seconds_per_shard = max(ceil(max(linear_wall, context_adjusted_wall) × 1.5), 60)；long_job_timeout_minutes = ceil((6×go_test_seconds + cold_build_ms×1.5/1000)/60) + 5",
+    "short_mutations": "未测：short 成本由 04.2 校准、mutations 由 04.4 校准；本轮沿用 20m/30m 候选，不据此冻结。",
+    "stability_note": "每窗口 3 次重复：wall 与 per-input 的极差 3.6%-9.4%，storage 0.02%，RSS 1.5%-3.2%；context-adjusted wall 的极差更大（30.9%/45.1%），因为斜率由 80 个缩样输入拟合。建议值取最差一轮的 required_job 与各轮 recommended 的最大值，不用中位数压低预算。",
+    "worst_case_run": "w32768-run1",
+    "note": "外推值，03.11 全量首轮后复核"
+  },
+  "raw_logs": {
+    "w256-run1": {
+      "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-1.jsonl",
+      "sha256": "797b401812b90ffd9c75bedcadbedfe18f4286dfb3d6ac304000b5a2182d33a7",
+      "bytes": 17598
+    },
+    "w256-run2": {
+      "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-2.jsonl",
+      "sha256": "8b30a40fe8fa874f2e1651cf2b149f72b319c4a3a768df89885d1f4a28a51dea",
+      "bytes": 17598
+    },
+    "w256-run3": {
+      "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w256-3.jsonl",
+      "sha256": "06f671608d0d5a8f535bd268b0e1e69da6cb17a2a224b88205dda265f5599f0b",
+      "bytes": 17599
+    },
+    "w32768-run1": {
+      "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-1.jsonl",
+      "sha256": "1ad06b56261cd925452b50d9844b1f1194f9001c69e55d5a96012d413f861372",
+      "bytes": 17615
+    },
+    "w32768-run2": {
+      "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-2.jsonl",
+      "sha256": "236e95732deed0b9a4aeaaf7ae0097b6a6c254498d323184e7dca018eaf42393",
+      "bytes": 17611
+    },
+    "w32768-run3": {
+      "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-w32768-3.jsonl",
+      "sha256": "e4e2201c27bfbf793c2ab7579dedadca8b1f956d32f6638274cc09e81fe6820a",
+      "bytes": 17615
+    }
+  },
+  "limitations": [
+    "缩样 20 输入×2 重启/会话，不是 03.11 的 300×30；外推是线性 + 会话内历史斜率修正（每输入不超过均值的 4 倍），不是全量实测。",
+    "cold build 在本机（darwin/arm64，隔离 GOCACHE）测得；CI runner 的 CPU/缓存/模块下载不同，作业预算另留 5 分钟准备。",
+    "存储增长按输入数线性 ×15；32768 档实测增长与 256 档几乎相同（事实/账本与回放窗口无关），仍按线性外推留保守上界。",
+    "RSS 取 max_child_rss ×1.5 的有界模型；线性 ×15 仅作上限参考，不作为建议值。",
+    "short 与 mutations 未被本校准测量，verdict=provisional_not_measured；冻结需各自的校准。",
+    "重启是父进程 SIGKILL（进程级），不是掉电/fsync 级崩溃注入；校准同样保持冥想启用、fsync 不削。",
+    "本文件是 03.10 校准证据，不是 03.11 的 1200/120 全量证据；03.11 首轮后必须复核并覆盖建议值。"
+  ],
+  "verification": {
+    "calibration_commands": [
+      "TAGENT_CALIBRATION_COLD_BUILD_MS=23257 go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRunCalibration$' -count=1 -race -json -timeout 30m -args -window=256",
+      "TAGENT_CALIBRATION_COLD_BUILD_MS=23257 go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRunCalibration$' -count=1 -race -json -timeout 30m -args -window=32768"
+    ],
+    "runs_per_window": 3,
+    "repeat_note": "任务行的正式验证为每窗口 1 次（-timeout 60m 仅为提议）；本证据按用户要求在 30m 超时下额外重复 3 次取稳定值，并以 3 次中最差一轮的 required_job 与各轮 recommended 的最大值给预算，不用中位数压低。",
+    "anchors": {
+      "256": {
+        "parent": "TestEventIntegrityLongRunCalibration pass (3/3 runs)",
+        "positive": "TestEventIntegrityLongRunCalibration/positive pass (3/3)",
+        "negative": "TestEventIntegrityLongRunCalibration/negative pass (3/3; 12 named mutations)",
+        "consumer": "TestEventIntegrityLongRunCalibration/consumer pass (3/3)"
+      },
+      "32768": {
+        "parent": "TestEventIntegrityLongRunCalibration pass (3/3 runs)",
+        "positive": "TestEventIntegrityLongRunCalibration/positive pass (3/3)",
+        "negative": "TestEventIntegrityLongRunCalibration/negative pass (3/3; 12 named mutations)",
+        "consumer": "TestEventIntegrityLongRunCalibration/consumer pass (3/3)"
+      }
+    },
+    "local_smoke_regression": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmoke$' -count=1 -timeout 30m",
+      "exit_code": 0,
+      "elapsed_external_seconds": 64,
+      "output_tail": "ok wechat-bot 63.950s"
+    },
+    "consumer_note": "consumer 子测试从落盘报告只读 budget.recommended.go_test_timeout_seconds_per_long_shard 与 budget.recommended.long_job_timeout_minutes，并校验与内存报告同源；05.1 预算冻结与 timeout-minutes 读同一字段。",
+    "run_ids_file": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/run-ids.txt",
+    "calibration_window_logs": [
+      "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/calibration-window256.jsonl",
+      "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.10/calibration-window32768.jsonl"
+    ],
+    "race_requirement": "校准主跑必须 -race：六项成本含 -race 开销，且 03.11 矩阵固定 -race。用户消息里的单轮验证命令省略了 -race，本轮按 task-graph 的 canonical 命令执行（-count=1 -race -json -timeout 30m -args -window=...）。非 race 调用现在以明确消息早失败，避免用非 race 成本冒充；已实测该早失败路径（0.36s，'the calibration measures the -race overhead and must run under -race'）。",
+    "guard_added_after_batch": true,
+    "post_batch_race_check": {
+      "command": "TAGENT_CALIBRATION_COLD_BUILD_MS=23257 go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRunCalibration$' -count=1 -race -timeout 30m -args -window=256",
+      "exit_code": 0,
+      "elapsed_external_seconds": 12,
+      "output_tail": "ok wechat-bot 7.683s",
+      "note": "guard 只拒绝非 race 调用，不改测量路径；6 次重复的测量二进制与最终代码仅差该前置检查。"
+    },
+    "non_race_guard_check": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRunCalibration$' -count=1 -timeout 5m -args -window=256",
+      "exit_code": 1,
+      "output": "--- FAIL: TestEventIntegrityLongRunCalibration (0.00s) / the calibration measures the -race overhead and must run under -race"
+    }
+  }
+}

@@ -1,0 +1,401 @@
+{
+  "leaf": "02.3",
+  "title": "投影折叠与恢复（event-sourced-projection）",
+  "change": "event-consumption-integrity",
+  "domain": "02-event-consumers",
+  "artifact": "summary",
+  "status": "implemented_verified",
+  "checkbox": "checked",
+  "generated_at": "2026-10-24T11:15:02Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/history/event_integrity_test.go（与 01.2/03.9 同文件单写）的 TestEventIntegrityProjection 下形成六锚：正锚 small_window_fold_and_restore、rebuild_refolds_from_wal（G4 用户裁定后的新验收面）；负锚 unconsumed_not_lost、rebuild_does_not_refold、fold_product_no_self_trigger；消费者锚 actual_request_assembly。全部经生产提交路径（Run.CommitToSession -> AgeFoldPlugin.ObserveCommit -> ReplayProjection.FoldByAge）与生产请求装配（Run.Invoke -> request.projectedSegment -> AssembleBudgetPrefix）驱动；WAL 重放使用生产 RebuildProjectionFromWAL，重折使用生产 FoldByAge 与和生产插件相同的 AgeFoldPlan，不用测试替身冒充折叠或装配。G4 已由用户裁定解除（折叠为事件投影形式，CompactionFact 可纯内存），compaction_event_writer 不再要求实施。",
+  "method": "窗口 60 tokens（阈值为 FoldWindow.VolumeThresholdBytes()=60*4*0.8=192 bytes），用四个 leg 组成的闭合回合按 key 顺序提交。rebuild_refolds_from_wal 先记录在线折叠形态（综述/段产物/保留原文/被消费键/compress 计数），再把链上 mapped 事实（排除无 message 的 compress.request）按提交序喂入生产 RebuildProjectionFromWAL 得到平铺投影，然后按同一 AgeFoldPlan 用两种读法重折：(a) 单遍 FoldByAge 断言带结构一致（保留/消费的原始键集、段产物键与内容、恰一个综述）；(b) 按事实提交边界逐条 Append + FoldByAge，断言 RenderProjection 与在线折叠逐字节相等。另断言重算出的 CompressRequest.ID 全部命中链上既有 compress.request、重折前后链上 compress.request 计数不变、保留材料内容等于原文、被折原文经 Run.CommittedEvent 精确读回。原五锚的断言与生产路径未改。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final",
+    "notes": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。十轮为十个独立进程（-count=1 -race），原始退出码逐行落 exits.txt；artifact-at-runs.txt 在十轮开跑前记录被测文件的 sha256 与行数，证明十轮对应 7b6c9e0e… / 5049 行。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/history/event_integrity_test.go",
+      "state": "untracked new file (shared with 01.2/03.9 and later leaves)",
+      "lines": 5049,
+      "sha256": "7b6c9e0e7f937e653c914286c4dd033ee248bf21e1f807616f39f672eb16ab9d",
+      "note": "本单只在 02.3 段内新增 rebuild_refolds_from_wal 子测试、3 个投影助手，并在父测试注册一行；02.3 既有五锚断言未改，01.2/03.9/其他叶段落未改。十轮与单轮均针对上述哈希（见 artifact-at-runs.txt 与 verification）。"
+    }
+  ],
+  "product_changes": [],
+  "g4": {
+    "question": "折叠产物是否落事实链（CompactionFact 是否持久化、由谁写），恢复调用链是否在生产中触发重建，以及 WAL 是否足以恢复折叠形态。",
+    "ruling": "resolved_by_user",
+    "resolution": "用户裁定（第三选项，00.3 冻结件原文）：折叠视为事件的投影形式——CompactionFact 可纯内存（不落事实链），但系统 MUST 能通过重放事件 WAL 完成重新折叠（重建路径按同一规则恢复折叠形态；重建内重折属投影派生不算自激，重建后不得再触发新折叠写入）。02.3 验收面由 compaction_event_writer 改写为 rebuild_refolds_from_wal。",
+    "attribution": {
+      "seed_replay_01_9": {
+        "source": "run.go:1162-1231 seedReplay（01.9 落地）",
+        "finding": "重建的是平铺投影，不含折叠形态",
+        "detail": "逐条 tier.Segments.Events -> memory.DecodeEventBody -> mappedEntryOf(evt) -> seed.projection.Append；不调用 FoldByAge，不读取/还原 CompactionEventType payload，compress.request 因无 message 不映射（mappedEntryOf 对空内容返回 false）；仅在 window.MaxTokens>0 时 AttachReplay。",
+        "consequence": "Boot 重启后投影只有原始事实序列；折叠形态不在 tier 里，只能由同一折叠规则从 WAL 重新导出。"
+      },
+      "rebuild_capability": {
+        "source": "memory/replay/projection.go:352 RebuildProjectionFromWAL",
+        "production_callers": 0,
+        "capability_verified": true,
+        "detail": "无 compaction 的链上走有界 fallback，按链上事实逐条还原 mapped 序列（本锚 report: fallback=true, scanned=true, entries=16=事实数, full_boundary=空）；能读取 CompactionEventType payload 是另一条分支，但生产折叠从不写该事实。全仓调用者均为测试（见 g4-grep.txt），seedReplay 也未调用它。",
+        "consequence": "零生产调用说明没有恢复接线点，不等于能力缺失；本锚以生产实现直接验证其能力面。"
+      },
+      "refold_rule": {
+        "source": "memory/replay/age_segments.go:227 FoldByAge；唯一生产调用者 age_fold.go:137 AgeFoldPlugin.ObserveCommit",
+        "finding": "纯投影派生：同一窗口/阈值 -> 同一 band 划分与内容寻址键；只返回 Products/Requests，不写事实链",
+        "plan_match": "ObserveCommit 用 {KeepRecent: window.KeepRecentTasks, VolumeThreshold: window.VolumeThresholdBytes()}；window.KeepRecentTasks 由 request.go:304 缺省为 config.DefaultKeepRecentTasks；本锚用 projectionWindowPlan 复现同一 plan（KeepRecent=config.DefaultKeepRecentTasks，VolumeThreshold=FoldWindow{MaxTokens:60}.VolumeThresholdBytes()=192）。"
+      },
+      "verdict": "重折能力已具备，无需补产品代码：RebuildProjectionFromWAL 复原 WAL 原始序列，FoldByAge 在同一 plan 下可对其重折，且按提交边界重放取得与在线逐字节一致的折叠形态。02.3 本单未改 memory/replay/*.go、run.go、age_fold.go；git diff 中 run.go 的 121 行属 01.9 seedReplay，非本单改动。"
+    },
+    "prior_findings": {
+      "compaction_fact_writer": {
+        "persisted": false,
+        "producers": [],
+        "code_evidence": [
+          "memory/replay/fold.go:111 ReplayProjection.Fold 是唯一构造 CompactionFact 的函数，并把 p.fold 留在投影内存态；其调用者仅测试",
+          "memory/replay/projection.go:413 RebuildProjectionFromWAL 能读取 context_compress 事实，但全仓无生产写入者",
+          "grep -rn 'context_compress' --include=*.go . -> 仅 api/event/meta.go:21 的类型常量与 projection.go 的读取分支"
+        ]
+      },
+      "production_fold_product": {
+        "type": "compress.request",
+        "writer": "age_fold.go:137-158 AgeFoldPlugin.ObserveCommit -> replay.FoldByAge -> Sessions.FileCompressRequest -> Run.fileCompressRequest",
+        "fact_shape": "event.CompressRequestType = \"compress.request\"，无 message，故不进投影（mappedEntryOf 对空内容返回 false）"
+      },
+      "recovery_call_chain": {
+        "rebuild_invoked_in_production": false,
+        "observed_behavior": "冷启动/重启不显式触发 RebuildProjectionFromWAL，也不触发再折叠；Boot 由 seedReplay 平铺重建。"
+      }
+    },
+    "evidence": [
+      {
+        "command": "grep -rn 'RebuildProjectionFromWAL' / 'FoldByAge' / 'CompactionFact' / 'context_compress' --include=*.go .（四段合并）",
+        "exit_code": 0,
+        "output": "87 行；关键命中：projection.go:352 定义、调用者均 *_test.go；FoldByAge 生产调用者仅 age_fold.go:137；CompactionFact 仅 fold.go:111 构造与 projection.go:413 读取；context_compress 仅 api/event/meta.go:21",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/g4-grep.txt",
+        "log_sha256": "1244170f219588c014994fa8b8d8d3bf835295faa5ed92ad71e449526f505aef",
+        "log_bytes": 11478
+      },
+      {
+        "command": "sed -n '1162,1231p' run.go（seedReplay 语义原文）",
+        "exit_code": 0,
+        "output": "70 行；mappedEntryOf + Append 的平铺重放，无 FoldByAge / compaction 还原",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/seedreplay.txt",
+        "log_sha256": "3ed8c6a99abc1995263143a7451695d01650c6e18df1fc5a02306c52e708959b",
+        "log_bytes": 2262
+      }
+    ]
+  },
+  "subtests": [
+    {
+      "name": "small_window_fold_and_restore",
+      "anchor": "positive",
+      "asserts": [
+        "窗口 60 tokens、4 个闭合回合后折叠被提交驱动触发（CompressRequestType 计数 > 0）",
+        "新带（turn 2）的 02-0-in/02-3-out 仍在投影中且内容为原文；02-1-plan/02-2-call 已被折成 -seg- 产物，产物摘要逐一列出被折 leg 的标签",
+        "CommittedEvent(02-1-plan) 精确读回被折原文（原文与模型视图分层）",
+        "重建（RebuildProjectionFromWAL）报告 fallback=true、Entries==mapped、Dropped==0，Compaction()==nil 且 FullBoundary()==空",
+        "重建后的原始 key 序列、segment-fold 产物键序列与生产折叠一致，且恰有一个 history summary（重建是单遍原始材料，summary 内容寻址键与增量多遍不同，故按原始键+产物键比较并只要求一个综述）",
+        "对重建结果再 FoldByAge：不追加第二份产物（NewFolded==0、MidFolded==0、Products/Requests 空、键序与产物逐字节不变）"
+      ]
+    },
+    {
+      "name": "rebuild_refolds_from_wal",
+      "anchor": "positive (G4 ruling)",
+      "asserts": [
+        "在线折叠态（窗口 60、4 个闭合回合）：投影 7 条 = 综述 -hist-7a03a687b120c516、保留的原始输入/输出 4 条、段产物 -seg-17cbc84220945512/-seg-17c077246230ae9b；3 个产物；链上 6 条 compress.request；0-1-plan 已被消费、3-0-in 保留",
+        "WAL 重放：16 条 mapped 事实（compress.request 无 message 不映射）经生产 RebuildProjectionFromWAL 还原；report.Fallback=true、Scanned=true、Entries=16=事实数、FullBoundary=空；Compaction()==nil；还原键序与提交序逐条相等；投影内 0 个合成产物（折叠形态不在链上）",
+        "单遍重折：对还原投影按同一 plan FoldByAge 触发（NewFolded>0、Products>0）；保留的原始键序列与被消费的原始键集合与在线折叠逐条相等；两个段产物键相同且（Type, Content, Time）逐字段相等；恰一个 history summary（单遍内容寻址键 -hist-e07e45be905e083b 与在线 -hist-7a03a687b120c516 不同，按日志记录并见 deviations，不冒充相等）",
+        "提交边界重放：按 WAL 事实提交顺序逐条 Append + FoldByAge（折叠形态作为投影派生）后，RenderProjection 与在线投影逐字节相等（均 7 条 / 1927 字节；综述、带边界、合成键全部一致）",
+        "不产生新折叠写入：重折重算的 6 个 CompressRequest.ID 全部命中链上既有 compress.request（内容寻址幂等）；重折前后 run 链上 compress.request 计数不变（6 -> 6）",
+        "未消费材料仍在：重折后保留的 02-0-in/03-3-out 内容等于原文 projectionBodyOfKey；被折原文 00-1-plan/01-2-call 经 Run.CommittedEvent 精确读回原文"
+      ],
+      "log": "online entries=[-hist-7a03a687b120c516 02-0-in -seg-17cbc84220945512 02-3-out 03-0-in -seg-17c077246230ae9b 03-3-out] products=[-hist-7a03a687b120c516 -seg-17cbc84220945512 -seg-17c077246230ae9b] requests=6; restored=16 raw facts; re-folded 7 entries=1927 bytes identical to the online 7 entries=1927 bytes; judgments=6"
+    },
+    {
+      "name": "unconsumed_not_lost",
+      "anchor": "negative",
+      "asserts": [
+        "尾部只提交 02-0-in/02-1-plan（未闭合回合）时，两条输入仍在投影中且内容为原文，无任何产物含其摘要",
+        "CommittedEvent 可精确读回未消费输入的原文",
+        "闭合该回合（02-2-call/02-3-out）后，plan/call 被折、in/out 保留、出现含 plan 02 的段产物（证明是「闭合后才折」而非吞掉未消费输入）"
+      ]
+    },
+    {
+      "name": "rebuild_does_not_refold",
+      "anchor": "negative",
+      "asserts": [
+        "4 个回合折叠后重建：report.Fallback=true、Entries==mapped(16)、Dropped==0、Scanned>0",
+        "Compaction()==nil、FullBoundary()==空（重建不产生 compaction payload）",
+        "重建键序恰为 16 个原始 leg 的提交序，无 SyntheticKey 产物",
+        "重建前后 CompressRequestType 计数不变（重建不写折叠产物）"
+      ]
+    },
+    {
+      "name": "fold_product_no_self_trigger",
+      "anchor": "negative",
+      "asserts": [
+        "重建后第一次 FoldByAge 产出产品；第二次仍 Triggered 但 NewFolded==0、MidFolded==0、Products/Requests 空，键序不变且产品逐字节保留",
+        "隔离构造：NewReplayProjection + Append([10-in, -seg-minted(ThinkingPlan), 10-out]) 后强制折叠 -> NewFolded==0、无产品、合成键条目仍在（SyntheticKey 守卫不被折叠吞掉）"
+      ]
+    },
+    {
+      "name": "actual_request_assembly",
+      "anchor": "consumer",
+      "asserts": [
+        "Run.Invoke 的真实 replayModel 请求最后一条为本次输入（user, \"projection request\"）",
+        "请求呈现的历史综述消息以 \"history summary: \" 开头，含 external_input/segment_fold/agent_output 三类摘要",
+        "请求中存在折叠段落消息（\"folded segment process:\"）与 turn 3 的输入/输出消息",
+        "被折原文不出现在任何请求消息中；同一原文经 Run.CommittedEvent 精确读回",
+        "请求呈现块与 Invoke 后投影的一段连续条目逐一相等（内容与角色按生产 RoleOf 映射）"
+      ]
+    }
+  ],
+  "parent_siblings": [
+    {
+      "name": "notice_visible_under_fold",
+      "owner": "EVID-04（非 02.3 锚）",
+      "note": "与六锚同父运行；十轮与单轮中均保持 pass，未被本单改动。"
+    }
+  ],
+  "verification": {
+    "single": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityProjection$' -count=1 -race -json -timeout 30m",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "parsed": {
+        "parent": "TestEventIntegrityProjection run=1 pass=1 fail=0 skip=0",
+        "named_subtests_run_pass": 7,
+        "children": [
+          "small_window_fold_and_restore",
+          "rebuild_refolds_from_wal",
+          "unconsumed_not_lost",
+          "rebuild_does_not_refold",
+          "fold_product_no_self_trigger",
+          "actual_request_assembly",
+          "notice_visible_under_fold"
+        ],
+        "note": "python3 逐行 json.loads；父与 7 个具名子测试各恰一次 run + 终局 pass；不用 grep -c。"
+      },
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/single.json",
+      "log_sha256": "adafaf1a826022169dd2d1d0e5ae33b39912a8c1086a0196103720bc28f8645f",
+      "log_bytes": 14571
+    },
+    "anchor_only": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityProjection$/^rebuild_refolds_from_wal$' -count=1 -race -v",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "output": "=== RUN TestEventIntegrityProjection/rebuild_refolds_from_wal; PASS; ok github.com/SpellingDragon/tagent/tests/integration/history 1.495s",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/anchor-rebuild-refolds.txt",
+      "log_sha256": "fce26c8b58d03740075003fa129e2b5d18ae74f39f30fc996839f62d89b42178",
+      "log_bytes": 1438
+    },
+    "negative_anchor": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityProjection$/^rebuild_does_not_refold$' -count=1 -race -v",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "output": "--- PASS: TestEventIntegrityProjection/rebuild_does_not_refold (0.00s); PASS; ok 1.476s",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/anchor-rebuild-does-not-refold.txt",
+      "log_sha256": "57231f05022913e1f8d482290a0a9f99e8c1b1376b5aa507c7c0df3eb755094b",
+      "log_bytes": 391
+    },
+    "consumer_anchor": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityProjection$/^actual_request_assembly$' -count=1 -race -v",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "output": "--- PASS: TestEventIntegrityProjection/actual_request_assembly (0.00s); PASS; ok 1.447s",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/anchor-actual-request-assembly.txt",
+      "log_sha256": "f85478df086673c55dd53dc3db1005cf124025721330dde3df5d2030c97509ab",
+      "log_bytes": 1650
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/02.3-final\"; : > \"$E/exits.txt\"; for i in $(seq 1 10); do go test ./tests/integration/history -run '^TestEventIntegrityProjection$' -count=1 -race -json -timeout 30m > \"$E/run-$i.json\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$E/exits.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "artifact_under_test": {
+        "lines": 5049,
+        "sha256": "7b6c9e0e7f937e653c914286c4dd033ee248bf21e1f807616f39f672eb16ab9d",
+        "recorded_before_runs_at": "2026-10-24T11:13:33Z",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/artifact-at-runs.txt",
+        "log_sha256": "850ffa368d522fa7e6d25dab43cec84d0af4d236cb368df58582572bba867999",
+        "log_bytes": 196
+      },
+      "exits": "10/10 exit=0",
+      "exits_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/exits.txt",
+      "exits_sha256": "2b436b67ce1a50322b0e4e6ae3d4b36e5aa7ef31342793d0b0cceb21623ed288",
+      "exits_bytes": 131,
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_sha256": "c537a826c066fcfee814c0ed0da41e090a25aee7a71e02f507d8c7537bea840f", "log_bytes": 14571},
+        {"round": 2, "exit_code": 0, "log_sha256": "01e1921ca1d1174f757278418e5ab47622402fe1d185c1a912f2c7344c8a0aff", "log_bytes": 14572},
+        {"round": 3, "exit_code": 0, "log_sha256": "4a9ae9ade1d9a412dfbbcb985808ff5a128ec84e96d17a1a25b50ebb13788a69", "log_bytes": 14569},
+        {"round": 4, "exit_code": 0, "log_sha256": "f3759ed1998e41c14b92a9ed90855e45b67208440754fa904d7ad9ba16e05ea1", "log_bytes": 14567},
+        {"round": 5, "exit_code": 0, "log_sha256": "2131c06e98ad18246c8e2a6b466047ecc18e34179c6646efab1972785b76585e", "log_bytes": 14566},
+        {"round": 6, "exit_code": 0, "log_sha256": "2e5fb491f8605eb850c0ffbef6bb1fb21a546ec87f1ef921c2f814c77d67c6b1", "log_bytes": 14572},
+        {"round": 7, "exit_code": 0, "log_sha256": "27088c332952245a10ff316a71d348144296c4028e261983d482a064c1dd5cc0", "log_bytes": 14566},
+        {"round": 8, "exit_code": 0, "log_sha256": "76ca051c0947ba9072b19998a00fafffa2a66a733cd0101b90313510e2b50bb2", "log_bytes": 14571},
+        {"round": 9, "exit_code": 0, "log_sha256": "be5ef2b677a805b81f2706e0a6b6095e25e1c024c05470e2c41463055401eb60", "log_bytes": 14568},
+        {"round": 10, "exit_code": 0, "log_sha256": "291f6a4c8dc7211ce08854d5b74656a7ba3304d6b9ce71f5ddae70bac07a8753", "log_bytes": 14575}
+      ],
+      "parser": "python3 parse.py 逐行 json.loads；每轮核验父测试与 7 个具名子测试（六锚 + EVID-04 兄弟锚）各恰一次 run + 终局 pass，拒绝 fail/skip/零匹配/重复 run/坏 JSON；exits.txt 10 行原始退出码逐行对应；不使用 grep -c。",
+      "parsed_result": "ALL_TEN_OK=True（10/10 轮）",
+      "parse_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/parse-output.txt",
+      "parse_sha256": "007c9760e655f18537e0ea093503701db2fbbe336f7c478903d6dce96b4d528c",
+      "parse_bytes": 1887,
+      "parse_script_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/parse.py",
+      "parse_script_sha256": "f445e8fae072e5cf973c797851140bc693d59ac2f14079acd6fd1765eaa4921f",
+      "parse_script_bytes": 1658
+    },
+    "regression": {
+      "history_all": {
+        "command": "go test ./tests/integration/history -count=1 -race -timeout 900s",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "ok github.com/SpellingDragon/tagent/tests/integration/history 29.259s",
+        "note": "含 01.2 全部既有测试、02.3 六锚与 EVID-04 兄弟锚、03.9 及其他叶段落；本单未改其断言",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/regress-history.txt",
+        "log_sha256": "469c8a129b6129f1ee5525559759ee284225b2673a2e8f1fec3bd41bfde098c4",
+        "log_bytes": 72
+      },
+      "family": {
+        "command": "go test ./tests/integration/host ./tests/integration/execution ./tests/integration/history -run '^TestEventIntegrity' -count=1 -race -json -timeout 900s",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "parsed": {
+          "parents_passed": 15,
+          "parents": [
+            "TestEventIntegrityReproduction",
+            "TestEventIntegrityNoticeIdentity",
+            "TestEventIntegrityTaskContinuation",
+            "TestEventIntegrityDelivery",
+            "TestEventIntegrityReflectionDelivery",
+            "TestEventIntegrityReplacement",
+            "TestEventIntegrityIdentityMatrix",
+            "TestEventIntegrityConsumptionRecovery",
+            "TestEventIntegrityProjection",
+            "TestEventIntegrityDecisionFlowMatrix",
+            "TestEventIntegrityFormalAssembly",
+            "TestEventIntegrityHarness",
+            "TestEventIntegrityRestart",
+            "TestEventIntegrityPersistence",
+            "TestEventIntegrityRestoreUse"
+          ],
+          "fail": [],
+          "skip": []
+        },
+        "note": "15 个 TestEventIntegrity* 父测试全 pass，无 fail/skip；覆盖 host/execution/history 三包的事件完整性族。",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/family-final.json",
+        "log_sha256": "2d132155ecf25ffa8eaec1dac1564bbb644b4dd22dc692af40a4347e3b2ad39c",
+        "log_bytes": 376221
+      }
+    },
+    "hygiene": {
+      "vet": {
+        "command": "go vet ./...",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "",
+        "note": "全仓 go vet 通过（空输出）",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/vet.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "gofmt": {
+        "command": "gofmt -l tests/integration/history",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "output": "",
+        "result": "GOFMT_LINES=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/gofmt.txt",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log_bytes": 0
+      },
+      "ownership": {
+        "command": "go run ./scripts/codetools event-ownership -check -json",
+        "cwd": "/Users/pengweiye/Documents/codes/tagent",
+        "exit_code": 0,
+        "result": "ok=true; violations=[]; 4 个 known uncovered（method value/接口调用，非本单新增）；counts: owners=6 symbols=14 packages_scanned=31 candidates=48 direct_calls=21 allowed=14 forbidden=0 unregistered=0 unowned=0 ambiguous=0",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/02.3-final/ownership.json",
+        "log_sha256": "5a9fa7eff412575bbb935b6626d929bd24c6d32f6f6f7ca03498139072df7f8d",
+        "log_bytes": 9887
+      }
+    }
+  },
+  "artifact_lineage": {
+    "reason": "02.3 首轮取证（2026-10-23）时共享文件为 2754 行 / ac797c…；此后 03.9、01.9、02.6 等叶在同一文件追加段落，最终为 5049 行 / 7b6c9e0e…。本单的单轮、十轮与全包/全族回归全部在最终 5049 行上执行，十轮开跑前另有 artifact-at-runs.txt 记录被测哈希。",
+    "previous_snapshot": {
+      "lines": 2754,
+      "sha256": "ac797ccc0d8c1bde056f69c482123db211f88ece6466854542299d6052b5bfab",
+      "note": "旧证据快照，仅作沿革；不再作为当前验收对象"
+    },
+    "final_artifact": {
+      "lines": 5049,
+      "sha256": "7b6c9e0e7f937e653c914286c4dd033ee248bf21e1f807616f39f672eb16ab9d"
+    }
+  },
+  "deviations": [
+    {
+      "planned": "消费者锚「原文经既有 [evt_key] 票据 recall 回补」",
+      "actual": "原文读取走 Run.CommittedEvent（正式精确读取面），未驱动 recall 工具",
+      "reason": "两处票据格式不互通：replay 预算票据是 [ticket KEY: full text retrievable by segment]，recall 的 parseKey 只认 [evt_KEY|type]/evt_KEY/裸键，且 recall 工具还需检索表与 tier 原文层；本测试的装配没有 retrieval，commitFact 也不写 tier 原文层，故 recall 工具不可用。",
+      "impact": "原文可读回的证据由生产 CommittedEvent 提供；票据 recall 回补属后续接线，未在本叶冒充。"
+    },
+    {
+      "planned": "折叠形态与在线一致（综述/带结构）",
+      "actual": "单遍重折的 history summary 内容寻址键与在线不同（-hist-e07e45be905e083b vs -hist-7a03a687b120c516），但保留/消费的原始键集、两个段产物与带边界完全一致；提交边界重放则逐字节一致",
+      "reason": "生产折叠是增量多遍：在线综述把先前折出的 -seg- 产物当作一行摘要读入；重建后的单遍重折直接读原始 detail，故综述内容（因而内容寻址键）不同。折叠是历史敏感的，同一规则在相同提交边界上重放才得到同一形态。",
+      "impact": "锚点同时给出两种读法：单遍断言带结构一致（可证伪原始键丢失/产物丢失/多综述），提交边界断言 RenderProjection 逐字节相等（7 条/1927 字节）。未把不同 summary 键冒充相等。"
+    },
+    {
+      "planned": "消费者锚在请求中看到「折叠后的综述」",
+      "actual": "请求中的输入条目出现一次投影条目 + 一份原生输入（重复）",
+      "reason": "recordMapped 的 ended 是折叠前的位置（7），折叠缩短 entries 后前缀被 clamp 到全量，把本次新提交的输入条目也纳入前缀。这是当前真实装配行为，且 request.go 不在本叶候选写集。",
+      "impact": "断言改为「呈现块与投影的连续一段逐条相等」，不再按 index 数学；该现象列入 observations，供后续回验时裁定是否修复。"
+    },
+    {
+      "planned": "若重折能力缺失，在 memory/replay 写集内最小补接线",
+      "actual": "未补任何产品代码",
+      "reason": "归因证明能力已具备：RebuildProjectionFromWAL 复原 WAL 序列，FoldByAge 在同一 plan 下可重折并取得在线形态。全仓 RebuildProjectionFromWAL 零生产调用；若在重建函数内强制重折或改 seedReplay（01.9 恢复面），等于改变零调用者语义或越过本单边界；G4 要求的是「MUST 能」，不是新增生产调用点。",
+      "impact": "Boot 仍按 01.9 平铺重建、不重折；恢复接线（若产品决定要）属根装配/恢复面，后续单列。"
+    },
+    {
+      "planned": "重建后 compress 计数不增作为「不产生新折叠写入」的证据",
+      "actual": "计数断言保留，但其强度有限：RebuildProjectionFromWAL/FoldByAge 本身无写入面，该断言按构造成立",
+      "reason": "更强的互补证据是：按提交边界重折重算出的 6 个 CompressRequest.ID 全部命中链上既有 compress.request（内容寻址幂等），任何接线后的去重都会 no-op；另有 rebuild_does_not_refold 的插件级计数不变。",
+      "impact": "报告同时给出 identity 命中与计数不变，不把单一构造性守卫当作充分证明。"
+    }
+  ],
+  "observations": [
+    "六锚单轮与十轮全绿；十轮每子测试恰一次 run + 终局 pass，父测试同，原始退出码 10/10 为 0。",
+    "归因结论：seedReplay（01.9）只做 mappedEntryOf -> Append 的平铺重建，不含折叠形态；折叠形态必须由同一 FoldByAge 规则从 WAL 重新导出。",
+    "RebuildProjectionFromWAL 零生产调用，但能力完整：无 compaction 链上走有界 fallback，本锚 16 条事实逐条还原且与提交序一致；Compaction 为空、无合成产物。",
+    "在线折叠态为 7 条：综述 -hist-7a03…、4 条保留原始输入/输出、2 个段产物；单遍重折得到同样的 7 条带结构与同样的 2 个段产物，只是综述内容寻址键变为 -hist-e07e…。",
+    "按提交边界逐条 Append + FoldByAge 后与在线投影逐字节相等（7 条 / 1927 字节），综述文本、带边界、合成键全部一致——这是「按同一规则恢复折叠形态」的最强读法。",
+    "重折重算的 6 个 CompressRequest.ID 全部已在链上（内容寻址幂等），重折前后 compress.request 计数 6 -> 6；配合 rebuild_does_not_refold（插件级 0 新增），证明重折是投影派生、不会触发新折叠写入。",
+    "未消费材料仍在：重折后 02-0-in/03-3-out 内容等于原文；被折原文 00-1-plan/01-2-call 经 CommittedEvent 精确读回，折叠只改投影形态、不改事实。",
+    "折叠是历史敏感的（单遍 vs 提交边界），后续若产品接线恢复重折，应按事实提交边界应用规则，或接受重新导出的 summary 身份（带结构仍一致）。",
+    "家族回归：host/execution/history 三包 15 个 TestEventIntegrity* 父测试全 pass，无 fail/skip；history 整包 29.259s 通过。",
+    "本单未改任何产品文件；run.go 的 121 行改动属 01.9 seedReplay（git diff 归属），memory/replay/*.go 与 age_fold.go 工作树无本单改动。"
+  ],
+  "limitations": [
+    "未做临时变异取证（未临时改产品制造红灯来证明锚点可证伪）；原因：候选产品文件处在并行单的写集/保护面，临时变异会互踩。负锚由具名断言与十轮稳定复跑承载。",
+    "未在真实 tier WAL 分段后端上重放：重放链是测试内 MemoryEventChain，事实来自生产 Run.SessionFacts 的 live 链条目；RebuildProjectionFromWAL 与 FoldByAge 本体为生产实现。",
+    "重折能力已证明，但未新增生产接线：Boot 仍按 01.9 seedReplay 平铺重建、不重折；若要求启动即恢复折叠形态，需要恢复面单列接线（本单未做，未越界改 01.9 语义）。",
+    "「重建后 compress 计数不增」在 API 层面按构造成立（重折无写入面）；其互补强证据是 request ID 全命中链上既有事实，见 deviations。",
+    "实际请求装配的原文回补未走 recall 工具（见 deviations），票据格式差异需上游裁定。",
+    "未测多会话/多分区的投影隔离（02.3 验收面不要求；由 03.2/03.3 承担）。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+    "line": "02.3",
+    "action": "勾选 `- [ ] 02.3` -> `- [x] 02.3`：六锚单轮 + 十轮全 pass（exit 0×10），WAL 重折能力已验（提交边界逐字节一致），负锚齐全，G4 用户裁定已解除，01.5 后正式回验与全族回归不回退。"
+  }
+}

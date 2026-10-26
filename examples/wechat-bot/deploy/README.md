@@ -5,6 +5,7 @@
 安全加固(非 root / 只读根 + 可写白名单 / 资源上限 / 崩溃自愈)与 docker-compose **对齐**。
 
 > 本指南配套 `deploy/tagent-wechat.service`(systemd 单元模板)。快速指引亦可执行 `./run.sh systemd`。
+> 这份部署实际接了什么、哪些变量**不被读取**,以根目录 README「装配面」与「待接线清单」为准。
 
 ---
 
@@ -14,17 +15,18 @@
 graph LR
     subgraph Server["远端服务器 (裸机 + systemd)"]
         UNIT["tagent-wechat.service<br/>Restart=always / SIGTERM 优雅关闭"] --> BIN["wechat-bot 二进制"]
-        BIN -->|EnvironmentFile| ENV[".env (chmod 600, ZAI_API_KEY)"]
+        BIN -->|EnvironmentFile| ENV[".env (chmod 600, provider 密钥)"]
         BIN -->|WorkingDirectory| DATA["数据目录 (ReadWritePaths 白名单)"]
-        BIN -->|exec 工具| TMUX["tmux 异步任务层 (PrivateTmp)"]
-        BIN -->|HTTPAPI :8089| HC["/healthz 健康探针"]
+        BIN -->|GET /healthz · POST /task| FACE["宿主 HTTP 面 127.0.0.1:8089"]
+        PL["tagent-mail-poller.service<br/>(可选) 邮件入站"] -->|POST /task 202| FACE
     end
     JOURNAL["journald<br/>journalctl -u tagent-wechat"] -.收日志.- UNIT
-    DATA --> MEM[".wechat-config/data 记忆+语义向量"]
-    DATA --> GOV["data/governance 预算+审批"]
-    DATA --> EVO["data/evolution bundles+发布历史"]
-    DATA --> REL["data/reliability 溢出/兜底/锚点"]
+    DATA --> MEM[".wechat-config 记忆与登录态"]
+    DATA --> GOV["data/governance 审批"]
 ```
+
+HTTP 面是宿主自己装配的最小面(不依赖 `cli.NewCLI`):`/healthz` 答存活、`/task` 收一条注入,
+只绑回环地址,故外部不可直达。
 
 ---
 
@@ -33,14 +35,11 @@ graph LR
 | 依赖 | 必需性 | 用途 | 安装(Debian/Ubuntu) |
 |------|--------|------|---------------------|
 | **go ≥ 1.24** | 硬性 | 构建二进制 | 官方 tarball（https://go.dev/dl/，推荐）或发行版 backports；`apt install golang-go` 在多数稳定版源中版本偏低，装后务必 `go version` 核对 ≥1.24 |
-| **tmux** | 硬性 | exec 工具的异步任务层 | `apt install tmux` |
-| **node 22 + openspec** | 软性 | plan 子 agent 的 spec 工具后端 | `apt install nodejs` + `npm i -g @fission-ai/openspec` |
-| **curl** | 软性 | 健康探针 `/healthz` | `apt install curl` |
+| **curl** | 软性 | 健康探针 `/healthz` 与 `restart-*.sh` 的健康门 | `apt install curl` |
+| **node 22 + openspec** | 软性 | plan 子 agent 的 spec 工具后端(工具面未接线,保留供重接) | `apt install nodejs` + `npm i -g @fission-ai/openspec` |
 | **rustviking** | 可选 | 仅 `memory.type: file` 需要(本配置用 `localfile`,无需) | 见 rustviking 仓库 |
 
 > `./wizard.sh` 会自动检查以上依赖(硬缺失则中止,软缺失则降级告警)。
-> **CGO**:本 example 可 `CGO_ENABLED=0` 纯静态构建(与 Dockerfile 一致,**无需 gcc**);
-> 若你的改动引入了需 CGO 的依赖,则改用默认 `CGO_ENABLED=1` 并 `apt install build-essential`。
 
 ---
 
@@ -55,25 +54,22 @@ git clone <your-tagent-repo> /opt/tagent/repo
 cd /opt/tagent/repo/examples/wechat-bot
 # 若部署目录就是此处,可直接用;否则拷贝 examples/wechat-bot 到 /opt/tagent/wechat-bot
 
-# 1) 初始化向导(7 步:依赖→密钥→**工作根**→.env→**ACL 权限**→连通→下一步)
-#    工作根(TAGENT_WORKING_DIR)可设为项目 clone 根(如 /home/user/codes),使 agent 操作其下所有仓库;
-#    向导步骤5 对工作根做 ACL 授权(服务用户 tagent 可读写**含已有文件**,不改原有 owner/group/mode)。
-./wizard.sh                       # 交互式;或 NONINTERACTIVE=1 预置 env 后跑(权限步骤需 sudo)
+# 1) 初始化向导(6 步:依赖→密钥→.env→运行目录→连通→下一步)
+#    只采集码面真读的变量:provider 密钥 + 部署路径覆盖。部署侧个人上下文(USER.md)自备。
+./wizard.sh                       # 交互式;或 NONINTERACTIVE=1 预置 env 后跑
 
 # 2) 构建二进制(纯静态,无需 gcc)
 CGO_ENABLED=0 ./run.sh build      # 产出 ./wechat-bot
 
-# 3) HOME 目录(tagent 系统用户已由 wizard 步骤5 创建;此处补 HOME,幂等)
+# 3) 专用系统用户 + HOME 目录(幂等)
 sudo useradd -r -s /usr/sbin/nologin tagent 2>/dev/null || true
 mkdir -p .home                    # HOME 收敛到部署目录内(数据集中、便于备份)
 
 # 4) 安装 systemd 单元(路径不同则先 sed 替换)
 sudo install -m 644 deploy/tagent-wechat.service /etc/systemd/system/
 # sudo sed -i "s#/opt/tagent/wechat-bot#$(pwd)#g" /etc/systemd/system/tagent-wechat.service
-# ⚠️ 若工作根在部署目录**外**(如 /home/user/codes),编辑 unit 的 ReadWritePaths 追加该路径为续行
-#    (在 .home 行末加 \ 换行填工作根绝对路径),否则 ProtectSystem=strict 会拒 agent 写工作区。
 
-# 5) 部署目录属主交给 tagent(数据目录须可写);工作区(codes)权限已由 wizard ACL 处理(不改原有)
+# 5) 部署目录属主交给 tagent(数据目录须可写)
 sudo chown -R tagent:tagent "$(pwd)"
 
 # 6) 启动 + 开机自启
@@ -85,9 +81,15 @@ sudo systemctl enable --now tagent-wechat
 
 ```bash
 systemctl status tagent-wechat                 # Active: active (running)
-journalctl -u tagent-wechat -f                 # 实时日志(应见 governance/evolution/reliability 启用日志)
-curl -fsS http://127.0.0.1:8089/healthz        # 健康探针
+journalctl -u tagent-wechat -f                 # 实时日志
+curl -fsS http://127.0.0.1:8089/healthz        # 健康探针(应回 ok)
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -X POST http://127.0.0.1:8089/task \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"探活一下"}],"trigger_source":"user"}'   # 应回 202
 ```
+
+`/task` 注入没有会话身份,宿主把它投到**最近一次有投递的会话**上;还没有任何会话时答 503。
 
 ---
 
@@ -95,50 +97,27 @@ curl -fsS http://127.0.0.1:8089/healthz        # 健康探针
 
 `ProtectSystem=strict` 下仅 `ReadWritePaths` 白名单可写。所有状态集中于部署目录,便于备份/迁移:
 
-| 路径 | 内容 | 子系统 | 备份优先级 |
-|------|------|--------|-----------|
-| `.wechat-config/data/` | 记忆事件 + 语义向量 KV(localfile) | memory / engine | ★★★ 核心 |
-| `data/governance/` | 预算滑窗 epoch + `approvals/` 待批文件 | governance | ★★ |
-| `data/evolution/` | 不可变 bundles + `releases.jsonl` 发布历史 | evolution | ★★ |
-| `data/reliability/` | bus 溢出 / mem_spill 兜底 / 冥想锚点 | reliability | ★ 可重建 |
-| `data/trajectories/` | LLM 调用轨迹 JSONL(SFT/RL 用) | trajectory | ★ 可选 |
-| `openspec/changes/` | plan 子 agent 规格化产出 | plan | ★★ |
-| `.home/` | HOME(node/openspec/rustviking 配置) | — | ★ |
-| `workspace/` `.tagent-workspace/` | 微信附件落盘 / exec 暂存(可清理) | app / exec | ☆ 临时 |
+| 路径 | 内容 | 备份优先级 |
+|------|------|-----------|
+| `.wechat-config/` | 登录态 cursor 与消息去重 seen.json(localfile) | ★★★ 核心 |
+| `data/governance/` | 待批文件与审批状态(配置项 `governance.dir`) | ★★ |
+| `data/trajectories/` | LLM 调用轨迹 JSONL | ★ 可选 |
+| `.home/` | HOME(进程内配置文件) | ★ |
+| `workspace/` `.tagent-workspace/` | 微信附件/长文本落盘(可清理) | ☆ 临时 |
 
-**备份**(核心记忆 + 治理/进化状态):
+**备份**:
 
 ```bash
-sudo -u tagent tar czf tagent-backup-$(date +%F).tgz \
-  .wechat-config data/governance data/evolution openspec/changes
+sudo -u tagent tar czf tagent-backup-$(date +%F).tgz .wechat-config data/governance
 ```
 
-### 工作根（TAGENT_WORKING_DIR）与 ACL 权限
+### 个人上下文 `USER.md`
 
-**工作根** = agent 的 file tools `base_dir` 与 exec 命令 `cwd` 的**共同基准**（框架 `config.WorkingDir`，
-二者恒一致 → 模型看到单一文件系统视图）。默认空 = 进程工作目录（部署目录）；设为项目 **clone 根**
-（如 `/home/user/codes`）→ agent 可读写该目录下**所有仓库**，而 tagent 自身配置/资源/数据路径不受影响
-（仍相对部署目录）。三种设置方式（优先级 env > yaml > 进程 cwd）：
-
-| 方式 | 位置 | 适用 |
-|------|------|------|
-| `TAGENT_WORKING_DIR` 环境变量 | `.env`（wizard 步骤3 引导写入）/ unit `Environment=` | **推荐**:部署时按实际 clone 位置填,yaml 保持便携 |
-| `working_dir:` | `tagent.yaml` 顶层 | 固定工作根、随配置入库 |
-| `properties.base_dir`/`workspace` | 单个 tool | 覆盖个别工具(优先级最高) |
-
-**ACL 权限**（wizard 步骤5 / `./wizard.sh --perms`）：让服务用户 `tagent` 能读写工作根（含**已有文件**），
-但**不改动**工作区原有的 owner/group/mode —— 用 POSIX ACL 追加而非 chown/chmod：
-
-```bash
-sudo setfacl -R -m  u:tagent:rwX <工作根>   # -R 递归覆盖已有文件(rwX:文件 rw、目录 rwx)
-sudo setfacl -R -d -m u:tagent:rwX <工作根>   # -d 默认 ACL:工作区内新建文件自动继承 tagent 权限
-```
-
-- **为何不影响原有权限**:ACL 只追加 named-user 条目,`mask ≥ owning group` ⇒ 原有 group 有效权限不变,
-  owner/other 完全不受影响（`ls -l` 的 group 位此后显示为 mask,属正常现象,有效权限未变）。
-- **两道放行**:ACL（文件系统层,服务用户可读写）+ systemd `ReadWritePaths`（沙箱层,须含工作根）——
-  二者都需覆盖工作根,agent 才能写;缺任一则 file/exec 对工作区只读失败。
-- **降级**:非 Linux / 无 `setfacl`（`apt install acl`）/ 无 sudo → wizard 告警并给手动指引,不中断部署。
+entry agent 的系统提示词声明了 `AGENTS.md`/`SOUL.md`/`USER.md`/`TOOLS.md`。其中 `USER.md` 是
+**部署侧个人上下文**,不随仓库分发(仓库里只有模板 `resources/prompts/USER.md.example`):
+`cp resources/prompts/USER.md.example resources/prompts/USER.md` 后按实际情况填写即可。
+检出库不带它也能启动——宿主跳过一个 info 日志继续装配,`journalctl` 里会看到
+`declared prompt file absent, skipped`。
 
 ---
 
@@ -151,19 +130,20 @@ sudo setfacl -R -d -m u:tagent:rwX <工作根>   # -d 默认 ACL:工作区内新
 | 实时日志 | `journalctl -u tagent-wechat -f` |
 | 最近 200 行 | `journalctl -u tagent-wechat -n 200` |
 | 健康检查 | `curl -fsS http://127.0.0.1:8089/healthz` |
-| 临时开 debug 日志 | `sudo systemctl edit tagent-wechat` 加 `[Service]` `Environment=LOG_LEVEL=debug` |
-| 启用 OTLP 追踪 | 同上加 `Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4317` |
+| 改端口 | `.env` 里 `TAGENT_HTTP_PORT=<端口>` 后 restart(unit 的 `Environment=` 优先) |
+| 给 `/task` 加凭据 | `.env` 里 `TAGENT_RL_AUTH_TOKEN=<随机串>`;mail-poller 读同名变量须一致 |
 
 **更新代码**(拉新版 → 重建 → 重启):
 
 ```bash
 cd /opt/tagent/wechat-bot && git pull
 sudo -u tagent CGO_ENABLED=0 ./run.sh build
-sudo systemctl restart tagent-wechat          # Restart 期间 reliability 子系统恢复 spill/锚点/发布历史
+sudo systemctl restart tagent-wechat
 ```
 
-**更新配置**:`tagent.yaml` 中 `mcp_servers` 段支持**热同步**(mtime 惰性检查,增删 MCP server 免重启);
-其余段(governance/evolution/reliability/agents)改动需 `systemctl restart` 生效。
+**更新配置**:`tagent.yaml` 每个键都在启动时经严格解码读一次,任何改动(含 `agents`/`governance`)
+都需 `systemctl restart` 生效——本宿主不做配置热同步。提示词文件(`resources/prompts/*.md`)同理,
+随进程重启加载。
 
 ---
 
@@ -173,13 +153,13 @@ sudo systemctl restart tagent-wechat          # Restart 期间 reliability 子�
 
 - `User=tagent`(非 root) + `NoNewPrivileges`(禁提权) + `ProtectHome`(真实 /home 不可见);
 - `ProtectSystem=strict` + `ReadWritePaths` 白名单(只读根,仅数据目录可写);
-- `PrivateTmp`(私有 /tmp,tmux socket 隔离) + `ProtectKernel*` / `RestrictSUIDSGID`;
-- 资源上限 `TasksMax=256`(防 fork 炸弹) / `MemoryMax=1G` / `LimitNOFILE=65536`;
+- `PrivateTmp`(私有 /tmp,服务间隔离) + `ProtectKernel*` / `RestrictSUIDSGID`;
+- 资源上限 `TasksMax=256` / `MemoryMax=1G` / `LimitNOFILE=65536`;
 - 密钥仅经 `EnvironmentFile=.env`(chmod 600,gitignore),**绝不硬编码或走 ~/.zshrc**;
-- HTTPAPI 仅监听 `:8089`,生产建议经反代/防火墙限制来源(如需外部访问)。
+- HTTP 面只绑 `127.0.0.1:8089`:外部无法直达,同机 mail-poller 才够得着。
 
-文末附**可选进一步加固**(RestrictAddressFamilies / CapabilityBoundingSet / SystemCallFilter)——
-因可能限制 `exec` 工具能力,默认注释,启用前务必验证业务命令。
+文末附**可选进一步加固**(RestrictAddressFamilies / CapabilityBoundingSet / SystemCallFilter),
+默认注释,启用前务必验证业务命令。
 
 ---
 
@@ -188,14 +168,15 @@ sudo systemctl restart tagent-wechat          # Restart 期间 reliability 子�
 | 现象 | 排查 |
 |------|------|
 | 启动即退出,status 示权限错 | 数据目录属主非 tagent:`sudo chown -R tagent:tagent <部署目录>`;确认 `ReadWritePaths` 覆盖 |
-| agent 写工作区(clone 根)失败/只读 | 工作根**两道放行**缺一:①unit `ReadWritePaths` 未含工作根 → 追加其绝对路径为续行;②ACL 未设 → `./wizard.sh --perms`(或 `getfacl <工作根>` 核对 tagent 条目) |
-| 工作根设了但 agent 仍在部署目录操作 | `TAGENT_WORKING_DIR` 未被读到:确认在 `.env`(wizard 步骤3 写入)或 unit `Environment=`;`systemctl show tagent-wechat -p Environment` 核对 |
 | `ZAI_API_KEY 未设置` | `.env` 缺失或未被 `EnvironmentFile` 读到;重跑 `./wizard.sh`,确认 `.env` 在部署目录且 chmod 600 |
-| exec 工具报 tmux 错 | tmux 未装或 `PrivateTmp` 下 socket 异常:`apt install tmux`;必要时临时关 `PrivateTmp` 验证 |
-| plan 子 agent spec 工具失败 | node/openspec 未装或 `NODE_PATH` 不符:`npm i -g @fission-ai/openspec`,`which openspec` 核对 |
-| 语义召回未生效(纯关键词) | `ZAI_API_KEY` 缺失/无效 → engine 优雅降级;查 `journalctl` 有无 `memory engine disabled` 告警 |
+| `DEEPSEEK_API_KEY 未设置` | knowledge 子 agent 的 provider 密钥同样必需(启动前校验);补进 `.env` 后 restart |
+| `/healthz` 连不上 | 端口被占或面未装配:日志里 `HTTP 面未装配` 说明绑定失败(查 `ss -tlnp | grep 8089`);换端口用 `TAGENT_HTTP_PORT` |
+| `/healthz` 回 401 | 设了 `TAGENT_RL_AUTH_TOKEN` 而探针没带 Bearer;`restart-*.sh` 会自动带上,手测需自行加 `-H` |
+| `/task` 回 503 | 宿主还没有任何会话投递过(注入没有会话身份);先发一条微信消息再注入 |
+| `/task` 回 401 | 异机来源且未配 `TAGENT_RL_AUTH_TOKEN`;或 token 与 mail-poller 侧不一致 |
+| `declared prompt file absent, skipped` | 缺 `resources/prompts/USER.md`(个人上下文,不随仓库分发);按 §四 从模板复制 |
 | OOM 被 kill 后重启 | `MemoryMax=1G` 触发;按机器内存上调 unit 的 `MemoryMax` 后 `daemon-reload && restart` |
-| 端口冲突 | `TAGENT_HTTP_PORT` 经 `.env` 或 unit `Environment=` 改;确认反代/防火墙同步 |
+| 端口冲突 | `TAGENT_HTTP_PORT` 经 `.env` 或 unit `Environment=` 改 |
 
 ---
 
@@ -204,81 +185,19 @@ sudo systemctl restart tagent-wechat          # Restart 期间 reliability 子�
 两种部署形态**并存**,择一即可:
 
 - **裸机 systemd**(本指南):无 Docker 依赖,贴近个人助手,资源开销低 —— **本次远端部署推荐**;
-- **Docker Compose**(本目录 `docker-compose.yml`):镜像隔离,适合已有容器编排基建的场景。
+- **Docker Compose**(根目录 `docker-compose.yml`):镜像隔离,适合已有容器编排基建的场景。
 
 二者共用同一 `tagent.yaml`(能力配置一致)与 `.env`(密钥),安全加固级别对齐。
+容器内 HTTP 面同样只绑 `127.0.0.1`,宿主机经 `ports` 映射到 `127.0.0.1:8089`。
 
 ---
 
-## 九、可观测后端（Jaeger，可选）
-
-**默认不起也完全正常**：未设 `OTEL_EXPORTER_OTLP_ENDPOINT` 时 tagent 走 noop provider——零导出、
-零开销、事件循环/工具/轨迹行为与无观测时逐字节一致。起后端只是为了**看见** turn span 树。
-
-### 9.1 启动 Jaeger all-in-one
-
-裸机形态（podman 或 docker 均可，单容器、内存存储、重启即清空）：
-
-```bash
-sudo podman run -d --name tagent-jaeger --restart=unless-stopped \
-  -e COLLECTOR_OTLP_ENABLED=true \
-  -e SPAN_STORAGE_TYPE=memory \
-  -e MEMORY_MAX_TRACES=20000 \
-  -p 127.0.0.1:16686:16686 -p 127.0.0.1:4317:4317 \
-  docker.io/jaegertracing/all-in-one:latest
-```
-
-容器形态：compose 已内置 `jaeger` 服务并归入 `observability` profile（**默认不启动**，不影响既有部署）：
-
-```bash
-docker compose --profile observability up -d
-```
-
-端口均只绑 `127.0.0.1`——UI（16686）经 SSH 隧道访问：`ssh -L 16686:127.0.0.1:16686 <服务器>`。
-
-### 9.2 让 tagent 导出
-
-| 形态 | 端点值 | 配置位置 |
-|---|---|---|
-| 裸机 systemd（Jaeger 同机） | `http://127.0.0.1:4317` | `.env` 加 `OTEL_EXPORTER_OTLP_ENDPOINT=...`，或 unit 内取消该行注释（模板已预留） |
-| 容器（compose 同网络） | `http://jaeger:4317` | `.env` 或宿主 env（compose 已透传该变量） |
-
-```bash
-sudo systemctl daemon-reload && sudo systemctl restart tagent-wechat
-journalctl -u tagent-wechat -n 50        # 应无 OTLP 连接错误
-```
-
-### 9.3 验证与 span 形态实录清单
-
-发一条微信消息触发一个 turn，然后在 UI（`http://127.0.0.1:16686`）按 service 查 tagent。
-以下五项是 `observability-tracing` 变更归档时转出的**环境实装项**（代码侧导出链路已就绪，仅缺后端
-实录），部署时顺带完成即可闭合：
-
-| # | 实录项 | 怎么看 |
-|---|---|---|
-| 1 | **turn root span 形态** | 找 `tagent.turn`：属性应含 `agent`/`trigger_source`/`chat_id`/`batch_size`/`event_sources`；退化重试为属性而非另开 span |
-| 2 | **框架层 span 名称与父子关系** | `tagent.turn` 下应挂 trpc-agent-go 自动埋点的 llmflow / functioncall 子 span；记录实际名称层级 |
-| 3 | **单 turn span 数量级** | 一次含 N 个工具调用的 turn 共产生多少 span（评估长期运行的 trace 存储压力与采样必要性） |
-| 4 | **异步任务跨 turn 关联** | 触发一个慢命令（走 tmux 后台），确认 `task_settled` 回流的新 turn 上有指向原 spawn turn 的 span link |
-| 5 | **langfuse exporter 适配性** | 若考虑换后端：OTLP 端点形态是否可直接对接（tagent 侧只认 `OTEL_EXPORTER_OTLP_ENDPOINT`，不绑定 Jaeger） |
-
-实录结论建议回写 `openspec/changes/LEDGER.md`（该变更已归档，按重编原则 #1 归档区不改写，裁决集中记账）。
-
-### 9.4 排障
-
-| 现象 | 排查 |
-|---|---|
-| UI 无任何 trace | 端点未生效：`systemctl show tagent-wechat -p Environment` 核对；确认 tagent 进程能连通 4317（`nc -zv 127.0.0.1 4317`） |
-| 有 span 但缺 `tagent.turn` | 该 turn 未走持久循环（子 agent 单轮 `Run()` 路径由父 turn 覆盖）；或 `trigger_source` 过滤所致 |
-| Jaeger 容器 OOM | 上调 `MEMORY_MAX_TRACES` 或内存限额；长期留存应改 `SPAN_STORAGE_TYPE=badger` 并挂卷 |
-| 担心开销 | 不设端点即 noop（零开销）；需要时常开、排障毕注释掉该行再 restart 即回到 noop |
-
-## 十、systemd unit 撰写通用陷阱（mail-poller 实战复盘）
+## 九、systemd unit 撰写通用陷阱（mail-poller 实战复盘）
 
 新增 unit（如 `tagent-mail-poller.service`）时，以下三类坑均已实战踩过，撰写/排障先对照：
 
 1. **行内注释静默吞值**：`ProtectSystem=full  # 注释` 整值解析失败被忽略（`systemd-analyze verify` 仅告警不拦截）。
    纪律：unit 文件注释一律独立成行；verify 有输出即视为失败，逐条清零。
 2. **service PATH ≠ 交互 shell PATH**：`/usr/bin/env <interpreter>` shebang 的可执行（node/python venv 等）在 systemd 最小 PATH 下 exit 127。
-   纪律：unit 显式 `Environment=PATH=<解释器所在目录>:/usr/bin:/bin`；tmux 手测通过 ≠ service 环境通过，**验收必须以 `systemctl status` + 服务日志为证**。
+   纪律：unit 显式 `Environment=PATH=<解释器所在目录>:/usr/bin:/bin`；交互 shell 手测通过 ≠ service 环境通过，**验收必须以 `systemctl status` + 服务日志为证**。
 3. **崩溃自愈须实测**：`Restart=always` 写了不算数，`sudo systemctl kill -s SIGKILL` 后确认 MainPID 更换、子进程重拉、持久化状态完好（参照 mail-poller notes 5.1 场景 5）。

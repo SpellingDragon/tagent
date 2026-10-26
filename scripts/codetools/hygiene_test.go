@@ -34,13 +34,13 @@ func rules(t *testing.T, files []string, sizes map[string]int64) []string {
 // TestTrackedHygieneRejectsEachDebrisShape 钉住 四条具名拒绝各自可达，且一条路径命中多条规则时逐条都报。
 func TestTrackedHygieneRejectsEachDebrisShape(t *testing.T) {
 	got := rules(t, []string{
-		"agent/a.go",
+		"runtime/a.go",
 		"hottest-sub1/relations.journal",
 		"hottest-sub2/.tagent-writer.lock",
 		"docs/empty.md",
 		"tool/gone.go",
 		"newdir/x.go",
-	}, map[string]int64{"agent/a.go": 12, "docs/empty.md": 0, "newdir/x.go": 5})
+	}, map[string]int64{"runtime/a.go": 12, "docs/empty.md": 0, "newdir/x.go": 5})
 	assert.ElementsMatch(t, []string{
 		"hottest-sub1/relations.journal=runtime-artifact-tracked",
 		"hottest-sub1/relations.journal=unregistered-top-level",
@@ -53,8 +53,8 @@ func TestTrackedHygieneRejectsEachDebrisShape(t *testing.T) {
 }
 
 func TestTrackedHygienePassesACleanIndex(t *testing.T) {
-	findings := checkTrackedHygiene([]string{"agent/a.go", "docs/b.md", ".github/workflows/ci.yml"},
-		fakeTree(map[string]int64{"agent/a.go": 3, "docs/b.md": 4, ".github/workflows/ci.yml": 5}))
+	findings := checkTrackedHygiene([]string{"runtime/a.go", "docs/b.md", ".github/workflows/ci.yml"},
+		fakeTree(map[string]int64{"runtime/a.go": 3, "docs/b.md": 4, ".github/workflows/ci.yml": 5}))
 	require.Empty(t, findings)
 }
 

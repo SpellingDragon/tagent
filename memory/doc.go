@@ -1,7 +1,13 @@
-// Package memory 是 tagent 的事实存储层：以 FullEvent 为唯一记录形态、按分区命名空间
-// 隔离、以键格式为单点约定，并在此之上提供检索（关键词／语义）、分层与压实、TTL 与
-// 物理遗忘。后端抽象（KV 底座、检索引擎、嵌入器）都遵循"契约居核心包、实现居子包"。
-// 事件类型常量的单点定义在事件包（event.Type*），本包不重复登记。
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
 //
-// 契约: docs/wiki/memory/memory-architecture.md#overview
+// Package memory is the runtime's durable original-text layer: it names one
+// stored original and the reference metadata that scopes it, commits those bytes
+// and returns them byte for byte, and carries the ordered projection and the
+// retention guard built beside them.
+//
+// The package speaks the fact vocabulary of the event package and nothing above
+// it, so the durable side cannot be reversed into the intelligent or governing
+// side. The storage unit itself lives in memory/ledger and the replay unit in
+// memory/replay; this package keeps the read face (queries, segment reads), the
+// projection and the assembly seam over them.
 package memory

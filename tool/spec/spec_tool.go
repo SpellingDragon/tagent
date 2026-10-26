@@ -3,64 +3,108 @@ package spec
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-	"trpc.group/trpc-go/trpc-agent-go/tool/function"
-
-	"github.com/SpellingDragon/tagent/agent"
 )
 
-// specArgs is the LLM-facing argument shape: a closed op plus optional fields.
+// ToolName is the tool name the declaration and the plan prompt share. It is
+// frozen: a rename is a prompt change and a declaration change in one breath.
+const ToolName = "spec"
+
+// Tool is the model-visible face of one plan backend: the closed operation set
+// beside the fields each operation consumes, and nothing else.
+type Tool struct {
+	backend Backend
+}
+
+// The tool satisfies the native callable tool port, so the runtime admits it
+// under the same registration wrapper as every other native tool.
+var _ trpctool.CallableTool = (*Tool)(nil)
+
+// NewTool returns the spec tool over the given backend.
+func NewTool(backend Backend) *Tool { return &Tool{backend: backend} }
+
+// specArgs is the argument shape one call carries: the operation beside the
+// fields it may consume.
 type specArgs struct {
-	Op       string `json:"op" jsonschema:"required,description=操作: init(初始化工作区,幂等) / new(新建计划) / status(查询状态) / validate(校验) / archive(归档) / instructions(取 artifact 模板) / list(列出计划)"`
-	Name     string `json:"name,omitempty" jsonschema:"description=计划名(kebab-case),new/status/validate/archive 需要"`
-	Artifact string `json:"artifact,omitempty" jsonschema:"description=instructions 专用: proposal/specs/design/tasks"`
-	JSON     bool   `json:"json,omitempty" jsonschema:"description=status/list 是否要 JSON 输出"`
+	// Op is the operation to run; it must belong to the closed set.
+	Op string `json:"op"`
+	// Name is the plan the operation addresses.
+	Name string `json:"name,omitempty"`
+	// Artifact names the artifact whose instructions are asked for.
+	Artifact string `json:"artifact,omitempty"`
+	// JSON asks for the machine-readable form of status and list.
+	JSON bool `json:"json,omitempty"`
 }
 
-// NewSpecTool creates the spec-management function tool over a Backend.
-// The tool surface is backend-agnostic; swapping the plan format only changes
-// the Backend injected here.
-func NewSpecTool(backend Backend) trpctool.Tool {
-	return function.NewFunctionTool(
-		func(ctx context.Context, args specArgs) (Result, error) {
-			req := Request{
-				Op:       Op(args.Op),
-				Name:     args.Name,
-				Artifact: args.Artifact,
-				JSON:     args.JSON,
-			}
-			if !validOps[req.Op] {
-				return Result{}, fmt.Errorf("未知操作 %q。允许: init / new / status / validate / archive / instructions / list", args.Op)
-			}
-			return backend.Run(ctx, req)
+// Declaration reports the tool declaration: the closed operation set as an
+// enumerated field beside the fields the operations consume, so the model reads
+// the whole surface before it calls.
+func (t *Tool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{
+		Name: ToolName,
+		Description: "manage work plans without a shell: one typed operation per call, covering the whole plan lifecycle. " +
+			"The operations prepare the plan workspace (idempotent), create a plan (name required), " +
+			"report the artifact state of a plan (name optional) or of the workspace, " +
+			"check a plan under the strict rule set (name required; plans carrying no spec deltas fail by design), " +
+			"close a plan whose tasks are all checked (name required), " +
+			"return the writing instructions of one artifact (artifact required: proposal/specs/design/tasks), " +
+			"and list the plans of the workspace. Plan files are written and read through the file tools, not through this one.",
+		InputSchema: &trpctool.Schema{
+			Type: "object",
+			Properties: map[string]*trpctool.Schema{
+				"op": {
+					Type:        "string",
+					Description: "the plan operation to run",
+					Enum: []any{
+						string(OpInit),
+						string(OpNew),
+						string(OpStatus),
+						string(OpValidate),
+						string(OpArchive),
+						string(OpInstructions),
+						string(OpList),
+					},
+				},
+				"name": {
+					Type:        "string",
+					Description: "the plan name (kebab-case); required by new, validate and archive",
+				},
+				"artifact": {
+					Type:        "string",
+					Description: "the artifact whose instructions are asked for: proposal, specs, design or tasks",
+				},
+				"json": {
+					Type:        "boolean",
+					Description: "ask for the machine-readable form of status and list",
+				},
+			},
+			Required: []string{"op"},
 		},
-		function.WithName("spec"),
-		function.WithDescription("规格化工作计划管理（无 shell，仅类型化操作）。op 取值：init=确保工作区就绪(幂等)；new=新建计划(需 name)；status=查询计划状态(可加 name/--json)；validate=严格校验(需 name)；archive=归档已完成计划(需 name)；instructions=取 artifact 模板(需 artifact: proposal/specs/design/tasks)；list=列出已有计划。计划文件的读写请改用 file 工具（已锁定在 openspec/ 目录）。本工具不含任何通用命令执行能力。"),
-	)
+	}
 }
 
-// RegisterTool registers the spec tool as a built-in plain tool,
-// backed by the openspec CLI. Agents opt in via config.
-// Properties:
-// - bin: openspec binary name/path
-// - work_dir: working directory containing openspec/ (default: process cwd)
-func RegisterTool() {
-	agent.RegisterPlainTool("spec", func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
-		var opts []OpenSpecOption
-		if cfg.Properties != nil {
-			if bin, ok := cfg.Properties["bin"].(string); ok {
-				opts = append(opts, WithOpenSpecBin(bin))
-			}
-			if dir, ok := cfg.Properties["work_dir"].(string); ok {
-				opts = append(opts, WithWorkDir(dir))
-			}
-		}
-		ct, ok := NewSpecTool(NewOpenSpecBackend(opts...)).(trpctool.CallableTool)
-		if !ok {
-			return nil, fmt.Errorf("spec: tool does not implement CallableTool")
-		}
-		return ct, nil
-	})
+// Call runs one operation through the backend and answers with its result. An
+// operation outside the closed set is refused by name before the backend is
+// reached, and a tool beside no backend refuses every call by name.
+func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
+	var args specArgs
+	if err := json.Unmarshal(jsonArgs, &args); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadArguments, err)
+	}
+	req := Request{
+		Op:       Op(args.Op),
+		Name:     args.Name,
+		Artifact: args.Artifact,
+		JSON:     args.JSON,
+	}
+	if !Valid(req.Op) {
+		return nil, fmt.Errorf("%w: %q (allowed: %s)", ErrUnknownOp, args.Op, allowedOps)
+	}
+	if t.backend == nil {
+		return nil, ErrBackendMissing
+	}
+	return t.backend.Run(ctx, req)
 }

@@ -1,0 +1,700 @@
+{
+  "leaf": "01.2",
+  "title": "消费恢复与位置连续",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "status": "complete",
+  "checkbox": "checked",
+  "completed_at": "2026-10-24T09:19:47Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "ruling": {
+    "contract": "openspec/changes/event-consumption-integrity/changes/00-contract-evidence/evidence/00.3-frozen-contract.json#public_api_or_format_change",
+    "status": "authorized_narrow",
+    "authorized_by": "user ruling at 01.2 stop point",
+    "chosen_candidate": "A",
+    "scope": "runtime/state durable FactLog consume: 键空间；不新增导出 API",
+    "constraints": [
+      "只在既有 FactLog 上新增 consume: 前缀键，按通知四元身份 TaskID/Round/Kind/Seq 编码，与既有 fact:/spec: 键编码风格一致",
+      "回执与事实写入共用同一 Sync 屏障",
+      "load 时回填已确认集合，恢复后不再把已确认通知重放为 owed",
+      "原子边界：先持久回执、后确认内存态；崩溃窗口内宁可重放不可丢确认，重放侧由消费幂等兜底",
+      "回执键空间只用于逻辑消费完成，不用于 Delivery 接受态；不改任务事实链状态机",
+      "除上述窄授权外，不新增其他持久化格式或 public API"
+    ]
+  },
+  "scope": "在 tests/integration/history/event_integrity_test.go（新增，与 02.3/03.4 同文件单写）实现 TestEventIntegrityConsumptionRecovery：既有 task 提交/恢复（task.MemoryRegistry + state.DurableCommit + 真实 localfile tier）与 mailbox Claim/Consume；真实父子进程重启用 exec.Command(os.Args[0], -test.run=^TestEventIntegrityConsumptionRecovery$) + 环境变量握手，父进程轮询 ready 报告后只 kill 自建子进程并 Wait。恢复子进程经正式 Boot 入口读取同一 durable 根；未用测试内存 store 冒充 durable。产品侧按 00.3 的 authorized_narrow 落地候选 A：consume: 回执键、同屏障、load 回填、先持久后确认。",
+  "method": "六个具名子测试：S1/S2 在当前进程内用真实 localfile tier 驱动注册、提交、重试、重开、Restore、mailbox Claim/Consume；S3/S4/S6 用 seed 子进程（真实任务回合 + 独立已领取任务 B 的提交链）→ 父 kill → recover 子进程经 tagent.Boot（host.go:221 -> Assemble host.go:396）从同一 durable 根重新装配；S5 在真实 MemoryStore 上验证位置只推进连续已消费前缀。S6 的消费成功路径由生产 facts.go bookNotice 写回执后驱动。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "tmpdir_resolved": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final",
+    "log_ref_template": "${TMPDIR:-/tmp}/event-consumption-integrity/01.2-final/<name>",
+    "notes": "原始 jsonl/日志只落临时目录；本文件只留摘要、原始退出码、哈希与 log_ref。本机 127.0.0.1:8089 已被一个与本次无关的 wechat-bot 进程占用，Boot 子进程用 TAGENT_HTTP_PORT=0 取临时端口，未终止任何非自建进程。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/history/event_integrity_test.go",
+      "state": "unchanged_since_previous_round",
+      "lines": 1113,
+      "sha256": "347850b472cfaa62acf07223cf451575d0ce5515cf269e33cf5ece8c4e19e1f8",
+      "note": "断言语义未改；本轮无需为回执接线调整装配"
+    },
+    {
+      "path": "runtime/state/durable.go",
+      "state": "modified",
+      "lines": 540,
+      "sha256": "6eeebbbe489f8042874327ea21fa09136119831aaaa6f5c8d79b4e624507f1af"
+    },
+    {
+      "path": "facts.go",
+      "state": "modified",
+      "lines": 580,
+      "sha256": "1ba312594663be862cfd5216dae747d4195643a6ade9831f3ced60b045a0fc78"
+    },
+    {
+      "path": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/evidence/01.2-summary.json",
+      "state": "modified",
+      "role": "本摘要"
+    }
+  ],
+  "product_changes": [
+    {
+      "path": "runtime/state/durable.go",
+      "changes": [
+        "consumePrefix = tagent/task/v1/consume:，与 fact:/spec: 同一 FactLog",
+        "consumeRecord 按 TaskID/Round/Kind/Seq 记录回执，Event 只作内容旁证",
+        "load 扫描 consumePrefix 回填 consumed 集合，fold fact 时跳过已消费 envelope",
+        "RecordConsumption：Put -> Sync -> 写 consumed、从 owed 删除；失败即返回且不确认",
+        "Records 经 unowedLocked 过滤已消费 envelope，使 Restore 不再重开 AwaitingDelivery",
+        "consumeKey 复用既有 \\x00 分隔编码"
+      ]
+    },
+    {
+      "path": "facts.go",
+      "changes": [
+        "bookNotice 在 Claim 成功之后、Consume 之前写持久回执",
+        "consumptionRecorder 可选接口 + (*Run).recordConsumption：无 durable log 的 carrier 不实现回执",
+        "回执写入失败则不确认邮箱，通知保持 owed 可重放"
+      ]
+    }
+  ],
+  "product_change_basis": "00.3 public_api_or_format_change 已由用户裁定为 authorized_narrow，候选 A 是授权范围内最小实现：只新增 consume: 键空间，复用既有 FactLog 与 Sync 屏障，不改变任务事实链的 revision/mutation/outbox 内容，不持久化 Delivery 接受态，不新增第二套消费状态仓。生产消费链由 facts.go 既有 bookNotice→Claim→Consume 路径驱动。",
+  "consumers": {
+    "durable_commit": "task.MemoryRegistry.Register/Advance -> state.NewDurableCommit（runtime/state/durable.go:117-131）-> FactLog Put/Sync（durable.go:249-291）；回执读取在 load（durable.go:141-199），写入在 RecordConsumption（durable.go:208-238），恢复投影在 Records/unowedLocked（durable.go:399-438）",
+    "restore": "state.DurableCommit.Records -> task.MemoryRegistry.Restore/foldLocked -> obligations AwaitingDelivery（runtime/task/restore.go:128-285）；恢复子进程经 tagent.Boot（host.go:221）-> host.go:396 的 Assemble -> run.go:543-590 restoreChains",
+    "mailbox": "state.MemoryStore.AcceptNotice/Claim/Consume（runtime/state/mailbox.go:59/176/201）",
+    "production_consumption": "Run.sink -> bookNotice（facts.go:369-393）：TrackDelivery -> AcceptNotice -> Claim -> recordConsumption（facts.go:390）-> Consume；由 runtime/task/wrapper.go:312 的 w.mailbox(ctx, notice) 在工具 settle 后驱动；durable carrier 由 run.go:298 构造",
+    "diagnostic_read": "Run.Query(ListFilter{Kinds:[ObjectNotice]}) -> memory/query/inventory.go readNotices/noticePhaseOf（memory/query/inventory.go:677-764）"
+  },
+  "subtests": [
+    {
+      "name": "claim_then_commit_retry_recovers",
+      "anchor": "positive",
+      "line": 83,
+      "terminal": "pass",
+      "stable_rounds": "10/10",
+      "asserts": [
+        "领取后不确定提交：CommitUncertain，facts=1（仅 admission），outbox=0，revision=1，claim 保持且无完成回执，消费位置 0",
+        "重试提交：CommitCommitted，facts=2（admission+settle），outbox 1 条 DeliveryPending 且身份相同",
+        "重开真实 localfile tier：chain 2 链；Restore 恢复成功且无 refusal；MemoryManager.Obligations 仍带该通知的 AwaitingDelivery 义务",
+        "随后 Consume 成功：位置 = 该条 AcceptSeq，Receipt.Completed=true"
+      ]
+    },
+    {
+      "name": "consume_only_after_durable_commit",
+      "anchor": "positive",
+      "line": 210,
+      "terminal": "pass",
+      "stable_rounds": "10/10",
+      "asserts": [
+        "提交前 durable.Accept 以具名 ErrNoticeNotOwed 拒绝；空邮箱 Claim(1) 以 ErrEntryUnknown 拒绝",
+        "提交时记录型 FactLog 观测到 Put 先于 Sync，且 Sync 次数增加（记录在屏障之后才报告 durable）",
+        "重开 tier 读到 2 条已提交记录后才 Accept -> DeliveryAccepted；邮箱在未 Claim 时 Consume 以 ErrNotClaimed 拒绝且位置 0，Claim 后 Consume 位置=AcceptSeq"
+      ]
+    },
+    {
+      "name": "independent_process_restart",
+      "anchor": "positive",
+      "line": 296,
+      "terminal": "pass",
+      "stable_rounds": "10/10",
+      "asserts": [
+        "父进程只 kill 自建 seed 子进程并 Wait：signalled=true，signal=killed（原始日志三段齐全：中断/Wait/重启读取）",
+        "recover 子进程经正式 tagent.Boot 从同一 localfile 根恢复两个任务，均 Recovered 且 Refused 为空",
+        "seed 中已领取但未消费的通知在重启后仍可见，phase=owed，Event 与 TargetAgent/TargetSession/TargetInstance 完整保留，Blocked=0（claim 未触发降级）",
+        "seed 邮箱只有 1 个 site、position=0，条目 claim=claimed 且 Completed=false"
+      ]
+    },
+    {
+      "name": "claim_does_not_confirm_early",
+      "anchor": "negative",
+      "line": 340,
+      "terminal": "pass",
+      "stable_rounds": "10/10",
+      "asserts": [
+        "seed 中领取态不是完成态：Completed=false、claim=claimed、邮箱位置 0",
+        "重启后该通知仍以待消费形态出现：phase=owed（明确拒绝成为 consumed）"
+      ]
+    },
+    {
+      "name": "no_skip_over_gap",
+      "anchor": "negative",
+      "line": 373,
+      "terminal": "pass",
+      "stable_rounds": "10/10",
+      "asserts": [
+        "三条已领取通知中先 Consume seq2：其自身完成，但消费位置仍为 0（不跨过 seq1 的空洞），seq1 仍为 claimed",
+        "补 Consume seq1 后位置一次推进到 seq2（连续前缀）",
+        "再 Consume seq3 后位置到 seq3，且不低于先前位置（永不回退）"
+      ]
+    },
+    {
+      "name": "consumed_entry_not_reprocessed",
+      "anchor": "negative",
+      "line": 427,
+      "terminal": "pass",
+      "stable_rounds": "10/10",
+      "asserts": [
+        "seed 中真实工具回合产生的通知已完成消费：phase=consumed，邮箱回执 Completed=true",
+        "父进程 kill 后 recover 子进程（Boot）不再把同一通知报告为 owed：日志为 'restart: the consumed notification task-2:1:settled:0 is not offered again'",
+        "消费回执经 consume: 键与事实共用 Sync 屏障持久化，load 回填后该通知从 owed 中剔除；Records 过滤使 Restore 也不再重开其 AwaitingDelivery"
+      ]
+    }
+  ],
+  "evidence": {
+    "single": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityConsumptionRecovery$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.2-final/single.jsonl\" 2>&1",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/single.jsonl",
+      "log_sha256": "d46a7048ea37f1820d3f8461d05e47accdc8cec598836a8c8ddfff0c1a6cc5c5",
+      "log_bytes": 12778,
+      "terminal": {
+        "TestEventIntegrityConsumptionRecovery": "pass",
+        "claim_then_commit_retry_recovers": "pass",
+        "consume_only_after_durable_commit": "pass",
+        "independent_process_restart": "pass",
+        "claim_does_not_confirm_early": "pass",
+        "no_skip_over_gap": "pass",
+        "consumed_entry_not_reprocessed": "pass"
+      },
+      "checker": "python3 ${log_dir}/check_round.py ${log_dir}/single.jsonl -> exit 0, ok=true, findings=[]",
+      "s6_evidence": [
+        "event_integrity_test.go:298: parent: child Wait → signalled=true signal=killed code=-1",
+        "event_integrity_test.go:431: seed: consumed=task-2:1:settled:0 phase=consumed",
+        "event_integrity_test.go:436: restart: the consumed notification task-2:1:settled:0 is not offered again"
+      ]
+    },
+    "ten_rounds": {
+      "command": "同一单轮命令独立执行 10 次，第 i 轮写入 run-$i.jsonl；未使用 -count=10，未合并日志；每轮单独用 check_round.py 核验",
+      "pattern": "每轮 exit 0、parent=pass、skip=0、6 个具名子测试各 run=1 且终局 pass、S6 两行证据齐全；十轮一致",
+      "checker": "python3 ${log_dir}/check_round.py ${log_dir}/run-$i.jsonl；十轮连接 verdicts.jsonl，全部 ok=true、findings=[]",
+      "rounds": [
+        {
+          "run_id": "run-1",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-1.jsonl",
+          "log_sha256": "37abfc93ad41f89dad900ed20a33d96ae775fe73ee29db6650dc1064a038b10e",
+          "log_bytes": 12774,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-2",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-2.jsonl",
+          "log_sha256": "181ed68dcca4e9bb4097f0751f82398a1ca1d9860c9e7344672ff8bbe277f559",
+          "log_bytes": 12780,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-3",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-3.jsonl",
+          "log_sha256": "6577607205ad29eece019d45b5a4104c03cf1612185244057aa26272b713c53f",
+          "log_bytes": 12778,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-4",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-4.jsonl",
+          "log_sha256": "3dd1baa62574425049e33f6c18b19b101e92b62d6705311ba2b8d6b0d080815c",
+          "log_bytes": 12777,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-5",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-5.jsonl",
+          "log_sha256": "1691d295ee8e72fafe8e79027c5a3e4de82971c2e30a6e3783b55c84d8f78317",
+          "log_bytes": 12779,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-6",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-6.jsonl",
+          "log_sha256": "928c02f1132ea60fecb279a5a645b45e0de37fe0b9ea07648336f528210ce210",
+          "log_bytes": 12778,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-7",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-7.jsonl",
+          "log_sha256": "9d5fc05b1749bd0bac4d06531cf149763dbc735fbacde5797fe95541aae72c7b",
+          "log_bytes": 12778,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-8",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-8.jsonl",
+          "log_sha256": "26b06487760c565889e7fd385e2e555db98dde1da5ef6a08233d6f96827f96ef",
+          "log_bytes": 12778,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-9",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-9.jsonl",
+          "log_sha256": "7fe66fa8f857365dafad1a6f367b01f4e3f62ff4d85db53d9d2b065ab2a0f158",
+          "log_bytes": 12777,
+          "verdict": "ok"
+        },
+        {
+          "run_id": "run-10",
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/run-10.jsonl",
+          "log_sha256": "0b04af954c97b72e8345932e6e59c4e1f9db52425edfcff1b320f801afe5c5b6",
+          "log_bytes": 12780,
+          "verdict": "ok"
+        }
+      ]
+    },
+    "regression": {
+      "history_package": {
+        "command": "go test ./tests/integration/history -count=1",
+        "exit_code": 0,
+        "output": "ok github.com/SpellingDragon/tagent/tests/integration/history 2.581s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/regression-history.txt",
+        "log_sha256": "563a5c91095630457bc437e38ce3daa0627a87979aa169e5ba7bc1682230274e"
+      },
+      "state_package": {
+        "command": "go test ./tests/integration/state -count=1",
+        "exit_code": 0,
+        "output": "ok github.com/SpellingDragon/tagent/tests/integration/state 0.407s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/regression-state.txt",
+        "log_sha256": "01ec8cf6888adc75a2b9c9a6afaccdeabe7e4853445c372999d3455e7f2fedb8"
+      },
+      "execution_package": {
+        "command": "go test ./tests/integration/execution -count=1",
+        "exit_code": 0,
+        "output": "ok github.com/SpellingDragon/tagent/tests/integration/execution 3.046s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/regression-execution.txt",
+        "log_sha256": "e57a310cbb34adc44f99d7399625ce99782edff89e25845b1e714ebf9f6876e9",
+        "note": "01.1 的测试仍在并通过"
+      },
+      "runtime_state_package": {
+        "command": "go test ./runtime/state -count=1",
+        "exit_code": 0,
+        "output": "ok github.com/SpellingDragon/tagent/runtime/state 0.273s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/regression-runtime-state.txt",
+        "log_sha256": "19c3995e799f19f58bae8e5a9c3f6dfcd1d191b1210dbd5a03f925c8d954c519"
+      },
+      "root_package": {
+        "command": "go test . -count=1",
+        "exit_code": 0,
+        "output": "? github.com/SpellingDragon/tagent [no test files]",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/regression-root.txt",
+        "log_sha256": "8dd36089339649ee40ec5401953afaad7c4681e853bb3d2d30a4de73b05ed5db"
+      }
+    },
+    "build_and_lint": {
+      "gofmt": "gofmt -l runtime/state facts.go -> 无输出，exit 0",
+      "go_vet_all": "go vet ./... -> exit 0",
+      "go_build_all": "go build ./... -> exit 0",
+      "go_vet_affected": "go vet ./runtime/state . -> exit 0",
+      "comment_policy_writeset": "go run ./scripts/comment_policy -no-baseline -v runtime/state facts.go -> 0 findings（exit 0）",
+      "comment_policy_product": "go run ./scripts/comment_policy -no-baseline -v *.go api runtime memory evolution telemetry rl tool internal cli -> exit 0；写集 0 findings，另有 1 条写集外既存 finding：evolution/meditation/driver.go:116 free-standing（工作树既有改动，HEAD 无此行）",
+      "event_ownership": "go run ./scripts/codetools event-ownership --check -> exit 0, OK（4 uncovered 仅报告，不计数）",
+      "architecture_policy": "python3 scripts/check_runtime_architecture.py --check-policy --json -> exit 0, warnings=[]",
+      "architecture_implementation": "python3 scripts/check_runtime_architecture.py --implementation --json -> exit 0",
+      "godoc_freshness": "bash scripts/gen_godoc.sh --check -> exit 1；docs/api 两处失配：runtime/state（本轮新增导出方法所致，待授权后重生成）与 scripts/codetools（写集外既存改动，HEAD 未含）"
+    },
+    "forbidden_wiring": {
+      "grep": "grep -c 'SendFace|Recorder|CommitToSession|IssueNotice' tests/integration/history/event_integrity_test.go -> 0",
+      "skips": "grep -n 't.Skip' tests/integration/history/event_integrity_test.go -> 无命中"
+    }
+  },
+  "gap": {
+    "anchor": "consumed_entry_not_reprocessed",
+    "status": "closed",
+    "observed_before": "seed 中通知已完成消费（phase=consumed, Receipt.Completed=true）；父 kill 后 recover 子进程（Boot）把同一通知报告为 phase=owed",
+    "root_cause": "mailbox 的 claim/consumption 与 durable acceptance 都只在内存，没有任何持久消费回执或位置",
+    "code_evidence_before": [
+      "run.go:283 r.store = state.NewMemoryStore(r.authority)",
+      "runtime/state/memory.go:66 MemoryStore 是 in-memory durable one，promises no recovery of its own",
+      "runtime/state/durable.go load 原注释：storage layer never records an acceptance，已提交通知一律按 owed/pending 重放",
+      "runtime/state/durable.go Accept 只改容器内 owed 条目的 Delivery",
+      "grep 'Consume(' runtime/state/durable.go -> 0 命中（持久层没有消费回执）",
+      "facts.go bookNotice 原在交付时 Claim+Consume 于内存 store"
+    ],
+    "resolution": {
+      "authorized_by": "00.3 authorized_narrow（候选 A）",
+      "implementation": "consume: 回执键持久化 + 同 Sync 屏障 + load 回填 + Records 过滤；facts.go 在 Claim 后、Consume 前写回执",
+      "atomic_boundary": "先 Put+Sync 回执，成功后才写内存 consumed 并从 owed 删除，再调用 mailbox Consume；回执失败即返回、不确认邮箱。崩溃在回执之前 -> 通知仍 owed，重启后重放（消费幂等兜底）；崩溃在回执之后、mailbox 确认之前 -> 日志已确认，重启后不再重放，不丢已持久确认。",
+      "replay_side": "重放只可能发生在回执未持久化时；消费侧按通知四元身份幂等，重复投递不产生第二次逻辑消费"
+    }
+  },
+  "before_after": {
+    "before": {
+      "status": "blocked",
+      "single_exit_code": 1,
+      "single_log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2/single.jsonl",
+      "single_log_sha256": "d1f9c5e33a16a121a58b5cbe8d822dfb09119a7c69417a3a630ef2f1c90347e6",
+      "s6_terminal": "fail",
+      "ten_rounds": "10/10 fail（同一业务断言）",
+      "evidence": "旧摘要 gap/root_cause 与本轮删除前的 01.2-summary.json 记录；日志仍在 01.2/ 目录"
+    },
+    "after": {
+      "status": "complete",
+      "single_exit_code": 0,
+      "single_log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.2-final/single.jsonl",
+      "single_log_sha256": "d46a7048ea37f1820d3f8461d05e47accdc8cec598836a8c8ddfff0c1a6cc5c5",
+      "s6_terminal": "pass",
+      "ten_rounds": "10/10 pass（check_round.py 逐轮 ok=true）",
+      "evidence": "single.jsonl 与 run-1..10.jsonl 均含 'seed: consumed=task-2:1:settled:0 phase=consumed' 与 'restart: the consumed notification task-2:1:settled:0 is not offered again'"
+    }
+  },
+  "deviations": [
+    {
+      "planned": "父子进程重启：seed 与 recover 的装配入口",
+      "actual": "recover 子进程走正式 tagent.Boot（恢复锚满足任务行『Boot 恢复』）；seed 子进程用 tagent.Assemble 驱动一个真实工具回合",
+      "reason": "Boot 的 HostOption 只有 WithSender（host.go:146-152），宿主文档无法声明本测试的自定义 native 工具 probe；seed 需要真实工具回合产生通知，只能经同一 Assemble 入口。恢复不需要工具，改走 Boot。",
+      "impact": "重启读取同一 durable 根、同一 restoreChains/BindingOwners 路径；不改变被测语义"
+    },
+    {
+      "planned": "不新增导出 API（包内实现）",
+      "actual": "runtime/state 新增导出方法 (*DurableCommit).RecordConsumption；facts.go 经可选接口 consumptionRecorder 调用",
+      "reason": "facts.go 属根包，跨包无法调用 runtime/state 的未导出方法。穷举后无包内方案：run.go:283 构造 MemoryStore、run.go:298 构造 DurableCommit，链接二者需改 run.go（本轮写集外）；包级注册表会引入全局状态；facts.go 直写 ledger 会复制键编码/屏障逻辑，等同第二套消费状态仓；现有导出方法（Commit/Accept/Declare/Records）语义均不承载消费完成。方法为附加式、仅实现于 *DurableCommit、不改变任何既有签名。",
+      "impact": "00.3 的 scope 注明『不新增导出 API』，本项超出该窄授权，需编排者/00.3 回填认可；docs/api 的 runtime/state 页面因此 stale（gen_godoc --check 红），本轮未改 docs/api 生成物",
+      "alternative_if_rejected": "授权修改 run.go 在构造 DurableCommit 后注入回执写入口，或把回执写入下沉到 MemoryStore.Consume（需构造期链接），即可收回导出方法"
+    },
+    {
+      "planned": "01.2 任务行写集不含 facts.go，且写『不新增持久化格式』",
+      "actual": "本轮按调派令修改 facts.go，并按 00.3 authorized_narrow 新增 consume: 持久键",
+      "reason": "调派令第 1、2 条明确授权 consume: 键空间与 facts.go 消费成功点接线；00.3 的 authorized_narrow 已把『不新增持久化格式』窄化为『只允许 consume: 键空间』",
+      "impact": "任务行文本与 task-graph write_files 需回写；产品面仍不触碰 00.2/03.1 已落文件与任务事实链状态机"
+    },
+    {
+      "planned": "事实链与恢复面完全不变",
+      "actual": "DurableCommit.Records 经 unowedLocked 过滤已消费 envelope",
+      "reason": "恢复面 runtime/task/restore.go 会按每条 fact 的 Outbox 重开 AwaitingDelivery；本轮写集不含 restore.go，只能在 Records 读面过滤，避免已消费通知在恢复后重开义务。持久化的 fact 记录、revision、mutation、Outbox() 均不变",
+      "impact": "仅改变恢复投影，不改变事实链状态机与幂等比较"
+    }
+  ],
+  "assumptions": [
+    {
+      "item": "no_skip_over_gap 的判定口径",
+      "assumption": "按『消费位置』解释：位置只推进连续已消费前缀，不跨过未完成项；mailbox 允许洞旁条目自身完成而位置停在洞前（session.go / mailbox.go Consume 的既有语义）",
+      "if_wrong": "若验收要求『后续条目不得先完成』，当前实现与该口径冲突，需要另行裁定"
+    },
+    {
+      "item": "consumed_entry_not_reprocessed 的可观测面",
+      "assumption": "重启后 Query 不再把同一通知报告为 owed，等价于它不再进入投递/消费路径（本锚在旧实现中正是以 owed 出现而失败）",
+      "if_wrong": "若要求证明第二次实际消费动作未发生，需在恢复进程再驱动一次 Flush/回合；本锚按旧失败面反证，语义与任务行一致"
+    },
+    {
+      "item": "回执写入与 mailbox Consume 的原子边界",
+      "assumption": "回执先持久、邮箱后确认；回执成功而 Consume 失败时，日志已确认，重启不再重放（以已持久确认为准）",
+      "if_wrong": "若要求 Consume 失败也回滚回执，需在 DurableCommit 增加补偿删除；与『宁可重放不可丢确认』的裁定方向相反"
+    },
+    {
+      "item": "seed 中已领取任务的邮箱归属",
+      "assumption": "用产品 state.MemoryStore 在同一 address/instance 上记录 claim（与 runtime 内部 store 同实现；runtime 的 store 未导出）",
+      "if_wrong": "不影响结论：重启后 owed 来自 durable chain 重放，不依赖该内存 store"
+    },
+    {
+      "item": "Boot 子进程的监听端口",
+      "assumption": "TAGENT_HTTP_PORT=0 让 Boot 的 loopback face 取临时端口；本机 8089 被无关 wechat-bot 占用，未终止任何非自建进程",
+      "if_wrong": "仅影响测试环境的端口选择，不改变任何被测语义"
+    }
+  ],
+  "notes": [
+    "01.2 checkbox 已勾选；仅改 01 域 tasks.md 的 01.2 一行，未改 00.2/03.1 已落文件，未触碰 01.3 的双路材料/忙丢缺陷。",
+    "原始日志与逐轮 verdicts 落 ${TMPDIR:-/tmp}/event-consumption-integrity/01.2-final/；change 内只留摘要、退出码、哈希与 log_ref。",
+    "复跑：mkdir -p ${TMPDIR:-/tmp}/event-consumption-integrity/01.2-final；按单轮命令执行；十轮按 run-$i.jsonl 独立执行并用 check_round.py 逐轮核验。",
+    "既存写集外红项：evolution/meditation/driver.go:116 comment finding 与 scripts/codetools docs/api stale 均来自工作树先前批次，不是本叶产物；未修复。"
+  ],
+  "reopened_patch": {
+    "generated_at": "2026-10-24T09:19:47Z",
+    "task_line": "01.2 补差重开：追加 handover_before_confirmation，先红证后修；证明交接结果可恢复后再确认消费；产品改动限 facts.go（sink/bookNotice 顺序）+ 按需 runtime/state。",
+    "anchor": {
+      "name": "TestEventIntegrityConsumptionRecovery/handover_before_confirmation",
+      "file": "tests/integration/history/event_integrity_test.go",
+      "shape": "父子进程真实重启：seed 子进程经正式 Assemble + 声明式 native 工具 probe 驱动一个真实工具回合，在交接内部（Consume 与 Backflow 之间等价的 commitSettled After 通道）用 WithPlugins + PostCommitObserver 阻断；父进程读 ready 报告后 kill 子进程；recover 子进程经正式 Boot 打开同一 durable 根。",
+      "signal_point": "tagent.WithPlugins(func(*Run)([]plugin.Instance,error)) 注册 handoverProbe（PostCommitObserver）：只对 TypeTaskSettled 且 MetaKeySettleTriggerSource 为空的事实（即 loop.commitSettled 的交接事实，非 tools.observeSettleDelivery 盖章路径）闭锁 reached 并阻塞至被杀。此刻 durable 状态等价于『sink 在 Backflow 之前退出』。",
+      "positive_assert": "restart 后任务 task-1 由 Recovery 重建（Recovered=true），通知 task-1:1:settled:0 仍以 phase=owed 出现，Event/TargetAgent/TargetSession/TargetInstance 与 seed 读取的身份一致 —— 交接结果可恢复。",
+      "negative_assert": "seed 读到的相位 MUST NOT 是 consumed（交接前确认即令该通知从恢复链消失 → 结果不可恢复）；seed 相位必须是 claimed。"
+    },
+    "red": {
+      "implementation": "修复前 facts.go bookNotice 在 Claim 之后立即 Consume（先持久 consume: 回执再内存确认），sink 之后才 loop.Backflow。",
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityConsumptionRecovery$/^handover_before_confirmation$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.2-patch/red.jsonl\" 2>&1",
+      "exit_code": 1,
+      "log": {
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/red-prefix-child-selector.jsonl",
+        "log_sha256": "3cf9429865ee7c62811f8381d0bc89bd32c7f6bef8a68bbc7f83c256cd4b6d8a",
+        "log_bytes": 4234,
+        "parent": "TestEventIntegrityConsumptionRecovery",
+        "named_tests_run_pass": 0,
+        "skip": 0,
+        "fail": 2,
+        "all_pass": false,
+        "tests": {
+          "TestEventIntegrityConsumptionRecovery": {
+            "run": 1,
+            "pass": 0,
+            "skip": 0,
+            "fail": 1
+          },
+          "TestEventIntegrityConsumptionRecovery/handover_before_confirmation": {
+            "run": 1,
+            "pass": 0,
+            "skip": 0,
+            "fail": 1
+          }
+        }
+      },
+      "failure_message": "event_integrity_test.go:325: the settled result of task-1:1:settled:0 is not recoverable after the restart: the interrupted handover left no owed notification, so nothing hands the result over again (the seed stood in phase \"consumed\" inside the handover, and a confirmation recorded before the handover starves the outbox of that notification)",
+      "seed_phase": "consumed",
+      "note": "红证用子 selector（父 + 新锚）跑修复前实现：父 fail=1，新锚 fail=1，其余锚未参与；红证与绿证都是同一业务断言的两次读数。"
+    },
+    "fix": {
+      "path": "facts.go",
+      "symbols": [
+        "Run.sink",
+        "Run.bookNotice"
+      ],
+      "change": "bookNotice 在 TrackDelivery -> AcceptNotice -> Site -> Claim 后返回 AcceptSeq 而不再 Consume；sink 在 bookNotice 成功后调用 loop.Backflow 交接，交接完成后才 store.Consume。注释改写为『claim 不是确认，交接前写回执会让未交接的通知从恢复链消失』。",
+      "invariant": "交接结果可恢复后才确认消费：回执在 Backflow 返回后写入；崩溃于 Backflow 之前 → 通知仍 owed，重启后重新交接；崩溃于回执之后 → 已交接且已确认，不重复。",
+      "discipline_check": "不是仅挪动确认调用：新锚证明重启后可恢复（phase=owed、事件身份保留、Recovery 重建任务）；未恢复正文双路输入（handover 测试不引入 Input 事实，sink 仍是唯一通知消费者入口）。"
+    },
+    "green": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityConsumptionRecovery$' -count=1 -race -json -timeout 10m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.2/single.jsonl\" 2>&1",
+      "exit_code": 0,
+      "single": {
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/single.jsonl",
+        "log_sha256": "0e1a928d4f1b6484c2a052f3d894e0b7641189db821965ed5420c504e09d9d12",
+        "log_bytes": 15141,
+        "parent": "TestEventIntegrityConsumptionRecovery",
+        "named_tests_run_pass": 7,
+        "skip": 0,
+        "fail": 0,
+        "all_pass": true,
+        "tests": {
+          "TestEventIntegrityConsumptionRecovery": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/claim_then_commit_retry_recovers": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/consume_only_after_durable_commit": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/handover_before_confirmation": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/independent_process_restart": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/claim_does_not_confirm_early": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/no_skip_over_gap": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          },
+          "TestEventIntegrityConsumptionRecovery/consumed_entry_not_reprocessed": {
+            "run": 1,
+            "pass": 1,
+            "skip": 0,
+            "fail": 0
+          }
+        }
+      },
+      "rounds_command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.2\"; for i in $(seq 1 10); do go test ./tests/integration/history -run '^TestEventIntegrityConsumptionRecovery$' -count=1 -race -json -timeout 10m > \"$E/run-$i.jsonl\" 2>&1; done",
+      "ten_rounds": [
+        {
+          "round": 1,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-1.jsonl",
+          "log_sha256": "f03a0989a1a968ae263e469bacc4e10feef1873b541add1a6a57ffbbccc87836",
+          "log_bytes": 15143,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 2,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-2.jsonl",
+          "log_sha256": "cc80c428e4ea56ceecdf12c95381e874f74ff7b9f39a010d73ce3d5e36d6a804",
+          "log_bytes": 15147,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 3,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-3.jsonl",
+          "log_sha256": "5f01c9fe6aed0691ff2de2c9ca676c724b74fad4062afb077532d31da30e3d0f",
+          "log_bytes": 15141,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 4,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-4.jsonl",
+          "log_sha256": "36b84ff8be8ac474fbe2271858ddac1549fae3e87afbe8b6138f6a8ff2e6171b",
+          "log_bytes": 15145,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 5,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-5.jsonl",
+          "log_sha256": "aa895c251b0afc14ffcaf007aa1ed3f43e7ded248d08604b5bc725df6edef3c6",
+          "log_bytes": 15142,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 6,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-6.jsonl",
+          "log_sha256": "c4ad71c94ed152ab171f538ae748d30444be16ca60c50362091ec0de5f2e6fa3",
+          "log_bytes": 15145,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 7,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-7.jsonl",
+          "log_sha256": "4f03791904f209c91df2f9e20209749c247e6336b04dbfbb64543554d921f28f",
+          "log_bytes": 15162,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 8,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-8.jsonl",
+          "log_sha256": "ccd38ab8d2590822f56db07c8b408a90e6dfff8476eb5faae7d0a3c7ebf4eb90",
+          "log_bytes": 15143,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 9,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-9.jsonl",
+          "log_sha256": "2614481c755b3d0c25815db330950d83a42719b4ee5f7609cbcbb4ed7cbcb8e8",
+          "log_bytes": 15146,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        },
+        {
+          "round": 10,
+          "exit_code": 0,
+          "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.2/run-10.jsonl",
+          "log_sha256": "d0b611c1136bd0df66a03b5092ed3252de184dea798566380fde4e8caa73faa3",
+          "log_bytes": 15145,
+          "parent_run_pass": true,
+          "named_tests_run_pass": 7,
+          "skip": 0,
+          "fail": 0
+        }
+      ],
+      "key_log_lines": [
+        "seed: pid=56843 notice=task-1:1:settled:0 phase=claimed event=2-a51481e4073bd4fbd8443c5f154356b1",
+        "restart: pid=56844 rebuilt=1 notice=task-1:1:settled:0 phase=owed",
+        "seed: pid=56847 consumed=task-2:1:settled:0 claimed=task-1:1:settled:0 position=0",
+        "restart: pid=56849 rebuilt=2 notices=1 owed=task-1:1:settled:0 notes=[the restart opened through tagent.Boot]"
+      ],
+      "original_anchors_no_regression": "同一父测试的 6 个原有锚（claim_then_commit_retry_recovers、consume_only_after_durable_commit、independent_process_restart、claim_does_not_confirm_early、no_skip_over_gap、consumed_entry_not_reprocessed）在单轮与十轮中全部 run=1 pass=1。"
+    },
+    "family_regression": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrity' -count=1 -race -json -timeout 20m",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T//event-consumption-integrity/01.3-patch/family-history.jsonl",
+      "summary": "TestEventIntegrityConsumptionRecovery（8 个具名测试）与 TestEventIntegrityRestart（10 个具名测试）全部 run=1 pass=1。"
+    },
+    "hygiene": {
+      "gofmt": {
+        "command": "gofmt -l facts.go tests/integration/history",
+        "exit_code": 0,
+        "output": ""
+      },
+      "vet": {
+        "command": "go vet ./tests/integration/history/ .",
+        "exit_code": 0,
+        "output": ""
+      },
+      "build": {
+        "command": "go build ./...",
+        "exit_code": 0
+      },
+      "ownership": {
+        "command": "go run ./scripts/codetools event-ownership --check",
+        "exit_code": 0,
+        "violations": 0,
+        "output_tail": "event-ownership: OK (4 uncovered call site(s) reported, none counted as covered)"
+      }
+    }
+  }
+}

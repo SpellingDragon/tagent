@@ -1,0 +1,244 @@
+{
+ "audited_at": "2026-10-25",
+ "conclusion": "42/42 叶均有可溯源证据（TMPDIR 目录、change 内 summary 或在树产物）；05 域 05.1—05.4 全勾，05.4 已按任务行字面全量重跑（24 条命令全 exit 0、bundle 17 份证据 ok=true、三负锚演练全红）。V8（race 门红于上游 trpc-mcp-go v0.0.10 既有竞态）经编排者裁定选项 A 转 resolved：race_check.sh 增双签名豁免、LEDGER 记 U5、分类器自测 15 例全 PASS，最终 race 门 WAIVED exit 0。新增 V9（preflight 唯一红片：同一分片在 05.4 字面矩阵绿、preflight 重复执行红，受控重跑绿；红证保留，定性为重启代对账 flake）。F3 判定为『达标』，已勾选；唯一未勾为 F4（远端/归档待授权）。",
+ "deviations": [
+  {
+   "action": "已修复并复验：V8 于终收口转 resolved，05.4/1.6/F2/F3 已全勾",
+   "evidence": "final/bundle-gate2.json；check_runtime_evidence.py:2329-2340 与 run_runtime_scenarios.py:912-921",
+   "finding": "bundle 门对真实 17 份证据（6 long + 10 short + 1 mutation）判红：唯一 error 为 module_fingerprints 跨 scope 不一致（short 3 模块 vs long 1 模块），其余检查全过",
+   "id": "V1",
+   "severity": "blocker",
+   "status": "resolved",
+   "resolution": "check_bundle_module_fingerprints 按 module_path 求交集比对（共享模块 digest/revision 必须一致，非交集模块按 scope 差异接受）；fixture 改为 short 3 模块 / long 1 共享模块；checker 自测 94 OK；17 份真实证据 bundle 门 ok=true/errors=[]；负例（共享 wechat-bot digest 改写）仍红",
+   "where": "05.2/05.4"
+  },
+  {
+   "action": "已修复：预算按 03.11 实测重算并登记，05.3 文档同步转『已落地（L1）』",
+   "evidence": "03.11-summary.json ci_budget（六片 test-log Elapsed 533/799/623/792/530/878s）",
+   "finding": "CI long 预算 600s/12min 小于实测分片耗时（4/6 >600s，最大 878s；3/6 超过或逼近 12min 作业帽）",
+   "id": "V2",
+   "severity": "blocker",
+   "status": "resolved",
+   "resolution": "ci.yml long 片 --timeout 1200（878s 最大值 ×1.37）、job timeout-minutes 25；preflight.sh 同步 1200；test_check_runtime_workflow.py 断言同步（39 tests OK）；注释改为 03.11 实测口径 533/799/623/792/530/878s",
+   "where": "05.1/05.2"
+  },
+  {
+   "action": "按派单口径勾选，缺口 57 次登记为债务，预算另计",
+   "evidence": "03.11-summary.json stability（orig/stab2/stab3）",
+   "finding": "交付稳定性 10 轮 × 六组合（60 次）未执行，仅同组合 3 次复跑",
+   "id": "V3",
+   "severity": "debt",
+   "where": "03.11"
+  },
+  {
+   "action": "接受，已披露",
+   "evidence": "03.11-v2/red-runs/seed-1-256-catchup2 与 seed-1-256-rerun",
+   "finding": "1-256 红片以 1 次受控重跑转绿，红证保留",
+   "id": "V4",
+   "severity": "info",
+   "where": "03.11"
+  },
+  {
+   "action": "接受，lint 复绿",
+   "evidence": "05.4/lint.log 与 lint3.log",
+   "finding": "04.2 勾选格式曾被转义为 04\\.2 致 lint 报缺 checkbox，已去转义",
+   "id": "V5",
+   "severity": "info",
+   "where": "04 域"
+  },
+  {
+   "action": "接受，不记为缺口",
+   "evidence": "文件逐一存在核验 + check_runtime_architecture --implementation exit 0",
+   "finding": "04.1/04.3/04.5 无独立 summary JSON，以在树产物为证据（golden/runtime/event_integrity_scenarios.json、scripts/codetools/event_ownership.go(+test)、scripts/check_runtime_plan.py）",
+   "id": "V6",
+   "severity": "info",
+   "where": "04 域"
+  },
+  {
+   "action": "已落地 change 内证据摘要（05.2/05.3/05.4 三份）",
+   "evidence": "ls changes/05-mr-integration 无 evidence/；TMPDIR/05.1 存在",
+   "finding": "05-mr-integration 无 change 内 evidence 目录；05.1 已勾但证据仅存于 TMPDIR（易失），其余域均有 change 内 summary",
+   "id": "V7",
+   "severity": "debt",
+   "status": "resolved",
+   "resolution": "已落 change 内 evidence/05.2-summary.json、05.3-summary.json、05.4-summary.json（含原始退出码与 log_ref）",
+   "where": "05 域"
+  },
+  {
+   "action": "已按编排者裁定选项 A 处置：登记上游 waiver（RACE_WAIVER_SIGNATURES 增 'trpc-mcp-go.*streamableHTTPClientTransport' 与 'trpc-mcp-go.*streamable_client\\.go'；LEDGER 记 U5（U4 已被 BeforeModel 时序占用）；test_race_check.sh 增 waived 正例 + 普通失败仍红 + server 侧帧仍红三例）；05.4/1.6/F2/F3 随后全勾",
+   "evidence": "evidence/05.4-summary.json（race_finding）；05.4/race-final.log；05.4/base-race-1..5.log；05.4/race-capabilities-only.log",
+   "finding": "race_check exit 1：2 处 DATA RACE 的 top frame 全在 trpc-mcp-go@v0.0.10/streamable_client.go（setSessionID/send/connectGetSSE/handleGetSSEEvents/handleSSEResponse），无 tagent-owned top frame；基线 f900ca2 副本（同 test 文件、同依赖、tool/mcp 零 diff）连跑 5 次 5/5 红，工作树连跑 8 次 8/8 红——系 05.1 按 D1 把 capabilities 纳入 race 集合后暴露的既有上游竞态，非本 change 引入",
+   "id": "V8",
+   "resolution": "race_check.sh 增两条 trpc-mcp-go 签名（符号行与路径行各一条，单路径签名会漏符号行）；LEDGER 记 U5（移除条件=升级到含上游修复版本）；分类器自测 15 例全 PASS（含 waived 正例、waived+plain failure 仍红、server 侧帧未登记仍红）；05.4 字面 race 集合 WAIVED 3 races exit 0，ci.yml 精确集合 WAIVED 2 races exit 0；真实旧红日志回放 WAIVED exit 0",
+   "severity": "blocker",
+   "status": "resolved",
+   "where": "05.4/F2"
+  },
+  {
+   "action": "已定性并披露：非重复投递、无重复答复；红证保留 + 受控重跑绿",
+   "evidence": "05.4-final/preflight.log:1925/1949（横幅+long 实跑）；preflight/event-long/seed-42-window-32768（红，run_id 3dd05182…，input_requests=1202）；05.4-final/preflight-red-rerun/seed-42-window-32768（绿，run_id 01b2b7ab…，requests=1201）",
+   "finding": "preflight --skip-smoke 的唯一红片：event-long seed=42/window=32768 报 `input identity does not reconcile: missing=[] duplicate=[SMOKE-R421096 x2]`（positive 与 consumer 子测试同因失败，negative 通过）；同一分片在同一树的 05.4 字面矩阵中 verdict=match",
+   "id": "V9",
+   "resolution": "逐层取证：gen108 报告 inputs 仅 1 条采样、outbound 仅 1 条 delegate ack + 1 条 settle-ack（无重复答复）；provider 侧多出 1 次同 last-user-text 入口调用（messages 12→14），发生在 restart_point 代（kill→ready 4.83s、recovered_tasks=116），属重启代对账口径对“一次投递多轮模型调用”的敏感性；与 03.11-v2 catchup2 同签名（V4 已判 flake）。受控重跑 verdict=match/exit 0；1 红 / 13 次分片执行",
+   "severity": "info",
+   "where": "05.4"
+  }
+ ],
+ "leaf": "F3",
+ "sampling": {
+  "key_evidence": {
+   "03.11-summary": true,
+   "04.2-final": true,
+   "05.4-summary": true,
+   "F1-recheck": true,
+   "bundle-gate2": true,
+   "final-bundle": true
+  },
+  "leaf_evidence_dirs_missing": "仅统计 TMPDIR 同名目录；00.3、05.2、05.3 以 change 内 summary 为证据；04.1/04.3/04.5 以在树产物为证据；05.4 为 change 内 summary + TMPDIR 真跑证据（05.4-final）",
+  "leaf_evidence_dirs_present": 38,
+  "leaf_evidence_sources": {
+   "00.1": "tmpdir",
+   "00.2": "tmpdir",
+   "00.3": "change-evidence",
+   "00.4": "tmpdir",
+   "01.1": "tmpdir",
+   "01.10a": "tmpdir",
+   "01.10b": "tmpdir",
+   "01.2": "tmpdir",
+   "01.3": "tmpdir",
+   "01.4": "tmpdir",
+   "01.5": "tmpdir",
+   "01.6": "tmpdir",
+   "01.7": "tmpdir",
+   "01.8": "tmpdir",
+   "01.9": "tmpdir",
+   "02.1": "tmpdir",
+   "02.2": "tmpdir",
+   "02.3": "tmpdir",
+   "02.4": "tmpdir",
+   "02.5": "tmpdir",
+   "02.6": "tmpdir",
+   "02.7": "tmpdir",
+   "03.1": "tmpdir",
+   "03.10": "tmpdir",
+   "03.11": "tmpdir",
+   "03.2": "tmpdir",
+   "03.3": "tmpdir",
+   "03.4": "tmpdir",
+   "03.5": "tmpdir",
+   "03.6": "tmpdir",
+   "03.7": "tmpdir",
+   "03.8": "tmpdir",
+   "03.9": "tmpdir",
+   "04.1": "in-tree-artifact",
+   "04.2": "tmpdir",
+   "04.3": "in-tree-artifact",
+   "04.4": "tmpdir",
+   "04.5": "in-tree-artifact",
+   "05.1": "tmpdir",
+   "05.2": "change-evidence",
+   "05.3": "change-evidence",
+   "05.4": "change-evidence+tmpdir"
+  },
+  "leaves_without_pointer": "无；42/42 叶均有指针（05.4 为 change 内 summary + TMPDIR 真跑证据）"
+ },
+ "scope": {
+  "domains": {
+   "00-contract-evidence": {
+    "checked": 4,
+    "leaves": [
+     "00.1",
+     "00.2",
+     "00.3",
+     "00.4"
+    ],
+    "unchecked": []
+   },
+   "01-runtime-consumption": {
+    "checked": 11,
+    "leaves": [
+     "01.1",
+     "01.2",
+     "01.3",
+     "01.4",
+     "01.5",
+     "01.6",
+     "01.7",
+     "01.8",
+     "01.9",
+     "01.10a",
+     "01.10b"
+    ],
+    "unchecked": []
+   },
+   "02-event-consumers": {
+    "checked": 7,
+    "leaves": [
+     "02.1",
+     "02.2",
+     "02.3",
+     "02.4",
+     "02.5",
+     "02.6",
+     "02.7"
+    ],
+    "unchecked": []
+   },
+   "03-formal-simulation": {
+    "checked": 11,
+    "leaves": [
+     "03.1",
+     "03.2",
+     "03.3",
+     "03.4",
+     "03.5",
+     "03.6",
+     "03.7",
+     "03.8",
+     "03.9",
+     "03.10",
+     "03.11"
+    ],
+    "unchecked": []
+   },
+   "04-regression-gates": {
+    "checked": 5,
+    "leaves": [
+     "04.1",
+     "04.2",
+     "04.3",
+     "04.4",
+     "04.5"
+    ],
+    "unchecked": []
+   },
+   "05-mr-integration": {
+    "checked": 4,
+    "leaves": [
+     "05.1",
+     "05.2",
+     "05.3",
+     "05.4"
+    ],
+    "unchecked": []
+   }
+  },
+  "leaves_checked": 42,
+  "leaves_total": 42,
+  "root_items": {
+   "1.1": true,
+   "1.2": true,
+   "1.3": true,
+   "1.4": true,
+   "1.5": true,
+   "1.6": true,
+   "F1": true,
+   "F2": true,
+   "F3": true,
+   "F4": false
+  }
+ },
+ "ticked": true,
+ "title": "独立偏差验收（单 AH 自任验证者）",
+ "verdict": "达标"
+}

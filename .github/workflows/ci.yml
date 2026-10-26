@@ -19,12 +19,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth 2 gives the commit-scope lint stage a parent to diff against:
+      # fetch-depth 0 keeps every citation-introducing commit reachable for the
+      # doc-refs citation-level anchors, and still gives commit-scope a parent:
       # the default shallow checkout grafts HEAD into a parentless commit, where
       # `git show --name-only` lists the whole tree.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -52,9 +53,9 @@ jobs:
       - name: Test (short)
         run: go test ./... -short -count=1
 
-      # Second module (resident-remaining-hardening 3.5): examples/wechat-bot is
-      # an independent module with no go.work, so the root `./...` never reaches
-      # it. Build/vet/test it explicitly or its regressions ship silently.
+      # Separate modules: examples/wechat-bot and examples/cli-host are
+      # independent modules with no go.work, so the root `./...` never reaches
+      # them. Build/vet/test each explicitly or its regressions ship silently.
       - name: Build (bot module)
         working-directory: examples/wechat-bot
         run: go build ./...
@@ -67,13 +68,27 @@ jobs:
         working-directory: examples/wechat-bot
         run: go test ./... -short -count=1
 
-      # Root package at the scheduling floor: with one P, a witness cannot be
-      # satisfied by whichever round happens to arrive first, so the attribution
-      # discipline of the in-flight/pinned-hop assertions is actually exercised.
-      # Admitted after three consecutive green local runs plus 75 targeted runs
-      # under GOMAXPROCS=1.
-      - name: Test (root package at the scheduling floor)
-        run: GOMAXPROCS=1 go test . -short -count=1
+      # Third module: examples/cli-host is likewise independent (no go.work), so
+      # the root `./...` never reaches it either.
+      - name: Build (cli-host module)
+        working-directory: examples/cli-host
+        run: go build ./...
+
+      - name: Vet (cli-host module)
+        working-directory: examples/cli-host
+        run: go vet ./...
+
+      - name: Test (cli-host module, short)
+        working-directory: examples/cli-host
+        run: go test ./... -short -count=1
+
+      # Scheduling floor: the attribution witnesses (delegation completion,
+      # handoff future notifications, receipt/background separation) live in
+      # tests/integration/execution; "which round happened to arrive first may
+      # not satisfy the witness" is exactly what one P exercises. GOMAXPROCS=1
+      # fixes the round order (~2.5s).
+      - name: Test (execution witnesses at the scheduling floor)
+        run: GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1
 
       # Comment whitelist, enforced as a ratchet: a batch may lower the per-rule
       # totals in scripts/comment_policy/baseline.json but never raise one. Slots are
@@ -104,10 +119,13 @@ jobs:
       # offending frame matches a registered upstream signature AND there is
       # no plain (non-race) failure. A green-looking race log from a failed
       # command (compile error / bad package / timeout) can never be reported
-      # as success. Package set widened to the memory SUBpackages, plugin, and
-      # rl (was: top-level memory only, no plugin/rl).
-      - name: Race (root + memory subpkgs + agent + evolution + event + tools + plugin + rl)
-        run: ./scripts/race_check.sh . ./memory/... ./agent/... ./evolution/ ./event/ ./tool/... ./plugin/ ./rl/
+      # as success. The package set is mapped from every modified product
+      # package and every formal integration suite, not just host/history: the
+      # event work touched runtime/{agent,task,state}, memory, evolution, rl,
+      # tool, api/{event,plugin} and all six integration trees, and a shrunken
+      # set would quietly drop them from the race gate.
+      - name: Race (root + memory + runtime + evolution + api + tool + rl + all integration suites)
+        run: ./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./evolution/... ./api/event/... ./tool/... ./api/plugin/... ./rl/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the
@@ -157,5 +175,225 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      # `go test -list '^TestSoak' ./tests/integration/host` names the real
+      # test: TestSoakContinuity in tests/integration/host, with no build tag.
+      # The old command pointed at a non-existent ./tests package and a
+      # TestSoak_Continuity that never existed here. Manual dispatch only; this
+      # job is neither the per-MR long run nor a required dependency.
       - name: Soak (write→compress→recall→restart × N)
-        run: go test ./tests/ -tags soak -run TestSoak_Continuity -count=1 -v -timeout 45m -args -rounds=30 -events-per-round=30
+        run: go -C . test ./tests/integration/host -run '^TestSoakContinuity$' -count=1 -v -timeout 45m -args -rounds=30 -events-per-round=30
+
+  # Event-integrity gates (event-consumption-integrity 05.1). Every pull request
+  # and every push to main/dev runs all three production jobs. No paths filter,
+  # no job-level if, no continue-on-error, no credential gate: a skipped event
+  # job is a silent hole in the consumption proof, and GitHub can present a
+  # skipped required check as success, so the skip hatches are removed at the
+  # source rather than papered over in the summary job.
+  event-integrity-short:
+    runs-on: ubuntu-latest
+    # 03.10 did not measure the short scope; 05.1 measured one full short round
+    # at 2m58s, so ten independent rounds are ~30m. 45m is that measurement
+    # times 1.5 headroom - the candidate 20m would kill the ten-round job.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # Ten independent runner processes, each its own `go test -count=1 -race
+      # -json`: ten logs, ten UUID run-ids, repeat_index 1..10. No `-count`
+      # amplification, and no --test-id subset: CI runs the complete scope.
+      - name: Event integrity short (ten independent rounds)
+        run: python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out "$RUNNER_TEMP/event-short"
+      - name: Upload event-short evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-integrity-short
+          path: ${{ runner.temp }}/event-short
+          if-no-files-found: error
+
+  event-integrity-long:
+    runs-on: ubuntu-latest
+    # 03.11 measured all six shards end to end: 533/799/623/792/530/878s, so
+    # the slowest shard is 878s. --timeout 1200 gives ~1.4x headroom on that
+    # shard, and timeout-minutes 25 (1500s) leaves ~300s for checkout, toolchain
+    # setup, tmux install and the artifact upload. The 03.10 extrapolation
+    # (2.39min) and the earlier 109-110s-per-shard claim were both wrong by
+    # 5-8x; 4/6 shards exceeded the old 600s bound.
+    timeout-minutes: 25
+    strategy:
+      # A red shard must not cancel the other five: every combination keeps
+      # its own evidence.
+      fail-fast: false
+      matrix:
+        seed: [1, 7, 42]
+        window: [256, 32768]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # One shard is 1200 distinct inputs / 120 real process restarts; the six
+      # shards add up to 7200 inputs / 720 restarts, and a single shard is never
+      # written as 7200/720. --repeat 1 keeps one independent process per
+      # combination. --timeout bounds ONE go test process, cold build included:
+      # 03.11 measured 533-878s per shard, so 1200s (~1.4x the 878s maximum)
+      # replaces the uncalibrated 600s that 4/6 shards exceeded.
+      - name: Event integrity long (one 1200-input/120-restart shard)
+        env:
+          SEED: ${{ matrix.seed }}
+          WINDOW: ${{ matrix.window }}
+        run: python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 1200 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+      - name: Upload event-long shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-integrity-long-seed-${{ matrix.seed }}-window-${{ matrix.window }}
+          path: ${{ runner.temp }}/event-long/seed-${{ matrix.seed }}-window-${{ matrix.window }}
+          if-no-files-found: error
+
+  event-integrity-mutations:
+    runs-on: ubuntu-latest
+    # 03.10 did not measure mutations (provisional candidate, 待校准).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # Only mutations already proven by 00.3 are enabled; a new confirmed
+      # defect must be registered in the checker's frozen registry, never
+      # skipped by narrowing --all here.
+      - name: Event integrity fault mutations
+        run: python3 scripts/check_event_integrity_mutations.py --all --json --out "$RUNNER_TEMP/event-integrity-mutations"
+      - name: Upload mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-integrity-mutations
+          path: ${{ runner.temp }}/event-integrity-mutations
+          if-no-files-found: error
+
+  event-integrity-required:
+    # The event summary check (05.2): it aggregates the three event producers and
+    # replaces none of the legacy jobs. always() plus needs on all three
+    # producers means a cancelled or skipped upstream can never present as
+    # success (a skipped required check is rendered green, so the gate must fail
+    # itself). Upstream results reach the shell through env, never as a raw
+    # expression inside a quoted argument; an empty result fails like
+    # cancelled/skipped/failure does.
+    if: always()
+    needs: [event-integrity-short, event-integrity-long, event-integrity-mutations]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Check upstream event results
+        env:
+          SHORT_RESULT: ${{ needs.event-integrity-short.result }}
+          LONG_RESULT: ${{ needs.event-integrity-long.result }}
+          MUTATIONS_RESULT: ${{ needs.event-integrity-mutations.result }}
+        run: |
+          set -euo pipefail
+          test -n "$SHORT_RESULT"
+          test "$SHORT_RESULT" = "success"
+          test -n "$LONG_RESULT"
+          test "$LONG_RESULT" = "success"
+          test -n "$MUTATIONS_RESULT"
+          test "$MUTATIONS_RESULT" = "success"
+      - name: Download event evidence
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: event-integrity-*
+          path: ${{ runner.temp }}/bundle
+          # One directory per artifact: every shard keeps its own source, and a
+          # merge would overwrite the same-named evidence.json across shards.
+          merge-multiple: false
+      # The same checker engine as the producers' evidence: no second matrix or
+      # fingerprint rule lives in this workflow. Bundle mode fails on a missing
+      # directory, an empty bundle, a missing short round, a missing matrix
+      # combination, a reused credential, or a mixed baseline - so a missing or
+      # truncated artifact can never read as "nothing to object to".
+      - name: Check event evidence bundle
+        if: always()
+        run: python3 scripts/check_runtime_evidence.py --bundle "$RUNNER_TEMP/bundle" --contract golden/runtime/event_integrity_scenarios.json --json
+      # The report name stays outside the `event-integrity-*` download pattern:
+      # a re-run of this job would otherwise download its own first-attempt
+      # bundle and duplicate every evidence file inside the next bundle.
+      - name: Upload required report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-gate-required-report
+          path: ${{ runner.temp }}/bundle
+          if-no-files-found: warn
+
+  # Event-semantics symptom anchors (event-semantics-boundary 04.3). The four
+  # user-voice smoke tests (accepted stays silent, settled reports once, failed
+  # turn delivers the raw cause, exec states stay silent) live in the wechat-bot
+  # module behind the smoke build tag. They are absent from the archived task
+  # graph's test registry, and registering them in the v2 contract would break
+  # the contract's bidirectional cross-check with that graph. So they get a job
+  # of their own that shares the event producers' no-skip-hatch discipline:
+  # no path filter, no job-level if, no continue-on-error. Whether a job is
+  # *required* is an external setting (branch protection) this file cannot
+  # assert; all this job guarantees is that it exists and runs on every pull
+  # request and every push to main/dev.
+  event-semantics-symptoms:
+    runs-on: ubuntu-latest
+    # The smoke scope measured ~5s locally; 20m covers a cold compile of the
+    # bot module plus the 600s in-process bound below with room to spare.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      # Same reason as the test job: exec/async cases skip when tmux is absent,
+      # and a symptom anchor that lands on a skip proves nothing.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      # `^TestLocalSmokeSymptom` is a prefix selector, not a list of full names:
+      # the smoke file holds every symptom anchor under that prefix, so the
+      # command selects all of them and picks up a new anchor without a workflow
+      # edit. `-json` keeps the per-test verdicts (pass/skip) in the
+      # uploaded evidence instead of a flat log.
+      - name: Symptom anchors (user-voice tests)
+        run: |
+          E="$RUNNER_TEMP/symptom"
+          mkdir -p "$E"
+          go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -json -timeout 600s > "$E/symptom.json" 2>&1
+      - name: Upload symptom evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: event-semantics-symptoms
+          path: ${{ runner.temp }}/symptom
+          if-no-files-found: error

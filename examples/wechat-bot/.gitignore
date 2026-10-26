@@ -10,11 +10,15 @@
 !go.mod
 !go.sum
 !main.go
-!system_alert.go
-!file_delivery.go
-!file_delivery_test.go
-!file_intake.go
-!file_intake_test.go
+!wechat.go
+!wechat_test.go
+!smoke_test.go
+!smoke_harness_test.go
+!smoke_wave2_test.go
+!smoke_errors_test.go
+!wechat_approval.go
+!wechat_files.go
+!wechat_notice.go
 !scripts/
 !scripts/verify_large_file.go
 !scripts/loggrep.py
@@ -51,6 +55,7 @@
 !resources/
 !resources/prompts/
 !resources/prompts/*.md
+!resources/prompts/USER.md.example
 resources/prompts/USER.md
 
 # Allow skills: whole dirs tracked (whitelist mode), runtime node_modules excluded.
@@ -90,8 +95,6 @@ logs/
 wechat-bot
 data/
 openspec/
-!dedup.go
-!dedup_test.go
 
 # ---- mail-poller (openspec: agentmail-email-inbound-channel) ----
 # 白名单制补充: 拉取器代码/文档/部署单元入库; .env 与 data/ 运行态保持忽略
@@ -106,10 +109,6 @@ openspec/
 # Tracked source that the whitelist must name explicitly (tracked ⇒ must not be ignored).
 !skills/
 !skills/url-fetcher/
-!reincarnation_notice.go
-!reincarnation_notice_test.go
-!delivery_receipt.go
-!delivery_receipt_test.go
 !skills/README.md
 !skills/url-fetcher/README.md
 !skills/url-fetcher/TESTING.md
@@ -123,6 +122,10 @@ openspec/
 !skills/url-fetcher/url_fetcher.js
 !scripts/ima-note-upload.sh
 
-# 主动送达面（send 工具）源码与测试：白名单制必须点名，否则新文件永远不进版本控制。
-!send_tool.go
-!send_tool_test.go
+# B3 data-plane smoke source (whitelist mode: tracked file must be named explicitly).
+!smoke_data_test.go
+!smoke_bench_test.go
+!smoke_recall_test.go
+!smoke_skill_test.go
+!smoke_mcp_test.go
+!smoke_exec_test.go

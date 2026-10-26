@@ -107,7 +107,7 @@
 
 ## 红色耦合台账（implementation-hardening 7A.3，2026-09-14）
 
-上游内部行为假设（trpc-agent-go v1.10.0）——升级时逐项对照钉测/豁免状态：
+上游内部行为假设（trpc-agent-go v1.10.0、trpc-mcp-go v0.0.10）——升级时逐项对照钉测/豁免状态：
 
 | # | 假设 | 状态 |
 |---|------|------|
@@ -115,6 +115,7 @@
 | U2 | runner 内部 steer 队列关闭路径与事件消费并发安全 | ❌ 上游内部竞态（-race 实测），豁免：见 CI race job 注释 + 上游 issue 待报 |
 | U3 | inmemory session service 的 hook 链并发读写（session.go:122 栈族） | ❌ 上游内部竞态，豁免同上；审计 F-4 的「Session.Clone」描述系误判，真身为本条 |
 | U4 | BeforeModel 回调时序（投影装配先于 LLM 调用） | ✅ 由 U1 钉测覆盖同链路 |
+| U5 | `trpc-mcp-go` streamable HTTP client transport 字段并发（`streamable_client.go`：`setSessionID`/`send`/`handleSSEResponse` 与 `Initialize` 派生的 GET SSE goroutine） | ❌ 上游内部竞态（trpc-mcp-go v0.0.10）；已登记 `RACE_WAIVER_SIGNATURES` 双签名（`trpc-mcp-go.*streamableHTTPClientTransport` 符号行 + `trpc-mcp-go.*streamable_client\.go` 文件行，单路径签名会漏符号行）；基线 f900ca2 副本 5/5 红、工作树 8/8 红，top frame 无 tagent-owned，系 05.1 把 `tests/integration/capabilities` 纳入 race 集合后首次暴露；**移除条件=升级到含上游修复的版本、删签名并复跑 race 门** |
 
 隐式耦合（包间暗连，非 import）：
 

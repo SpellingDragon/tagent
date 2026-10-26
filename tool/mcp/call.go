@@ -1,217 +1,276 @@
-// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"sync"
+	"reflect"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-
-	"github.com/SpellingDragon/tagent/agent"
-	"github.com/SpellingDragon/tagent/agent/reliability"
-	tagenttool "github.com/SpellingDragon/tagent/tool"
 )
 
-// CallToolName is the registry ID of the mcp_call gateway tool.
-const CallToolName = "mcp_call"
-
-// Verify CallTool implements tool.CallableTool at compile time.
-var _ trpctool.CallableTool = (*CallTool)(nil)
-
-// CallTool is the generic MCP execution gateway. Its declaration is
-// CONSTANT (server/tool/args) regardless of registry content, so agents
-// holding it keep a byte-stable tools prefix while the reachable MCP
-// surface changes freely underneath.
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
 //
-// Failures return a callErrorResult with nil error (the same pattern as
-// web_search's Message field) so the self-correction material — available
-// servers/tools, the target's InputSchema — reaches the model as a normal
-// tool result it can act on.
-type CallTool struct {
-	reg tagenttool.MCPRegistry
-	// degradation 可选（T-G）：非 nil 时 mcp_call 失败/成功上报 DepMCP 退化（MCP server 连续
-	// 失败→degraded，成功→恢复）。per-agent 视角追踪全局 MCP registry（各 agent 独立退化状态）。
-	degradation *reliability.DegradationManager
-
-	// mu 保护 probeEvery/probeCount：DepMCP degraded 时的熔断半开探测——
-	// 每 N 次放行 1 次真调用。N<=0 = 关闭。
-	mu         sync.Mutex
-	probeEvery int
-	probeCount int
-}
-
-// SetMCPProbeEvery配置熔断半开探测间隔：DepMCP degraded 时
-// 每 N 次调用放行 1 次真探测（其余直接返回熔断 result），探测成功经既有成功上报路径
-// 触发恢复。N<=0 = 关闭熔断（零行为变化）。
-func (t *CallTool) SetMCPProbeEvery(n int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.probeEvery = n
-}
-
-// SetDegradation 注入退化状态机（工厂从 PlainToolFactoryConfig.Degradation）。nil = 不上报。
-func (t *CallTool) SetDegradation(d *reliability.DegradationManager) {
-	t.degradation = d
-}
-
-// NewCallTool creates the mcp_call gateway over the given registry.
-func NewCallTool(reg tagenttool.MCPRegistry) *CallTool {
-	if reg == nil {
-		reg = emptyRegistry{}
+// mustParseSchema turns one gateway schema constant into the shared schema
+// value every declaration hands out. Parsed once: the declared schema is a
+// constant of the package, never a function of what the registry holds.
+func mustParseSchema(doc string) *trpctool.Schema {
+	var schema trpctool.Schema
+	if err := json.Unmarshal([]byte(doc), &schema); err != nil {
+		panic("mcp: the gateway schema constant does not parse: " + err.Error())
 	}
-	return &CallTool{reg: reg}
+	return &schema
 }
 
-// Declaration implements trpctool.Tool. The schema is fixed by design —
-// see the CallTool doc comment.
-func (t *CallTool) Declaration() *trpctool.Declaration {
-	return &trpctool.Declaration{
-		Name: CallToolName,
-		Description: "Call a tool on a registered MCP server. " +
-			"Use mcp_discover (knowledge) to find servers, tools and their input schemas. " +
-			"args is passed through as the target tool's JSON arguments.",
-		InputSchema: &trpctool.Schema{
-			Type: "object",
-			Properties: map[string]*trpctool.Schema{
-				"server": {Type: "string", Description: "MCP server name (the <name> in mcp_discover source \"mcp:<name>\")"},
-				"tool":   {Type: "string", Description: "Tool name on that server"},
-				"args":   {Type: "object", Description: "JSON arguments for the target tool (see its Input Schema)"},
-			},
-			Required: []string{"server", "tool"},
+// callInputSchema is the fixed input schema of the call gateway, parsed once
+// from MCPCallInputSchemaJSON.
+var callInputSchema = mustParseSchema(MCPCallInputSchemaJSON)
+
+// normalizeRegistry folds a typed-nil registry — a nil pointer held by a
+// non-nil interface — onto the nil interface, so "no registry is injected"
+// can never be mistaken for a live table at call time.
+func normalizeRegistry(registry Registry) Registry {
+	if registry == nil {
+		return nil
+	}
+	value := reflect.ValueOf(registry)
+	switch value.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Interface, reflect.Slice, reflect.Func:
+		if value.IsNil() {
+			return nil
+		}
+	}
+	return registry
+}
+
+// callResult is the self-correcting payload of a gateway failure: every
+// failure of the call side comes back as a result carrying its named state and
+// the material the model needs to correct itself — the available server list,
+// the target server's tool list, or the target tool's input schema.
+type callResult struct {
+	OK          bool             `json:"ok"`
+	Server      string           `json:"server,omitempty"`
+	Tool        string           `json:"tool,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	Servers     []string         `json:"servers,omitempty"`
+	Tools       []string         `json:"tools,omitempty"`
+	InputSchema *trpctool.Schema `json:"input_schema,omitempty"`
+	Hint        string           `json:"hint,omitempty"`
+}
+
+// resultJSON packs one gateway result as the JSON text the model reads. A
+// failure is still a result — the Go error beside it stays nil — so the turn
+// carries the correction material instead of dying on a transport error.
+func resultJSON(v any) (any, error) {
+	text, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("mcp: the result does not marshal: %v", err), nil
+	}
+	return string(text), nil
+}
+
+// callArgs are the three fixed arguments of the call gateway.
+type callArgs struct {
+	Server string         `json:"server"`
+	Tool   string         `json:"tool"`
+	Args   map[string]any `json:"args"`
+}
+
+// parseCallArgs decodes the gateway arguments. An empty argument object is
+// accepted here and refused below with the schema guidance, so a call that
+// forgot everything is told what to send instead of how the JSON broke.
+func parseCallArgs(jsonArgs []byte) (callArgs, error) {
+	var args callArgs
+	trimmed := bytes.TrimSpace(jsonArgs)
+	if len(trimmed) == 0 {
+		return args, nil
+	}
+	err := json.Unmarshal(trimmed, &args)
+	return args, err
+}
+
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
+//
+// CallTool is the fixed mcp_call gateway: one plain tool with the constant
+// server/tool/args declaration whose calls reach whatever the injected live
+// registry holds at call time. The declaration never reads the registry, so
+// runtime registration changes the reachable tool surface and never the tool
+// set an agent declared. Every failure comes back as a named result carrying
+// the material to correct the next call, and never as a Go error.
+type CallTool struct {
+	registry    Registry
+	declaration *trpctool.Declaration
+}
+
+// NewCallTool builds the call gateway over the injected live registry. A
+// missing registry must still build: it changes what a call answers, never
+// whether the tool exists.
+func NewCallTool(registry Registry) *CallTool {
+	return &CallTool{
+		registry: normalizeRegistry(registry),
+		declaration: &trpctool.Declaration{
+			Name:        ToolNameMCPCall,
+			Description: "call one tool on a registered MCP server: name the server and the tool, and pass the tool arguments object under args; the servers reachable at call time come from the live registry",
+			InputSchema: callInputSchema,
 		},
 	}
 }
 
-// callArgs is the mcp_call invocation payload.
-type callArgs struct {
-	Server string          `json:"server"`
-	Tool   string          `json:"tool"`
-	Args   json.RawMessage `json:"args"`
+// Declaration returns the fixed declaration of the call gateway: the same
+// name, description and schema whatever the registry holds.
+func (t *CallTool) Declaration() *trpctool.Declaration {
+	return t.declaration
 }
 
-// callErrorResult carries self-correction material back to the model.
-type callErrorResult struct {
-	Error            string          `json:"error"`
-	AvailableServers []string        `json:"available_servers,omitempty"`
-	AvailableTools   []string        `json:"available_tools,omitempty"`
-	InputSchema      json.RawMessage `json:"input_schema,omitempty"`
-}
-
-// Call implements trpctool.CallableTool.
+// Call routes one call to the named tool of the named server through the live
+// registry. The wire protocol stays with the locked framework tool set the
+// registry hands out. Failures answer as named results: an empty table names
+// both registration sources, an unknown server echoes the registered names, an
+// unknown tool echoes that server's tool list, and a failed inner call carries
+// the target tool's input schema.
+//
+// - A successful call returns the native result untouched: the gateway adds no envelope of its own to a call that answered.
 func (t *CallTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
-	var a callArgs
-	if err := json.Unmarshal(jsonArgs, &a); err != nil {
-		return nil, fmt.Errorf("mcp_call: invalid args: %w", err)
+	args, err := parseCallArgs(jsonArgs)
+	if err != nil {
+		return resultJSON(callResult{
+			Error:       fmt.Sprintf("mcp: the %s arguments do not parse: %v", ToolNameMCPCall, err),
+			InputSchema: t.declaration.InputSchema,
+		})
 	}
+	if args.Server == "" || args.Tool == "" {
+		return resultJSON(callResult{
+			Server:      args.Server,
+			Tool:        args.Tool,
+			Error:       fmt.Sprintf("mcp: %s needs both the %s and the %s argument", ToolNameMCPCall, MCPCallArgServer, MCPCallArgTool),
+			Servers:     t.registryNames(ctx),
+			InputSchema: t.declaration.InputSchema,
+		})
+	}
+	if names := t.registryNames(ctx); len(names) == 0 {
+		return resultJSON(callResult{
+			Server: args.Server,
+			Tool:   args.Tool,
+			Error:  "mcp: no MCP server is registered, so no tool can be called",
+			Hint:   "register a server first: declare one in the configuration file or register one at runtime",
+		})
+	}
+	toolset, release, ok := borrowServer(ctx, t.registry, args.Server)
+	if !ok {
+		return resultJSON(callResult{
+			Server:  args.Server,
+			Tool:    args.Tool,
+			Error:   fmt.Sprintf("mcp: no server is registered under the name %q", args.Server),
+			Servers: t.registryNames(ctx),
+		})
+	}
+	defer release()
 
-	if t.degradation != nil && t.probeEvery > 0 && !t.degradation.IsDegraded(reliability.DepMCP) {
-		t.mu.Lock()
-		t.probeCount = 0
-		t.mu.Unlock()
+	tools := toolset.Tools(ctx)
+	if len(tools) == 0 {
+		return resultJSON(callResult{
+			Server: args.Server,
+			Tool:   args.Tool,
+			Error: fmt.Sprintf("mcp: server %q is registered but listed no tools — MCP dependency failure, its connection may be down",
+				args.Server),
+		})
 	}
-	if t.degradation != nil && t.degradation.IsDegraded(reliability.DepMCP) {
-		t.mu.Lock()
-		n := t.probeEvery
-		t.probeCount++
-		allow := n <= 0 || t.probeCount%n == 0
-		t.mu.Unlock()
-		if !allow {
-			return callErrorResult{
-				Error:            fmt.Sprintf("MCP 依赖降级中（熔断保护，稍后重试；每 %d 次放行一次探测）", n),
-				AvailableServers: t.reg.Names(),
-			}, nil
-		}
-	}
-
-	names := t.reg.Names()
-	if a.Server == "" || a.Tool == "" {
-		return callErrorResult{
-			Error:            "mcp_call requires both \"server\" and \"tool\"",
-			AvailableServers: names,
-		}, nil
-	}
-	if len(names) == 0 {
-		return callErrorResult{
-			Error: "no MCP servers are registered (declare mcp_servers in the config file or register one at runtime)",
-		}, nil
-	}
-
-	ts, ok := t.reg.Get(a.Server)
-	if !ok || ts == nil {
-		return callErrorResult{
-			Error:            fmt.Sprintf("unknown MCP server %q", a.Server),
-			AvailableServers: names,
-		}, nil
-	}
-
-	var target trpctool.CallableTool
-	var toolNames []string
-	for _, tl := range ts.Tools(ctx) {
-		decl := tl.Declaration()
+	names := make([]string, 0, len(tools))
+	var target trpctool.Tool
+	for _, candidate := range tools {
+		decl := candidate.Declaration()
 		if decl == nil {
 			continue
 		}
-		toolNames = append(toolNames, decl.Name)
-		if decl.Name == a.Tool {
-			if ct, ok := tl.(trpctool.CallableTool); ok {
-				target = ct
-			}
+		names = append(names, decl.Name)
+		if decl.Name == args.Tool {
+			target = candidate
 		}
 	}
-	sort.Strings(toolNames)
 	if target == nil {
-		if len(toolNames) == 0 && t.degradation != nil && ctx.Err() == nil {
-			t.degradation.ReportFailure(reliability.DepMCP, fmt.Errorf("mcp server %q unreachable (no tools enumerated)", a.Server))
+		return resultJSON(callResult{
+			Server: args.Server,
+			Tool:   args.Tool,
+			Error:  fmt.Sprintf("mcp: server %q offers no tool named %q", args.Server, args.Tool),
+			Tools:  names,
+		})
+	}
+	called, ok := target.(trpctool.CallableTool)
+	if !ok {
+		return resultJSON(callResult{
+			Server: args.Server,
+			Tool:   args.Tool,
+			Error:  fmt.Sprintf("mcp: server %q offers tool %q without a call face — MCP dependency failure", args.Server, args.Tool),
+			Tools:  names,
+		})
+	}
+	rawArgs := []byte("{}")
+	if args.Args != nil {
+		if rawArgs, err = json.Marshal(args.Args); err != nil {
+			return resultJSON(callResult{
+				Server:      args.Server,
+				Tool:        args.Tool,
+				Error:       fmt.Sprintf("mcp: the %s arguments for %q do not marshal: %v", MCPCallArgArgs, args.Tool, err),
+				InputSchema: target.Declaration().InputSchema,
+			})
 		}
-		return callErrorResult{
-			Error:          fmt.Sprintf("tool %q not found on MCP server %q (the server may be unreachable or the tool name wrong)", a.Tool, a.Server),
-			AvailableTools: toolNames,
-		}, nil
 	}
-
-	args := a.Args
-	if len(args) == 0 {
-		args = json.RawMessage("{}")
+	result, callErr := called.Call(ctx, rawArgs)
+	if callErr != nil {
+		return resultJSON(callResult{
+			Server:      args.Server,
+			Tool:        args.Tool,
+			Error:       fmt.Sprintf("mcp: server %q tool %q failed: %v", args.Server, args.Tool, callErr),
+			InputSchema: target.Declaration().InputSchema,
+		})
 	}
-	res, err := target.Call(ctx, args)
-	if err != nil {
-		if t.degradation != nil && ctx.Err() == nil {
-			t.degradation.ReportFailure(reliability.DepMCP, err)
-		}
-		var schemaJSON json.RawMessage
-		if decl := target.Declaration(); decl != nil && decl.InputSchema != nil {
-			schemaJSON, _ = json.Marshal(decl.InputSchema)
-		}
-		return callErrorResult{
-			Error:       fmt.Sprintf("mcp tool %s/%s failed: %v — check args against input_schema and retry", a.Server, a.Tool, err),
-			InputSchema: schemaJSON,
-		}, nil
-	}
-	if t.degradation != nil {
-		t.degradation.ReportSuccess(reliability.DepMCP)
-	}
-	return res, nil
+	return result, nil
 }
 
-// RegisterTool registers mcp_call as a builtin plain tool. Called by
-// tagent.RegisterBuiltinTools(). The factory succeeds even without a wired
-// registry (mirroring mcp_discover's empty-stub behavior) so YAML
-// references never fail at build time.
-func RegisterTool() {
-	agent.RegisterPlainTool(CallToolName, func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
-		ct := NewCallTool(cfg.MCPRegistry)
-		ct.SetDegradation(cfg.Degradation)
-		ct.SetMCPProbeEvery(cfg.MCPProbeEvery)
-		return ct, nil
-	})
+// registryNames reports the currently registered server names, and answers
+// nothing for a missing registry.
+func (t *CallTool) registryNames(ctx context.Context) []string {
+	if t.registry == nil {
+		return nil
+	}
+	return t.registry.Names(ctx)
 }
 
-// emptyRegistry backs mcp_call when no registry was wired.
-type emptyRegistry struct{}
+// 契约: docs/wiki/tool/tool-architecture.md#mcp-gateway-injection
+//
+// Gateways carries the two built-in gateway tools of one injected live
+// registry beside the fixed declarations they hand to a request. The
+// declarations are constants of the tools, so re-issuing them always answers
+// the same values.
+type Gateways struct {
+	call     *CallTool
+	discover *DiscoverTool
+}
 
-func (emptyRegistry) Get(string) (trpctool.ToolSet, bool) { return nil, false }
-func (emptyRegistry) List() []trpctool.ToolSet            { return nil }
-func (emptyRegistry) Names() []string                     { return nil }
+// NewGateways builds both gateway tools over the same live registry: one
+// table the call gateway and the discovery read, so a server registered at
+// runtime is immediately both callable and discoverable.
+func NewGateways(registry Registry, discovery Discovery) *Gateways {
+	return &Gateways{
+		call:     NewCallTool(registry),
+		discover: NewDiscoverTool(registry, discovery),
+	}
+}
+
+// CallTool returns the mcp_call gateway.
+func (g *Gateways) CallTool() *CallTool {
+	return g.call
+}
+
+// DiscoverTool returns the mcp_discover gateway.
+func (g *Gateways) DiscoverTool() *DiscoverTool {
+	return g.discover
+}
+
+// ReloadDeclarations re-issues the declarations of the built-in gateway tools
+// in the order they are handed to a request: fixed values, independent of the
+// registry content.
+func (g *Gateways) ReloadDeclarations(_ context.Context) []*trpctool.Declaration {
+	return []*trpctool.Declaration{g.call.Declaration(), g.discover.Declaration()}
+}

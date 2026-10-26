@@ -1,0 +1,180 @@
+{
+  "leaf": "03.2",
+  "title": "输入身份与会话矩阵（input-identity-matrix / session-isolation）",
+  "change": "event-consumption-integrity",
+  "domain": "03-formal-simulation",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T22:21:20+08:00",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "根模块输入身份与会话矩阵取证：tests/integration/host/event_integrity_test.go 的父测试 TestEventIntegrityIdentityMatrix，下辖 positive / negative / consumer 三个子测试，三锚共享同一次父测试执行负载（design D3/D4）。覆盖：同正文不同身份的两条输入均保留且不被内容去重；同身份重送在消费面只消费一次；两个 user 会话的通知身份、投影与投递动作互不串；按正文去重、跨会话串身份、重送二次消费、身份/目标错配四种形状必须具名失败。产品零改动。",
+  "method": "tagent.Boot 装配两个 user 会话（同一 module/agent 声明的两个 session），各经 Host.Invoke 完成 delegate → accept → 子代理 worker（park/release 屏障）→ continuationSettle 的正式链路；随后各自经 Run.CommitToSession 提交两条同正文（identityRowBody）不同 EventID 的输入并重送首条（记录宿主返回的 Key），再各驱动一次 read turn。观测只取正式面：scriptedProvider 实际服务的请求（Index/Model/Messages，共 8 条 model-entry + 2 条 model-worker）、recordingSender 记录的动作（target/body/pending/result）、Host.SessionFacts、Host.ReplayEntries、Host.ActiveSessions。positive 读真实负载；negative 以真实负载为基线做四种定向变异，要求检查器恰报对应具名 kind；consumer 从根公开入口回读请求来源与身份归属。",
+  "environment": {
+    "os": "Darwin arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.2",
+    "note": "原始 json/jsonl 只落仓库外临时目录；本文件只留摘要、哈希与 log 名。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "added (untracked new file; 03.2 段落从 3628 行起追加父测试 + 3 子测试 + identityMatrix* 辅助，文件 3624 → 4299 行，共 +675 行)",
+      "lines": 4299,
+      "sha256": "c5e76abb43855dd3700e0699ad983dd99445751e6705dbd45c023e1ce55e96e0"
+    }
+  ],
+  "product_changes": [],
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath) 装配两个 user 会话 → Host.Invoke 完成 delegate/accept/worker/follow-up 两轮 → Run.CommitToSession 提交身份行（含重送）→ Host.Invoke 读轮 → Host.ActiveSessions / Host.SessionFacts / Host.ReplayEntries 回读",
+    "observation": "请求侧 = scriptedProvider 实际服务请求（Index/Model/Messages）；动作侧 = recordingSender 的 senderAction{target,body,pending,result}；投影侧 = Host.ReplayEntries；运行面 = Host.ActiveSessions(\"user\")",
+    "consumer_subtest": "consumer：provider 恰服务 10 条请求（8 model-entry + 2 model-worker）、ActiveSessions(\"user\")==2；两会话 read/follow 请求均以 provider 实际服务序号溯源（session.read.Index == readIndex == scene.requests[readIndex].Index）；read 请求恰携带 1 份本会话输入；重送 Key 在 ReplayEntries 恰 1 条；CommitToSession 返回 == keys + keys[0]；每条 readAnswer 动作恰一次且达本址；全部动作 confirmed 且目标属于两个 user 会话之一"
+  },
+  "subtests": [
+    {
+      "name": "positive",
+      "anchor": "positive",
+      "line": 4156,
+      "asserts": [
+        "真实负载的 identityMatrixViolations 为空（身份保留 / 隔离 / 动作寻址三类检查全通过）",
+        "两会话的 settle TaskID 不同、task.Notice 四元不同",
+        "每个会话的 noticeFact.Key == agent.NoticeFactKey(InvocationID, Notice)",
+        "settle 事实正文携带本会话 material；follow-up 请求恰 1 份该 material 且携带本会话 accepted 正文",
+        "read 请求恰 2 份 identityRowBody（同正文不同身份均保留）",
+        "accepted 与 followBody 动作在本址各恰 1 条且 confirmed"
+      ]
+    },
+    {
+      "name": "negative",
+      "anchor": "negative",
+      "line": 4223,
+      "asserts": [
+        "真实负载先被断言零违规（负锚不以真实负载已坏为前提）",
+        "body_deduped 变异只留下 same_body_identity_merged",
+        "resent_consumed_twice 变异只留下 same_identity_resent_twice",
+        "cross_session_bleed 变异只留下 cross_session_identity_bleed",
+        "action_misaddressed 变异只留下 action_target_mismatch",
+        "每个变异恰留下一种 kind（identityMatrixViolationKinds 排序去重后 len==1 且相等）"
+      ]
+    },
+    {
+      "name": "consumer",
+      "anchor": "consumer",
+      "line": 4250,
+      "asserts": [
+        "provider 服务 10 条请求，模型分布恰为 model-entry×8 与 model-worker×2（无其他模型）",
+        "Boot 装配建立恰 2 个 user 会话",
+        "read/follow 请求的 Index 与 provider 服务位置互证，观测不是从自建切片自证",
+        "read 请求模型为 model-entry 且恰 1 份本会话输入",
+        "重送 EventID 在 ReplayEntries 恰 1 条（同身份重送在消费面幂等）",
+        "CommitToSession 的返回逐一等于调用方声明的 keys + keys[0]（不吞身份、不换身份）",
+        "readAnswer 动作恰一次达本址；所有动作 confirmed 且落在两个 user 会话之一"
+      ]
+    }
+  ],
+  "negative_mutations": [
+    {
+      "name": "body_deduped",
+      "line": 3843,
+      "mutation": "删除第二条同正文不同身份（key2）的投影条目与 read 请求中的一份用户副本，模拟按正文去重",
+      "kind": "same_body_identity_merged"
+    },
+    {
+      "name": "resent_consumed_twice",
+      "line": 3854,
+      "mutation": "追加首条身份的重复投影条目与一份用户副本，模拟同身份重送被二次消费",
+      "kind": "same_identity_resent_twice"
+    },
+    {
+      "name": "cross_session_bleed",
+      "line": 3869,
+      "mutation": "把对方的身份 key 与对方的 readInput 塞入本会话观测，模拟跨会话串身份",
+      "kind": "cross_session_identity_bleed"
+    },
+    {
+      "name": "action_misaddressed",
+      "line": 3884,
+      "mutation": "把本会话 follow 动作的 target 改为对端地址，模拟身份/目标错配",
+      "kind": "action_target_mismatch"
+    }
+  ],
+  "mechanics": {
+    "identity_preserved": "commitFact 保留调用方 EventID：运行日志 fact=identity-row-first-session-first / identity-row-first-session-second / identity-row-second-session-first / identity-row-second-session-second；factOrder 记录含重送的 3 次写入，而 ReplayProjection.Append 以 entry.Key 去重（replay_budget.go:92），故消费面每条身份只出现一次、重送 Key 在 ReplayEntries 恰 1 条。",
+    "same_body_distinct_identity": "两条同正文不同 EventID 在 read 请求中各出现一次（reproductionUserCopies == 2），证明去重键是动作身份而非内容摘要。",
+    "isolation": "两会话 settle TaskID 不同（continuationSettle 观测）、task.Notice 四元不同、NoticeFactKey 与 agent.NoticeFactKey 一致；foreign key / foreign readInput / foreign body 不出现于本会话的投影、请求与动作观测。"
+  },
+  "verification": {
+    "single_round": {
+      "command": "go -C . test ./tests/integration/host -run '^TestEventIntegrityIdentityMatrix$' -count=1 -race -json > $E/baseline.json 2> $E/baseline.log",
+      "exit": 0,
+      "result": "父测试 + 3 子测试各恰一次 run/pass；PASS ok 0.698s",
+      "log": "baseline.json, baseline.log"
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/03.2\"; mkdir -p \"$E\"; : > \"$E/run-ids.txt\"; for i in $(seq 1 10); do id=$(python3 -c 'import uuid;print(uuid.uuid4())'); go -C . test ./tests/integration/host -run '^TestEventIntegrityIdentityMatrix$' -count=1 -race -json -timeout 10m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; printf 'run=%d run_id=%s exit=%d\\n' \"$i\" \"$id\" \"$rc\" >> \"$E/run-ids.txt\"; [ \"$rc\" -eq 0 ] || exit 1; done; test \"$(ls \"$E\"/run-*.jsonl | wc -l | tr -d ' ')\" = 10",
+      "exits": "10 行全 0（run-ids.txt 含 10 个 run_id）",
+      "checker": "python3 $E/check.py $E：逐轮解析 run-$i.jsonl，要求父+3 子各 run==1 且 pass==1，无 fail/skip/多余测试 → 10/10 轮 OK，ALL-OK。首版检查器漏过滤包级 run/pass 事件（无 Test 字段）触发 KeyError，属检查器缺陷；修正后重跑结果一致。",
+      "logs": "run-1.jsonl … run-10.jsonl, run-ids.txt, check.py"
+    },
+    "regression": [
+      {
+        "command": "go -C . test ./tests/integration/host -count=1",
+        "exit": 0,
+        "result": "ok 13.414s（含 00.2 4/4、01.3、01.4、02.2、02.4、03.1、03.2 全绿）",
+        "log": "host-regression.log"
+      },
+      {
+        "command": "go -C . test ./tests/integration/execution -count=1",
+        "exit": 0,
+        "result": "ok 2.860s",
+        "log": "execution.log"
+      },
+      {
+        "command": "go -C . test ./tests/integration/history -count=1",
+        "exit": 0,
+        "result": "ok 11.008s（本轮并行单已可编译，无需重试）",
+        "log": "history.log"
+      }
+    ],
+    "gates": [
+      {
+        "command": "go build ./...",
+        "exit": 0
+      },
+      {
+        "command": "go vet ./...",
+        "exit": 0,
+        "log": "vet.log"
+      },
+      {
+        "command": "gofmt -l tests/integration/host/event_integrity_test.go",
+        "exit": 0,
+        "result": "无输出（写集干净）"
+      },
+      {
+        "command": "go run ./scripts/codetools event-ownership --check",
+        "exit": 0,
+        "result": "symbols 14 owners 6 candidates 48 direct 21 allowed 14；OK（4 uncovered 如实报告，未计覆盖）",
+        "violations": 0,
+        "log": "ownership.log"
+      }
+    ]
+  },
+  "probe": {
+    "purpose": "证明 positive 的副本数断言非空转（消费面确实恰为 2 份）。",
+    "action": "临时把 read 请求期望副本数 2 改为 99，只保留探针日志，随后从 $E/restore.bak 还原。",
+    "observed": "event_integrity_test.go:3646: the read request of session-identity-matrix-first carried 2 user copies of \"replay the shared identity row\", want the two identities it committed → FAIL",
+    "restore": "还原后 sha256 回到 c5e76abb43855dd3700e0699ad983dd99445751e6705dbd45c023e1ce55e96e0（与探针前一致），并重跑 baseline：exit 0，父+3 子各 1 run/1 pass。"
+  },
+  "convergences": {
+    "negative_by_mutation": "根公开入口无法被测试驱动出‘按正文去重/跨会话串身份/重送二次消费/动作错投’的真实缺陷（那需要改产品），故 negative 以真实负载为基线做四种定向变异，证明检查器对每种形状恰报一个具名 kind；真实负载零违规由 negative 先行断言，避免基线已坏。",
+    "consumer_lineage": "consumer 以 provider 实际服务请求的 Index 与切片位置互证（session.read.Index == readIndex == scene.requests[readIndex].Index），避免从自建切片自证。此前 DeepEqual(scene.requests[i], session.read) 属恒真断言，已替换。",
+    "dedupe_surface": "‘同身份重送幂等’的验收面定在消费侧：投影/请求各一次；CommitToSession 的返回仍回显调用方身份（keys + keys[0]），既不把重复提交伪装成新事实，也不改 factOrder 既有语义。",
+    "no_new_api": "全程未新增 API 或持久格式；identityMatrix* / driveIdentityMatrix 等辅助仅在测试文件内。"
+  },
+  "checkpoint": {
+    "tasks_md": "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/tasks.md",
+    "state": "保持 - [ ]（verify_after=01.5；产物 ready，待 01.5 后正式证据回验再勾选）",
+    "line": 36
+  }
+}

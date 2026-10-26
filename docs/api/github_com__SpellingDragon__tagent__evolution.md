@@ -1,270 +1,676 @@
 package evolution // import "github.com/SpellingDragon/tagent/evolution"
 
-Package evolution 实现 agent 的自我改进通道：改动默认即生效，本包负责留痕（git 原生改进 commit）、后验评估（canary
-证据 ＋ 确定性指标闸 ＋ LLM 评审双触发）与 安全回滚（仅回滚带改进标记的提交，劣化只出建议不自动动手）。
+Package evolution owns the self-improvement channel: it records an improvement
+a real agent already landed, evaluates that improvement after real requests
+consumed it, and proposes a rollback without ever performing one.
+
+An edit to a prompt, skill or script takes effect by itself, so this package
+tracks the edit instead of gating it: a file is read hot at the next request
+boundary, and only a structural change passes the gate declared here. The three
+channels that observe, register and consolidate an improvement live beside it,
+one package per channel: meditation reads the fact chain and condenses it,
+refine registers a landed edit in git, and consolidation carries the wake-up
+vocabulary of the memory channel.
+
+CONSTANTS
+
+const (
+	// CriterionParamID names the fixture parameter carrying the case id.
+	CriterionParamID = "id"
+
+	// CriterionParamTask names the fixture parameter carrying the task the
+	// candidate binding answers.
+	CriterionParamTask = "task"
+
+	// CriterionParamExpect names the fixture parameter carrying the declared
+	// value the evaluation face judges the produced answer against.
+	CriterionParamExpect = "expect"
+
+	// CriterionParamBaseline names the fixture parameter carrying the declared
+	// comparison value the benchmark face judges the produced answer against.
+	CriterionParamBaseline = "baseline"
+)
+const (
+	// CheckEval names the evaluation check a publication must carry a
+	// disposition for.
+	CheckEval state.CheckName = state.CheckName(SegmentEval)
+
+	// CheckBenchmark names the benchmark check a publication must carry a
+	// disposition for.
+	CheckBenchmark state.CheckName = state.CheckName(SegmentBenchmark)
+
+	// CheckApplyGate names the apply gate check a publication must carry a
+	// disposition for.
+	CheckApplyGate state.CheckName = state.CheckName(SegmentApplyGate)
+)
+const (
+	DefaultMinSamples      = 5
+	DefaultNegativeRateMax = 0.3
+	DefaultDenialRateMax   = 0.3
+	DefaultCriticalRateMax = 0.2
+)
+    DefaultMinSamples and the other default guardrail thresholds are the wiki
+    defaults of the post-hoc judgment: at least five decidable feedback samples,
+    and the negative feedback, governance refusal and critical-operation rates
+    cut at 0.3, 0.3 and 0.2.
+
+const DefaultJudgeScoreMax = 1.0
+
+    DefaultJudgeScoreMax is the score ceiling of the LLM judge: only an explicit
+    low score — strictly below the threshold — proposes a rollback. A judge that
+    cannot produce such an explicit score decides nothing.
+
+const EvaluationCriterionRef = "evaluation"
+
+    EvaluationCriterionRef names the declaration reference that carries the
+    evaluation fixtures of one agent: one reference per fixture, with the case
+    parameters beside it. The reference is declaration data the composition root
+    resolves nothing of, so an agent tooling a real tool never collides with it.
 
 VARIABLES
 
-var DefaultProtectedPaths = []string{"resources/prompts/**", "skills/**", "scripts/**"}
-    DefaultProtectedPaths 是自改进受控清单的单一真源：evolution 的登记边界、认知资产
-    漂移审计的文件集与资产写审批规则共用本清单，消费方不得复制路径字面量。
+var ErrActivationUnusable = errors.New("evolution: activation record unusable: version, moment and evidence are all required")
 
-var ErrNothingToCommit = fmt.Errorf("nothing-to-commit")
-    ErrNothingToCommit：受控文件无改动（N4）——调用方以 result 渗透，不按 error。
+    ErrActivationUnusable reports an activation record that cannot prove a
+    real consumption: one of its version, moment or evidence is missing. Such
+    a record is refused instead of being folded into the consumption ledger,
+    because an unusable record can never stand as the activation evidence of a
+    window.
 
-FUNCTIONS
+var ErrCandidateRefused = errors.New("evolution: the candidate refused the gate probe")
+    ErrCandidateRefused reports a declared change whose probe the candidate
+    refused. The refusal carries the probe's own named root cause underneath it.
 
-func DefaultAssetPatterns() []string
-    DefaultAssetPatterns 返回漂移审计的受控清单（同源真源转发，wiring 唯一入口）。
+var ErrCheckMissing = errors.New("evolution: the apply gate holds no evidence for a required check")
+    ErrCheckMissing reports an apply gate that holds no evidence for a required
+    check. A missing required check refuses the publication.
 
-func GitAddCommit(dir string, paths []string, note string) (sha string, err error)
-    GitAddCommit 对受控路径文件执行 add+commit（message 带改进标记），返回新 commit sha。 仅 add 显式
-    paths（绝不 -A——防混入用户工作区改动）。nothing-to-commit 由调用方 按 GitNothingToCommit 判定并以
-    result 呈现（N4，非 error）。
+var ErrCorrelationConflict = errors.New("evolution: git correlation conflicts with the recorded mapping")
+    ErrCorrelationConflict reports a git correlation that contradicts the
+    mapping already on record for the version it names. The recorded mapping
+    stands and the conflicting correlation is refused, so a registration can
+    never silently relabel a version that consumption evidence already bound to
+    another commit.
 
-func GitCommitHasTag(dir, sha string) (bool, string, error)
-    GitCommitHasTag 校验目标 commit 的 message 行首带改进标记（rollback 安全闸： 防误 revert
-    用户提交）。sha 可为前缀。
+var ErrCorrelationUnusable = errors.New("evolution: git correlation unusable: version and registration sha are both required")
+    ErrCorrelationUnusable reports a git correlation that names nothing:
+    an empty version or an empty registration SHA. Such a correlation is refused
+    before any mapping is touched.
 
-func GitIsRepo(dir string) bool
-    GitIsRepo 报告 dir 是否在 git 工作区内（启动自检用，Warn 不阻断——闸不是墙）。
+var ErrCriterionMissing = errors.New("evolution: the declaration carries no evaluation criterion for a declared change")
+    ErrCriterionMissing reports a declared change whose declaration carries no
+    evaluation criterion on the judged face. A face without a declared criterion
+    cannot be judged, the segment that observes it reports insufficient evidence
+    beside this cause, and that verdict is never a pass.
 
-func GitRevertSafe(dir, sha string) (string, error)
-    GitRevertSafe 校验标记后执行 git revert --no-edit。冲突时返回冲突详情 （exit!=0 的
-    CombinedOutput），由 agent 决定后续——建议式哲学。
+var ErrCriterionNotMet = errors.New("evolution: the produced answer does not meet the declared evaluation criterion")
+    ErrCriterionNotMet reports a declared change whose produced answer
+    contradicts the evaluation criterion its declaration carries. The refusal
+    names the produced answer beside the declared value underneath it, and a
+    contradiction is never reported as a pass.
 
-func MatchProtectedPaths(cwd string, paths, patterns []string) (bool, []string)
-    MatchProtectedPaths 校验 paths（相对运行 cwd 归一后）全部落在 patterns 内。 返回 (ok,
-    越界路径列表)。pattern 按 / 分段：`**` 匹配任意段序列，`*` 段内通配。
+var ErrDeclarationDiverged = errors.New("evolution: the execution binding diverges from the declaration plan the gate consumes")
+    ErrDeclarationDiverged reports a gate call whose execution binding was
+    prepared from a declaration plan other than the declaration plan the gate
+    consumes. The pair is refused outright and never resolved to either side.
 
-func NewRefineTool(g *GitEvolution) tool.Tool
-    NewRefineTool 构建 git 原生 refine 工具（entry only，装配层先于治理包裹追加——A3）。
+var ErrEvaluationUnrecorded = errors.New("evolution: post-hoc evaluation event not recorded")
+    ErrEvaluationUnrecorded reports a completed post-hoc evaluation whose event
+    could not be recorded through the injected recorder. The judgment itself is
+    returned as it stands; only the event is missing, and the caller is told so
+    by name instead of the failure being swallowed.
+
+var ErrEvidenceMissing = errors.New("evolution: the gate holds no complete evidence for a declared change")
+    ErrEvidenceMissing reports gate evidence for a declared change that is
+    missing or unreachable. The segment that observes it reports insufficient
+    evidence beside this cause, and that verdict is never a pass.
 
 TYPES
 
-type ActivationLog struct {
+type Activation struct {
+	// Version names the improvement version the request really consumed.
+	Version string
+	// At is the moment the real consumption happened.
+	At time.Time
+	// Evidence names the recorded consumption that proves the moment.
+	Evidence EvidenceRef
+}
+    Activation is one real request consumption of one improvement version:
+    the version actually consumed, the moment the consumption happened and the
+    evidence that proves it.
+
+    This is the only thing that anchors an evidence window. A file takes effect
+    when it lands on disk, so the first real consumption routinely precedes the
+    git registration (t0 write < t1 consume < t2 register); the window opens
+    at t1 and a registration at t2 never opens, anchors or moves it. All three
+    fields are required: a record missing its version, moment or evidence cannot
+    prove a consumption and is refused with ErrActivationUnusable.
+
+type ActivationLedger struct {
 	// Has unexported fields.
 }
-    ActivationLog 记录 bundle（或改进 sha）的激活时刻，供证据采集当作窗口起点：
-    只看激活后的表现，而非固定回看窗。它是内存态——重启后清零，对重启前激活者回退 固定回看窗（有意降级，理由见文档）。由发布管理器与证据源共享同一实例。
+    ActivationLedger is the in-memory table of real consumption evidence,
+    rebuilt from recorded events and never persisted: the one-shot window,
+    the consumptions and the git correlation per version.
 
-func NewActivationLog() *ActivationLog
-    NewActivationLog 构建激活时刻表。
+    - The window anchor is the activation moment: the first Consume opens it,
+    later ones never move it, and a git registration never opens one. -
+    Consumption records are never relabeled: Correlate only adds the git mapping
+    and refuses a contradicting one with ErrCorrelationConflict.
 
-func (a *ActivationLog) Record(bundleID string, ts int64)
-    Record 记录 bundle 激活时刻（UnixMilli）。nil-safe。
+func NewActivationLedger() *ActivationLedger
+    NewActivationLedger builds an empty consumption ledger: no version has a
+    window, a consumption or a correlation yet.
 
-func (a *ActivationLog) Since(bundleID string) (int64, bool)
-    Since 返回 bundle 激活时刻（UnixMilli）；未记录返回 (0,false)。nil-safe。
+func (l *ActivationLedger) Consume(a Activation) (EvidenceWindow, bool, error)
+    Consume records one real request consumption of one improvement version and
+    returns the version's evidence window together with whether this call opened
+    it.
 
-type AssetAuditor struct {
-	// Has unexported fields.
+    The first consumption of a version opens the window at that activation
+    moment and reports opened=true; every later consumption is appended to the
+    consumption records of the version and reports opened=false with the window
+    unchanged, so the anchor stays at the first real consumption no matter how
+    many requests follow. A record missing its version, moment or evidence is
+    refused with ErrActivationUnusable and changes nothing.
+
+func (l *ActivationLedger) Consumed(version string) []Activation
+    Consumed lists every real consumption recorded for a version, in recording
+    order. The list is the turn count of the version: one entry is one real
+    request that consumed it. A defensive copy is returned, so a caller cannot
+    rewrite the recorded facts.
+
+func (l *ActivationLedger) Correlate(version, sha string) error
+    Correlate records the git registration commit of one improvement version.
+
+    The registration SHA is a git correlation only: it links feedback to the
+    real consumption version and never opens, anchors or moves an evaluation
+    window. A version never consumed keeps no window no matter how often it
+    is correlated, and this call never re-stamps the requests, feedback or
+    window already attributed to the version. Correlating the same SHA twice is
+    idempotent; a different SHA for a version already correlated is refused with
+    ErrCorrelationConflict and the recorded mapping stands. An empty version or
+    SHA is refused with ErrCorrelationUnusable.
+
+func (l *ActivationLedger) RegistrationOf(version string) (string, bool)
+    RegistrationOf returns the registration commit a version correlates to and
+    whether one is on record. The SHA is a git correlation only and never the
+    anchor of any window.
+
+func (l *ActivationLedger) Window(version string) (EvidenceWindow, bool)
+    Window returns the evidence window of a version and whether it has opened.
+    A version never consumed returns the zero window and false; that zero window
+    never means an open window.
+
+type Evaluation struct {
+	// Version names the improvement version the evaluation judged.
+	Version string
+	// SHA is the registration commit the version correlates to; it is empty
+	// when no registration is on record.
+	SHA string
+	// Verdict is the four-state post-hoc verdict.
+	Verdict PosteriorVerdict
+	// Summary states the evidence the verdict rests on: sample counts, rates
+	// and the named exclusions and unavailable criteria.
+	Summary string
+	// Suggestion is the advice text of the verdict; it is empty for every
+	// verdict that yields no advice.
+	Suggestion string
+	// EvidenceRefs names the evidence the verdict rests on.
+	EvidenceRefs []EvidenceRef
 }
-    AssetAuditor 周期扫描认知资产并比对基线；漂移经 report 回调入事实链。 report 为 nil
-    时仅日志（降级安全）。并发约定：scanAndReport 由 ticker 与启动 路径先后调用，内部以 mu 串行化快照读写。
+    Evaluation is one post-hoc evaluation event: the improvement version,
+    its correlated registration commit, the four-state verdict, the evidence
+    summary behind it and the advice text the verdict carries.
 
-func NewAssetAuditor(wd string, patterns, extraFiles []string, report func([]AssetChange)) *AssetAuditor
-    NewAssetAuditor 构造审计器。wd 为空回退进程 cwd；patterns 为受控清单 （DefaultProtectedPaths
-    同源传入）；extraFiles 是清单外补充文件 （主配置 ConfigPath，可空）。interval<=0 时使用
-    assetAuditInterval。
+    A degraded verdict carries a rollback advice for the agent to consider
+    — the `refine rollback <sha>` command beside a `git diff` review note.
+    The event is advice only: the framework never reverts anything itself,
+    reverting is a terminal act of the agent. The SHA is the git correlation of
+    the version and never the window anchor.
 
-func (a *AssetAuditor) Close() error
-    Close 停止后台循环并同步等待其完全退出（幂等）。Close 返回后保证无任何快照写入， 避免调用方的资源清理（如
-    t.TempDir）与尾随写竞态。
+type EvaluationRecorder func(ctx context.Context, evaluation Evaluation) error
+    EvaluationRecorder records one post-hoc evaluation event. It is the port
+    through which the judgment reaches the event face without importing it.
+    A nil recorder records nothing, and a recorder failure never retracts the
+    judgment that was already produced; the evaluation reports the unrecorded
+    event with ErrEvaluationUnrecorded instead.
 
-func (a *AssetAuditor) Start() error
-    Start 起后台循环：先做一次启动比对（上一代快照 → 漂移事件 → 新基线；无历史 静默建基线），随后进入周期 ticker。初始比对放在
-    goroutine 内——审计不得阻塞 agent 构造路径（文件哈希是有界 I/O，不该串进装配关键路径）。返回 error 仅用于
-    保留签名兼容（当前不产生）。
+type EvidenceRef string
+    EvidenceRef names one piece of evidence a gate or post-hoc report cites:
+    a run identifier, a check result or another durable reference a reader can
+    resolve and re-verify. A verdict that is not backed by resolvable evidence
+    is never a pass.
 
-type AssetChange struct {
-	File      string
-	OldHash   string
-	NewHash   string
-	Size      int64
-	Timestamp int64
+type EvidenceWindow struct {
+	// Version names the improvement version whose real consumption opened the
+	// window.
+	Version string
+	// ActivatedAt is the activation moment at which a real request first consumed
+	// that version.
+	ActivatedAt time.Time
+	// ActivationEvidence names the evidence that proves the activation moment:
+	// the recorded first real consumption of Version. Its zero value means no
+	// activation evidence is on record and is never read as an opened window.
+	ActivationEvidence EvidenceRef
 }
-    AssetChange 是一次漂移的最小证据单元：旧/新内容指纹 + 检测时刻（unix ms）。 OldHash 为空表示新增，NewHash
-    为空表示删除。
 
-func DiffAssetSnapshots(prev, cur map[string]FileEntry) []AssetChange
-    DiffAssetSnapshots 是纯函数比对引擎：内容 hash 不同=变更；新增/删除文件也算 变更（OldHash/NewHash
-    留空表意）。顺序稳定（按文件名字典序），事件可复现。
+    EvidenceWindow is the one-shot evidence window of one improvement version.
 
-type EvalResult struct {
-	Score  float64
-	Pass   bool
+    Its origin is the activation moment, the moment a real request first
+    consumed that version, and the version it names is the one actually
+    consumed. A git registration time is a correlation only and never the
+    window's origin, because a file takes effect when it lands on disk and
+    registration may follow the first real consumption. The window is carried
+    by the refinement ledger entry together with the post-hoc report the window
+    produced, so a window always connects back to its result. A window that
+    cannot show activation evidence is judged insufficient with the missing
+    evidence named, and the zero value never means the window is open.
+
+type Feedback struct {
+	// Stamp names the version or registration commit the feedback was stamped
+	// with when it was recorded.
+	Stamp string
+	// Consumed names the improvement version the producing request really
+	// consumed. It is the attribution fact and is never derived from the stamp.
+	Consumed string
+	// Degrades reports whether the feedback degrades the consumed version.
+	Degrades bool
+	// Evidence names the recorded feedback event the entry rests on.
+	Evidence EvidenceRef
+}
+    Feedback is one user feedback entry joined to an improvement version for the
+    post-hoc judgment: the version stamp it carries, the version the producing
+    request really consumed, whether it degrades and the evidence it rests on.
+
+    Joining is a two-condition exact match and never a time-window guess:
+    the entry counts for a version only when the request really consumed that
+    version and the stamp names the version or its correlated registration
+    commit. An entry missing its consumed version, or carrying a stamp of
+    another version, is labeled unknown and excluded from the decidable sample
+    with the reason named; it never leaks into a degradation count and never
+    time-joins.
+
+type FeedbackSource func(ctx context.Context, version string) ([]Feedback, error)
+    FeedbackSource is the port the post-hoc judgment reads recorded feedback
+    through. An error return means the evidence source is unreachable: the
+    judgment aborts as insufficient with the source named and never guesses the
+    missing feedback.
+
+type GateError struct {
+	// Segment names the structural gate segment that failed.
+	Segment Segment
+	// Scope names the declaration scope the failure covers.
+	Scope string
+	// Cause is the root cause chain of the failure.
+	Cause error
+}
+    GateError is the named failure of one structural gate segment over one
+    declaration scope: the segment that failed, the scope the failure covers
+    and the root cause chain underneath. Unwrap exposes that chain, so a caller
+    reaches the named root of a failure through errors.Is and errors.As instead
+    of matching rendered text.
+
+func (e *GateError) Error() string
+    Error renders the failed segment, the scope it covered and the cause chain.
+
+func (e *GateError) Unwrap() error
+    Unwrap exposes the root cause chain of the failure.
+
+type GateReport struct {
+	// Verdict is the segment's disposition for the candidate.
+	Verdict GateVerdict
+	// Reason is the named reason behind the verdict: the exemption reason for
+	// not-applicable, the named missing evidence for insufficient evidence, and
+	// the named ground for a refusal.
 	Reason string
+	// Scope is the scope the disposition covers: the part of the candidate or
+	// the set of checks the verdict, exemption or refusal applies to.
+	Scope string
+	// EvidenceRefs names the evidence the verdict rests on. A verdict of pass
+	// rests on reachable evidence and never on an empty list.
+	EvidenceRefs []EvidenceRef
 }
-    EvalResult 是后验评估结果。
+    GateReport is the disposition one structural gate segment returns for a
+    candidate declaration plan, with everything a reader needs to audit it:
+    the verdict, the reason behind it, the scope the disposition covers and the
+    evidence the verdict rests on.
 
-type Evaluator interface {
-	Evaluate(ctx context.Context, key string) (EvalResult, error)
+    A gate never returns a bare verdict. A not-applicable disposition carries
+    its exemption reason and scope instead of counting as evidence, an
+    insufficient evidence disposition names what is missing, and a disposition
+    without reachable evidence is never a pass. The structural vocabulary of
+    Verdict judges a candidate before publication and is never reused as the
+    post-hoc evaluation states of an improvement version (PosteriorVerdict):
+    the two vocabularies are disjoint. The zero GateReport carries no verdict
+    and must not be read as a pass.
+
+type GateVerdict string
+    GateVerdict is the disposition one structural gate segment reports for a
+    candidate declaration plan.
+
+    The verdicts are mutually exclusive and the three non-passing dispositions
+    stay distinguishable: a segment that does not apply, a segment whose
+    evidence is missing and a segment that refuses are three different facts.
+    Insufficient evidence is never reported as a pass. This vocabulary judges a
+    structural candidate before publication and is never reused as the post-hoc
+    evaluation states of an improvement version; those live in PosteriorVerdict
+    and never here.
+
+const (
+	// GateVerdictPass reports that the segment ran and its evidence passed.
+	GateVerdictPass GateVerdict = "pass"
+
+	// GateVerdictReject reports that the segment ran and refused the candidate.
+	GateVerdictReject GateVerdict = "reject"
+
+	// GateVerdictNotApplicable reports that the segment does not apply to this
+	// candidate; the exclusion carries its reason and scope.
+	GateVerdictNotApplicable GateVerdict = "not-applicable"
+
+	// GateVerdictInsufficientEvidence reports that the segment's evidence is
+	// missing or unreachable. It is never reported as a pass.
+	GateVerdictInsufficientEvidence GateVerdict = "insufficient-evidence"
+)
+type Guardrail struct {
+	// Enabled reports whether governance guardrails were active while the
+	// version was consumed. The counts below are read only when this is true.
+	Enabled bool
+	// DenialCount counts the governance refusals recorded for the consumed
+	// version. It is read only when Enabled is true.
+	DenialCount int
+	// CriticalCount counts the critical operations recorded for the consumed
+	// version. It is read only when Enabled is true.
+	CriticalCount int
 }
-    Evaluator 是后验评估器：对一个改进窗口（key=commit sha）的实际表现打分。 nil = 跳过 judge（仅
-    guardrail）。
+    Guardrail is the governance guardrail statistics of one improvement version:
+    the governance refusal count and the critical-operation count observed while
+    real requests consumed it.
 
-type Evidence struct {
-	BundleID string `json:"bundle_id"`
-	// TurnCount 窗口内真实 turn 数（用户输入型事件；C1 口径修正）
-	TurnCount int `json:"turn_count"`
-	// DenialCount 治理拒绝数（行为变差信号：agent 频试危险操作）
-	DenialCount int `json:"denial_count"`
-	// CriticalCount critical 挂起数
-	CriticalCount int `json:"critical_count"`
-	// NegFeedback negative feedback 数（D1：任务成败/用户反馈负评）
-	NegFeedback int   `json:"neg_feedback"`
-	WindowMs    int64 `json:"window_ms"`
-}
-    Evidence 是 canary 期间的表现证据（后验评估/Guardrail 的输入）。
+    Enabled is what makes the counts judgeable. When governance is disabled
+    the counts are never read and the denial and critical criteria are marked
+    unavailable in the report by name, so a silent zero never masquerades as
+    "no degradation": the reverse control is that a disabled guardrail carrying
+    huge counts still judges nothing, while the same counts under an enabled
+    guardrail do.
 
-func (e Evidence) CriticalRate() float64
-    CriticalRate 返回 critical 操作率。
+type GuardrailSource func(ctx context.Context, version string) (Guardrail, error)
+    GuardrailSource is the port the post-hoc judgment reads governance
+    guardrail statistics through. An error return means the evidence source is
+    unreachable: the judgment aborts as insufficient with the source named.
 
-func (e Evidence) DenialRate() float64
-    DenialRate 返回治理拒绝率（DenialCount / TurnCount）。无活动返回 0。
+type Judge func(ctx context.Context, review Review) (Judgment, error)
+    Judge is the LLM-judge port of the post-hoc judgment: it reviews one due
+    window's evidence set and answers a judgment. A nil Judge means no LLM judge
+    is configured and the judgment then rests on the deterministic guardrail
+    criteria alone.
 
-func (e Evidence) Sufficient(minSamples int) bool
-    Sufficient 报告样本是否足以判定（不足则保守不判劣化）。
+func NewModelJudge(m model.Model, threshold float64) Judge
+    NewModelJudge builds the default LLM judge over the public model face:
+    it reviews one due window's evidence set with one model request and folds
+    the answer into a Judgment.
 
-type EvidenceSource interface {
-	Collect(ctx context.Context, bundleID string) (Evidence, error)
-}
-    EvidenceSource 收集 canary 证据。
+    The judge is conservative on every path. Only an explicit score strictly
+    below the threshold reports Degraded; a score at or above it reports a
+    healthy judgment; and every failure — a failed model entry, a stream that
+    never completed, an unparsable answer or an answer without a score — is
+    digested into a Judgment with Decidable false and never an error, so a judge
+    miss surfaces as "no decidable verdict" and is reported insufficient instead
+    of masquerading as healthy. The answer is read as JSON from the first brace
+    of the content, so a markdown fence around it is tolerated; the score is
+    clamped into [0,1] and a missing reason is filled with a named placeholder.
 
-type FileEntry struct {
-	Hash  string `json:"hash"`
-	Size  int64  `json:"size"`
-	Mtime int64  `json:"mtime"`
-}
-    FileEntry 是单个资产文件的内容指纹。
-
-type GitCommitInfo struct {
-	Sha  string
-	Note string
-	// Time git 默认本地格式（status 展示用，不参与排序）
-	Time    string
-	Subject string
-}
-    GitCommitInfo 是一条改进 commit 的摘要。
-
-func GitLogFiltered(dir string, limit int) ([]GitCommitInfo, error)
-    GitLogFiltered 列出改进标记 commit（行首锚定，排除 Revert——K5）。limit<=0 取 20。
-
-type GitEvolution struct {
-	// Has unexported fields.
-}
-    GitEvolution 是装配单元：工具 + 生命周期。
-
-func NewGitEvolution(cfg GitEvolutionConfig) *GitEvolution
-    NewGitEvolution 构建装配单元；store/judge/guard 可为零值，运行时依赖经 BindRuntime 延迟绑定。
-
-func (g *GitEvolution) BindRuntime(store memory.MemoryStore, pid int, judge Evaluator, guard Guardrail)
-    BindRuntime 延迟绑定运行时依赖（入口 memStore ＋ 评估器对）。
-
-func (g *GitEvolution) DigestSummary() string
-    DigestSummary 供冥想 digest 渗透的自我改进摘要（M1/裁决 Q4 三来源之二、三）： 最近评估结论（劣化建议必现）+
-    未登记产物清单。空串=无内容。
-
-func (g *GitEvolution) EvaluateNow(sha string, ts int64)
-    EvaluateNow 供测试/运维主动触发（跳过 delay）。
-
-func (g *GitEvolution) Evaluations() map[string]improvementContent
-    Evaluations 拉取全部 evaluation 事件（status join 用——S4：EventTypes 过滤+Content 解码）。
-
-func (g *GitEvolution) IsRepo() bool
-    IsRepo 启动自检：非 git 仓下改文件仍然生效，只是没有留痕与评估保护（告警不阻断）。
-
-func (g *GitEvolution) LatestSha() string
-    LatestSha 返回最新 improvement 的 sha（版本章来源——SetBundleIDProvider 接它）。 空串 =
-    无改进（不盖章）。首次调用做一次惰性恢复（S2：查最新 improvement 事件）。
-
-func (g *GitEvolution) Log() *ActivationLog
-    Log 暴露窗口时刻表（装配层共享给 StoreEvidenceSource——W4 锚点接线）。
-
-func (g *GitEvolution) Register(paths []string, note string) (string, string, error)
-    Register 执行登记：受控校验 → git commit → improvement 事件（即窗口）→ 评估定时。 返回 (sha, 提示消息,
-    err)。ErrNothingToCommit 以特殊消息返回（N4：非 error 语义）。
-
-func (g *GitEvolution) SetGovernanceSignalsAvailable(fn func() bool)
-    SetGovernanceSignalsAvailable 声明治理闸是否已接线：拒绝率与 critical 判据以治理事件
-    为食，治理关闭时在结构上不可用，evaluate 必须显式说明而非让零计数冒充健康证据。 未设置（nil）= 不加注解的遗留行为。
-
-func (g *GitEvolution) Stop()
-    Stop 收敛评估 goroutine（挂在 agent 生命周期上）：经抢占通道即时收敛，无需等满
-    评估延迟；被抢占的窗口不产生结论，如实降级而不伪造。
-
-func (g *GitEvolution) Unregistered() []string
-    Unregistered 提示受控路径中 mtime 晚于最后登记的文件（Q4：digest 三来源之一）。 简化实现：git status
-    --porcelain 列受控路径下的已修改未提交文件（等价语义：有改动未登记）。
-
-type GitEvolutionConfig struct {
-	// WorkDir 运行目录（git 仓根=cwd；受控路径相对它归一）
-	WorkDir string
-	// ProtectedPaths 受控路径 patterns（默认三目录）
-	ProtectedPaths []string
-	// JudgeDelay register 后评估延迟（0=立即）
+type JudgePolicy struct {
+	// JudgeDelay is how long after the activation moment the window becomes
+	// due. Zero means due immediately at activation.
 	JudgeDelay time.Duration
-}
-    GitEvolutionConfig 是 git 原生自进化的运行参数（config.go EvolutionConfig 映射）。
-
-type Guardrail interface {
-	Breach(key string) (breached bool, reason string)
-}
-    Guardrail 是确定性指标闸：breach 即劣化信号。nil = 不监控。 （git-native 后输出为建议式 evaluation
-    事件——P4 框架不动手。）
-
-type GuardrailConfig struct {
-	// MaxDenialRate canary 窗口治理拒绝率上限（默认 0.3）
-	MaxDenialRate float64
-	// MaxCriticalRate critical 操作率上限（默认 0.2）
-	MaxCriticalRate float64
-	// MaxNegFbRate 率上限：0 取默认 0.3，负值表示显式禁用该判据（禁用无需再填一个不可达的 >1 值）。
-	MaxNegFbRate float64
-	// MinSamples 最小样本数（不足不判，默认 5，防抖动错杀）
+	// MinSamples is the decidable feedback sample a judgment needs. Zero folds
+	// to DefaultMinSamples.
 	MinSamples int
+	// NegativeRateMax is the negative feedback rate ceiling. Zero folds to the
+	// default; a negative value disables this criterion explicitly.
+	NegativeRateMax float64
+	// DenialRateMax is the governance refusal rate ceiling, judged only while
+	// governance is enabled. Zero folds to the default; a negative value
+	// disables this criterion explicitly.
+	DenialRateMax float64
+	// CriticalRateMax is the critical-operation rate ceiling, judged only while
+	// governance is enabled. Zero folds to the default; a negative value
+	// disables this criterion explicitly.
+	CriticalRateMax float64
 }
-    GuardrailConfig 是指标闸阈值。
+    JudgePolicy is the threshold set of the post-hoc judgment. The wiki defaults
+    are carried by DefaultJudgePolicy, and a zero field means "not set" and
+    folds to that default; a negative rate ceiling explicitly disables that rate
+    criterion instead of pretending it never fires.
 
-type LLMJudgeEvaluator struct {
+    A rate is a count over the turn count of the version (the real requests
+    recorded as consuming it) and a criterion is breached strictly above its
+    ceiling, so a rate exactly at the ceiling is not a breach.
+
+func DefaultJudgePolicy() JudgePolicy
+    DefaultJudgePolicy returns the wiki default thresholds.
+
+type Judgment struct {
+	// Decidable reports whether the judgment carries a usable verdict.
+	Decidable bool
+	// Degraded reports the verdict: the version degraded. It is read only when
+	// Decidable is true.
+	Degraded bool
+	// Reason states the judge's named ground or the named reason it could not
+	// decide.
+	Reason string
+	// Evidence names the evidence the judgment rests on.
+	Evidence []EvidenceRef
+}
+    Judgment is what the LLM judge answers for one review. Decidable false
+    means the judge produced no usable verdict — a failed call, an unparsable
+    answer or an answer without a score — and such a judgment asserts nothing:
+    the caller reports insufficient and never folds the miss into healthy.
+
+type Policy struct {
 	// Has unexported fields.
 }
-    LLMJudgeEvaluator 用 LLM 对 canary 表现证据做质量裁决（实现 release.go 的 Evaluator）。
 
-func NewLLMJudgeEvaluator(judge model.Model, src EvidenceSource, minSamples int, passThreshold float64, timeout time.Duration) *LLMJudgeEvaluator
-    NewLLMJudgeEvaluator 构建 LLM 评审器。judge 为 nil 时 Evaluate 恒保守通过。 minSamples<=0
-    取 5；passThreshold<=0 取 0.5；timeout<=0 取 60s。
+    Policy is the governance adapter of the structural gate: it dispositions the
+    checks of one publication candidate by running the gate's segments over the
+    same declaration plan and the same generation of the execution binding the
+    candidate carries. Each disposition is filed under its check name beside
+    the reason, scope and evidence references of the gate report it comes from,
+    and a failing segment keeps its named root cause chain in the returned error
+    so the refusal it causes stays attributable. Missing evidence is filed as an
+    unanswered check and never as a passing one.
 
-func (e *LLMJudgeEvaluator) Evaluate(ctx context.Context, bundleID string) (EvalResult, error)
-    Evaluate 实现 Evaluator：收集证据 → LLM 裁决 → EvalResult。保守：任何不确定均 Pass:true。
+func NewPolicy(gate StructuralGate) *Policy
+    NewPolicy returns the governance policy over one structural gate.
 
-func (e *LLMJudgeEvaluator) WithEffort(effort string) *LLMJudgeEvaluator
-    WithEffort sets the reasoning_effort knob for judge requests (optional).
-    (tagent-unify-model-call-config.)
+func (p *Policy) Check(ctx context.Context, plan state.StatePlan) (map[state.CheckName]state.CheckAnswer, error)
+    Check evaluates one publication candidate and answers each check under the
+    name it is filed by. The gate segments run over the declaration plan the
+    candidate carries beside the candidate itself, and the errors of the failing
+    segments are returned beside the answers so a refused publication reaches
+    their named roots.
 
-type MetricGuardrail struct {
+type Posterior struct {
 	// Has unexported fields.
 }
-    MetricGuardrail 是确定性指标闸（实现 release.go 的 Guardrail 接口）：canary 表现超阈值 → breach
-    → 快回滚。样本不足或收集失败 → 不 breach（保守，不误回滚）。无状态、并发安全。
+    Posterior is the post-hoc evaluation of improvement versions: it judges one
+    version over the evidence window its real consumption opened, joins feedback
+    by exact attribution, applies the deterministic guardrail criteria and the
+    LLM judge, and records one evaluation event per judgment.
 
-func NewMetricGuardrail(src EvidenceSource, cfg GuardrailConfig) *MetricGuardrail
-    NewMetricGuardrail 构建指标闸。
+    - The judgment order is fixed: missing activation evidence, window not due,
+    unreachable evidence source and too few decidable samples each report
+    insufficient or not-due, never healthy. - A breached deterministic
+    guardrail criterion reports degraded, judged before and independently
+    of the LLM judge. - Only an explicit low judge score reports degraded;
+    a judge that cannot decide reports insufficient, because a failed evaluation
+    never masquerades as healthy. - Every degraded verdict yields a rollback
+    advice event and never an automatic revert. - Governance-disabled guardrail
+    criteria are marked unavailable by name instead of being read as clean
+    zeros.
 
-func (g *MetricGuardrail) Breach(bundleID string) (bool, string)
-    Breach 实现 Guardrail：检查 canary 表现是否违约（确定性阈值，快、廉价，先于 LLM-judge）。
+func NewPosterior(ledger *ActivationLedger, policy JudgePolicy, feedback FeedbackSource, guardrail GuardrailSource, judge Judge, record EvaluationRecorder) *Posterior
+    NewPosterior wires the post-hoc evaluation: the consumption ledger
+    whose windows it judges, the threshold set, the feedback and guardrail
+    evidence ports, the optional LLM judge and the evaluation event recorder.
+    A nil ledger is replaced with an empty one so the judgment still answers
+    insufficient instead of panicking; nil evidence ports stand in as
+    unreachable sources and a nil recorder records nothing.
 
-type StoreEvidenceSource struct {
-	// Has unexported fields.
+func (p *Posterior) Evaluate(ctx context.Context, version string, now time.Time) (EvidenceWindow, PosteriorReport, error)
+    Evaluate runs the post-hoc judgment of one improvement version over the
+    evidence window its real consumption opened and records one four-state
+    evaluation event for it.
+
+    The returned window is the window judged; it is the zero window exactly when
+    the verdict is insufficient for missing activation evidence, and that zero
+    never means an open window. The returned report is the 00.19 four-state
+    PosteriorReport: its Reason names the missing evidence for insufficient
+    and the named ground for degraded, and a healthy verdict over disabled
+    governance guardrails carries the named unavailability annotation instead of
+    clean silence. The error return is nil unless the evaluation event could not
+    be recorded, in which case it wraps ErrEvaluationUnrecorded and the judgment
+    is still returned as it stands. A zero now is filled with the current time.
+
+type PosteriorReport struct {
+	// Verdict is the post-hoc state of the improvement version, exactly one of
+	// healthy, degraded, insufficient or not-due.
+	Verdict PosteriorVerdict
+	// Reason is the named reason behind the verdict: the named missing evidence
+	// for insufficient, the named ground for degraded.
+	Reason string
+	// EvidenceRefs names the evidence the verdict rests on.
+	EvidenceRefs []EvidenceRef
 }
-    StoreEvidenceSource 从 MemoryStore 读最近 window 的事件算证据。canary hold 期间调用即 近似该
-    bundle 激活后的表现（治理记录 + 事件量是主要信号）。
+    PosteriorReport is the post-hoc evaluation report of one improvement
+    version: the four-state verdict, the named reason behind it and the evidence
+    it rests on.
 
-func NewStoreEvidenceSource(store memory.MemoryStore, partitionID int, window time.Duration) *StoreEvidenceSource
-    NewStoreEvidenceSource 构建证据源。window<=0 取默认 10m（canary 观察窗）。
+    The report is kept apart from the structural GateReport: the
+    structural verdicts judge a candidate declaration before publication,
+    the post-hoc states judge an improvement version after real consumption,
+    and neither vocabulary is ever substituted for the other. When the verdict
+    is insufficient, Reason names the missing evidence and the judgment aborts
+    instead of falling back to healthy. Source and statistics fields are
+    declared together with their real reviewer or guardrail consumer, so this
+    report carries no speculative evaluation table. The zero report means no
+    evaluation has run yet; its empty verdict is not a fifth state and is never
+    read as healthy.
 
-func (s *StoreEvidenceSource) Collect(ctx context.Context, bundleID string) (Evidence, error)
-    Collect 读窗口事件算证据。store 为 nil 或查询失败返回空证据 + err（调用方保守不判劣化）。
+type PosteriorVerdict string
+    PosteriorVerdict is the post-hoc evaluation state of one improvement version
+    after real requests consumed it, judged over its evidence window: healthy,
+    degraded, insufficient or not-due.
 
-func (s *StoreEvidenceSource) SetActivationLog(log *ActivationLog)
-    SetActivationLog 注入激活时刻表（W4）：Collect 以 bundle 激活时刻为窗口起点，而非固定回看。
+    - healthy: the window reached its judgment point with enough decidable
+    evidence and that evidence shows no degradation. - degraded: the same
+    threshold was met but the evidence shows degradation, which yields a
+    rollback proposal. - insufficient: an attempted judgment aborted because
+    the decidable evidence fell below the threshold or a source was missing or
+    unreachable; the missing evidence is named. - not-due: the window has not
+    reached its judgment point yet, so no judgment is owed. - The states are
+    mutually exclusive and never blurred: insufficient never mixes with degraded
+    (an aborted judgment asserts no degradation), not-due is never read as
+    healthy, and insufficient is never folded into healthy. - This vocabulary
+    is the post-hoc half only and never reused for the structural gate's
+    pre-publication dispositions (GateVerdict); a verdict not produced yet is
+    the empty PosteriorReport, never a fifth verdict, and that empty value is
+    never read as healthy.
+
+const (
+	// PosteriorHealthy reports a due window whose decidable evidence met the
+	// threshold and showed no degradation.
+	PosteriorHealthy PosteriorVerdict = "healthy"
+
+	// PosteriorDegraded reports a due window whose decidable evidence met the
+	// threshold and showed degradation; it yields a rollback proposal.
+	PosteriorDegraded PosteriorVerdict = "degraded"
+
+	// PosteriorInsufficient reports an attempted judgment that aborted because
+	// the decidable evidence was below threshold or an evidence source was
+	// missing or unreachable; the missing evidence is named. It asserts no
+	// degradation and is never read as healthy.
+	PosteriorInsufficient PosteriorVerdict = "insufficient"
+
+	// PosteriorNotDue reports a window that has not reached its judgment point
+	// yet; it is never read as healthy and yields no rollback proposal.
+	PosteriorNotDue PosteriorVerdict = "not-due"
+)
+type Review struct {
+	// Version names the improvement version under judgment.
+	Version string
+	// Turns is the number of real requests recorded as consuming the version.
+	Turns int
+	// Joined holds the decidable feedback entries that passed the two-condition
+	// join, in recording order.
+	Joined []Feedback
+	// Guardrail carries the guardrail statistics of the version; its counts are
+	// judgeable only when Enabled is true.
+	Guardrail Guardrail
+}
+    Review is the evidence set handed to the LLM judge for one due window:
+    the version under judgment, its turn count, the decidable feedback entries
+    joined to it and its guardrail statistics. The judge reads this set and
+    produces a judgment; it never re-derives the joins or the turn count.
+
+type Segment string
+    Segment names one segment of the structural gate over one candidate:
+    the evaluation segment, the benchmark segment or the apply gate.
+
+const (
+	// SegmentEval names the evaluation segment of the structural gate.
+	SegmentEval Segment = "eval"
+
+	// SegmentBenchmark names the benchmark segment of the structural gate.
+	SegmentBenchmark Segment = "benchmark"
+
+	// SegmentApplyGate names the apply gate of the structural gate.
+	SegmentApplyGate Segment = "apply-gate"
+)
+type StructuralGate interface {
+	// Eval reports whether the candidate's declarations meet their evaluation
+	// evidence. The report carries the disposition with its reason, scope and
+	// evidence references. Evidence that is missing or unreachable yields
+	// insufficient evidence, which is never a pass.
+	Eval(ctx context.Context, plan state.OrgPlan, binding state.StatePlan) (GateReport, error)
+
+	// Benchmark reports whether the candidate's declarations meet their benchmark
+	// evidence. The report carries the disposition with its reason, scope and
+	// evidence references. Evidence that is missing or unreachable yields
+	// insufficient evidence, which is never a pass.
+	Benchmark(ctx context.Context, plan state.OrgPlan, binding state.StatePlan) (GateReport, error)
+
+	// ApplyGate reports whether the candidate's declaration and binding may be
+	// applied as the next generation. A missing required check refuses the
+	// publication, and a check that does not apply to this candidate is recorded
+	// in the report with its reason and scope instead of being counted as
+	// evidence.
+	ApplyGate(ctx context.Context, plan state.OrgPlan, binding state.StatePlan) (GateReport, error)
+}
+    StructuralGate is the ordered gate a candidate organization plan passes
+    through before it becomes the next effective generation: Eval, then
+    Benchmark, then ApplyGate.
+
+    Every segment receives the same declaration plan and the same generation of
+    the prepared execution binding, so no segment compiles a second declaration
+    or a shadow binding of its own. A segment reports its disposition in a
+    GateReport — verdict, reason, scope and evidence references together —
+    and keeps a failure's named root cause reachable through errors.Is and
+    errors.As rather than flattened into a bare string. A segment whose evidence
+    is missing is never reported as a pass. The redline list (4 rules):
+    MUST hand every segment the same declaration plan and the same prepared
+    binding generation. MUST keep a named failure's root cause reachable through
+    errors.Is and errors.As. MUST NOT report a segment whose evidence is missing
+    as a pass. MUST NOT compile a second declaration or a shadow binding inside
+    a segment.
+
+func NewStructuralGate() StructuralGate
+
+    NewStructuralGate returns the structural gate over the declaration plan and
+    the prepared execution binding each call carries in. Every segment consumes
+    that one pair through the same admission and the same evidence evaluation,
+    so the gate parses no configuration of its own and holds no second
+    declaration beside the one it was handed. The gate files what its evaluation
+    and benchmark segments observed per pair, and the apply gate consumes those
+    very records instead of driving the candidate binding again.

@@ -11,7 +11,7 @@
 # reincarnated agent to verify (销假). Every outcome lands in restart.log.
 #
 # Phases (1-2 run while old process still serves => build failure costs nothing):
-#   0. preflight: old pid alive & holds :8089
+#   0. preflight: old pid alive & holds the HTTP face port
 #   1. env snapshot from /proc/<pid>/environ (exact env inheritance)
 #   2. build new binary to /tmp (system Go 1.24, tagent needs >=1.24)
 #   3. atomic binary swap (mv; old kept as wechat-bot.prev)
@@ -28,6 +28,8 @@ SNAP=/tmp/tagent_env.snapshot
 NEWBIN=/tmp/wechat-bot.new
 DONEDIR="$BASE/run"
 DONEF="$DONEDIR/restart.done"
+# 端口与宿主 HTTP 面同源（env TAGENT_HTTP_PORT，缺省 8089）。
+PORT="${TAGENT_HTTP_PORT:-8089}"
 mkdir -p "$DONEDIR" 2>/dev/null
 log(){ echo "[$(date '+%F %T')] $*"; }
 
@@ -54,15 +56,12 @@ log "=== restart session start (target pid=$OLD_PID, shell $$) ==="
 
 # 0. preflight
 kill -0 "$OLD_PID" 2>/dev/null || { log "FATAL: pid $OLD_PID not alive, abort"; exit 1; }
-ss -tlnp 2>/dev/null | grep -q ":8089 .*pid=$OLD_PID," || { log "FATAL: pid $OLD_PID does not hold :8089, abort"; exit 1; }
-log "preflight ok: pid alive and holds :8089"
+ss -tlnp 2>/dev/null | grep -q ":$PORT .*pid=$OLD_PID," || { log "FATAL: pid $OLD_PID does not hold :$PORT, abort"; exit 1; }
+log "preflight ok: pid alive and holds :$PORT"
 
 # 1. env snapshot (contains secrets -> chmod 600, removed after success)
 tr '\0' '\n' < "/proc/$OLD_PID/environ" > "$SNAP" || { log "FATAL: env snapshot failed"; exit 1; }
 chmod 600 "$SNAP"
-# breaking-change env (RL endpoint policy, required since 0a31e46 2026-09-27)
-grep -q '^TAGENT_RL_ALLOW_LLM_REDIRECT=' "$SNAP" || echo 'TAGENT_RL_ALLOW_LLM_REDIRECT=1' >> "$SNAP"
-grep -q '^TAGENT_RL_ENDPOINT_ALLOWLIST=' "$SNAP" || echo 'TAGENT_RL_ENDPOINT_ALLOWLIST=open.bigmodel.cn,api.deepseek.com,api.moonshot.cn,api.lkeap.cloud.tencent.com,tokenhub.tencentmaas.com' >> "$SNAP"
 export GOMEMLIMIT="${GOMEMLIMIT:-1800MiB}"  # heap 软顶：防运行时水位爬上 2G+（2026-09-30 审计后加）
 OLD_TRAJ_BYTES="$(stat -c %s data/trajectories/wechat-session.jsonl 2>/dev/null || echo 0)"
 log "env snapshot: $(wc -l < "$SNAP") vars"
@@ -166,7 +165,7 @@ for i in $(seq 1 90); do
     sleep 2
     CODE=$(curl -s -o /tmp/tagent_healthz.json -w '%{http_code}' \
         ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} --max-time 3 \
-        http://127.0.0.1:8089/healthz 2>/dev/null)
+        http://127.0.0.1:$PORT/healthz 2>/dev/null)
     if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
         log "AUTH_FAIL: healthz returned $CODE — token missing/mismatch (TAGENT_RL_AUTH_TOKEN). NOT killing; manual fix required"
         rm -f /tmp/tagent_restart.done
@@ -174,10 +173,10 @@ for i in $(seq 1 90); do
         exit 3
     fi
     if [ "$CODE" = "200" ]; then
-        LISTEN_PID=$(ss -tlnp 2>/dev/null | grep ':8089 ' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+        LISTEN_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
         # 2026-09-12 00:23 lesson: healthz OK alone is a false positive - in the
         # script race the "RESTART OK" line credited a pid that was not the
-        # spawned one. Require the 8089 listener to be our spawn (setsid keeps
+        # spawned one. Require the face-port listener to be our spawn (setsid keeps
         # the pid; if it forked, accept only when the spawn pid itself is gone).
         if [ -n "$LISTEN_PID" ] && [ "$LISTEN_PID" != "$NEW_PID" ] && kill -0 "$NEW_PID" 2>/dev/null; then
             log "note: healthz up but listener pid=$LISTEN_PID != spawned $NEW_PID - keep waiting"

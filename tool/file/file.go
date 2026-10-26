@@ -1,108 +1,182 @@
-// Package file wraps trpc-agent-go's built-in file operation tools for tagent.
+// 契约: docs/wiki/tool/tool-architecture.md#tool-registry
 //
-// - read_file, save_file, list_file and friends register as plain tools for agent YAML.
-// - base_dir falls back to the agent working root, then ".", sharing one filesystem view with the exec tool.
-// 契约: docs/wiki/platform/agent-behavior-matrix.md#working-dir
+// Package file is the model-facing file surface of an action agent: the file
+// tools one declaration grants, confined to the base directory and the read
+// roots the same declaration fixes. The package owns no file system of its
+// own: every tool is the tRPC file tool set, so this package only selects the
+// granted tools and keeps their request prefix in declaration order.
 package file
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
+	"strings"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
-	"trpc.group/trpc-go/trpc-agent-go/tool/file"
-
-	"github.com/SpellingDragon/tagent/agent"
+	trpcfile "trpc.group/trpc-go/trpc-agent-go/tool/file"
 )
 
-// fileToolNames lists the tool names exposed by trpc-agent-go's file toolset.
-var fileToolNames = []string{
-	"read_file",
-	"save_file",
-	"list_file",
-	"search_file",
-	"search_content",
-	"read_multiple_files",
-	"replace_content",
-}
-
-// toolSetCache holds file.ToolSet instances keyed by base directory.
-// File tools sharing the same base_dir reuse the same ToolSet.
-var (
-	toolSetCache = map[string]trpctool.ToolSet{}
-	toolSetMu    sync.Mutex
+// SaveFileToolName and the six sibling names are the seven names the
+// declaration and the action prompt share. They are frozen: a rename is a
+// prompt change and a declaration change in one breath.
+const (
+	// SaveFileToolName is the name of the file write tool.
+	SaveFileToolName = "save_file"
+	// ReadFileToolName is the name of the single file read tool.
+	ReadFileToolName = "read_file"
+	// ReadMultipleFilesToolName is the name of the multi-file read tool.
+	ReadMultipleFilesToolName = "read_multiple_files"
+	// ListFileToolName is the name of the directory listing tool.
+	ListFileToolName = "list_file"
+	// SearchFileToolName is the name of the file name search tool.
+	SearchFileToolName = "search_file"
+	// SearchContentToolName is the name of the file content search tool.
+	SearchContentToolName = "search_content"
+	// ReplaceContentToolName is the name of the in-place edit tool.
+	ReplaceContentToolName = "replace_content"
 )
 
-var registerOnce sync.Once
+// ErrUnknownTool reports a declared tool id the file surface does not carry,
+// so a declaration that drifts from the frozen seven stops the assembly
+// instead of exposing a name nothing answers.
+var ErrUnknownTool = errors.New("file: the declaration names no such file tool")
 
-// RegisterTools registers all built-in file operation tools as plain tools.
-// Should be called once during tagent's built-in tool registration.
-// Uses sync.Once for idempotency — safe to call multiple times.
-func RegisterTools() {
-	registerOnce.Do(func() {
-		for _, name := range fileToolNames {
-			name := name
-			agent.RegisterPlainTool(name, makeFileToolFactory(name))
-		}
-	})
-}
+// ErrDuplicateTool reports a declared tool id named twice: one grant is one
+// entry of the request prefix.
+var ErrDuplicateTool = errors.New("file: the declaration names the same file tool twice")
 
-// makeFileToolFactory returns a plain tool factory for the given file tool name.
-func makeFileToolFactory(name string) agent.PlainToolFactory {
-	return func(cfg agent.PlainToolFactoryConfig) (trpctool.CallableTool, error) {
-		baseDir := resolveBaseDir(cfg.Properties, cfg.WorkingDir)
-
-		ts, err := getToolSet(baseDir)
-		if err != nil {
-			return nil, fmt.Errorf("file tool %q: create file toolset: %w", name, err)
-		}
-
-		for _, t := range ts.Tools(context.Background()) {
-			decl := t.Declaration()
-			if decl == nil || decl.Name != name {
-				continue
-			}
-			ct, ok := t.(trpctool.CallableTool)
-			if !ok {
-				return nil, fmt.Errorf("file tool %q: registered tool %T does not implement CallableTool", name, t)
-			}
-			return ct, nil
-		}
-
-		return nil, fmt.Errorf("file tool %q: not found in file toolset", name)
+// Names returns the seven names in the frozen order the tool set carries them.
+func Names() []string {
+	return []string{
+		SaveFileToolName,
+		ReadFileToolName,
+		ReadMultipleFilesToolName,
+		ListFileToolName,
+		SearchFileToolName,
+		SearchContentToolName,
+		ReplaceContentToolName,
 	}
 }
 
-// resolveBaseDir 解析 file 工具的根目录。优先级:显式 properties.base_dir > agent 级 WorkingDir
-// (config.working_dir / TAGENT_WORKING_DIR) > "."(进程 cwd,现状默认)。与 exec 命令 cwd 走同一
-// 优先级(builtin.go actionFactory),二者始终一致 → 模型看到单一文件系统视图。
-func resolveBaseDir(props map[string]any, workingDir string) string {
-	if props != nil {
-		if v, ok := props["base_dir"].(string); ok && v != "" {
-			return v
-		}
-	}
-	if workingDir != "" {
-		return workingDir
-	}
-	return "."
+// Options fixes the face one file surface is assembled over: the directory
+// every path resolves under, the roots a read may name absolutely, and the
+// tools the declaration grants.
+type Options struct {
+	// BaseDir is the directory every relative path resolves under; an empty
+	// directory means the current directory.
+	BaseDir string
+	// ReadRoots are the additional roots an absolute read may name; writes
+	// never reach outside BaseDir.
+	ReadRoots []string
+	// Tools selects the granted tools in declaration order; an empty list
+	// grants all seven in the frozen order.
+	Tools []string
 }
 
-// getToolSet returns a cached file.ToolSet for the given base directory.
-func getToolSet(baseDir string) (trpctool.ToolSet, error) {
-	toolSetMu.Lock()
-	defer toolSetMu.Unlock()
+// Surface is the file tool set of one agent: the granted tools over the
+// declared base directory, in the order the declaration names them.
+type Surface struct {
+	baseDir string
+	name    string
+	inner   trpctool.ToolSet
+	tools   []trpctool.Tool
+}
 
-	if ts, ok := toolSetCache[baseDir]; ok {
-		return ts, nil
+// New assembles the file surface the options fix. The base directory must
+// exist when the surface is built, so a deployment whose declared directory
+// is missing is refused at assembly rather than at the first call.
+func New(opts Options) (*Surface, error) {
+	base := strings.TrimSpace(opts.BaseDir)
+	if base == "" {
+		base = "."
 	}
-
-	ts, err := file.NewToolSet(file.WithBaseDir(baseDir))
+	granted, err := selectTools(opts.Tools)
 	if err != nil {
 		return nil, err
 	}
+	inner, err := trpcfile.NewToolSet(
+		trpcfile.WithBaseDir(base),
+		trpcfile.WithReadOnlyDirs(opts.ReadRoots...),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("file: open the base directory %q: %w", base, err)
+	}
+	carried := make(map[string]trpctool.Tool, len(granted))
+	for _, tool := range inner.Tools(context.Background()) {
+		carried[declaredName(tool)] = tool
+	}
+	tools := make([]trpctool.Tool, 0, len(granted))
+	for _, name := range granted {
+		tool, ok := carried[name]
+		if !ok {
+			_ = inner.Close()
+			return nil, fmt.Errorf("file: the native file tool set carries no %q tool", name)
+		}
+		tools = append(tools, tool)
+	}
+	return &Surface{baseDir: base, name: inner.Name(), inner: inner, tools: tools}, nil
+}
 
-	toolSetCache[baseDir] = ts
-	return ts, nil
+// selectTools resolves the granted names: no declaration grants all seven in
+// the frozen order, and a written declaration grants exactly its entries in
+// its own order.
+func selectTools(declared []string) ([]string, error) {
+	if len(declared) == 0 {
+		return Names(), nil
+	}
+	granted := make([]string, 0, len(declared))
+	seen := make(map[string]bool, len(declared))
+	for _, raw := range declared {
+		name := strings.TrimSpace(raw)
+		if !known(name) {
+			return nil, fmt.Errorf("%w: %q", ErrUnknownTool, raw)
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateTool, name)
+		}
+		seen[name] = true
+		granted = append(granted, name)
+	}
+	return granted, nil
+}
+
+// known reports whether one name belongs to the frozen seven.
+func known(name string) bool {
+	for _, candidate := range Names() {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
+// declaredName reports the name one native tool declares.
+func declaredName(tool trpctool.Tool) string {
+	if tool == nil || tool.Declaration() == nil {
+		return ""
+	}
+	return tool.Declaration().Name
+}
+
+// Tools implements the tool set interface: the granted tools in declaration
+// order.
+func (s *Surface) Tools(context.Context) []trpctool.Tool {
+	return s.tools
+}
+
+// Close implements the tool set interface: the surface holds no resource the
+// native tool set does not already release.
+func (s *Surface) Close() error {
+	return s.inner.Close()
+}
+
+// Name implements the tool set interface.
+func (s *Surface) Name() string {
+	return s.name
+}
+
+// BaseDir reports the directory every relative path resolves under.
+func (s *Surface) BaseDir() string {
+	return s.baseDir
 }

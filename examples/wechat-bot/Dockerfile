@@ -9,26 +9,26 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/wechat-bot .
 
 # ---------- 工具阶段：node 运行时 + openspec CLI ----------
-# plan 子 agent 的 spec 工具后端是 openspec（npm 包）；skills（url-fetcher 等）
-# 也需要 node。此处用官方 node 镜像安装 openspec，运行阶段只拷贝必要产物，
+# plan 子 agent 的 spec 工具后端是 openspec（npm 包）；knowledge 的 skill_* 工具
+# 也需要 node。两者均由 Boot 按 tagent.yaml 声明接线，运行时镜像必须保留。
+# 此处用官方 node 镜像安装 openspec，运行阶段只拷贝必要产物，
 # 避免在最终镜像里保留 npm 缓存与构建工具。
 FROM node:22-bookworm-slim AS tooling
 RUN npm install -g @fission-ai/openspec --no-audit --no-fund \
  && npm cache clean --force
 
 # ---------- 运行阶段：debian-slim + 运行时依赖 ----------
-# 选型说明：本 bot 需要 tmux（action 异步任务层）、node（openspec/skills）、
-# 以及 shell（entrypoint）——distroless/static 三者皆无，故改用 debian-slim。
+# 选型说明：本 bot 需要 node（openspec/skills 工具面）、
+# curl（容器内探活）以及 shell（entrypoint）——distroless/static 三者皆无，故改用 debian-slim。
 # 安全加固（非 root / cap_drop / no-new-privileges / 资源上限 / 仅绑本地端口）
 # 全部保留于 docker-compose.yml，不因基础镜像变化而削弱。
 FROM debian:bookworm-slim
 
 # 运行时依赖：
-#   tmux            — action 工具的异步任务层
-#   curl            — 健康检查探针（GET /healthz）
+#   curl            — 容器内探 /healthz（compose healthcheck 用它）
 #   libstdc++6/zlib1g — 拷贝来的 node 二进制所需运行时库
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl tmux libstdc++6 zlib1g \
+      ca-certificates curl libstdc++6 zlib1g \
  && rm -rf /var/lib/apt/lists/*
 
 # node 运行时 + openspec CLI（自工具阶段拷贝，固定 node 22 版本）

@@ -1,0 +1,201 @@
+{
+  "id": "EVID-05-restart-refold-regression",
+  "order": "AA-followup",
+  "repair_leaf": "EVID-05-followup",
+  "closing_leaf": "AD",
+  "change": "event-consumption-integrity",
+  "repo": "/Users/pengweiye/Documents/codes/tagent",
+  "head": "6cc4414",
+  "status": "complete",
+  "fix_applied": "full",
+  "outcome": "三轴（恢复轴/预算轴/MUT-EVID-05）保持；裁定 A1 与扩权已落地：03.6 negative 的判定点移到恢复边界（重启后、下一回合前：恢复合成键集与重启前逐键相等且非空、恢复零 compress 事实提交；回合后只保留非折叠检查），通知读取栅栏改为身份解析（intake 不再保存投影位置，每次 drive 从链按身份解析出的 ended 边界重读，已报身份由 intake 的 read 集记住；facts.go 的 NoticesFrom 对失效位置按身份边界重锚）。256/seed1 全 121 代 + 120 次重启绿（604.656s，report wall 602759.807ms，与 AC 决定性实验 599.408s 同量级）；FoldControl 单轮与 -race 均绿；host/history/execution/evolution/learning/微信审批回归全绿；变异门 --all 11/11 killed（MUT-EVID-05 digest 未变，MUT-EVID-04 因 facts.go 新增身份解析调用同步重锚后仍 killed）。",
+  "anchor_ruling_applied": {
+    "source": "00.3-frozen-contract.json defects[EVID-05-restart-refold-regression].anchor_ruling",
+    "ruling": "方案A（R23）+ 追加裁定 A1+扩权（2026-10-25，AC 单实测后）",
+    "a1_negative_observation_point": "恢复边界：rig.reboot() 之后、下一回合 route 之前。①恢复出的 synthetic 键集 = 重启前 synthetic 键集（双向相等且非空）；②恢复本身不新增 compress.request 事实。回合后只保留原非折叠检查（单请求、旧材料若出现必须经 history summary、反思静默）；在线 keep_recent 重铸新 -hist- 与重启回合同样重铸都合法。",
+    "expansion_notice_fence": "runtime/agent/loop.go 的 intake.cursor 从投影位置改为身份解析（不保存位置，每轮从 endedAt 身份边界重解析），facts.go 的 NoticesFrom 协同按当前序列/身份边界重锚。位置游标被折叠重写截断是 256 通知不可见的真根因。"
+  },
+  "axes": {
+    "restore_axis": {
+      "target": "run.go seedReplay + restoreFoldForm",
+      "implementation": "逐条 Append 后立刻 FoldByAge(AgeFoldPlan{KeepRecent: window.KeepRecentTasks, VolumeThreshold: window.VolumeThresholdBytes()})，与 AgeFoldPlugin.ObserveCommit 的 plan 完全一致；报告里的 report.Requests 一律不提交，恢复路径不写 compress.request；window.MaxTokens <= 0 时不折。",
+      "same_form_measured": "重启前投影 = [-hist-…, R7311 输入, R7311 输出]（entries=3 synthetic=1 rendered=2098B, window=2400）；重启后 seeded 与重启前逐键完全一致（本轮 03.6 negative 实测 -hist-a278996b70d3a951，另一次 -hist-5550fbba103c7658）。",
+      "no_new_writes": "恢复内不产生 compress.request；02.3 rebuild_does_not_refold 不回退（history 全族绿）。",
+      "reused_aa_patch": "/tmp/aa-evid05/restore-axis/restore-axis.patch（等价实现，已按仓库风格重写为具名函数）",
+      "untouched_this_leaf": "run.go restoreFoldForm 未改动（本轮只读消费其产物）。"
+    },
+    "budget_axis": {
+      "target": "memory/replay/replay_budget.go assembleBudgetLocked + noticeCard",
+      "implementation": "降级链末端不再 continue：event.TypeFeedback 条目渲染 <=300 chars 身份卡片（状态截 60 + 原文首行 + 票据），仍 recordLocked 记账（PresentationSummary），不静默跳过。",
+      "gates": "go test ./memory/replay -race = ok 1.348s；history notice_visible_under_fold 绿。",
+      "not_sufficient_for_256": "256 红组合的通知不是被预算丢弃：它在（按身份记录的）已结束边界之外，由通知 feed 作为投影增量读给回合；feed 失手后预算根本看不到它（见 resolved_blockers[BLOCKER-2]）。",
+      "untouched_this_leaf": "本轮无需改动 replay_budget.go。"
+    },
+    "notice_fence_axis": {
+      "target": "runtime/agent/loop.go 的 progressNotes/intake + facts.go 的 noticeProjection",
+      "implementation": "①intake 删除 cursor/seeded：范围不再保存投影位置；每次 drive 用 NoticeBoundary 取本次按 endedAt 身份解析出的 ended 边界，直接 NoticesFrom(chain, prefix, boundary)，已报通知由 intake.read（event.EventID 集）去重，保证每份通知恰好报一次；②facts.go NoticesFrom 在读取时把调用方传来的位置按当前序列重锚：cursor < endedPrefix() 或 cursor > len(entries) 时取 endedPrefix()，再走原有 clamp 与身份前缀过滤；NoticeBoundary/NoticesFrom 的契约文档同步为“位置按身份在读取时解析，绝不跨折叠保存”。",
+      "no_second_cursor_store": "身份状态只有 intake.read 一份；位置解析复用 request.go 的 endedPrefix() 同族逻辑（不新建游标仓）。",
+      "why_not_interface_change": "把 NoticeFeed 的 cursor 参数改成事件身份需要改导出接口签名，会波及 runtime/agent/loop_test.go、examples/contract/runtime_agent/NoticeFeed_example.go 与 docs/api（均在本叶写集之外，且 scripts/check_concept_budget.py 校验示例与接口一致）；任务书明确允许“每轮从 endedAt 身份边界重解析位置”，与 AC 已证实验同义，故选此路径，零接口变更。",
+      "covers_00_1_observation": "00.1 盘点观察“位置索引跨折叠可能跳过同 range 后续 progress 通知”由同一读取路径覆盖：256 长程的 /task 消费回合（58/58）在折叠与重启之间反复读进度通知，全绿；host TestEventIntegrityTaskContinuation/notice_visible_under_small_window 单独复跑 PASS（ok 1.811s，log /tmp/evid05-final-notice-smallwindow.log），history notice_visible_under_fold 同族绿。"
+    },
+    "mutation": {
+      "id": "MUT-EVID-05-restart-flat-restore",
+      "kill_surface": "run.go 删除 restoreFoldForm 调用块（恢复平铺）",
+      "test_package": "./tests/integration/history",
+      "test_selector": "^TestEventIntegrityProjection$",
+      "anchor_subtest": "restart_restores_fold_form",
+      "expect_assertion": "the restart restored the fold products",
+      "why_not_03_6": "变异门的 COPY_EXCLUDED_PREFIXES=(\"examples/\") 使 03.6/03.11 不在变异树内，任务书允许“既有 history 测试若需”，故在 02.3 同族新增恢复边界锚（同形相等 + 恢复零写入）作为杀伤面。",
+      "counterfactual": "临时删除 restoreFoldForm 调用后，恰在该具名断言 Fatal：the restart restored the fold products []…",
+      "gate": "python3 scripts/check_event_integrity_mutations.py --all --json：gate.ok=true，11/11 killed，assertion_hit=true，patch_digest sha256:45d263dddd06088934093950b4ccf513b5f5b8fabe9863ddbe056dc168c68fa7（log /tmp/evid05-gate-AD2/mutations/MUT-EVID-05-restart-flat-restore/run.jsonl）",
+      "reanchor_evid04": "本叶 facts.go 在 NoticesFrom 内新增 held.endedPrefix() 调用，MUT-EVID-04-position-boundary 原补丁删除 endedPrefix 后不再编译（compile_failure）。按“loop.go/facts.go 改动若打破其他锚则同步重锚”，给 MUT-EVID-04 追加第 7 条替换（facts.go: boundary := held.endedPrefix() → boundary := held.ended，保持变异语义=位置边界），并同步 scripts/test_check_event_integrity_mutations.py 的补丁数 6→7 与断言。重锚后仍 killed（named_assertion，digest sha256:7f631dabc42554b435b63798b0a5c918e2284c09c702883d8d50f911c0962a2e）。"
+    }
+  },
+  "red_green": {
+    "baseline_red_pre_fix": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -race -timeout 300s",
+      "exit": 1,
+      "failure": "negative: smoke_test.go:1703 the restart re-folded the pre-restart material into the request",
+      "log_ref": "/tmp/aa-evid05/baseline/fold-control.log"
+    },
+    "ruling_a_red_now": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -race -timeout 300s",
+      "exit": 1,
+      "positive": "[integrity-fold] smoke-chat-b: entries=3 synthetic=1 rendered=2098 bytes (window=2400)",
+      "failure": "negative (1.83s) smoke_test.go:1729: the restart minted the synthetic key -hist-a3203cc229ba9e5b, want the restored key set within the pre-restart [-hist-c3c7ee52fe51ad7d]",
+      "reading": "观测点在重启回合之后：该回合把 R7311 推入 middle band，按在线规则重铸一条 -hist- 并新提一个 compress.request。重启只是把同一回合交回同一条规则。"
+    },
+    "no_discrimination_proof": {
+      "baseline_flat": "seeded = 7 条原始、0 synthetic；回合后新铸 1 条 -hist- + 1 个 cmp-。",
+      "restore_axis": "seeded = 与重启前逐键相同；回合后同样新铸 1 条 -hist- + 1 个 cmp-。",
+      "online_control_same_process_no_restart": "不重启、同一点继续一回合：before 3 键，after 新铸 -hist-55a9… + cmp-921f…，与重启回合逐形一致。",
+      "conclusion": "裁定 A 的 ①② 若在重启回合之后观测，基线与修复同样红（零分辨力）；真正有分辨力的观测点是恢复边界上的形态锚（非空/相等 + 恢复零 compress），已按 A1 落在 03.6 negative 与 02.3 restart_restores_fold_form，并由 MUT-EVID-05 杀死。"
+    },
+    "a1_counterfactual_flat_restore": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run 'TestEventIntegrityFoldControl/negative' -count=1 -timeout 300s",
+      "mutant": "临时删除 run.go seedReplay 的 restoreFoldForm 调用块（与 MUT-EVID-05 同一补丁语义）；run.go 备份 sha256:9b9253fb7b1f0550313e58569ccaca5014df28e4aaedb2cbb227979a4691199b，实验后逐字节还原并复核同一 sha256，随后 negative 复跑绿",
+      "exit": 1,
+      "failure": "smoke_test.go:1722: the restart restored no fold product, want the 1 key(s) the chain held [-hist-b6d921be7655f761]",
+      "restored_green": "ok wechat-bot 3.822s",
+      "log_refs": ["/tmp/evid05-final-a1-counterfactual-flat.log", "/tmp/evid05-final-a1-restored-green.log"]
+    },
+    "long_run_256_red": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRun$' -count=1 -race -timeout 600s -args -seed=1 -window=256",
+      "exit": 1,
+      "wall": "85.30s",
+      "failure": "generation 8 failed；child: answer generation 8 session smoke-chat-b round 24: no text to smoke-chat-b carrying \"settle-ack SMOKE-R10097\" after 1m0s (recorded=23)",
+      "log_ref": "/tmp/evid05-longrun-256.log",
+      "determinism": "同 seed/window 两次独立运行在同一代同一轮复现（85.30s / 85.81s）"
+    },
+    "fold_control_green_after_fix": {
+      "command_race": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -race -timeout 300s",
+      "result_race": "ok wechat-bot 5.192s（父 3.68s；positive 0.19s / negative 3.32s / consumer 0.17s）",
+      "command_single": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityFoldControl$' -count=1 -timeout 300s",
+      "result_single": "ok wechat-bot 4.062s",
+      "negative_log": "[integrity-fold-negative] the rebuilt projection minted 1 product(s) and a second fold consumed nothing; the restart restored the 1 fold product(s) the chain held [-hist-a278996b70d3a951] with no judgment of its own and the original 4-099ac975bb74f7611279a93a970dd31c stayed readable across it",
+      "log_refs": ["/tmp/evid05-final-foldcontrol-fixed.log", "/tmp/evid05-final-foldcontrol-norace.log"]
+    },
+    "long_run_256_green_after_fix": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRun$' -count=1 -race -timeout 900s -args -seed=1 -window=256",
+      "exit": 0,
+      "result": "ok wechat-bot 604.656s",
+      "report_wall_ms": 602759.806542,
+      "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w256-20261025-014412",
+      "report": "report-window-256-seed-1.json（scale: 1200 inputs / 120 restarts / 121 generations / 4 sessions on one host；reconciliation: input_requests 1201 expected 1200 missing null duplicate null，notification_requests 47 expected 47 missing null，actions 1728/1728 missing null，consumer_turns 58/58 answered 58，fold_samples 484 fold_synthetics 484）",
+      "log_ref": "/tmp/evid05-final-256-fixed.log",
+      "ac_experiment_baseline": "AC 决定性实验（游标每轮重置到边界）run-s1-w256-20261025-011908，wall_ms 599408.603292（ok 601.186s）；本轮完整修复后 wall_ms 602759.807（ok 604.656s），同量级且 gen8 起全代绿。",
+      "gen8": "通过（前次红失败代），全 121 代与 120 次重启均绿。"
+    }
+  },
+  "blockers": [],
+  "resolved_blockers": [
+    {
+      "id": "BLOCKER-1-ruling-gap",
+      "what": "03.6 negative 的裁定 A ①② 与“红转绿”不可同时满足",
+      "resolution": "按追加裁定 A1 移到恢复边界：重启后、下一回合前断言恢复 synthetic 键集与重启前逐键相等且非空、恢复零 compress 事实提交；回合后只保留单请求、旧材料若出现必须带 history summary、反思静默。",
+      "discrimination": "该观测点上平铺恢复 seeded = 0 synthetic（AC baseline_flat 实测）；本轮又以临时平铺补丁直接实测：negative 在 smoke_test.go:1722 以 named 具名断言红（the restart restored no fold product），还原 run.go 后立即复绿。同形恢复输出非空且逐键相等即绿。",
+      "evidence": "red_green.fold_control_green_after_fix；MUT-EVID-05 在 history 同形锚 killed。"
+    },
+    {
+      "id": "BLOCKER-2-notice-fence-position",
+      "what": "256 gen8：结算通知被通知读取游标跳过",
+      "mechanism": "progressNotes 的 cursor 是投影位置；年龄折叠把投影从 7 条重写为 2 条（[history_summary 816B, feedback 62B]），cursor 被截到 2，而通知在 index 1；endedAt 按身份解析出的边界是 1，所以预算前缀只含综述、通知既不在前缀也不在 feed 读数里。",
+      "measured_before": "[DIAG-NOTICE] inv=…chat-b#2 boundary=1 cursor=2 reached=2 views=0；[DIAG-ASSEMBLE] prefix=1 total=2 limit=1024（0=history_summary 816B, 1=feedback 62B）",
+      "resolution": "intake 不再保存位置；每轮按身份边界重读，read 集按身份去重；NoticesFrom 对失效位置按身份边界重锚（axes.notice_fence_axis）。",
+      "measured_after": "256/seed1 121 代 + 120 重启 ok 604.656s；report notification_requests 47/47、consumer_turns 58/58、fold_samples 484/484。",
+      "log_ref": "/tmp/evid05-final-256-fixed.log"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "fence-identity-via-reanchor",
+      "decision": "不改导出 NoticeFeed 接口签名，改为“每次 drive 从身份边界重解析位置 + intake.read 身份去重 + NoticesFrom 读取时重锚”。",
+      "why": "接口签名变更会波及其实现/示例/文档（loop_test.go、examples/contract/NoticeFeed_example.go、docs/api），超出本叶写集；任务书给出该等价路径且 AC 已用同一语义跑出 121 代全绿。",
+      "cost": "每次 drive 多一次 NoticeBoundary/NoticesFrom 的线性扫描（范围长度的通知条目），无第二份状态仓。"
+    },
+    {
+      "id": "evid04-reanchor",
+      "decision": "MUT-EVID-04 追加第 7 条补丁替换并同步 unittest 计数 6→7。",
+      "why": "facts.go 的 NoticesFrom 新增 endedPrefix 调用后，原变异删除 endedPrefix 导致编译失败（compile_failure），不再构成证据；任务书要求“loop.go/facts.go 改动若打破其他锚则同步重锚”。",
+      "validation": "重锚后 --all 仍 11/11 killed、assertion_hit=true；MUT-EVID-05 digest 未变。"
+    }
+  ],
+  "regression": {
+    "history_family": {
+      "command": "go test ./tests/integration/history -run 'TestEventIntegrity' -count=1 -race -timeout 900s",
+      "result": "ok 27.549s（TestEventIntegrityConsumptionRecovery / Projection / Restart / Persistence / RestoreUse 全绿）",
+      "projection_subtests": "TestEventIntegrityProjection 全 8 子锚 PASS：small_window_fold_and_restore / rebuild_refolds_from_wal / unconsumed_not_lost / rebuild_does_not_refold / restart_restores_fold_form / fold_product_no_self_trigger / actual_request_assembly / notice_visible_under_fold（2026-10-25 复跑：ok 1.712s，log /tmp/evid05-final-projection-v.log）",
+      "log_ref": "/tmp/evid05-final-history.log"
+    },
+    "host_family": {
+      "command": "go test ./tests/integration/host -run 'TestEventIntegrity' -count=1 -race -timeout 900s",
+      "result": "ok 8.189s（Reproduction / TaskContinuation / Delivery / ReflectionDelivery / Replacement / IdentityMatrix / DecisionFlowMatrix / FormalAssembly 全绿；含 notice_visible_under_small_window 与 notice_input_without_projection）",
+      "log_ref": "/tmp/evid05-final-host.log"
+    },
+    "execution": {
+      "command": "go test ./tests/integration/execution -run 'TestEventIntegrityNoticeIdentity|TestEventIntegrityExecStateEvents' -count=1 -race -timeout 600s",
+      "result": "ok 6.699s（01.1 通知身份 + 01.10b 执行状态事件）",
+      "log_ref": "/tmp/evid05-final-execution.log"
+    },
+    "evolution": {
+      "command": "go test ./tests/integration/evolution -run 'TestEventIntegrityMeditationSchedule' -count=1 -race -timeout 600s",
+      "result": "ok 2.030s（02.1）",
+      "log_ref": "/tmp/evid05-final-evolution.log"
+    },
+    "learning": {
+      "command": "go test ./tests/integration/learning -run 'TestEventIntegrityCapture' -count=1 -race -timeout 600s",
+      "result": "ok 2.627s（02.7）",
+      "log_ref": "/tmp/evid05-final-learning.log"
+    },
+    "wechat_approval": {
+      "command": "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityApprovalControl$|^TestEventIntegrityApprovalWeChat$' -count=1 -race -timeout 600s",
+      "result": "ok 122.303s（03.4 抽查）",
+      "log_ref": "/tmp/evid05-final-wechat-approval.log"
+    },
+    "replay_unit": {
+      "command": "go test ./memory/replay -count=1 -race -timeout 300s",
+      "result": "ok 1.348s",
+      "log_ref": "/tmp/evid05-final-replay.log"
+    },
+    "runtime_agent_unit": "go test ./runtime/agent -race：ok 1.653s（含 invariantNoticeFeed 的 boundary/身份读断言）",
+    "state_unit": "go test ./tests/integration/state -run '^TestNoticeFactsSurviveTheChainRebuild$' -race：ok 1.260s",
+    "build_vet_fmt": "go build ./...、go vet ./...、go -C examples/wechat-bot vet -tags smoke ./... 全 exit 0；gofmt -l runtime/agent/loop.go facts.go examples/wechat-bot/smoke_test.go 无输出；git diff --check 无输出",
+    "ownership_gate": "go -C . run ./scripts/codetools event-ownership --check：OK（4 uncovered call site 报告，none counted）",
+    "arch_gate": "python3 scripts/check_runtime_architecture.py --implementation --json：exit 0，blocked 计数 0",
+    "mutation_gate": "python3 scripts/check_event_integrity_mutations.py --all --json --out /tmp/evid05-gate-AD2：gate.ok=true，control_tree_green=true，11/11 killed，全部 named_assertion/assertion_hit/counted_killed，source_digest sha256:f68f7bedd84f66663ddfbe25f492f93792af9d6fc08eca47979b16e7176ab359（log /tmp/evid05-gate-AD2.out，逐条 /tmp/evid05-gate-AD2/mutations/<id>/run.jsonl）",
+    "mutation_unittest": "python3 -m unittest scripts.test_check_event_integrity_mutations：12 tests OK",
+    "observed_pre_existing_failure": "python3 scripts/check_concept_budget.py 仍 FAILED：S2 struct-fields tool/exec/state.go:StateEvent 8 字段未 baselined；该文件为 01.10b 新叶未跟踪产物（git status ?? tool/exec/state.go），不在本叶写集，与本叶改动无关；本叶涉及的 loop.go/facts.go 只命中既有 baselined warn。"
+  },
+  "write_set_actual": [
+    "runtime/agent/loop.go（栅栏身份化：intake 去位置游标，progressNotes 每轮按身份边界重读 + read 身份去重；接口与红线文档同步）",
+    "facts.go（NoticeBoundary/NoticesFrom 文档同步身份语义；NoticesFrom 对失效位置按 endedPrefix 重锚）",
+    "examples/wechat-bot/smoke_test.go（03.6 negative 观测点按 A1 移到恢复边界；删除回合后键集/压缩比较，保留非折叠检查）",
+    "scripts/check_event_integrity_mutations.py（MUT-EVID-04 追加第 7 条替换以保持变异语义，MUT-EVID-05 未改）",
+    "scripts/test_check_event_integrity_mutations.py（补丁数 6→7 + 新增替换断言）",
+    "openspec/…/evidence/EVID-05-fix-summary.json（本文件）",
+    "run.go（恢复轴，AC 叶已落，本叶未改）",
+    "memory/replay/replay_budget.go（预算轴，AC 叶已落，本叶未改）",
+    "tests/integration/history/event_integrity_test.go（restart_restores_fold_form，AC 叶已落，本叶未改）"
+  ],
+  "not_in_this_leaf": "六组合全量 v2 证据重跑（03.11 收口单，R32b 后台）；02.3 rebuild_refolds_from_wal 仍保持未勾选（待单独排期，不在本叶范围）；docs/api 重生成留 05.3/收尾。"
+}

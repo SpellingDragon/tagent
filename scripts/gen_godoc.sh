@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# The doc generation pins the go.mod toolchain: go doc output for test-only
+# packages differs across Go versions, so local and CI must run the same one.
 # Generates docs/api/ from the source's own documentation comments: one Markdown
 # file per package plus an index. The output is derived, never hand-edited — change
 # the comments and regenerate.
@@ -10,6 +12,7 @@
 # GODOC_OUT overrides the destination (used to verify the generator before the
 # repository adopts docs/api/). Stale files are reported, never deleted: removal
 # stays a human decision.
+export GOTOOLCHAIN=go1.24.1
 set -euo pipefail
 
 check=0

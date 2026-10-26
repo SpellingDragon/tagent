@@ -1,0 +1,41 @@
+{
+ "leaf": "05.2",
+ "title": "bundle 门 + workflow 自测（05.2 本地完成门）",
+ "status": "red-blocked",
+ "executed_at": "2026-10-25",
+ "gate": {
+  "command": "python3 scripts/check_runtime_evidence.py --bundle \"${TMPDIR}/event-consumption-integrity/final-bundle\" --contract golden/runtime/event_integrity_scenarios.json --json",
+  "exit_code": 1,
+  "ok": false,
+  "output": "${TMPDIR}/event-consumption-integrity/final/bundle-gate2.json",
+  "counts": {
+   "bundle_evidence_files": 17,
+   "bundle_long_evidence": 6,
+   "bundle_short_evidence": 10,
+   "bundle_mutation_evidence": 1,
+   "event_log_packages": 9,
+   "event_log_tests": 180
+  },
+  "long_combos": [[1, 256], [1, 32768], [7, 256], [7, 32768], [42, 256], [42, 32768]],
+  "errors": [
+   "bundle mixes 2 different baseline module fingerprints; the evidence must describe one source tree"
+  ],
+  "all_other_checks": "pass（contract_digest 单一、六组合齐全、repeat 1..10 覆盖、run_id 与 test-log 不复用、subtests/log sha/scale 均通过）"
+ },
+ "root_cause": {
+  "kind": "叶外门缺陷（scripts/），非证据缺陷",
+  "detail": "short 证据 module_fingerprints=3 个模块（根模块 / cli-host / wechat-bot）；long 证据只记 1 个模块（wechat-bot），因为 runner 只为本次 scope 选中的 group 记指纹；checker 把 short+long 全部 16 份的 module_fingerprints 逐字比较，必然得到 2 组。",
+  "checker": "scripts/check_runtime_evidence.py:2329-2342（runner_entries = short + long_runs；json.dumps(module_fingerprints) 逐字比较）",
+  "runner": "scripts/run_runtime_scenarios.py:912-922（groups = event_groups(index, selected) 后只收本 scope 模块）",
+  "test_gap": "scripts/test_check_runtime_evidence.py:1037 的 fixture 对所有 scope 复用同一 event_fingerprints()，只覆盖同集合内哈希漂移，未覆盖混合 scope bundle；自测 93 项全绿仍漏检",
+  "ci_impact": ".github/workflows/ci.yml:296-341 的 event-integrity-required 用同一命令汇总三档 artifact，因此远端同样必红"
+ },
+ "supporting_runs": {
+  "workflow_structure": {"command": "python3 -m unittest discover -s scripts -p 'test_check_runtime_workflow.py'", "exit_code": 0, "tests": 39, "log": "${TMPDIR}/event-consumption-integrity/05.4/unittest-workflow.log"},
+  "checker_selftest": {"command": "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'", "exit_code": 0, "tests": 93, "log": "${TMPDIR}/event-consumption-integrity/05.4/unittest-evidence.log"},
+  "lint": {"command": "bash scripts/lint.sh", "exit_code": 0, "log": "${TMPDIR}/event-consumption-integrity/05.4/lint3.log"}
+ },
+ "blocked_downstream": ["05.2", "05.3", "05.4", "1.6", "F2", "F3"],
+ "fix_scope": "scripts/run_runtime_scenarios.py（按合同全模块记指纹）或 scripts/check_runtime_evidence.py（按 module_path 交集比对）+ 补混合 scope fixture；均在本单写集外，需 05.2 补丁叶执行",
+ "ticked": false
+}

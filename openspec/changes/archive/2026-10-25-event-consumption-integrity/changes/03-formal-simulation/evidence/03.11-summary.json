@@ -1,0 +1,483 @@
+{
+  "leaf": "03.11",
+  "title": "长程矩阵全量执行（TestEventIntegrityLongRun）",
+  "change": "event-consumption-integrity",
+  "domain": "03-formal-simulation",
+  "status": "red",
+  "matrix_harness": "六组合使用同一台架版本（v4/v5）：FaultInputAttempts 恒等式 + consumer_turns 推导 + dump roles/bodies；256 三组合以 v5 重跑覆盖 v3 旧记录，产品树指纹 21210961…（find -newermt 证明 20:50 后无产品 .go 变更；每次运行前后指纹相等）。",
+  "verdict": "六组合重跑后 3 绿 3 红：32768 三 seed 全绿（三锚共享同一次矩阵运行，身份对账全部闭合）；256 三 seed 都在 generation 8 / smoke-chat-b / round 24 的同一具名断言失败（通知正文在入口请求中不可见，模型把退化后的折叠综述当成委托），缩样稳定性 10/10 同签名。冻结面 7200 输入/720 重启未跑满：实测 3891 输入/384 次重启开机（红组合在 gen8 中止，不是缩样）。03.11 保持未勾选；产品缺陷按边界如实红、未修。",
+  "recon_encoding": "recon 里的 null 即 report 的 null：该集合为空（无缺、无重、无丢弃）",
+  "executed_at_utc": "2026-10-24T12:27:00Z/2026-10-24T13:58:00Z（本机 +08:00 20:27–21:58；含 v5 256 重跑 21:53–21:58；各组合 report 自带 generated_at/written_at）",
+  "write_set": [
+    "examples/wechat-bot/smoke_test.go",
+    "examples/wechat-bot/smoke_harness_test.go",
+    "openspec/changes/event-consumption-integrity/changes/03-formal-simulation/evidence/03.11-summary.json"
+  ],
+  "contract": {
+    "host": "one shared Host for all four sessions (no four independent Hosts)",
+    "sessions": 4,
+    "inputs_per_session": 300,
+    "inputs_per_combo": 1200,
+    "restart_points_per_session": 30,
+    "restarts_per_combo": 120,
+    "initial_boot_counts_as_restart": false,
+    "combos": [[1, 256], [1, 32768], [7, 256], [7, 32768], [42, 256], [42, 32768]],
+    "inputs_total": 7200,
+    "restarts_total": 720,
+    "count": 1,
+    "race": true,
+    "meditation": "enabled; the harness never disables it (scale.meditation_enabled asserted true)",
+    "fsync": "not weakened (scale.fsync_dropped asserted false)",
+    "input_restart_seed_window_shrink": "none"
+  },
+  "harness": {
+    "parent_test": "TestEventIntegrityLongRun",
+    "parent_test_location": "examples/wechat-bot/smoke_test.go:2791（positive 对账恒等式在 2825）",
+    "kernel": "03.10 calibration kernel (smokeCalibration* in examples/wechat-bot/smoke_harness_test.go) extended to the full parameter set, not rewritten",
+    "anchors": ["positive", "negative", "consumer"],
+    "anchor_sharing": "all three anchors read the single matrix run of each combo; no anchor×3, no extra matrix",
+    "child_process": "the parent test binary re-executes itself as the host child (03.9 subprocess handshake); SIGKILL at rotating restart points",
+    "run_identity": "report.run_dir + report.generated_at / generation written_at (no separate uuid was minted; see deviations)"
+  },
+  "harness_corrections": [
+    {
+      "id": "fault-input-attempts",
+      "problem": "旧恒等式 `input_requests = 1200 + fault_input_retries` 假定每个故障步至少到达模型一次；storage_deny 在提交输入事实前中止，该故障步 got=0，于是非故障输入只有 1197 条，实际 1197+2+2=1201，旧式却要 1202——32768 三 seed 在 v3 轮全部因此假红（smoke_test.go:2826 old line）。",
+      "change": "smoke_harness_test.go 的 smokeLongReconciliation 新增 FaultInputAttempts（json: fault_input_attempts），故障分支 got>0 计数首尝试、got>1 仍计 retries；smoke_test.go 正锚恒等式改为 (InputsTotal-Faults)+FaultInputAttempts+FaultInputRetries，并打印三项分解。",
+      "files": ["examples/wechat-bot/smoke_harness_test.go", "examples/wechat-bot/smoke_test.go"],
+      "verification": "重跑 v4 三组合全绿；三份 report 均为 fault_input_attempts=2、fault_input_retries=2、input_requests=1201=1197+2+2（见 combos[].recon）。"
+    },
+    {
+      "id": "consumer-turns-derivation",
+      "problem": "前次遗留的第二个台架期望值：ExpectedConsumerTurns 需要按“每代消费会话首个非并发输入”重算，不能按固定轮次推导。",
+      "change": "该修正已在树上（本次未改逻辑）；本次只验证。",
+      "files": [],
+      "verification": "三个绿组合 expected_consumer_turns=58 且 consumer_turns=58、consumer_answered=58（58=每代一次×58 个有消费回合的代）。"
+    },
+    {
+      "id": "provider-dump-roles",
+      "problem": "42-32768 的 v3 一次性重复（SMOKE-R421096 x2）只有“最后一条用户消息相同”这一层，无法区分重复消费与回合内工具续转。",
+      "change": "smokeLongWriteProviderDump 对重复 last_user_text 的请求附带 roles/bodies（每段截断 300 字节）；同一台架期望值修正文件内。",
+      "files": ["examples/wechat-bot/smoke_harness_test.go"],
+      "verification": "42-32768 修正后重跑 duplicate_input_requests=null；该 dump 只会在失败时落盘，作为后续复现的归因材料。"
+    }
+  ],
+  "reproduce": {
+    "per_combo_command": "BASE=\"${TMPDIR:-/tmp}/event-consumption-integrity/03.11-final\"; E=\"$BASE/<v3|v4>-<seed>-<window>\"; mkdir -p \"$E\"; TAGENT_CALIBRATION_RUN_DIR=\"$E\" go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityLongRun$' -count=1 -race -json -timeout 900s -args -seed=<seed> -window=<window> > \"$E/run-seed<seed>-window<window>.jsonl\" 2>&1",
+    "exit_codes": "${TMPDIR:-/tmp}/event-consumption-integrity/03.11-final/exit-codes-v3.txt（256×3 与修正前 32768×3）、exit-codes-v4.txt（修正后 32768×3）、exit-codes-stability.txt（缩样 10 轮）",
+    "note": "六组合逐条独立执行，不塞进一次 go test；修正后的权威 32768 结果是 v4 目录，v3 的 32768 结果因台架恒等式缺陷作废（见 superseded_runs）。"
+  },
+  "product_tree": {
+    "fingerprint_command": "cd /Users/pengweiye/Documents/codes/tagent && find . -name '*.go' ! -name '*_test.go' ! -path '*/vendor/*' -print | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256",
+    "fingerprint_after_runs": "21210961f7d949562c73f07d6cef9fecb5a8f8ed0f50d601c28c83185ec88d94",
+    "no_product_change_during_runs": "每个组合与每轮稳定性都在运行前后各取一次指纹，全部相等（v3/v4 记为 1e6e29a6…，稳定性十轮同值；该值与上面的排序指纹不同只因命令未排序，见 deviations）。另以 find -newermt '2026-10-24 20:16:00' 复核：20:16 之后没有产品 .go 变更。",
+    "parallel_tree_activity": "20:27:23-24 并行方改写了两个 smoke 文件（另有 docs/api 20:23、二进制 20:27:26 重建）；本叶随后在其上重放三处台架修正，并复核 256 失败签名与改写前 v1/v2 完全一致（语义未变）。当前 sha256：smoke_test.go=b71e2c95528691c86817fe0a10be7791c2351eb98bcac948dd7e1b702cee7992，smoke_harness_test.go=ecaef45419686ef2d0f33605bd21de313ab0aacddbc24b7ab32aa13dd66d19f0。"
+  },
+  "combos": [
+    {
+      "seed": 1,
+      "window": 256,
+      "run_id": "v5-1-256 @ generation 08 (re-run on the same harness that produced the green v4 combos)",
+      "run_dir": "${TMPDIR}/event-consumption-integrity/03.11-final/v5-1-256",
+      "exit_code": 1,
+      "process_wall_s": 87.9,
+      "status": "red",
+      "generations_reported": 9,
+      "inputs_dispatched": 97,
+      "restarts_booted": 8,
+      "consumer_turns": 5,
+      "fold_samples": 32,
+      "fold_synthetics": 32,
+      "outbound": 112,
+      "max_child_rss_bytes": 90357760,
+      "max_child_cpu_millis": 836,
+      "storage": "not measured: the run aborted before the final assemble walked storage; the per-combo storage root is a t.TempDir removed with the test",
+      "failure": "generation 8 failed: answer generation 8 session smoke-chat-b round 24: no text to smoke-chat-b carrying \"settle-ack SMOKE-R10097\" after 1m0s (recorded=23)",
+      "fault": {"kind": "storage_deny", "generation": 8, "session": "smoke-chat-a", "round": 24, "marker": "SMOKE-R10096", "answered": false, "facts_before": 60, "facts_after": 60, "named_logs": 1, "outcome": "failed_named"},
+      "anchors": "none reached (the child driver failed before the six-combo report was assembled)",
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/v5-1-256/run-seed1-window256.jsonl"
+    },
+    {
+      "seed": 1,
+      "window": 32768,
+      "run_id": "v4-1-32768 @ generated_at=2026-10-24T13:03:31Z",
+      "run_dir": "${TMPDIR}/event-consumption-integrity/03.11-final/v4-1-32768",
+      "exit_code": 0,
+      "process_wall_s": 474.9,
+      "run_wall_s": 469.9,
+      "status": "green",
+      "anchors": {"positive": "pass", "negative": "pass", "consumer": "pass"},
+      "inputs": 1200,
+      "restarts": 120,
+      "recon": {
+        "input_samples": 1200,
+        "expected_inputs": 1200,
+        "input_requests": 1201,
+        "fault_input_attempts": 2,
+        "fault_input_retries": 2,
+        "missing_input_requests": null,
+        "duplicate_input_requests": null,
+        "rebind_requests": 484,
+        "expected_rebinds": 484,
+        "missing_rebinds": null,
+        "notification_requests": 47,
+        "expected_notifications": 47,
+        "missing_notifications": null,
+        "action_events": 1728,
+        "expected_actions": 1728,
+        "missing_actions": null,
+        "provider_requests": 1905,
+        "reflect_requests": 79,
+        "delegate_inputs": 48,
+        "consumer_turns": 58,
+        "expected_consumer_turns": 58,
+        "consumer_answered": 58,
+        "concurrent_batches": 2,
+        "concurrent_answered": 8,
+        "reloads": 3,
+        "reloads_installed": 3,
+        "fold_samples": 484,
+        "fold_synthetics": 372,
+        "faults": 3,
+        "faults_answered": 0,
+        "faults_named": 3,
+        "faults_dropped": null
+      },
+      "drain": {"drained": false, "unsettled_named": 50, "reason": "task=task-N reason=awaiting-delivery / awaiting-tool"},
+      "storage": {"growth_bytes": 6385928, "files_added": 11},
+      "peak": {"max_child_rss_bytes": 319160320, "parent_rss_bytes": 335347712, "children": 121},
+      "faults": [
+        {"kind": "storage_deny", "generation": 8, "session": "smoke-chat-a", "round": 24, "marker": "SMOKE-R10096", "answered": false, "facts_before": 40, "facts_after": 40, "outcome": "failed_named"},
+        {"kind": "model_fail", "generation": 20, "session": "smoke-chat-b", "round": 55, "marker": "SMOKE-R10221", "answered": false, "facts_before": 50, "facts_after": 52, "outcome": "failed_named"},
+        {"kind": "channel_fail", "generation": 32, "session": "smoke-chat-c", "round": 85, "marker": "SMOKE-R10342", "answered": false, "refused_sends": 1, "facts_before": 56, "facts_after": 58, "outcome": "failed_named"}
+      ],
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/v4-1-32768/report.json"
+    },
+    {
+      "seed": 7,
+      "window": 256,
+      "run_id": "v5-7-256 @ generation 08 (re-run on the same harness that produced the green v4 combos)",
+      "run_dir": "${TMPDIR}/event-consumption-integrity/03.11-final/v5-7-256",
+      "exit_code": 1,
+      "process_wall_s": 88.7,
+      "status": "red",
+      "generations_reported": 9,
+      "inputs_dispatched": 97,
+      "restarts_booted": 8,
+      "consumer_turns": 5,
+      "fold_samples": 32,
+      "fold_synthetics": 32,
+      "outbound": 112,
+      "max_child_rss_bytes": 88424448,
+      "max_child_cpu_millis": 919,
+      "storage": "not measured: the run aborted before the final assemble walked storage",
+      "failure": "generation 8 failed: answer generation 8 session smoke-chat-b round 24: no text to smoke-chat-b carrying \"settle-ack SMOKE-R70097\" after 1m0s (recorded=23)",
+      "fault": {"kind": "storage_deny", "generation": 8, "session": "smoke-chat-a", "round": 24, "marker": "SMOKE-R70096", "answered": false, "facts_before": 60, "facts_after": 60, "named_logs": 1, "outcome": "failed_named"},
+      "anchors": "none reached (the child driver failed before the six-combo report was assembled)",
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/v5-7-256/run-seed7-window256.jsonl"
+    },
+    {
+      "seed": 7,
+      "window": 32768,
+      "run_id": "v4-7-32768 @ generated_at=2026-10-24T13:11:09Z",
+      "run_dir": "${TMPDIR}/event-consumption-integrity/03.11-final/v4-7-32768",
+      "exit_code": 0,
+      "process_wall_s": 455.4,
+      "run_wall_s": 450.7,
+      "status": "green",
+      "anchors": {"positive": "pass", "negative": "pass", "consumer": "pass"},
+      "inputs": 1200,
+      "restarts": 120,
+      "recon": {
+        "input_samples": 1200,
+        "expected_inputs": 1200,
+        "input_requests": 1201,
+        "fault_input_attempts": 2,
+        "fault_input_retries": 2,
+        "missing_input_requests": null,
+        "duplicate_input_requests": null,
+        "rebind_requests": 484,
+        "expected_rebinds": 484,
+        "missing_rebinds": null,
+        "notification_requests": 47,
+        "expected_notifications": 47,
+        "missing_notifications": null,
+        "action_events": 1728,
+        "expected_actions": 1728,
+        "missing_actions": null,
+        "provider_requests": 1901,
+        "reflect_requests": 75,
+        "delegate_inputs": 48,
+        "consumer_turns": 58,
+        "expected_consumer_turns": 58,
+        "consumer_answered": 58,
+        "concurrent_batches": 2,
+        "concurrent_answered": 8,
+        "reloads": 3,
+        "reloads_installed": 3,
+        "fold_samples": 484,
+        "fold_synthetics": 372,
+        "faults": 3,
+        "faults_answered": 0,
+        "faults_named": 3,
+        "faults_dropped": null
+      },
+      "drain": {"drained": false, "unsettled_named": 50, "reason": "task=task-N reason=awaiting-delivery / awaiting-tool"},
+      "storage": {"growth_bytes": 6432361, "files_added": 11},
+      "peak": {"max_child_rss_bytes": 315211776, "parent_rss_bytes": 361971712, "children": 121},
+      "faults": [
+        {"kind": "storage_deny", "generation": 8, "session": "smoke-chat-a", "round": 24, "marker": "SMOKE-R70096", "answered": false, "facts_before": 40, "facts_after": 40, "outcome": "failed_named"},
+        {"kind": "model_fail", "generation": 20, "session": "smoke-chat-b", "round": 55, "marker": "SMOKE-R70221", "answered": false, "facts_before": 50, "facts_after": 52, "outcome": "failed_named"},
+        {"kind": "channel_fail", "generation": 32, "session": "smoke-chat-c", "round": 85, "marker": "SMOKE-R70342", "answered": false, "refused_sends": 1, "facts_before": 64, "facts_after": 66, "outcome": "failed_named"}
+      ],
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/v4-7-32768/report.json"
+    },
+    {
+      "seed": 42,
+      "window": 256,
+      "run_id": "v5-42-256 @ generation 08 (re-run on the same harness that produced the green v4 combos)",
+      "run_dir": "${TMPDIR}/event-consumption-integrity/03.11-final/v5-42-256",
+      "exit_code": 1,
+      "process_wall_s": 88.1,
+      "status": "red",
+      "generations_reported": 9,
+      "inputs_dispatched": 97,
+      "restarts_booted": 8,
+      "consumer_turns": 5,
+      "fold_samples": 32,
+      "fold_synthetics": 32,
+      "outbound": 112,
+      "max_child_rss_bytes": 87097344,
+      "max_child_cpu_millis": 898,
+      "storage": "not measured: the run aborted before the final assemble walked storage",
+      "failure": "generation 8 failed: answer generation 8 session smoke-chat-b round 24: no text to smoke-chat-b carrying \"settle-ack SMOKE-R420097\" after 1m0s (recorded=23)",
+      "fault": {"kind": "storage_deny", "generation": 8, "session": "smoke-chat-a", "round": 24, "marker": "SMOKE-R420096", "answered": false, "facts_before": 60, "facts_after": 60, "named_logs": 1, "outcome": "failed_named"},
+      "anchors": "none reached (the child driver failed before the six-combo report was assembled)",
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/v5-42-256/run-seed42-window256.jsonl"
+    },
+    {
+      "seed": 42,
+      "window": 32768,
+      "run_id": "v4-42-32768 @ generated_at=2026-10-24T13:18:41Z",
+      "run_dir": "${TMPDIR}/event-consumption-integrity/03.11-final/v4-42-32768",
+      "exit_code": 0,
+      "process_wall_s": 450.5,
+      "run_wall_s": 446.7,
+      "status": "green",
+      "anchors": {"positive": "pass", "negative": "pass", "consumer": "pass"},
+      "inputs": 1200,
+      "restarts": 120,
+      "recon": {
+        "input_samples": 1200,
+        "expected_inputs": 1200,
+        "input_requests": 1201,
+        "fault_input_attempts": 2,
+        "fault_input_retries": 2,
+        "missing_input_requests": null,
+        "duplicate_input_requests": null,
+        "rebind_requests": 484,
+        "expected_rebinds": 484,
+        "missing_rebinds": null,
+        "notification_requests": 47,
+        "expected_notifications": 47,
+        "missing_notifications": null,
+        "action_events": 1728,
+        "expected_actions": 1728,
+        "missing_actions": null,
+        "provider_requests": 1902,
+        "reflect_requests": 76,
+        "delegate_inputs": 48,
+        "consumer_turns": 58,
+        "expected_consumer_turns": 58,
+        "consumer_answered": 58,
+        "concurrent_batches": 2,
+        "concurrent_answered": 8,
+        "reloads": 3,
+        "reloads_installed": 3,
+        "fold_samples": 484,
+        "fold_synthetics": 372,
+        "faults": 3,
+        "faults_answered": 0,
+        "faults_named": 3,
+        "faults_dropped": null
+      },
+      "drain": {"drained": false, "unsettled_named": 54, "reason": "task=task-N reason=awaiting-delivery / awaiting-tool"},
+      "storage": {"growth_bytes": 6427433, "files_added": 11},
+      "peak": {"max_child_rss_bytes": 320618496, "parent_rss_bytes": 337346560, "children": 121},
+      "faults": [
+        {"kind": "storage_deny", "generation": 8, "session": "smoke-chat-a", "round": 24, "marker": "SMOKE-R420096", "answered": false, "facts_before": 40, "facts_after": 40, "outcome": "failed_named"},
+        {"kind": "model_fail", "generation": 20, "session": "smoke-chat-b", "round": 55, "marker": "SMOKE-R420221", "answered": false, "facts_before": 58, "facts_after": 60, "outcome": "failed_named"},
+        {"kind": "channel_fail", "generation": 32, "session": "smoke-chat-c", "round": 85, "marker": "SMOKE-R420342", "answered": false, "refused_sends": 1, "facts_before": 56, "facts_after": 58, "outcome": "failed_named"}
+      ],
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/v4-42-32768/report.json"
+    }
+  ],
+  "superseded_runs": [
+    {
+      "combos": ["v3-1-32768", "v3-7-32768"],
+      "exit_code": 1,
+      "failure": "smoke_test.go:2826: input requests = 1201, want 1202 (1200 clean inputs + 2 fault retries)",
+      "reason": "台架恒等式把 1200 全当非故障输入，漏算故障步首尝试；产品侧对账本身是闭合的（1201=1197+2+2）。修正后由 v4-1/7-32768 重跑，均绿。"
+    },
+    {
+      "combos": ["v3-42-32768"],
+      "exit_code": 1,
+      "failure": "smoke_test.go:2823: input identity does not reconcile: missing=[] duplicate=[SMOKE-R421096 x2]",
+      "reason": "修正台架后由 v4-42-32768 重跑 exit 0、duplicate=null；该次重复未复现，作为一次性观察登记在 open_observation。"
+    }
+  ],
+  "totals": {
+    "combos_green": 3,
+    "combos_red": 3,
+    "inputs_contract": 7200,
+    "restarts_contract": 720,
+    "inputs_green": 3600,
+    "restarts_green": 360,
+    "inputs_all_six": 3891,
+    "restarts_all_six": 384,
+    "shortfall": "seed1/7/42 × window256 都在 generation 8 中止：各只跑到 97 输入、8 次开机（gen00..gen08，gen08 断言失败）。冻结面没有缩样，是红中断。"
+  },
+  "anchors_observed_in_green_combos": {
+    "positive": {
+      "inputs": "1200 条业务输入逐身份对账：input_samples=1200/1200；input_requests=1201=1197 条非故障输入 + 2 次故障步首尝试 + 2 次故障重试；missing=0 duplicate=0",
+      "rebinds": "484/484（(120+1)×4），missing=0 duplicate=0",
+      "notifications": "47/47（48 次委托减 1 次被存储拒写的委托），missing=0 duplicate=0",
+      "actions": "1728/1728，missing=0 duplicate=0；report.outbound 共 1729 条 text，其中 1728 条命中 answer/delegate ack/settle-ack 身份，余 1 条是 model_fail 的用户可见错误文案（非身份型外发）",
+      "restarts": "120 个样本，每样本四会话全部重绑且有 kill→ready 实测与触发点",
+      "drain": "终态非绝对排空，但为具名未确认清单（50/50/54 条 task=task-N reason=awaiting-delivery 或 awaiting-tool），断言按“排空或具名清单”接受",
+      "storage": "+6.39–6.43MB / 11 个文件，walk 无问题",
+      "peak": "子进程峰值 RSS 300.6–305.8MiB，父进程 319.8–345.2MiB，121 个子进程",
+      "folds": "484 个折叠样本；32768 组合 fold_synthetics=372（折叠仍会发生，不是零折叠）"
+    },
+    "negative": {
+      "storage_deny": "gen8/chat-a：拒写真探针命中（permission denied），输入事实提交失败后 drive_error 具名中止，facts 40→40 不回退；0 answered + 3 named 是 01.8 persist-before-live 之后的预期形态",
+      "model_fail": "gen20/chat-b：具名失败（用户可见“执行出错：本轮模型回合失败，未产出交付内容。”），非静默",
+      "channel_fail": "gen32/chat-c：refused_sends=1 且具名日志 ≥1",
+      "zero_silent_drop": "faults_dropped 为空（3 故障 = 0 answered + 3 named）",
+      "replacement_x_compaction": "3 次 /reload 全部安装（gen30/60/90），同时 484 个折叠样本；256 窗口的 fold_synthetics>0 断言在红组合中止前已由每代 4 条 synthetic 支撑",
+      "multi_session_simultaneous": "2 批 × 4 会话同时完成，8/8 回答，无错误"
+    },
+    "consumer": {
+      "path": "正式宿主 + 本地 HTTP /task（202 受理后异步 Host.Invoke）",
+      "turns": "58/58（每代消费会话首个非并发输入），answered=58，status=202，全部无错误",
+      "chain": "provider_requests 1901–1905 条，含 75–79 次 reflect 请求与 48 次委托输入"
+    }
+  },
+  "defect": {
+    "id": "03.11-red-window256-generation8",
+    "title": "256 窗口下通知回合的入口请求只剩一条退化折叠综述，通知正文与身份对模型不可见",
+    "relation": "00.3 defects[EVID-04-notice-visibility-loss] 的修复义务仍未在矩阵级闭合；单 N 的最小负锚 notice_visible_under_fold 已绿，但长程路径仍违反同一条义务。",
+    "observed_in": ["1-256", "7-256", "42-256", "stability 1..10"],
+    "generation": 8,
+    "session": "smoke-chat-b",
+    "round": 24,
+    "assertion": "answer generation 8 session smoke-chat-b round 24: no text to smoke-chat-b carrying \"settle-ack SMOKE-R10097/R70097/R420097\" after 1m0s (recorded=23)",
+    "determinism": "三个 seed 在本次六组合中同签名；缩样稳定性 seed1/window256 十轮也全部在 gen8 同断言失败（84.9–88.2s）。此前 seed42/window256 曾全绿，说明该路径与恢复/折叠的堆积节奏相关。",
+    "evidence": {
+      "provider_dump": "${TMPDIR}/event-consumption-integrity/03.11-final/v3-<seed>-256/provider-requests-failed.json（三 seed 同形）",
+      "sequence": [
+        "#134 smoke-entry msgs=2 last_user_text=\"SMOKE-R10097 smoke delegate artifact\"：委托输入，产生了 delegate ack",
+        "#136 smoke-worker msgs=1 \"produce SMOKE-R10097\"；#137 smoke-entry msgs=8 读到 {call-worker-SMOKE-R10097 task-3 true 0}",
+        "#138 smoke-entry msgs=1 roles=[user]，正文只有被截断的 \"history summary: external_input: SMOKE-R8700001 rebind smoke-chat-b; ...\"，没有 \"tagent: task task-3 settled / result: worker result SMOKE-R10097\"（通知正文）",
+        "#139–#142：模型把该综述当成一次委托，按综述里的首个标记 R8700001 产生 worker/ack/settled 链；期望的 settle-ack R10097 永不出现"
+      ],
+      "absent_text": "tagent: task task-3 settled\\nresult:\\nworker result SMOKE-R10097",
+      "contrast": "同一请求在 window=32768 的组合里携带完整通知正文，47 条通知全部对账通过；最小复现 TestEventIntegrityProjection/notice_visible_under_fold 本轮仍 pass（exit 0，7 子测试全绿）。",
+      "fold_activity": "256 红组合在每个已完成代都有 4 个折叠样本/4 条 synthetic（4 会话各一），gen8 因失败没有折叠采样；即失败不是“没折叠”，而是折叠/恢复后通知不可见。"
+    },
+    "attribution": [
+      "首要候选：01.9 seedReplay 把 tier 中已提交事实（含折叠 synthetic）重建进投影，注册时 endedAt 留空，恢复条目全量成为“已结束材料”；256 窗口下这条综述即可占满预算前缀。",
+      "装配侧：request.go projectedSegment 用 AssembleBudgetPrefix(window.MaxTokens, prefix) 组装整个前缀；replay_budget.go assembleBudgetLocked 对 full/ticket/summary 都放不下的条目直接跳过且不记录（无 settle 事实）——通知身份与正文就此静默消失，正是 EVID-04 修复义务禁止的形态。",
+      "通知回合的输入通路（facts.go/settle_turn.go 的 fireNoticeTurn）在本次树上的实现让通知依赖会话链呈现；当前证据只能确认“请求里没有通知正文”，不能确认责任落在三段中的哪一段。",
+      "故障窗口排除：storage_deny 注入在 smokeLongFault 返回前已 restore（smoke_harness_test.go:3532-3534），后续 chat-b round24 不在拒写窗口内——排除“故障恢复与通知回合重叠”这一替代解释。",
+      "边界：03.11 无权改产品代码，故只记录不改；owner 为产品侧（request.go / memory/replay/replay_budget.go / facts.go 通知边界）。"
+    ],
+    "prior_claim_vs_now": "00.3 记录单 N 修复后两红组合在 2026-10-24T02:11Z 前后重跑绿（47/47 通知、58/58 消费、含 gen16）；该绿证在本次树上不可复现：当前三 seed 都在更早的 gen8 失败，且 seed42 也红。旧 gen16 断言已不再出现，说明 gen16 那条已被修掉，但 01.9 恢复折叠材料后在更早的代暴露了同一义务的另一条路径。",
+    "owner": "产品侧，不在 03.11 写集内；按边界如实红、不修"
+  },
+  "open_observation": {
+    "id": "42-32768-duplicate-once",
+    "observed_in": "v3-42-32768（修正前）",
+    "detail": "smoke_test.go:2823 duplicate_input_requests=[SMOKE-R421096 x2]；provider dump 显示 index 1716（msgs=12）与 1717（msgs=14）的 last_user_text 相同，动作侧仍各一次（delegate ack / settle-ack 单份），输入样本 ms=1480 对相邻 953；发生在 gen108/chat-a/round274。",
+    "repro": "修正台架后 v4-42-32768 重跑 exit 0、duplicate=null，未复现。",
+    "follow_up": "已给 smokeLongWriteProviderDump 增加重复 last_user_text 的 roles/bodies，下一次复现可直接区分“重复消费”与“回合内工具续转”。"
+  },
+  "stability_tier": {
+    "spec": "10 轮 × 六组合 = 60 次独立执行；允许缩为 1 组合 × 10 次并显式标注",
+    "status": "shrunk_combo_x10",
+    "measured": {
+      "combo": "seed=1/window=256",
+      "rounds": 10,
+      "exit_codes": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+      "wall_s": [86.2, 84.9, 85.6, 85.6, 88.2, 87.3, 86.7, 87.0, 87.7, 87.2],
+      "wall_min_s": 84.9,
+      "wall_max_s": 88.2,
+      "wall_mean_s": 86.64,
+      "failure": "全部同签名：smoke_test.go:2796 / generation 8 / smoke-chat-b / round 24 / settle-ack missing (recorded=23)",
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/exit-codes-stability.txt"
+    },
+    "why_not_full_60": "按本轮权威六组合实测，全量 60 次 ≈ 10×1644.6s = 274.1min（≈4.6h），远超 03.10 的 12m 作业参照；且矩阵本身为红，稳定性档没有可交付物。缩样档 10 次 ≈ 14.4min，已执行并如实标注为缩样。",
+    "interpretation": "十轮同签名红是缺陷的强重复性证据，不是交付稳定性绿证。"
+  },
+  "budget": {
+    "reference": "03.10 建议：分片 go test -timeout 60s 起，作业 12m 参照",
+    "per_shard_measured_s": {
+      "window256": [87.9, 88.7, 88.1],
+      "window32768": [474.9, 455.4, 450.5],
+      "stability_256": [86.2, 84.9, 85.6, 85.6, 88.2, 87.3, 86.7, 87.0, 87.7, 87.2]
+    },
+    "per_shard_timeout_used_s": 900,
+    "deviation": "32768 实测 450.5–474.9s，是 03.10 的 60s 起始值的 7.5–7.9 倍；200s 也不够（v3 曾用 200s 被超时风险压着）。本轮统一用 900s（15m）：对实测最大值约 1.9 倍余量，同时比任务模板的 45m 更快失败。",
+    "job_measured_s": 1645.5,
+    "job_reference_s": 720,
+    "job_note": "权威六组合串行 87.9+474.9+88.7+455.4+88.1+450.5 = 1645.5s ≈ 27.4min，是 12m 参照的 2.29 倍。仅 32768 三组合串行就是 1380.8s ≈ 23.0min；缩样 10 轮 866.4s ≈ 14.4min。03.10 的 12m 作业预算对这个矩阵已失效，05.1 的 CI timeout-minutes 需要按此重算。"
+  },
+  "regression": {
+    "command": "go -C examples/wechat-bot test -tags smoke . -run '^(TestLocalSmoke|TestLocalSmokeGuards|TestEventIntegrityReflectionDeliveryControl|TestEventIntegrityFoldControl|TestEventIntegrityReplacementControl|TestEventIntegrityCaptureControl)$' -count=1 -race -json -timeout 20m",
+    "exit_code": 1,
+    "elapsed_s": 100.442,
+    "log": "${TMPDIR}/event-consumption-integrity/03.11-final/regression/parent-sample.jsonl",
+    "pass": [
+      "TestLocalSmoke pass 90.45s",
+      "TestLocalSmokeGuards pass 0.06s",
+      "TestEventIntegrityReflectionDeliveryControl pass 3.60s（positive/negative/consumer 均 pass）",
+      "TestEventIntegrityReplacementControl pass 1.48s（三子测试均 pass）",
+      "TestEventIntegrityCaptureControl pass 2.48s（三子测试均 pass）"
+    ],
+    "fail": [
+      "TestEventIntegrityFoldControl/negative fail 1.70s",
+      "TestEventIntegrityFoldControl fail 1.91s"
+    ],
+    "fold_control_diagnosis": {
+      "assertion": "smoke_test.go:1703: the restart re-folded the pre-restart material into the request",
+      "request": "重启后的 SMOKE-R7312 请求含一条 \"history summary: ... SMOKE-R7305 / SMOKE-R7310 / SMOKE-REFLECTION 1 / SMOKE-R7311 …\"；随后单独呈现 SMOKE-REFLECTION 5 与 SMOKE-R7312",
+      "repeat": "单跑 ^TestEventIntegrityFoldControl/negative$ 复现（exit 1，negative 1.80s）",
+      "attribution": "01.9 seedReplay 的既定行为：重启时恢复 tier 中全部已提交事实（含折叠 synthetic），注册时 endedAt 留空，恢复序列全量按“已结束材料”呈现，因此重启后的请求会携带重启前已有的综述。这是“携带”，不是“再折叠”：综述只覆盖重启前的 R7305–R7311，更新的 reflection/R7312 仍单独呈现；且 TestEventIntegrityProjection/rebuild_does_not_refold 本轮 pass。03.6 负锚用 strings.Contains(\"history summary:\") 一律禁止综述，与其注释里的“重建不折叠”语义已不一致。",
+      "owner": "03.6 的负锚期望值（不在 03.11 写集内）；03.11 只如实记录，未改。",
+      "caveat": "该负锚后续的“重启不得新提压缩请求”检查因前面的 Fatal 未执行到，本结论只基于请求结构与 rebuild_does_not_refold 绿证。"
+    },
+    "minimal_anchor_projection": {
+      "command": "go test ./tests/integration/history -run '^TestEventIntegrityProjection$' -count=1 -race -json -timeout 10m",
+      "exit_code": 0,
+      "elapsed_s": 4.87,
+      "subtests": "small_window_fold_and_restore / rebuild_refolds_from_wal / unconsumed_not_lost / rebuild_does_not_refold / fold_product_no_self_trigger / actual_request_assembly / notice_visible_under_fold 全 pass",
+      "log": "${TMPDIR}/event-consumption-integrity/03.11-final/regression/projection-anchor.jsonl"
+    },
+    "gofmt": "gofmt -l smoke_test.go smoke_harness_test.go 无输出（干净）",
+    "vet": "go -C examples/wechat-bot vet -tags smoke . 退出码 0"
+  },
+  "task_state": {
+    "checkbox": "- [ ] 03.11 保持未勾选",
+    "verify_after": "01.5 已满足",
+    "rule": "三锚 + 六组合全绿才勾选；本次 3/6 绿（256 三 seed 红），故不勾"
+  },
+  "deviations": [
+    "超时：任务模板写 45m，上一轮用 200s；本轮按实测（32768 最高 474.9s）统一用 -timeout 900s（15m），既覆盖实测又保留失败快速退出。",
+    "并行树活动：20:27:23-24 有并行方改写 smoke_test.go / smoke_harness_test.go（另有 docs/api 20:23、二进制 20:27:26 重建）；本叶在其上重放三处台架修正，并复核 256 失败签名与改写前 v1/v2 完全一致。",
+    "双跑处置：首轮启动时检测到同组合的另一路进程，为避免双跑按 R17 先终止本路重复组、等待另一路退出后再继续；v3/v4 每个组合记录的 rivals=0，运行目录独立。",
+    "指纹方法：脚本里的 find|xargs 未排序，跨轮出现 2fa67541 vs 1e6e29a6 的假漂移；单次运行的前后比较仍然有效（均相等）。事后用 LC_ALL=C sort 复算为 21210961…，并以 find -newermt 证明 20:16 后无产品 .go 变更。",
+    "台架改动（写集内、非产品）：FaultInputAttempts 恒等式、重复 last_user_text 的 dump roles/bodies；consumer_turns 推导为树上既有修正，本次只验证。",
+    "256 三组合先以 v3 记录；台架恒等式修正后按同一内核以 v5 重跑（87.9/88.7/88.1s，均 exit 1），失败签名逐字相同（gen8/chat-b/round24/settle-ack R10097/R70097/R420097，recorded=23）；v5 覆盖 v3 作为权威记录，v3 原始日志仍保留在对应 run_dir。",
+    "42-32768 的一次性重复已按“修正后台架重跑 + 未复现”登记，不当作产品缺陷定性。"
+  ]
+}

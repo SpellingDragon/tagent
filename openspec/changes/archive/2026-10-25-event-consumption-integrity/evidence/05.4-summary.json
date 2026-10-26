@@ -1,0 +1,303 @@
+{
+ "leaf": "05.4",
+ "title": "最终集成（L1 本地）与独立偏差验收",
+ "status": "green",
+ "verdict": "pass",
+ "executed_at": "2026-10-25",
+ "session": "单 AK 终收口（编排者裁定：race waiver 选项 A + 05.4 按任务行字面全量重跑）",
+ "tree": {
+  "head": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "working_tree_dirty": true,
+  "note": "05.4 只读最终树：本轮未改产品/测试代码，写集仅 scripts/race_check.sh、scripts/test_race_check.sh、openspec/changes/LEDGER.md（waiver 登记）与 change 内证据/勾选。驱动脚本逐条记录原始退出码（exit-codes.txt），遇首个非零即停；本轮 24 条全 0。",
+  "driver": "${TMPDIR}/event-consumption-integrity/05.4-final/run.sh",
+  "started_at": "2026-10-25T05:01:10+0800",
+  "finished_at": "2026-10-25T06:40:02+0800"
+ },
+ "commands": [
+  {
+   "id": "a-lint",
+   "command": "bash scripts/lint.sh",
+   "exit_code": 0,
+   "result": "lint: ok（fmt/build/vet/policy/doc budget/event-ownership/name-check/doc-refs/gen_godoc/proc-refs/tracked-hygiene/package-layout/dotted-refs/commit-scope 全过；末行 `lint: ok`）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/lint.log"
+  },
+  {
+   "id": "f-race-05.4-literal",
+   "command": "./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/ ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...",
+   "exit_code": 0,
+   "result": "WAIVED — 3 race(s)，全部 top frame 命中登记的上游豁免（LEDGER U2/U3/U5：trpc-agent-go v1.10.0 + trpc-mcp-go v0.0.10）；FAIL(3)=race(3)，无 plain failure",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/race/race-05.4-literal.log"
+  },
+  {
+   "id": "f-race-ci-exact",
+   "command": "./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./evolution/... ./api/event/... ./tool/... ./api/plugin/... ./rl/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...",
+   "exit_code": 0,
+   "result": "WAIVED — 2 race(s)，top frame 全在 trpc-mcp-go@v0.0.10 streamable_client.go（CI job 同集合，逐字复跑）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/race/race-ci-exact.log"
+  },
+  {
+   "id": "b-short",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out ${TMPDIR}/event-consumption-integrity/05.4-final/short",
+   "exit_code": 0,
+   "result": "repeats: passed=10/10，10 份独立 run_id（2fd43df6…/3e69ec04…/42745cf1…/61b720a4…/61daec1a…/6729080e…/85971f1d…/8b0adcb8…/cfaaefb1…/e7c99c11…），repeat_index 1..10，逐轮 verdict=match",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/short.log"
+  },
+  {
+   "id": "c-long-1-256",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 1 --window 256 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-1-window-256",
+   "exit_code": 0,
+   "result": "run_id=9f71acf3-5faa-4bb4-8350-a2590478e874 verdict=match；inputs=1200 restarts=120；wall=530.97s",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-1-window-256.log"
+  },
+  {
+   "id": "c-long-1-32768",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 1 --window 32768 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-1-window-32768",
+   "exit_code": 0,
+   "result": "run_id=b2aaccbd-05b5-434b-998a-25532ee5b05b verdict=match；inputs=1200 restarts=120；wall=706.77s",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-1-window-32768.log"
+  },
+  {
+   "id": "c-long-7-256",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 7 --window 256 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-7-window-256",
+   "exit_code": 0,
+   "result": "run_id=b0cae3c8-0478-4bdf-b4c0-3cc575a5ad76 verdict=match；inputs=1200 restarts=120；wall=531.39s",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-7-window-256.log"
+  },
+  {
+   "id": "c-long-7-32768",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 7 --window 32768 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-7-window-32768",
+   "exit_code": 0,
+   "result": "run_id=05695991-ae8a-4ebe-bdb6-7986530bbe69 verdict=match；inputs=1200 restarts=120；wall=706.76s",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-7-window-32768.log"
+  },
+  {
+   "id": "c-long-42-256",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 42 --window 256 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-42-window-256",
+   "exit_code": 0,
+   "result": "run_id=c05b749f-b373-40fd-9f67-cfa9c23d3ca8 verdict=match；inputs=1200 restarts=120；wall=526.32s",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-42-window-256.log"
+  },
+  {
+   "id": "c-long-42-32768",
+   "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 42 --window 32768 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-42-window-32768",
+   "exit_code": 0,
+   "result": "run_id=4bc26f35-7a0f-4164-b373-b0d233509ae3 verdict=match；inputs=1200 restarts=120；wall=706.00s",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/long/seed-42-window-32768.log"
+  },
+  {
+   "id": "d-mutations",
+   "command": "python3 scripts/check_event_integrity_mutations.py --all --json --out ${TMPDIR}/event-consumption-integrity/05.4-final/mutations",
+   "exit_code": 0,
+   "result": "gate.ok=true；killed 11/11（MUT-EVID-02/03/04/05、MUT-G1、MUT-CAND-01.1/01.2×2/01.8/01.10/02.2）；failures=[]；not_evidence_backed=[]；pending=[]；control_tree_green=true",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/mutations.log"
+  },
+  {
+   "id": "e-root-build",
+   "command": "go -C . build ./...",
+   "exit_code": 0,
+   "result": "root build ok（空输出）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/build-root.log"
+  },
+  {
+   "id": "e-root-vet",
+   "command": "go -C . vet ./...",
+   "exit_code": 0,
+   "result": "root vet ok（空输出）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/vet-root.log"
+  },
+  {
+   "id": "e-root-test",
+   "command": "go -C . test ./... -count=1",
+   "exit_code": 0,
+   "result": "root 全包 ok；末行 `ok github.com/SpellingDragon/tagent/tool/subagent 1.692s`",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/test-root.log"
+  },
+  {
+   "id": "e-wechat-build",
+   "command": "go -C examples/wechat-bot build ./...",
+   "exit_code": 0,
+   "result": "wechat-bot build ok（空输出）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/build-wechat.log"
+  },
+  {
+   "id": "e-wechat-vet",
+   "command": "go -C examples/wechat-bot vet ./...",
+   "exit_code": 0,
+   "result": "wechat-bot vet ok（空输出）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/vet-wechat.log"
+  },
+  {
+   "id": "e-wechat-test",
+   "command": "go -C examples/wechat-bot test ./... -count=1",
+   "exit_code": 0,
+   "result": "`ok wechat-bot 0.440s`",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/test-wechat.log"
+  },
+  {
+   "id": "e-cli-build",
+   "command": "go -C examples/cli-host build ./...",
+   "exit_code": 0,
+   "result": "cli-host build ok（空输出）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/build-cli.log"
+  },
+  {
+   "id": "e-cli-vet",
+   "command": "go -C examples/cli-host vet ./...",
+   "exit_code": 0,
+   "result": "cli-host vet ok（空输出）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/vet-cli.log"
+  },
+  {
+   "id": "e-cli-test",
+   "command": "go -C examples/cli-host test ./... -count=1",
+   "exit_code": 0,
+   "result": "`ok tagent-cli-host 0.341s`",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/test-cli.log"
+  },
+  {
+   "id": "g-openspec",
+   "command": "bash scripts/check-openspec.sh",
+   "exit_code": 0,
+   "result": "`OK: all main specs pass validate --strict.`；仅 WIP 提示 change/post-training-data-loop（不门禁）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/openspec.log"
+  },
+  {
+   "id": "g-doc-budget",
+   "command": "python3 scripts/check_doc_budget.py --json",
+   "exit_code": 0,
+   "result": "ok=true；measured 206 files / 21934 lines = baseline（slack 0）；change=null（openspec/changes 不计入）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/doc-budget.json"
+  },
+  {
+   "id": "g-unittest",
+   "command": "python3 -m unittest discover -s scripts -p 'test_check_runtime_*.py'",
+   "exit_code": 0,
+   "result": "Ran 227 tests in 12.624s；OK",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/unittest.log"
+  },
+  {
+   "id": "h-bundle-gate",
+   "command": "python3 scripts/check_runtime_evidence.py --bundle ${TMPDIR}/event-consumption-integrity/05.4-final/bundle --contract golden/runtime/event_integrity_scenarios.json --json",
+   "exit_code": 0,
+   "result": "ok=true；errors=[]；warnings=[]；bundle_evidence_files=17（10 short + 6 long + 1 mutation）；long_combos 六组合齐全；event_log_tests=180；notes 仅『bundle 模式只查证据一致性，productVerified 保持 null』",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/bundle-gate.json"
+  }
+ ],
+ "waiver": {
+  "decision": "编排者裁定选项 A：登记上游豁免（不升级依赖、不维持红）",
+  "files_changed": [
+   "scripts/race_check.sh",
+   "scripts/test_race_check.sh",
+   "openspec/changes/LEDGER.md"
+  ],
+  "signatures_added": [
+   "trpc-mcp-go.*streamableHTTPClientTransport",
+   "trpc-mcp-go.*streamable_client\\.go"
+  ],
+  "why_two_signatures": "top offending frame 逐条匹配：符号行（2 空格缩进）只含 transport 符号不含文件名，路径行（6 空格）只含文件名——单条路径签名会漏符号行（单 AI 探针已实测 exit 1）",
+  "ledger_row": "U5（U4 已被 BeforeModel 回调时序占用，新行顺延为 U5；已在战报③申报）",
+  "ledger_text": "trpc-mcp-go streamable HTTP client transport 字段并发（streamable_client.go：setSessionID/send/handleSSEResponse 与 Initialize 派生的 GET SSE goroutine）；移除条件=升级到含修复版本，删签名并复跑 race 门",
+  "classifier_selftest": {
+   "command": "bash scripts/test_race_check.sh",
+   "exit_code": 0,
+   "result": "15 例全 PASS（1–13 分类器用例含新增 11 waived MCP / 12 waived+plain failure 仍红 / 13 server 侧帧未登记仍红；14–15 真跑一绿一红）",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/test-race-check.log"
+  },
+  "replay_real_red_log": {
+   "how": "RACE_CHECK_CLASSIFY_ONLY=1 RACE_CHECK_FAKE_EXIT=1 回放单 AI 的 race-final.log（真实两处上游 race）",
+   "exit_code": 0,
+   "result": "WAIVED — 2 race(s)，fails(2)=races(2)，无 plain failure",
+   "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/replay-real-race-log.txt"
+  },
+  "ops_doc": "未改 docs/OPERATION.md：doc budget slack=0（206/21934），加行即 exit 1；U2/U3 先例的登记点本就只在 LEDGER + race_check.sh 头注释，OPERATION.md §5.1 只描述语义不枚举签名"
+ },
+ "bundle": {
+  "path": "${TMPDIR}/event-consumption-integrity/05.4-final/bundle",
+  "layout": "short/repeat-1..10 + long/seed-{1,7,42}-window-{256,32768} + mutations/（本轮真跑产物，未复用旧证据）",
+  "counts": {"short": 10, "long": 6, "mutations": 1, "test_ids": 28},
+  "gate": "ok=true; errors=[]; warnings=[]"
+ },
+ "negative_drills": {
+  "how": "在 05.4-final/bundle 副本上做三处篡改，逐项跑 --bundle 门；先用 drill-dryrun 在旧 final-bundle 干跑确认三种篡改均红，再对新 bundle 正式跑",
+  "cases": [
+   {"id": "n1", "tamper": "删除 long/seed-7-window-256", "exit_code": 1, "message": "ok=false；`bundle must hold exactly 6 event-long evidence file(s) (one per matrix combination), found 5` + `bundle is missing event-long matrix combination(s) [(7, 256)]`"},
+   {"id": "n2", "tamper": "改名一个场景 subtest", "exit_code": 1, "message": "ok=false；`'control_normal_path_renamed' is not a registered (parent,name) anchor of 00.2/TestEventIntegrityReproduction` + `missing verdict for mandatory anchor`"},
+   {"id": "n3", "tamper": "把 repeat-2 的 run_id 覆盖成 repeat-1", "exit_code": 1, "message": "ok=false；`bundle reuses run_id '3e69ec04…' … one execution credential cannot stand for two independent rounds`"}
+  ],
+  "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/drills/"
+ },
+ "preflight_gate": {
+  "command": "bash scripts/preflight.sh --skip-smoke",
+  "exit_code": 1,
+  "requirement": "05.4 验证条款只要求：输出含『不具备完整 MR 等价证据』且事件 long 仍被执行，不得以末行 ok 充验收",
+  "requirement_met": "是——横幅在 preflight.log:1925『preflight: smoke 未运行，本次 preflight 不具备完整 MR 等价证据』，且 event integrity short/long 均实际执行（preflight.log:1927/1949）",
+  "green_parts": "lint ok；golden deterministic verdict=match（required=14 attested=14 drift=0）；root/wechat/cli 测试 ok；event-short 10/10 match；event-long 5/6 match",
+  "red_part": "event-long seed=42/window=32768 exit=1（run_id=3dd05182-f68a-4605-bcb7-03d0d99b870f；wall=656.85s；inputs=1200 restarts=120；positive 与 consumer 两子测试同因 `input identity does not reconcile: missing=[] duplicate=[SMOKE-R421096 x2]` 失败，negative 子测试通过）",
+  "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/preflight.log",
+  "red_evidence_retained": "${TMPDIR}/event-consumption-integrity/preflight/event-long/seed-42-window-32768（未删）与 ${TMPDIR}/event-consumption-integrity/03.11/run-s42-w32768-20261025-080801"
+ },
+ "known_flakes": [
+  {
+   "id": "K1",
+   "gate": "event-long seed=42/window=32768 · 输入身份对账",
+   "occurrences": "1 次红 / 13 次分片执行（05.4-final 6 片全绿 + preflight 6 片 5 绿 1 红 + 受控重跑 1 绿）",
+   "signature": "missing=[] duplicate=[<marker> x2]；同一签名的历史先例 03.11-v2 `seed-1-256-catchup2`（duplicate=[SMOKE-R10496 x2]，F3-acceptance V4 已判 flake）",
+   "root_cause_analysis": {
+    "harness_sent": "gen108 报告 inputs 采样中 SMOKE-R421096 仅 1 条（seed=42/session=smoke-chat-a/index=274）",
+    "user_visible": "outbound 仅 1 条 `delegate ack SMOKE-R421096` + 1 条 `settle-ack SMOKE-R421096`（无重复答复）",
+    "extra_request": "provider 侧 2 条同 last_user_text 的入口请求（index 1737/1738，同模型 smoke-entry-b，messages 12→14），后接 worker `produce SMOKE-R421096`、工具回执 `{call-worker-SMOKE-R421096 task-121 true 0}` 与 `tagent: task task-121 settled`——正常 delegate 只有 3 次入口调用（marker/回执/settled），本次多出一次 marker 轮",
+    "generation_context": "gen108 是 restart_point（trigger=smoke-chat-d，kill→ready 4.83s，boot 3.76s，recovered_tasks=116）",
+    "arithmetic": "红：input_requests=1202 = 1196 正常 + 2（本条重复轮）+ 0/3/1（三个故障步）；受控重跑：requests=1201，差 1 正好是本条多出的那一轮",
+    "classification": "重启代里对 delegate 形态输入多出一次同 last-user-text 的入口调用；非重复投递（采样 1 条）、非重复答复（ack 对 1 组）、无 missing。属对账口径对『一次投递多轮模型调用』的敏感性，非本 change 引入的产品缺陷",
+    "controlled_rerun": {
+     "command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed 42 --window 32768 --repeat 1 --timeout 1200 --out ${TMPDIR}/event-consumption-integrity/05.4-final/preflight-red-rerun/seed-42-window-32768",
+     "exit_code": 0,
+     "run_id": "01b2b7ab-dddf-433c-afe8-82bb822c0376",
+     "verdict": "match",
+     "wall": "657.18s",
+     "log_ref": "${TMPDIR}/event-consumption-integrity/05.4-final/preflight-red-rerun/seed-42-window-32768/repeat-1/test-log.jsonl"
+    }
+   },
+   "impact": "05.4 字面六片矩阵当轮 6/6 绿；preflight 的重复执行偶发红，红证保留、受控重跑绿。不掩盖：已在 summary、F3-acceptance V9 与终报②披露"
+  }
+ ],
+ "deviation": {
+  "planned": "05.4 字面命令清单 + 验证条款（bundle 正锚/负锚 + preflight 横幅）",
+  "actual": "全部执行；额外补跑 ci.yml 精确 race 集合、test_race_check.sh、真实红日志回放、bundle 三负锚演练、preflight 全量（并对其唯一红片做受控重跑定性）",
+  "reason": "编排者要求字面全量重跑 + 任何门红先定性；额外项用于把 waiver 与 bundle 的负锚做成可复跑凭据",
+  "impact": "无验收面缩水；preflight 红片作为已知 flake 披露，未折抵任何必跑项"
+ },
+ "history": {
+  "previous_verdict": "blocked",
+  "previous_status": "red",
+  "previous_summary_backup": "${TMPDIR}/event-consumption-integrity/05.4-final/05.4-summary.blocked-2026-10-25.json",
+  "previous_backup_sha256": "20f2659423eade16a7235d2bb02946f27a5330a0a6e320fe69b3f143ff67dea5",
+  "previous_blocking_reason": "race_check exit 1：2 处 DATA RACE 的 top frame 全在 trpc-mcp-go@v0.0.10/streamable_client.go，无 tagent-owned top frame；基线 f900ca2 副本 5/5 红、工作树 8/8 红；签名未登记，门禁按设计判红，修法落在本单写集之外，停报待裁。",
+  "previous_race_finding_kept": {
+   "failing_test": "tests/integration/capabilities.TestMCPFaceBindsTheDeclaredServers/the_declared_server_answers_through_the_call_gateway",
+   "top_frames": [
+    "trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).setSessionID @ streamable_client.go",
+    "trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).send @ streamable_client.go:264/467/607",
+    "trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).connectGetSSE @ streamable_client.go:682/702",
+    "trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).handleGetSSEEvents @ streamable_client.go:735",
+    "trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).handleSSEResponse @ streamable_client.go"
+   ],
+   "tagent_role": "仅调用链下方出现（tool/mcp/call.go:170 → tools.go:709 → runtime/task/wrapper.go:286），无 tagent-owned racy access",
+   "pre_existing_proof": "git archive f900ca2 → ${TMPDIR}/event-consumption-integrity/05.4/base-tree；mcp_face_test.go 逐字节相同、go.mod 同版本、tool/mcp/** 零 diff；基线连跑 5 次 5/5 红，工作树 8 次 8/8 红",
+   "waiver_probe": "单 AI 探针：单条路径签名 exit 1（符号行 unmatched）；双签名 exit 0 WAIVED"
+  },
+  "previous_not_executed_in_05.4": [
+   "short 十轮（曾复用 05.1 的 10 份证据）",
+   "long 六组合（曾复用 03.11/05.1 的 6 份证据）",
+   "mutations（曾复用 04.4/05.1 的 1 份证据）",
+   "bash scripts/preflight.sh --skip-smoke"
+  ],
+  "previous_options": [
+   {"id": "A", "action": "授权登记上游 waiver（本轮采纳）"},
+   {"id": "B", "action": "升级 trpc-mcp-go 到含修复版本（未采纳：上游未必有修复版本，且需重签全部指纹）"},
+   {"id": "C", "action": "维持红，停在 41/42（未采纳：CI 同样会红，MR 不可合）"}
+  ],
+  "what_changed_since": "编排者裁定选项 A + 字面全量重跑：waiver 双签名登记并自测 15 例、24 条命令真跑全 0、bundle 门 17 份新证据 ok=true、三负锚演练全红、preflight 唯一红片受控重跑绿"
+ },
+ "ticked": true
+}

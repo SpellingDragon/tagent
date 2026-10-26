@@ -4,11 +4,14 @@
 
 投影作为事实链（KV LSM 事件日志）的纯回放映射：压缩折叠以一等 compaction 事件（`context_compress_summary`，代际标记滚动 supersede）入事实链，冷启动经「最新 compaction snapshot + 尾部重放」逐字节重建投影（prefix-cache 复用）；单一真相源（事实链），无游离 checkpoint。覆盖 R1（上下文跨重启连续）。
 ## Requirements
+
 ### Requirement: 投影是事实链的纯回放（一等不变量）
 
-投影（SessionProjection）SHALL 恒等于事实链（KV LSM 事件日志）的 fold/回放映射（**正常运行路径精确成立；退化恢复路径最终一致**），兑现「投影是写入的旁路产物、事实链只在 KV 里」。运行期每次 `StoreEvent` SHALL 伴随 `projection.Add`（增量回放；`persistBusEvent` SHALL 对齐 stored-gate：StoreEvent 失败 SHALL NOT Append，交由 spill 恢复双写补回）；压缩折叠 SHALL 作为事实链的一条 compaction 事件（非游离于事实链外的投影态快照）。系统 SHALL NOT 把投影态持久化到事实链之外的独立 checkpoint（避免双真相源）。**文档化边界**：跨退化恢复的重启可能缺 spill 补写事件（spill 沿用旧 key，晚于 compaction 补写时被 tail 边界切掉）——最终一致非逐字节。
+投影（SessionProjection）SHALL 恒等于事实链（KV LSM 事件日志）的 fold/回放映射（**正常运行路径精确成立；退化恢复路径最终一致**），兑现「投影是写入的旁路产物、事实链只在 KV 里」。运行期每次 `StoreEvent` SHALL 伴随 `projection.Add`（增量回放；`persistBusEvent` SHALL 对齐 stored-gate：StoreEvent 失败 SHALL NOT Append，交由 spill 恢复双写补回）；压缩折叠 SHALL 作为事实链的一条 compaction 事件（非游离于事实链外的投影态快照）。系统 SHALL NOT 把投影态持久化到事实链之外的独立 checkpoint（避免双真相源）。
 
-投影消费 SHALL 使用后端返回的 canonical fact 构建引用，不以当前事件重新派生摘要/角色/时间；已存在引用不重复，普通已完成历史不因重放重新展开。内部处理回执、任务注册、常驻会话记录、**历史试验内部记录（wf.*，仅被动排除，不新增写入）**及既有快照/内联排除项 SHALL 不作为普通消息投影；正常写、在线 spill 恢复、冷启动使用同一类型/元数据判定，不能只在重启过滤。批次进入执行前幂等补齐选中事实的引用，包括恢复时未被 snapshot/tail 包含的旧 key；该补齐只覆盖原始 outstanding 选择集合。本变更不修改普通已完成历史的压缩/回放算法，既有普通 spill 晚于 compaction 补写的最终一致边界继续明确保留。
+投影消费 SHALL 使用后端返回的 canonical fact 构建引用，不以当前事件重新派生摘要/角色/时间；已存在引用不重复，普通已完成历史不因重放重新展开。内部处理回执、任务注册、常驻会话记录、**历史试验内部记录（wf.*，仅被动排除，不新增写入）**及既有快照/内联排除项 SHALL 不作为普通消息投影；正常写、在线 spill 恢复、冷启动使用同一类型/元数据判定，不能只在重启过滤。批次进入执行前幂等补齐选中事实的引用，包括恢复时未被 snapshot/tail 包含的旧 key；该补齐只覆盖原始 outstanding 选择集合。
+
+投影回放与投影消费 SHALL 进入**实际 Agent 请求**装配：原文、模型视图与呈现决策分层（只有决策为全文时两者才相同），MUST NOT 以呈现决策反推原文。投影态只在事实链内，MUST NOT 引入第二可写真源。
 
 #### Scenario: 运行期投影随事实链增量回放
 
@@ -35,11 +38,10 @@
 - **WHEN** 当前输入已投影并经历压缩，随后同业务 turn 进行传输重试
 - **THEN** 不重插同一输入引用，不复制事实，使用本批已有派生视图
 
-#### Scenario: 被动排除不额外缩短历史 TTL
+#### Scenario: 投影进入实际请求且分层
 
-- **GIVEN** 全局 TTL 为 90 天、没有显式 wf 类型 TTL，存在一条 31 天前的历史 wf 记录
-- **WHEN** 加载被动排除注册并运行既有生命周期扫描
-- **THEN** 本变更不新增 30 天类型 TTL，该记录不因此提前淘汰；它仍不进入普通投影、召回或 embedding，既有显式 TTL 和 retention 保护语义不变
+- **WHEN** 一次实际 Agent 请求由投影装配
+- **THEN** 原文、模型视图、呈现决策 SHALL 分层；只有呈现决策为全文时视图才与原文相同，MUST NOT 以决策反推原文
 
 ### Requirement: 折叠向事实链追加 compaction 事件
 
@@ -82,29 +84,42 @@
 
 相同事实链、配置与 TTL 存活前提下，正常 snapshot 路径的 render SHALL 字节一致。缺键或读取失败 SHALL 形成结构化 partial/failed 结果，不假称逐字节。无 compaction 时 SHALL 进入有界 fallback，不再 no-op；空库必须经成功扫描确认。
 
+重建结果 SHALL 进入实际 Agent 请求（与「投影是事实链的纯回放」装配一致）；因果链按 `(PartitionID, SessionID)` 隔离（见 `causal-chain-isolation`），回放 MUST NOT 跨会话连链。
+
 #### Scenario: 逐字节重建（snapshot + 尾部）
+
 - **WHEN** 使用 Content 不等于 EventSummary 的数据，折叠后继续写尾部并独立进程重启
 - **THEN** retained refs、合成 tool_chain、边界和尾部恢复后渲染字节一致
 
 #### Scenario: 综述前置首位 + 交错顺序
+
 - **WHEN** 恢复交错 retained refs
 - **THEN** 综述在首位，合成与正 key refs 保持载荷次序
 
 #### Scenario: 尾部不丢
+
 - **WHEN** snapshot 后存在跨多页尾部
 - **THEN** 所有可见尾部均按 EventKey 追加，不静默截最新端
 
 #### Scenario: bus 滞留事件顺序保真
+
 - **WHEN** Timestamp 与写入序相反
 - **THEN** 恢复遵循 EventKey 写入序而非 Timestamp
 
 #### Scenario: fullBoundary 与 meditationKeys 正确恢复
+
 - **WHEN** snapshot 与尾部都含冥想产出
 - **THEN** boundary 使用载荷值，双方冥想 keys 均回种
 
 #### Scenario: 无 compaction 事件时恢复
+
 - **WHEN** 事实链有原始事件但从未折叠
 - **THEN** 执行 fallback，非空链不被默认为空会话
+
+#### Scenario: 重建不跨会话连链
+
+- **WHEN** 冷启动回放遇多会话事实
+- **THEN** 因果链与投影 SHALL 按 `(PartitionID, SessionID)` 隔离，MUST NOT 把另一会话事件连入
 
 ### Requirement: 折叠原文冷存不删、回放按 retained-ref 跳过
 
@@ -178,3 +193,24 @@ SessionProjection SHALL 支持通道分区（对话/遥测/反思）：assembleR
 - **WHEN** 两轮装配之间遥测区发生降级、看板刷新
 - **THEN** 对话区与反思区的渲染字节保持稳定（prefix-cache 命中不受通道治理波及）
 
+### Requirement: 折叠的幂等与不回流
+
+`FoldByAge` MUST 以折叠材料的内容寻址身份幂等：对同一投影、同一窗口参数重复折叠 SHALL 产出同一组折叠键或退回 no-op，MUST NOT 追加第二份同义综述、第二份 `tool_chain` 合成 ref 或第二条 compaction 判断。折叠已完成的投影（既有 fold 状态非空或已无待折材料）再次进入折叠 SHALL 短路，MUST NOT 递归折叠自身产物。`RebuildProjectionFromWAL` SHALL 只复原投影，MUST NOT 触发折叠、MUST NOT 因重建向事实链写入 compaction 事件；重建后再次装配请求 MUST NOT 产生新的折叠副作用。幂等判定 SHALL 以折叠键与事实链条目为证据，MUST NOT 以时间窗或内容相似度代替键比较。
+
+#### Scenario: 重复折叠不追加第二份产物
+
+- **WHEN** 对已折叠的同一投影以同一窗口参数再次调用 `FoldByAge`
+- **THEN** 折叠键集合 SHALL 保持不变，投影与事实链 MUST NOT 新增同义综述或 `tool_chain` ref
+- **AND** 折叠计数 SHALL 如实反映本次为 no-op，而非第二次产出
+
+#### Scenario: 重建不触发折叠（失败）
+
+- **WHEN** 冷启动对含折叠产物的事实链执行 `RebuildProjectionFromWAL`
+- **THEN** 重建 MUST NOT 调用折叠，事实链 MUST NOT 新增 compaction 事件
+- **AND** 复原后的投影渲染 SHALL 与折叠时逐字节一致（既有逐字节义务不变）
+
+#### Scenario: 折叠产物不触发自身（失败）
+
+- **WHEN** 折叠产物（综述 ref 或 `tool_chain` 合成 ref）再次进入同一 fold 判定
+- **THEN** 折叠 SHALL 短路，MUST NOT 产生对自身的第二轮折叠或递归增长
+- **AND** 被折叠原文 SHALL 仍可经既有 `[evt_key]` 票据 recall 回补（既有冷存义务不变）

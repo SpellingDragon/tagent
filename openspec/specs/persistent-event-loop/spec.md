@@ -87,19 +87,50 @@ InjectMessage SHALL 检查 loopActive 标志。Loop 运行时（loopActive=true�
 
 ### Requirement: task_settled 作为一等事件触发回收 turn
 
-`task_settled` SHALL 作为一等事件进入持久事件循环。当一个后台 Task settle 时,其 `task_settled` 事件 SHALL 经 EventBus 进入循环,并像外部输入一样触发一个新 turn(回收 turn);当循环空闲(阻塞在 Pull)时,`task_settled` SHALL 能唤醒它。
+`task_settled` SHALL 作为一等事件进入持久事件循环。当一个后台 Task settle 时，其 `task_settled` 事件 SHALL 经 EventBus 进入循环，并像外部输入一样驱动**下一步 decision**；当循环空闲（阻塞在 Pull）时，`task_settled` SHALL 能唤醒它。
 
-若一个 turn 正在进行,`task_settled` SHALL 排队至下一轮被消费,SHALL NOT 打断进行中的 turn。
+该下一步 decision SHALL 归属**原 invocation**（沿用原调用身份；CallID 按 decision 作用域保真，见 `event-metadata-contract`），MUST NOT 偷偷新建 invocation——仅应用**显式 Handoff** 时改投新目标/实例（见本能力「Handoff 未来通知的目标、实例与稳定序号」）。原主 spec 中「触发一个**新顶层 turn**（回收 turn）」的表述改按此收窄：消费该通知的是**原 invocation 的下一步 decision**，不新造调用归属。
+
+若一个 decision 正在进行，`task_settled` SHALL 排队至下一轮被消费，SHALL NOT 打断进行中的 decision。该排队 SHALL 保留通知本身及其未结义务；驱动器忙时 MUST NOT 丢弃、覆盖或跳过该通知，MUST 在后续轮次完成逻辑消费。
+
+一次终态通知的输入材料 SHALL 只来自该通知已提交事实或有来源的有界视图；同一通知身份 MUST NOT 为同一 decision 重复生成用户输入事实，MUST NOT 触发第二次逻辑消费。正文可在会话历史中合法再次出现；重复判定 SHALL 依据通知身份、事实键、动作身份与因果归属，MUST NOT 以正文出现次数、文本相似度或正文前缀判定。
+
+不同 `TaskID`、责任 invocation 或 session 的通知 SHALL 各自保留其责任归属、送达目标与消费位置；同一 session 不同 invocation 不合批的既有义务见本能力「业务 turn 开始执行时绑定编排版本」，本要求不重复定义；不同 session 的通知 MUST NOT 互相覆盖送达目标或消费位置。
 
 #### Scenario: 空闲时任务完成唤醒循环
 
-- **WHEN** 事件循环空闲(阻塞在 Pull)且一个后台任务 settle
-- **THEN** `task_settled` 事件 SHALL 唤醒循环并触发一个回收 turn
+- **WHEN** 事件循环空闲（阻塞在 Pull）且一个后台任务 settle
+- **THEN** `task_settled` 事件 SHALL 唤醒循环并驱动**原 invocation 的下一步 decision**
 
-#### Scenario: turn 进行中任务完成则排队
+#### Scenario: decision 进行中任务完成则排队
 
-- **WHEN** 一个 turn 正在执行时某后台任务 settle
-- **THEN** `task_settled` SHALL 排队,SHALL NOT 打断当前 turn,SHALL 在下一轮被消费
+- **WHEN** 一个 decision 正在执行时某后台任务 settle
+- **THEN** `task_settled` SHALL 排队，SHALL NOT 打断当前 decision，SHALL 在下一轮被消费
+
+#### Scenario: 后台结果不新建 invocation
+
+- **WHEN** 一次后台任务结算并回流
+- **THEN** 回流 SHALL 落在原 invocation 的下一步 decision 上，MUST NOT 偷偷创建新 invocation
+- **AND** 仅应用显式 Handoff 时才改投新目标/实例
+
+#### Scenario: 同一通知不重复生成输入
+
+- **WHEN** 一条终态通知驱动原 invocation 的下一步 decision，且该通知的已提交事实携带正文
+- **THEN** 同一通知身份 MUST NOT 为同一 decision 生成第二份用户输入事实，MUST NOT 触发第二次逻辑消费
+- **AND** 该正文可在会话历史或模型请求中合法再次出现，MUST NOT 以正文出现次数判定重复
+- **AND** 重复判定 SHALL 依据通知/事实/动作身份与因果归属
+
+#### Scenario: 忙时通知保留待办
+
+- **WHEN** 一个 decision 正在执行时到达终态通知，且该 decision 持续到下一轮
+- **THEN** 该通知 SHALL 保留在既有 intake/mailbox 的待办中，MUST NOT 被丢弃或覆盖
+- **AND** 该通知 SHALL 在下一轮被消费并驱动原 invocation 的下一步 decision
+
+#### Scenario: 多任务多会话各自续转
+
+- **WHEN** 同一宿主上两个不同 `TaskID` 或两个不同 session 各自产生终态通知
+- **THEN** 每条通知 SHALL 各自驱动其责任 invocation 的下一步 decision
+- **AND** 不合批沿用既有条款，MUST NOT 互相覆盖送达目标或消费位置
 
 ### Requirement: 循环不依赖 bus echo 自触发
 
@@ -128,17 +159,37 @@ RunFlow 向 outputCh 发送事件时 MUST 设 2s 宽限；超限将事件全文�
 
 同一个 TagentAgent 的 StopLoop SHALL 为终结操作：再次 StartLoop SHALL 显式返回错误，不返回关闭通道，不创建第二个循环。需要重新运行时 SHALL 创建新 agent 并从事实链恢复。重复 Stop/Close SHALL 幂等；Start/Stop/Close 的并发状态转换 MUST 受同一生命周期同步机制保护。每次成功启动的输出通道 SHALL 恰关闭一次，循环异常退出也 SHALL 更新真实 active/terminated 状态。
 
+循环关闭 SHALL 以**真实义务收束**为准：先拒绝新输入、结算已接受义务、轮询真实停止确认；MUST NOT 把 `cancel` 调用或队列取空当作完成。非合作 producer 返回的 `false` MUST NOT 被当作已结束；截止期限到达 SHALL 返回未收束原因（见 02.9）。
+
 #### Scenario: Stop 后 Start 的往返
+
 - **WHEN** 同实例 StopLoop 返回后再次 StartLoop
 - **THEN** 返回明确终结态错误；新实例可正常恢复并启动
 
 #### Scenario: 两轮完整往返后停止
+
 - **WHEN** 分别创建两个实例执行 Start→Stop→Close
 - **THEN** 两个实例各关闭自己的通道一次，重复停止不 panic
 
 #### Scenario: 并发启动停止
+
 - **WHEN** Start/Stop/Close 并发执行或 loop 异常退出
 - **THEN** active 状态与真实消费者一致，无 WaitGroup 误用、双关闭或后台孤儿
+
+#### Scenario: 先拒新再结算
+
+- **WHEN** 循环开始关闭
+- **THEN** 新输入 SHALL 被拒绝，已接受义务 SHALL 被结算，MUST NOT 在关闭后仍受理新输入
+
+#### Scenario: 非合作 producer false 不伪结束
+
+- **WHEN** 关闭轮询一个非合作 producer，其返回 `false` 表示尚未结束
+- **THEN** 系统 MUST NOT 把该 `false` 当作已结束，SHALL 保持未收束直到真实停止确认或截止
+
+#### Scenario: 截止报告未收束原因
+
+- **WHEN** 关闭在截止期限到达时仍有未收束义务
+- **THEN** 关闭 SHALL 返回未收束原因，MUST NOT 以成功完成宣称
 
 ### Requirement: 可判定的接收结果
 
@@ -200,6 +251,8 @@ claim SHALL 不删除原件。事实提交使用固定 EventKey 与源 ID 幂等
 
 由在途执行派生、进入另一 agent 事件管线的输入 SHALL 随入队携带派生引用并在消费时沿用发起版本，不因排队改读最新 effective；同一管线内不相容输入（不同父请求或不同继承代）不得混入同一批次。
 
+业务 turn 使用的模型/工具/插件绑定 SHALL 从 state **借出同代**绑定（见 01 生效 state 与 02.5），MUST NOT 在循环内自建第二份状态真源，也 MUST NOT 在调用中途读取全局最新 agent 表。同一 session 的**不同 invocation** MUST NOT 合批进同一次模型请求：各自独立决策、各自携带解析与去重身份。
+
 #### Scenario: 排队的派生输入保持发起版本
 
 - **WHEN** G1 执行中向 B 投递的委派输入仍在 B 的队列中等待，期间发布 G2
@@ -219,6 +272,16 @@ claim SHALL 不删除原件。事实提交使用固定 EventKey 与源 ID 幂等
 
 - **WHEN** G1 期间派生的后台任务在 G2 发布后 settle 并回流为新 turn
 - **THEN** 新 turn 使用 G2；原后台执行沿用其启动时绑定直至实际停止
+
+#### Scenario: 借同代绑定不自建真源
+
+- **WHEN** 一个业务 turn 需要模型/工具/插件
+- **THEN** 其 SHALL 从 state 借出同代绑定，MUST NOT 在循环内构造第二份可写状态或读全局最新表
+
+#### Scenario: 同 session 不同 invocation 不合批
+
+- **WHEN** 同一 session 上有两个不同 invocation 的就绪输入
+- **THEN** 二者 SHALL 各自独立决策、分别进模型请求，MUST NOT 合并为同一批模型请求
 
 ### Requirement: 瞬时提交失败的重排覆盖完整冻结接收集
 
@@ -295,6 +358,8 @@ durable inbox 消费侧（claimDurable）恢复 envelope 的 source_event slot �
 
 回合执行中模型入口的任何失败——执行凭据校验拒绝、迭代器创建失败、流通道创建失败或返回 nil 流——MUST 以携带错误信息的失败 Response 在事件流中呈现，并使回合归约为 failed turn、形成 failed completion；MUST NOT 静默零产出使回合被归约为 completed、以 completed 口径冻结 completion 并 ack 持久输入。上游框架契约（迭代器创建失败可经 error 返回、流内错误编码进 Response.Error）SHALL 在所有模型包装层被同构兑现。
 
+模型面 SHALL 以**单一** channel/iterator 消费并归约终局——有效终局、usage 尾包、partial-only、错误、取消、生产者结束（ProducerDone）分别取证；系统 MUST NOT 引入 LLMAgent 或任何第二工具迭代循环。终局 `unknown` MUST 告警，MUST NOT 默认 completed。usage 尾包 SHALL 在同一消费路径归约（见 `request-budget-accounting`）。
+
 #### Scenario: 迭代器创建失败归约 failed turn
 
 - **WHEN** 执行门包装的模型在迭代器创建时返回 error
@@ -309,6 +374,16 @@ durable inbox 消费侧（claimDurable）恢复 envelope 的 source_event slot �
 
 - **WHEN** 执行凭据 verify 失败拒绝模型调用
 - **THEN** 失败以带错误信息的失败响应进入事件流（含日志），回合失败可观测
+
+#### Scenario: ProducerDone 与终局一致
+
+- **WHEN** 流以生产者结束（ProducerDone）收尾且期间无错误
+- **THEN** 归约 SHALL 恰好产生一个终局，MUST NOT 因 ProducerDone 额外产生第二个终局或第二循环
+
+#### Scenario: 不引第二工具循环
+
+- **WHEN** 一个回合内模型返回工具调用
+- **THEN** 工具轮次 SHALL 由自有唯一事件循环（非框架 Runner/LLMAgent 第二循环）处理，系统 MUST NOT 自建第二套工具迭代循环
 
 ### Requirement: inbox 写者唯一性与目录单属主
 
@@ -331,3 +406,118 @@ inbox-v2 的每次写落盘 SHALL 由**写者身份**保证唯一：临时文件
 - **WHEN** 持有目录的进程崩溃（无 Close）
 - **THEN** 新进程的 `NewInbox` 可以取得目录并恢复，不需要人工清理锁残留
 
+### Requirement: Handoff 未来通知的目标、实例与稳定序号
+
+显式 Handoff（转交）后，**未来**通知 SHALL 投递到**新接收 session 与新实例**，并记录转交关联（原目标 → 新目标）；**已开始**的通知 SHALL 保留其原目标与身份，MUST NOT 被追回、MUST NOT 因重试改投新实例。
+
+通知身份 SHALL 至少含 `{TaskID, ExecutionRound, Category, Seq}`，其中 `Seq` 为**稳定序号**；同一通知的重复运输 MUST NOT 生成第二份事实（幂等），多次 progress 通知 SHALL 按稳定 `Seq` 有序、可对账。
+
+**实例所有者的源/目标区分**：通知的实例所有者 SHALL 区分**源实例（source instance，任务发起所属实例）**与**目标实例（target instance，Handoff 后的接收实例）**：Handoff 前产生的通知归**源实例**身份，Handoff 后的未来通知归**目标实例**身份；同一通知 MUST NOT 被两端实例同时认领或重复生成事实。本处「实例」为与实例身份（`InstanceID`）一致的运行时单位，非主 spec `runtime-resource-ownership` 的存储资源 owner。
+
+**关闭时未交付须保留**：任一实例关闭时，其**尚未交付**的通知/义务 MUST **保留并按可恢复路径承接**（交由资源 owner 或恢复材料），MUST NOT 因实例退役而直接丢弃（不得以 `removed` 直接丢弃）；未确认停止者沿用 `runtime-resource-ownership` 的 poisoned 保有规则。
+
+#### Scenario: 未来通知转新目标与实例
+
+- **WHEN** 一次显式 Handoff 后，原任务产生新的未来通知
+- **THEN** 该通知 SHALL 投递到新接收 session 与新实例，并记录转交关联
+
+#### Scenario: 已开始通知保留旧目标
+
+- **WHEN** 某通知在 Handoff 前已开始投递
+- **THEN** 该通知 SHALL 保留原目标/身份，MUST NOT 被追回或改投新实例
+
+#### Scenario: 重试不改投
+
+- **WHEN** 一次通知投递失败并重试
+- **THEN** 重试 SHALL 投往同一（按 Handoff 时点确定的）目标，MUST NOT 中途改投
+
+#### Scenario: 多 progress 稳定 seq 有序
+
+- **WHEN** 同一任务在轮次内产生多条 progress 通知
+- **THEN** 各通知的 `Seq` SHALL 稳定且有序，消费端可据此对账，重复运输不生成第二份
+
+#### Scenario: 源/目标实例身份区分
+
+- **WHEN** 一次 Handoff 发生，同一任务在 Handoff 前后各有通知
+- **THEN** Handoff 前的通知 SHALL 归**源实例**身份，Handoff 后的未来通知 SHALL 归**目标实例**身份
+- **AND** 同一通知 MUST NOT 被两端实例同时认领或重复生成事实
+
+#### Scenario: 关闭未交付通知保留
+
+- **WHEN** 一个实例关闭时而其仍有尚未交付的通知/义务
+- **THEN** 未交付项 SHALL 保留并由可恢复路径承接（资源 owner / 恢复材料），MUST NOT 随实例退役直接丢弃（不以 `removed` 丢弃）
+
+### Requirement: 通知消费位置连续且不跨空洞
+
+同一 `(TaskID, Round, Kind)`（`Round` 即既有 `ExecutionRound`，`Kind` 即既有 `Category`）的通知 SHALL 按稳定 `Seq` 形成连续消费位置。消费方 SHALL 只在位置 k 的逻辑消费确认后推进到 k+1；位置 k 未确认时 MUST NOT 确认 k+1，MUST NOT 以“后续位置已处理”掩盖空洞。领取（claim）MUST NOT 被视为消费确认。恢复 SHALL 从最后一个连续确认的位置继续，MUST NOT 跳过未确认位置，MUST NOT 回退到已确认位置之前。本要求规定位置连续性；单条输入的领取、消费确认与清理语义沿用本能力「输入处理确认与幂等」，不另建 inbox 或完成回执格式。
+
+#### Scenario: 空洞阻断后续确认
+
+- **WHEN** 位置 k 尚未确认而位置 k+1 的通知已到达并被处理
+- **THEN** k+1 的消费确认 SHALL 被阻断或挂起
+- **AND** MUST NOT 在 k 未确认时把 k+1 记为已消费
+
+#### Scenario: 领取不提前确认
+
+- **WHEN** 消费方 claim 一条通知但尚未完成逻辑消费
+- **THEN** 该通知的消费位置 MUST NOT 被记为已确认
+- **AND** 其未确认状态 SHALL 在恢复后保持
+
+#### Scenario: 恢复从最后确认位置继续
+
+- **WHEN** 进程重启且存在已确认位置 k 与未确认位置 k+1
+- **THEN** 恢复 SHALL 从 k 之后继续，并把 k+1 作为下一个待确认位置
+- **AND** MUST NOT 跳过 k+1，MUST NOT 回退到 k 之前
+
+### Requirement: 正式宿主缺必要端口或身份时具名拒绝
+
+承载持久事件循环的正式宿主 SHALL 在缺少运行所必需的端口或身份时以具名错误拒绝，MUST NOT 以默认值静默降级：根宿主缺少外发 `MessageSender` 时，用户地址的 turn MUST 返回具名错误且 MUST NOT 进入模型调用；微信宿主缺少声明身份时，`newWechatApp` MUST 返回具名错误且 MUST NOT 以默认地址启动；CLI 宿主选择真实模型而缺少凭据时，`run` MUST 以具名错误失败且 MUST NOT 回退到 mock。测试 MUST NOT 通过手工补接线使正式入口通过。
+
+#### Scenario: 根宿主缺 sender 具名拒绝
+
+- **WHEN** 以 `Boot` 装配的宿主未注入 `MessageSender`，且驱动入口 agent 的用户地址 turn
+- **THEN** `Host.Invoke` SHALL 返回 `ErrHostSenderMissing`
+- **AND** MUST NOT 发出 provider 请求或静默 headless 执行
+
+#### Scenario: 微信宿主缺声明身份具名拒绝
+
+- **WHEN** `newWechatApp` 收到空的入口身份
+- **THEN** 其 SHALL 返回 `ErrNoChatAddress`（经 `NewSessionRouter` 的显式校验）
+- **AND** MUST NOT 以默认 agent 或默认 session 前缀启动
+
+#### Scenario: CLI 宿主缺模型凭据具名拒绝
+
+- **WHEN** `run` 选择非 mock 模型且 `-api-key-env` 指向的环境变量为空
+- **THEN** `run` SHALL 以非零码退出，并在 stderr 输出含模型名与环境变量名的具名错误
+- **AND** MUST NOT 回退到 mock 或发出模型请求
+
+### Requirement: 循环面的模型感知边界
+
+循环面的全部输入 SHALL 按三族分类，且只有前两族可作为说话素材：**用户世界**（用户消息，构成回合）、**业务需注意**（任务终态、具名拒绝、工具错误，作为行动与汇报素材）、**系统内部确认**（受理回执、投递成功回执、progress 状态、执行资源中间态，MUST NOT 成为说话素材）。系统内部确认 SHALL 只以最小确认回答其对应调用，具名拒绝 MUST NOT 被收敛成静默。三族的逐条语义与回执正文见 `quiet-receipts`，本要求只固定循环面的呈现边界，不另建同义要求。
+
+progress 通知 SHALL 只作为其 range 的事实落链（通知身份与稳定序号沿用本能力「Handoff 未来通知的目标、实例与稳定序号」），MUST NOT 进入该 range 的 intake 呈现面，因而 MUST NOT 使下一步 decision 的模型请求增加任何消息；该通知本身 MUST NOT 被丢弃，其事实仍按身份可查。
+
+失败极性 SHALL 达至用户面，而不止于事件流与日志：真失败且该回合没有可交付的助手正文时，用户 SHALL 收到携带**原始错误信息**的告知，MUST NOT 因“避免打扰”而静默结束回合。失败告知的触发条件、去重、与既有回执通道的关系及留痕口径见 `failure-notice`，本要求只固定“失败必须可达用户”这一条。
+
+#### Scenario: 受理回执不构成模型材料
+
+- **WHEN** 一次委派调用被受理，原 invocation 的下一步 decision 随即形成模型请求
+- **THEN** 该请求 MUST NOT 含受理回执的任务号、状态词或结算承诺；受理回执只以最小确认回答该调用，其事实 MAY 落链供审计、MUST NOT 作为说话素材呈现
+
+#### Scenario: progress 只落 fact 不进 intake
+
+- **WHEN** 一个 range 在执行中收到同一任务的 progress 通知
+- **THEN** 该通知 SHALL 作为事实落链并保留其通知身份与稳定序号，MUST NOT 进入该 range 的 intake 呈现面；下一步 decision 的模型请求 MUST NOT 因该 progress 增加任何消息，该通知 MUST NOT 被丢弃或覆盖；多 progress 的稳定序号与有序性沿用本能力「Handoff 未来通知的目标、实例与稳定序号」
+
+#### Scenario: 失败回合必达用户告知
+
+- **WHEN** 模型调用真失败（框架内重试已耗尽）且该回合没有可交付的助手正文
+- **THEN** 用户 SHALL 收到恰好一条告知，其正文携带**原始错误信息**，由 sender 直投而非模型生成；同一事实 SHALL 落 fact 供审计、失败原因 SHALL 出现在日志中；成功回合 MUST NOT 出现该告知
+
+#### Scenario: exec 中间态不构成模型材料、不驱动回合
+- **WHEN** 执行资源管理器在调用返回后观察到执行资源的中间态（stable、suspect 或 exited）
+- **THEN** 该观察 MUST NOT 驱动 follow-up 回合，模型请求数 MUST NOT 因此增加，且 SHALL 只落无载荷审计事实（无消息正文、无通知分类与任务号）、MUST NOT 作为说话素材或进入下一轮 decision 的模型请求
+
+#### Scenario: 投递前审核是投递的必要条件
+- **WHEN** 宿主把一条正文（回合正文、失败告知或跨代理 send 的正文）投递到目标会话
+- **THEN** 该投递 SHALL 在到达渠道前把投递语义（正文、血统、目标）交审核插件裁决：allow/record SHALL 恰好投递一次；hold MUST NOT 投递、SHALL 挂起并在批准后原样补投恰好一次且 MUST NOT 被报告为投递；拒绝 MUST NOT 投递并 SHALL 留下无载荷审计事实（投递身份、血统、目标与字节数可查）；未配置审核时 SHALL 照常投递（默认 allow）

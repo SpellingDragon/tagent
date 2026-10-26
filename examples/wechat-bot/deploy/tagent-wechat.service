@@ -9,14 +9,13 @@
 #
 # 设计:systemd 直接管理二进制(Type=simple + Restart=always + SIGTERM 优雅关闭 +
 #       journald 收日志);安全加固对标 docker-compose.yml(非 root / 只读根 +
-#       ReadWritePaths 白名单 / NoNewPrivileges / 资源上限),但避免过度 sandbox
-#       误挡 exec 工具的正常子命令(未启用 RestrictAddressFamilies 等,见文末可选加固)。
+#       ReadWritePaths 白名单 / NoNewPrivileges / 资源上限)。
 # ============================================================================
 
 [Unit]
-Description=tagent WeChat Bot — 个人助手 agent(治理/自进化/可靠性/语义召回全启用)
+Description=tagent WeChat Bot — 个人助手 agent(治理闸恒挂;审批面按 tagent.yaml 启用)
 Documentation=file:///opt/tagent/wechat-bot/deploy/README.md
-# 依赖网络在线(LLM API / MCP / 微信网关均需出网);network-online 确保出网就绪后启动
+# 依赖网络在线(LLM API / 微信网关均需出网);network-online 确保出网就绪后启动
 After=network-online.target
 Wants=network-online.target
 
@@ -37,22 +36,14 @@ Environment=TAGENT_CONFIG=/opt/tagent/wechat-bot/tagent.yaml
 Environment=TAGENT_HTTP_PORT=8089
 # node/openspec 全局模块路径(plan 子 agent 的 spec 工具后端);按发行版调整(见 README 依赖表)
 Environment=NODE_PATH=/usr/lib/node_modules
-# OTLP 追踪导出(可选):取消注释并填端点即启用 turn span 导出,留空=noop 零开销、行为逐字节不变。
-# 起 Jaeger 后端、端点取值(裸机 127.0.0.1:4317 / 容器 jaeger:4317)、span 形态实录清单与排障
-# 见同目录 README.md §九「可观测后端」。
-# Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
-# agent 工作根(TAGENT_WORKING_DIR):通常由 .env(wizard.sh 步骤3写入)经上方 EnvironmentFile 注入,
-# 无需在此重复;若要在 unit 内固定,取消下行注释并填 clone 根绝对路径:
-# Environment=TAGENT_WORKING_DIR=/home/user/codes
-# ⚠️ 一旦工作根设在部署目录**之外**(如 /home/user/codes),必须把该路径追加到下方 ReadWritePaths——
-#    否则 ProtectSystem=strict 会使 agent 的 file/exec 对工作区只读失败。wizard.sh --perms 已对该
-#    路径做 ACL 授权(服务用户可读写含已有文件);ReadWritePaths 是 systemd 沙箱层的**第二道**放行。
+# 宿主 HTTP 面(探活 + 注入)只绑 127.0.0.1:<端口>;端点 GET /healthz、POST /task。
+# 凭据放 .env 的 TAGENT_RL_AUTH_TOKEN(非空时 /task 要 Bearer,mail-poller 读同名变量)。
 
-# systemd 直接管理二进制:SIGTERM 直达 → 优雅关闭(排空 ReliableBus/关闭 tmux/flush 轨迹)
+# systemd 直接管理二进制:SIGTERM 直达 → 优雅关闭(停止接客 + 排空在飞回合 + 关 run)
 ExecStart=/opt/tagent/wechat-bot/wechat-bot
 KillSignal=SIGTERM
 TimeoutStopSec=30
-# 崩溃自愈:异常退出 5s 后重启(配合 reliability 子系统 → 重启恢复 spill/锚点/发布历史)
+# 崩溃自愈:异常退出 5s 后重启
 Restart=always
 RestartSec=5
 # 日志 → journald(journalctl -u tagent-wechat -f);不落文件,免 logrotate
@@ -64,21 +55,16 @@ SyslogIdentifier=tagent-wechat
 NoNewPrivileges=true              # 禁止 setuid 提权(= compose no-new-privileges)
 ProtectSystem=strict              # 整个 / 只读,仅 ReadWritePaths 白名单可写(= compose read_only)
 ProtectHome=true                  # /home /root /run/user 不可见(HOME 已收敛到部署目录内)
-PrivateTmp=true                   # 私有 /tmp:exec 工具的 tmux socket 落此(可写,服务间隔离)
+PrivateTmp=true                   # 私有 /tmp(服务间隔离)
 ProtectKernelTunables=true        # 禁改内核参数(/proc/sys 等只读)
 ProtectKernelModules=true         # 禁加载内核模块
 ProtectControlGroups=true         # cgroup 只读
 RestrictSUIDSGID=true             # 禁创建 SUID/SGID 文件
-# 可写白名单(ProtectSystem=strict 下仅此列可写)——记忆/数据/工作区/规格化产出/HOME
-# ⚠️ 若 TAGENT_WORKING_DIR 设在部署目录**外**(如 /home/user/codes),须追加其绝对路径为续行,例如:
-#      ReadWritePaths=... \
-#                     /opt/tagent/wechat-bot/.home \
-#                     /home/user/codes          ← 追加工作根(否则 agent 写工作区被 strict 拒)
+# 可写白名单(ProtectSystem=strict 下仅此列可写)——登录态/审批数据/轨迹/附件暂存/HOME
 ReadWritePaths=/opt/tagent/wechat-bot/.wechat-config \
                /opt/tagent/wechat-bot/data \
                /opt/tagent/wechat-bot/workspace \
                /opt/tagent/wechat-bot/.tagent-workspace \
-               /opt/tagent/wechat-bot/openspec/changes \
                /opt/tagent/wechat-bot/.home
 # 资源上限(= compose deploy.resources:防 fork 炸弹 / 内存爆)
 LimitNOFILE=65536
@@ -89,10 +75,10 @@ MemoryMax=1G                      # 内存硬上限(超限 OOM-kill → Restart 
 WantedBy=multi-user.target
 
 # ============================================================================
-# 可选进一步加固(按需取消注释;注意可能限制 exec 工具能力,启用前验证业务命令)
+# 可选进一步加固(按需取消注释;启用前验证业务命令)
 # ============================================================================
-# RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX   # 限制 socket 家族(exec 网络命令仍可用)
+# RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX   # 限制 socket 家族(仅需 TCP/UDP/unix)
 # RestrictNamespaces=true                            # 禁 namespace 创建(挡容器内套娃)
 # LockPersonality=true                               # 禁切换执行域
 # CapabilityBoundingSet=                             # 清空 capability(= compose cap_drop ALL)
-# SystemCallFilter=@system-service                   # seccomp 白名单(最严,可能挡部分 exec)
+# SystemCallFilter=@system-service                   # seccomp 白名单(最严,启用前逐条验证)

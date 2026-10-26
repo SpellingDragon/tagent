@@ -1,0 +1,159 @@
+{
+  "leaf": "01.7",
+  "title": "CLI 宿主装配与缺凭据拒绝",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T13:37:50Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 examples/cli-host/main_test.go 增加 TestEventIntegrityCLIAdapter：正锚 formal_cli_turn 经 CLI 产品入口 run 从 stdin 驱动一次 mock 回合、stdout 恰一条 fresh assistant 正文且退出码 0；负锚 missing_model_key_fails_closed 以真实模型名与空 key 环境变量经 run 装配，退出码 1、stderr 含 newNativeModel 的具名缺 key 错误、stdout 无正文且不回退 mock。MUST NOT 以 cli.NewCLI 或接口声明冒充 CLI 生产入口——本叶未使用。取证优先：两个锚对当前行为全绿，未改产品文件。",
+  "method": "测试只调用 examples/cli-host/main.go 的 run(args, stdin, stdout, stderr)（main.go:59），由其内部 parseFlags → assemble → newNativeModel → tagent.Assemble → cliSession.invoke/repl → printFresh 完成整条产品链；正锚走 repl 路径（stdin 模式，stderr 断言 repl 提示符 '> ' 证明确实走 stdin 分支），负锚经同一 run 在 assemble 阶段由 newNativeModel（main.go:169-182）具名拒绝。未直接调用 invoke/assemble，未构造 cli.NewCLI。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7",
+    "module": "tagent-cli-host (examples/cli-host, replace github.com/SpellingDragon/tagent => ../..)"
+  },
+  "artifacts": [
+    {
+      "path": "examples/cli-host/main_test.go",
+      "state": "extended",
+      "lines": 87,
+      "lines_added": 63,
+      "sha256": "98aa85e3ca3ba21ec35541664d590a5ba382ddc999026c4f3fe606af9e7aef2a"
+    },
+    {
+      "path": "examples/cli-host/main.go",
+      "state": "unchanged by this leaf; sha256 equals the pre-edit record",
+      "lines_added": 0,
+      "lines_removed": 0,
+      "sha256": "145756270c98ca11400800f79a8a7051a79c716de3e47f8a40cbcf4fa6878cb3",
+      "proof": "main.go.orig 与恢复后 main.go sha256 均为 145756270c98ca11400800f79a8a7051a79c716de3e47f8a40cbcf4fa6878cb3；git status 仅显示 M examples/cli-host/main_test.go"
+    }
+  ],
+  "product_changes": [],
+  "product_change_decision": "取证优先：扩展测试后两个锚对当前产品行为全绿（mock 回合正常、缺 key 具名拒绝且不回退），未发现 01.7 范围内已证实的产品缺陷，故未改 main.go。两次可证伪性 mutation 仅临时改 main.go，跑完立即从 main.go.orig 逐字节恢复并以 sha256 校验（14575627...）。",
+  "falsifiability_mutations": [
+    {
+      "id": "missing_key_falls_back_to_mock",
+      "target": "examples/cli-host/main.go newNativeModel",
+      "mutation": "key 为空时由返回具名错误改为返回 &mockModel{name: mockModelName}",
+      "command": "go -C examples/cli-host test -run 'TestEventIntegrityCLIAdapter/missing_model_key_fails_closed' -count=1 -json",
+      "exit_code": 1,
+      "result": "负锚 FAIL（3 条 fail 事件），证明负锚能捕获回退 mock 的回归",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/mutation1-negative.jsonl",
+      "log_sha256": "43fc237a2ae249dd06e15a246fc77393b299905d28dc7bf43bf7983a439b44bd",
+      "log_bytes": 2749
+    },
+    {
+      "id": "fresh_body_not_printed",
+      "target": "examples/cli-host/main.go printFresh",
+      "mutation": "把 fmt.Fprintln(s.out, content) 改为 _ = content，回合正文不再写 stdout",
+      "command": "go -C examples/cli-host test -run 'TestEventIntegrityCLIAdapter/formal_cli_turn' -count=1 -json",
+      "exit_code": 1,
+      "result": "正锚 FAIL（3 条 fail 事件），证明正锚读取的是真实 stdout 回合正文",
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/mutation2-positive.jsonl",
+      "log_sha256": "82634d4869e240bc6595e4f8cdca066fe78d0eebb89009dc7bfd72341d0d4ac4",
+      "log_bytes": 2642
+    }
+  ],
+  "verification": {
+    "single": {
+      "command": "go -C examples/cli-host test -run '^TestEventIntegrityCLIAdapter$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.7/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/single.jsonl",
+      "log_sha256": "5e5283082259ffe350c8762363791b090749472ecd6ddd7bc297e81b8a55cc5a",
+      "log_bytes": 3103,
+      "parsed": {
+        "parent": "TestEventIntegrityCLIAdapter run=1 pass=1",
+        "named_subtests_run_pass": 2,
+        "skip": 0,
+        "fail": 0
+      }
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.7\"; mkdir -p \"$E\"; for i in $(seq 1 10); do go -C examples/cli-host test -run '^TestEventIntegrityCLIAdapter$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; echo \"round=$i exit=$rc\"; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-1.jsonl", "log_sha256": "b02841798210ffb1162c700782a6311f2da0304bbd44cdfef8ac3ee283084517", "log_bytes": 3103, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-2.jsonl", "log_sha256": "8646dd5b98b504c4c15d9f393dab5a788ea9e6fa506896012fbcb37c08b89746", "log_bytes": 3104, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-3.jsonl", "log_sha256": "e4e9eab5036414d3cfe877233077314f70de296642bb413a5c9eb69b316883c2", "log_bytes": 3114, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-4.jsonl", "log_sha256": "476fc489be2cf39cdee19b8d6c88c05c14e4287309ec748056863520a7e3b35f", "log_bytes": 3106, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-5.jsonl", "log_sha256": "12993ee98fee37cca001d574d674092e311fd3c6d75898e9a95578c299766994", "log_bytes": 3104, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-6.jsonl", "log_sha256": "60f653da4c46b501b8e0dc805fcef295401cb7b23d21cba8cb49a13e8785193c", "log_bytes": 3103, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-7.jsonl", "log_sha256": "769c6eaa576c816531460bbc1b307c3fbd0a787f956220f548f0252c634eba82", "log_bytes": 3103, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-8.jsonl", "log_sha256": "8619b52b4236cec53390379a07ea3c6878991aab6545dd58ae50e4191e1bb33e", "log_bytes": 3103, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-9.jsonl", "log_sha256": "e88750896949a0603fcd21052092e305b60de68957c11acfe2eecf197eaca490", "log_bytes": 3118, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/run-10.jsonl", "log_sha256": "33a391bb1a4da6aeda12095c6d8314d0a7c649cbd8dc52da126743e22599114f", "log_bytes": 3104, "parent_run_pass": true, "named_subtests_run_pass": 2, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐轮 json.loads 每行，按 Test 归集 run/pass/skip/fail 计数；要求父测试与全部 2 个具名子测试各 run=1、pass=1、skip=0、fail=0，且父 run 存在（非零匹配）",
+      "parsed_result": "ALL_TEN_OK=True"
+    },
+    "hygiene": {
+      "vet": {"command": "go -C examples/cli-host vet ./...", "exit_code": 0, "output": ""},
+      "gofmt": {"command": "gofmt -l examples/cli-host", "exit_code": 0, "output": ""},
+      "existing_package_tests": {
+        "command": "go -C examples/cli-host test -count=1 ./...",
+        "exit_code": 0,
+        "summary": "ok tagent-cli-host 0.338s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.7/package.log",
+        "log_sha256": "7a6928c1142cab7eb60ce3ffbe4d9b5bbe5d4ec565769f6267d9b8f2ef3f4675",
+        "log_bytes": 28
+      },
+      "build": {
+        "command": "go -C examples/cli-host build ./...",
+        "exit_code": 0,
+        "note": "改动前基线可编译；测试扩展不引入非测试依赖"
+      }
+    }
+  },
+  "consumers": {
+    "formal_entry": "examples/cli-host/main.go:59 run(args []string, stdin io.Reader, stdout, stderr io.Writer) int；测试唯一调用点，未使用 cli.NewCLI、未直接调 invoke/assemble",
+    "assembly": "run -> parseFlags (main.go:106) -> assemble (main.go:143) -> newNativeModel (main.go:169) -> tagent.Assemble（唯一公开装配入口）",
+    "drive": "run -> cliSession.repl (main.go:236, stdin 模式) -> cliSession.invoke (main.go:198) -> rt.Invoke -> printFresh (main.go:223) -> fmt.Fprintln(stdout)",
+    "closed_rejection": "run -> assemble -> newNativeModel 缺 key 返回具名错误 -> run 打印 'cli-host: assemble: ...' 并 return 1 (main.go:72-76)，reader/stdin 未被消费、stdout 无正文"
+  },
+  "red_lines": {
+    "formal_run_only": "正锚与负锚都只调用 run；测试文件内 invoke(/assemble(/NewCLI 作为调用点命中 0（仅在注释中提及）。",
+    "no_mock_fallback": "负锚断言 stdout 为空且不含 'mock reply'，同时 stderr 含 newNativeModel 的完整具名错误文案（model %q needs a key in $%s; use -model mock for the credential-free path）。",
+    "stdin_path_proven": "正锚以 stdin 模式驱动 run，并断言 stderr 含 repl 提示符 '> '，排除 -c 快路径冒充。",
+    "no_product_change": "main.go sha256 与改动前一致（14575627...），git status 仅 main_test.go 修改。"
+  },
+  "subtests": [
+    {
+      "name": "formal_cli_turn",
+      "anchor": "positive",
+      "line": 33,
+      "asserts": [
+        "run(nil, stdin='hello from stdin\\n', stdout, stderr) 退出码 0",
+        "stderr 含 repl 提示符 '> '，证明走 stdin 分支而非 -c",
+        "stdout 恰一条非空行，内容等于 mock 模型对本回合用户消息的回复 'mock reply: hello from stdin'"
+      ]
+    },
+    {
+      "name": "missing_model_key_fails_closed",
+      "anchor": "negative",
+      "line": 57,
+      "asserts": [
+        "run(-model gpt-4.1-mini -api-key-env TAGENT_EVENT_INTEGRITY_MISSING_KEY, key 环境变量为空) 退出码 1（不是 2 的 flag 错误）",
+        "stderr 含 newNativeModel 完整具名错误：model \"gpt-4.1-mini\" needs a key in $TAGENT_EVENT_INTEGRITY_MISSING_KEY; use -model mock for the credential-free path",
+        "stdout 为空，无 assistant 正文",
+        "stdout 不含 'mock reply'，证明未回退 mock"
+      ]
+    }
+  ],
+  "limitations": [
+    "真实模型路径只验证到凭据门（newNativeModel）；按任务定义负锚不得发起远端调用，未配置 base-url、未触网。",
+    "未新增 public API 或持久化格式；正锚使用产品内建 mock 模型（main.go 注释明确其为 runtime 的真实模型实现而非测试替身）。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.7",
+    "action": "本摘要写入后勾选该一条为 [x]"
+  }
+}

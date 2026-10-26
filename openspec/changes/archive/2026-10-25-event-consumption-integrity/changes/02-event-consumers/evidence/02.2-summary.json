@@ -1,0 +1,102 @@
+{
+  "leaf": "02.2",
+  "title": "反思投递（meditation-delivery-tool / cross-session-delivery）",
+  "change": "event-consumption-integrity",
+  "domain": "02-event-consumers",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T13:56:40Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "反思投递面取证：tests/integration/host/event_integrity_test.go 的父测试 TestEventIntegrityReflectionDelivery，下辖 11 个具名子测试（2 正 + 8 负 + 1 消费者锚）。目标集合取装配期 deliver_to 授权集合（G2/G3/G9 裁定），入口按现行 Run.CommitToSession，拒绝文本用当前具名 [deliver_summary_denied] 字符串。产品改动仅 evolution/meditation/deliver.go（+135/-28）：成功回执逐目标覆盖计数、部分目标零存活具名拒绝、部分提交失败附 covered 统计、同动作身份（task.CallFrame DedupKey）重放幂等。未新增注入路径、未改 CommitToSession 签名、未新增持久格式。",
+  "method": "每个子测试从正式入口发起：单元级用 tagent.Assemble 装配的 Run（真实 Run.CommitToSession / Run.ActiveSessions / Run.SessionFacts 与真实模型环），消费者锚用 tagent.Boot 装配（hostDocument.toolsFor 授予 deliver_summary → hostMeditationPort.CommitToSession → 目标会话下一轮真实请求）。断言读副作用（目标链事实、sink 写入、模型实际请求消息）与具名回执，不以内部调用计数代替。replay_identity 以 task.CallFrame{CallIdentity{CallID}} 构造同一/不同动作身份，断言同身份第二次返回同一回执且写入数不变、换 CallID 后写入数 +1。",
+  "environment": {
+    "os": "Darwin arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/02.2",
+    "note": "原始 json 只落仓库外临时目录；本文件只留摘要、哈希与 log_ref。"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/host/event_integrity_test.go",
+      "state": "added (untracked new file; 02.2 段落追加 6 个子测试，父测试与既有 5 个子测试保持)",
+      "lines": 3190,
+      "sha256": "ef86a294d089674939c193fa197e6dd6e26a4d894a8e22d5dcbfe1a03e82a382"
+    },
+    {
+      "path": "evolution/meditation/deliver.go",
+      "state": "modified",
+      "diff": "+135/-28",
+      "sha256": "0917db7034c7750dda5b495658721da5e963fca617bcd4e370f58c8977c91a34"
+    }
+  ],
+  "product_changes": [
+    "deliver.go#deliver：成功回执改为逐目标覆盖 [deliver_summary_ok] delivered to N session(s) across M target(s): user: 1/1 sessions committed",
+    "deliver.go#deliver：部分目标零存活（部分覆盖）时返回 [deliver_summary_denied] 具名未覆盖目标，不再以已写入部分报成功",
+    "deliver.go#deliver：部分会话提交失败时返回失败数 + 首错 + covered 统计，并保留未覆盖目标具名",
+    "deliver.go#Call：同动作身份（task.CallFrame→CallIdentity→DedupKey）重放直接返回首次回执、不二次写；不同 CallID 是不同动作，允许再次写"
+  ],
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath) + meditation.enabled/deliver_to 装配 → hostDocument.toolsFor 授予 deliver_summary → 模型显式调用 → hostMeditationPort.CommitToSession → Run.CommitToSession → 目标会话下一轮真实请求装配",
+    "unit_entry": "tagent.Assemble(declaration, nativeAgents) → Run（Run.CommitToSession / Run.ActiveSessions / Run.SessionFacts 为正式公开面）",
+    "consumer_subtest": "boot_deliver_to_target_request：Boot 装配后经 Host.Invoke（TriggerSource=user）驱动两轮，断言工具只授予冥想会话、回执含 user: 1/1 sessions committed、目标会话下一轮真实请求携带投递正文"
+  },
+  "subtests": [
+    {"name": "explicit_call_reaches_target_session", "anchor": "positive", "line": 2708, "asserts": ["成功回执以 [deliver_summary_ok] 开头且含 user: 1/1 sessions committed", "目标链恰 1 条 meditation-stamped 外部输入且正文一致", "目标会话下一轮真实请求携带投递正文"]},
+    {"name": "same_batch_yield_is_legal_success", "anchor": "positive", "line": 2743, "asserts": ["目标忙轮在飞时投递返回合法成功且提交 1 条", "忙轮结算不受投递影响", "下一轮消费投递"]},
+    {"name": "zero_live_target_not_success", "anchor": "negative", "line": 2821, "asserts": ["授权目标无存活会话时不报成功", "拒绝具名该目标", "已覆盖目标写入仍可读"]},
+    {"name": "partial_commit_failure_not_success", "anchor": "negative", "line": 2854, "asserts": ["一个会话提交失败时整体不报成功", "拒绝含失败数与首个具名错误", "covered 统计如实"]},
+    {"name": "wrong_target_no_extra_write", "anchor": "negative", "line": 2888, "asserts": ["参数名白名单外目标被声明拒绝（content only）", "不产生任何额外会话写入"]},
+    {"name": "empty_whitelist_fail_closed", "anchor": "negative", "line": 2920, "asserts": ["deliver_to 为空时 Boot fail-closed", "拒绝文本含 names no deliver_to target"]},
+    {"name": "unknown_target_named_refusal", "anchor": "negative", "line": 2939, "asserts": ["deliver_to 指向未声明 agent 时 Boot 具名拒绝", "拒绝文本含 undeclared agent \\\"nobody\\\""]},
+    {"name": "target_not_running_named_refusal", "anchor": "negative", "line": 2958, "asserts": ["已声明目标无存活会话时具名拒绝", "目标无会话/无事实/模型零请求（不走 one-shot 回退）"]},
+    {"name": "delivery_does_not_rearm_novelty", "anchor": "negative", "line": 2992, "asserts": ["投递前收敛并清空 fired", "直接投递后 750ms 窗口无新 fired 且模型调用数不增（投递是 meditation lineage，不喂新鲜度）"]},
+    {"name": "replay_identity", "anchor": "negative", "line": 3046, "asserts": ["同 CallFrame 身份第二次返回同一回执且写入数保持 1", "换 CallID 的独立动作再次写，写入数 2（身份证据，不以内容摘要/时间窗代替）"]},
+    {"name": "boot_deliver_to_target_request", "anchor": "consumer", "line": 3094, "asserts": ["Boot 装配只把 deliver_summary 授予冥想会话", "模型显式调用后回执含 user: 1/1 sessions committed", "目标会话下一轮真实请求携带投递正文"]}
+  ],
+  "baseline_and_fix": {
+    "baseline_log": "baseline.json",
+    "red": ["explicit_call_reaches_target_session", "same_batch_yield_is_legal_success", "zero_live_target_not_success", "partial_commit_failure_not_success", "replay_identity", "boot_deliver_to_target_request", "delivery_does_not_rearm_novelty（测试设计假红：首版以模型请求总数判定，同批 assistant 提交合法触发 retained 再 pass；已改为投递前后 fired/模型调用增量）"],
+    "green": ["wrong_target_no_extra_write", "empty_whitelist_fail_closed", "unknown_target_named_refusal", "target_not_running_named_refusal"],
+    "fixes": [
+      "产品：deliver.go 逐目标覆盖/部分零存活具名/部分失败 covered/动作身份重放幂等（写集内最小修）",
+      "测试：boot 锚改用 Host.Invoke 且 TriggerSource=user（driver 只认 host-facing stamp）",
+      "测试：投递可见性依赖目标 agent 声明 max_tokens（会话映射 projection），与既有 bootReproductionHost 一致，属测试文档配置",
+      "测试：replay 断言改为写入数 1→2 + 回执同一，删除同正文文本比较"
+    ]
+  },
+  "convergences": {
+    "all_zero_text": "全部授权目标零存活沿用既有具名文本 [deliver_summary_denied] no bound target sessions（既有 TestDeliverSummaryRefusals 精确断言）；部分零存活才追加 uncovered 目标名。符合 G9「用当前具名字符串」口径。",
+    "replay_scope": "动作身份幂等为进程内（DeliverSummaryTool.receipts 内存映射），无跨进程/跨重启持久回执；未新增持久格式或 API，跨进程重放不在本叶声明范围。",
+    "g2_g3_g9": "G2：动作身份取 task.CallFrame 的 CallID/DecisionID 组成的 DedupKey，未用内容摘要或时间窗。G3：入口按现行 Run.CommitToSession，不改写条款。G9：拒绝文本只断言既有具名 [deliver_summary_denied] 前缀。"
+  },
+  "verification": {
+    "single_round": {
+      "command": "go test ./tests/integration/host -run '^TestEventIntegrityReflectionDelivery$' -count=1 -race -json",
+      "exit": 0,
+      "result": "父测试 + 11 子测试各恰一次 run/pass（12 个测试）",
+      "log": "single-final.json"
+    },
+    "ten_rounds": {
+      "command": "for i in $(seq 1 10); do go test ./tests/integration/host -run '^TestEventIntegrityReflectionDelivery$' -count=1 -race -json > \"$EVID/run-$i.json\" 2>&1; rc=$?; printf 'run-%d exit=%d\\n' \"$i\" \"$rc\" >> \"$EVID/exits.txt\"; if [ \"$rc\" -ne 0 ]; then exit \"$rc\"; fi; done",
+      "exits": "10 行全 0",
+      "checker": "python3 逐轮解析 run-$i.json：父测试与 11 子测试各 run==1 且 pass==1，无 fail/skip/重复/零匹配 → ALL-OK（10/10 轮，每轮 12 个测试）",
+      "logs": "run-1.json … run-10.json, exits.txt"
+    },
+    "regression": [
+      {"command": "go test ./tests/integration/host -count=1", "exit": 0, "result": "ok 12.022s（含 00.2 4/4、01.3、01.4 既有用例）"},
+      {"command": "go test ./tests/integration/execution ./tests/integration/history -count=1", "exit": 0, "result": "execution ok 2.943s；history ok 2.921s"}
+    ],
+    "gates": [
+      {"command": "go build ./...", "exit": 0},
+      {"command": "go vet ./...", "exit": 0},
+      {"command": "gofmt -l evolution/meditation/deliver.go tests/integration/host/event_integrity_test.go", "exit": 0, "result": "无输出（写集干净）"},
+      {"command": "go run ./scripts/codetools event-ownership --check", "exit": 0, "result": "symbols 14 owners 6 direct 21 allowed 14；OK（4 uncovered 如实报告，未计覆盖）"}
+    ]
+  },
+  "checkpoint": {
+    "tasks_md": "openspec/changes/event-consumption-integrity/changes/02-event-consumers/tasks.md",
+    "state": "保持 - [ ]（verify_after=01.5；产物 ready，待 01.5 后正式证据回验再勾选）"
+  }
+}

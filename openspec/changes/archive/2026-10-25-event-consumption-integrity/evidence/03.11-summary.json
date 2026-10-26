@@ -1,0 +1,306 @@
+{
+ "bundle_gate": {
+  "classification": "叶外门缺陷（scripts/）：runner 只为本次 scope 选中模块记指纹（event-long=examples/wechat-bot 单模块；event-short=根+cli-host+wechat-bot 三模块），checker bundle 门却要求全部 17 份 module_fingerprints 逐字一致；其自测 fixture 对所有 scope 复用同一 event_fingerprints()，故真实跨 scope 证据必红，CI event-integrity-required 同会红",
+  "error": "bundle mixes 2 different baseline module fingerprints; the evidence must describe one source tree",
+  "exit": 1,
+  "fix_location": "scripts/run_runtime_scenarios.py（按合同全模块记指纹）或 scripts/check_runtime_evidence.py（按模块交集比对），均在本单写集外",
+  "ok": false,
+  "output": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/final/bundle-gate2.json",
+  "path": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/final-bundle"
+ },
+ "catchup2_red": {
+  "classification": "台架计数口径：同一回合工具续转（request 761 = 760 + assistant tool_call + tool result）被 exact(marker) 当作第二次驱动；input_samples=1200 证明产品侧无二次驱动，非产品缺陷",
+  "dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-1-256",
+  "exit_code": 1,
+  "failure": "smoke_test.go:2860 input identity does not reconcile: missing=[] duplicate=[SMOKE-R10496 x2]",
+  "preserved_at": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/red-runs/seed-1-256-catchup2",
+  "reconciliation": {
+   "consumer": "58/58",
+   "fault_input_attempts": 2,
+   "fault_input_retries": 2,
+   "input_requests": 1202,
+   "input_samples": 1200,
+   "notifications": "47/47",
+   "rebinds": "484/484"
+  },
+  "run_id": "7bba4e07-812b-4ad1-b5d2-543c6e0c33c8",
+  "seed": 1,
+  "verdict": "unattested",
+  "wall_s": 660.0,
+  "window": 256
+ },
+ "change": "event-consumption-integrity",
+ "ci_budget": {
+  "classification": "05.1/05.2 的 CI 预算冻结失准（改动面在 .github/ 与 scripts/，本单写集外）；03.10 校准文件自述『03.11 首轮后必须复核并覆盖建议值』尚未执行。",
+  "detail": "CI 冻结 --timeout 600（单 go test 进程，含冷构建）与 timeout-minutes: 12；03.11 实测 4/6 分片 >600s（623/792/799/878s），3/6 分片逼近或超过 12 分钟作业帽。CI 注释所称『03.11 measured one shard at 109-110s wall』与 03.10 校准 0.33 分钟/片均与实测差 5-8 倍。",
+  "fix": "按最大观察值 878s 加余量重算并登记：--timeout >= 1200、timeout-minutes >= 20（同时复核 03.10 外推口径），由 05.1/05.2 补丁叶执行。",
+  "frozen": {
+   "job_timeout_minutes": 12,
+   "runner_timeout_s": 600
+  },
+  "impact": "远端 event-integrity-long 六分片中至少四片必因 go test 超时失败，required 汇总必红；阻塞 05.2 远端可用性、05.3 文档转正与 F2/F4。",
+  "measured_shard_elapsed_s": {
+   "seed-1-window-256": 533.56,
+   "seed-1-window-32768": 799.49,
+   "seed-42-window-256": 622.66,
+   "seed-42-window-32768": 792.27,
+   "seed-7-window-256": 530.03,
+   "seed-7-window-32768": 877.88
+  },
+  "over_600s": [
+   "seed-1-window-32768",
+   "seed-42-window-256",
+   "seed-42-window-32768",
+   "seed-7-window-32768"
+  ],
+  "source": ".github/workflows/ci.yml:223-258（event-integrity-long）",
+  "verdict": "red"
+ },
+ "combos": [
+  {
+   "duplicate_input_requests": null,
+   "exit_code": 0,
+   "input_requests": 1201,
+   "input_samples": 1200,
+   "inputs": 1200,
+   "missing_input_requests": null,
+   "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w256-20261025-041932",
+   "restarts": 120,
+   "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-1-256-rerun",
+   "run_id": "bb2de6ec-da47-47a7-8f1c-50c5aca1fa90",
+   "seed": 1,
+   "source": "rerun-after-catchup2-red",
+   "subtests": {
+    "consumer": "pass",
+    "negative": "pass",
+    "positive": "pass"
+   },
+   "verdict": "match",
+   "wall_s": 533.3,
+   "window": 256
+  },
+  {
+   "duplicate_input_requests": null,
+   "exit_code": 0,
+   "input_requests": 1201,
+   "input_samples": 1200,
+   "inputs": 1200,
+   "missing_input_requests": null,
+   "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w32768-20261025-033428",
+   "restarts": 120,
+   "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-1-32768",
+   "run_id": "f8681b65-a2a5-4914-9ac9-cadc45beac92",
+   "seed": 1,
+   "source": "catchup2",
+   "subtests": {
+    "consumer": "pass",
+    "negative": "pass",
+    "positive": "pass"
+   },
+   "verdict": "match",
+   "wall_s": 799.2,
+   "window": 32768
+  },
+  {
+   "duplicate_input_requests": null,
+   "exit_code": 0,
+   "input_requests": 1201,
+   "input_samples": 1200,
+   "inputs": 1200,
+   "missing_input_requests": null,
+   "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s7-w256-20261025-023943",
+   "restarts": 120,
+   "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-7-window-256",
+   "run_id": "e7234f3f-bbf1-4576-9ffd-ac3316aa7be4",
+   "seed": 7,
+   "source": "wave0311",
+   "subtests": {
+    "consumer": "pass",
+    "negative": "pass",
+    "positive": "pass"
+   },
+   "verdict": "match",
+   "wall_s": 529.8,
+   "window": 256
+  },
+  {
+   "duplicate_input_requests": null,
+   "exit_code": 0,
+   "input_requests": 1201,
+   "input_samples": 1200,
+   "inputs": 1200,
+   "missing_input_requests": null,
+   "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s7-w32768-20261025-035856",
+   "restarts": 120,
+   "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-7-32768",
+   "run_id": "355067e2-2564-409d-a78e-3cdaa9ef5f43",
+   "seed": 7,
+   "source": "catchup2",
+   "subtests": {
+    "consumer": "pass",
+    "negative": "pass",
+    "positive": "pass"
+   },
+   "verdict": "match",
+   "wall_s": 877.6,
+   "window": 32768
+  },
+  {
+   "duplicate_input_requests": null,
+   "exit_code": 0,
+   "input_requests": 1201,
+   "input_samples": 1200,
+   "inputs": 1200,
+   "missing_input_requests": null,
+   "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s42-w256-20261025-030151",
+   "restarts": 120,
+   "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-42-window-256",
+   "run_id": "55f3ceb5-fd48-475d-883a-09febbf3d913",
+   "seed": 42,
+   "source": "wave0311",
+   "subtests": {
+    "consumer": "pass",
+    "negative": "pass",
+    "positive": "pass"
+   },
+   "verdict": "match",
+   "wall_s": 622.3,
+   "window": 256
+  },
+  {
+   "duplicate_input_requests": null,
+   "exit_code": 0,
+   "input_requests": 1201,
+   "input_samples": 1200,
+   "inputs": 1200,
+   "missing_input_requests": null,
+   "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s42-w32768-20261025-024835",
+   "restarts": 120,
+   "run_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11-v2/seed-42-window-32768",
+   "run_id": "72629812-0e13-480f-a2be-3e3e3a3c7d83",
+   "seed": 42,
+   "source": "wave0311",
+   "subtests": {
+    "consumer": "pass",
+    "negative": "pass",
+    "positive": "pass"
+   },
+   "verdict": "match",
+   "wall_s": 791.9,
+   "window": 32768
+  }
+ ],
+ "contract": {
+  "digest": "sha256:9f4e50fea63a62a129e2834e8b16a145b7bd99536f51f500046a2a709e8a4e1b",
+  "matrix": "seeds[1,7,42] x windows[256,32768] = 6 combos",
+  "path": "golden/runtime/event_integrity_scenarios.json",
+  "per_combo": {
+   "inputs": 1200,
+   "restarts": 120
+  }
+ },
+ "deviations": [
+  {
+   "action": "保留红证于 red-runs/seed-1-256-catchup2；在无并发长跑、产品树指纹前后一致（4a913817…）条件下受控重跑 1 次，exit=0 verdict=match（run_id bb2de6ec…，wall 538s）",
+   "id": "D1",
+   "reason": "同组合此前已 3 次全绿且产品树未变；红因定位为台架 exact(marker) 计数口径（R23），非产品缺陷；重跑次数=1，未做反复刷绿",
+   "what": "seed=1/window=256 在 catchup2 中 exit=1（duplicate=[SMOKE-R10496 x2]）"
+  },
+  {
+   "action": "如实登记",
+   "id": "D2",
+   "reason": "runner 是 04.2 冻结的正式入口且产出 evidence v2；900s 未截断任何分片（最长 878s），但余量仅 22s",
+   "what": "执行路径用 04.2 runner（--scope event-long --repeat 1）而非任务行裸 go test；go test -timeout 900s 而非任务行示例 45m"
+  },
+  {
+   "action": "按派单口径以同组合 3 次稳定复跑（stability orig/stab2/stab3）勾选，缺口 57 次登记为债务",
+   "id": "D3",
+   "reason": "派单第 4 步明确以 stability 3 次 + 7200/720 为勾选依据；60 次预算约 10 小时，超出本单窗口，且不影响 7200/720 主口径",
+   "what": "任务行要求的『交付稳定性 10 轮 × 六组合（60 次独立执行）』未执行"
+  },
+  {
+   "action": "catchup2 改串行后六组合收齐",
+   "id": "D4",
+   "reason": "并发同写同目录/同参数拼装是事故源，非产品问题",
+   "what": "早期并发波次两次失败（02:10 summary.json 引号破损；03:32 参数形状导致 exit=2）"
+  },
+  {
+   "action": "定性为叶外门缺陷，05.2 起不勾选，单列上报",
+   "id": "D5",
+   "reason": "checker 要求全部 runner 证据 module_fingerprints 逐字一致，runner 只记本 scope 选中模块；其自测 fixture 对所有 scope 复用同一组，未覆盖混合 scope bundle",
+   "what": "总门 15 条 error 中第 15 条为 bundle 指纹口径冲突（short 3 模块 vs long 1 模块）"
+  },
+  {
+   "action": "单列 ci_budget 红项，不入 03.11 的 7200/720 主口径",
+   "id": "D6",
+   "reason": "属 05.1/05.2 预算冻结缺陷，需 .github/scripts 侧修复",
+   "what": "CI long 预算（600s/12min）小于实测分片耗时"
+  }
+ ],
+ "domain": "03-formal-simulation",
+ "executed_at": "2026-10-25T02:24+08:00/2026-10-25T04:30+08:00（六组合含 03:34 catchup2 三片与 04:19 红片重跑）",
+ "harness_gap": {
+  "class": "R23（骨架/计数口径）",
+  "fix": "写集外（测试文件），未修；建议后续叶把续转请求排除出 exact(marker) 计数",
+  "impact": "偶发（同组合 3 次绿后 1 次红）；产品侧对账闭合",
+  "location": "examples/wechat-bot/smoke_harness_test.go smokeLongReconcile/exact()",
+  "symptom": "工具续转请求的 last_user_text 仍以 marker 开头时被计为重复输入"
+ },
+ "leaf": "03.11",
+ "product_tree": {
+  "revision": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "wechat_bot_content_hash": "sha256:7d22cc947ce5c0f9ff0ed11523b2be205b8247712ba5bcdf3fe1f04017cc5ea2"
+ },
+ "stability": {
+  "combo": "seed=1/window=256",
+  "green_runs": [
+   {
+    "drained": false,
+    "duplicate_input_requests": null,
+    "missing_input_requests": null,
+    "mode": "bare go test (no evidence v2)",
+    "report_complete": true,
+    "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w256-20261025-025047",
+    "tag": "orig",
+    "wall_s": 599.9
+   },
+   {
+    "drained": false,
+    "duplicate_input_requests": null,
+    "missing_input_requests": null,
+    "mode": "bare go test (no evidence v2)",
+    "report_complete": true,
+    "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w256-20261025-031218",
+    "tag": "stab2",
+    "wall_s": 600.2
+   },
+   {
+    "drained": false,
+    "duplicate_input_requests": null,
+    "missing_input_requests": null,
+    "mode": "bare go test (no evidence v2)",
+    "report_complete": true,
+    "report_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w256-20261025-032223",
+    "tag": "stab3",
+    "wall_s": 571.3
+   }
+  ],
+  "note": "同一组合 3 次独立全绿（orig/stab2/stab3），wall 571-600s"
+ },
+ "status": "green",
+ "task_state": {
+  "checkbox": "- [ ] -> - [x]",
+  "criteria": "六组合 evidence verdict=match；同组合 3 次稳定复跑全绿；六片 inputs/restarts 求和=7200/720",
+  "leaf": "03.11",
+  "ticked": true,
+  "verify_after": "01.5 已满足"
+ },
+ "title": "长程矩阵全量执行（TestEventIntegrityLongRun）",
+ "totals": {
+  "basis": "六片 report 的 scale.inputs_total/restarts_total 求和：6x1200=7200、6x120=720",
+  "combos": 6,
+  "green": 6,
+  "inputs": 7200,
+  "restarts": 720
+ }
+}

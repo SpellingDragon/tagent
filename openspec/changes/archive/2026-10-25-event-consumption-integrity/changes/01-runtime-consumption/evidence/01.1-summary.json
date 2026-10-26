@@ -1,0 +1,176 @@
+{
+  "leaf": "01.1",
+  "title": "通知身份与幂等",
+  "change": "event-consumption-integrity",
+  "domain": "01-runtime-consumption",
+  "artifact": "summary",
+  "generated_at": "2026-10-23T10:24:04Z",
+  "baseline_commit": "6cc441436c2aab15edcee34cf2561086232c8311",
+  "short_commit": "6cc4414",
+  "source_repo": "/Users/pengweiye/Documents/codes/tagent",
+  "scope": "在 tests/integration/execution/event_integrity_test.go 实现 TestEventIntegrityNoticeIdentity：通知身份是 TaskID+Round+Kind+Seq 四元组、正文在身份之外；正锚经 Boot 正式装配 + Host.Invoke 驱动声明工具与子代理，通知由 runtime/task 生产、由 Run.deliver 投递、由 facts.go 现有消费者读取；负锚把同一正式运行产出的身份交给 state.MemoryStore.AcceptNotice（bookNotice/deliver 调用的同一方法）验证幂等与具名冲突，不新建第二套身份。",
+  "method": "六个具名子测试：正式链三段（positive / conflict / cross-invocation）全部走 tagent.Boot + Host.Invoke + scripted OpenAI 兼容 provider + 记录型 MessageSender；handoff 子测试复用包内 task.Wrap + MemoryManager.Handoff 的既有 handoff 驱动方式（生产 wrapper 作唯一通知生产者、flush 交付冻结 envelope）；multiple_progress 按 OBS-E2 收敛。测试代码内 CommitToSession / IssueNotice / NoticeSequencer 命中数为 0（仅文件头契约注释提及）。",
+  "environment": {
+    "os": "darwin 14.7.2 arm64",
+    "go": "go1.27.1 darwin/arm64",
+    "python": "Python 3.9.6",
+    "log_dir": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1"
+  },
+  "artifacts": [
+    {
+      "path": "tests/integration/execution/event_integrity_test.go",
+      "state": "added",
+      "lines": 1576,
+      "sha256": "729905351cdccfb4186a14796f874c0ec48a964049e6eafe26d6e648948dc899"
+    }
+  ],
+  "product_changes": [],
+  "product_change_basis": "00.2 已证 NoticeFactKey / mailbox 幂等正常；本叶在正式链上取证未见身份或幂等缺陷，负锚全部得到具名拒绝或幂等成功，故未改任何产品文件（write set 中 runtime/task、runtime/agent、tools.go、facts.go、run.go、invoke.go、host.go 均未修改）。",
+  "consumers": {
+    "formal_entry": "tagent.Boot(configPath, tagent.WithSender(sender))（host.go）",
+    "drive": "Host.Invoke -> Run.Invoke -> agent.Loop.Drive（invoke.go / host.go:579-637）",
+    "producer": "runtime/task.Wrap -> execute -> Notice{TaskID, Round, Kind, Seq:0, Event}(wrapper.go:293-306)；子代理经 task.Wrap 包裹的 native 工具 -> Delegate -> completeDelegation -> Notice{Seq:0, Text}(delegate.go:380-441)",
+    "delivery": "Runtime assemble 的 task.NewMemoryManager(..., task.WithEnvelopeDeliverer(r.deliver))（run.go）；Run.deliver -> TrackDelivery -> AcceptNotice -> observeSettleDelivery（tools.go:53-135）",
+    "consumer": "Run.sink -> bookNotice -> TrackDelivery/AcceptNotice/Site/mailboxSeqOf/Claim/Consume -> Loop.Backflow（facts.go:297-388）；通知投影 Run.Query(ListFilter{Kinds:[ObjectNotice]})（memory/query/inventory.go readNotices / snapshot.go noticeDetailOf）",
+    "settle_turn": "SettleDriver.ObserveCommit -> Host.fireNoticeTurn（settle_turn.go / host.go:650-698），只认 TypeTaskSettled + 终态 notice kind + 已记住 user address"
+  },
+  "red_lines": {
+    "formal_boot_and_invoke": "全部正锚与两个负锚的身份都来自 Boot + Host.Invoke 的一次真实运行；断言读取 SessionFacts 与 Query 通知投影。",
+    "production_identity_only": "被测 notice 值、invocation、address、instance 均取自正式运行（eventIntegrityNoticeFromFormalRun）；key 一律经 agent.NoticeFactKey / Notice.FactKey 计算，无第二套身份格式。",
+    "no_manual_notice_commit_no_sequencer": "测试代码 CommitToSession / IssueNotice / NoticeSequencer 命中 0（grep；仅文件头契约注释提及）；handoff 子测试的通知由生产 task.Wrap 产生。"
+  },
+  "subtests": [
+    {
+      "name": "tool_and_subagent_notice_reaches_original_invocation",
+      "anchor": "positive",
+      "line": 66,
+      "asserts": [
+        "一次 Host.Invoke 的 entry turn 走完 3 个 decision；声明工具 send 与声明子代理 worker 各落一条 task",
+        "工具结果事实、工具 settle 事实、委托 settle 事实的 InvocationID 都等于发起调用的 invocation；settle 事实 Owner 为该 address",
+        "工具通知身份 = settled/Seq 0/Round>=1，落在原 address，消息箱 claim+consume 后 phase=consumed；委托通知身份同形、phase=accepted（无人值守投递）",
+        "两条工具结果各只被其发起 invocation 的下一个 decision 首次读到（按模型 decision 流定位，历史重放不计为再次投递）",
+        "恰好一条通知事实，Key == agent.NoticeFactKey(新 invocation, notice)，该 Key 下事实数 == 1",
+        "该通知正文只被一个 follow-up decision 读取；sender 各收到一次工具正文与 follow-up 正文；脚本无 violation"
+      ]
+    },
+    {
+      "name": "duplicate_delivery",
+      "anchor": "negative",
+      "line": 232,
+      "asserts": [
+        "同一正式身份同正文二次 AcceptNotice 返回 nil（幂等）",
+        "消息箱只有 1 条：AcceptSeq 保持 1，EventID == notice.Event，InvocationID 为发起责任范围",
+        "notice.FactKey() 两次读取一致、agent.NoticeFactKey 对同一身份稳定"
+      ]
+    },
+    {
+      "name": "conflicting_body_same_identity",
+      "anchor": "negative",
+      "line": 281,
+      "asserts": [
+        "同身份异正文以 errors.Is(err, state.ErrNoticeConflict) 具名拒绝，不静默合并",
+        "消息箱仍只有 1 条，保留首次正文与首次 Event"
+      ]
+    },
+    {
+      "name": "cross_invocation_not_merged",
+      "anchor": "negative",
+      "line": 319,
+      "asserts": [
+        "同一 native call id 在两个 invocation 中产生两个不同 TaskID",
+        "两条 settle 事实各自携带自己的 InvocationID",
+        "两条通知四元组不同、FactKey 不同、均 consumed，agent.NoticeFactKey 因责任范围不同而不同",
+        "同一消息箱接受两条后保留 2 条且 InvocationID 不同，不合并消费"
+      ]
+    },
+    {
+      "name": "handoff_preserves_issued_target",
+      "anchor": "positive",
+      "line": 446,
+      "asserts": [
+        "handoff 后未来通知路由到新 target/新 instance（envelope.Target=targetB, TargetInstance=instance-b）",
+        "已开始（通知已创建、envelope 已冻结）的通知保留旧 target/旧 instance（targetA / instance-a）",
+        "两条 envelope 的 Notice 都等于生产 wrapper 创建的身份（settled/Seq 0/Round>=1/Event 非空）"
+      ]
+    },
+    {
+      "name": "multiple_progress_ordered_by_seq",
+      "anchor": "converged_per_OBS_E2",
+      "line": 547,
+      "asserts": [
+        "t.Logf 记录多条 progress 在当前生产路径不可达及 file:line 原因",
+        "正式链对该任务只记录 1 条通知；两次读取 agent.NoticeFactKey 一致",
+        "同一终态身份重复交付幂等（消息箱 1 条、AcceptSeq 1）",
+        "progress 形态身份与终态 key 不同；同一 progress 身份重复交付幂等（消息箱 2 条、progress 条目 AcceptSeq 2）"
+      ]
+    }
+  ],
+  "obs_e2": {
+    "status": "unreachable_converged",
+    "reason": "生产点只写终态且 Seq 恒 0：runtime/task/wrapper.go:302、runtime/agent/delegate.go:404、runtime/task/cancel.go:81-86；仓库无 NoticeProgress 生产者，同一任务多条 progress 不可达。",
+    "convergence": "不为凑序号改产品加分配器；子测试如实 t.Logf 记录不可达 + file:line，并收敛为既有单通知身份稳定性验证 + 重复 progress 交付被生产消息箱幂等拒绝。progress 形态身份仅由正式运行的 notice 改 Kind 得到（同一四元组方案、同一 NoticeFactKey），不新建第二套身份。"
+  },
+  "commands": {
+    "single": {
+      "command": "go test ./tests/integration/execution -run '^TestEventIntegrityNoticeIdentity$' -count=1 -race -json -timeout 5m > \"${TMPDIR:-/tmp}/event-consumption-integrity/01.1/single.jsonl\" 2>&1",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "exit_code": 0,
+      "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/single.jsonl",
+      "log_sha256": "90d599c5c2bfbff11c1386742c63bb0aee218ff9bdce95f23bb009847b73941f",
+      "log_bytes": 25717,
+      "parsed": {
+        "parent": "TestEventIntegrityNoticeIdentity run=1 pass=1",
+        "named_subtests_run_pass": 6,
+        "skip": 0,
+        "fail": 0
+      }
+    },
+    "ten_rounds": {
+      "command": "E=\"${TMPDIR:-/tmp}/event-consumption-integrity/01.1\"; mkdir -p \"$E\"; for i in $(seq 1 10); do go test ./tests/integration/execution -run '^TestEventIntegrityNoticeIdentity$' -count=1 -race -json -timeout 5m > \"$E/run-$i.jsonl\" 2>&1; rc=$?; if [ $rc -ne 0 ]; then exit 1; fi; done",
+      "cwd": "/Users/pengweiye/Documents/codes/tagent",
+      "independent_processes": true,
+      "count_flag": "-count=1",
+      "rounds": [
+        {"round": 1, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-1.jsonl", "log_sha256": "5e394e43bc7d09735b46a2446996666b794b678c205889cce0e3b67ef4344f2d", "log_bytes": 25728, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 2, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-2.jsonl", "log_sha256": "faec24ab92f6cf456d88d3d45881ca8d79d27552e0608e78640fae8e7ae85bd3", "log_bytes": 25714, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 3, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-3.jsonl", "log_sha256": "5b99cda7d45809ac8f06bcec7ab9361b1ad2f65d14d0d1301be7893c7920526b", "log_bytes": 25713, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 4, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-4.jsonl", "log_sha256": "a36583678c96d6852e241ae02438c8b2712b6450001a65ee8ea49cdd017ad7e1", "log_bytes": 25716, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 5, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-5.jsonl", "log_sha256": "59f17e38c8855fed29f804b8a2bb2e559b326ff865728fa0739afd4b7d721c75", "log_bytes": 25717, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 6, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-6.jsonl", "log_sha256": "ca954f01d3a042d1bc4215fbb2c10c9bd39e3dbbd547e1fe0458fef0be07fc33", "log_bytes": 25728, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 7, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-7.jsonl", "log_sha256": "be3fbbd51c8ab1ba5ad48bab45abaa7066b4cb69ae3b8e09ca07e00542b0fe9d", "log_bytes": 25713, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 8, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-8.jsonl", "log_sha256": "55d76101a61cb2418784c117ab16b73dbb8b773bbc4a143a11738d55dae12cdc", "log_bytes": 25710, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 9, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-9.jsonl", "log_sha256": "efcfc76855e173b553b630bf0bcb7a5c1acd5d9e4090d79f6cafb9e71e07e74f", "log_bytes": 25735, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0},
+        {"round": 10, "exit_code": 0, "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/run-10.jsonl", "log_sha256": "62d2f87f4af86ff74a9a4ecc3e1b07201eb335f9d37d8dd85ddf0bfc7886c70c", "log_bytes": 25716, "parent_run_pass": true, "named_subtests_run_pass": 6, "skip": 0, "fail": 0}
+      ],
+      "parser": "python3 逐轮 json.loads 每行，按 Test 归集 run/pass/skip/fail 计数；要求父测试与全部 6 个具名子测试各 run=1、pass=1、skip=0、fail=0",
+      "parsed_result": "ALL_TEN_OK=True"
+    },
+    "hygiene": {
+      "vet": {"command": "go vet ./tests/integration/execution", "exit_code": 0, "output": ""},
+      "gofmt": {"command": "gofmt -l tests/integration/execution", "exit_code": 0, "output": ""},
+      "build": {"command": "go build ./...", "exit_code": 0},
+      "existing_package_tests": {
+        "command": "go test ./tests/integration/execution -count=1",
+        "exit_code": 0,
+        "summary": "ok github.com/SpellingDragon/tagent/tests/integration/execution 3.031s",
+        "log_ref": "/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/01.1/package.log",
+        "log_sha256": "88966406c39e7caefac94f5eadae04cd7b1bf90be91c0b593c3628029ef682cc",
+        "log_bytes": 73
+      }
+    }
+  },
+  "observations": [
+    "follow-up 请求在同一 decision 内两次携带 notice 正文：一次是 fireNoticeTurn 提交的 feedback notice 事实，一次是 driveLocked 收到的 Input（host.go:675-696）；通知身份仍只有一条（NoticeFactKey 下事实数 1），这不是第二次通知投递，属 host 输入重复，超出本叶写集与身份/幂等范围，未改产品，仅记录。",
+    "handoff 子测试经 task.Wrap + MemoryManager.Flush 的 envelope deliverer seam 驱动（包内既有 handoff 测试方式），不走 Boot/Host.Invoke；通知仍由生产 wrapper 产生，未接回 IssueNotice/NoticeSequencer。",
+    "负锚的身份来自真实 Boot+Host.Invoke 运行，但重复/异正文/跨 invocation 的交付动作发生在 state.MemoryStore.AcceptNotice 这一生产消费者方法上（bookNotice 与 Run.deliver 调用的同一方法）；重复投递无法在不新增生产生产者的情况下经 Boot 端到端注入。"
+  ],
+  "limitations": [
+    "multiple_progress_ordered_by_seq 未在生产链上产生多条 progress（OBS-E2 不可达），只验证单通知身份有序与重复 progress 交付的幂等拒绝。",
+    "无产品改动，故 go build ./... 仅作可编译回归；未新增 public API 或持久化格式。"
+  ],
+  "tasks_md_update": {
+    "file": "openspec/changes/event-consumption-integrity/changes/01-runtime-consumption/tasks.md",
+    "line": "01.1",
+    "action": "本摘要写入后勾选该一条为 [x]"
+  }
+}
