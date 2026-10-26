@@ -36,6 +36,7 @@ import (
 	"github.com/SpellingDragon/tagent/evolution/governance"
 	"github.com/SpellingDragon/tagent/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -181,9 +182,11 @@ type Host struct {
 	// deliveryRuler rules every turn body before the sender is called; a nil
 	// ruler keeps every delivery allowed.
 	deliveryRuler plugin.DeliveryRuler
-	// pendingDeliveries holds the bodies the review waits on, keyed by the
-	// identity an approval or refusal names, and heldSeq orders the identities.
-	// TODO(delivery-review): persist the holds across a restart.
+	// pendingDeliveries holds the bodies the host owes a target before the
+	// sender ran or was refused, keyed by the identity an approval or refusal
+	// names, and heldSeq orders the identities. Every obligation is recorded
+	// under the storage tier beside the table entry, so the table is rebuilt
+	// from the records beside a restart.
 	pendingDeliveries map[string]*heldDelivery
 	heldSeq           uint64
 
@@ -466,6 +469,10 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		capture:           capture,
 		telemetryStop:     telemetryStop,
 		userAddresses:     map[event.SessionID]event.Address{},
+	}
+	if err := host.restorePendingDeliveries(ctx); err != nil {
+		cancel()
+		return nil, host.abortBoot(err)
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -1081,9 +1088,43 @@ type heldDelivery struct {
 	heldAt   time.Time
 }
 
-// HeldDeliveries reports the bodies the review plugin is holding before
-// delivery, oldest first. The result is a copy the caller owns: reading here
-// changes no hold, and only ApproveDelivery or RefuseDelivery resolves one.
+// hostDeliveryPrefix locates the durable record of every delivery obligation
+// the review table holds, on the same fact surface the durable consume
+// receipts commit through.
+const hostDeliveryPrefix = "tagent/task/v1/delivery:"
+
+// hostDeliveryHeld names the record state of a body the review parked before
+// the sender ran.
+const hostDeliveryHeld = "held"
+
+// hostDeliveryRetry names the record state of a body the channel refused: the
+// record of the redelivery the body owes.
+const hostDeliveryRetry = "retry"
+
+// hostDeliverySent names the record state of a body the sender accepted: the
+// receipt of an obligation discharged.
+const hostDeliverySent = "sent"
+
+// hostDeliveryRefused names the record state of a body a refusal discarded:
+// the receipt of an obligation given up beside its audit fact.
+const hostDeliveryRefused = "refused"
+
+// hostDeliveryRecord is the durable form of one delivery obligation: the
+// identity, content, lineage and target of the body beside the state the
+// obligation stands in and the moment it was taken.
+type hostDeliveryRecord struct {
+	ID      string        `json:"id"`
+	Content string        `json:"content"`
+	Lineage string        `json:"lineage"`
+	Target  event.Address `json:"target"`
+	Status  string        `json:"status"`
+	HeldAt  time.Time     `json:"held_at"`
+}
+
+// HeldDeliveries reports the bodies the host owes a target before delivery:
+// the holds the review plugin parked and the redeliveries a refused send owes,
+// oldest first. The result is a copy the caller owns: reading here changes no
+// hold, and only ApproveDelivery or RefuseDelivery resolves one.
 func (h *Host) HeldDeliveries() []HeldDelivery {
 	if h == nil {
 		return nil
@@ -1101,7 +1142,9 @@ func (h *Host) HeldDeliveries() []HeldDelivery {
 // ApproveDelivery re-delivers one held body exactly once: the body is sent to
 // the target it named, and the hold is consumed, so a repeated approval names
 // no hold and delivers no second copy. A send the channel refuses restores the
-// hold for a later approval and is reported to the caller.
+// hold for a later approval and is reported to the caller. Every hold is
+// recorded beside the review table, so the approval resolves the body across a
+// restart as well.
 func (h *Host) ApproveDelivery(ctx context.Context, id string) error {
 	if h == nil {
 		return ErrHostClosed
@@ -1120,20 +1163,22 @@ func (h *Host) ApproveDelivery(ctx context.Context, id string) error {
 	delete(h.pendingDeliveries, id)
 	h.mu.Unlock()
 	if sender == nil {
-		h.restoreHeldDelivery(held)
+		h.restoreHeldDelivery(ctx, held, hostDeliveryRetry)
 		return fmt.Errorf("%w: the held delivery of %s", ErrHostSenderMissing, id)
 	}
 	if err := sender.Send(ctx, held.delivery.Target, held.delivery.Content); err != nil {
-		h.restoreHeldDelivery(held)
+		h.restoreHeldDelivery(ctx, held, hostDeliveryRetry)
 		return fmt.Errorf("tagent: the approved delivery of %s was refused: %w", id, err)
 	}
+	h.recordDeliveryState(ctx, held, hostDeliverySent)
 	assemblyInfo("tagent: the held delivery of %s was approved and sent", id)
 	return nil
 }
 
 // RefuseDelivery discards one held body: nothing is delivered, the hold is
 // consumed, and an audit feedback fact without a model payload records the
-// refusal at the target address.
+// refusal at the target address. The refusal consumes the durable record as
+// well, so no later boot owes the body again.
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error {
 	if h == nil {
 		return ErrHostClosed
@@ -1150,31 +1195,76 @@ func (h *Host) RefuseDelivery(ctx context.Context, id string) error {
 	}
 	delete(h.pendingDeliveries, id)
 	h.mu.Unlock()
+	h.recordDeliveryState(ctx, held, hostDeliveryRefused)
 	h.noteDeliveryRefusal(ctx, held)
 	assemblyInfo("tagent: the held delivery of %s was refused", id)
 	return nil
 }
 
+// deliveryDurable reports the fact surface the delivery records commit
+// through: the storage tier the run opened, and nil beside a run that keeps no
+// tier, where the review table stays process-local.
+func (h *Host) deliveryDurable() state.FactLog {
+	if h == nil || h.run == nil || h.run.tier == nil {
+		return nil
+	}
+	return ledger.TierFactLog(h.run.tier)
+}
+
+// recordDeliveryState commits the durable record of one delivery obligation
+// under the state it stands in and completes the write barrier before it
+// returns. A record beside no tier, or a commit the tier refused, is a warning
+// beside the obligation the review table still holds.
+func (h *Host) recordDeliveryState(ctx context.Context, held *heldDelivery, status string) {
+	log := h.deliveryDurable()
+	if log == nil {
+		return
+	}
+	body, err := json.Marshal(hostDeliveryRecord{
+		ID:      held.id,
+		Content: held.delivery.Content,
+		Lineage: held.delivery.Lineage,
+		Target:  held.delivery.Target,
+		Status:  status,
+		HeldAt:  held.heldAt,
+	})
+	if err != nil {
+		assemblyWarn("tagent: the delivery record of %s does not marshal: %v", held.id, err)
+		return
+	}
+	if err := log.Put(ctx, hostDeliveryPrefix+held.id, body); err != nil {
+		assemblyWarn("tagent: the delivery record of %s was refused: %v", held.id, err)
+		return
+	}
+	if err := log.Sync(ctx); err != nil {
+		assemblyWarn("tagent: the delivery record of %s left no write barrier: %v", held.id, err)
+	}
+}
+
 // restoreHeldDelivery returns one held body to the waiting table after a
-// decision could not be carried out, so a later approval can resolve it.
-func (h *Host) restoreHeldDelivery(held *heldDelivery) {
+// decision could not be carried out, so a later approval can resolve it, and
+// records the obligation beside the state it stands in.
+func (h *Host) restoreHeldDelivery(ctx context.Context, held *heldDelivery, status string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return
 	}
 	if h.pendingDeliveries == nil {
 		h.pendingDeliveries = map[string]*heldDelivery{}
 	}
 	h.pendingDeliveries[held.id] = held
+	h.mu.Unlock()
+	h.recordDeliveryState(ctx, held, status)
 }
 
-// holdDelivery parks one body the review plugin held: the hold is recorded
-// under a host-local identity and the caller delivers nothing.
-func (h *Host) holdDelivery(delivery plugin.Delivery, reason string) {
+// holdDelivery parks one body the host owes a target: the obligation is
+// recorded under a host-local identity and in the durable record beside the
+// table entry, and the caller delivers nothing.
+func (h *Host) holdDelivery(ctx context.Context, delivery plugin.Delivery, reason, status string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		assemblyWarn("tagent: the held delivery to %s was dropped beside a closed host", delivery.Target.SessionID)
 		return
 	}
@@ -1183,8 +1273,73 @@ func (h *Host) holdDelivery(delivery plugin.Delivery, reason string) {
 	}
 	h.heldSeq++
 	id := fmt.Sprintf("delivery-%06d", h.heldSeq)
-	h.pendingDeliveries[id] = &heldDelivery{id: id, delivery: delivery, heldAt: time.Now()}
+	held := &heldDelivery{id: id, delivery: delivery, heldAt: time.Now()}
+	h.pendingDeliveries[id] = held
+	h.mu.Unlock()
+	h.recordDeliveryState(ctx, held, status)
 	assemblyInfo("tagent: the delivery to %s was held: %s", delivery.Target.SessionID, reason)
+}
+
+// restorePendingDeliveries rebuilds the review table from the durable delivery
+// records of the storage tier: every obligation still owed stands restored
+// under the identity and hold moment it was recorded with, and the sequence
+// behind the identities continues past the restored ones. A record that names
+// no identity, or a body that does not unmarshal, refuses the boot by name: the
+// host never starts beside an obligation it cannot honor.
+func (h *Host) restorePendingDeliveries(ctx context.Context) error {
+	log := h.deliveryDurable()
+	if log == nil {
+		return nil
+	}
+	records, err := log.Scan(ctx, hostDeliveryPrefix)
+	if err != nil {
+		return fmt.Errorf("tagent: read the delivery records: %w", err)
+	}
+	keys := make([]string, 0, len(records))
+	for key := range records {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		var record hostDeliveryRecord
+		if err := json.Unmarshal(records[key], &record); err != nil {
+			return fmt.Errorf("tagent: the delivery record %s does not unmarshal: %w", key, err)
+		}
+		if record.ID == "" {
+			return fmt.Errorf("tagent: the delivery record %s names no identity", key)
+		}
+		if seq := deliveryHeldSeq(record.ID); seq > h.heldSeq {
+			h.heldSeq = seq
+		}
+		switch record.Status {
+		case hostDeliveryHeld, hostDeliveryRetry:
+		default:
+			continue
+		}
+		held := &heldDelivery{
+			id:       record.ID,
+			delivery: plugin.Delivery{Content: record.Content, Lineage: record.Lineage, Target: record.Target},
+			heldAt:   record.HeldAt,
+		}
+		h.mu.Lock()
+		if h.pendingDeliveries == nil {
+			h.pendingDeliveries = map[string]*heldDelivery{}
+		}
+		h.pendingDeliveries[held.id] = held
+		h.mu.Unlock()
+		assemblyInfo("tagent: the delivery %s stands owed beside the restart: %s", record.ID, record.Status)
+	}
+	return nil
+}
+
+// deliveryHeldSeq reports the order number inside one delivery identity, and
+// zero beside an identity that carries none.
+func deliveryHeldSeq(id string) uint64 {
+	seq, err := strconv.ParseUint(strings.TrimPrefix(id, "delivery-"), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return seq
 }
 
 // deliveryOutcome is the terminal state of one reviewed delivery: the sender
@@ -1208,8 +1363,9 @@ type hostDeliverFunc func(ctx context.Context, delivery plugin.Delivery) (delive
 // deliverOne sends one outbound body through the review plugin's ruling: an
 // allowed or recorded delivery is sent, a hold parks the body, and a ruling
 // that could not be rendered parks it too instead of delivering unreviewed
-// content. The second result names the cause of a hold or a refusal for the
-// caller's receipt; a delivered body carries none.
+// content. A send the channel refuses parks the body as the redelivery it owes.
+// The second result names the cause of a hold or a refusal for the caller's
+// receipt; a delivered body carries none.
 func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery plugin.Delivery) (deliveryOutcome, string) {
 	if sender == nil {
 		return deliveryRefused, "the host carries no outbound message sender"
@@ -1219,20 +1375,21 @@ func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery pl
 		switch {
 		case err != nil:
 			assemblyWarn("tagent: the review of the delivery to %s failed: %v", delivery.Target.SessionID, err)
-			h.holdDelivery(delivery, "the delivery review failed: "+err.Error())
+			h.holdDelivery(ctx, delivery, "the delivery review failed: "+err.Error(), hostDeliveryHeld)
 			return deliveryHeld, "the delivery review failed: " + err.Error()
 		case disposition == plugin.DispositionHold:
-			h.holdDelivery(delivery, "the review held the delivery")
+			h.holdDelivery(ctx, delivery, "the review held the delivery", hostDeliveryHeld)
 			return deliveryHeld, "the review held the delivery"
 		case disposition == plugin.DispositionAllow, disposition == plugin.DispositionRecord:
 		default:
 			assemblyWarn("tagent: the review of the delivery to %s returned %q", delivery.Target.SessionID, disposition)
-			h.holdDelivery(delivery, "the delivery review returned an unknown disposition")
+			h.holdDelivery(ctx, delivery, "the delivery review returned an unknown disposition", hostDeliveryHeld)
 			return deliveryHeld, "the delivery review returned an unknown disposition"
 		}
 	}
 	if err := sender.Send(ctx, delivery.Target, delivery.Content); err != nil {
 		assemblyWarn("tagent: the host delivery to %s was refused: %v", delivery.Target.SessionID, err)
+		h.holdDelivery(ctx, delivery, "the channel refused the delivery: "+err.Error(), hostDeliveryRetry)
 		return deliveryRefused, err.Error()
 	}
 	return deliverySent, ""

@@ -1,0 +1,11 @@
+=== RUN   TestDeliveryRecovery
+=== RUN   TestDeliveryRecovery/a_held_delivery_survives_the_restart
+    delivery_recovery_test.go:83: held deliveries after the restart = [], want the one body the first boot held
+=== RUN   TestDeliveryRecovery/a_failed_send_owes_a_redelivery_across_the_restart
+    delivery_recovery_test.go:137: owed deliveries beside the refused send = [], want the body owed a redelivery
+=== RUN   TestDeliveryRecovery/a_refused_delivery_stays_refused_and_audited
+    delivery_recovery_test.go:193: held deliveries after the restart = [], want the recorded body "delivery-000001"
+--- FAIL: TestDeliveryRecovery (0.44s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/tests/integration/host	0.843s
+FAIL

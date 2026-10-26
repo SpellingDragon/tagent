@@ -219,3 +219,36 @@ replays 索引键由 `event.SessionID` 单键改完整地址 `event.Address{Agen
 - 共享工作区并发在途：request.go/age_fold.go/tool/exec/*（3.3）、tests/integration/execution/event_integrity_test.go（3.3）等非本单面未碰；2.1 已提交 e46708d 并逐 hunk 剔除本单 hunks（对称：本单提交逐 hunk 剔除 2.1/3.3 的账目 hunks）。
 - 终端会话被并发 agent 共享，验证输出以重定向文件为准。
 - known flaky（findings W0 已记，超范围未修）：受理回执事实断裂（TestLocalSmokeSymptomAcceptedSilent）本次症状全家 6/30 观察面下全过。
+
+# W2 findings — 3.1 G5 交付恢复（单 3.1）
+
+## 结论
+
+G5 两半落地：①待审批投递跨重启恢复——`pendingDeliveries` 每笔义务在内存表之外写持久记录（复用 localfile 持久层 `consume:` 回执同族：`ledger.TierFactLog` 同一 kv 后端，键 `tagent/task/v1/delivery:<id>`，字段=身份/内容/血统/目标/状态/HeldAt），Boot 经 `restorePendingDeliveries` 重建（`held`/`retry` 恢复、`sent`/`refused` 回执不恢复、坏记录具名拒启）；②发送失败持久重试义务——`deliverOne` 发送失败把正文停为 `retry` 义务（回执文案不动），经审批面补投一次幂等。
+
+## 红证（先于修复，三子测全红）
+
+`go test ./tests/integration/host -run '^TestDeliveryRecovery$' -count=1 -v` → 三子测 FAIL（证据 `evidence/3-1-delivery-recovery-red.txt`）：`held deliveries after the restart = []`（G5「重启后 0 条」）、`owed deliveries beside the refused send = []`（G5「失败即丢」）。修后同命令三子测全 PASS。
+
+## 实现要点
+
+- `host.go`：`hostDeliveryRecord`（未导出，JSON 落盘）+ 状态常量 `held/retry/sent/refused`；`recordDeliveryState` Put+Sync，写失败仅 WARN 不丢进程内义务；`holdDelivery`/`restoreHeldDelivery` 带状态入表并落盘；`ApproveDelivery` 成功→`sent` 回执、无 sender/发送失败→`retry` 义务回表；`RefuseDelivery` 先 `refused` 回执再审计 fact；`Boot` 在 face 启动前恢复，`deliveryHeldSeq` 从恢复 ID 推进 heldSeq 防身份冲突。
+- **冻结面保持**：`TestEventIntegrityDelivery`（失败不自动复投、回执恒 `[send_denied]`）不动——补投只走审批面，`deliverOne` 失败仍返回 `deliveryRefused, err.Error()`。
+
+## 自行决策与已知边界（申报）
+
+- 「发送失败转持久重试义务」实现为**审批面补投义务**（status=retry 进 pendingDeliveries，HeldDeliveries 可见、Approve 补投一次）而非自动复投：依据冻结面（不自动复投）+ 负锚「批准两次第二次 ErrDeliveryNotFound」（复投恰一次）。
+- at-least-once 边界：ApproveDelivery 先 Send 后记 `sent` 回执，进程在两步之间崩溃则该义务重演（可重复补投一次）；与 `consume:` 回执族同语义。
+- 非 durable tier 时持久层退化为进程内表（tier 已有「keeps no record across process exit」告警），重启恢复为 no-op。
+
+## 三锚与绿证（可复跑）
+
+- 正锚：`go test ./tests/integration/host -run 'DeliveryRecovery|DeliveryReview' -count=3` → ok 5.967s（TestDeliveryRecovery 三子测 + TestDeliveryReview 全绿 ×3）。
+- 负锚：`a_refused_delivery_stays_refused_and_audited`（拒绝后不复投+审计 fact 带 delivery_id+再重启 0 条+ErrDeliveryNotFound）绿；两处 `the repeated approval = ErrDeliveryNotFound`（批准两次第二次具名拒绝、无第二份正文）绿。
+- 消费者锚：正式 `tagent.Boot` 入口（bootDeliveryRecoveryHost → Boot → Invoke 真实回合）；恢复链证据=`tagent: the delivery delivery-000001 stands owed beside the restart: retry`（run tier localfile durable=true 同 root 二次 Boot）；批准链=`the held delivery of delivery-000001 was approved and sent`。
+- 回归：`go test ./tests/integration/host ./runtime/... -count=1` → 4 包全 ok（host 26.260s，含 TestEventIntegrityDelivery 冻结面）；`go build ./...`、`go vet ./...` 干净；`bash scripts/lint.sh` → `lint: ok`（gen_godoc 68 包匹配、doc-refs/package-layout 过）。
+- docs/api：导出 doc（HeldDeliveries/ApproveDelivery/RefuseDelivery）随语义微调，`bash scripts/gen_godoc.sh` 再生成，仅 `docs/api/github_com__SpellingDragon__tagent.md` 变动。
+
+## 白名单
+
+全部改动在白名单内：host.go、tests/integration/host/delivery_recovery_test.go、openspec/changes/fidelity-and-recovery/**、docs/api/**。

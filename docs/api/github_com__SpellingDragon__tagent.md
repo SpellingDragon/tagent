@@ -531,8 +531,10 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
 func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     ApproveDelivery re-delivers one held body exactly once: the body is sent to
     the target it named, and the hold is consumed, so a repeated approval names
-    no hold and delivers no second copy. A send the channel refuses restores the
-    hold for a later approval and is reported to the caller.
+    no hold and delivers no second copy. A send the channel refuses restores
+    the hold for a later approval and is reported to the caller. Every hold is
+    recorded beside the review table, so the approval resolves the body across a
+    restart as well.
 
 func (h *Host) Close(ctx context.Context) error
     Close stops the endpoints and the reflection driver, drains the run and
@@ -544,9 +546,10 @@ func (h *Host) FaceAddr() string
     address beside a host that serves none.
 
 func (h *Host) HeldDeliveries() []HeldDelivery
-    HeldDeliveries reports the bodies the review plugin is holding before
-    delivery, oldest first. The result is a copy the caller owns: reading here
-    changes no hold, and only ApproveDelivery or RefuseDelivery resolves one.
+    HeldDeliveries reports the bodies the host owes a target before delivery:
+    the holds the review plugin parked and the redeliveries a refused send owes,
+    oldest first. The result is a copy the caller owns: reading here changes no
+    hold, and only ApproveDelivery or RefuseDelivery resolves one.
 
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     Invoke drives one invocation through the assembled run. An invocation at the
@@ -556,7 +559,8 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
     consumed, and an audit feedback fact without a model payload records the
-    refusal at the target address.
+    refusal at the target address. The refusal consumes the durable record as
+    well, so no later boot owes the body again.
 
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
     Reload reads the configuration source again, publishes the declaration
