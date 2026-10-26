@@ -282,10 +282,12 @@ func smokeErrorsApprovalExpired(t *testing.T) {
 		pending.ID, pending.ExpiresMs)
 }
 
-// smokeErrorsShortTTLDocument 把宿主文档的审批有效期改到最小分钟值。
+// smokeErrorsShortTTLDocument 把审批夹具（重声明 send 的审批通道）的有效期改到
+// 最小分钟值。过期裁决/重试仍被扣留只能由 tool+digest 的审批登记表达，投递挂起
+// 没有 TTL 与摘要，故这个场景保留在审批通道上，不换对象。
 func smokeErrorsShortTTLDocument(c *smokeConfig) string {
 	base := *c
-	base.Doc = nil
+	base.Doc = smokeApprovalDocument
 	document := base.document()
 	patched := strings.Replace(document, "approval_ttl_minutes: 30",
 		fmt.Sprintf("approval_ttl_minutes: %d", smokeErrorsTTLMinutes), 1)

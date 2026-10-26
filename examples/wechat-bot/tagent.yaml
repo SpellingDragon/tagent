@@ -85,11 +85,10 @@ agents:
     # 部署方把 USER.md 放进 prompt_dir 即被加载。
     system_prompt:
       files: [AGENTS.md, SOUL.md, USER.md]
-    # 主动送达面:声明即授权(不声明的 agent 看不见 send);发送通路与会话解析复用宿主唯一实现。
+    # 送达面:send 保留为跨代理工具(装配位),entry 不再声明——正文只经自动投递出口落地(D4)。
     # 委派面:knowledge/recall/plan 声明为 agent 引用——模型看到名为 knowledge/recall/plan 的工具,
     # 工具面是被委派 agent 自己的 tools[],描述从 description_file 热载。
     tools:
-      - { kind: tool, id: send }
       - { kind: agent, agent: knowledge, description_file: knowledge_backend.md }
       - { kind: agent, agent: recall, event_params: [event_keys] }
       - { kind: agent, agent: plan, description_file: plan_tool_desc.md }

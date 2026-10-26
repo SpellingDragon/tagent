@@ -49,7 +49,7 @@ const (
 	smokeFile
 )
 
-// smokeSchedule 是 20 轮一个周期的配比：文本 12 / 长文 2 / 委派 3 / 审批 1 / 文件 2，
+// smokeSchedule 是 20 轮一个周期的配比：文本 12 / 长文 2 / 委派 3 / 投递审核 1 / 文件 2，
 // 重复 15 次即 300 轮（60% / 10% / 15% / 5% / 10%）。
 var smokeSchedule = [20]smokeKind{
 	smokeText, smokeText, smokeDelegate, smokeText, smokeLong,
@@ -78,7 +78,7 @@ func smokeRoundText(round int, kind smokeKind) string {
 	case smokeDelegate:
 		text = marker + " smoke delegate artifact"
 	case smokeApproval:
-		text = marker + " smoke approval request"
+		text = marker + " smoke review request"
 	case smokeFile:
 		text = marker + " smoke file please"
 	}
@@ -134,6 +134,7 @@ func TestLocalSmoke(t *testing.T) {
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
+	cfg.DeliveryRuler = &smokeReviewRuler{holdPrefix: []string{"hold-ack "}}
 	cfg.write(t)
 	rig := bootSmokeRig(t, cfg, provider)
 	obs := &smokeObservation{Rounds: smokeRounds}
@@ -397,7 +398,7 @@ func runSmokePump(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smo
 		obs.Rounds, obs.Requests, obs.Switches, obs.Samples,
 		obs.MinGoroutines, obs.MaxGoroutines, obs.FirstHeap, obs.LastHeap, obs.HeapSlope)
 	t.Logf("[matrix 5] delegations=%d: every round got the accept ack and a settle follow-up carrying the worker body", obs.Kinds[smokeDelegate])
-	t.Logf("[matrix 6] approvals=%d: every round went Hold -> approve <digest> -> retry executed -> approved body delivered", obs.Kinds[smokeApproval])
+	t.Logf("[matrix 6] reviews=%d: every round's body was held by the delivery review, approved, and delivered exactly once", obs.Kinds[smokeApproval])
 	t.Logf("[matrix 9] file replies=%d: every round sent the path answer and the fake bot recorded a file send", obs.Kinds[smokeFile])
 	t.Logf("[matrix 10] long outputs=%d: every >2000B reply went through the sender truncation fallback", obs.Kinds[smokeLong])
 	if spread := obs.MaxGoroutines - obs.MinGoroutines; spread > 64 {
@@ -449,23 +450,9 @@ func driveSmokeRound(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *
 		}
 	case smokeApproval:
 		rig.postTask(text)
+		held := rig.waitHeldDelivery(chat, "hold-ack "+marker, 120*time.Second)
+		rig.approveDelivery(context.Background(), held)
 		rig.waitText(chat, "hold-ack "+marker, 120*time.Second)
-		pending := rig.pendingApproval(30 * time.Second)
-		digest := pending.ArgsDigest
-		if len(digest) > 8 {
-			digest = digest[:8]
-		}
-		announce := rig.waitText(smokeApproverChat, digest, 30*time.Second)
-		if !strings.Contains(announce.Body, "审批请求") {
-			t.Fatalf("round %d approval announcement = %q, want the digest %s", round, announce.Body, digest)
-		}
-		handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
-		if err != nil || !handled || !strings.Contains(reply, "approved") {
-			t.Fatalf("round %d approval ruling = (%t, %q, %v), want the approved ruling", round, handled, reply, err)
-		}
-		rig.postTask(marker + " smoke retry")
-		rig.waitText(chat, "approved-done "+marker, 120*time.Second)
-		rig.waitText(chat, smokeApprovalMarker+" "+marker, 120*time.Second)
 	case smokeFile:
 		path := filepath.Join(cfg.WorkspaceDir, smokeFileMarker)
 		files := rig.fileCount(chat, path)
@@ -579,10 +566,12 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 // runSmokeMeditationCheck 断言冥想：事件驱动触发 → 反思 → deliver_summary →
 // 用户会话链可见，并由下一轮请求读到。
 // - the reflection summary lands on the driven session first: production Drive moves the injection address, then /task
+// - the driver is event-driven: after a quiet pump only new host-facing traffic opens the rhythm floor, so the wait drives probe turns
 func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvider, logs *smokeLogRecorder, obs *smokeObservation) {
 	t.Helper()
 	deadline := time.Now().Add(120 * time.Second)
 	reflectionChat := ""
+	probe := 0
 	for {
 		for _, chat := range smokeChats {
 			for _, evt := range rig.sessionFacts(chat) {
@@ -608,7 +597,12 @@ func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvide
 			t.Fatalf("no meditation summary landed in a user session chain within %s (reflect requests=%d)\nfacts:\n%s\nreflect requests:\n%s\nlogs:\n%s",
 				120*time.Second, smokeRequestsFor(provider, smokeReflectModel), rig.factDigest(), smokeRequestDetail(provider, smokeReflectModel), logs.digest("reflection", "deliver_summary", "meditation", "tool", "budget"))
 		}
-		time.Sleep(100 * time.Millisecond)
+		probe++
+		marker := fmt.Sprintf("SMOKE-R75%02d", probe)
+		chat := smokeChats[probe%len(smokeChats)]
+		rig.drive(chat, marker+" meditation probe")
+		rig.waitText(chat, "answer "+marker, 30*time.Second)
+		time.Sleep(time.Second)
 	}
 	if smokeRequestsFor(provider, smokeReflectModel) == 0 {
 		t.Fatal("the reflection loop answered no model request")
@@ -1021,6 +1015,7 @@ func bootSmokeIntegrityHost(t *testing.T, interval, minGap string) *smokeIntegri
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	cfg.MeditationInterval = interval
+	cfg.Doc = smokeApprovalDocument
 	if minGap != "" {
 		cfg.MeditationMinGap = minGap
 	}
@@ -3622,5 +3617,163 @@ func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string,
 	}
 	if held {
 		t.Fatalf("%s 审计事实携带退出码 %q，want 无（无确认终止）", phase, exit)
+	}
+}
+
+// TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send，正文恰一条。
+// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send，部署文档也不声明它；正文恰一条。
+// - 负锚 face_is_readable：同一请求的工具面确实被读到（委派工具在列），防"空列表"式假通过。
+// - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，消息由替身通道记录。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
+	const marker = "SMOKE-R9701"
+	deployment, err := os.ReadFile("tagent.yaml")
+	if err != nil {
+		t.Fatalf("读取部署入口文档：%v", err)
+	}
+	if strings.Contains(string(deployment), "id: send") {
+		t.Fatalf("部署入口仍声明 send：tagent.yaml 含 %q", "id: send")
+	}
+
+	rig, provider := symptomRig(t)
+	rig.drive(symptomChat, marker+" 普通问题")
+	rig.waitText(symptomChat, "answer "+marker, 30*time.Second)
+
+	texts := symptomStableTexts(rig, symptomChat, 3*time.Second)
+	if len(texts) != 1 || texts[0] != "answer "+marker {
+		t.Fatalf("普通回合 outbound = %d 条 %s，want 恰好一条 %q", len(texts), symptomQuote(texts), "answer "+marker)
+	}
+	requests := provider.recorded()
+	if len(requests) == 0 {
+		t.Fatal("入口回合没有驱动任何模型请求，工具面不可判读")
+	}
+	for _, request := range requests {
+		for _, name := range request.Tools {
+			if name == sendToolID {
+				t.Fatalf("入口工具面仍授予 %q：请求授予的工具 = %v，want 无 send", sendToolID, request.Tools)
+			}
+		}
+	}
+	if !smokeToolsContain(requests[0].Tools, smokeWorkerModel) {
+		t.Fatalf("入口工具面 = %v，want 至少含委派工具 %q（否则空列表会假通过）",
+			requests[0].Tools, smokeWorkerModel)
+	}
+	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档无 send；普通回合恰一条投递 %q",
+		requests[0].Tools, texts[0])
+}
+
+// smokeToolsContain 报告工具名列表是否含 want。
+func smokeToolsContain(tools []string, want string) bool {
+	for _, name := range tools {
+		if name == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLocalSmokeSymptomDeliveryHold 是症状直译锚 G-B：hold 是等待，不是投递。
+// - 正锚 hold_waits_then_approves_once：hold 后 outbound=0，批准后恰好一条原正文。
+// - 负锚 refuse_delivers_nothing_and_audits：拒绝后仍为 0 条，且会话留下投递身份/血统/字节数可查的 feedback 事实。
+// - 消费者锚 production_outlet：正文来自真实宿主回合的自动投递出口，ruler 收到了同一条投递语义。
+// 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
+func TestLocalSmokeSymptomDeliveryHold(t *testing.T) {
+	t.Run("hold_waits_then_approves_once", func(t *testing.T) {
+		const marker = "SMOKE-R9702"
+		want := "hold-ack " + marker
+		ruler := &smokeReviewRuler{holdPrefix: []string{"hold-ack "}}
+		rig, _ := symptomDeliveryRig(t, ruler)
+		rig.drive(symptomChat, marker+" smoke review request")
+
+		held := rig.waitHeldDelivery(symptomChat, want, 30*time.Second)
+		if !ruler.sawContent(want) {
+			t.Fatalf("投递审核没有裁决到 %q；收到的投递 = %+v", want, ruler.seenDeliveries())
+		}
+		if texts := symptomStableTexts(rig, symptomChat, 2*time.Second); len(texts) != 0 {
+			t.Fatalf("hold 期间 outbound = %d 条 %s，want 0（hold 不得读作投递）",
+				len(texts), symptomQuote(texts))
+		}
+		rig.approveDelivery(context.Background(), held)
+		rig.waitText(symptomChat, want, 30*time.Second)
+		texts := symptomStableTexts(rig, symptomChat, 2*time.Second)
+		if len(texts) != 1 || texts[0] != want {
+			t.Fatalf("批准后 outbound = %d 条 %s，want 恰好一条 %q", len(texts), symptomQuote(texts), want)
+		}
+		if left := rig.host.HeldDeliveries(); len(left) != 0 {
+			t.Fatalf("批准后挂起表 = %+v，want 已消费", left)
+		}
+		t.Logf("[symptom-gb] 正锚：hold 零消息 → 批准后恰一条 %q", texts[0])
+	})
+
+	t.Run("refuse_delivers_nothing_and_audits", func(t *testing.T) {
+		const marker = "SMOKE-R9703"
+		want := "hold-ack " + marker
+		ruler := &smokeReviewRuler{holdPrefix: []string{"hold-ack "}}
+		rig, _ := symptomDeliveryRig(t, ruler)
+		rig.drive(symptomChat, marker+" smoke review request")
+
+		held := rig.waitHeldDelivery(symptomChat, want, 30*time.Second)
+		if err := rig.host.RefuseDelivery(context.Background(), held.ID); err != nil {
+			t.Fatalf("拒绝挂起投递 %s：%v", held.ID, err)
+		}
+		if texts := symptomStableTexts(rig, symptomChat, 2*time.Second); len(texts) != 0 {
+			t.Fatalf("拒绝后 outbound = %d 条 %s，want 0", len(texts), symptomQuote(texts))
+		}
+		if left := rig.host.HeldDeliveries(); len(left) != 0 {
+			t.Fatalf("拒绝后挂起表 = %+v，want 已消费", left)
+		}
+		fact := symptomDeliveryRefusalFact(t, rig, symptomChat)
+		if fact.Message.Content != "" {
+			t.Fatalf("拒绝事实携带正文 %q，want 无模型载荷", fact.Message.Content)
+		}
+		if got := fact.Meta[event.MetaKeyTriggerSource]; got != "host" {
+			t.Fatalf("拒绝事实 trigger_source = %q，want host", got)
+		}
+		if got := fact.Meta[event.MetaPrefix+"delivery_id"]; got != held.ID {
+			t.Fatalf("拒绝事实 delivery_id = %q，want %q", got, held.ID)
+		}
+		if got := fact.Meta[event.MetaPrefix+"lineage"]; got != "user" {
+			t.Fatalf("拒绝事实 lineage = %q，want user", got)
+		}
+		if got := fact.Meta[event.MetaPrefix+"content_bytes"]; got != strconv.Itoa(len(want)) {
+			t.Fatalf("拒绝事实 content_bytes = %q，want %d", got, len(want))
+		}
+		t.Logf("[symptom-gb] 负锚：拒绝零投递，审计事实保留投递身份 %s 与 %d 字节", held.ID, len(want))
+	})
+}
+
+// symptomDeliveryRig 装配一个带投递审核的症状台架：默认文档（无 send）+
+// 注入的 ruler，其余与 symptomRig 相同。
+func symptomDeliveryRig(t *testing.T, ruler plugin.DeliveryRuler) (*smokeRig, *smokeProvider) {
+	t.Helper()
+	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
+	cfg.MeditationInterval = "1h"
+	cfg.DeliveryRuler = ruler
+	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	cfg.Endpoint = provider.endpoint()
+	cfg.write(t)
+	rig := bootSmokeRig(t, cfg, provider)
+	t.Cleanup(func() {
+		if err := rig.close(); err != nil {
+			t.Errorf("close the symptom delivery rig: %v", err)
+		}
+	})
+	return rig, provider
+}
+
+// symptomDeliveryRefusalFact 返回该会话记录的唯一投递拒绝事实。
+func symptomDeliveryRefusalFact(t *testing.T, rig *smokeRig, chat string) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, fact := range rig.sessionFacts(chat) {
+			if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyEventSummary] == "delivery refused" {
+				return fact
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("会话 %s 没有投递拒绝审计事实；facts = %v", chat, rig.sessionFacts(chat))
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

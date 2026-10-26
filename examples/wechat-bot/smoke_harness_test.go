@@ -34,6 +34,7 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -107,6 +108,9 @@ type smokeConfig struct {
 	// MaxTokens 覆盖入口 agent 的回放窗口；0 保持既有 2000，校准与长程用它
 	// 参数化 256/32768 两档（语义是回放 MaxTokens，不是响应长度）。
 	MaxTokens int
+	// DeliveryRuler 把投递审核注入宿主；nil 保持默认不拦截（D5）。症状 G-B
+	// 与收尾轮迁移用它在投递侧挂起/放行。
+	DeliveryRuler plugin.DeliveryRuler
 }
 
 // meditationInterval 报告文档渲染的冥想节奏下限。
@@ -177,7 +181,8 @@ func (c *smokeConfig) write(t *testing.T) {
 	}
 }
 
-// document 渲染宿主文档：入口 agent 小窗口高频折叠、多 agent、审批开启。
+// document 渲染宿主文档：入口 agent 小窗口高频折叠、多 agent、治理开启。
+// 入口不声明 send：正文只经自动投递出口落地，工具面无 send（D4）。
 func (c *smokeConfig) document() string {
 	if c.Doc != nil {
 		return c.Doc(c)
@@ -193,7 +198,6 @@ agents:
   %s:
     model: %s
     tools:
-      - { kind: tool, id: send }
       - { kind: agent, agent: smoke-worker }
     max_tokens: %d
     compress_threshold: 0.3
@@ -220,8 +224,6 @@ governance:
   enforcement: normal
   dir: %s
   approval_ttl_minutes: 30
-  risk_rules:
-    - { tool: send, level: critical }
 app:
   wechat:
     config_dir: %s
@@ -240,10 +242,34 @@ app:
 	)
 }
 
-// smokeModelRequest 是脚本模型收到的一次请求：模型名与它读到的消息。
+// smokeApprovalDocument 在默认文档上重新声明 send 与它的 critical 风险规则：
+// 审批通道（tool+digest/TTL/重试执行）仍要一个 critical 工具来练，而生产入口
+// 不声明 send（D4）。只有审批类场景用这份夹具，其余场景走无 send 的默认文档。
+func smokeApprovalDocument(c *smokeConfig) string {
+	base := *c
+	base.Doc = nil
+	document := base.document()
+	tools := "    tools:\n      - { kind: agent, agent: smoke-worker }\n"
+	patched := strings.Replace(document, tools,
+		"    tools:\n      - { kind: tool, id: send }\n      - { kind: agent, agent: smoke-worker }\n", 1)
+	if patched == document {
+		panic("smoke: the rendered document carries no entry tools block to declare send in")
+	}
+	ttl := "  approval_ttl_minutes: 30\n"
+	patched = strings.Replace(patched, ttl,
+		ttl+"  risk_rules:\n    - { tool: send, level: critical }\n", 1)
+	if !strings.Contains(patched, "risk_rules") {
+		panic("smoke: the rendered document carries no governance block to declare the risk rule in")
+	}
+	return patched
+}
+
+// smokeModelRequest 是脚本模型收到的一次请求：模型名、它读到的消息与它被授予的
+// 工具面（工具名）。
 type smokeModelRequest struct {
 	Model    string
 	Messages []smokeModelMessage
+	Tools    []string
 }
 
 // smokeModelMessage 是请求里的一条消息，解码到断言需要的字段。
@@ -302,9 +328,22 @@ func (p *smokeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	if raw, ok := body["messages"]; ok {
 		_ = json.Unmarshal(raw, &messages)
 	}
+	var tools []string
+	if raw, ok := body["tools"]; ok {
+		var declared []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(raw, &declared); err == nil {
+			for _, tool := range declared {
+				tools = append(tools, tool.Function.Name)
+			}
+		}
+	}
 	p.mu.Lock()
 	index := len(p.requests)
-	p.requests = append(p.requests, smokeModelRequest{Model: modelName, Messages: messages})
+	p.requests = append(p.requests, smokeModelRequest{Model: modelName, Messages: messages, Tools: tools})
 	hook := p.hook
 	p.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -359,6 +398,8 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 		return smokeToolCallBody("call-retry-"+marker, sendToolID, smokeSendArgs(marker))
 	case strings.Contains(last, "smoke approval"):
 		return smokeToolCallBody("call-hold-"+marker, sendToolID, smokeSendArgs(marker))
+	case strings.Contains(last, "smoke review"):
+		return smokeAnswerBody("hold-ack " + marker)
 	case strings.Contains(last, "smoke delegate"):
 		return smokeToolCallBody("call-worker-"+marker, smokeWorkerModel,
 			`{"input":"produce `+marker+`"}`)
@@ -1170,6 +1211,9 @@ func bootSmokeRigWithPort(t *testing.T, cfg *smokeConfig, provider *smokeProvide
 		port = channel
 	}
 	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
+	if cfg.DeliveryRuler != nil {
+		options = append(options, tagent.WithDeliveryRuler(cfg.DeliveryRuler))
+	}
 	host, err := tagent.Boot(cfg.ConfigPath, options...)
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
@@ -1225,6 +1269,9 @@ func (r *smokeRig) reboot() {
 		r.t.Fatalf("assemble the wechat application on reboot: %v", err)
 	}
 	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
+	if r.cfg.DeliveryRuler != nil {
+		options = append(options, tagent.WithDeliveryRuler(r.cfg.DeliveryRuler))
+	}
 	host, err := tagent.Boot(r.cfg.ConfigPath, options...)
 	if err != nil {
 		r.t.Fatalf("boot the host on reboot: %v", err)
@@ -1249,6 +1296,71 @@ func (r *smokeRig) reboot() {
 
 // face 报告注入面的监听地址。
 func (r *smokeRig) face() string { return r.app.face }
+
+// smokeReviewRuler 是投递审核的台架实现：正文以任一 holdPrefix 开头时挂起，
+// 其余放行；每条裁决都记下，供断言“投递确实经过了审核出口”。
+type smokeReviewRuler struct {
+	mu         sync.Mutex
+	holdPrefix []string
+	seen       []plugin.Delivery
+}
+
+// Rule 记下一条投递并给出脚本裁决。
+func (r *smokeReviewRuler) Rule(_ context.Context, delivery plugin.Delivery) (plugin.Disposition, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seen = append(r.seen, delivery)
+	for _, prefix := range r.holdPrefix {
+		if strings.HasPrefix(delivery.Content, prefix) {
+			return plugin.DispositionHold, nil
+		}
+	}
+	return plugin.DispositionAllow, nil
+}
+
+// seenDeliveries 报告裁决过的投递，按裁决顺序。
+func (r *smokeReviewRuler) seenDeliveries() []plugin.Delivery {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]plugin.Delivery(nil), r.seen...)
+}
+
+// sawContent 报告是否有一次裁决的正文以给定前缀开头。
+func (r *smokeReviewRuler) sawContent(prefix string) bool {
+	for _, delivery := range r.seenDeliveries() {
+		if strings.HasPrefix(delivery.Content, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitHeldDelivery 等到该会话挂起一条正文以 want 开头的投递，把它交回；超时即
+// 失败并列出当前挂起表。
+func (r *smokeRig) waitHeldDelivery(chat, want string, timeout time.Duration) tagent.HeldDelivery {
+	r.t.Helper()
+	deadline := time.Now().Add(timeout)
+	target := r.addressOf(chat)
+	for {
+		for _, held := range r.host.HeldDeliveries() {
+			if held.Delivery.Target == target && strings.HasPrefix(held.Delivery.Content, want) {
+				return held
+			}
+		}
+		if time.Now().After(deadline) {
+			r.t.Fatalf("no held delivery to %s starts with %q within %s; held = %+v", chat, want, timeout, r.host.HeldDeliveries())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// approveDelivery 批准一条挂起投递，并要求它在超时内到达渠道。
+func (r *smokeRig) approveDelivery(ctx context.Context, held tagent.HeldDelivery) {
+	r.t.Helper()
+	if err := r.host.ApproveDelivery(ctx, held.ID); err != nil {
+		r.t.Fatalf("approve the held delivery %s: %v", held.ID, err)
+	}
+}
 
 // smokeInjection 是 /task 注入面的线上形状：宿主的 hostInjection 不导出，这里
 // 按它的 JSON 契约逐字段重建，触发器来源与消息形状保持一致。
