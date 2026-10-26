@@ -210,6 +210,9 @@ replays 索引键由 `event.SessionID` 单键改完整地址 `event.Address{Agen
 - 消费者锚：Boot→Invoke 真实请求（RequestFidelity 三场景 + ProtocolGate 400 门；scriptedProvider servedRequests 读回 wire 形态）。
 - 回归：`go test ./tests/integration/host -run 'TestFactFidelity|TestRequestFidelity' -count=3` → ok 1.365s；`go test ./tests/... -count=1` → 11 包全 ok（host 26.7s）；`go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptom' -tags smoke -count=1` → ok 15.756s；`go build ./...`、`go vet ./...` 干净；gen_godoc --check 绿（68 包）。
 - lint：本合单文件 comment_policy findings 归零（顺手修 facts.go:165 free-standing 2.2 遗留、fact_fidelity_test.go 两处 free-standing 并入 doc）；残余 9 项全属并发在途（agent_session_isolation_test.go 2.1 项、tool/exec 3.3 项），非本单面。
+- lint 收尾（clone 级）：371ce82 修本单新写 bullet 超长（`五类事实全达` 169 runes>testDocMaxLineRunes 160）压至 149；clone 复验 comment_policy `0 finding(s); 0 beyond baseline`，并发在途 9 项已被各自单清零。
+- lint 残红归属确认：concept budget `memory/event_body.go:EventBody 20 exported fields exceeds baseline 8`（scripts/check_concept_budget.py:131）自 817ab97（2.2「EventBody 全字段」）即存在——`git show 817ab97:memory/event_body.go` EventBody 20 字段、`git show 817ab97 --name-only | grep -c golden`=0（2.2 漏同步 ratchet 基线）；本单 6e0500b 只改 SameFact/canonical/helpers 未加字段。3.3 findings「lint 与形态」已裁定同一红「非本单面，白名单外勿碰」，本单依裁定不碰 scripts 基线，留 2.2/编排处置。
+- clone 级绿证（HEAD=371ce82）：`TAGENT_FIDELITY_COLD_BOOT=1 go test ./tests/integration/host -run RequestFidelity -count=1` → ok 0.527s；`go test ./tests/integration/host -run 'TestFactFidelity|TestRequestFidelity' -count=3` → ok 1.078s；`go test ./tests/integration/inspection -run TestObservationReachDiagnostics -count=1` → ok 0.362s。
 
 ## 环境与并发申报
 
