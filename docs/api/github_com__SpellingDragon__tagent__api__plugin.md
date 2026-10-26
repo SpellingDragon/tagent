@@ -179,6 +179,7 @@ type Delivery struct {
 type DeliveryRuler interface {
 	// Rule returns the disposition for one outbound delivery. An allowed or
 	// recorded delivery is sent; a held delivery waits for the host's decision.
+	// Rule may be called concurrently for deliveries of different sessions.
 	Rule(ctx context.Context, delivery Delivery) (Disposition, error)
 }
     DeliveryRuler is the delivery->disposition port: it renders the one ruling
