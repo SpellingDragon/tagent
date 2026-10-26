@@ -727,7 +727,7 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 // - Minting a new invocation for the follow-up range is the admitted shape, so the checks read causality and non-merging, not literal reuse.
 // - The telemetry presentation of an unconsumed notice is not asserted: the baseline wires no such degradation face.
 // - The leaf owns consumption semantics, not presentation.
-// - The projectionless anchor joins the list: a chain whose declaration registers no mapped sequence carries no projection.
+// - The windowless anchor joins the list: under every window declaration the notice reaches the follow-up from the committed fact.
 // - The notice fact must still reach the follow-up from the committed fact itself.
 func TestEventIntegrityTaskContinuation(t *testing.T) {
 	reproductionEnv(t)
@@ -5498,8 +5498,10 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 }
 
 // projectionlessState is one declaration shape of the session chain under
-// check: the window line the entry agent declares, and whether that declaration
-// registers a mapped sequence at all.
+// check: the window line the entry agent declares, and the mapped-sequence
+// registration that shape reads. The window is the presentation budget and the
+// fold measure, never whether the chain replays — every shape registers, and
+// the assertion pins that shape against a regression that gates registration.
 type projectionlessState struct {
 	name       string
 	window     string
@@ -5508,8 +5510,8 @@ type projectionlessState struct {
 
 // bootProjectionlessHost boots the entry document of one session chain whose
 // window declaration is the given line verbatim: an empty line declares no
-// window, so the run registers no projection for the chain and the loop reads
-// the notice material from the committed facts alone.
+// window — the no-budget shape — and the loop reads the notice material from
+// the committed facts in every shape.
 func bootProjectionlessHost(t *testing.T, provider *scriptedProvider, sender recordingSender, window string) *tagent.Host {
 	t.Helper()
 	return bootIntegrityHostWithAgents(t, provider, sender,
@@ -5526,13 +5528,15 @@ func bootProjectionlessHost(t *testing.T, provider *scriptedProvider, sender rec
 // runNoticeInputWithoutProjection drives one delegated task under each legal
 // window declaration and requires the follow-up decision of the settled task to
 // read the notice material in all of them. The chain shape is asserted beside
-// the drive, so the check reads the assembly it names instead of inferring it: a
-// declaration naming no window and one naming zero tokens register no
-// projection, while the declared window registers one.
+// the drive, so the check reads the assembly it names instead of inferring it:
+// every declaration registers its mapped sequence — the window names the
+// presentation budget and the fold measure, never whether the chain replays —
+// and the assertion pins that against a regression that gates registration
+// again.
 func runNoticeInputWithoutProjection(t *testing.T) {
 	states := []projectionlessState{
-		{name: "no_declared_window"},
-		{name: "zero_window", window: "    max_tokens: 0\n"},
+		{name: "no_declared_window", projection: true},
+		{name: "zero_window", window: "    max_tokens: 0\n", projection: true},
 		{name: "declared_window", window: "    max_tokens: 256\n", projection: true},
 	}
 	for _, state := range states {

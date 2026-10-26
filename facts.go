@@ -280,9 +280,11 @@ func sessionOf(evt event.Event) event.SessionID {
 // fresh projection through AttachReplay under the window the declaration names,
 // so every later consumption of the chain assembles the sequence the commits
 // record and the age fold measures it against the same window. A held
-// registration is left as it stands, and a session naming no window maps onto
-// no projection: its commits record nothing beside the fact itself and a
-// declaration that declares no window keeps the assembly as it stood.
+// registration is left as it stands, and a session naming no window registers
+// exactly as a budgeted one does: the window is the presentation budget and the
+// fold measurement, never the registration gate — a declaration of no tokens
+// presents its projection under no budget at all, and the fold reads the
+// default window as its measure.
 // A chain beside no projection still reads its notice facts: the notice read
 // face attaches for it too and answers from the committed facts of the session,
 // so the material of a notification reaches the follow-up decision whether or
@@ -303,10 +305,6 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 	}
 	r.mu.Unlock()
 	if held {
-		r.attachNoticeFeed()
-		return
-	}
-	if window.MaxTokens <= 0 {
 		r.attachNoticeFeed()
 		return
 	}

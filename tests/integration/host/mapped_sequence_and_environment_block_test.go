@@ -88,7 +88,8 @@ func TestProjectionCarriesTheCommittedSequence(t *testing.T) {
 }
 
 // TestProjectionAbsentKeepsTheTranscript checks the assembly of an agent naming no replay budget.
-//   - the session transcript carries the ended range as it always did
+//   - the no-budget window registers its mapped sequence like a budgeted one: the window is the budget and the fold measure, never the registration gate
+//   - the ended range rides the mapped sequence and the transcript keeps none of it, so a fact reaches the model from one face
 //   - the request carries each fact once and no environment block
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
@@ -115,14 +116,8 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 	invokeTurn(t, run, "inv-unmapped-2", addr, "第二轮输入")
 
 	history := run.SessionHistory(addr)
-	if len(history) != 4 {
-		t.Fatalf("session transcript = %+v, want both ended ranges as they always landed", history)
-	}
-	wantHistory := []string{"第一轮输入", "回答第1轮", "第二轮输入", "回答第2轮"}
-	for i, want := range wantHistory {
-		if history[i].Content != want {
-			t.Fatalf("transcript message %d = %q, want %q", i, history[i].Content, want)
-		}
+	if len(history) != 0 {
+		t.Fatalf("session transcript = %+v, want the mapped sequence of the no-budget window to carry the ended range instead — one face per fact", history)
 	}
 	requests := provider.recorded()
 	if len(requests) != 2 {
@@ -130,7 +125,20 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 	}
 	got := requests[1].Messages
 	if len(got) != 3 {
-		t.Fatalf("second request carries %d messages, want the transcript and the range input: %v", len(got), got)
+		t.Fatalf("second request carries %d messages, want the two mapped facts and the range input: %v", len(got), got)
+	}
+	wantCarried := []struct {
+		role    model.Role
+		content string
+	}{
+		{model.RoleUser, "第一轮输入"},
+		{model.RoleAssistant, "回答第1轮"},
+		{model.RoleUser, "第二轮输入"},
+	}
+	for i, want := range wantCarried {
+		if got[i].Role != want.role || got[i].Content != want.content {
+			t.Fatalf("message %d = (%q, %q), want (%q, %q): the ended range must reach the model through the mapped sequence", i, got[i].Role, got[i].Content, want.role, want.content)
+		}
 	}
 	for _, message := range got {
 		if strings.Contains(message.Content, "## Environment") {

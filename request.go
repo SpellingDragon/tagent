@@ -271,8 +271,9 @@ func (h replayEntry) endedPrefix() int {
 // on present themselves once their range ends.
 // A chain that names no session is refused by name: assembling one would join
 // every user of the partition into one transcript. A window of no tokens is
-// refused the same way: it bounds every request to an empty prefix and leaves
-// the age fold no share of a window to measure.
+// accepted as the no-budget window it means: the requests present the whole
+// projection with no budget bound, and the age fold measures against the
+// default window instead of none.
 // The seam carries no agent identity, so the registration is kept for every
 // user of the session it names; the chains this run commits register under the
 // full address of the agent that owns them through attachScopedReplay, so they
@@ -297,14 +298,12 @@ func (r *Run) attachScopedReplay(addr event.Address, window FoldWindow, projecti
 }
 
 // attachReplayAt registers one mapped sequence under the address it names. A
-// registration that carries no projection, and a window of no tokens, are
-// refused exactly as the attach seams document.
+// registration that carries no projection is refused exactly as the attach
+// seams document; a window of no tokens is the no-budget window, never a
+// refused one.
 func (r *Run) attachReplayAt(addr event.Address, window FoldWindow, projection *replay.ReplayProjection) error {
 	if projection == nil {
 		return errors.New("tagent: the replay registration carries no projection")
-	}
-	if window.MaxTokens <= 0 {
-		return errors.New("tagent: the replay registration carries no model window")
 	}
 	window = normalizeFoldWindow(window)
 	r.mu.Lock()
@@ -688,7 +687,9 @@ func (a *requestAssembly) environmentSegment(ctx context.Context) ([]model.Messa
 // full→ticket→summary under one window assembly and neither grows a budget
 // assembly of its own. The token budget is read off the one window the
 // registration carries, so the request side never receives a second budget the
-// registration does not know. A negative prefix assembles the whole projection.
+// registration does not know — except the window of no tokens, which names no
+// budget at all and presents the whole projection (see projectionBudget). A
+// negative prefix assembles the whole projection.
 //
 // The projection carries one entry per fact and keeps no call pairing, so the
 // segment restores the pairing the wire requires before the request leaves:
@@ -698,7 +699,7 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 	if projection == nil {
 		return nil, nil
 	}
-	entries, err := projection.AssembleBudgetPrefix(ctx, window.MaxTokens, prefix)
+	entries, err := projection.AssembleBudgetPrefix(ctx, projectionBudget(projection, window, prefix), prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -716,6 +717,37 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 		messages = append(messages, message)
 	}
 	return messages, nil
+}
+
+// projectionBudget reports the token budget one request presents its projected
+// material under. A window naming a positive model window presents under that
+// window's budget, so the budget keeps shaping presentation exactly as the
+// window's fold threshold shapes the fold: the two are separate identities of
+// one window. A window naming no tokens presents no bound at all: the budget is
+// measured from the material itself — every entry's presented view beside its
+// kept original, at the packing ratio the assembly packs under — so the whole
+// projection presents in full and no entry degrades to a ticket the
+// declaration never asked for.
+func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, prefix int) int {
+	if window.MaxTokens > 0 {
+		return window.MaxTokens
+	}
+	entries := projection.Entries()
+	if prefix >= 0 && prefix < len(entries) {
+		entries = entries[:prefix]
+	}
+	total := 0
+	if hint := projection.RecoveryHint(); hint != nil {
+		total += len(hint.Content)
+	}
+	for _, entry := range entries {
+		view := len(entry.Content)
+		if original, kept := projection.Original(entry.Key); kept && len(original) > view {
+			view = len(original)
+		}
+		total += view
+	}
+	return total/replay.BudgetCharsPerToken + 1
 }
 
 // restoreCallPairing restores the call-result pairing one projected entry lost

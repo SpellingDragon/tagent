@@ -934,13 +934,13 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
     are ended material and are presented at once; the facts the run commits
     from here on present themselves once their range ends. A chain that names
     no session is refused by name: assembling one would join every user of
-    the partition into one transcript. A window of no tokens is refused the
-    same way: it bounds every request to an empty prefix and leaves the age
-    fold no share of a window to measure. The seam carries no agent identity,
-    so the registration is kept for every user of the session it names; the
-    chains this run commits register under the full address of the agent that
-    owns them through attachScopedReplay, so they never cross agents that share
-    a session id.
+    the partition into one transcript. A window of no tokens is accepted as
+    the no-budget window it means: the requests present the whole projection
+    with no budget bound, and the age fold measures against the default window
+    instead of none. The seam carries no agent identity, so the registration
+    is kept for every user of the session it names; the chains this run commits
+    register under the full address of the agent that owns them through
+    attachScopedReplay, so they never cross agents that share a session id.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address and

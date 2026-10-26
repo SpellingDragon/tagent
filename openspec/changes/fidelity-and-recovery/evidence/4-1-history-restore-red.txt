@@ -1,0 +1,11 @@
+=== RUN   TestHistoryRestoresWithoutBudget
+=== RUN   TestHistoryRestoresWithoutBudget/history_restores_without_budget
+    history_restore_budget_test.go:129: the request carries no restored history: the turn-one input (user) material "history-restore turn one input marker" is absent from the wire, which carried 1 messages
+=== RUN   TestHistoryRestoresWithoutBudget/presentation_is_unlimited_at_zero
+    history_restore_budget_test.go:203: the max_tokens: 0 request presented no full projection: the tail marker "history-restore unbounded tail marker" is absent, so the unbounded material degraded (wire carries 38 chars)
+=== RUN   TestHistoryRestoresWithoutBudget/budget_window_still_folds_and_shapes
+    history_restore_budget_test.go:311: [history-restore 3] negative: the 32000-token window still folds (1 synthetic products) and still shapes the request (ticket present, tail marker cut)
+--- FAIL: TestHistoryRestoresWithoutBudget (0.23s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/tests/integration/host	0.704s
+FAIL

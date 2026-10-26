@@ -1218,9 +1218,9 @@ func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryE
 // registered sequence reads as ended material: a cold start has no range in
 // flight, and the next committed input opens the first one, which
 // moves the boundary without dropping a restored entry. A session whose
-// declaration names no model window keeps no registration, matching the live
-// attach path, and a body the schema cannot decode fails the boot instead of
-// silently dropping the material the tier holds.
+// declaration names no model window registers under the no-budget window
+// exactly as the live attach path does, and a body the schema cannot decode
+// fails the boot instead of silently dropping the material the tier holds.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 	events, err := tier.Segments.Events(ctx)
 	if err != nil {
@@ -1264,9 +1264,6 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 	}
 	for _, addr := range order {
 		seed := seeds[addr]
-		if seed.window.MaxTokens <= 0 {
-			continue
-		}
 		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
 			return err
 		}
@@ -1298,19 +1295,30 @@ func (r *Run) seedFact(evt event.Event) {
 // restart reads the same summary the live process read. The fold is
 // projection-derived: every judgment it re-derives is already a compress request
 // on the chain, so the restore files nothing back and writes no fact of its own.
-// A window naming no positive token window folds nothing, matching the live
-// registration, and a fold refused by the context fails the boot instead of
-// silently leaving the material at one shape the chain never had.
+// The fold threshold is one identity of the window and never the registration
+// gate: a window naming no tokens measures its fold against the default model
+// window instead of folding nothing, so the restored chain keeps the fold form
+// the age rules give it. A fold refused by the context fails the boot instead
+// of silently leaving the material at one shape the chain never had.
 func restoreFoldForm(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) error {
-	if projection == nil || window.MaxTokens <= 0 {
+	if projection == nil {
 		return nil
 	}
+	measured := window
+	if measured.MaxTokens <= 0 {
+		measured.MaxTokens = defaultFoldWindowTokens
+	}
 	_, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      window.KeepRecentTasks,
-		VolumeThreshold: window.VolumeThresholdBytes(),
+		KeepRecent:      measured.KeepRecentTasks,
+		VolumeThreshold: measured.VolumeThresholdBytes(),
 	})
 	return err
 }
+
+// defaultFoldWindowTokens is the model window a fold measures against when the
+// declaration names no tokens: the fold threshold is the window's own identity,
+// so a zero window reads the default measure instead of dissolving the fold.
+const defaultFoldWindowTokens = 32000
 
 // seedLandedSeq reports the last sequence slot every partition already
 // committed, so the landing path of a restarted run continues the positions the
