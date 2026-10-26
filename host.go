@@ -299,7 +299,17 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	meditationPort := &hostMeditationPort{plan: meditationPlan}
 	client := &http.Client{Timeout: doc.requestTimeout()}
 	models := newHostModelBuilder(doc, client)
-	natives, err := doc.nativeAgents(ctx, client, cfg.hostSender, recallPort, meditationPlan, meditationPort)
+	// host is assigned once the assembly returns; every face assembled before it
+	// reads the variable at call time instead of capturing a nil instance, because
+	// a call can only ever run beside a published host.
+	var host *Host
+	deliverSend := func(ctx context.Context, delivery plugin.Delivery) (deliveryOutcome, string) {
+		if host == nil {
+			return deliveryRefused, "the host is not assembled"
+		}
+		return host.deliverOne(ctx, host.sender, delivery)
+	}
+	natives, err := doc.nativeAgents(ctx, client, cfg.hostSender, deliverSend, recallPort, meditationPlan, meditationPort)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -327,12 +337,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}()
 	var driver *meditation.Driver
 	var settleDriver *SettleDriver
-	// host is assigned once the assembly returns; the settle face captures the
-	// variable, because the three faces it needs are the host's own memory and
-	// drive and are only called after Boot published it. The execution ledger is
-	// created before the assembly and observes state through the same variable,
-	// because a resource can only be acquired once the host drives a call.
-	var host *Host
+	// The settle face captures the host variable, because the three faces it needs
+	// are the host's own memory and drive and are only called after Boot published
+	// it. The execution ledger is created before the assembly and observes state
+	// through the same variable, because a resource can only be acquired once the
+	// host drives a call.
 	var execManager *tagentexec.Manager
 	observer, telemetryStop, err := hostTelemetryObserver(ctx, doc.Telemetry)
 	if err != nil {
@@ -666,13 +675,15 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 		h.rememberUserAddress(req.Address)
 		baseline = len(h.run.SessionFacts(req.Address))
 	}
+	lineage := deliveryLineageOf(req.TriggerSource)
+	ctx = withDeliveryLineage(ctx, lineage)
 	turn, err := h.run.Invoke(ctx, req)
 	if err != nil {
 		assemblyWarn("tagent: the invocation %s of %s ended by error: %v", req.InvocationID, req.Address.SessionID, err)
 		return turn, err
 	}
 	if user {
-		h.deliverFresh(ctx, req.Address, baseline, sender, deliveryLineageOf(req.TriggerSource), turn)
+		h.deliverFresh(ctx, req.Address, baseline, sender, lineage, turn)
 	}
 	return turn, nil
 }
@@ -1176,31 +1187,76 @@ func (h *Host) holdDelivery(delivery plugin.Delivery, reason string) {
 	assemblyInfo("tagent: the delivery to %s was held: %s", delivery.Target.SessionID, reason)
 }
 
-// deliverOne sends one turn body through the review plugin's ruling: an
+// deliveryOutcome is the terminal state of one reviewed delivery: the sender
+// accepted the body, the review parked it, or the channel refused it.
+type deliveryOutcome int
+
+const (
+	// deliverySent reports a body the sender accepted.
+	deliverySent deliveryOutcome = iota
+	// deliveryHeld reports a body the review parked before the sender ran.
+	deliveryHeld
+	// deliveryRefused reports a body the sender refused.
+	deliveryRefused
+)
+
+// hostDeliverFunc is the one delivery outlet of the host: every outbound body —
+// the answer of a turn, the notice of a failed turn and the body a declared send
+// tool delivers — reaches the sender through it.
+type hostDeliverFunc func(ctx context.Context, delivery plugin.Delivery) (deliveryOutcome, string)
+
+// deliverOne sends one outbound body through the review plugin's ruling: an
 // allowed or recorded delivery is sent, a hold parks the body, and a ruling
 // that could not be rendered parks it too instead of delivering unreviewed
-// content.
-func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery plugin.Delivery) {
+// content. The second result names the cause of a hold or a refusal for the
+// caller's receipt; a delivered body carries none.
+func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery plugin.Delivery) (deliveryOutcome, string) {
+	if sender == nil {
+		return deliveryRefused, "the host carries no outbound message sender"
+	}
 	if ruler := h.deliveryRuler; ruler != nil {
 		disposition, err := ruler.Rule(ctx, delivery)
 		switch {
 		case err != nil:
 			assemblyWarn("tagent: the review of the delivery to %s failed: %v", delivery.Target.SessionID, err)
 			h.holdDelivery(delivery, "the delivery review failed: "+err.Error())
-			return
+			return deliveryHeld, "the delivery review failed: " + err.Error()
 		case disposition == plugin.DispositionHold:
 			h.holdDelivery(delivery, "the review held the delivery")
-			return
+			return deliveryHeld, "the review held the delivery"
 		case disposition == plugin.DispositionAllow, disposition == plugin.DispositionRecord:
 		default:
 			assemblyWarn("tagent: the review of the delivery to %s returned %q", delivery.Target.SessionID, disposition)
 			h.holdDelivery(delivery, "the delivery review returned an unknown disposition")
-			return
+			return deliveryHeld, "the delivery review returned an unknown disposition"
 		}
 	}
 	if err := sender.Send(ctx, delivery.Target, delivery.Content); err != nil {
 		assemblyWarn("tagent: the host delivery to %s was refused: %v", delivery.Target.SessionID, err)
+		return deliveryRefused, err.Error()
 	}
+	return deliverySent, ""
+}
+
+// deliveryLineageKey is the context key one running turn's trigger-source
+// stamp is carried under, from the drive down to the send tool.
+type deliveryLineageKey struct{}
+
+// withDeliveryLineage stamps the trigger-source line of the running turn on the
+// context the drive hands to its calls, so a cross-agent body names the line its
+// turn names instead of inventing one.
+func withDeliveryLineage(ctx context.Context, lineage string) context.Context {
+	return context.WithValue(ctx, deliveryLineageKey{}, lineage)
+}
+
+// deliveryLineageFrom reports the line the running turn stamped and whether one
+// is set.
+func deliveryLineageFrom(ctx context.Context) (string, bool) {
+	lineage, ok := ctx.Value(deliveryLineageKey{}).(string)
+	if !ok || lineage == "" {
+		return "", false
+	}
+	return lineage, true
 }
 
 // deliveryLineageOf reports the lineage one turn body carries: the trigger
@@ -1708,7 +1764,7 @@ func (d *hostDocument) declaresTool(id, name string) bool {
 
 // nativeAgents constructs the live pieces every declared agent is assembled
 // with.
-func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, sender MessageSender, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) (map[event.AgentID]NativeAgent, error) {
+func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, sender MessageSender, deliver hostDeliverFunc, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) (map[event.AgentID]NativeAgent, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
@@ -1719,7 +1775,7 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, se
 		if err != nil {
 			return nil, err
 		}
-		tools, err := d.toolsFor(ctx, spec.ID, sender, recallPort, meditationPlan, meditationPort)
+		tools, err := d.toolsFor(ctx, spec.ID, sender, deliver, recallPort, meditationPlan, meditationPort)
 		if err != nil {
 			return nil, err
 		}
@@ -1734,10 +1790,10 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, se
 // and original store are wired to the port itself (it forwards to the faces Bind
 // attaches) and the relation ledger comes from the port's read face, so
 // recall_trace walks the host's parent chain.
-func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSender, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) ([]trpctool.CallableTool, error) {
+func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSender, deliver hostDeliverFunc, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
 	if id != meditationAgentOf(meditationPlan) && d.declaresTool(id, hostSendToolID) {
-		available[hostSendToolID] = &hostSendTool{sender: sender}
+		available[hostSendToolID] = &hostSendTool{sender: sender, deliver: deliver}
 	}
 	if id == meditationAgentOf(meditationPlan) && d.declaresTool(id, meditation.DeliverSummaryToolName) {
 		available[meditation.DeliverSummaryToolName] = meditation.NewDeliverSummaryTool(meditationPlan.targets, meditationPort, meditationPort)
@@ -2002,11 +2058,16 @@ const hostSendToolID = "send"
 // hostSendContentMax is the byte ceiling of one body the send tool delivers.
 const hostSendContentMax = 8 * 1024
 
-// hostSendTool is the model-visible outbound face: one content argument
-// delivered to the address the call frame carries through the host's message
-// sender.
+// hostSendLineage is the delivery lineage of a call that carries no governance
+// pass: the body originated in the send tool itself, so the line names the tool
+// rather than borrowing the user's line.
+const hostSendLineage = "send"
+
+// hostSendTool is the model-visible outbound face: one content argument handed
+// to the host's one delivery outlet, which rules it before any body leaves.
 type hostSendTool struct {
-	sender MessageSender
+	sender  MessageSender
+	deliver func(context.Context, plugin.Delivery) (deliveryOutcome, string)
 }
 
 var _ trpctool.CallableTool = (*hostSendTool)(nil)
@@ -2021,7 +2082,7 @@ type hostSendArgs struct {
 func (t *hostSendTool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
 		Name:        hostSendToolID,
-		Description: "Deliver one body to the user address of this call. The target comes from the call's session address; it is not an argument. A refusal returns a [send_denied] result text and the turn continues.",
+		Description: "Deliver one body to the user address of this call. The target comes from the call's session address; it is not an argument. A refusal returns a [send_denied] result text, and a body held for review returns a [send_held] result text; the turn continues either way.",
 		InputSchema: &trpctool.Schema{
 			Type: "object",
 			Properties: map[string]*trpctool.Schema{
@@ -2034,9 +2095,12 @@ func (t *hostSendTool) Declaration() *trpctool.Declaration {
 
 // Call implements tool.CallableTool: every refusal and delivery failure is
 // answered as result text, and an error is reserved for a malformed argument
-// shape. A delivered body is answered with the bare ok: the receipt is the
-// credential that the delivery happened, not a report to repeat, so it names
-// no target session and carries no wording the model could speak to the user.
+// shape. The body is handed to the host's one delivery outlet, so the same
+// ruler rules a cross-agent send and a turn body, and a hold is answered as a
+// hold: the receipt must never report a held body as delivered. A delivered
+// body is answered with the bare ok: the receipt is the credential that the
+// delivery happened, not a report to repeat, so it names no target session and
+// carries no wording the model could speak to the user.
 func (t *hostSendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(jsonArgs, &probe); err != nil {
@@ -2063,15 +2127,49 @@ func (t *hostSendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if !ok {
 		return t.denied("this call carries no explicit session address"), nil
 	}
-	if err := t.sender.Send(ctx, addr, args.Content); err != nil {
-		return t.denied(err.Error()), nil
+	if t.deliver == nil {
+		return t.denied("the host carries no delivery outlet"), nil
 	}
-	return "ok", nil
+	outcome, cause := t.deliver(ctx, plugin.Delivery{
+		Content: args.Content,
+		Lineage: hostSendLineageOf(ctx),
+		Target:  addr,
+	})
+	switch outcome {
+	case deliverySent:
+		return "ok", nil
+	case deliveryHeld:
+		return t.held(cause), nil
+	default:
+		return t.denied(cause), nil
+	}
 }
 
 // denied renders one refusal as result text.
 func (t *hostSendTool) denied(reason string) string {
 	return "[send_denied] " + reason
+}
+
+// held renders one hold as result text: the body is waiting for review, not
+// delivered, and the text must not read as a delivery receipt.
+func (t *hostSendTool) held(reason string) string {
+	return "[send_held] " + reason
+}
+
+// hostSendLineageOf reports the lineage a send call hands to the delivery
+// ruler: the governance pass of the running call when the dispatch stated one,
+// the trigger-source stamp of the running turn otherwise, and the send tool's
+// own line when the call runs beside neither.
+func hostSendLineageOf(ctx context.Context) string {
+	if pass, ok := governance.CallPassFrom(ctx); ok {
+		if source := strings.TrimSpace(pass.TriggerSource); source != "" {
+			return source
+		}
+	}
+	if lineage, ok := deliveryLineageFrom(ctx); ok {
+		return lineage
+	}
+	return hostSendLineage
 }
 
 // hostCallAddress reports the explicit invocation address the call frame
