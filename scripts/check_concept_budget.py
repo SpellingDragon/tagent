@@ -128,7 +128,7 @@ BASELINE = (
     ("struct-fields", "api/event/types.go:Event", 16),
     ("struct-fields", "evolution/posterior.go:Evaluation", 6),
     ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
-    ("struct-fields", "memory/event_body.go:EventBody", 8),
+    ("struct-fields", "memory/event_body.go:EventBody", 20),  # 2026-10-26: full-fact fidelity (fidelity-and-recovery 2.2) names every field a restore needs; ratchet kept, count follows the declared design
     ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
     ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
     ("struct-fields", "memory/query_events.go:EventRecord", 7),
