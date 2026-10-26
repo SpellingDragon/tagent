@@ -162,9 +162,6 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	r.landing.Unlock()
 	if errors.Is(err, ledger.ErrContentConflict) {
-		// The identity already names a record the barrier published: the very
-		// fact is answered as the commitment it already is, and another content
-		// is refused by name. The record under the key never moves either way.
 		prior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)
 		if getErr != nil {
 			return getErr

@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -344,18 +343,14 @@ func runFidelityRequestAfterCompression(t *testing.T) {
 // runFidelityRequestAfterColdBoot drives one tool-call turn, closes the host
 // and re-boots the same document over the same storage root, and requires the
 // first request the restarted run assembles from its replayed chain to carry
-// the complete call-result pair of the call the run before it issued.
+// the complete call-result pair of the call the run before it issued. The call
+// fact the first boot committed beside its result is the pairing source the
+// restart re-reads: the seeded ledger resolves both sides of the pair, so the
+// request after the cold boot carries the call identity, function name and the
+// arguments as the model issued them instead of a minted stand-in.
 //
-// 本项不以 Skip 结项：冷启动后的配对恢复在本叶白名单内结构上不可达——调用身份
-// 在重启即失的进程事实里，真参数只在已死进程的请求快照里（assistant 调用消息从
-// 不入事实、重建路径只恢复 Content），任何白名单内的读都无法拼回配对。恢复依赖
-// fact-fidelity 叶（EventBody 全字段 + 调用事实）与启动重建，均属并发叶的禁碰面。
-// 场景保持完整武装，红证可随时复跑：TAGENT_FIDELITY_COLD_BOOT=1 go test
-// ./tests/integration/host -run 'RequestFidelity/request_after_cold_boot' -v。
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 func runFidelityRequestAfterColdBoot(t *testing.T) {
-	if os.Getenv("TAGENT_FIDELITY_COLD_BOOT") == "" {
-		t.Skip("cold-boot pairing recovery is structurally out of this leaf's whitelist: the call identity dies with the process facts and the true call arguments live only in the dead process's request snapshots (the assistant call message commits no fact, the seed rebuilds no call fields) — set TAGENT_FIDELITY_COLD_BOOT=1 to drive the known red证; 本项不以 Skip 结项，待 fact-fidelity(2.2) + 调用事实/种子恢复落地后解除")
-	}
 	const (
 		inputOne  = "fidelity cold boot turn issues the call"
 		note      = "the cold boot fidelity note"

@@ -161,8 +161,8 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			t.Fatalf("echo_tool executions = %d, want the allowed call executed once", got)
 		}
 		shown := run.Presentations()
-		if len(shown) != 4 {
-			t.Fatalf("presentations = %+v, want one After presentation per committed fact of the turn (entry input, settled delivery, call result and output)", shown)
+		if len(shown) != 5 {
+			t.Fatalf("presentations = %+v, want one After presentation per committed fact of the turn (entry input, assistant call, settled delivery, call result and output)", shown)
 		}
 		facts := map[event.EventID]bool{}
 		for _, presentation := range shown {

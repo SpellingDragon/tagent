@@ -259,13 +259,17 @@ func (b EventBody) Ref() ledger.OriginalRef
     own.
 
 func (b EventBody) SameFact(other EventBody) bool
-    SameFact reports whether one body names the same fact as another: one
-    identity stands for one immutable fact, so a second commit under an identity
-    is answered as the fact it already names only when nothing of the fact
-    itself moved. The stamps a commit path adds beside a fact — the record time,
-    the invocation a delivery minted and the runtime instance — describe the
-    commit rather than the fact and decide nothing here; the format and the
-    retention policy describe the reference registered beside it, likewise.
+    SameFact reports whether one body names the same fact as another:
+    one identity stands for one immutable fact, so a second commit under an
+    identity is answered as the fact it already names only when nothing of
+    the fact itself moved. The stamps the commit protocol generates beside a
+    fact — the record time, the invocation identity, the runtime instance,
+    the format and the retention policy — describe the commit rather than the
+    fact and decide nothing here; the format and the retention policy describe
+    the reference registered beside it, likewise. The stamps a caller may
+    declare — the source, the target and the task — join the judgment only where
+    both sides declare them: a stamp one body left unstated matches anything,
+    and two different declared stamps never name the same fact.
 
 type EventRecord struct {
 	// Key is the canonical identity of the event, in its hex form.

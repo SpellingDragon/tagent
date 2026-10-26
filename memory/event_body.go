@@ -278,10 +278,14 @@ func emptyMessage(msg model.Message) bool {
 // SameFact reports whether one body names the same fact as another: one
 // identity stands for one immutable fact, so a second commit under an identity
 // is answered as the fact it already names only when nothing of the fact
-// itself moved. The stamps a commit path adds beside a fact — the record time,
-// the invocation a delivery minted and the runtime instance — describe the
-// commit rather than the fact and decide nothing here; the format and the
-// retention policy describe the reference registered beside it, likewise.
+// itself moved. The stamps the commit protocol generates beside a fact — the
+// record time, the invocation identity, the runtime instance, the format and
+// the retention policy — describe the commit rather than the fact and decide
+// nothing here; the format and the retention policy describe the reference
+// registered beside it, likewise. The stamps a caller may declare — the
+// source, the target and the task — join the judgment only where both sides
+// declare them: a stamp one body left unstated matches anything, and two
+// different declared stamps never name the same fact.
 func (b EventBody) SameFact(other EventBody) bool {
 	left, err := b.canonical()
 	if err != nil {
@@ -291,15 +295,54 @@ func (b EventBody) SameFact(other EventBody) bool {
 	if err != nil {
 		return false
 	}
-	return bytes.Equal(left, right)
+	if !bytes.Equal(left, right) {
+		return false
+	}
+	return sameRangeStamp(b.Source, b.Owner, other.Source, other.Owner) &&
+		sameRangeStamp(b.Target, b.Owner, other.Target, other.Owner) &&
+		sameTaskStamp(b.TaskID, other.TaskID)
+}
+
+// sameRangeStamp reports whether one caller-declared range stamp — a source or
+// a target — names the same range as the other: a stamp one side left unstated
+// is the wildcard of the comparison and matches anything, and two stamps both
+// declared answer equal only when they name the same address. The owner of the
+// fact is the backfill default of the commit paths, so a stamp reading the
+// owner is exactly an unstated one.
+func sameRangeStamp(left, leftOwner, right, rightOwner event.Address) bool {
+	if unstatedRange(left, leftOwner) || unstatedRange(right, rightOwner) {
+		return true
+	}
+	return left == right
+}
+
+// unstatedRange reports whether one source or target stamp names no range of
+// its own: the zero address, or the owner of the fact itself — the value the
+// commit paths backfill a stamp the caller left unstated to.
+func unstatedRange(stamp, owner event.Address) bool {
+	return stamp.IsZero() || stamp == owner
+}
+
+// sameTaskStamp reports whether one caller-declared task stamp names the same
+// task as the other: a stamp one side left empty is the wildcard of the
+// comparison and matches anything, and two stamps both declared answer equal
+// only when they name the same task.
+func sameTaskStamp(left, right event.TaskID) bool {
+	if left == "" || right == "" {
+		return true
+	}
+	return left == right
 }
 
 // canonical returns the encoded fact content of one body: the body the event
-// behind it projects to with every commit stamp and reference registration
-// removed, so two bodies compare as the facts they name and never as two
-// commits or two references beside them. A body the earlier writer committed
-// and the full body of the same content project to the same bytes, because the
-// projection runs through the event the body restores.
+// behind it projects to with every protocol-generated stamp and reference
+// registration removed — the record time, the invocation identity, the runtime
+// instance, the format and the retention policy — beside the caller-declared
+// range and task stamps, which SameFact judges pairwise instead. Two bodies
+// compare as the facts they name and never as two commits or two references
+// beside them. A body the earlier writer committed and the full body of the
+// same content project to the same bytes, because the projection runs through
+// the event the body restores.
 func (b EventBody) canonical() ([]byte, error) {
 	body, err := BodyFromEvent(b.Event(), b.Format, b.RetentionPolicy)
 	if err != nil {
@@ -310,5 +353,8 @@ func (b EventBody) canonical() ([]byte, error) {
 	body.InstanceID = ""
 	body.Format = ""
 	body.RetentionPolicy = ""
+	body.Source = event.Address{}
+	body.Target = event.Address{}
+	body.TaskID = ""
 	return body.Encode()
 }

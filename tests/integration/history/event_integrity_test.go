@@ -1212,6 +1212,7 @@ func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) res
 			what    string
 		}{
 			{string(model.RoleUser), o.Seed.Input, "the conversation input"},
+			{string(model.RoleAssistant), persistenceCallText, "the assistant tool call"},
 			{string(model.RoleTool), o.Seed.ResultText, "the tool result"},
 			{string(model.RoleAssistant), o.Seed.Answer, "the assistant output"},
 		}
@@ -1224,6 +1225,11 @@ func restoreAssertNextRequest(t *testing.T, outcome func(*testing.T, string) res
 				t.Fatalf("the %s restart's next request message %d = %s %q, want %s %q (the restored material must be carried, not only read from the ledger); messages=%s",
 					mode, at, messages[at].Role, messages[at].Content, expectation.role, expectation.content, restoreDescribe(messages))
 			}
+		}
+		carriedCalls := messages[1].ToolCalls
+		if len(carriedCalls) != 1 || carriedCalls[0].ID != restoreCallID {
+			t.Fatalf("the %s restart's next request carried the call message %s, want the tool call %s the chain paired beside its result",
+				mode, restoreDescribe(messages), restoreCallID)
 		}
 		last := messages[len(messages)-1]
 		if last.Role != string(model.RoleUser) || last.Content != restoreNextInput {
@@ -3745,6 +3751,10 @@ func persistenceTerminalAnswer(text string) string {
 	return `{"id":"persistence","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":` + string(encoded) + `},"finish_reason":"stop"}]}`
 }
 
+// persistenceCallText is the assistant text one scripted tool-call answer
+// carries beside the calls it issues.
+const persistenceCallText = "looking"
+
 // persistenceToolCallAnswer renders one assistant answer that issues a call of
 // the named tool with the given argument text.
 func persistenceToolCallAnswer(name, callID, arguments string) string {
@@ -3752,7 +3762,7 @@ func persistenceToolCallAnswer(name, callID, arguments string) string {
 	if err != nil {
 		panic("history: encode the persistence tool arguments: " + err.Error())
 	}
-	return `{"id":"persistence-tool","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":"looking","tool_calls":[{"id":"` +
+	return `{"id":"persistence-tool","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":"` + persistenceCallText + `","tool_calls":[{"id":"` +
 		callID + `","type":"function","function":{"name":"` + name + `","arguments":` + string(encoded) + `}}]},"finish_reason":"tool_calls"}]}`
 }
 
@@ -4532,7 +4542,7 @@ type restoreChainView struct {
 }
 
 // TestEventIntegrityRestoreUse drives the cold-start anchors over one durable root:
-// - one formal turn commits a conversation input, a tool result and an assistant output
+// - one formal turn commits a conversation input, an assistant tool call, a tool result and an assistant output
 // - the process stops by a drained close and by an abrupt interruption
 // - a restarted process reopens the same root through the formal Boot entry and drives its next actual request
 // - the positive readings are the original text, the invocation and task attribution and the call/result pairing the durable chain keeps

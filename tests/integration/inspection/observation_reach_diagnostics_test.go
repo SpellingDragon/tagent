@@ -205,6 +205,7 @@ func obsInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation, s
 // instead of asserted type by type in the check that walks them.
 type obsKindCoverage struct {
 	entry   int
+	call    int
 	output  int
 	tool    int
 	settled int
@@ -219,6 +220,11 @@ func (c *obsKindCoverage) take(t *testing.T, evt event.Event) {
 		c.entry++
 		if evt.Message.Content != "hello" {
 			t.Fatalf("turn-start 事实内容 = %q, want the input the turn was invoked with", evt.Message.Content)
+		}
+	case event.TypeThinkingPlan:
+		c.call++
+		if len(evt.Message.ToolCalls) != 1 || evt.Message.ToolCalls[0].ID != "call-1" || evt.Message.ToolCalls[0].Function.Name != "echo" {
+			t.Fatalf("观察事实调用身份 = %+v, want the tool call the assistant message committed with", evt.Message.ToolCalls)
 		}
 	case event.TypeAgentOutput:
 		c.output++
@@ -242,7 +248,7 @@ func (c *obsKindCoverage) take(t *testing.T, evt event.Event) {
 			t.Fatalf("delivery 事实缺任务身份: %+v", evt)
 		}
 	default:
-		t.Fatalf("观察事实类型 = %q, want one of the four frozen types of a turn", evt.Type)
+		t.Fatalf("观察事实类型 = %q, want one of the frozen types of a turn", evt.Type)
 	}
 }
 
@@ -251,9 +257,9 @@ func (c *obsKindCoverage) take(t *testing.T, evt event.Event) {
 // settled delivery.
 func (c obsKindCoverage) want(t *testing.T) {
 	t.Helper()
-	if c.entry != 1 || c.output != 1 || c.tool != 1 || c.settled != 1 {
-		t.Fatalf("观察面覆盖 = entry %d / output %d / tool %d / settled %d, want one of each",
-			c.entry, c.output, c.tool, c.settled)
+	if c.entry != 1 || c.call != 1 || c.output != 1 || c.tool != 1 || c.settled != 1 {
+		t.Fatalf("观察面覆盖 = entry %d / call %d / output %d / tool %d / settled %d, want one of each",
+			c.entry, c.call, c.output, c.tool, c.settled)
 	}
 }
 
@@ -261,7 +267,7 @@ func (c obsKindCoverage) want(t *testing.T) {
 // - the After pass resolves each committed fact through the assembly's own ledger and hands it to the observer
 // - every observation failure settles as a visible gap on the diagnostic read face beside the committed fact
 // - 正式装配消费: the observer wired at the assembly entry consumes each committed fact of a real turn
-// - 四类事实全达: the entry input, the assistant output, the call result and the settled delivery each reach the observer as the fact it committed as
+// - 五类事实全达: the entry input, the assistant tool call, the assistant output, the call result and the settled delivery each reach the observer as the fact it committed as
 // - 观察逐字节保真: the observed call result is byte-identical beside the call identity, and each boundary carries the very message of the turn
 // - 边界次序真实: the turn-start fact is observed first and the turn-end fact last, so the boundaries frame the facts between them
 // - 缺口可从诊断读到: a failed observation lands as a named gap on the read face of the run and drops nothing

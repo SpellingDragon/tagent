@@ -929,10 +929,14 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
     The entries a registration carries were replayed from the chain, so they
     are ended material and are presented at once; the facts the run commits
     from here on present themselves once their range ends. A chain that names
-    no session is refused by name: assembling one would join every user of the
-    partition into one transcript. A window of no tokens is refused the same
-    way: it bounds every request to an empty prefix and leaves the age fold no
-    share of a window to measure.
+    no session is refused by name: assembling one would join every user of
+    the partition into one transcript. A window of no tokens is refused the
+    same way: it bounds every request to an empty prefix and leaves the age
+    fold no share of a window to measure. The seam carries no agent identity,
+    so the registration is kept for every user of the session it names; the
+    chains this run commits register under the full address of the agent that
+    owns them through attachScopedReplay, so they never cross agents that share
+    a session id.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address and
@@ -976,7 +980,10 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
     The commit is a write of this run, never a second store beside it: the fact
     lands in the same live ledger, on the same durable log and in the same
     mapped sequence as the target session's own input, so that session's next
-    assembly reads it like any other external input.
+    assembly reads it like any other external input. The address block of the
+    event is backfilled, never overwritten: a source, target or owner the caller
+    already stamped is kept as the caller wrote it, and only an unstated stamp
+    reads as the target address of the commit.
 
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error)
     CommittedEvent reports the fact an identity names: the live fact of this
@@ -986,7 +993,7 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
     native payload and the lineage its bytes carry and never an invented one.
 
 func (r *Run) CommittedFacts() int
-    CommittedFacts reports how many live facts this run holds: the counter the
+    CommittedFacts reports how many facts this run holds: the counter the
     metrics endpoint reports beside the turns and deliveries of the host.
 
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
@@ -1013,8 +1020,12 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
     InjectEvent commits one explicit input event of the named responsibility
     range and drives the loop session of its address with it, exactly as the
     Invoke entry drives a range the host admitted. The caller owns the event's
-    address and lineage; this entry stamps only the identities that scope it to
-    this run and range, and reports the identity the fact committed under.
+    address and lineage; this entry backfills only the stamps the caller left
+    unstated — an unstated source and target read as the owner of the event, an
+    unstated invocation identity as the one this call names — while the runtime
+    instance stamp is always this run's own and never the caller's to write.
+    The fact commits under the identity the event carries after the backfill,
+    and the drive runs the range under that same identity.
 
 func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 
@@ -1150,10 +1161,11 @@ func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     requests they were fixed for; reading them moves nothing.
 
 func (r *Run) SessionFacts(addr event.Address) []event.Event
-    SessionFacts reports the live facts of one session in the order they
-    committed: the chain one address wrote, as the run holds it. Only facts
-    still in the live ledger are answered; a chain restored from the durable
-    tier is read through the committed-event face instead.
+    SessionFacts reports the facts of one session in the order they committed:
+    the chain one address wrote, as the run holds it — the facts this process
+    committed beside every fact the storage tier already held at assembly,
+    both read through the one ledger. A fact outside the session the address
+    names is answered never.
 
 func (r *Run) SessionHistory(addr event.Address) []model.Message
     SessionHistory reports the transcript the named session accumulated across

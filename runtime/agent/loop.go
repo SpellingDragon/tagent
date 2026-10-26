@@ -496,6 +496,31 @@ func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decisi
 	})
 }
 
+// commitCalls commits the assistant message one decision issued its tool calls
+// as the call fact of the range, before the calls it names are admitted: the
+// message the model produced beside every call identity, function name and the
+// arguments as the model issued them, landed as its own fact of the run. The
+// call fact is what the projection restores the pairing a later request replays
+// from — beside the result facts the calls settle into, the chain keeps both
+// sides of every call-result pair and a restart recovers the pairing from the
+// facts alone. A commit the ledger refuses ends the decision beside the named
+// error before any call it names is admitted, so a call never executes over a
+// fact that never landed.
+func (l *Loop) commitCalls(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) error {
+	return l.commitFact(ctx, inv.Address.AgentID, event.Event{
+		Type:         event.TypeThinkingPlan,
+		Timestamp:    time.Now(),
+		Message:      assistantOf(outcome),
+		Owner:        inv.Address,
+		Source:       inv.Address,
+		Target:       inv.Address,
+		InvocationID: inv.InvocationID,
+		InstanceID:   inv.Instance,
+		DecisionID:   decision.DecisionID,
+		EpisodeID:    episodeOfReady(inv.Ready),
+	})
+}
+
 // commitSettled commits one settled notification as the delivery fact of the
 // range it settles into, beside the task it belongs to and the address the
 // notification was accepted at, and runs the After pass of that fact. A
@@ -1010,6 +1035,10 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		if round.final {
 			receipts = refuseClosingCalls(callsOf(outcome))
 		} else {
+			if commitErr := l.commitCalls(ctx, inv, decision, outcome); commitErr != nil {
+				_ = handle.Release(ctx)
+				return decision, outcome, nil, nil, nil, commitErr
+			}
 			receipts, observations, facts, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
 			if err != nil {
 				_ = handle.Release(ctx)

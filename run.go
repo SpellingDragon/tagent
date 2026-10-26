@@ -959,13 +959,17 @@ func (r *Run) establish(ctx context.Context, addr event.Address) error {
 // InjectEvent commits one explicit input event of the named responsibility
 // range and drives the loop session of its address with it, exactly as the
 // Invoke entry drives a range the host admitted. The caller owns the event's
-// address and lineage; this entry stamps only the identities that scope it to
-// this run and range, and reports the identity the fact committed under.
+// address and lineage; this entry backfills only the stamps the caller left
+// unstated — an unstated source and target read as the owner of the event, an
+// unstated invocation identity as the one this call names — while the runtime
+// instance stamp is always this run's own and never the caller's to write. The
+// fact commits under the identity the event carries after the backfill, and
+// the drive runs the range under that same identity.
 func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error) {
 	if !evt.Owner.IsComplete() {
 		return agent.Turn{}, "", fmt.Errorf("tagent: the injected event address is incomplete: %v", evt.Owner)
 	}
-	if invocationID == "" {
+	if invocationID == "" && evt.InvocationID == "" {
 		return agent.Turn{}, "", errors.New("tagent: the injected event carries no invocation identity")
 	}
 	if err := r.establish(ctx, evt.Owner); err != nil {
@@ -980,7 +984,9 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
 	}
-	evt.InvocationID = invocationID
+	if evt.InvocationID == "" {
+		evt.InvocationID = invocationID
+	}
 	evt.InstanceID = r.instance
 	key, err := r.commitFactChecked(ctx, evt)
 	if err != nil {
@@ -988,7 +994,7 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 	}
 	evt.Key = key
 	turn, err := r.loop.Drive(ctx, agent.Invocation{
-		InvocationID: invocationID,
+		InvocationID: evt.InvocationID,
 		Address:      evt.Owner,
 		Instance:     r.instance,
 		Ready:        []event.Event{evt},
@@ -1006,7 +1012,10 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 // The commit is a write of this run, never a second store beside it: the fact
 // lands in the same live ledger, on the same durable log and in the same mapped
 // sequence as the target session's own input, so that session's next assembly
-// reads it like any other external input.
+// reads it like any other external input. The address block of the event is
+// backfilled, never overwritten: a source, target or owner the caller already
+// stamped is kept as the caller wrote it, and only an unstated stamp reads as
+// the target address of the commit.
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
 	if err := r.establish(ctx, addr); err != nil {
 		return "", err
@@ -1014,7 +1023,15 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
 	if evt.Type == "" {
 		return "", errors.New("tagent: the cross-session event carries no frozen type")
 	}
-	evt.Owner, evt.Source, evt.Target = addr, addr, addr
+	if evt.Owner.IsZero() {
+		evt.Owner = addr
+	}
+	if evt.Source.IsZero() {
+		evt.Source = addr
+	}
+	if evt.Target.IsZero() {
+		evt.Target = addr
+	}
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
 	}
@@ -1060,10 +1077,11 @@ func (r *Run) ActiveSessions(agentID event.AgentID) []event.Address {
 	return out
 }
 
-// SessionFacts reports the live facts of one session in the order they
-// committed: the chain one address wrote, as the run holds it. Only facts still
-// in the live ledger are answered; a chain restored from the durable tier is
-// read through the committed-event face instead.
+// SessionFacts reports the facts of one session in the order they committed:
+// the chain one address wrote, as the run holds it — the facts this process
+// committed beside every fact the storage tier already held at assembly, both
+// read through the one ledger. A fact outside the session the address names is
+// answered never.
 func (r *Run) SessionFacts(addr event.Address) []event.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1088,8 +1106,8 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event {
 	return out
 }
 
-// CommittedFacts reports how many live facts this run holds: the counter the
-// metrics endpoint reports beside the turns and deliveries of the host.
+// CommittedFacts reports how many facts this run holds: the counter the metrics
+// endpoint reports beside the turns and deliveries of the host.
 func (r *Run) CommittedFacts() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1194,8 +1212,11 @@ func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryE
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.
-// The whole registered sequence reads as ended material: a cold start has no
-// range in flight, and the next committed input opens the first one, which
+// Every committed fact is held in the live ledger of this run beside the
+// registration (see seedFact), so a projected entry resolves the fact it was
+// minted from and the call-result pairing survives the restart. The whole
+// registered sequence reads as ended material: a cold start has no range in
+// flight, and the next committed input opens the first one, which
 // moves the boundary without dropping a restored entry. A session whose
 // declaration names no model window keeps no registration, matching the live
 // attach path, and a body the schema cannot decode fails the boot instead of
@@ -1218,6 +1239,7 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
+		r.seedFact(evt)
 		addr := replayAddressOf(evt)
 		if addr.SessionID == "" {
 			continue
@@ -1253,6 +1275,20 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		r.attachNoticeFeed()
 	}
 	return nil
+}
+
+// seedFact holds one fact the storage tier already committed in the live
+// ledger of this run: the same map every commit of this process lands in, in
+// the commit order the tier recorded. A restarted run then reads its facts
+// back beside the fresh ones — the identity one projected entry was minted from
+// resolves again, so the call-result pairing a request replays is recovered
+// from the facts alone — and a re-commit of an identity the tier already holds
+// is judged against the very fact it names instead of writing a second one.
+func (r *Run) seedFact(evt event.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.facts[evt.Key] = evt
+	r.factOrder = append(r.factOrder, evt.Key)
 }
 
 // restoreFoldForm folds one replayed projection at the commit boundaries the
