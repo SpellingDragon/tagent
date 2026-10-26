@@ -173,3 +173,46 @@ replays 索引键由 `event.SessionID` 单键改完整地址 `event.Address{Agen
 - 负锚：`a_hung_capture_never_holds_the_release`（挂起捕获不得拖延释放）绿；`names_the_unconfirmed_state_without_taking_over`（未知探针只具名拒绝、零接管零新开、错误不含 released/stopped/exit=）绿；既有 `unconfirmed_restart_not_reported_stopped` 保留绿。
 - 消费者锚：ReleaseTool 正式入口答案携带 `final output: omega`；`runEventIntegrityExecFinalOutputSurvives` 经 host.Invoke 真实模型回合读回 settled 报告（LastIndex 定位防第一回合误报）；`runEventIntegrityExecRestartTakesOver` 回合文本含 `reattached `+key 且 `restarted.Run().ExecState(key)`→Held&&Adopted。
 - clone 级：`git clone` 干净树（本提交，无共享工作区并发在途改动）→ `go build ./...` 好；两包 ok（execution 21.5s / tool/exec 12.0s）；并发面 3 红证测试（capabilities TestFormalLoopEnforcesPolicy、history TestEventIntegrityRestoreUse|next_request_uses_restored_material、inspection TestObservationReachDiagnostics）在同一 clone 全绿 → 三红归共享工作区并发在途改动，非本单。
+
+# W0+W1 findings — 1.2 调用事实入链 + 2.3 戳记边界（合单 facts/loop/run 簇）
+
+## 结论
+
+两叶合单落地：①assistant 工具调用消息（ToolCalls/ToolCallID/逐字参数）由 commitCalls 提交为调用事实、先于 result 入链，seedReplay 经 seedFact 把存储事实回填活账本——投影/恢复即重配对（restoreCallPairing 的数据源补齐）；②提交协议改"零值回填"（InjectEvent/CommitToSession 非零不覆写 Source/Target/Owner/InvocationID），SameFact 排除面机制化为协议生成戳记（Timestamp/InvocationID/InstanceID/Format/Retention 出比较面），Source/Target/TaskID 调用方提供即入（absent-wildcard：未声明侧匹配一切，两侧均声明则精确比较）。Q5/Q17 裁定兑现。
+
+## 红证（先于修复，③ 冷启动）
+
+`TAGENT_FIDELITY_COLD_BOOT=1 go test ./tests/integration/host -run 'RequestFidelity/request_after_cold_boot' -count=1 -v` → FAIL（单 A 的 Skip 红证形态复现）：`request 3 (model model-entry): message 2: role=tool carries no tool_call_id (content="ok")`——调用事实不入链，冷启动投影只恢复 result 侧，配对断裂。
+
+## 实现要点
+
+- **1.2**：`loop.go` 新增 `commitCalls`（TypeThinkingPlan + assistantOf 全 ToolCalls），接线在 decide 非 final 工具调用分支 `dispatch` 前——**顺序关键**（call 事实先于 result 入链，投影序 [call, result]，否则冷启动 mint 路径给 "{}" 参数）；提交失败以具名错误结束决策、任何 call 不执行（D6-1 形态）。`run.go` `seedReplay` 循环 `r.seedFact(evt)`（新 helper）把 tier 事实回填 `r.facts/r.factOrder`（恢复配对数据源 + 跨重启再提交幂等，防 recordMapped 双登记）。
+- **2.3**：`run.go` InjectEvent/CommitToSession 四字段零值回填；InjectEvent 以 `evt.InvocationID`（回填后）驱动 Drive 保持范围身份一致（自决项）；InstanceID 保持协议盖戳（禁覆写）。`memory/event_body.go` canonical 加 Source/Target/TaskID 清零，SameFact 加 pairwise absent-wildcard（`unstatedRange`：零值或 ==Owner ≡ 未声明，与回填默认值同源）。
+- **不动**：fold.go（TypeThinkingPlan 折入摘要由 mint 路径兜底，② 活进程 snapshots 有真参数；③ 32000 窗口种子侧不折叠）、request.go（禁碰面）。
+
+## 三处旧假设测试期望扩容（申报，非验收面缩水）
+
+1.2 使回合事实集合新增调用事实一类，三处"call 不入链"旧世界断言转红（与 2.1 归因剥离实验结论一致：该三红来自本合单在途改动）：
+- `capabilities/formal_loop_enforces_policy_test.go`：presentations 计数 4→5（断言语义"每已提交事实一个 presentation"不变，枚举扩容 +assistant call）。
+- `inspection/observation_reach_diagnostics_test.go`：obsKindCoverage 覆盖枚举加 TypeThinkingPlan 分支（断言 call 身份 ToolCalls）；四类→五类。
+- `history/event_integrity_test.go`：restoreAssertNextRequest 期望序 [user, tool, assistant] → [user, assistant call, tool, assistant]，并加 carriedCalls 断言（ToolCalls 携带 restoreCallID）；persistenceCallText 提为常量（渲染器与断言单一真源）。
+三处均为核心验收意图不变/增强（材料全带、每事实全达、配对可断），非删断言。
+
+## 白名单外触碰（派单明示，申报）
+
+`memory/event_body.go`（SameFact/canonical 边界机制化，Q17 裁定直接要求面）；其余均在白名单（runtime/agent/loop.go、facts.go、run.go、tests/integration/**、docs/api/**）。tools.go 未动（确认 1.2 无需扩白名单）。
+
+## 三锚与绿证（可复跑）
+
+- 红→绿锚：`TAGENT_FIDELITY_COLD_BOOT=1 go test ./tests/integration/host -run 'RequestFidelity/request_after_cold_boot' -count=1 -v` → 修后 PASS（`[fidelity 3] positive: the cold-boot request carries the complete pair of "call-fidelity-cold-boot"`），Skip 已解除（无环境变量无条件跑同绿）。
+- 2.3 正锚：`factFidelityUndeclaredStampIsIdempotent`（带 Source=X 提交→Source 存活入事实（修复前被 CommitToSession 覆写）；同 key 一次带 Source 一次不带=幂等、单条记录、戳记不动）。
+- 2.3 负锚：`factFidelityStampOverwriteRefused`（Source/TaskID 覆写→ErrFactKeyConflict 具名冲突、存储保持首次声明值）。
+- 消费者锚：Boot→Invoke 真实请求（RequestFidelity 三场景 + ProtocolGate 400 门；scriptedProvider servedRequests 读回 wire 形态）。
+- 回归：`go test ./tests/integration/host -run 'TestFactFidelity|TestRequestFidelity' -count=3` → ok 1.365s；`go test ./tests/... -count=1` → 11 包全 ok（host 26.7s）；`go -C examples/wechat-bot test . -run '^TestLocalSmokeSymptom' -tags smoke -count=1` → ok 15.756s；`go build ./...`、`go vet ./...` 干净；gen_godoc --check 绿（68 包）。
+- lint：本合单文件 comment_policy findings 归零（顺手修 facts.go:165 free-standing 2.2 遗留、fact_fidelity_test.go 两处 free-standing 并入 doc）；残余 9 项全属并发在途（agent_session_isolation_test.go 2.1 项、tool/exec 3.3 项），非本单面。
+
+## 环境与并发申报
+
+- 共享工作区并发在途：request.go/age_fold.go/tool/exec/*（3.3）、tests/integration/execution/event_integrity_test.go（3.3）等非本单面未碰；2.1 已提交 e46708d 并逐 hunk 剔除本单 hunks（对称：本单提交逐 hunk 剔除 2.1/3.3 的账目 hunks）。
+- 终端会话被并发 agent 共享，验证输出以重定向文件为准。
+- known flaky（findings W0 已记，超范围未修）：受理回执事实断裂（TestLocalSmokeSymptomAcceptedSilent）本次症状全家 6/30 观察面下全过。
