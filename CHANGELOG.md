@@ -7,6 +7,32 @@
 
 （当前无未发布变更。)
 
+## [v0.4.0] - 2026-10-26
+
+### Breaking Changes（事件语义边界与发送/审核解耦；发送不再是模型工具）
+
+- **entry 不再授予 `send`**：模型对用户的说话唯一路径是回合正文，经发送插件（投递唯一出口）送达；`send` 仅保留为跨代理通信工具（当前无消费者，不装配）。影响：任何依赖“模型调 send 说话”的部署提示需改写；模型工具面见 `TestLocalSmokeSymptomNoSendTool`。
+- **受理回执收敛为裸 `ok`**（`admissionReceiptText`）：task 身份/状态/承诺不再进模型上下文（`accepted task-` 文本退役）；委派工具描述同步（不再承诺回执携带 task 身份）。
+- **send 成功回执收敛为裸 `ok`**：`[send_ok] delivered to ...` 退役；`[send_denied] <reason>` 具名拒绝保留。
+- **progress 通知只落事实**（`commitProgressFact`）：不再 park 进 intake、不进任何模型请求材料；终态通知（settled/failed/cancelled）照旧驱动后续回合。
+- **exec 中间态（stable/suspect/exited）不驱动模型回合、不进材料**：只落无载荷审计事实（`exec-state: <phase>` 前缀 + resource/phase/exit_code），读面走状态查询；终态由 settle 通知承担。
+
+### Added
+
+- **失败告知**（`failure-notice:` 事实 + sender 直投）：模型真失败且回合无可交付正文时，框架直投**原始错误**（2KiB 截断+「（已截断）」标注）给用户；不编造原因、不静默（`TestLocalSmokeSymptomFailureNotice`）。
+- **投递唯一出口 + 投递前审核**（`api/plugin` Delivery/DeliveryRuler + `host.deliverOne`）：回合正文、失败告知、跨代理 send 共用一出口；投递语义（内容/血统/目标）交审核插件裁决，三态 allow/record/**hold**（hold=批准后补投，拒绝丢弃+审计）；默认 allow，规则显式触发。
+- **独立注入会话**（`POST /task` 可选 `session` 字段）：注入驱动 `injected:` 命名空间的独立会话，无需微信 admit；通知回投该会话。
+- **症状锚六组 + CI job `event-semantics-symptoms`**：受理静默 / 完成恰一条 / 失败告知 / exec 中间态静默 / entry 无 send / 投递 hold-批准补投-拒绝；红转绿双证据随 F 收口。
+- **每 MR 门禁三档落地**：`event-integrity-short`（十轮独立凭据）、`event-integrity-long`（六组合 7200 输入/720 重启）、`event-integrity-mutations`（11 变异 killed）+ `event-integrity-required` 汇总（bundle 17 份证据）。
+- **exec 声明可枚举**（`tool/exec`）：kind 枚举 `["", "tmux"]`、resource Pattern `[A-Za-z0-9_-]{1,64}`+描述同源（`kindSchema`/`resourceSchema` 双 Declaration 同词表）。
+- **embedding 空文本具名拒绝**（`ErrEmptyText`）：空查询在请求前短路，检索降级 keyword-only，不再 3 次无效 provider 重试。
+
+### Fixed
+
+- EVID-02 双路材料（`fireNoticeTurn` 去 Input）、EVID-03 忙时丢通知（retained+rearm）、EVID-04 折叠边界越界（`endedPrefix` 身份边界）、EVID-05 重启重折回归（`restoreFoldForm` 同形重折）。
+- tmux 3.4 负载下不记 `pane_dead_status`（drain 包装写退出记录+Stop 回读）；tmux server 退出判 confirmed stop。
+- evidence 记相对路径（可搬迁 bundle 校验）；`pipelineProgress` 判据显式化（Round 语义钉死）；`admitNotice` 死代码清理。
+
 ## [v0.3.0] - 2026-10-11
 
 ### Breaking Changes（merge-review-remediation：dev→main 合并前评审修订，45 项发现全量落地；pre-release 姿态，无迁移承诺）
