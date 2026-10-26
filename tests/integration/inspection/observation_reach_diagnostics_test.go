@@ -267,7 +267,7 @@ func (c obsKindCoverage) want(t *testing.T) {
 // - the After pass resolves each committed fact through the assembly's own ledger and hands it to the observer
 // - every observation failure settles as a visible gap on the diagnostic read face beside the committed fact
 // - 正式装配消费: the observer wired at the assembly entry consumes each committed fact of a real turn
-// - 五类事实全达: the entry input, the assistant tool call, the assistant output, the call result and the settled delivery each reach the observer as the fact it committed as
+// - 五类事实全达: the entry input, the assistant call, the assistant output, the call result and the settled delivery each reach the observer as committed
 // - 观察逐字节保真: the observed call result is byte-identical beside the call identity, and each boundary carries the very message of the turn
 // - 边界次序真实: the turn-start fact is observed first and the turn-end fact last, so the boundaries frame the facts between them
 // - 缺口可从诊断读到: a failed observation lands as a named gap on the read face of the run and drops nothing
