@@ -225,7 +225,7 @@ var (
 	// published generation of its agent.
 	_ FactCommit = (FactCommit)(nil)
 
-	_ func(event.Event) event.EventID = FactCommit(nil)
+	_ func(event.Event) (event.EventID, error) = FactCommit(nil)
 
 	_ func(*Loop, FactCommit) = (*Loop).SetFactCommit
 

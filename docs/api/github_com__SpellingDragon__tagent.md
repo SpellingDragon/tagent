@@ -981,9 +981,9 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error)
     CommittedEvent reports the fact an identity names: the live fact of this
     process when it holds one, and otherwise the event the storage tier already
-    committed. A committed body carries the light fields and no trigger source,
-    so a fact restored from the tier carries the lineage its bytes carry and
-    never an invented one.
+    committed. A committed body carries every field the event committed with,
+    so a fact restored from the tier carries the whole metadata projection, the
+    native payload and the lineage its bytes carry and never an invented one.
 
 func (r *Run) CommittedFacts() int
     CommittedFacts reports how many live facts this run holds: the counter the

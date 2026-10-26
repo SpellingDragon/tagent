@@ -677,7 +677,7 @@ type invariantCommitFace struct {
 }
 
 // commit records one committed fact and reports the identity it committed under.
-func (c *invariantCommitFace) commit(evt event.Event) event.EventID {
+func (c *invariantCommitFace) commit(evt event.Event) (event.EventID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if evt.Key == "" {
@@ -687,7 +687,7 @@ func (c *invariantCommitFace) commit(evt event.Event) event.EventID {
 	if c.feed != nil && evt.Type == event.TypeFeedback {
 		c.feed.append(NoticeView{Key: evt.Key, Text: evt.Message.Content})
 	}
-	return evt.Key
+	return evt.Key, nil
 }
 
 // list reports the facts committed so far.
@@ -1068,7 +1068,7 @@ func newQuietNoticeLedger(feed *invariantNoticeFeed) *quietNoticeLedger {
 // commit records one fact under its identity and reports it back: a delivery of an
 // identity the ledger already holds keeps the one record and reports that same
 // identity.
-func (l *quietNoticeLedger) commit(evt event.Event) event.EventID {
+func (l *quietNoticeLedger) commit(evt event.Event) (event.EventID, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if evt.Key == "" {
@@ -1076,14 +1076,14 @@ func (l *quietNoticeLedger) commit(evt event.Event) event.EventID {
 	}
 	l.attempts = append(l.attempts, evt.Key)
 	if _, held := l.events[evt.Key]; held {
-		return evt.Key
+		return evt.Key, nil
 	}
 	l.events[evt.Key] = evt
 	l.order = append(l.order, evt.Key)
 	if l.feed != nil && evt.Type == event.TypeFeedback {
 		l.feed.append(NoticeView{Key: evt.Key, Text: evt.Message.Content})
 	}
-	return evt.Key
+	return evt.Key, nil
 }
 
 // list reports the facts the ledger holds in commit order.

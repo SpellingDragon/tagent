@@ -12,11 +12,14 @@ memory/replay; this package keeps the read face (queries, segment reads),
 the projection and the assembly seam over them.
 
 The body schema one committed event carries through the segment store: the
-canonical identity and the light fields a query filters and matches on, and the
-owner, format and retention policy the reference beside it is registered under.
-A stored body is self-describing: it decodes back into the query record and the
-recall reference, so a committed body becomes queryable and readable without a
-second registry. The original text behind the event stays in the original store
+canonical identity and every field the event itself carries — the light fields a
+query filters and matches on together with the metadata projection, the native
+payload and the lineage identifiers — and the owner, format and retention policy
+the reference beside it is registered under. A stored body is self-describing:
+it decodes back into the query record, the recall reference and the very event
+that committed, so a committed body becomes queryable and readable without
+a second registry and a fact restored across a restart keeps every field it
+committed with. The original text behind the event stays in the original store
 and is read byte for byte through the scoped path.
 
 The identity to partition mapping of the memory side: one name resolves to one
@@ -83,6 +86,12 @@ var ErrBodyKeyMismatch = errors.New("memory: event body key disagrees with the s
 var ErrEventBody = errors.New("memory: event body does not decode under the body schema")
     ErrEventBody reports a committed body that does not decode under the body
     schema, so no query record and no reference can be derived from its bytes.
+
+var ErrFactKeyConflict = errors.New("memory: the event key already names another fact")
+    ErrFactKeyConflict reports a commit whose canonical key already names
+    another fact: one identity stands for one immutable fact, so a second,
+    different content under one key is refused by name instead of overwriting
+    the fact a reader already holds.
 
 var ErrQueryOrder = errors.New("memory: query names an unknown order")
     ErrQueryOrder reports a query that names an order other than the two
@@ -175,6 +184,35 @@ type EventBody struct {
 	Format string `json:"format"`
 	// RetentionPolicy is the retention policy the reference is held under.
 	RetentionPolicy string `json:"retention_policy"`
+
+	// Meta carries the metadata projection the event committed with: every
+	// entry kept whole, so a restored fact reads its summary, its trigger
+	// source and its audit entries exactly as it committed them.
+	Meta map[string]string `json:"meta,omitempty"`
+	// Message is the native model payload the event carries, kept whole: the
+	// role, the content, the tool calls and the reasoning a fact commits with
+	// are what it says, and no projection of them stands for them.
+	Message model.Message `json:"message"`
+	// Source is the address the event came from.
+	Source event.Address `json:"source"`
+	// Target is the address the event is delivered to.
+	Target event.Address `json:"target"`
+	// InvocationID is the responsibility range the event is scoped to.
+	InvocationID event.InvocationID `json:"invocation_id,omitempty"`
+	// TaskID is the task the event belongs to.
+	TaskID event.TaskID `json:"task_id,omitempty"`
+	// InstanceID is the runtime instance the event belongs to.
+	InstanceID event.InstanceID `json:"instance_id,omitempty"`
+	// EpisodeID is the application level episode the event belongs to.
+	EpisodeID event.EpisodeID `json:"episode_id,omitempty"`
+	// DecisionID is the model decision the event is scoped to.
+	DecisionID event.DecisionID `json:"decision_id,omitempty"`
+	// AttemptID is the model attempt the event is scoped to.
+	AttemptID event.AttemptID `json:"attempt_id,omitempty"`
+	// CallID is the native provider call identifier the event records.
+	CallID string `json:"call_id,omitempty"`
+	// ApprovalID is the approval ticket identity of the call the event records.
+	ApprovalID string `json:"approval_id,omitempty"`
 }
     EventBody is the body schema of one committed event: the fields a query
     filters and orders on together with the reference scope the recall of the
@@ -182,9 +220,10 @@ type EventBody struct {
 
 func BodyFromEvent(ev event.Event, format, retentionPolicy string) (EventBody, error)
     BodyFromEvent derives the body of one event: its canonical key, frozen type,
-    summary and content, its event time on the millisecond axis, and the owner,
-    format and retention policy the reference beside it is registered under.
-    An event carrying no key is refused by name.
+    summary and content, its event time on the millisecond axis, the whole
+    metadata projection, native payload and lineage identifiers the event
+    carries, and the owner, format and retention policy the reference beside it
+    is registered under. An event carrying no key is refused by name.
 
 func DecodeEventBody(body []byte) (EventBody, error)
     DecodeEventBody decodes one committed body under the body schema, or names
@@ -200,6 +239,14 @@ func DecodeEventBody(body []byte) (EventBody, error)
 func (b EventBody) Encode() ([]byte, error)
     Encode returns the committed bytes of the body under the body schema.
 
+func (b EventBody) Event() event.Event
+    Event restores the very event the body carries: every field it committed
+    with — the whole metadata projection, the native payload and the lineage
+    identifiers — read back exactly as it stands. A body the earlier writer
+    committed carries the light fields alone: the content and the summary those
+    bytes hold fill the message and the metadata they name, and every identity
+    those bytes never carried stays empty instead of an invented one.
+
 func (b EventBody) Record(partitionID int, windowTS int64) EventRecord
     Record returns the query record of the body under the partition and segment
     window its event is committed into.
@@ -210,6 +257,15 @@ func (b EventBody) Ref() ledger.OriginalRef
     stays undeclared here — the original store computes it over the bytes it
     commits, so a derived reference never carries a completeness claim of its
     own.
+
+func (b EventBody) SameFact(other EventBody) bool
+    SameFact reports whether one body names the same fact as another: one
+    identity stands for one immutable fact, so a second commit under an identity
+    is answered as the fact it already names only when nothing of the fact
+    itself moved. The stamps a commit path adds beside a fact — the record time,
+    the invocation a delivery minted and the runtime instance — describe the
+    commit rather than the fact and decide nothing here; the format and the
+    retention policy describe the reference registered beside it, likewise.
 
 type EventRecord struct {
 	// Key is the canonical identity of the event, in its hex form.

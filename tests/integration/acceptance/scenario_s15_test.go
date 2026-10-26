@@ -168,11 +168,11 @@ type scenarioProgressFacts struct {
 }
 
 // commit keeps one fact as it stands and reports the identity it carries.
-func (f *scenarioProgressFacts) commit(evt event.Event) event.EventID {
+func (f *scenarioProgressFacts) commit(evt event.Event) (event.EventID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seen = append(f.seen, evt)
-	return evt.Key
+	return evt.Key, nil
 }
 
 // under reports the facts committed under one identity.

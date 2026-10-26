@@ -1130,9 +1130,9 @@ func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]m
 
 // CommittedEvent reports the fact an identity names: the live fact of this
 // process when it holds one, and otherwise the event the storage tier already
-// committed. A committed body carries the light fields and no trigger source,
-// so a fact restored from the tier carries the lineage its bytes carry and
-// never an invented one.
+// committed. A committed body carries every field the event committed with, so
+// a fact restored from the tier carries the whole metadata projection, the
+// native payload and the lineage its bytes carry and never an invented one.
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error) {
 	if id == "" {
 		return event.Event{}, fmt.Errorf("%w: the identity is empty", ErrCommittedFactMissing)
@@ -1158,18 +1158,9 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 	if err != nil {
 		return event.Event{}, err
 	}
-	meta := map[string]string{}
-	if body.Summary != "" {
-		meta[event.MetaKeyEventSummary] = body.Summary
-	}
-	return event.Event{
-		Key:       id,
-		Type:      body.Type,
-		Timestamp: time.UnixMilli(body.Timestamp),
-		Meta:      meta,
-		Message:   model.Message{Content: body.Content},
-		Owner:     body.Owner,
-	}, nil
+	restored := body.Event()
+	restored.Key = id
+	return restored, nil
 }
 
 // seedObservedEvents lands every event the storage tier already committed into
@@ -1220,18 +1211,8 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		if err != nil {
 			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
 		}
-		meta := map[string]string{}
-		if body.Summary != "" {
-			meta[event.MetaKeyEventSummary] = body.Summary
-		}
-		evt := event.Event{
-			Key:       stored.Key,
-			Type:      body.Type,
-			Timestamp: time.UnixMilli(body.Timestamp),
-			Meta:      meta,
-			Message:   model.Message{Content: body.Content},
-			Owner:     body.Owner,
-		}
+		evt := body.Event()
+		evt.Key = stored.Key
 		session := sessionOf(evt)
 		if session == "" {
 			continue
@@ -1758,7 +1739,10 @@ func (r *Run) noteModelReplacement(ctx context.Context, agentID event.AgentID, f
 		from = held.lease.CurrentVersion()
 	}
 	fact := event.ModelReplacementFor(agentID, from, to, source, event.ModelReplacementResultRequested)
-	key := r.loop.CommitFactFor(ctx, agentID, fact.Event(time.Now().UTC()))
+	key, commitErr := r.loop.CommitFactFor(ctx, agentID, fact.Event(time.Now().UTC()))
+	if commitErr != nil {
+		return "", fmt.Errorf("tagent: commit the model replacement fact of agent %q: %w", agentID, commitErr)
+	}
 	if key == "" {
 		return "", fmt.Errorf("%w: agent %q", ErrModelChangeUncommitted, agentID)
 	}

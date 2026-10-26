@@ -36,12 +36,15 @@ type FactResolver func(id event.EventID) (model.Message, bool)
 // the whole event as the ledger of the run keeps it and reports the identity
 // that fact committed under, minting one for an event that arrives without an
 // identity. The identity it answers is the one the After pass reads back, so an
-// observation never reconstructs the fact it observes.
+// observation never reconstructs the fact it observes. A commit that did not
+// land reports no identity beside the named failure, so no caller ever answers
+// a commitment over a fact the ledger refused.
 //
-// The redline list (2 rules):
+// The redline list (3 rules):
 // MUST store the whole event as it stands, minting an identity only for an event that carries none.
 // MUST report the identity that fact committed under, so the observation reads that very fact back.
-type FactCommit func(evt event.Event) event.EventID
+// MUST report a refused commit beside no identity, so the caller decides what a fact that never landed means.
+type FactCommit func(evt event.Event) (event.EventID, error)
 
 // FactPipelines assembles the ordered plugin pipeline of one agent, so the
 // After pass of a fact the loop commits outside a dispatch — the ready input of
@@ -299,12 +302,16 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		if round.final {
 			turn.FinalRound = round.reason
 			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
-			l.commitOutput(ctx, inv, decision, outcome)
+			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
+				return l.failCommit(turn, commitErr)
+			}
 			return turn, nil
 		}
 		if len(receipts) == 0 && len(observations) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
-			l.commitOutput(ctx, inv, decision, outcome)
+			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
+				return l.failCommit(turn, commitErr)
+			}
 			return turn, nil
 		}
 		transcript = append(transcript, assistantOf(outcome))
@@ -312,6 +319,15 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		transcript = append(transcript, observations...)
 		rounds++
 	}
+}
+
+// failCommit reports one drive whose output fact did not commit: the turn ends
+// beside the failed terminal and the named cause of the refusal, so a caller
+// never reads a completed turn over a fact that never landed.
+func (l *Loop) failCommit(turn Turn, cause error) (Turn, error) {
+	turn.Terminal = model.KindFailed
+	turn.Failure = strings.TrimSpace(cause.Error())
+	return turn, fmt.Errorf("tagent: the output fact of the drive did not commit: %w", cause)
 }
 
 // consumerDebug renders one line of the consumer face at DEBUG: the drive's start
@@ -329,6 +345,23 @@ func consumerDebug(format string, args ...any) {
 	}
 	defer func() { _ = recover() }()
 	trpclog.Default.Debugf(format, args...)
+}
+
+// consumerWarn renders one line of the consumer face at WARN beside a fact the
+// commit face refused: a notice fact and a delivery fact answer no caller, so
+// the refused commit is reported here rather than swallowed, and the bypass
+// discipline of the consumer face applies to this line too.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
+// MUST carry the named cause beside the identity of the fact family it belongs to.
+// MUST NOT render transcript, message or tool-output content.
+func consumerWarn(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Warnf(format, args...)
 }
 
 // Backflow admits one notification of a call into the range of the invocation
@@ -369,7 +402,9 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 func (l *Loop) commitProgressFact(invocationID event.InvocationID, notice task.Notice) {
 	in := l.intakeFor(invocationID)
 	if addr := in.rangeAddress(); addr.IsComplete() {
-		l.commitNotice(invocationID, addr, notice)
+		if _, err := l.commitNotice(invocationID, addr, notice); err != nil {
+			consumerWarn("tagent: the notice fact of task %s did not commit: %v", notice.TaskID, err)
+		}
 	}
 }
 
@@ -382,7 +417,7 @@ func (l *Loop) commitProgressFact(invocationID event.InvocationID, notice task.N
 // and never input a decision speaks from. The notification's own four-tuple
 // stays its identity: the fact reference it carries names the work it reports
 // and never replaces that identity.
-func (l *Loop) commitNotice(invocationID event.InvocationID, addr event.Address, notice task.Notice) event.EventID {
+func (l *Loop) commitNotice(invocationID event.InvocationID, addr event.Address, notice task.Notice) (event.EventID, error) {
 	return l.commitFactKey(context.Background(), addr.AgentID, event.Event{
 		Key:       NoticeFactKey(invocationID, notice),
 		Type:      event.TypeFeedback,
@@ -443,9 +478,11 @@ func (l *Loop) observeReady(ctx context.Context, inv Invocation) {
 // turn-end fact of the range and runs its After pass: the message the drive
 // commits to the transcript of its session beside the decision, invocation and
 // address it belongs to, so the turn end is one committed fact of the run and
-// not a line derived from the outcome afterwards.
-func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) {
-	l.commitFact(ctx, inv.Address.AgentID, event.Event{
+// not a line derived from the outcome afterwards. A commit the ledger refuses
+// is reported to the caller of the drive beside a failed terminal, so a turn
+// never answers completed over a fact that never landed.
+func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) error {
+	return l.commitFact(ctx, inv.Address.AgentID, event.Event{
 		Type:         event.TypeAgentOutput,
 		Timestamp:    time.Now(),
 		Message:      assistantOf(outcome),
@@ -463,12 +500,14 @@ func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decisi
 // range it settles into, beside the task it belongs to and the address the
 // notification was accepted at, and runs the After pass of that fact. A
 // notification that arrived before the range recorded its own address commits
-// no delivery fact: the fact of a delivery names the range it lands in.
+// no delivery fact: the fact of a delivery names the range it lands in. A
+// commit the ledger refuses answers no caller, so it is reported at WARN and
+// the delivery itself still settles into its range.
 func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice) {
 	if addr.AgentID == "" || addr.SessionID == "" {
 		return
 	}
-	l.commitFact(ctx, addr.AgentID, event.Event{
+	if err := l.commitFact(ctx, addr.AgentID, event.Event{
 		Type:         event.TypeTaskSettled,
 		Timestamp:    time.Now(),
 		TaskID:       notice.TaskID,
@@ -477,7 +516,9 @@ func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationI
 		Target:       addr,
 		InvocationID: invocationID,
 		InstanceID:   l.instance,
-	})
+	}); err != nil {
+		consumerWarn("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, err)
+	}
 }
 
 // commitFact commits one fact of the run through the attached commit face and
@@ -485,28 +526,35 @@ func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationI
 // loop beside no commit face commits nothing and observes nothing; a commit
 // face beside no pipeline face still commits the fact but leaves its
 // observation unnetted, so the missing face is a named gap beside a fact that
-// stays committed as it stands.
-func (l *Loop) commitFact(ctx context.Context, agentID event.AgentID, evt event.Event) {
-	l.commitFactKey(ctx, agentID, evt)
+// stays committed as it stands. A refused commit is reported to the caller, so
+// the loop never carries on as if a fact that never landed had landed.
+func (l *Loop) commitFact(ctx context.Context, agentID event.AgentID, evt event.Event) error {
+	_, err := l.commitFactKey(ctx, agentID, evt)
+	return err
 }
 
 // commitFactKey commits one fact of the run through the attached commit face and
 // runs the After pass of that fact, and reports the identity the fact committed
-// under. An empty identity reports a loop that committed nothing: a loop beside
-// no commit face commits nothing and observes nothing, while a commit face
-// beside no pipeline face still commits the fact but leaves its observation
-// unnetted, so the missing face is a named gap beside a fact that stays
-// committed as it stands.
-func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID {
+// under. An empty identity beside no error reports a loop that committed
+// nothing: a loop beside no commit face commits nothing and observes nothing,
+// while a commit face beside no pipeline face still commits the fact but leaves
+// its observation unnetted, so the missing face is a named gap beside a fact
+// that stays committed as it stands. A refused commit reports no identity
+// beside the named failure and runs no After pass, because no committed fact
+// stands there to observe.
+func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt event.Event) (event.EventID, error) {
 	l.mu.Lock()
 	commit, pipelines := l.commit, l.pipelines
 	l.mu.Unlock()
 	if commit == nil {
-		return ""
+		return "", nil
 	}
-	key := commit(evt)
+	key, err := commit(evt)
+	if err != nil {
+		return "", err
+	}
 	if key == "" {
-		return ""
+		return "", nil
 	}
 	if pipelines == nil {
 		l.publish(view.Presentation{Fact: key, Gaps: []view.ObservationGap{{
@@ -514,10 +562,10 @@ func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt eve
 			Fact:   key,
 			Err:    ErrFactPipelineUnwired,
 		}}})
-		return key
+		return key, nil
 	}
 	l.afterPass(ctx, agentID, key)
-	return key
+	return key, nil
 }
 
 // CommitFactFor commits one fact on behalf of the named agent and runs the
@@ -526,8 +574,9 @@ func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt eve
 // producer outside a dispatch — the configuration source judging a model
 // replacement — lands its fact in the one ledger and is observed through the
 // faces of that agent's published generation exactly as the loop's own facts
-// are. An empty identity reports a loop beside no commit face.
-func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID {
+// are. An empty identity beside no error reports a loop beside no commit face,
+// and a refused commit reports the failure beside no identity.
+func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) (event.EventID, error) {
 	return l.commitFactKey(ctx, agentID, evt)
 }
 

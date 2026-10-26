@@ -412,16 +412,20 @@ type DrainReport struct {
     reached real termination, and the obligations that were still open when the
     close reported.
 
-type FactCommit func(evt event.Event) event.EventID
+type FactCommit func(evt event.Event) (event.EventID, error)
     FactCommit is the one commit face of the facts the loop produces: it stores
     the whole event as the ledger of the run keeps it and reports the identity
     that fact committed under, minting one for an event that arrives without
     an identity. The identity it answers is the one the After pass reads back,
-    so an observation never reconstructs the fact it observes.
+    so an observation never reconstructs the fact it observes. A commit that
+    did not land reports no identity beside the named failure, so no caller ever
+    answers a commitment over a fact the ledger refused.
 
-    The redline list (2 rules): MUST store the whole event as it stands, minting
+    The redline list (3 rules): MUST store the whole event as it stands, minting
     an identity only for an event that carries none. MUST report the identity
     that fact committed under, so the observation reads that very fact back.
+    MUST report a refused commit beside no identity, so the caller decides what
+    a fact that never landed means.
 
 type FactPipelines func(agentID event.AgentID) (plugin.Pipeline, error)
     FactPipelines assembles the ordered plugin pipeline of one agent,
@@ -625,14 +629,15 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
     the cancellation of the caller that delivered it, because observation is a
     bypass.
 
-func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID
+func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) (event.EventID, error)
     CommitFactFor commits one fact on behalf of the named agent and runs the
     After pass of that fact, and reports the identity the fact committed under.
     It is the same commit the loop's own production points use, exposed so a
     producer outside a dispatch — the configuration source judging a model
     replacement — lands its fact in the one ledger and is observed through the
     faces of that agent's published generation exactly as the loop's own facts
-    are. An empty identity reports a loop beside no commit face.
+    are. An empty identity beside no error reports a loop beside no commit face,
+    and a refused commit reports the failure beside no identity.
 
 func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     Drive runs one invocation until its latest decision reaches a terminal that

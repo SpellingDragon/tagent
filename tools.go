@@ -108,8 +108,8 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 	if held {
 		return
 	}
-	key := r.commitFact(fact)
-	if key == "" {
+	key, err := r.commitFact(fact)
+	if err != nil || key == "" {
 		return
 	}
 	pipeline, err := r.factPipeline(addr.AgentID)

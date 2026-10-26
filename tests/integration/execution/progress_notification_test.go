@@ -112,11 +112,11 @@ type committedFacts struct {
 }
 
 // commit keeps one fact as it stands and reports the identity it carries.
-func (c *committedFacts) commit(evt event.Event) event.EventID {
+func (c *committedFacts) commit(evt event.Event) (event.EventID, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seen = append(c.seen, evt)
-	return evt.Key
+	return evt.Key, nil
 }
 
 // under reports the facts committed under one identity.
