@@ -159,3 +159,50 @@
 - `go -C examples/wechat-bot test . -run '^TestLocalSmoke' -count=1 -tags smoke -timeout 1800s` → 117.208s，除 `TestLocalSmokeWave2Recall` 外全绿（`/tmp/smoke_full2.log`）；`TestLocalSmoke` 41.81s、`SymptomNoSendTool` 0.41s、`SymptomDeliveryHold` 4.57s。
 - 五包集成：`go test ./tests/integration/{host,journey,capabilities,evolution,execution}/ -count=1 -timeout 1800s` → 五包 `ok`（23.029s / 12.202s / 1.595s / 1.556s / 12.947s）。
 - `go build ./...` → ok；`go vet ./...` → exit 0；`bash scripts/lint.sh` → `lint: ok`；`openspec validate delivery-review-plugins --strict` → `Change 'delivery-review-plugins' is valid`。
+
+## 2.1 裁定（编排者，2026-10-26）
+
+选项 A 采纳：Wave2Exec 两例等价迁移（对象 send→exec_run 与投递 hold）；`Wave2Errors/expired_approval_keeps_the_retried_call_held` 保留在工具审批通道——投递挂起不实现 TTL/参数摘要/重试执行，那是**工具审批通道**的固有语义；两个通道并存（工具审批 vs 投递审核）是本案的设计结果，不是遗漏。
+
+# F 收口（2026-10-26）
+
+## F1 契约零改动
+
+- `e6b67aa..HEAD`：`golden/runtime/scenarios.json` + `golden/runtime/event_integrity_scenarios.json` 合计 diff **0 字节**（v1/v2 均零改）。
+- 主规格只有 `openspec/specs/persistent-event-loop/spec.md` 一个文件进入 diff，`+4/-0`：新场景「投递前审核是投递的必要条件」；既有 Requirement/Scenario 未改。
+- `openspec validate delivery-review-plugins --strict` → `Change 'delivery-review-plugins' is valid`（exit 0）。
+- 证据：`evidence/F1-contract.txt`。
+
+## F2 全量门禁（9 项，逐条原始退出码）
+
+| # | 门 | 结果 |
+| --- | --- | --- |
+| 1 | `bash scripts/lint.sh` | exit 0，`lint: ok` |
+| 2 | 根 `go build/vet/test ./... -short` | 0 / 0 / 0（38 包 ok、0 FAIL） |
+| 3 | 微信 + cli-host 三连 | 两模块各 0 / 0 / 0 |
+| 4 | short 十轮（`--repeat 10`） | exit 0；10 个互异 run_id；每轮 28 test_id / 140 子测试；≈28m |
+| 5 | long 六片（1/7/42 × 256/32768，`--timeout 1200`） | 6/6 `verdict=match`；每片 1200 inputs/120 restarts，合计 7200/720 |
+| 6 | mutations `--all` | exit 0；control 树先绿；11/11 killed；`gate.ok=true` |
+| 7 | bundle 总门（`--bundle`） | `ok=true`；17 份证据（10 short + 6 long + 1 mutation）；9 包/180 测试 |
+| 8 | 症状 job（`^TestLocalSmokeSymptom`） | exit 0；6 父测试 / 10 子测试全 pass、0 skip（G1–G4 + G-A/G-B） |
+| 9 | `test_check_runtime_*.py` + `check-openspec.sh` | 233 tests OK（exit 0）；main specs 全 strict（exit 0） |
+
+- **一次受控重跑（红证保留）**：7/256 首轮 `unattested`——`generation 56 / round 149` 的 60s 墙钟等待超时（`recorded=41`），语义断言未失败；同树同合同另两片 match，当时 3 long + short 十轮并发且宿主常驻负载高，定性为并发加压下的等待超时。红证原样留在 `long-s7-w256/`；并行面清空后**独占重跑一次** → `verdict=match`（run_id `b6ae2edf-f99c-4466-b75c-33e8ce2a5e1a`）。bundle 用重跑证据，红证不入 bundle。
+- bundle 首次组装只复制 evidence.json 时 exit 1（16 条 `evidence.test_log not found`：checker 按证据目录解析 test_log），补齐每目录 `test-log.jsonl` 后复跑 exit 0；过程如实记入证据。
+- 证据：`evidence/F2-gates.txt`（原始日志在 `$TMPDIR/drp-final/`）。
+
+## F3 回滚即红（两红两绿，DoD 已由 F1/F2 覆盖）
+
+- a）entry 去 send 回滚：`tagent.yaml` + 台架默认文档临时恢复 `- { kind: tool, id: send }` →
+  - G-A 红 1：`smoke_test.go:3635` 部署入口仍声明 send（exit 1）；
+  - G-A 红 2：仅保留台架文档 send → `smoke_test.go:3653` 入口工具面仍授予 send（exit 1）；
+  - 还原：两文件 `git checkout --` → blob==HEAD、shasum 与基线一致、diff 0 字节 → G-A exit 0。
+- b）投递裁决点短路：`host.go` `deliverOne` 将 `ruler != nil` 改为 `false && ruler != nil`（跳过审核查询）→
+  - G-B 红：两个子测试都等不到挂起条目（`smoke_test.go:3688/3715`，`held=[]`，exit 1，60.25s）；
+  - 还原：blob==HEAD、shasum `6c70ea08…`、diff 0 字节 → G-B exit 0（4.93s）。
+- 证据：`evidence/F3-redgreen.txt`（含两次破坏的 diff、编译退出码、具名断言行、还原三重校验）。
+
+## F4
+
+- 未做：归档与导览留主代理授权；`tasks.md` 的 F4 保持未勾。
+
