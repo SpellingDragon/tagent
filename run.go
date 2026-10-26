@@ -709,9 +709,12 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 // shared dependencies of the whole run.
 type assemblyConfig struct {
 	hostSender MessageSender
-	governance state.Governance
-	approver   task.Approver
-	policy     plugin.Governor
+	// deliveryRuler is the review plugin's delivery face the host consults
+	// before it sends one turn body. A nil ruler keeps every delivery allowed.
+	deliveryRuler plugin.DeliveryRuler
+	governance    state.Governance
+	approver      task.Approver
+	policy        plugin.Governor
 	// approvals is the approval book the host opens the declared risk table
 	// over: the policy that grades the document's risk_rules registers the
 	// held call there, so an external approver rules the very request.

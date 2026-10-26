@@ -23,6 +23,10 @@ func ExampleCompressTrigger()
     filed, while a face that refuses refuses the pass by name, no later face
     runs, and the request stays pending.
 
+func ExampleDeliveryRuler()
+    ExampleDeliveryRuler rules one turn body before the sending plugin delivers
+    it: the allowed body is sent, and a held body waits for the host's decision.
+
 func ExampleEnvironmentInject()
     ExampleEnvironmentInject renders the environment blocks of one request
     assembly: the multi-block face answers each block as its own product

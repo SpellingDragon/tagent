@@ -139,6 +139,11 @@ var ErrCommittedFactMissing = errors.New("tagent: the committed fact is not held
     ErrCommittedFactMissing reports a fact identity this run holds neither in
     its live ledger nor in the storage tier it was assembled over.
 
+var ErrDeliveryNotFound = errors.New("tagent: no held delivery names that identity")
+    ErrDeliveryNotFound reports an approval or refusal that names no held
+    delivery: no hold was issued under that identity, or a decision already
+    consumed it. A repeated decision is refused by name and delivers nothing.
+
 var ErrDiagnosticSwitchUnknown = errors.New("tagent: the diagnostic switch names no subsystem of this host")
     ErrDiagnosticSwitchUnknown reports a diagnostic switch naming no subsystem
     of this host: the switch is refused by name instead of being dropped in
@@ -491,6 +496,21 @@ func (w FoldWindow) VolumeThresholdBytes() int
     start degrading the projection rather than after it already had. A window
     naming no tokens reports no threshold, and a fold read under it never fires.
 
+type HeldDelivery struct {
+	// ID names this hold and is the identity ApproveDelivery and
+	// RefuseDelivery resolve.
+	ID string
+
+	// Delivery is the semantic the ruler held.
+	Delivery plugin.Delivery
+
+	// HeldAt is the moment the host recorded the hold.
+	HeldAt time.Time
+}
+    HeldDelivery is one outbound body the review plugin held before the sending
+    plugin delivered it: the identity an approval or refusal names, the delivery
+    semantic the ruler read, and the moment the hold was recorded.
+
 type Host struct {
 	// Has unexported fields.
 }
@@ -508,6 +528,12 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     it. Every failure before the assembly returns the named refusal and leaves
     nothing running.
 
+func (h *Host) ApproveDelivery(ctx context.Context, id string) error
+    ApproveDelivery re-delivers one held body exactly once: the body is sent to
+    the target it named, and the hold is consumed, so a repeated approval names
+    no hold and delivers no second copy. A send the channel refuses restores the
+    hold for a later approval and is reported to the caller.
+
 func (h *Host) Close(ctx context.Context) error
     Close stops the endpoints and the reflection driver, drains the run and
     closes the MCP servers. A repeated close reports the first result and runs
@@ -517,10 +543,20 @@ func (h *Host) FaceAddr() string
     FaceAddr reports the address the loopback endpoints listen on, and an empty
     address beside a host that serves none.
 
+func (h *Host) HeldDeliveries() []HeldDelivery
+    HeldDeliveries reports the bodies the review plugin is holding before
+    delivery, oldest first. The result is a copy the caller owns: reading here
+    changes no hold, and only ApproveDelivery or RefuseDelivery resolves one.
+
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     Invoke drives one invocation through the assembled run. An invocation at the
     user address of the entry agent delivers the fresh assistant output through
     the message sender; every other address is driven headless.
+
+func (h *Host) RefuseDelivery(ctx context.Context, id string) error
+    RefuseDelivery discards one held body: nothing is delivered, the hold is
+    consumed, and an audit feedback fact without a model payload records the
+    refusal at the target address.
 
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
     Reload reads the configuration source again, publishes the declaration
@@ -537,6 +573,11 @@ type HostOption func(*assemblyConfig)
     HostOption configures one Boot call. It is the host-facing name of the
     assembly option, so the host protocol's option type is declared here rather
     than borrowed by alias.
+
+func WithDeliveryRuler(ruler plugin.DeliveryRuler) HostOption
+    WithDeliveryRuler attaches the review plugin's delivery face: the host rules
+    every outbound body through it before the sender is called. A host beside no
+    ruler delivers every body, so the default review allows every delivery.
 
 func WithSender(sender MessageSender) HostOption
     WithSender attaches the outbound message face every turn output of the host

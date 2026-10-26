@@ -99,6 +99,11 @@ var ErrHostUnauthenticated = errors.New("tagent: the task request is not authent
 // content: a turn reads user input only, so the request is refused by name.
 var ErrHostEmptyTask = errors.New("tagent: the task request carries no user message")
 
+// ErrDeliveryNotFound reports an approval or refusal that names no held
+// delivery: no hold was issued under that identity, or a decision already
+// consumed it. A repeated decision is refused by name and delivers nothing.
+var ErrDeliveryNotFound = errors.New("tagent: no held delivery names that identity")
+
 // MessageSender is the outbound message face the host delivers turn output
 // through: one body, one explicit address, and the delivery outcome reported
 // to the caller.
@@ -152,6 +157,13 @@ func WithSender(sender MessageSender) HostOption {
 	return func(c *assemblyConfig) { c.hostSender = sender }
 }
 
+// WithDeliveryRuler attaches the review plugin's delivery face: the host rules
+// every outbound body through it before the sender is called. A host beside no
+// ruler delivers every body, so the default review allows every delivery.
+func WithDeliveryRuler(ruler plugin.DeliveryRuler) HostOption {
+	return func(c *assemblyConfig) { c.deliveryRuler = ruler }
+}
+
 // Host is the assembled runtime of one host document: the run the entry
 // drives, the scheduled reflection beside it and the two loopback endpoints a
 // supervisor and an inbound channel reach. The host holds no application
@@ -166,6 +178,14 @@ type Host struct {
 	// deliveries counts every body the outbound face accepted, whether the host
 	// delivered a turn answer or a declared send tool delivered its own body.
 	deliveries *hostDeliveryMeter
+	// deliveryRuler rules every turn body before the sender is called; a nil
+	// ruler keeps every delivery allowed. pendingDeliveries holds the bodies the
+	// ruler held, keyed by the identity an approval or refusal names, and heldSeq
+	// orders the identities.
+	deliveryRuler plugin.DeliveryRuler
+	// TODO(delivery-review): persist pendingDeliveries across a restart.
+	pendingDeliveries map[string]*heldDelivery
+	heldSeq           uint64
 
 	// configPath is the source the host was booted from and the file a reload
 	// reads again; doc is the document last published, natives are the tool
@@ -212,6 +232,7 @@ type Host struct {
 var (
 	_ func(string, ...HostOption) (*Host, error)                      = Boot
 	_ func(MessageSender) HostOption                                  = WithSender
+	_ func(plugin.DeliveryRuler) HostOption                           = WithDeliveryRuler
 	_ func(task.Approver) HostOption                                  = WithApprover
 	_ func(state.Governance) HostOption                               = WithGovernance
 	_ func(*Host, context.Context, InvokeRequest) (agent.Turn, error) = (*Host).Invoke
@@ -418,22 +439,24 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	recallPort.Bind(run)
 	meditationPort.Bind(run)
 	host = &Host{
-		ctx:           ctx,
-		cancel:        cancel,
-		run:           run,
-		entry:         event.AgentID(decl.Entry),
-		sender:        cfg.hostSender,
-		deliveries:    deliveryMeter,
-		meditation:    driver,
-		settle:        settleDriver,
-		execManager:   execManager,
-		configPath:    configPath,
-		doc:           doc,
-		natives:       natives,
-		models:        models,
-		capture:       capture,
-		telemetryStop: telemetryStop,
-		userAddresses: map[event.SessionID]event.Address{},
+		ctx:               ctx,
+		cancel:            cancel,
+		run:               run,
+		entry:             event.AgentID(decl.Entry),
+		sender:            cfg.hostSender,
+		deliveries:        deliveryMeter,
+		deliveryRuler:     cfg.deliveryRuler,
+		pendingDeliveries: map[string]*heldDelivery{},
+		meditation:        driver,
+		settle:            settleDriver,
+		execManager:       execManager,
+		configPath:        configPath,
+		doc:               doc,
+		natives:           natives,
+		models:            models,
+		capture:           capture,
+		telemetryStop:     telemetryStop,
+		userAddresses:     map[event.SessionID]event.Address{},
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -649,7 +672,7 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 		return turn, err
 	}
 	if user {
-		h.deliverFresh(ctx, req.Address, baseline, sender, turn)
+		h.deliverFresh(ctx, req.Address, baseline, sender, deliveryLineageOf(req.TriggerSource), turn)
 	}
 	return turn, nil
 }
@@ -1001,7 +1024,7 @@ const failureNoticeSummary = "failure-notice"
 // commits no transcript history, so the facts are the one read face both session kinds share.
 // - A body wins over a failure: a turn that produced a deliverable answer delivers it.
 // - A failed turn without a body delivers the raw recorded cause; no cause stays silent.
-func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender, turn agent.Turn) {
+func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender, lineage string, turn agent.Turn) {
 	if sender == nil {
 		return
 	}
@@ -1010,9 +1033,7 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline in
 		if turn.Terminal == model.KindFailed {
 			if notice := failureNoticeText(turn.Failure); notice != "" {
 				h.noteFailureNotice(ctx, addr, turn)
-				if err := sender.Send(ctx, addr, notice); err != nil {
-					assemblyWarn("tagent: the failure notice to %s was refused: %v", addr.SessionID, err)
-				}
+				h.deliverOne(ctx, sender, plugin.Delivery{Content: notice, Lineage: lineage, Target: addr})
 				return
 			}
 			assemblyDebug("tagent: the invocation of %s failed without a recorded cause", addr.SessionID)
@@ -1022,9 +1043,199 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline in
 		return
 	}
 	for _, content := range contents {
-		if err := sender.Send(ctx, addr, content); err != nil {
-			assemblyWarn("tagent: the host delivery to %s was refused: %v", addr.SessionID, err)
+		h.deliverOne(ctx, sender, plugin.Delivery{Content: content, Lineage: lineage, Target: addr})
+	}
+}
+
+// HeldDelivery is one outbound body the review plugin held before the sending
+// plugin delivered it: the identity an approval or refusal names, the delivery
+// semantic the ruler read, and the moment the hold was recorded.
+type HeldDelivery struct {
+	// ID names this hold and is the identity ApproveDelivery and
+	// RefuseDelivery resolve.
+	ID string
+
+	// Delivery is the semantic the ruler held.
+	Delivery plugin.Delivery
+
+	// HeldAt is the moment the host recorded the hold.
+	HeldAt time.Time
+}
+
+// heldDelivery is the host-side record of one held delivery: the public
+// identity beside the order the hold was taken in.
+type heldDelivery struct {
+	id       string
+	delivery plugin.Delivery
+	heldAt   time.Time
+}
+
+// HeldDeliveries reports the bodies the review plugin is holding before
+// delivery, oldest first. The result is a copy the caller owns: reading here
+// changes no hold, and only ApproveDelivery or RefuseDelivery resolves one.
+func (h *Host) HeldDeliveries() []HeldDelivery {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	held := make([]HeldDelivery, 0, len(h.pendingDeliveries))
+	for _, entry := range h.pendingDeliveries {
+		held = append(held, HeldDelivery{ID: entry.id, Delivery: entry.delivery, HeldAt: entry.heldAt})
+	}
+	h.mu.Unlock()
+	sort.Slice(held, func(i, j int) bool { return held[i].ID < held[j].ID })
+	return held
+}
+
+// ApproveDelivery re-delivers one held body exactly once: the body is sent to
+// the target it named, and the hold is consumed, so a repeated approval names
+// no hold and delivers no second copy. A send the channel refuses restores the
+// hold for a later approval and is reported to the caller.
+func (h *Host) ApproveDelivery(ctx context.Context, id string) error {
+	if h == nil {
+		return ErrHostClosed
+	}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return ErrHostClosed
+	}
+	held, ok := h.pendingDeliveries[id]
+	if !ok {
+		h.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrDeliveryNotFound, id)
+	}
+	sender := h.sender
+	delete(h.pendingDeliveries, id)
+	h.mu.Unlock()
+	if sender == nil {
+		h.restoreHeldDelivery(held)
+		return fmt.Errorf("%w: the held delivery of %s", ErrHostSenderMissing, id)
+	}
+	if err := sender.Send(ctx, held.delivery.Target, held.delivery.Content); err != nil {
+		h.restoreHeldDelivery(held)
+		return fmt.Errorf("tagent: the approved delivery of %s was refused: %w", id, err)
+	}
+	assemblyInfo("tagent: the held delivery of %s was approved and sent", id)
+	return nil
+}
+
+// RefuseDelivery discards one held body: nothing is delivered, the hold is
+// consumed, and an audit feedback fact without a model payload records the
+// refusal at the target address.
+func (h *Host) RefuseDelivery(ctx context.Context, id string) error {
+	if h == nil {
+		return ErrHostClosed
+	}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return ErrHostClosed
+	}
+	held, ok := h.pendingDeliveries[id]
+	if !ok {
+		h.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrDeliveryNotFound, id)
+	}
+	delete(h.pendingDeliveries, id)
+	h.mu.Unlock()
+	h.noteDeliveryRefusal(ctx, held)
+	assemblyInfo("tagent: the held delivery of %s was refused", id)
+	return nil
+}
+
+// restoreHeldDelivery returns one held body to the waiting table after a
+// decision could not be carried out, so a later approval can resolve it.
+func (h *Host) restoreHeldDelivery(held *heldDelivery) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	if h.pendingDeliveries == nil {
+		h.pendingDeliveries = map[string]*heldDelivery{}
+	}
+	h.pendingDeliveries[held.id] = held
+}
+
+// holdDelivery parks one body the review plugin held: the hold is recorded
+// under a host-local identity and the caller delivers nothing.
+func (h *Host) holdDelivery(delivery plugin.Delivery, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		assemblyWarn("tagent: the held delivery to %s was dropped beside a closed host", delivery.Target.SessionID)
+		return
+	}
+	if h.pendingDeliveries == nil {
+		h.pendingDeliveries = map[string]*heldDelivery{}
+	}
+	h.heldSeq++
+	id := fmt.Sprintf("delivery-%06d", h.heldSeq)
+	h.pendingDeliveries[id] = &heldDelivery{id: id, delivery: delivery, heldAt: time.Now()}
+	assemblyInfo("tagent: the delivery to %s was held: %s", delivery.Target.SessionID, reason)
+}
+
+// deliverOne sends one turn body through the review plugin's ruling: an
+// allowed or recorded delivery is sent, a hold parks the body, and a ruling
+// that could not be rendered parks it too instead of delivering unreviewed
+// content.
+func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery plugin.Delivery) {
+	if ruler := h.deliveryRuler; ruler != nil {
+		disposition, err := ruler.Rule(ctx, delivery)
+		switch {
+		case err != nil:
+			assemblyWarn("tagent: the review of the delivery to %s failed: %v", delivery.Target.SessionID, err)
+			h.holdDelivery(delivery, "the delivery review failed: "+err.Error())
+			return
+		case disposition == plugin.DispositionHold:
+			h.holdDelivery(delivery, "the review held the delivery")
+			return
+		case disposition == plugin.DispositionAllow, disposition == plugin.DispositionRecord:
+		default:
+			assemblyWarn("tagent: the review of the delivery to %s returned %q", delivery.Target.SessionID, disposition)
+			h.holdDelivery(delivery, "the delivery review returned an unknown disposition")
+			return
 		}
+	}
+	if err := sender.Send(ctx, delivery.Target, delivery.Content); err != nil {
+		assemblyWarn("tagent: the host delivery to %s was refused: %v", delivery.Target.SessionID, err)
+	}
+}
+
+// deliveryLineageOf reports the lineage one turn body carries: the trigger
+// source the invocation stated, or the user stamp a user-address turn carries
+// when the invocation names none.
+func deliveryLineageOf(triggerSource string) string {
+	if stamp := strings.TrimSpace(triggerSource); stamp != "" {
+		return stamp
+	}
+	return "user"
+}
+
+// noteDeliveryRefusal commits the audit fact of one refused delivery: a
+// feedback fact owned by the target address, carrying the hold identity and the
+// delivery dimensions in its metadata and no model payload in its message, so
+// the fact enters no model request. A refused commit is a warning beside the
+// refusal.
+func (h *Host) noteDeliveryRefusal(ctx context.Context, held *heldDelivery) {
+	if h == nil || h.run == nil {
+		return
+	}
+	if _, err := h.run.CommitToSession(ctx, held.delivery.Target, event.Event{
+		Type:      event.TypeFeedback,
+		Timestamp: time.Now(),
+		Meta: map[string]string{
+			event.MetaKeyTriggerSource:          "host",
+			event.MetaKeyEventSummary:           "delivery refused",
+			event.MetaPrefix + "delivery_id":    held.id,
+			event.MetaPrefix + "lineage":        held.delivery.Lineage,
+			event.MetaPrefix + "target_agent":   string(held.delivery.Target.AgentID),
+			event.MetaPrefix + "target_session": string(held.delivery.Target.SessionID),
+			event.MetaPrefix + "content_bytes":  strconv.Itoa(len(held.delivery.Content)),
+		},
+	}); err != nil {
+		assemblyWarn("tagent: the refusal of the held delivery %s left no fact: %v", held.id, err)
 	}
 }
 
