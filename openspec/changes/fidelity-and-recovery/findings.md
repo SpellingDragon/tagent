@@ -252,3 +252,107 @@ G5 两半落地：①待审批投递跨重启恢复——`pendingDeliveries` 每
 ## 白名单
 
 全部改动在白名单内：host.go、tests/integration/host/delivery_recovery_test.go、openspec/changes/fidelity-and-recovery/**、docs/api/**。
+
+# W3 findings — 4.1 G7 历史恢复与预算解耦（单 4.1）
+
+## 结论
+
+MaxTokens 三身份按 Q2 裁定拆开落地：①注册门删除（`facts.go` attachDeclaredReplay 不再以 MaxTokens<=0 拒注册投影、`request.go` attachReplayAt 不再拒零窗口、`run.go` seedReplay 不再跳过零窗口）；②fold 阈值与呈现预算各用各的——fold 侧零窗口用配置缺省窗口兜底（`run.go` restoreFoldForm：`defaultFoldWindowTokens = 32000`），呈现侧零预算=不限预算（`request.go` projectionBudget：预算从材料全量测得 +1 token 余量，同一 AssembleBudgetPrefix 装配通道，不降级不溢出）；③max_tokens=0 与 32000 恢复路径形态收敛。症状（max_tokens=0 落盘事实重启后请求无旧历史）红→绿。
+
+## 红证（先于修复，evidence/4-1-history-restore-red.txt）
+
+`go test ./tests/integration/host -run TestHistoryRestoresWithoutBudget -count=1` 修复前：
+- `history_restores_without_budget`：`the request carries no restored history ... absent from the wire, which carried 1 messages`；
+- `presentation_is_unlimited_at_zero`：`tail marker absent ... wire carries 38 chars`；
+- `budget_window_still_folds_and_shapes`：修复前即绿（预算窗口折叠面未受损，作防回退锚）。
+
+## 实现要点（五处，均白名单内）
+
+- `facts.go` attachDeclaredReplay：删注册门（`window.MaxTokens <= 0 → attachNoticeFeed return`），零窗口会话与预算会话同样注册 mapped 序列；注释改写为三身份陈述。
+- `request.go` attachReplayAt：删 `MaxTokens<=0` 一票否决（保留 nil projection 拒绝）；AttachReplay/attachReplayAt doc 随语义更新。
+- `run.go` seedReplay：删 `seed.window.MaxTokens <= 0 → continue`，恢复读取与预算解耦。
+- `run.go` restoreFoldForm：`measured.MaxTokens <= 0 → defaultFoldWindowTokens (32000)`，fold 阈值（VolumeThresholdBytes）由缺省窗口兜底，活/恢复折叠共用一把尺。
+- `request.go` projectedSegment/projectionBudget（新 helper）：`MaxTokens>0` 照旧按预算呈现（预算照旧影响呈现=负锚）；零窗口预算=投影材料全量（含 RecoveryHint、每条 entry 的 kept original 取大）/BudgetCharsPerToken+1，走同一 AssembleBudgetPrefix，Full 形态呈现不设限。
+
+## 三处旧假设测试期望更新（申报，非验收面缩水）
+
+Q2「无预算=注册投影」直接后果，双面互斥（no fact reaches the model from two faces）下历史从 transcript 面迁至投影面：
+- `event_integrity_test.go` runNoticeInputWithoutProjection 状态表：三态 projection 期望 false→true，防注册门回退锚（continuationSingleCopy 单份断言仍过）。
+- `mapped_sequence_and_environment_block_test.go` TestProjectionAbsentKeepsTheTranscript：transcript 4 条→0 条（one face per fact），第二请求 3 条映射消息逐条断言（carried==1、无环境块断言保留）；对偶 TestProjectionCarriesTheCommittedSequence 不动仍绿。
+- 父 doc bullets 改为现状契约陈述。
+函数名保留（无外部引用，1.2 先例）。
+
+## 三锚与绿证（可复跑）
+
+- 红→绿锚：`go test ./tests/integration/host -run HistoryRestores -count=1` → 3 子测 PASS（重启后请求含 turn-one input/answer；159753-char 巨回合全文呈现；32000 窗口 1 synthetic+ticket+尾切）。
+- 负锚：`budget_window_still_folds_and_shapes`（max_tokens=32000 压缩照旧生效：synthetic>0、probe 请求含 "[ticket"、尾 marker 被切）+ `presentation_is_unlimited_at_zero`（max_tokens=0 呈现不设限：全文、无 "[ticket"）。
+- 消费者锚：`tagent.Boot(configPath)`（max_tokens=0 装配）→ `Host.Invoke` 请求含旧历史（scriptedProvider servedRequests 读 wire 形态）。
+- 门禁：`go test ./tests/integration/host -run 'HistoryRestores|RequestFidelity' -count=3` → 9×PASS（RequestFidelity 三场景 + ProtocolGate 400 门同跑）；`go test ./tests/integration/host -run TestEventIntegrityTaskContinuation -count=1` → 10 子测 PASS；host/runtime/memory 回归全 ok；`go build ./...`、`go vet ./...` 干净；comment_policy 0 finding；gen_godoc 再生成仅 docs/api/github_com__SpellingDragon__tagent.md 变动；主仓 dotted-refs 绿（worktree `.git` 为文件时假红，findings 先例）。
+
+## 回归红待裁（白名单外，未触碰、未勾 4.1）
+
+clone 级全量回归唯一红：`tests/integration/execution/TestReceiptAndBackgroundStaySeparate`（第二 invocation 断言 8 条 ledger 含 2 条 "ok" admission receipts、settled body 不以 tool 角色）。归因硬证：**HEAD 纯净树 da2c8d5（零本单改动）把 decl 改 `MaxTokens: 32000` 同测同红、失败形态逐字节一致**（6 条：turn-1、assistant call turn、tool bg-fast/bg-slow、done-a、turn-2）——该断言钉的是 transcript 面形态（旧「无预算=不注册投影」专属路径），与投影面冻结契约天然冲突：
+- `runtime/agent/request_assembly.go` RoleOf 契约原文「a replayed settled fact is history replayed as it stood, so it renders under the tool role its result fact answered a call with」——恢复历史渲染 tool 角色是冻结契约（request_fidelity 的 call-result pairing 负锚同向）；
+- admission receipt（"ok"）产生于 `runtime/agent/loop.go` admissionText（内存 wire 确认），非提交事实（record 只提交 settled body），投影面无从恢复。
+
+Q2 删除注册门后无预算会话形态必然收敛到预算会话形态（派单「设 32000 后恢复」恢复的正是投影面形态）。处置多解且代价大，**按白名单与验收面红线停止待裁**：
+- (a) 推荐：扩白名单，把该测试 requests[2] 断言随 RoleOf 契约迁移为投影面形态（receipt 断言保留在 in-flight 面 requests[1]，该面修复后仍绿）；
+- (b) admission receipt 落为提交事实并入投影（需动 runtime/agent/loop.go 与事实链语义，与「receipt 是 admission 确认非历史事实」设计冲突，G2 键语义风险）；
+- (c) 维持现状留后续单随裁决处置。
+
+## 自行决策与已知边界（申报）
+
+- projectionBudget 零预算测法=材料全量/4+1 token：经同一装配通道保 Full 形态、防 1-token 边界误降级；未动 AssembleBudgetPrefix 冻结语义（budget<1 → ErrBudgetInvalid 不变）。
+- live 侧折叠在 max_tokens=0 下仍不挂载/不触发（tools.go 挂载门、age_fold.go 零阈值、SessionFolds 冻结红线，均白名单外）；活/恢复折叠在 0 下不对称（restore 用 32000 兜底、live 永不折）——已知边界，非本单缺陷面。
+- `api/config/config.go` MaxTokens 文档过期未改（白名单外）；委派 refs 预算零值语义独立不在 G7 呈现面。
+- G2 键语义（SameFact）与 2.3 零值回填未触碰。
+
+## 白名单
+
+改动：facts.go、run.go、request.go、tests/integration/host/{history_restore_budget_test,event_integrity_test,mapped_sequence_and_environment_block_test}.go、openspec/changes/fidelity-and-recovery/**、docs/api/**。tests/integration/execution/** 未触碰（归因实验仅在 /tmp worktree 副本）。
+
+# 4.2 + 4.3（G8 向量候选完整检索 + G9 完整请求预算，memory 簇合单）
+
+## 结论
+
+G8：vectorLeg 不再按 recent 预截断检索候选——候选完整读、完整打分排序后才按 `vector_top_k` 取最佳命中。G9：呈现决定改**条件重用**（事实基准不变且视图放得下才复用），预算收缩→瞬时降级（决策与 settle fact 不动），事实变化→重算并替换决策；整请求（含 noticeCard、recovery hint）全程硬约束 `≤ budget × 4` 字节。
+
+## 红证（先于修复，症状逐字）
+
+- G8 `go test ./memory/search -run '^TestVectorCandidateCompleteness$'` 修复前：`vector_top_k=1 answered []`（=proposal G8 行「vector_top_k=1 后零命中」）。
+- G9 `go test ./memory/replay -run '^TestRequestBudgetEnforced$'` 修复前三子测红：`the request carried 200 bytes under a 4-byte budget`（=G9 行「200 字节内容在预算缩至 4 字节后仍完整保留」）、`second assembly = "yyy…" want … not the stale preview`（无条件重用 stale preview）、`the request carried 302 bytes under an 80-byte budget`（noticeCard 越预算）。修后四子测全 PASS。
+
+## 实现要点
+
+- `memory/search/store_searcher.go` vectorLeg：`opts.Limit = 0`（完整读候选，去掉读侧按 (Timestamp,Key) 的页界预截断），`vector_top_k` 改为打分排序后截取 `out = out[:s.vectorTopK]`；语义从「最近 n 条里打分」变为「全候选打分后取最佳 n」。
+- `memory/replay/replay_budget.go`：
+  - 新增 `settled map[event.EventID]string`：决策绑定时的事实原文基准（recordLocked 绑定、Append 补绑、replaceLocked 重绑），区分「预算变化」与「事实变化」；
+  - 条件复用三分支：基准不变且 `len(view) <= room` → 复用 recorded view；基准不变放不下 → `belowForm(decision.Mode)` 瞬时降级（`settleNone`，决策/settle fact 不动，预算回升即复用原视图）；基准不符 → 全形态重算（`settleReplace`，覆盖决策 + settle 事实按身份去重落地）；
+  - 硬约束：装配全程 `Σ len(Content) ≤ budget*budgetCharsPerToken`——recovery hint 经 `cutBytes` 收缩到 limit、noticeCard 收缩到剩余 room（字节真界、rune 安全），其余形态放不下即 skip；
+  - 形态链抽为 `presentWithin`（full→ticket→summary→card，card 仅 TypeFeedback，room>0 必产出）。
+
+## 自行决策与已知边界（申报）
+
+- 「top_k=0 拒绝」负锚歧义：既有语义 0=腿不截断（config「0 takes the runtime default」、既有测试钉零调谐=无界），负调谐才具名拒绝 `ErrRetrievalTuning`。负锚按既有语义覆盖三者：空查询 `ErrQueryTextMissing`、负调谐 `ErrRetrievalTuning`、top_k=0 无界不截断。
+- 瞬时降级不覆盖决策：预算收缩不改写 recorded decision 与 settle fact（保住「a recorded preview is never promoted back to the full text」，且多预算消费者并存互不棘轮）；只有事实变化才替换决策。
+- noticeCard 在 room≤0（预算一字节不剩）时跳过：硬约束赢于「通知不丢弃」的未定义角。
+- 事实变化测试用白盒接缝（直改 `projection.originals`）表达 fact 层替换原文；card 形态决策 Preview=标准 300 界 card、展示=收缩到 room 的瞬时视图。
+
+## R23 适配（骨架断言改写，验收意图保留）
+
+`TestStoreSearcherHonoursRetrievalTuning`：`vectorLimit != 3`（钉被修缺陷机制=读侧截断）→ `vectorLimit != 0`（读侧无界、打分后截取）；向量 fixture 改递减余弦使 top-3=最旧三候选；`len(result.Refs) == 3` 冻结断言不动。
+
+## 三锚与绿证（可复跑）
+
+- G8 正锚：`go test ./memory/search -run '^TestVectorCandidateCompleteness$' -count=1 -v` → 三子测 PASS（unbounded 命中旧相关记录 / top_k=1 仍命中 / 具名拒绝与零界）。
+- G8 负锚：`the_named_refusals_and_the_zero_bound_stand`（ErrQueryTextMissing、ErrRetrievalTuning、top_k=0 无界）PASS。
+- G8 消费者锚：`read.go:96 supply.searcher = search.NewStoreSearcher(...)` → `StoreSearcher.Search`（vectorLeg 在内，生产读取面）；`go test ./memory/... -run 'Vector' -count=3` 全 ok。
+- G9 正锚：`go test ./memory/replay -run '^TestRequestBudgetEnforced$' -count=1 -v` → 四子测 PASS（200→4 字节真缩减且预算恢复复用原视图 / 事实变化重算 / 整请求含 noticeCard 与 hint ≤预算 / 0 预算具名拒绝）。
+- G9 负锚：`a_non-positive_budget_is_refused_by_name`（`ErrBudgetInvalid`）PASS。
+- G9 消费者锚：正式入口 `request.go:701 projectedSegment → projection.AssembleBudgetPrefix`（Boot→Invoke 真实请求）；`go test ./tests/integration/host -run 'Budget|Projection'` → `TestRequestCarriesProjectedBudget`、`TestProjectionAssemblyServesTheThreeUses`、`TestProjectionCarriesTheCommittedSequence` 全 PASS。
+- 定向：`go test ./memory/... ./tests/integration/host -run 'Vector|Budget|FactFidelity' -count=3` → 全 ok。
+- 回归：`go test ./memory/... ./tests/... -count=1` → memory 簇 + tests/integration/history 全 ok；`go build ./...`、`go vet ./...` 干净；`bash scripts/lint.sh` → `lint: ok`（comment_policy 0 findings、gen_godoc 一致）。
+
+## 白名单
+
+全部改动在白名单内：memory/search/**、memory/replay/**、openspec/changes/fidelity-and-recovery/**、docs/api/**。

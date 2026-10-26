@@ -537,15 +537,22 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry)
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error)
     AssembleBudget packs the projection into one agent request of the given
     token budget and returns the entries the request is assembled from, recovery
-    hint first when one applies. A recorded decision is followed unconditionally
-    — the view a replay reproduces never drifts with the remaining budget —
-    while an unrecorded entry degrades from the full text to a ticket and
-    then to the summary until the budget is met, settling on the decision it
-    recorded as one replay-settle fact. An entry that fits none of them is
-    skipped without a record and without a settle fact, so a later assembly
-    under a larger budget can still present it in full — except a notice entry,
-    which the budget may shorten to its identity card but never drop: a notice
-    the model never read is an event the model never saw arrive.
+    hint first when one applies. A recorded decision is followed while the
+    fact it settled over is unchanged and its view fits the budget — the view a
+    replay reproduces never drifts with the remaining budget. A budget too small
+    for the recorded view degrades below it for that assembly alone, leaving the
+    recorded decision and its settle fact as they stand; a fact that changed
+    under the decision recomputes the presentation over the changed fact and
+    replaces the decision. An entry without a recorded decision degrades from
+    the full text to a ticket and then to the summary until the budget is met,
+    settling on the decision it records as one replay-settle fact. The assembled
+    request never runs past the budget it names: every entry it carries, the
+    recovery hint and the notice card included, is cut to the room that remains.
+    An entry that fits none of them is skipped without a record and without a
+    settle fact, so a later assembly under a larger budget can still present
+    it in full — except a notice entry, which the budget may shorten to its
+    identity card but never drop: a notice the model never read is an event the
+    model never saw arrive.
 
     The source facts are read and never written: the assembly files settle facts
     on the projection's own settle account, so the fact chain it replayed is

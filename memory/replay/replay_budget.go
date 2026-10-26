@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -75,6 +76,7 @@ type ReplayProjection struct {
 	seen      map[event.EventID]struct{}
 	originals map[event.EventID]string
 	decisions map[event.EventID]PresentationDecision
+	settled   map[event.EventID]string
 	consumed  map[event.EventID]struct{}
 	fold      *CompactionFact
 	settles   []ReplaySettle
@@ -88,6 +90,7 @@ func NewReplayProjection() *ReplayProjection {
 		seen:      map[event.EventID]struct{}{},
 		originals: map[event.EventID]string{},
 		decisions: map[event.EventID]PresentationDecision{},
+		settled:   map[event.EventID]string{},
 		consumed:  map[event.EventID]struct{}{},
 	}
 }
@@ -107,6 +110,9 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 		p.seen[entry.Key] = struct{}{}
 		p.originals[entry.Key] = entry.Content
 		if decision, recorded := p.decisions[entry.Key]; recorded {
+			if _, bound := p.settled[entry.Key]; !bound {
+				p.settled[entry.Key] = entry.Content
+			}
 			entry.Content = p.viewOf(decision, entry)
 		}
 		if entry.Type == event.TypeThinkingPlan {
@@ -118,15 +124,21 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 
 // AssembleBudget packs the projection into one agent request of the given token
 // budget and returns the entries the request is assembled from, recovery hint
-// first when one applies. A recorded decision is followed unconditionally — the
-// view a replay reproduces never drifts with the remaining budget — while an
-// unrecorded entry degrades from the full text to a ticket and then to the
-// summary until the budget is met, settling on the decision it recorded as one
-// replay-settle fact. An entry that fits none of them is skipped without a
-// record and without a settle fact, so a later assembly under a larger budget
-// can still present it in full — except a notice entry, which the budget may
-// shorten to its identity card but never drop: a notice the model never read is
-// an event the model never saw arrive.
+// first when one applies. A recorded decision is followed while the fact it
+// settled over is unchanged and its view fits the budget — the view a replay
+// reproduces never drifts with the remaining budget. A budget too small for
+// the recorded view degrades below it for that assembly alone, leaving the
+// recorded decision and its settle fact as they stand; a fact that changed under
+// the decision recomputes the presentation over the changed fact and replaces
+// the decision. An entry without a recorded decision degrades from the full text
+// to a ticket and then to the summary until the budget is met, settling on the
+// decision it records as one replay-settle fact. The assembled request never
+// runs past the budget it names: every entry it carries, the recovery hint and
+// the notice card included, is cut to the room that remains. An entry that fits
+// none of them is skipped without a record and without a settle fact, so a later
+// assembly under a larger budget can still present it in full — except a notice
+// entry, which the budget may shorten to its identity card but never drop: a
+// notice the model never read is an event the model never saw arrive.
 //
 // The source facts are read and never written: the assembly files settle facts
 // on the projection's own settle account, so the fact chain it replayed is
@@ -151,7 +163,8 @@ func (p *ReplayProjection) AssembleBudgetPrefix(ctx context.Context, budget, pre
 }
 
 // assembleBudgetLocked runs the assembly over the leading prefix of the entries
-// under the recorded decisions and the remaining budget.
+// under the recorded decisions, the facts those decisions settled over and the
+// remaining budget.
 func (p *ReplayProjection) assembleBudgetLocked(budget, prefix int) []ProjectionEntry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -164,64 +177,41 @@ func (p *ReplayProjection) assembleBudgetLocked(budget, prefix int) []Projection
 	out := make([]ProjectionEntry, 0, len(entries)+1)
 	if p.recovery != nil {
 		hint := *p.recovery
+		hint.Content = cutBytes(hint.Content, limit)
 		out = append(out, hint)
 		used += len(hint.Content)
 	}
 	for _, entry := range entries {
+		original := p.originalOf(entry)
+		room := limit - used
 		if entry.Key != "" {
 			if decision, recorded := p.decisions[entry.Key]; recorded {
-				view := p.viewOf(decision, entry)
-				shown := entry
-				shown.Content = view
-				out = append(out, shown)
-				used += len(view)
+				if p.settledOnLocked(entry.Key, original) {
+					view := p.viewOf(decision, entry)
+					if len(view) <= room {
+						shown := entry
+						shown.Content = view
+						out = append(out, shown)
+						used += len(view)
+						continue
+					}
+					if shown, ok := p.presentWithin(entry, original, room, belowForm(decision.Mode), settleNone); ok {
+						out = append(out, shown)
+						used += len(shown.Content)
+					}
+					continue
+				}
+				if shown, ok := p.presentWithin(entry, original, room, formFull, settleReplace); ok {
+					out = append(out, shown)
+					used += len(shown.Content)
+				}
 				continue
 			}
 		}
-		original := p.originalOf(entry)
-		if used+len(original) <= limit {
-			if entry.Key != "" {
-				p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationFull})
-			}
-			shown := entry
-			shown.Content = original
+		if shown, ok := p.presentWithin(entry, original, room, formFull, settleRecord); ok {
 			out = append(out, shown)
-			used += len(original)
-			continue
+			used += len(shown.Content)
 		}
-		preview := boundedText(original, ticketPreviewBytes)
-		ticket := preview + "\n" + ticketText(entry.Key)
-		if used+len(ticket) <= limit {
-			if entry.Key != "" {
-				p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationTicket, Preview: preview})
-			}
-			shown := entry
-			shown.Content = ticket
-			out = append(out, shown)
-			used += len(ticket)
-			continue
-		}
-		if used+len(entry.Summary) <= limit {
-			if entry.Key != "" {
-				p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationSummary, Preview: entry.Summary})
-			}
-			shown := entry
-			shown.Content = entry.Summary
-			out = append(out, shown)
-			used += len(entry.Summary)
-			continue
-		}
-		if entry.Type != event.TypeFeedback {
-			continue
-		}
-		card := noticeCard(entry, original)
-		if entry.Key != "" {
-			p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationSummary, Preview: card})
-		}
-		shown := entry
-		shown.Content = card
-		out = append(out, shown)
-		used += len(card)
 	}
 	return out
 }
@@ -271,14 +261,160 @@ func (p *ReplayProjection) recordLocked(key event.EventID, decision Presentation
 		return
 	}
 	p.decisions[key] = decision
+	p.bindSettledLocked(key, false)
+	p.landSettleLocked(decision)
+	p.reshapeLocked(key, decision)
+}
+
+// replaceLocked replaces the recorded decision of one entry with the decision
+// its changed fact now settles on and lands that decision's settle fact: the
+// fact baseline is rebound to the changed fact, and a settle fact the same
+// decision already landed is not landed twice.
+func (p *ReplayProjection) replaceLocked(key event.EventID, decision PresentationDecision) {
+	if key == "" {
+		return
+	}
+	p.decisions[key] = decision
+	p.bindSettledLocked(key, true)
+	p.landSettleLocked(decision)
+	p.reshapeLocked(key, decision)
+}
+
+// landSettleLocked files the settle fact of one decision, skipping the fact a
+// decision with the same identity already landed.
+func (p *ReplayProjection) landSettleLocked(decision PresentationDecision) {
 	settle := ReplaySettleFor(decision)
+	for _, landed := range p.settles {
+		if landed.ID == settle.ID {
+			return
+		}
+	}
 	settle.At = time.Now().UTC()
 	p.settles = append(p.settles, settle)
+}
+
+// reshapeLocked rewrites the model view of the entries one key holds to the view
+// the decision describes, leaving the kept original untouched.
+func (p *ReplayProjection) reshapeLocked(key event.EventID, decision PresentationDecision) {
 	for i, entry := range p.entries {
 		if entry.Key == key {
 			p.entries[i].Content = p.viewOf(decision, entry)
 		}
 	}
+}
+
+// bindSettledLocked binds the fact baseline a decision settles over: the kept
+// original at the moment the decision was taken, so a later assembly can tell a
+// changed fact from a changed budget. A rebinding replaces the baseline of a
+// decision recomputed over a changed fact.
+func (p *ReplayProjection) bindSettledLocked(key event.EventID, rebind bool) {
+	if !rebind {
+		if _, bound := p.settled[key]; bound {
+			return
+		}
+	}
+	if original, kept := p.originals[key]; kept {
+		p.settled[key] = original
+	}
+}
+
+// settledOnLocked reports whether the fact a recorded decision settled over is
+// still the fact the entry carries: only a changed fact recomputes a recorded
+// presentation, never a changed budget.
+func (p *ReplayProjection) settledOnLocked(key event.EventID, original string) bool {
+	baseline, bound := p.settled[key]
+	if !bound {
+		return true
+	}
+	return baseline == original
+}
+
+// settleAction names what a presentation settles on once one fits the room:
+// recording the first decision of an entry, replacing the decision a changed
+// fact invalidated, or settling nothing for a degraded replay of a decision that
+// stands.
+type settleAction int
+
+const (
+	settleNone settleAction = iota
+	settleRecord
+	settleReplace
+)
+
+// presentationForm names one shape an entry is presented in, ordered from the
+// fullest to the shortest: the full text, the ticket, the stored summary and —
+// for a notice only — the identity card.
+type presentationForm int
+
+const (
+	formFull presentationForm = iota
+	formTicket
+	formSummary
+	formCard
+)
+
+// belowForm returns the form one step below a recorded presentation, so a
+// degraded replay re-presents below the decision it degraded from and never at
+// or above it.
+func belowForm(mode PresentationMode) presentationForm {
+	switch mode {
+	case PresentationFull:
+		return formTicket
+	case PresentationTicket:
+		return formSummary
+	default:
+		return formCard
+	}
+}
+
+// presentWithin presents the entry at the first form from the one named that
+// fits the room left in the budget, settling the decision it presents under
+// record. A notice card is the one form that is cut to the room instead of
+// skipped when it does not fit: a notice the model never read is an event the
+// model never saw arrive, and cutting it keeps the assembled request inside the
+// budget without dropping the arrival.
+func (p *ReplayProjection) presentWithin(entry ProjectionEntry, original string, room int, from presentationForm, record settleAction) (ProjectionEntry, bool) {
+	for form := from; form <= formCard; form++ {
+		decision := PresentationDecision{Key: entry.Key}
+		content := original
+		switch form {
+		case formFull:
+			decision.Mode = PresentationFull
+		case formTicket:
+			preview := boundedText(original, ticketPreviewBytes)
+			decision.Mode = PresentationTicket
+			decision.Preview = preview
+			content = preview + "\n" + ticketText(entry.Key)
+		case formSummary:
+			decision.Mode = PresentationSummary
+			decision.Preview = entry.Summary
+			content = entry.Summary
+		case formCard:
+			if entry.Type != event.TypeFeedback {
+				continue
+			}
+			card := noticeCard(entry, original)
+			decision.Mode = PresentationSummary
+			decision.Preview = card
+			if room <= 0 {
+				return ProjectionEntry{}, false
+			}
+			content = cutBytes(card, room)
+		}
+		if form != formCard && len(content) > room {
+			continue
+		}
+		switch record {
+		case settleRecord:
+			p.recordLocked(entry.Key, decision)
+		case settleReplace:
+			p.replaceLocked(entry.Key, decision)
+		}
+		shown := entry
+		shown.Content = content
+		return shown, true
+	}
+	return ProjectionEntry{}, false
 }
 
 // viewOf renders the model view one decision describes: the full original only
@@ -325,6 +461,21 @@ func boundedText(text string, n int) string {
 		return text
 	}
 	return string(runes[:n]) + "…"
+}
+
+// cutBytes bounds text to n bytes on a rune boundary without a cut mark, so the
+// cut result never runs past the hard byte bound it is cut for.
+func cutBytes(text string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(text) <= n {
+		return text
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	return text[:n]
 }
 
 // seedConsumed marks one consumed key as reseeded, so the consumed state a

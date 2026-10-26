@@ -173,9 +173,13 @@ func (s *StoreSearcher) keywordLeg(ctx context.Context, q Query, partitions []in
 
 // vectorLeg returns the vector leg of q: the references of the authorized
 // partition set ranked by the cosine of their embedding against the embedding
-// of the query text. A searcher with no seam or no embedder, and an embedder
-// that fails or returns no vector, all answer an empty leg, which is the
-// keyword-only fallback rather than a failed retrieval.
+// of the query text. The candidates are read whole and scored whole, so the
+// declared vector bound cuts the best hits after the scoring instead of the
+// most recent candidates before it — a bound of one still recalls the old
+// relevant record an embedding places near the query, and never just the newest
+// candidate. A searcher with no seam or no embedder, and an embedder that fails
+// or returns no vector, all answer an empty leg, which is the keyword-only
+// fallback rather than a failed retrieval.
 func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int, strategy Strategy) ([]ledger.OriginalRef, error) {
 	if strategy == StrategyKeywordOnly || s.vectors == nil || s.embedder == nil {
 		return nil, nil
@@ -186,7 +190,7 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 	}
 	opts := q.QueryOptions()
 	opts.PartitionIDs = partitions
-	opts.Limit = s.vectorTopK
+	opts.Limit = 0
 	opts.Keyword = ""
 	refs, err := s.source.QueryEvents(ctx, opts)
 	if err != nil {
@@ -223,6 +227,9 @@ func (s *StoreSearcher) vectorLeg(ctx context.Context, q Query, partitions []int
 	out := make([]ledger.OriginalRef, 0, len(hits))
 	for _, hit := range hits {
 		out = append(out, hit.ref)
+	}
+	if s.vectorTopK > 0 && len(out) > s.vectorTopK {
+		out = out[:s.vectorTopK]
 	}
 	return out, nil
 }
