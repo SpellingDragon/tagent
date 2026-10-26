@@ -97,3 +97,39 @@
 
 - 本单 4 项 comment_policy 违规已归零（TestRequestFidelity/ProtocolGate 文档压"一行意图+bullet+索引"、smoke_test.go free-standing 语义并入 t.Logf）。
 - 仍红 3 项**全属 817ab97（单 B）遗留**：facts.go:165（禁碰面）、fact_fidelity_test.go:317/359（B 的 2.2 测试）——待 B 修或上级裁决，本单不碰。
+
+# W1 findings — 2.1 G4 投影会话索引作用域（单 2.1）
+
+## 结论
+
+replays 索引键由 `event.SessionID` 单键改完整地址 `event.Address{AgentID, SessionID}`，两层槽设计：**scoped 生产槽**（生产路径按完整地址注册）+ **legacy 无 agent 槽**（AttachReplay 冻结缝保持原语义）。`requestBoundary` 按 `{boundary.Agent, boundary.Chain.SessionID}` 经 `replaySlotLocked`（exact → legacy fallback）查找。红证先行 → 修后绿 → 负锚还原单键复红同症状，闭环。
+
+## 设计约束（冻结面决定两层键，而非严格分区键）
+
+- `AttachReplay` 签名被骨架断言冻结，且 6 个白名单外冻结测试以任意 PartitionID 注册后经 run.Invoke 消费（execution/cross_session_scoping、learning/formal_request_snapshot:75、history/age_band_request、history/projection_replay_and_budget:391,426、acceptance/scenario_age_fixtures:186、host/request_boundary:195,369）→ 严格按 PartitionIDFromName 匹配会打破它们 → AttachReplay 语义不动（legacy 槽，PartitionID 继续被忽略）。
+- `RequestChain{SessionID}` 由 loop.go 构造（PartitionID 恒 0；loop.go 禁碰）→ 查找侧只能从 `boundary.Agent` 推导作用域。
+- 会话级读面（ReplayEntries/noticeProjection×2/age_fold ProjectionOf）经 `replayOfSessionLocked`：legacy 优先 → 多 scoped 按 AgentID 排序取首个（确定性降级，SessionFolds 接口签名未动，骨架断言合规）。
+- 事实地址派生 `replayAddressOf(evt) = {agentOf(evt), sessionOf(evt)}`：与 transcript history 的地址键同源。
+
+## 机械波及申报（facts.go/age_fold.go；run.go 只取索引键 hunks）
+
+- facts.go 6 处纯索引键适配：recordMapped 槽解析/回写、attachDeclaredReplay（addr 派生 + held=scoped||seam 判定 + attachScopedReplay）、ReplayEntries、noticeProjection.NoticeBoundary/NoticesFrom、CommitHistory mapped 判定。**facts.go:310 `if window.MaxTokens <= 0` 门逐字未动**（G7/4.1 归属，本单未碰）。
+- age_fold.go 1 处：ProjectionOf 改会话级读面（一行）。
+- run.go 只改 replays 字段/初始化/seedReplay 索引键（seeds/order 键化 + attachScopedReplay 注册）；run.go 其余未提交 hunks（InjectEvent/CommitToSession backfill、seedFact、doc）属并发在途单，git add 时逐 hunk 剔除，未入本单提交。
+- facts.go 未提交 hunk（persistFact 注释删除）同样属并发在途，未入本单提交。
+
+## 归因剥离实验（三处确定性红证非本单所致）
+
+全量 `go test ./tests/... -count=1` 红 3：capabilities TestFormalLoopEnforcesPolicy（presentations 5 条 want 4）、history TestEventIntegrityRestoreUse/next_request_uses_restored_material（message 1 = assistant "looking" want tool）、inspection TestObservationReachDiagnostics（观察 thinking_plan 不在四类冻结类型）。**剥离**：还原本单 4 文件（request.go/run.go/facts.go/age_fold.go）至 HEAD、仅留并发在途改动（runtime/agent/loop.go +29、memory/event_body.go SameFact 语义、tool/exec/*）→ 三测逐字同红；HEAD 纯净 clone（/tmp/tagent-head-check@5f78bdf）三测绿 → 红来自并发在途改动，非本单索引键改动（剥离后恢复本单文件，红不变）。execution 包全量并行一次 480s FAIL / 一次 24s ok（单跑 21s ok）→ 负载型 flaky，本次全量绿。
+
+## lint
+
+- 本单 3 项 comment policy 违规（agent_session_isolation_test.go：doc-not-brief/doc-not-name-prefixed/test-doc-not-one-sentence）已修归零。
+- 残余 6 项全属 tool/exec/exec_test.go（free-standing ×4 + test-doc-not-one-sentence ×2，并发 3.3 在途，白名单外勿碰）。
+
+## 三锚与绿证（可复跑）
+
+- 正锚：`go test ./tests/integration/host -run 'TestAgentSessionIsolation|TestRequestFidelity' -count=3` → TestAgentSessionIsolation 3×PASS（requests_stay_scoped + detector_flags_foreign_marker）、TestRequestFidelity 3×PASS（tool_call_then_next_turn/request_after_compression/request_after_cold_boot）、TestRequestFidelityProtocolGate 3×PASS；ok 1.868s。
+- 负锚：replayAddressOf 临时还原 `event.Address{SessionID: sessionOf(evt)}` 单键 → `requests_stay_scoped` 红（`request 2 (model model-beta) carries the foreign markers [alpha-history-marker-A11 alpha-answer-marker]`）→ 恢复后绿。
+- 消费者锚：Boot→Invoke 真实请求（bootIntegrityHostWithAgents + driveIntegrityTurn→host.Invoke，scriptedProvider servedRequests 读回 wire 形态；标记从 provider 真实收到的请求文本读出，非测试手工接线）。
+- 回归：`go test ./tests/integration/host ./memory/... ./runtime/... -count=1` → 9 包全 ok（host 26.8s）；`go build ./...`、`go vet ./...` 干净；全量 `go test ./tests/... -count=1` 除上述 3 处并发单红证外包 ok（acceptance/config/evolution/execution/host/journey/learning/state）。

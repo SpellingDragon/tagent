@@ -239,7 +239,7 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	held, carried := r.replays[sessionOf(evt)]
+	slot, held, carried := r.replaySlotLocked(replayAddressOf(evt))
 	if !carried {
 		return
 	}
@@ -248,7 +248,7 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 		held.endedAt = evt.Key
 	}
 	held.rangeInvocation = evt.InvocationID
-	r.replays[sessionOf(evt)] = held
+	r.replays[slot] = held
 }
 
 // admitsRange reports whether one committed fact starts a range: the ready
@@ -292,12 +292,14 @@ func sessionOf(evt event.Event) event.SessionID {
 // not the declaration registered a mapped sequence. The face is one read of one
 // truth — the fact chain — and never a second input lane beside it.
 func (r *Run) attachDeclaredReplay(evt event.Event) {
-	session := sessionOf(evt)
-	if session == "" {
+	addr := replayAddressOf(evt)
+	if addr.SessionID == "" {
 		return
 	}
 	r.mu.Lock()
-	_, held := r.replays[session]
+	_, scoped := r.replays[addr]
+	_, seam := r.replays[event.Address{SessionID: addr.SessionID}]
+	held := scoped || seam
 	window := FoldWindow{}
 	if !held {
 		window = foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
@@ -311,7 +313,7 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 		r.attachNoticeFeed()
 		return
 	}
-	err := r.AttachReplay(agent.RequestChain{SessionID: session}, window, replay.NewReplayProjection())
+	err := r.attachScopedReplay(addr, window, replay.NewReplayProjection())
 	if err != nil {
 		return
 	}
@@ -326,7 +328,7 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 // request.
 func (r *Run) ReplayEntries(session event.SessionID) ([]replay.ProjectionEntry, bool) {
 	r.mu.Lock()
-	held, carried := r.replays[session]
+	held, carried := r.replayOfSessionLocked(session)
 	r.mu.Unlock()
 	if !carried {
 		return nil, false
@@ -366,7 +368,7 @@ var _ agent.NoticeFeed = noticeProjection{}
 func (p noticeProjection) NoticeBoundary(chain agent.RequestChain) (int, bool) {
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
-	held, carried := p.run.replays[chain.SessionID]
+	held, carried := p.run.replayOfSessionLocked(chain.SessionID)
 	if !carried || held.projection == nil {
 		return 0, true
 	}
@@ -387,7 +389,7 @@ func (p noticeProjection) NoticeBoundary(chain agent.RequestChain) (int, bool) {
 func (p noticeProjection) NoticesFrom(chain agent.RequestChain, prefix event.EventID, cursor int) ([]agent.NoticeView, int, bool) {
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
-	held, carried := p.run.replays[chain.SessionID]
+	held, carried := p.run.replayOfSessionLocked(chain.SessionID)
 	if !carried || held.projection == nil {
 		return p.run.noticesOfLocked(chain.SessionID, prefix, cursor)
 	}
@@ -677,7 +679,7 @@ func (r *Run) SessionHistory(addr event.Address) []model.Message {
 func (r *Run) CommitHistory(addr event.Address, msgs []model.Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, mapped := r.replays[addr.SessionID]; mapped {
+	if _, _, mapped := r.replaySlotLocked(addr); mapped {
 		return
 	}
 	r.history[addr] = append(r.history[addr], msgs...)

@@ -273,10 +273,33 @@ func (h replayEntry) endedPrefix() int {
 // every user of the partition into one transcript. A window of no tokens is
 // refused the same way: it bounds every request to an empty prefix and leaves
 // the age fold no share of a window to measure.
+// The seam carries no agent identity, so the registration is kept for every
+// user of the session it names; the chains this run commits register under the
+// full address of the agent that owns them through attachScopedReplay, so they
+// never cross agents that share a session id.
 func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projection *replay.ReplayProjection) error {
 	if chain.SessionID == "" {
 		return agent.ErrRequestChainSessionRequired
 	}
+	return r.attachReplayAt(event.Address{SessionID: chain.SessionID}, window, projection)
+}
+
+// attachScopedReplay registers the mapped sequence of one agent's session chain
+// under its full address — the agent beside its session — so a request of that
+// agent reads its own chain's material and never the chain of another agent
+// sharing the session id. A chain that names no session is refused exactly as
+// the AttachReplay seam refuses it.
+func (r *Run) attachScopedReplay(addr event.Address, window FoldWindow, projection *replay.ReplayProjection) error {
+	if addr.SessionID == "" {
+		return agent.ErrRequestChainSessionRequired
+	}
+	return r.attachReplayAt(addr, window, projection)
+}
+
+// attachReplayAt registers one mapped sequence under the address it names. A
+// registration that carries no projection, and a window of no tokens, are
+// refused exactly as the attach seams document.
+func (r *Run) attachReplayAt(addr event.Address, window FoldWindow, projection *replay.ReplayProjection) error {
 	if projection == nil {
 		return errors.New("tagent: the replay registration carries no projection")
 	}
@@ -286,8 +309,58 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
 	window = normalizeFoldWindow(window)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replays[chain.SessionID] = replayEntry{projection: projection, window: window}
+	r.replays[addr] = replayEntry{projection: projection, window: window}
 	return nil
+}
+
+// replayAddressOf reports the full address one committed fact's mapped sequence
+// registers under: the agent that owns the fact beside the session chain it
+// belongs to, the same address its transcript history is keyed by.
+func replayAddressOf(evt event.Event) event.Address {
+	return event.Address{AgentID: agentOf(evt), SessionID: sessionOf(evt)}
+}
+
+// replaySlotLocked resolves the slot one address's mapped sequence is kept in,
+// beside the registration it holds: the chain registered under the full address
+// first, and the chain a registration naming no agent — the AttachReplay seam —
+// left for every user of the session beside it. A reader that names no agent
+// resolves through replayOfSessionLocked instead. The read is taken under the
+// run lock the caller already holds.
+func (r *Run) replaySlotLocked(addr event.Address) (event.Address, replayEntry, bool) {
+	if held, carried := r.replays[addr]; carried {
+		return addr, held, true
+	}
+	legacy := event.Address{SessionID: addr.SessionID}
+	if held, carried := r.replays[legacy]; carried {
+		return legacy, held, true
+	}
+	return event.Address{}, replayEntry{}, false
+}
+
+// replayOfSessionLocked resolves the mapped sequence a reader that names only
+// the session chain reads: the chain a registration naming no agent left for
+// every user of the session first, and otherwise the chain the session
+// registered — beside several agent-scoped chains sharing one session id, the
+// first of them in agent order, deterministically. The read is taken under the
+// run lock the caller already holds.
+func (r *Run) replayOfSessionLocked(session event.SessionID) (replayEntry, bool) {
+	if session == "" {
+		return replayEntry{}, false
+	}
+	if held, carried := r.replays[event.Address{SessionID: session}]; carried {
+		return held, true
+	}
+	var agents []event.AgentID
+	for addr := range r.replays {
+		if addr.SessionID == session && addr.AgentID != "" {
+			agents = append(agents, addr.AgentID)
+		}
+	}
+	if len(agents) == 0 {
+		return replayEntry{}, false
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
+	return r.replays[event.Address{AgentID: agents[0], SessionID: session}], true
 }
 
 // normalizeFoldWindow fills the fold settings a declaration left unset: a
@@ -344,7 +417,7 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 	}
 	r.mu.Lock()
 	fixer := r.fixers[boundary.Agent]
-	sequence, registered := r.replays[boundary.Chain.SessionID]
+	_, sequence, registered := r.replaySlotLocked(event.Address{AgentID: boundary.Agent, SessionID: boundary.Chain.SessionID})
 	r.mu.Unlock()
 	assembly := requestAssembly{
 		run:         r,

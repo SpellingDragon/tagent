@@ -174,10 +174,12 @@ func (s ageFoldSessions) SessionOf(_ context.Context, id event.EventID) (event.S
 }
 
 // ProjectionOf reports the projection one session registered for replay beside
-// the window it was registered under.
+// the window it was registered under; a session whose chains several agents
+// share resolves to the chain replayOfSessionLocked names for a reader beside
+// no agent identity.
 func (s ageFoldSessions) ProjectionOf(_ context.Context, session event.SessionID) (*replay.ReplayProjection, FoldWindow, bool) {
 	s.run.mu.Lock()
-	held, carried := s.run.replays[session]
+	held, carried := s.run.replayOfSessionLocked(session)
 	s.run.mu.Unlock()
 	if !carried {
 		return nil, FoldWindow{}, false

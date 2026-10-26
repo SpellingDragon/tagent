@@ -199,7 +199,12 @@ type Run struct {
 	presented    []view.Presentation
 	snapshots    []RequestSnapshotRecord
 	fixers       map[event.AgentID]*fileFixer
-	replays      map[event.SessionID]replayEntry
+	// replays holds the mapped sequence every registered chain replays into a
+	// request, keyed by the full address — the agent beside its session — so two
+	// agents sharing a session id keep their projections apart; a registration
+	// the AttachReplay seam made names no agent and is kept under the bare
+	// session for every user of it.
+	replays map[event.Address]replayEntry
 	// ageFold folds a session's projection once its replay fills the window the
 	// declaration gave it; it is mounted on every agent that declares a window.
 	ageFold *AgeFoldPlugin
@@ -256,7 +261,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		facts:          map[event.EventID]event.Event{},
 		history:        map[event.Address][]model.Message{},
 		fixers:         map[event.AgentID]*fileFixer{},
-		replays:        map[event.SessionID]replayEntry{},
+		replays:        map[event.Address]replayEntry{},
 		landedSeq:      map[int]int64{},
 		approver:       cfg.approver,
 		policy:         cfg.policy,
@@ -1204,8 +1209,8 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		projection *replay.ReplayProjection
 		window     FoldWindow
 	}
-	seeds := map[event.SessionID]*sessionSeed{}
-	var order []event.SessionID
+	seeds := map[event.Address]*sessionSeed{}
+	var order []event.Address
 	for _, stored := range events {
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
@@ -1213,34 +1218,34 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		}
 		evt := body.Event()
 		evt.Key = stored.Key
-		session := sessionOf(evt)
-		if session == "" {
+		addr := replayAddressOf(evt)
+		if addr.SessionID == "" {
 			continue
 		}
 		entry, ok := mappedEntryOf(evt)
 		if !ok {
 			continue
 		}
-		seed, held := seeds[session]
+		seed, held := seeds[addr]
 		if !held {
 			r.mu.Lock()
 			window := foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
 			r.mu.Unlock()
 			seed = &sessionSeed{projection: replay.NewReplayProjection(), window: window}
-			seeds[session] = seed
-			order = append(order, session)
+			seeds[addr] = seed
+			order = append(order, addr)
 		}
 		seed.projection.Append(ctx, entry)
 		if err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {
 			return err
 		}
 	}
-	for _, session := range order {
-		seed := seeds[session]
+	for _, addr := range order {
+		seed := seeds[addr]
 		if seed.window.MaxTokens <= 0 {
 			continue
 		}
-		if err := r.AttachReplay(agent.RequestChain{SessionID: session}, seed.window, seed.projection); err != nil {
+		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
 			return err
 		}
 	}

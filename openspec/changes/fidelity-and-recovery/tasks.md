@@ -24,7 +24,7 @@ graph LR
 
 ## W1
 
-- [ ] 2.1 G4 作用域：replays 索引改 AgentID+SessionID 完整地址 + 跨 Agent 同名会话隔离测试 —— 前置：无（与 1.0 同文件 request.go→串行）；正锚隔离测试；负锚（还原 SessionID 单键→串历史）
+- [x] 2.1 G4 作用域：replays 索引改 AgentID+SessionID 完整地址 + 跨 Agent 同名会话隔离测试 —— 前置：无（与 1.0 同文件 request.go→串行）；正锚隔离测试；负锚（还原 SessionID 单键→串历史）
 - [x] 2.2 G2+G3 事实保真合单：EventBody 全字段；同键幂等/冲突；commit 失败→Invoke error —— 前置：无；正锚重装配全字段；负锚（同键异内容→冲突不双成功；断屏障→error 非 completed）；消费者锚=Host.Invoke 返回值
 
 ## W2
