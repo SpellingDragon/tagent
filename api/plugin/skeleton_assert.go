@@ -140,6 +140,8 @@ var (
 	_ func(Pipeline, context.Context, EnvironmentRequest) ([]string, error) = Pipeline.InjectEnvironment
 
 	_ error = ErrCallIdentityChanged
+
+	_ error = ErrObservationObligationRetained
 )
 
 // The flow declarations keep every documented field.

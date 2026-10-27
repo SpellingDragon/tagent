@@ -10,19 +10,18 @@ import (
 
 // After runs the one consuming pass over one fact whose canonical commit already
 // happened: every fact->observation face reads the fact first, then every
-// fact->view face renders it. The pass runs after the commit and never before
-// it, so a refused call and a call whose commit failed present nothing at all.
-// An observation that fails is recorded as a named gap in the returned
-// presentation and never rolls the committed fact back; a presenter that drops
-// its text drops its own view only. The pass carries no error return: a failure
-// here is a gap or a dropped view, never a reason to touch the committed fact.
+// fact->view face renders it. The pass runs after the commit and never before it,
+// so a refused call and a call whose commit failed present nothing at all, and it
+// carries no error return: a failure here is a gap or a dropped view, never a
+// reason to touch the committed fact. A fact answers one view, several, or none —
+// each view stands in the order the presenters were declared, names the presenter
+// that wrote it beside the fact it was rendered from, and a presenter that drops
+// its text drops its own view only.
 //
-// The fact enters the presentation pass once and every presenter renders it:
-// each answers its own view, the views stand in the order the presenters were
-// declared, and each view names the presenter that wrote it beside the fact it
-// was rendered from, so a fact answers one view, several, or none when the
-// pipeline carries no presenter at all — and every view it answers stays
-// traceable to its source.
+// The redline list (3 rules):
+// MUST answer an observer-only failure as a named gap and dispatch the later faces.
+// MUST report a driver failure beside ErrObservationObligationRetained, and never as a delivered observation or a log line alone.
+// MUST NOT retry, absorb or clear a driver's obligation here: the obligation stays in the driver's own account.
 //
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentation {
@@ -32,7 +31,7 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
 		err := face.impl.ObserveCommit(ctx, fact)
 		observePhase(PhaseConsume, faceObserve, Port{Reads: MaterialFact, Produces: ProductObservation}, face.name, phaseResult(err), "fact="+string(fact), started)
 		if err != nil {
-			out.Gaps = append(out.Gaps, view.ObservationGap{Plugin: face.name, Fact: fact, Err: err})
+			out.Gaps = append(out.Gaps, face.gap(fact, err))
 		}
 	}
 	for _, face := range p.presenters {

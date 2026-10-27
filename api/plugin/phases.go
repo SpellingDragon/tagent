@@ -91,12 +91,17 @@ type RiskAssessor interface {
 }
 
 // PostCommitObserver is the fact->observation port's narrow face: ObserveCommit
-// observes one fact after its canonical commit, as a read-only duty.
+// observes one fact after its canonical commit, as a read-only duty. One face
+// carries one of two duties, and the duty is read from the face itself when the
+// flow is assembled: an observer-only face reads the fact and owes nothing of it,
+// while a driver face (driverObservation) is asked by the fact to start work
+// somebody owes, such as a follow-up turn or a delivery.
 //
-// The redline list (3 rules):
+// The redline list (4 rules):
 // MUST observe a fact whose canonical commit already happened.
 // MUST NOT roll the committed fact back or re-run the work when the observation fails.
 // MUST NOT write the fact it observes.
+// MUST carry the driver duty when a failed observation leaves work owed, and keep that obligation in a durable account of its own.
 type PostCommitObserver interface {
 	ObserveCommit(ctx context.Context, id event.EventID) error
 }
@@ -198,7 +203,7 @@ type Pipeline struct {
 	risks      []served[RiskAssessor]
 	governors  []served[Governor]
 	injects    []served[EnvironmentInject]
-	observers  []served[PostCommitObserver]
+	observers  []observedFace
 	presenters []served[FinalPresenter]
 	triggers   []served[CompressTrigger]
 }
@@ -247,7 +252,10 @@ func assemble(declarations []declaration) (Pipeline, error) {
 			}
 		case Port{Reads: MaterialFact, Produces: ProductObservation}:
 			if impl, ok := element.impl.(PostCommitObserver); ok {
-				out.observers = append(out.observers, served[PostCommitObserver]{element.name, impl})
+				out.observers = append(out.observers, observedFace{
+					served: served[PostCommitObserver]{element.name, impl},
+					drives: dutyOfObserved(element.impl),
+				})
 				servedAny = true
 			}
 		case Port{Reads: MaterialFact, Produces: ProductView}:

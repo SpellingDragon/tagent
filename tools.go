@@ -108,8 +108,9 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 	if held {
 		return
 	}
-	key, err := r.commitFact(fact)
+	key, err := r.commitFactChecked(ctx, fact)
 	if err != nil || key == "" {
+		assemblyWarn("tagent: the settle of %s at %s did not commit err=%v", notice.TaskID, addr.AgentID, err)
 		return
 	}
 	pipeline, err := r.factPipeline(addr.AgentID)

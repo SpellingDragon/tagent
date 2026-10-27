@@ -190,6 +190,11 @@ var (
 	_ plugin.Instance           = (*SettleDriver)(nil)
 	_ plugin.PostCommitObserver = (*SettleDriver)(nil)
 	_ interface{ Stop() }       = (*SettleDriver)(nil)
+
+	// The settle face declares the driver duty: a fact that fires a settle leaves
+	// the follow-up turn owed in the mailbox account, so a failed observation of
+	// this face is an owed obligation rather than a missing reading.
+	_ interface{ DrivesObligation() } = (*SettleDriver)(nil)
 )
 
 // NewSettleDriver assembles the settle face over the fact lookup of one run,
@@ -221,6 +226,11 @@ func (d *SettleDriver) Name() string { return "settle-driver" }
 func (d *SettleDriver) Port() plugin.Port {
 	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
 }
+
+// DrivesObligation marks this face's duty: the observation wakes the pump, and the
+// work it woke is owed on the mailbox account, so a failed observation leaves the
+// follow-up turn owed and the account hands it to the next decision.
+func (d *SettleDriver) DrivesObligation() {}
 
 // ObserveCommit reads the fact one commit wrote and wakes the pump when the
 // fact is one the settle trigger table fires on. The observation itself starts

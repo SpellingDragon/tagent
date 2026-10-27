@@ -38,42 +38,25 @@ const (
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
-// commitFact stores one fact of this run in the ledger the post-commit
-// observation reads back, and reports the identity it committed under: an event
-// that arrives without an identity is minted one here, and the whole event is
-// kept exactly as it stands, so the observer restores the fact as it committed
+// commitFactChecked is the one commit entry of this run's facts: an event that
+// arrives without an identity is minted one here, and the whole event is kept
+// exactly as it stands, so the observer restores the fact as it committed
 // instead of reconstructing one.
-// - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive and the settled delivery all land here.
+// - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive, the settled delivery and the compression judgment all land here.
 // - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
 // - A committed fact enters the mapped sequence of its own session chain right after it lands, so every consumption of that chain assembles the sequence the commits recorded.
 //
-// The identity is empty beside a commit that did not land: a caller that reads
-// the fact back by the reported identity never reads a fact the storage tier
-// refused, and the failure is reported beside the run instead of answered as a
-// commitment. A commit whose identity already names a fact is answered as that
-// very fact when the content is the same, and refused by name when it is not:
-// one identity stands for one immutable fact, so nothing is written and no
-// second content ever both succeeds under one identity.
-func (r *Run) commitFact(evt event.Event) (event.EventID, error) {
-	key, err := r.commitFactChecked(context.Background(), evt)
-	if err != nil {
-		assemblyWarn("tagent: the fact was not committed err=%v", err)
-		return "", err
-	}
-	return key, nil
-}
-
-// commitFactChecked commits one fact into the storage tier before it enters the
-// live ledger, and reports the failure of that commit to the caller: a caller
-// told the fact committed holds a fact a later process reads back, and a caller
-// told it failed holds no live copy of it, so no path reports success over a
-// fact the tier refused. One identity names one immutable fact: a commit that
-// repeats the fact the identity already names is answered as the commitment it
-// already is — the original identity beside no second record — and a commit
-// carrying other content under that identity is refused by name before
-// anything under it moves. The judgment is the same one the storage tier
-// answers under, so the live ledger and the durable record never disagree about
-// what one identity names.
+// The failure is the caller's to observe, never a line this entry writes and
+// swallows: the identity is empty beside a commit that did not land, a caller
+// that reads the fact back by the reported identity never reads a fact the
+// storage tier refused, and a caller that can neither return nor read the
+// failure records it at its own call site. One identity names one immutable
+// fact: a commit that repeats the fact the identity already names is answered
+// as the commitment it already is — the original identity beside no second
+// record — and a commit carrying other content under that identity is refused
+// by name before anything under it moves. The judgment is the same one the
+// storage tier answers under, so the live ledger and the durable record never
+// disagree about what one identity names.
 func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
@@ -139,7 +122,7 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	if held {
 		return storedFactConflict(evt.Key, stored, body)
 	}
-	if err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {
+	if err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {
 		return err
 	}
 	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
@@ -182,9 +165,9 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 		assemblyWarn("tagent: the committed fact %s is not landed in the query table err=%v", evt.Key, err)
 	}
 	if supply.seam != nil {
-		text := body.Content
+		text := body.Message.Content
 		if text == "" {
-			text = body.Summary
+			text = body.Meta[event.MetaKeyEventSummary]
 		}
 		supply.seam.Submit(evt.Key, text)
 	}
@@ -652,33 +635,33 @@ func mailboxSeqOf(site *state.Session, notice task.Notice) (state.AcceptSeq, boo
 }
 
 // SessionHistory reports the transcript the named session accumulated across
-// the drives that already ended on it, as a copy the caller owns. The history
-// of one session never mixes with the history of another.
+// the drives that already ended on it, as a copy the caller owns.
 //
-// This ledger is the read-out face of the execution scene the run holds, not a
-// durability record: what a restarted process reads back is recovered from the
-// durable fact chain by replay, so no body snapshot is kept beside the facts.
+// The history of one session chain is one face: the mapped sequence its commits
+// record, read through the request boundary of the next invocation. This face
+// carries no second copy of it, so it answers an empty transcript for every
+// chain — a session whose material exists reads it from that sequence, and a
+// session whose commits recorded none has none to read. A reader that keeps a
+// transcript beside the sequence would present the same facts twice, once from
+// the sequence and once from the copy, and a restart would present a different
+// history than the live process, because the copy is not a durability record
+// while the sequence is replayed from the durable fact chain.
 func (r *Run) SessionHistory(addr event.Address) []model.Message {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]model.Message(nil), r.history[addr]...)
+	return nil
 }
 
-// CommitHistory appends the transcript one ended drive accumulated to the
-// history of its session, so the next invocation of the session reads the
-// range's history as it actually ended while no two invocations ever batch
-// their ready input together. A session whose chain carries a mapped sequence
-// commits no transcript here: that sequence carried every fact of the range as
-// it committed, and the range reads back from it instead of from a second
-// transcript of the same facts.
-func (r *Run) CommitHistory(addr event.Address, msgs []model.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, _, mapped := r.replaySlotLocked(addr); mapped {
-		return
-	}
-	r.history[addr] = append(r.history[addr], msgs...)
-}
+// CommitHistory is the write side of the same one face: the transcript one
+// ended drive accumulated is already carried by the mapped sequence of the
+// session — every fact of the range entered it as it committed, in commit order,
+// with the boundary the next request presents — so committing it here keeps no
+// second copy and appends nothing.
+//
+// The call is kept as the seam the loop commits an ended drive's transcript
+// through: a loop beside this face needs no branch of its own, and a run beside
+// no mapped sequence records no transcript at all, exactly as a chain whose
+// facts committed nothing has nothing to present. The history a restart reads
+// comes back from the durable fact chain by replay, never from this seam.
+func (r *Run) CommitHistory(addr event.Address, msgs []model.Message) {}
 
 // resolveFact reports the native tool message one recorded fact carries.
 func (r *Run) resolveFact(id event.EventID) (model.Message, bool) {

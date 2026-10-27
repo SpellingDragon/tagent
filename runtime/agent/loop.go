@@ -1622,7 +1622,10 @@ func observationOf(msg model.Message, callID, tool string) model.Message {
 // history of a session from and writes one ended drive's transcript back to:
 // the invocations of one session share the history the drives that already
 // ended on it committed, while each drive aggregates only its own ready input
-// beside that history and never batches with a neighbour.
+// beside that history and never batches with a neighbour. A session whose
+// transcript a mapped sequence carries needs no second face here: that
+// sequence is the one history of the session, so an implementation may answer
+// none of its own beside it.
 //
 // The redline list (3 rules):
 // MUST report the history the named session accumulated, as a copy the caller owns.

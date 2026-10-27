@@ -120,6 +120,20 @@ func servedNames[T any](faces []served[T]) []string {
 	return names
 }
 
+// observedNames spells the registered names of the fact->observation face set in
+// declared order: the set carries a duty beside every name, so it reads its own
+// shape instead of the one servedNames spells for the ports that carry none.
+func observedNames(faces []observedFace) []string {
+	if len(faces) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(faces))
+	for _, face := range faces {
+		names = append(names, face.name)
+	}
+	return names
+}
+
 // shapeOf spells the face sets one assembled flow carries.
 func shapeOf(p Pipeline) faceShape {
 	return faceShape{
@@ -127,7 +141,7 @@ func shapeOf(p Pipeline) faceShape {
 		Risks:      servedNames(p.risks),
 		Governors:  servedNames(p.governors),
 		Injects:    servedNames(p.injects),
-		Observers:  servedNames(p.observers),
+		Observers:  observedNames(p.observers),
 		Presenters: servedNames(p.presenters),
 		Triggers:   servedNames(p.triggers),
 	}

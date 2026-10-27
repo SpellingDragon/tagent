@@ -1,16 +1,21 @@
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
 //
 // The body schema one committed event carries through the segment store: the
-// canonical identity and every field the event itself carries — the light
-// fields a query filters and matches on together with the metadata projection,
-// the native payload and the lineage identifiers — and the owner, format and
-// retention policy the reference beside it is registered under. A stored body
-// is self-describing: it decodes back into the query record, the recall
-// reference and the very event that committed, so a committed body becomes
-// queryable and readable without a second registry and a fact restored across
-// a restart keeps every field it committed with. The original text behind the
-// event stays in the original store and is read byte for byte through the
-// scoped path.
+// canonical identity and every field the event itself carries — the metadata
+// projection, the native payload and the lineage identifiers — and the owner,
+// format and retention policy the reference beside it is registered under. The
+// light fields a query filters and matches on are not stored beside those: the
+// summary is read out of the metadata projection and the content out of the
+// native payload when the record is built, so no field of a committed event is
+// held twice and no second copy of it can drift from the event it names. A
+// stored body is self-describing: it decodes back into the query record, the
+// recall reference and the very event that committed, so a committed body
+// becomes queryable and readable without a second registry and a fact restored
+// across a restart keeps every field it committed with. One body format exists:
+// bytes an earlier writer committed under another identity field carry no
+// identity under this schema and are refused by name, because that state is
+// rebuilt cold instead of migrated. The original text behind the event stays in
+// the original store and is read byte for byte through the scoped path.
 package memory
 
 import (
@@ -18,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -34,10 +38,6 @@ type EventBody struct {
 	Key event.EventID `json:"key"`
 	// Type is the frozen event type of the event.
 	Type string `json:"type"`
-	// Summary is the stored summary of the event, the small rendering text.
-	Summary string `json:"summary"`
-	// Content is the stored content of the event, matched by the keyword leg.
-	Content string `json:"content"`
 	// Timestamp is the event time in Unix milliseconds.
 	Timestamp int64 `json:"timestamp"`
 	// Owner is the address the reference of the body is registered for.
@@ -92,10 +92,12 @@ var ErrBodyKeyMismatch = errors.New("memory: event body key disagrees with the s
 var ErrFactKeyConflict = errors.New("memory: the event key already names another fact")
 
 // BodyFromEvent derives the body of one event: its canonical key, frozen type,
-// summary and content, its event time on the millisecond axis, the whole
-// metadata projection, native payload and lineage identifiers the event
-// carries, and the owner, format and retention policy the reference beside it
-// is registered under. An event carrying no key is refused by name.
+// its event time on the millisecond axis, the whole metadata projection, native
+// payload and lineage identifiers the event carries, and the owner, format and
+// retention policy the reference beside it is registered under. Nothing the
+// event already carries is copied into a light field of its own, so the body
+// keeps one copy of every field and the record of a query derives the rest. An
+// event carrying no key is refused by name.
 func BodyFromEvent(ev event.Event, format, retentionPolicy string) (EventBody, error) {
 	if ev.Key == "" {
 		return EventBody{}, ledger.ErrEventKeyRequired
@@ -107,8 +109,6 @@ func BodyFromEvent(ev event.Event, format, retentionPolicy string) (EventBody, e
 	return EventBody{
 		Key:             ev.Key,
 		Type:            ev.Type,
-		Summary:         ev.Meta[event.MetaKeyEventSummary],
-		Content:         ev.Message.Content,
 		Timestamp:       ev.Timestamp.UnixMilli(),
 		Owner:           ev.Owner,
 		Format:          format,
@@ -136,37 +136,16 @@ func (b EventBody) Encode() ([]byte, error) {
 // DecodeEventBody decodes one committed body under the body schema, or names
 // the refusal for bytes that carry no body of this schema.
 //
-// Bodies the earlier writer committed spell their identity as event_key beside
-// event_type and event_summary. Those bodies decode under the same schema: the
-// decimal identity is carried over verbatim, because it is the key the segment
-// index stored the event under, and the two renamed fields fill the light
-// fields they name. A body carrying no identity at all is refused by name, so
-// an event key can never be invented from the bytes beside it.
+// One body format exists. Bytes an earlier writer committed spell their
+// identity as event_key beside event_type and event_summary, which is no
+// identity under this schema: they are refused by name so an event key can
+// never be invented from the bytes beside it. Such state is not migrated — a
+// store holding it is rebuilt cold (the kv.json precedent), so the refusal names
+// the bytes that must be dropped rather than standing in for a migration path.
 func DecodeEventBody(body []byte) (EventBody, error) {
 	var decoded EventBody
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return EventBody{}, fmt.Errorf("%w: %w", ErrEventBody, err)
-	}
-	if decoded.Key == "" {
-		var legacy struct {
-			Key     json.RawMessage `json:"event_key"`
-			Type    string          `json:"event_type"`
-			Summary string          `json:"event_summary"`
-		}
-		if err := json.Unmarshal(body, &legacy); err != nil {
-			return EventBody{}, fmt.Errorf("%w: %w", ErrEventBody, err)
-		}
-		key, err := legacyBodyKey(legacy.Key)
-		if err != nil {
-			return EventBody{}, err
-		}
-		decoded.Key = key
-		if decoded.Type == "" {
-			decoded.Type = legacy.Type
-		}
-		if decoded.Summary == "" {
-			decoded.Summary = legacy.Summary
-		}
 	}
 	if decoded.Key == "" {
 		return EventBody{}, fmt.Errorf("%w: the body carries no event key", ErrEventBody)
@@ -174,44 +153,19 @@ func DecodeEventBody(body []byte) (EventBody, error) {
 	return decoded, nil
 }
 
-// legacyBodyKey reads the canonical identity out of the earlier event_key
-// field: the decimal literal that writer recorded, as a JSON number or as a
-// string. A number is kept verbatim, so the identity matches the segment
-// index key character by character; a literal that is not an unsigned integer
-// has no canonical spelling and is refused by name.
-func legacyBodyKey(raw json.RawMessage) (event.EventID, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "", nil
-	}
-	if raw[0] == '"' {
-		var key string
-		if err := json.Unmarshal(raw, &key); err != nil {
-			return "", fmt.Errorf("%w: legacy event key: %w", ErrEventBody, err)
-		}
-		if key == "" {
-			return "", nil
-		}
-		return event.EventID(key), nil
-	}
-	var number json.Number
-	if err := json.Unmarshal(raw, &number); err != nil {
-		return "", fmt.Errorf("%w: legacy event key: %w", ErrEventBody, err)
-	}
-	if _, err := strconv.ParseUint(number.String(), 10, 64); err != nil {
-		return "", fmt.Errorf("%w: legacy event key %q is not an unsigned integer", ErrEventBody, number.String())
-	}
-	return event.EventID(number.String()), nil
-}
-
 // Record returns the query record of the body under the partition and segment
-// window its event is committed into.
+// window its event is committed into. The summary and the content of the record
+// are derived on read — the summary out of the metadata projection, the content
+// out of the native payload — because the body stores neither beside the event
+// it carries: a record therefore reads the very fields the event committed with,
+// and no second copy of them can stand for them.
 func (b EventBody) Record(partitionID int, windowTS int64) EventRecord {
 	return EventRecord{
 		Key:         b.Key,
 		PartitionID: partitionID,
 		Type:        b.Type,
-		Summary:     b.Summary,
-		Content:     b.Content,
+		Summary:     b.Meta[event.MetaKeyEventSummary],
+		Content:     b.Message.Content,
 		Timestamp:   b.Timestamp,
 		WindowTS:    windowTS,
 	}
@@ -228,30 +182,22 @@ func (b EventBody) Ref() ledger.OriginalRef {
 
 // Event restores the very event the body carries: every field it committed
 // with — the whole metadata projection, the native payload and the lineage
-// identifiers — read back exactly as it stands. A body the earlier writer
-// committed carries the light fields alone: the content and the summary those
-// bytes hold fill the message and the metadata they name, and every identity
-// those bytes never carried stays empty instead of an invented one.
+// identifiers — read back exactly as it stands. Nothing is backfilled into it:
+// the body keeps no light field beside the event, so the summary stays the one
+// entry of the metadata projection and the content the one text of the native
+// payload, and a field the bytes never carried stays empty instead of an
+// invented one.
 func (b EventBody) Event() event.Event {
-	meta := make(map[string]string, len(b.Meta)+1)
+	meta := make(map[string]string, len(b.Meta))
 	for key, value := range b.Meta {
 		meta[key] = value
-	}
-	if b.Summary != "" {
-		if _, held := meta[event.MetaKeyEventSummary]; !held {
-			meta[event.MetaKeyEventSummary] = b.Summary
-		}
-	}
-	message := b.Message
-	if emptyMessage(message) && b.Content != "" {
-		message = model.Message{Content: b.Content}
 	}
 	return event.Event{
 		Key:          b.Key,
 		Type:         b.Type,
 		Timestamp:    time.UnixMilli(b.Timestamp),
 		Meta:         meta,
-		Message:      message,
+		Message:      b.Message,
 		Owner:        b.Owner,
 		Source:       b.Source,
 		Target:       b.Target,
@@ -264,15 +210,6 @@ func (b EventBody) Event() event.Event {
 		CallID:       b.CallID,
 		ApprovalID:   b.ApprovalID,
 	}
-}
-
-// emptyMessage reports whether one native message carries no payload at all:
-// no role, no content, no tool identity, no reasoning and no parts, so the
-// content of a light body can fill it without overwriting anything.
-func emptyMessage(msg model.Message) bool {
-	return msg.Role == "" && msg.Content == "" && msg.ToolID == "" && msg.ToolName == "" &&
-		msg.ReasoningContent == "" && msg.ReasoningSignature == "" &&
-		len(msg.ContentParts) == 0 && len(msg.ToolCalls) == 0
 }
 
 // SameFact reports whether one body names the same fact as another: one
@@ -340,9 +277,8 @@ func sameTaskStamp(left, right event.TaskID) bool {
 // instance, the format and the retention policy — beside the caller-declared
 // range and task stamps, which SameFact judges pairwise instead. Two bodies
 // compare as the facts they name and never as two commits or two references
-// beside them. A body the earlier writer committed and the full body of the
-// same content project to the same bytes, because the projection runs through
-// the event the body restores.
+// beside them. The projection runs through the event the body restores, so the
+// comparison is over the event itself and not over any copy of it stored beside.
 func (b EventBody) canonical() ([]byte, error) {
 	body, err := BodyFromEvent(b.Event(), b.Format, b.RetentionPolicy)
 	if err != nil {

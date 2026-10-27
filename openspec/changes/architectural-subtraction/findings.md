@@ -113,3 +113,20 @@ CI 与 `lint.sh` 两侧同步改并各有一条断言钉住。
 
 纯搬迁 + 引用同步，无行为变更：`git revert <本提交>` 即回到平铺布局。唯一的语义增量是
 wrapper 与实体自解析根，revert 后两者一并消失，无残留状态。
+
+---
+
+## 波 1 集成裁定（2026-10-27，集成-1，HEAD 前置 8919acf）
+
+三轨并发（A1: 1.1+1.3 ∥ B: 1.2 ∥ C1: 2.3）落地后，编排者集成修复与裁定：
+
+- **裁定①（1.1 负锚构造等价）**：D6 原文「注入拒写 tier→age_fold 提交失败」不可构造——fold 事实 `Owner.AgentID==""` 在 persistFact 早退于 tier 之前（反事实实证）。负锚改为公共入口两类真实拒写（无事件时间/同键异内容），不变量同向（拒绝可达+活账本零写入+具名错误），具名测试与 `-run` 正则逐字符不变。非缩水，登记于任务行。
+- **裁定②（read.go 计划缺口）**：design D0 列 read.go 为 1.2 消费者，但白名单无归属——跨轨编译红 5 处（facts.go×3/read.go×2 直接字段引用）。编排者按 R8 修复：`body.Content→body.Message.Content`、`body.Summary→body.Meta[event.MetaKeyEventSummary]`；memory/query_events.go Godoc 同步（stored→derived 措辞）。
+- **裁定③（1.3 重定基线）**：双路径第二面（r.history）在 8919acf 已不可达——CommitHistory 的映射门先于本变更存在、AttachReplay 注册门已不存在。本叶实为删死代码：负锚 TestSingleHistoryPath 基线即绿（行为不回归锚），红转绿由结构断言（history[ 2→0）承载。SessionHistory=单面空、CommitHistory=文档化 no-op，与 host 既有冻结锚（断言 SessionHistory==0）一致；HistoryFace 契约文档补 mapped-sequence 例外（loop.go）。tools.go ageFold 挂载门 `MaxTokens>0` 保留——它是呈现/fold 门，G7 子测 presentation_is_unlimited_at_zero 钉住。
+- **裁定④（2.3 driver 失败落点）**：`Pipeline.After` 无 error 返回（skeleton_assert+根包两调用点钉住），driver 失败以 gap+导出 sentinel `plugin.ErrObservationObligationRetained`（errors.Is 可判）落 presentation 读面；义务重试路径（mailbox 账）未动。机制为未导出 `driverObservation` 接口+`DrivesObligation()` 标记，S4 概念预算实测无新债。
+- **行为变化登记（1.2）**：混有旧代 event_key body 的 state 冷启动具名硬失败（ErrEventBody 上抛），需删状态重建——D3.2 no-legacy 裁定的必然推论；当前格式 body 无损（summary 在 meta、content 在 message）。
+- **2.1 边界登记**：SettleDriver pump 跨会话串行（drain 逐 seat 驱动）=已知边界；减法变更不加机制，并行化另行立案。C1 增量注释措辞 retained→owed 以保结构断言 `grep -cE 'retained|firing|rearm' settle_turn.go`=0 逐字成立。
+- **词法门**：新测试文件 comment_policy 5 finding（audit-marker "legacy" 措辞/测试文档单句/free-standing 注释）由编排者清零；`TestDecodeEventBodyLegacyRefused` 测试名保留（标识符不在注释门面）。
+- **归属待裁（随波2-A2）**：rl LeaseObserver 分类——Driver 需自有持久账户（现无）vs Observer-only+边界登记。
+
+**波 1 集成凭据**（逐条原始退出码）：build RC=0；gofmt 空；vet RC=0；TestFactFidelity/RequestFidelity(冷启动)/TestHistoryRestoresWithoutBudget/TestFoldCommitFailureSurfaces|TestSingleHistoryPath/TestDecodeEventBodyLegacyRefused/TestObserverLayering 全 RC=0；TestSettleWakeSingleDrive -count=3 RC=0（10.1s）；runtime/agent+telemetry+rl -short RC=0；全 host 29.8s RC=0；全仓 short 38 包 RC=0；history[/snapshots grep=0、settle grep=0。

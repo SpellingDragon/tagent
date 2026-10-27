@@ -189,8 +189,8 @@ func (s ageFoldSessions) ProjectionOf(_ context.Context, session event.SessionID
 
 // FileCompressRequest files one compression judgment on the chain of the session
 // whose material was judged.
-func (s ageFoldSessions) FileCompressRequest(_ context.Context, session event.SessionID, request event.CompressRequest) error {
-	return s.run.fileCompressRequest(session, request)
+func (s ageFoldSessions) FileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error {
+	return s.run.fileCompressRequest(ctx, session, request)
 }
 
 // fileCompressRequest lands one compression judgment in the live ledger of this
@@ -199,7 +199,10 @@ func (s ageFoldSessions) FileCompressRequest(_ context.Context, session event.Se
 // judgment is the same judgment and never a second fact. The fact carries no
 // message, because a judgment about material is not material of its own and must
 // never enter the projection it judged.
-func (r *Run) fileCompressRequest(session event.SessionID, request event.CompressRequest) error {
+// A judgment the commit refused lands in no ledger at all, and the refusal is
+// recorded at this call site instead of being answered as a filed judgment: the
+// fold reports the gap rather than leaving a judgment silently unkept.
+func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error {
 	if session == "" {
 		return errors.New("tagent: the compression judgment names no session chain")
 	}
@@ -216,12 +219,14 @@ func (r *Run) fileCompressRequest(session event.SessionID, request event.Compres
 	if stamp.IsZero() {
 		stamp = time.Now()
 	}
-	r.commitFact(event.Event{
+	if _, err := r.commitFactChecked(ctx, event.Event{
 		Key:       request.ID,
 		Type:      request.FactType(),
 		Timestamp: stamp,
 		Meta:      map[string]string{event.MetaKeyEventSummary: request.Reason},
 		Owner:     event.Address{SessionID: session},
-	})
+	}); err != nil {
+		assemblyWarn("tagent: the compression judgment of session %s was not committed err=%v", session, err)
+	}
 	return nil
 }

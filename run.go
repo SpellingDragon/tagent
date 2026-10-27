@@ -149,7 +149,6 @@ type Run struct {
 	factOrder []event.EventID
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
-	history map[event.Address][]model.Message
 	factSeq uint64
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
@@ -259,7 +258,6 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		admission:      task.NewMemoryAdmission(),
 		sites:          map[event.Address]bool{},
 		facts:          map[event.EventID]event.Event{},
-		history:        map[event.Address][]model.Message{},
 		fixers:         map[event.AgentID]*fileFixer{},
 		replays:        map[event.Address]replayEntry{},
 		landedSeq:      map[int]int64{},
@@ -331,7 +329,9 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.loop.SetHistory(r)
 	r.loop.SetWatch(r.shutdown.Watch)
 	r.loop.SetPresentations(r.takePresentation)
-	r.loop.SetFactCommit(r.commitFact)
+	r.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		return r.commitFactChecked(context.Background(), evt)
+	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
 	r.loop.SetRequestSnapshotFace(r.snapshotRequest)

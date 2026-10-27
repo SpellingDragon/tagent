@@ -39,7 +39,7 @@
 
 - 代码：`facts.go`、`run.go`、`request.go`、`memory/event_body.go`、`memory/replay/`、`settle_turn.go`、`runtime/state/mailbox.go`、`api/plugin/`、`rl/capture` 读回、`tools.go`、`age_fold.go`。
 - **启动门（已满足，2026-10-27）**：fidelity-and-recovery 已 17/17 归档（`3c2cf89`，archive/2026-10-27-fidelity-and-recovery/）——G4 地址键、3.2 mailbox 形态、1.2 调用事实全部入 main。
-- **派发模型（用户裁定：全程多 agent）**：实施=子代理按 ORCHESTRATION.md 白名单逐单执行；验证=每波后独立验证子代理（R30）；门禁=后台 shell 轮询（R32b）。**R21 构建闭包实测约束**：本变更各叶几乎全部触碰 tagent 根包（facts.go/run.go/request.go/settle_turn.go 同包）或其上游（api/plugin、memory），批内强制并发=半成品互踩；故派发单元=批（根包簇合单，批内串行），批间串行，并发轴落在「实施 × 验证 × 后台门禁」三角色，见 design D0。
+- **派发模型（用户裁定：充分并发，2026-10-27 二次确认）**：文件簇零相交三轨并发（波1 A1∥B∥C1 → 波2 A2∥C2 → 波3 A3）+ 编排者集成验证轨；R21 编译互踩以「包内锚窗口验/host 级锚集成验/异文件编译错轮询重跑」三约缓解，见 design D0 与 ORCHESTRATION 2.3。
 - 三批顺序（用户裁定）：批 1 统一提交/事件编码/历史读取 → 批 2 通知消费/快照生命周期/Observer 分层 → 批 3 词汇精简/呈现删除。
 
 ## 必答一问
