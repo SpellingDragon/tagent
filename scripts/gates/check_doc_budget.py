@@ -47,7 +47,7 @@
 用法：
   python3 scripts/gates/check_doc_budget.py [--repo-root DIR] [--baseline PATH] [--json]
   python3 scripts/gates/check_doc_budget.py --tighten      # 只下调基线，拒绝上调
-退出码：0=通过（含可下调 warn）；1=超基线或输入不可用。
+退出码：0=通过（实测与基线相等）；1=不相等（两向）或输入不可用。
 """
 from __future__ import annotations
 
@@ -188,8 +188,12 @@ def load_baseline(path):
     return payload, out
 
 
-def compare(report, baseline, totals):
-    """Apply the one-way ratchet: above fails, below earns a tighten hint."""
+def compare(report, baseline, totals, tightening=False):
+    """Apply the zero-delta lockstep: any drift fails both ways.
+
+    Under --tighten the below-baseline drift is the reason the lockstep runs,
+    so it reads as a note instead of an error; a rise stays refused either way.
+    """
     for metric in METRICS:
         limit = baseline[metric]
         observed = totals[metric]
@@ -203,11 +207,15 @@ def compare(report, baseline, totals):
                 "同批压掉等量文档，或把减少处锁进基线后重测；禁止上调基线掩盖增长。"
                 .format(label, observed, limit, observed - limit))
         elif observed < limit:
-            report.warn(
-                "文档体量低于基线（{}）：实测 {} < 基线 {}（-{}）。棘轮可下调："
-                "跑 `python3 scripts/gates/check_doc_budget.py --tighten` 把减少量锁住，"
+            drift = (
+                "文档体量低于基线（{}）：实测 {} < 基线 {}（-{}）。零差额：体量减少与锁步必须同提交——"
+                "跑 `python3 scripts/gates/check_doc_budget.py --tighten` 把减少量锁住后一并提交，"
                 "否则基线虚高、下一批又能涨回去。"
                 .format(label, observed, limit, limit - observed))
+            if tightening:
+                report.note("锁步进行中，--tighten 将写入该减少量：" + drift)
+            else:
+                report.error(drift)
 
 
 def tighten(report, path, payload, baseline, totals, root):
@@ -288,7 +296,7 @@ def run(argv):
             report.error("no markdown documents found under {}: an empty scan is not a "
                          "green budget".format(root))
         else:
-            compare(report, baseline, totals)
+            compare(report, baseline, totals, tightening=bool(args.tighten))
             if args.tighten:
                 tighten(report, baseline_path, payload, baseline, totals, root)
         report.note("document volume only: whether the prose is right stays with review; "

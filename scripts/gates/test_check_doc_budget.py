@@ -2,8 +2,9 @@
 """Selftests for check_doc_budget.py — tempfile fixtures only, no product writes.
 
 覆盖棘轮门的正负锚：
-  * 正锚：实测=基线 → exit 0；实测<基线 → exit 0 且提示可下调；--tighten 下调成功；
-  * 负锚：超基线（篇数/行数分别）→ exit 1；--tighten 试图上调 → exit 1 且文件不动；
+  * 正锚：实测=基线 → exit 0；--tighten 下调成功且幂等；
+  * 负锚：超基线（篇数/行数分别）→ exit 1；实测<基线未锁 → exit 1（零差额，指 --tighten）；
+    --tighten 试图上调 → exit 1 且文件不动；
     0 篇 / 基线缺失 / 基线形状坏 → exit 1（不许空转判绿）；
   * 口径锚：gitignored 不入预算、未提交但未 ignore 的计入、非 markdown 不计、
     末尾无换行的残行计一行；`openspec/changes/**`（活跃计划与归档）作为过程工件
@@ -72,7 +73,7 @@ class FixtureCase(unittest.TestCase):
         return code, json.loads(out)
 
 
-class PassAndWarnTest(FixtureCase):
+class TestStrictZeroDelta(FixtureCase):
     def test_at_baseline_passes(self):
         self.write("a.md", "one\ntwo\n")
         self.write("docs/b.md", "three\n")
@@ -82,21 +83,21 @@ class PassAndWarnTest(FixtureCase):
         self.assertIn("RESULT: ok", out)
         self.assertNotIn("warn:", out)
 
-    def test_below_baseline_warns_to_tighten(self):
+    def test_below_baseline_refuses_until_tightened(self):
         self.write("a.md", "one\n")
         self.baseline(files=5, lines=50)
         code, out, _err = self.cli()
-        self.assertEqual(code, 0, out)
-        self.assertIn("棘轮可下调", out)
+        self.assertEqual(code, 1, out)
+        self.assertIn("零差额", out)
         self.assertIn("--tighten", out)
-        self.assertEqual(out.count("warn:"), 2, out)
+        self.assertNotIn("warn:", out)
 
     def test_equal_metric_and_lower_metric_are_independent(self):
         self.write("a.md", "one\ntwo\n")
         self.baseline(files=1, lines=99)  # files 相等、lines 更低
         code, out, _err = self.cli()
-        self.assertEqual(code, 0, out)
-        self.assertEqual(out.count("warn:"), 1, out)
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("warn:", out)
         self.assertIn("行数", out)
 
 

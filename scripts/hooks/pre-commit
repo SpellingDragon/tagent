@@ -5,8 +5,9 @@
 #   git config core.hooksPath scripts/hooks
 #
 # It enforces the same gates CI runs: OpenSpec spec hygiene, the lossless
-# verifier for test-family consolidations (staged rename table), and — when Go
-# sources are staged — the comment-policy ratchet via scripts/lint.sh.
+# verifier for test-family consolidations (staged rename table), the doc-budget
+# zero-delta lockstep when markdown is staged, and — when Go sources are staged
+# — the comment-policy ratchet via scripts/lint.sh.
 #
 # Only runs when the commit touches openspec/specs/ or openspec/changes/,
 # so it stays out of the way for unrelated commits.
@@ -17,7 +18,14 @@ staged="$(git diff --cached --name-only --diff-filter=ACMR || true)"
 
 if printf '%s\n' "$staged" | grep -qE '^openspec/(specs|changes)/'; then
   echo "[pre-commit] openspec change detected — running spec-hygiene gate..."
-  "$repo_root/scripts/check-openspec.sh"
+  "$repo_root/scripts/gates/check-openspec.sh"
+fi
+
+# Doc-budget lockstep: any staged markdown crosses the counting boundary, so
+# the tree-level zero-delta assertion runs in the same commit that moves it.
+if printf '%s\n' "$staged" | grep -qE '\.(md|markdown)$'; then
+  echo "[pre-commit] markdown staged — running doc-budget lockstep (zero delta)..."
+  python3 "$repo_root/scripts/gates/check_doc_budget.py" --repo-root "$repo_root"
 fi
 
 # Test-family consolidation gate: when a commit moves or renames test files, a
