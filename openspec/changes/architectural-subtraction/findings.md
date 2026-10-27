@@ -148,3 +148,15 @@ wrapper 与实体自解析根，revert 后两者一并消失，无残留状态�
 - **波 1 门禁终态**：worktree(a63429c) 13 门 RC=0；lint 红=doc-budget（已重锁）、mutations 红=伴锚陈旧（已迁移+主树 11/11）——两者均已在主树修复复验；long 六片后台进行中（结果落 evidence）。
 
 **波 2 集成凭据**：build 0；snapshots grep=0；RequestSnapshotFace 族 grep=0；plugin.Phase/RouteOf 全仓 grep=0；TestRequestSnapshotsSingleSource/TestFormalRequestSnapshotHasNoSecrets（三子测红→绿）/RequestFidelity|TestRuntimeVisibility/settle/api-plugin/evolution 三包/telemetry/rl/runtime-agent 全 RC=0；全仓 short 39 包 RC=0；全 host RC=0；变异 11/11；doc-budget RESULT ok。
+
+---
+
+## 波 3 集成裁定（2026-10-27，集成-3，波前 HEAD 379885a）
+
+A3（3.2）落地后编排者迁移与裁定：
+
+- **裁定⑦（3.2 跨白名单五件由编排者落地）**：①history/projection_replay_and_budget_test 删 Decision 查表段，二次装配语义改「同预算现算同一视图」（断言强度保持：同视图+不含全文）；②acceptance/scenario_s07 观测块改按 `entry.Content==original` 判 full，观测键 `presentation_full_text_iff_decision_full`→`presentation_full_text_iff_full_room`；③golden/runtime/scenarios.json 同键重命名（验收契约随语义，D3.4 登记）；④主规格 event-sourced-projection 两处「原文、模型视图与呈现决策分层」直写为「原文与模型视图分层（视图按当前事实、声明与预算现算）」+change 内 MODIFIED delta 逐字一致（归档零 diff，fidelity 先例）；⑤FACT-VOCABULARY 删族 6 行（编号留空位不重排，稳 ID 优于重排）+投影账本段改「呈现不落账」、GLOSSARY「结算」词条改任务结算语义。
+- **settle 家族整体删除追认**：A3 反事实甄别成立（RecordDecision 唯一调用者是装配自身、Decision 生产消费者 0、replay.settle 无事件族注册、fold 恢复不读决策）——「保留机制解耦复用」会是零消费方的空转状态，违反减法本义，整体删除正确。
+- **A3 自行决策追认**：noticeCard 下限形态（ticket 先占位→状态→材料头，bound=min(room,300)）；负锚扩为三测；projectionBudget 读 Original 带 keyless 回退；测试并入既有文件（词法门镜像要求）。
+
+**波 3 集成凭据**：build 0；history/acceptance 迁移后 vet 0、TestProjectionReplayAndBudget ok、acceptance 全 ok；docs/api 重生成 GEN=0；delta `openspec validate --strict` 过；G9 numstat 184/0 零改动。

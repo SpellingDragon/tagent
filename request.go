@@ -709,10 +709,11 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 // window's budget, so the budget keeps shaping presentation exactly as the
 // window's fold threshold shapes the fold: the two are separate identities of
 // one window. A window naming no tokens presents no bound at all: the budget is
-// measured from the material itself — every entry's presented view beside its
-// kept original, at the packing ratio the assembly packs under — so the whole
-// projection presents in full and no entry degrades to a ticket the
-// declaration never asked for.
+// measured from the material itself — every entry's kept original text, at the
+// packing ratio the assembly packs under — so the whole projection presents in
+// full and no entry degrades to a ticket the declaration never asked for. The
+// measure reads the original the projection keeps, never the view an assembly
+// shaped, because the view belongs to that assembly alone.
 func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, prefix int) int {
 	if window.MaxTokens > 0 {
 		return window.MaxTokens
@@ -726,11 +727,11 @@ func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, pr
 		total += len(hint.Content)
 	}
 	for _, entry := range entries {
-		view := len(entry.Content)
-		if original, kept := projection.Original(entry.Key); kept && len(original) > view {
-			view = len(original)
+		text, kept := projection.Original(entry.Key)
+		if !kept {
+			text = entry.Content
 		}
-		total += view
+		total += len(text)
 	}
 	return total/replay.BudgetCharsPerToken + 1
 }

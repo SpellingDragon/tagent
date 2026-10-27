@@ -269,20 +269,16 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if original, kept := proj.Original("big-1"); !kept || original != full {
 			t.Fatalf("original layer = %d bytes kept=%v, want the full text kept apart from the view", len(original), kept)
 		}
-		decision, recorded := proj.Decision("big-1")
-		if !recorded || decision.Mode != replay.PresentationTicket {
-			t.Fatalf("recorded decision = %+v (%v), want a ticket decision", decision, recorded)
-		}
 
 		second, err := proj.AssembleBudget(ctx, 200)
 		if err != nil {
 			t.Fatalf("second AssembleBudget: %v", err)
 		}
 		if second[0].Content != view {
-			t.Fatalf("second assembly view = %q, want the same recorded ticket view", second[0].Content)
+			t.Fatalf("second assembly view = %q, want the same budget to recompute the same view", second[0].Content)
 		}
 		if strings.Contains(second[0].Content, full) {
-			t.Fatal("second assembly re-carrried the full text despite the recorded ticket decision")
+			t.Fatal("second assembly re-carried the full text although the budget only fits the ticket")
 		}
 	})
 
