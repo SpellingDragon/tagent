@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	"trpc.group/trpc-go/trpc-agent-go/log"

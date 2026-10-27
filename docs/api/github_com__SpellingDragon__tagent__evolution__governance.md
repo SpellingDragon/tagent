@@ -1,4 +1,4 @@
-package governance // import "github.com/SpellingDragon/tagent/evolution/governance"
+package governance // import "github.com/SpellingDragon/tagent/features/evolution/governance"
 
 Package governance implements the extension points plugin declares: the risk
 policy that rules each tool call, the budget and goal registry it consults, and

@@ -270,7 +270,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "flight, dropping the observation instead of retaining it."
         ),
         replacement=Replacement(
-            file="evolution/meditation/driver.go",
+            file="features/evolution/meditation/driver.go",
             old=(
                 "\tif d.firing {\n"
                 "\t\td.retained = true\n"
@@ -368,7 +368,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "so the declaration no longer refuses the argument."
         ),
         replacement=Replacement(
-            file="evolution/meditation/deliver.go",
+            file="features/evolution/meditation/deliver.go",
             old=(
                 "\tfor key := range probe {\n"
                 "\t\tif key != \"content\" {\n"

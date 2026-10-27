@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
 
 // chainWrite is the canonical cross-session write face: it files one event into the

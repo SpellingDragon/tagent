@@ -6,7 +6,7 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 )
 
 // sizeAndRuling is the element that serves both faces of the risk port: it grades one

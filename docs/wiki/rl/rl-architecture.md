@@ -83,7 +83,7 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 <a id="trajectory-capture"></a>
 ## 五、决策采集（capture v2）
 
-采集层（`rl/trajectory_capture.go`）挂在 `TrajectoryRecorder` 之上，由 `NewTrajectoryRecorderWithOptions` + `WithCapture` 装配，**默认关闭**：关闭时 v1 录制路径逐字节不变，包括"队列满可丢、永不阻塞模型调用"。开启后它只承诺模型 SDK 边界**能证明**的那些事。
+采集层（`features/rl/trajectory_capture.go`）挂在 `TrajectoryRecorder` 之上，由 `NewTrajectoryRecorderWithOptions` + `WithCapture` 装配，**默认关闭**：关闭时 v1 录制路径逐字节不变，包括"队列满可丢、永不阻塞模型调用"。开启后它只承诺模型 SDK 边界**能证明**的那些事。
 
 | 承诺面 | 规则 | 佐证 |
 |---|---|---|
@@ -105,7 +105,7 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 <a id="training-export"></a>
 ## 六、授权离线导出（训练事实）
 
-`ExportTrainingFacts`（`rl/training_export.go`）是训练事实的**只读消费入口**：把已授权分区里的事件与绑定其上的反馈逐行导成快照，并附一份说明"这份快照含什么、读得有多完整"的 manifest。
+`ExportTrainingFacts`（`features/rl/training_export.go`）是训练事实的**只读消费入口**：把已授权分区里的事件与绑定其上的反馈逐行导成快照，并附一份说明"这份快照含什么、读得有多完整"的 manifest。
 
 | 契约 | 规则 | 佐证 |
 |---|---|---|
@@ -137,4 +137,4 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 
 ### 退役记录：AReaL 在线训练桥（2026-10）
 
-桥侧三件（`tagent_adapter.py`、`train_tagent.py`、`train_rl_config.yaml`，原址分别在 `train/rl/` 与示例目录）已退役删除：它们面向 **AReaL 改名前**的 `train.*` 包布局（现行 AReaL 顶层包为 `areal/`），`train_tagent.py` 的 `sys.path` 存在把点号模块名当目录段的字面 bug，且 `run.sh` 引用的 `areal_config.yaml` 从不存在、CI 无 Python 覆盖——无规格承诺、无法验证的陈旧面。保留的是活面：本 `rl/` Go 包（轨迹录制、可换模型、HTTPAPI）、`tagent.rl.yaml` 运行时配置、上述离线转换器。重新接训练环的条件：按现行 `areal.*` 布局重写适配器，且其点号模块引用须经 `codetools dotted-refs` 门（仓库内可解析或显式登记外部包）。
+桥侧三件（`tagent_adapter.py`、`train_tagent.py`、`train_rl_config.yaml`，原址分别在 `train/rl/` 与示例目录）已退役删除：它们面向 **AReaL 改名前**的 `train.*` 包布局（现行 AReaL 顶层包为 `areal/`），`train_tagent.py` 的 `sys.path` 存在把点号模块名当目录段的字面 bug，且 `run.sh` 引用的 `areal_config.yaml` 从不存在、CI 无 Python 覆盖——无规格承诺、无法验证的陈旧面。保留的是活面：本 `features/rl/` Go 包（轨迹录制、可换模型、HTTPAPI）、`tagent.rl.yaml` 运行时配置、上述离线转换器。重新接训练环的条件：按现行 `areal.*` 布局重写适配器，且其点号模块引用须经 `codetools dotted-refs` 门（仓库内可解析或显式登记外部包）。

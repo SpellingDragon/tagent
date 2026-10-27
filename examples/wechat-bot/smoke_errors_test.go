@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 

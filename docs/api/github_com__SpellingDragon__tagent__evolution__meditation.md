@@ -1,4 +1,4 @@
-package meditation // import "github.com/SpellingDragon/tagent/evolution/meditation"
+package meditation // import "github.com/SpellingDragon/tagent/features/evolution/meditation"
 
 The meditation domain's own judgments over the facts it consumes: the freshness
 judgment that reads one observed fact and the delivery judgment that reads one

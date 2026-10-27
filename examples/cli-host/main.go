@@ -24,7 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/features/evolution"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	openaimodel "trpc.group/trpc-go/trpc-agent-go/model/openai"
 

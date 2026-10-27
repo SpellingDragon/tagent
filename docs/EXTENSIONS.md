@@ -74,7 +74,7 @@
 <a id="consumer-protocol"></a>
 ## 四、消费器协议：三个实例、六个面，一条协议
 
-消费 event 的不止一处：回合驱动、时间驱动与宿主的外部驱动各跑一个循环。它们**共用一条协议**，差别只在驱动源（`runtime/agent/loop.go` 与 `evolution/meditation/reflection.go`）：
+消费 event 的不止一处：回合驱动、时间驱动与宿主的外部驱动各跑一个循环。它们**共用一条协议**，差别只在驱动源（`runtime/agent/loop.go` 与 `features/evolution/meditation/reflection.go`）：
 
 1. **读事实**：按身份引用（`event.EventID`）读一条已提交的事实，读的是事实本身，不是它的副本。
 2. **消费**：用这条事实做一次执行——回合驱动的一次决策、时间驱动的一次反思判定、外部驱动的一轮宿主消费。
@@ -84,7 +84,7 @@
 | 实例 | 驱动源 | 读的事实 | 产出的新事实（族） |
 |---|---|---|---|
 | `Loop.Drive`（回合驱动，`runtime/agent/loop.go`） | 一次 invocation 的 `Ready` 输入，以及终态通知的 `Backflow` 回填 | ready 输入里的事件，身份即 `event.EventID` | 决策记录与尝试记录（`rl.DecisionRecord` / `rl.AttemptRecord`，经 `agent.Recorder` 在产生点提交） |
-| `Reflection.Tick`（时间驱动，`evolution/meditation/reflection.go`） | 宿主按节拍调用 `Tick`，节奏下限由 `ReflectionCadence` 判定 | 事实链上 watermark 之后、lineage 非自管的已提交事实（观察面） | 反思输入事件（`event.TypeExternalInput`，lineage 为 reflection）；它再交给回合驱动消费 |
+| `Reflection.Tick`（时间驱动，`features/evolution/meditation/reflection.go`） | 宿主按节拍调用 `Tick`，节奏下限由 `ReflectionCadence` 判定 | 事实链上 watermark 之后、lineage 非自管的已提交事实（观察面） | 反思输入事件（`event.TypeExternalInput`，lineage 为 reflection）；它再交给回合驱动消费 |
 | 宿主循环（外部驱动） | 宿主自己的调度与传输（`Run` 的 sink、`task.WithEnvelopeDeliverer`） | 宿主选中并交进 `Ready` 的事实 | 宿主自己提交的事实：框架在此只给边界，不给循环 |
 
 回合实例与时间实例**不互相收编**：`Tick` 没有 Invocation 与决策语义，把它塞进 `Loop` 的一个相位会造出一个不存在的相位。两个框架内实例由同一条协议用例固定——各读一条事实、各产一条新事实、源事实不变（`tests/integration/evolution/consumer_protocol_test.go`）。
@@ -201,7 +201,7 @@ agents:
 | 3 | `api/config` | 是：声明族（规范指纹身份） | 组合根与热重载候选；`runtime/state` 读绑定 | 存续 | 事实 |
 | 4 | `api/event` | 是：核心事件族（`Key` 身份） | 全部消费面的输入词汇 | 事实本体 | 事实 |
 | 5 | `evolution` | 否：产物是 `TypeExternalInput` 事件，归 `event` 族 | `Tick` 读事实链；`Loop` 再消费它产出的输入 | 回放（watermark 之后） | 消费 |
-| 6 | `evolution/governance` | 否：`Decision` 是裁决读数，不产事实 | 执行器读裁决；审批通道读 hold；审计面读事件日志 | 观测 | 消费 |
+| 6 | `features/evolution/governance` | 否：`Decision` 是裁决读数，不产事实 | 执行器读裁决；审批通道读 hold；审计面读事件日志 | 观测 | 消费 |
 | 7 | `memory` | 是：引用票据族（原文 `Key` 身份） | 组装与检索面读；策展消费读压缩请求 | 存续 | 时态 |
 | 8 | `api/model` | 否：锁定 tRPC 原生模型协议 | `runtime/agent` 的单次决策调用 | 无（边界） | 边界 |
 | 9 | `api/plugin` | 否：三拓展点的窄口抽象（端口、Observer/AuditSink、Governor），实现分派到各领域 | pipeline 按端口派发；组合根注入各领域实现 | 观测 | 消费 |

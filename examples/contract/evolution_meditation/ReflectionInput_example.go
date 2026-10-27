@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
 
 // ownLoopSession is the canonical reflection input face: it commits one reflection input

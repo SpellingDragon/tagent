@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // errNoDecision is reported for an attempt record that names no decision to belong to.

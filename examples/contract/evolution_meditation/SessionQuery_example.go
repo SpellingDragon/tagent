@@ -2,7 +2,7 @@ package evolutionmeditationexample
 
 import (
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
 
 // liveBindings is the canonical live-binding face: it reports the complete addresses

@@ -10,7 +10,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/view"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"

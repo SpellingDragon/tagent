@@ -49,7 +49,7 @@
 
 ## 二、自进化行为（Evolution · git 原生）
 
-自进化不采用 bundle 快照/发布道——文件即真源 + git 版本层 + 建议式评估。`refine` 三 op（`evolution/refine.go`）只装配给 entry agent；冥想产物落盘后经它的 register 登记。冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒——三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。这三份在**任何观察面下都是同一段**，冥想线（观察面含他人分区）只是把它排在观察面概况之后（见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)）。
+自进化不采用 bundle 快照/发布道——文件即真源 + git 版本层 + 建议式评估。`refine` 三 op（`features/evolution/refine.go`）只装配给 entry agent；冥想产物落盘后经它的 register 登记。冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒——三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。这三份在**任何观察面下都是同一段**，冥想线（观察面含他人分区）只是把它排在观察面概况之后（见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)）。
 
 | op | 风险级 | agent 反应 |
 |----|--------|-----------|

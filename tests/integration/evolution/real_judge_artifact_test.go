@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	evo "github.com/SpellingDragon/tagent/evolution"
+	evo "github.com/SpellingDragon/tagent/features/evolution"
 
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 )

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // errEmptyLine is reported for a record line the writer cannot persist.

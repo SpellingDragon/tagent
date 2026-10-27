@@ -26,10 +26,10 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )

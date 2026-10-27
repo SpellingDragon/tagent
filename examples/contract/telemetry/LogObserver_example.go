@@ -8,7 +8,7 @@ import (
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 )
 
 // lineSink is the canonical framework logger of this sample: it keeps every

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"

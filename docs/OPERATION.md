@@ -196,11 +196,11 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 **D4 文档面规模。** 全仓 markdown 实测 1915 篇：`openspec` 1125 篇（变更过程工件）、`examples` 588 篇（示例 module 自带）、`docs` 180 篇、`resources` 10 篇、`.agents` 8 篇，另根 3 篇与 `internal` 1 篇。**`docs` 面只有 180 篇**——评审口径若说"全仓 markdown"，不是 `docs`。分区对象因此只有 `docs` 这 180 篇，见 §八。
 
-**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**观测面见 §七·E**：四类识别点都直接写 trpc 框架面（`trpc-agent-go/log` 与 `telemetry/trace`），仓库不在其上叠第二套抽象。
+**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**观测面见 §七·E**：四类识别点都直接写 trpc 框架面（`trpc-agent-go/log` 与 `features/telemetry/trace`），仓库不在其上叠第二套抽象。
 
 ### E. 观测面：四类识别的观察点（复用框架 log + telemetry）
 
-四类各有一个观察点。日志一律写 `trpc-agent-go/log` 的 `log.Default`，链路一律写 `trpc-agent-go/telemetry/trace` 的 `trace.Tracer`；仓库内的 `telemetry/` 只把这两面接到宿主 sink，不定义新抽象。
+四类各有一个观察点。日志一律写 `trpc-agent-go/log` 的 `log.Default`，链路一律写 `trpc-agent-go/telemetry/trace` 的 `trace.Tracer`；仓库内的 `features/telemetry/` 只把这两面接到宿主 sink，不定义新抽象。
 
 | 类 | 观察点（源码） | 级别与载体 | 每次携带（有界） | 行首 |
 |---|---|---|---|---|
@@ -212,7 +212,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 - **开 DEBUG**：默认 zap 级别是 Info，端口派发与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
 - **generation span 归框架**（框架 semconv，Langfuse 直接读）：一次模型调用恰好一条 `chat <model>` span，由**驱动模型的那一方**开——框架 `internal/flow/llmflow` 的模型步（`itrace.StartSpan`），或开了 `openai.WithChatTelemetry(true)` 的 provider 模型直调。`gen_ai.operation.name=chat`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`/`output_tokens`（provider 报了缓存命中时再加 `gen_ai.usage.input_tokens.cached`）、失败请求的 `Error` status，都由框架侧渲染；本仓的模型响应面只写那一行 INFO，不在同一个 tracer 上再开第二条。
 - **旁路判据**：四个观察点的 logger 调用都在 `recover` 保护内（模型响应面不再调 tracer），失败只丢一条观察，不改事实、不改终态、不改投递。
-- **Langfuse 装配（进程启动时一次）**：`telemetry/langfuse.Start` 装的是 `telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故 generation span 无需为本仓库写转换代码。**span 只有一条**：框架为每次模型调用开一条同名 `chat <model>` span；本仓 `api/model/observe.go` 只写 INFO 行与 token/latency 渲染，不在同一个 tracer 上开第二条 generation。两种驱动方式下都只有一条：走框架模型步（llmflow）时框架必然开，直调 provider 模型时由宿主的 `openai.WithChatTelemetry(true)` 开——直调且未开该选项的宿主没有 generation span，需要时在模型构造处打开。复跑见 `go test ./api/model/... ./tests/integration/host -run 'ModelCallObservation|ModelRequestIsOneGeneration|FourFacesObservation' -count=1`。
+- **Langfuse 装配（进程启动时一次）**：`features/telemetry/langfuse.Start` 装的是 `features/telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故 generation span 无需为本仓库写转换代码。**span 只有一条**：框架为每次模型调用开一条同名 `chat <model>` span；本仓 `api/model/observe.go` 只写 INFO 行与 token/latency 渲染，不在同一个 tracer 上开第二条 generation。两种驱动方式下都只有一条：走框架模型步（llmflow）时框架必然开，直调 provider 模型时由宿主的 `openai.WithChatTelemetry(true)` 开——直调且未开该选项的宿主没有 generation span，需要时在模型构造处打开。复跑见 `go test ./api/model/... ./tests/integration/host -run 'ModelCallObservation|ModelRequestIsOneGeneration|FourFacesObservation' -count=1`。
 
 ```go
 clean, err := langfuse.Start(ctx,
@@ -234,7 +234,7 @@ defer clean(ctx)
 |---|---|---|---|---|
 | 压缩请求 | `api/event/compress_request.go` 的 `event.CompressRequest` 事实（由提交后观测插件发入事实链，无独立接缝文件） | 无专用日志；事实经 `telemetry.LogObserver` 的 DEBUG 通用行 | fact、type、task、payload 形状 | `tagent: fact` |
 | 委派 | `runtime/agent/delegate.go` 的 `Delegate`/`Complete`/`land` | DEBUG 受理与拒答、INFO 落定 | task、agent、call、status、elapsed | `tagent: delegation` |
-| 审批 | `evolution/governance/policy.go` 的 `riskCritical` | INFO 裁定、DEBUG 等待 | tool、digest、risk、rule、ruling、by 或 expires_ms | `tagent: approval` |
+| 审批 | `features/evolution/governance/policy.go` 的 `riskCritical` | INFO 裁定、DEBUG 等待 | tool、digest、risk、rule、ruling、by 或 expires_ms | `tagent: approval` |
 | 持久化 | `runtime/state/durable.go` 的 `Commit`/`Declare`/`load` | ERROR 日志 | task、mutation、result（uncommitted/uncertain/undeclared） | `tagent: durable` |
 | 恢复与存储 tier | `run.go` 的 `Assemble` 与 `restoreChains` | INFO 折叠、WARN 非持久 tier、ERROR 中断 | tier、durable、chains、recovered、dropped、elapsed | `tagent: storage tier`、`tagent: restore` |
 | 环境块生成 | `request.go` 的 `environmentBlock` | DEBUG 日志 | reason、agent、tasks、omitted；进程计数 `tagent.EnvironmentBlockGenerations()` | `tagent: environment block generated` |

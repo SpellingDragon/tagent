@@ -1,4 +1,4 @@
-package evolution // import "github.com/SpellingDragon/tagent/evolution"
+package evolution // import "github.com/SpellingDragon/tagent/features/evolution"
 
 Package evolution owns the self-improvement channel: it records an improvement
 a real agent already landed, evaluates that improvement after real requests

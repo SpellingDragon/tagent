@@ -1,4 +1,4 @@
-package rl // import "github.com/SpellingDragon/tagent/rl"
+package rl // import "github.com/SpellingDragon/tagent/features/rl"
 
 Package rl is the training observation surface of the runtime: it declares the
 versioned records a model request is remembered by, the episode and dependency

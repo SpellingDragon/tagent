@@ -58,13 +58,13 @@
 
 ## 6. HTTP 限额与 allowlist（控制面 + LLM 重定向）
 
-- **限额**（`rl/http_api.go:HTTPAPILimits`，默认）：`MaxBodyBytes` 1 MiB、`/task` `MaxMessages` 32、`MaxContentBytes` 256 KiB、`MaxFeedbackQueue` 1024；`SetLimits` 拒负值（"拒绝一切"限额是误配非特性）。构造器 `NewHTTPServer` 显式超时（`ReadHeaderTimeout` 5s / `ReadTimeout` 30s / `WriteTimeout` 60s / `IdleTimeout` 60s），根除零值 `http.Server` 误绑 `:80` 无死线的回归。
+- **限额**（`features/rl/http_api.go:HTTPAPILimits`，默认）：`MaxBodyBytes` 1 MiB、`/task` `MaxMessages` 32、`MaxContentBytes` 256 KiB、`MaxFeedbackQueue` 1024；`SetLimits` 拒负值（"拒绝一切"限额是误配非特性）。构造器 `NewHTTPServer` 显式超时（`ReadHeaderTimeout` 5s / `ReadTimeout` 30s / `WriteTimeout` 60s / `IdleTimeout` 60s），根除零值 `http.Server` 误绑 `:80` 无死线的回归。
 - **allowlist 两层**（同语义：精确 host、任意端口）：
   1. **初始 URL**：`HTTPAPI.SetEndpointPolicy(enabled, allowedHosts)` 约束 `/task` 携带的 `llm_base_url` 初跳；
   2. **逐跳 CheckRedirect**：`rl.EndpointRedirectPolicy(allowedHosts)` 装进 LLM client，**30x 每一跳目标 host 必 ∈ allowlist**，越界报 `endpoint redirect policy: hop %d target host %q not in endpoint allowlist (initial URL %q)`。
 - **配置面**：`TAGENT_RL_ALLOW_LLM_REDIRECT`（`1` 才允许动态重定向，默认禁用）、`TAGENT_RL_ENDPOINT_ALLOWLIST`（逗号分隔 host）。**未启用重定向时任何 30x 跳转全拒**。
 - **升级/回滚注意**：新增逐跳 CheckRedirect 收紧了行为——若既有部署曾依赖「allowlist 端点二次跳转到非 allowlist host」，升级后会被拒（fail-closed，符合 Major 5 消除文档化降级的目标）；回滚则失去逐跳防护，仅初跳受约。allowlist 变更走配置，非数据迁移。
-- **佐证**：`rl/http_api_test.go`（HopSemantics / EmptyAllowlist / AllowlistedHopChain / HopCap / NormalizeRedirectHost）。
+- **佐证**：`features/rl/http_api_test.go`（HopSemantics / EmptyAllowlist / AllowlistedHopChain / HopCap / NormalizeRedirectHost）。
 
 ## 7. 一页式升级检查清单
 

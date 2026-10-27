@@ -125,7 +125,7 @@ jobs:
       # tool, api/{event,plugin} and all six integration trees, and a shrunken
       # set would quietly drop them from the race gate.
       - name: Race (root + memory + runtime + evolution + api + tool + rl + all integration suites)
-        run: ./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./evolution/... ./api/event/... ./tool/... ./api/plugin/... ./rl/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+        run: ./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./features/... ./api/event/... ./tool/... ./api/plugin/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the

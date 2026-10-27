@@ -15,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )

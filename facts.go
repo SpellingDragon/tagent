@@ -19,7 +19,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
-	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 )
 
 // mappedSummaryRunes bounds the one-line read a mapped entry carries when the

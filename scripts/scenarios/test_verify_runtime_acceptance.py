@@ -26,7 +26,7 @@ import verify_runtime_acceptance as v
 from test_convert_trajectories import (FakeTokenizer, capture_record, fact_for,
                                         feedback_for, sealed_manifest, _rmtree)
 
-PACKAGE = "github.com/SpellingDragon/tagent/rl"
+PACKAGE = "github.com/SpellingDragon/tagent/features/rl"
 REQUIRED = ["TestRealModel_Chat", "TestRealModel_Tools"]
 
 

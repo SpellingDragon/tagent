@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 )
 

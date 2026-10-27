@@ -13,7 +13,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 

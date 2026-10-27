@@ -22,7 +22,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
 
 // TestReflectionScopeAndWatermark drives the reflection loop over its authorized face, its persisted watermark and its loop-session injection face.

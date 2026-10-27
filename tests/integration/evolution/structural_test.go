@@ -12,7 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 
-	evo "github.com/SpellingDragon/tagent/evolution"
+	evo "github.com/SpellingDragon/tagent/features/evolution"
 
 	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 )

@@ -14,7 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"

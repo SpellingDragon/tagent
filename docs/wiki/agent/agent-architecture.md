@@ -139,7 +139,7 @@
 | `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖）、Inbox（durable inbox-v2）、AnchorStore（默认关） | 无 |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
 | `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go） | 无 |
-| `rl/`（独立顶级包） | TrajectoryRecorder + HTTPAPI（token 认证 + loopback fail-closed）+ SwappableModel（retired model 延迟回收） | 无 |
+| `features/rl/`（独立顶级包） | TrajectoryRecorder + HTTPAPI（token 认证 + loopback fail-closed）+ SwappableModel（retired model 延迟回收） | 无 |
 
 依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖。agent 包内文件按职责分五组：
 
@@ -161,7 +161,7 @@
 | `agent/org` | 退役账本、候选事务簿记、换壳 overlay——**发布动作留根包**，两侧只经注入契约协作 | agent/org → config, agent；MUST NOT import root |
 | `agent/resources` | 共享存储/引擎的最后引用清理、目录写锁（flock）、毒化封闭与重开判定 | agent/resources → config, memory；MUST NOT import root/agent |
 
-漂移审计器（evolution/asset_drift.go）与整理提示（memory/consolidation_hint.go）同期归域，方向由编译器与 `TestArch_LayeredDependencyDirection` 双重执法。发布动作留在根包的原因：`architecture-guardrails` 的「唯一编排发布权」规定组合根独占执行绑定的构造与发布，内部包不得触及编排内部状态——世代**机制**可迁、**特权**留根。
+漂移审计器（features/evolution/asset_drift.go）与整理提示（memory/consolidation_hint.go）同期归域，方向由编译器与 `TestArch_LayeredDependencyDirection` 双重执法。发布动作留在根包的原因：`architecture-guardrails` 的「唯一编排发布权」规定组合根独占执行绑定的构造与发布，内部包不得触及编排内部状态——世代**机制**可迁、**特权**留根。
 
 <a id="data-flow"></a>
 ## 四、数据流

@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/SpellingDragon/tagent/api/event"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // sessionFacts is the canonical chain-read face: the facts one session

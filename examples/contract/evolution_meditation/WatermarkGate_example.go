@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
 
 // heldWatermark is the canonical freshness gate over the execution watermark: it reports

@@ -20,7 +20,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // smokeDataRounds 是导出对账驱动的轮数：落在 5-10 轮的窗口里，每轮一个唯一标记。

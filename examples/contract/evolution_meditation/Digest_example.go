@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 )
 
 // boundedDigest is the canonical self-state summary: it renders the observed facts since

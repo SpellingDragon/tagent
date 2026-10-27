@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 )
 
 // memoryLog is the canonical governance log: governance events are staged under their

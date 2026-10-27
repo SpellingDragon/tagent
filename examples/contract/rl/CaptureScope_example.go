@@ -9,7 +9,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // trajectScope is the canonical decision-bound capture: the scope hands the

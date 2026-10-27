@@ -84,8 +84,8 @@ NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
 # governance/→evolution/governance/、host_bridge.go→cli/host_face.go、diagnostics.go→host_face.go）只做键正名，
 # observed 不动——路径对齐不是豁免扩张。已清零的条目按棘轮生命周期删除，不得回填。
 BASELINE = (
-    ("iface-methods", "rl/capture.go:Capture", 3),
-    ("iface-methods", "rl/capture_wiring.go:CaptureScope", 4),
+    ("iface-methods", "features/rl/capture.go:Capture", 3),
+    ("iface-methods", "features/rl/capture_wiring.go:CaptureScope", 4),
     ("iface-methods", "runtime/agent/loop.go:Capture", 3),
     ("struct-fields", "api/event/model_replacement.go:ModelReplacement", 7),
     ("struct-fields", "runtime/agent/delegate.go:Delegation", 9),
@@ -99,7 +99,7 @@ BASELINE = (
     # S1 iface-methods — 10 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
     ("iface-methods", "runtime/agent/loop.go:Recorder", 3),
-    ("iface-methods", "rl/produce.go:Recorder", 3),
+    ("iface-methods", "features/rl/produce.go:Recorder", 3),
     ("iface-methods", "runtime/state/durable.go:FactLog", 4),
     ("iface-methods", "runtime/state/store.go:Store", 4),
     ("iface-methods", "runtime/task/registry.go:Manager", 4),
@@ -130,7 +130,7 @@ BASELINE = (
     # 身份/内容/归属/账目四块的数据语义（序列化保真面），不拆构造、不拆块；可读性由
     # api/event/types.go 的语义块文档分组承担。
     ("struct-fields", "api/event/types.go:Event", 16),
-    ("struct-fields", "evolution/posterior.go:Evaluation", 6),
+    ("struct-fields", "features/evolution/posterior.go:Evaluation", 6),
     ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
     ("struct-fields", "memory/event_body.go:EventBody", 20),  # 2026-10-26: full-fact fidelity (fidelity-and-recovery 2.2) names every field a restore needs; ratchet kept, count follows the declared design
     ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
@@ -140,31 +140,31 @@ BASELINE = (
     ("struct-fields", "memory/replay.go:DeliveryRecord", 8),
     ("struct-fields", "memory/search/port.go:Query", 9),
     ("struct-fields", "memory/ledger/segment_store.go:SegmentRecord", 6),
-    ("struct-fields", "evolution/governance/denial.go:DenialRecord", 9),
-    ("struct-fields", "evolution/governance/goal.go:Goal", 6),
+    ("struct-fields", "features/evolution/governance/denial.go:DenialRecord", 9),
+    ("struct-fields", "features/evolution/governance/goal.go:Goal", 6),
     ("struct-fields", "memory/query/inventory.go:InventoryCounts", 6),
     ("struct-fields", "memory/query/inventory.go:NoticeEntry", 9),
     ("struct-fields", "memory/query/inventory.go:SessionEntry", 6),
     ("struct-fields", "memory/query/snapshot.go:DetailState", 6),
     ("struct-fields", "memory/query/subscribe.go:Update", 6),
     ("struct-fields", "memory/query/types.go:ObjectRef", 7),
-    ("struct-fields", "rl/capture.go:CaptureManifest", 9),
-    ("struct-fields", "rl/capture.go:RequestSnapshot", 11),
+    ("struct-fields", "features/rl/capture.go:CaptureManifest", 9),
+    ("struct-fields", "features/rl/capture.go:RequestSnapshot", 11),
     # 数据保真面（记录 schema＝序列化载体，字段为数据语义本体非配置选择面——
     # S2 类别豁免，同 event.Event 16f 先例）。装配期配置/选择面不入本块：配置面
     # 零债硬拦。以下逐项具名引入叶与保真理由。
     # 06.8 加性 ModelVersion：替换记录携带版本归属通路的证据。
-    ("struct-fields", "rl/replacement.go:ReplacementRecord", 6),
+    ("struct-fields", "features/rl/replacement.go:ReplacementRecord", 6),
     # 08.4 新产数据面（诊断读出报告＝数据保真面非配置选择面，S2 类别豁免；
     # 引入叶 08.4——七段读出是报告语义本体，同 Explanation 先例）
     ("struct-fields", "host_face.go:DiagnosticReport", 7),
-    ("struct-fields", "rl/record.go:AttemptRecord", 12),
-    ("struct-fields", "rl/record.go:DecisionRecord", 7),
-    ("struct-fields", "rl/record.go:EpisodeRecord", 9),
-    ("struct-fields", "rl/record.go:ModelViewRef", 8),
+    ("struct-fields", "features/rl/record.go:AttemptRecord", 12),
+    ("struct-fields", "features/rl/record.go:DecisionRecord", 7),
+    ("struct-fields", "features/rl/record.go:EpisodeRecord", 9),
+    ("struct-fields", "features/rl/record.go:ModelViewRef", 8),
     # 06.3 采集账目（引入叶）：准入/拒收/写错/在飞四类计数是丢失账本体，
     # Dropped() 由分类计数合成，拆块即审计面需要二次归并。
-    ("struct-fields", "rl/sink.go:CaptureLedger", 8),
+    ("struct-fields", "features/rl/sink.go:CaptureLedger", 8),
     ("struct-fields", "runtime/state/resources.go:SkillLoad", 6),
     ("struct-fields", "runtime/state/session.go:MailboxEntry", 6),
     ("struct-fields", "runtime/task/wrapper.go:Result", 6),
@@ -176,7 +176,7 @@ BASELINE = (
     # 本体，收窄字段等于拆数据面，消费方须把同一观察二次归并。
     ("struct-fields", "tool/exec/state.go:StateEvent", 8),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
-    ("ctx-bare", "evolution/governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
+    ("ctx-bare", "features/evolution/governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     ("ctx-bare", "host.go:*", 1),    # deliveryLineageFrom：回合血统经类型化 accessor 落到 send 投递
     ("ctx-bare", "settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间

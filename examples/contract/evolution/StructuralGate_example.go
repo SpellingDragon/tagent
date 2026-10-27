@@ -3,7 +3,7 @@ package evolutionexample
 import (
 	"context"
 
-	"github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/features/evolution"
 	"github.com/SpellingDragon/tagent/runtime/state"
 )
 

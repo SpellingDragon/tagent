@@ -20,7 +20,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // hostCaptureID is the identity the boot capture seals its manifest under.

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent"
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 )
 
 // TestJourneyBootForwardsGovernance drives a call Boot must rule on:

@@ -1,4 +1,4 @@
-package telemetry // import "github.com/SpellingDragon/tagent/telemetry"
+package telemetry // import "github.com/SpellingDragon/tagent/features/telemetry"
 
 The log face of the observation bypass: the observer that renders each committed
 fact into one framework log line after the fact is durable. The level follows

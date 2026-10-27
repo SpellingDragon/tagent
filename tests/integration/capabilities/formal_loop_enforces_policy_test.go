@@ -12,7 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
