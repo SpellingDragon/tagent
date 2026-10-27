@@ -495,11 +495,20 @@ retained/firing/rearm 三态内存队列删除，通知待消费责任归 mailbo
   `settleDeliveryKey(notice)` 按四元组寻回通知事实，本就与 invocation 无关。故不需要裁定①的逐行登记程序，
   且 event-short 十轮 9/10 match（唯一红是既有 03.6 FoldControl，基线 worktree 复现同一句）。
 
-### 回滚即红（三点，逐条原文见 F3b-ddual-drive-fix.txt §三）
+### 回滚即红（三点，逐条原文见 F3b-dual-drive-fix.txt §三）
 
 - 还原 c2 → `follow-up turns after the restart = 2, want the 1 the landed attempt closes`
 - 还原 c1 → `follow-up turns beside a landed attempt = 1, want none`
 - 还原 e → `notice facts after the resume = 2, want the one instruction`
+
+### 回归门禁（本单重采，逐条 RC=0）
+
+- `go build ./...` / `go vet ./...`；`go test ./... -short -count=1`（根模块 38 包 ok）；
+  `race_check.sh` 四包（host/execution/state/agent）；三模块 build+vet+test -short；`bash scripts/lint.sh`；
+  症状全家（`go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom'` → ok 13.136s）。
+- clone 级（提交 0365931 的干净 clone `/tmp/tagent-clone-0365931`，无共享工作区未跟踪态）：build+vet RC=0；
+  `runtime/...` + `tests/integration/{host,execution,state,history,acceptance}` 全 ok（host 33.460s / execution 24.092s）；
+  `bash scripts/lint.sh` RC=0（gen_godoc 68 包与提交态一致）。
 
 ### 未纳入本单（各单开）
 

@@ -1,6 +1,6 @@
 fidelity-and-recovery · 缺陷修复证据：双驱动（c2 同屏障 + c1 前置 attempt + e 通知身份去分域）
 执行日期：2026-10-27　　仓库：/Users/pengweiye/Documents/codes/tagent
-基线 HEAD：b0af340（工作树 = 本单改动，未提交；本文所有数字均在该树上采集）
+基线 HEAD：b0af340；本单改动已提交（0365931，未 push）
 归因输入：evidence/dual-drive-attribution.txt（460 行；E1 并发单赢家 / E2 无双 Accept / E3 回执唯一 fence /
 38-38 确定性窗口 / 4.5 NoticeFactKey invocation 分域 / 4.6 修复方向）
 裁定（上级）：S1 at-least-once 保留 + 幂等兑现到「回合驱动恰一次」；S2 跨进程双驱动 = 缺陷；
@@ -16,32 +16,35 @@ S3 验收 dup=0 / notif=47 / transcript 无重复。
 一、三 fence（代码锚，逐条对应归因 4.3 c1/c2 与 4.5 e）
 ────────────────────────────────────────────────────────────────
 c2 回执与交付同屏障（窗口：整个回合 → 同屏障内的崩溃）
-  settle_turn.go:342-403  driveSeat 在 fire 之前把 settleBarrier{notice, settle, consume} 盖到 fire 的 ctx 上；
+  settle_turn.go:392-403  driveSeat 在 fire 之前把 settleBarrier{notice, settle, consume} 盖到 fire 的 ctx 上
+                          （类型与 accessor：settle_turn.go:89-118）；
                           settle → attempts.RecordAttempt(terminal)；consume → wake.Consume（context.WithoutCancel）。
-  host.go:705-736         driveLocked: run.Invoke 返回后立即 settleTerminal(ctx, turn)（= 回合终态落定的同事务边界），
-                          然后才 deliverFresh；settleTerminal 先落 attempt 终态，KindCompleted 才落消费回执。
-  host.go:816-825         noticeInvocation：follow-up 回合的 invocation = "notice:" + notice.FactKey()。
-  settle_turn.go:404-411  fire 正常返回后仍有一次 Consume（容忍 state.ErrClaimSettled），作为无 barrier 面
+  host.go:708             driveLocked: run.Invoke 返回后立即 settleTerminal(ctx, turn)（= 回合终态落定的同事务边界），
+                          然后才 deliverFresh。
+  host.go:715-738         settleTerminal 先落 attempt 终态，KindCompleted 才落消费回执。
+  host.go:826-828         noticeInvocation：follow-up 回合的 invocation = "notice:" + notice.FactKey()。
+  settle_turn.go:409-411  fire 正常返回后仍有一次 Consume（容忍 state.ErrClaimSettled），作为无 barrier 面
                           （自定义 driver）的兜底；同键重复消费由 account 具名拒绝。
 c1 fire 前写 durable attempt（双重 fence）
-  settle_turn.go:366-385  driveSeat: attempts.Attempt(notice) 读门 →
+  settle_turn.go:354-385  driveSeat: attempts.Attempt(notice) 读门 →
                             held && Terminal==completed → 只 Consume（补回执）并 return，不再驱动第二个回合；
                             err → release；
                             否则 RecordAttempt({Terminal:""}) 先落 in-flight 标记，再 fire。
-  runtime/state/durable.go:73-99,242-303  SettleAttempt / attemptRecord / attemptRecorder；
-                          attemptPrefix = "tagent/task/v1/attempt:"，键 = task\x00round\x00kind\x00seq；
+  runtime/state/durable.go:54,83-99,169-200,296-303,613  attemptPrefix / SettleAttempt / attemptRecord /
+                          attemptRecorder / load() 回填 / attemptOf / attemptKey；
+                          键 = task\x00round\x00kind\x00seq；
                           recordAttempt 走 Put+Sync（同屏障），同内容重复不发第二对，写失败如实报错不确认；
-                          load() 扫描 attemptPrefix 回填 → Boot 后 RestoreOwed/Wake 读到跨进程 attempt。
-  runtime/state/memory.go:265-314  MemoryStore.Attempt / RecordAttempt（有 durable 账走 attemptsLog，无则自账，
+                          Boot 后 RestoreOwed/Wake 读到跨进程 attempt。
+  runtime/state/memory.go:271-314  MemoryStore.Attempt / RecordAttempt（有 durable 账走 attemptsLog，无则自账，
                           空 TaskID → ErrNoticeIdentityMissing）。
-  runtime/state/mailbox.go:49-56   durableConsumption 收窄为 consumptionRecorder+OwedNotices（attempt 走独立窄口，
+  runtime/state/mailbox.go:49-58  durableConsumption 收窄为 consumptionRecorder+OwedNotices（attempt 走独立窄口，
                           S1 iface-methods 3 门）。
 e 通知身份去 invocation 分域（transcript 不追加第二条指令）
-  host.go:775-790         fireNoticeTurn: identified 取 barrier.notice（补齐四元组）→ invocationID := noticeInvocation(identified)；
+  host.go:781-785         fireNoticeTurn: identified 取 barrier.notice（补齐四元组）→ invocationID := noticeInvocation(identified)；
                           notice 事实键仍是 NoticeFactKey(invocationID, notice) 的**形状**，身份改由通知本体决定。
                           同通知 → 同键 → CommitToSession 幂等命中，transcript 只有一条指令。
   NoticeFactKey 生成/消费点核对：agent.NoticeFactKey（api/agent）签名不变；调用点=fireNoticeTurn（生成）；
-  settleDeliveryKey(notice)（settle_turn.go:355 读回通知事实，四元组寻址，与 invocation 无关）；
+  settleDeliveryKey(notice)（settle_turn.go:355 lookup 读回通知事实，四元组寻址，与 invocation 无关）；
   facts.go sink 的 EVID 家族断言读的是事实键本体与 meta，不读 invocation 前缀 → 无合同断言随本改动改写。
 
 ────────────────────────────────────────────────────────────────
@@ -98,6 +101,12 @@ e 通知身份去 invocation 分域（transcript 不追加第二条指令）
   42/32768*      match    47/47                      ∅    ∅     1728/1728  857.84s  run-s42-w32768-20261027-143646
   合计 6/6 verdict=match，每片 notif=47、dup=0、missing=0、action 对账 1728/1728。
 
+  修复前后同日对照（同一参数矩阵、同一 03.11 对账口径，report-*.json 逐片直读）：
+    修复前 2026-10-27 04:41–08:27 共 13 个 run 的 dup≠0（notif 48–51/47，F2 期重采；
+    同日其余 run 也有 47/47 的干净片——dup 随进程死亡落在窗口内与否而定），
+    重复对形如 SMOKE-R10597 x2 / SMOKE-R420599 x2（与归因 E3 的「同一通知驱动两次」一致）；
+    修复后 2026-10-27 13:10–14:36 的六片全部 notif=47/47、dup=∅、miss=∅。
+
   * 受控重跑：42/32768 首跑（run-s42-w32768-20261027-141644）红，形态与 dup 无关：
     gen48 smoke_test.go:2853 等不到 "settle-ack SMOKE-R420496" 60s（recorded=21）；provider 尾部 dump 显示
     该 marker 的入口回合被重启后重驱，最后一次工具结果 = 
@@ -122,6 +131,13 @@ e 通知身份去 invocation 分域（transcript 不追加第二条指令）
   （"the restart minted the synthetic key -hist-…"）。归因为既有面：同一断言在基线 HEAD b0af340 的
   git worktree（/tmp/tagent-base，无本单改动）单跑同样红、形态逐字相同；历史归档
   openspec/changes/archive/2026-10-25-…/EVID-05-fix-summary.json 也是同一句。与本单三 fence 无关（留待单开）。
+- clone 级（干净克隆 /tmp/tagent-clone-0365931，无共享工作区未跟踪态；git log -1 = 0365931，git status 干净）：
+    go build ./... && go vet ./...                                        RC=0
+    go test ./runtime/... ./tests/integration/host ./tests/integration/execution \
+            ./tests/integration/state ./tests/integration/history ./tests/integration/acceptance -count=1
+      → runtime/agent 0.658s / state 0.410s / task 0.668s / host 33.460s / execution 24.092s /
+        integration/state 0.739s / history 7.139s / acceptance 1.434s，全部 ok，0 FAIL
+    bash scripts/lint.sh                                                  RC=0（lint: ok；gen_godoc 68 包与提交态一致）
 
 ────────────────────────────────────────────────────────────────
 六、flake 台账（本单）
