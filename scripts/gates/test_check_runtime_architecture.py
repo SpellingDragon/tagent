@@ -187,10 +187,10 @@ class PolicyTest(unittest.TestCase):
 
     def test_root_must_list_every_package(self):
         policy = copy.deepcopy(self.policy)
-        policy["edges"][0]["allow"] = [p for p in policy["edges"][0]["allow"] if p != "evolution"]
+        policy["edges"][0]["allow"] = [p for p in policy["edges"][0]["allow"] if p != "features/evolution"]
         code, out, _ = self.check_policy(policy)
         self.assertNotEqual(code, 0)
-        self.assertIn("does not list package 'evolution'", out)
+        self.assertIn("does not list package 'features/evolution'", out)
 
     def test_self_allowed_is_rejected(self):
         policy = copy.deepcopy(self.policy)
@@ -440,9 +440,9 @@ class ImplementationTest(unittest.TestCase):
         self.assertIn("unknown first-party package 'state/reload'", out)
 
     def test_missing_required_package_is_rejected(self):
-        code, out, _ = self.run_impl(go_list_stream(self.policy, omit=("evolution",)))
+        code, out, _ = self.run_impl(go_list_stream(self.policy, omit=("features/evolution",)))
         self.assertNotEqual(code, 0)
-        self.assertIn("required planned package 'evolution' is not implemented", out)
+        self.assertIn("required planned package 'features/evolution' is not implemented", out)
 
     def test_edge_violation_is_rejected(self):
         text = go_list_stream(self.policy, extra_imports={

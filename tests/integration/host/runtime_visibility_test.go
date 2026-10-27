@@ -28,8 +28,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/cli"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
-	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
 

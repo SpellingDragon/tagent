@@ -1,4 +1,4 @@
-package rlexample // import "github.com/SpellingDragon/tagent/examples/contract/rl"
+package rlexample // import "github.com/SpellingDragon/tagent/examples/contract/features_rl"
 
 Package rlexample shows how the capture scope binds one decision view.
 

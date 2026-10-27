@@ -1,4 +1,4 @@
-package evolutionmeditationexample // import "github.com/SpellingDragon/tagent/examples/contract/evolution_meditation"
+package evolutionmeditationexample // import "github.com/SpellingDragon/tagent/examples/contract/features_evolution_meditation"
 
 Package evolutionmeditationexample holds the canonical examples of the
 meditation faces a reflection loop reads and writes through: the bounded digest,

@@ -20,9 +20,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/state"
-	"github.com/SpellingDragon/tagent/features/telemetry"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )

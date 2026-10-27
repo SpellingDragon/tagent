@@ -66,7 +66,7 @@ jobs:
       # First-party product packages per golden/runtime/architecture.json (its
       # scope excludes scripts/tests/examples/docs/resources). The root
       # package is *.go: a bare `.` would recurse the whole root module.
-      PRODUCT_PACKAGES: "*.go api runtime memory evolution telemetry rl tool internal cli"
+      PRODUCT_PACKAGES: "*.go api runtime memory features tool internal cli"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4

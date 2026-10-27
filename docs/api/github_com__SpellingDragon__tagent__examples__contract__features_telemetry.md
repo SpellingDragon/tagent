@@ -1,4 +1,4 @@
-package telemetryexample // import "github.com/SpellingDragon/tagent/examples/contract/telemetry"
+package telemetryexample // import "github.com/SpellingDragon/tagent/examples/contract/features_telemetry"
 
 Package telemetryexample holds the canonical examples of the observation bypass
 implementation faces: one file per interface, a minimal implementation beside

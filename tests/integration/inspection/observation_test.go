@@ -27,8 +27,8 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/features/telemetry"
+	"github.com/SpellingDragon/tagent/memory/query"
 )
 
 // commitSet is the committed-fact face of these tests: it records the facts

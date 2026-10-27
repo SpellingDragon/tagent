@@ -8,3 +8,10 @@
 - **D1 判据张力（W1-E 发现，裁定采纳）**：runtime/agent→features/evolution/governance（WithCallPass）实证「严格可移除」不成立——判据改「能力从属」；端口化另案候选。
 - **存量悬空登记（非本变更引入，不扩面）**：behavior-matrix:52 refine.go、agent-architecture:164 asset_drift.go、behavior-matrix:9 gate.go、:22 checkIndex、agent-architecture 第三节 20+ 条 3369af7 前旧树——属既有文档债，留档待文档批。
 - **保持不变的「路径状」身份**（可观测性/持久化契约，迁移不改名）：OTel meter 名 `tagent/telemetry`（×2）、事件类型前缀 `tagent/governance/v1/*`。
+
+---
+
+## 环境事故记录（2026-10-27 夜，负结果入库）
+
+- **本机文件数据蒸发事件**：磁盘 99% 满（余 16Gi/926Gi）期间，**615 个 tracked 文件读空（openspec 归档 600、scripts 14、examples 1）+ features/ 53 个 .go**——stat 尺寸完好而 read 返回空（APFS data-less 形态；git 因 stat 吻合而不判变，checkout 空转，须 rm+checkout 强制重写恢复）。已全量恢复（REMAIN_VOID=1，余一为会话前即存在的未跟踪 data-less 文件 `examples/wechat-bot/skills/interview/agent-interview-helper`——其诡异状态之谜至此揭晓）。**受害者含架构检查器与 lib（71 自测败之因）**；早前 verify_restart_prefix「负载下 flake」同族（冷读空）。**建议用户：磁盘清理与备份检查（机器健康级问题，非仓库问题）。**
+- **门禁面四处陈旧随迁**（CI 红的完整清单）：runtime-contracts.yml PRODUCT_PACKAGES、ci.yml race 表（已有）、lint.sh 产品包目录清单、hygiene.go 顶层注册表、examples/contract 五目录名（S4 推导按包路径）、两个自测 fixture 字面量（R23 型：判据对、字面量随契约陈旧——test_check_runtime_architecture 的 evolution 两处、test_check_runtime_workflow 的 RACE_PACKAGES）。

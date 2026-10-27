@@ -32,8 +32,8 @@ import (
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
-	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 )

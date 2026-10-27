@@ -1,4 +1,4 @@
-package evolutiongovernanceexample // import "github.com/SpellingDragon/tagent/examples/contract/evolution_governance"
+package evolutiongovernanceexample // import "github.com/SpellingDragon/tagent/examples/contract/features_evolution_governance"
 
 Package evolutiongovernanceexample holds the canonical examples of the
 governance domain faces: one file per interface, a minimal implementation beside
