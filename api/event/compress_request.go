@@ -10,7 +10,7 @@
 // however often it is judged.
 //
 // The judgment is vocabulary rather than a domain mechanism: the mechanisms
-// that judge it (workspace on a tool result, evolution/meditation on a card
+// that judge it (workspace on a tool result, features/evolution/meditation on a card
 // sequence) and the log that files it (memory) live in three domains, and the
 // event axis is the one package all three already speak. The producer and the
 // reason a mechanism states stay with that mechanism; this file states the fact

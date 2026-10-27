@@ -196,7 +196,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 
 **D4 文档面规模。** 全仓 markdown 实测 1915 篇：`openspec` 1125 篇（变更过程工件）、`examples` 588 篇（示例 module 自带）、`docs` 180 篇、`resources` 10 篇、`.agents` 8 篇，另根 3 篇与 `internal` 1 篇。**`docs` 面只有 180 篇**——评审口径若说"全仓 markdown"，不是 `docs`。分区对象因此只有 `docs` 这 180 篇，见 §八。
 
-**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**观测面见 §七·E**：四类识别点都直接写 trpc 框架面（`trpc-agent-go/log` 与 `features/telemetry/trace`），仓库不在其上叠第二套抽象。
+**D5 bus factor = 1。** 缓释手段就是本文档本身：任何"只在一个人的会话记忆里"的约定（门禁口径、踩坑形态、回正条件）必须回写到本文或 wiki，否则它不构成可继承的资产。§五·3 的两条已知形态即此类回写。**观测面见 §七·E**：四类识别点都直接写 trpc 框架面（`trpc-agent-go/log` 与 `trpc-agent-go/telemetry/trace`），仓库不在其上叠第二套抽象。
 
 ### E. 观测面：四类识别的观察点（复用框架 log + telemetry）
 
@@ -212,7 +212,7 @@ go list -f '{{.ImportPath}} {{if or .TestGoFiles .XTestGoFiles}}HAS-WHITEBOX{{el
 - **开 DEBUG**：默认 zap 级别是 Info，端口派发与消费面需 `log.SetLevel("debug")` 才出；模型响应是 INFO 级，开箱即见、每请求一行。
 - **generation span 归框架**（框架 semconv，Langfuse 直接读）：一次模型调用恰好一条 `chat <model>` span，由**驱动模型的那一方**开——框架 `internal/flow/llmflow` 的模型步（`itrace.StartSpan`），或开了 `openai.WithChatTelemetry(true)` 的 provider 模型直调。`gen_ai.operation.name=chat`、`gen_ai.request.model`、`gen_ai.usage.input_tokens`/`output_tokens`（provider 报了缓存命中时再加 `gen_ai.usage.input_tokens.cached`）、失败请求的 `Error` status，都由框架侧渲染；本仓的模型响应面只写那一行 INFO，不在同一个 tracer 上再开第二条。
 - **旁路判据**：四个观察点的 logger 调用都在 `recover` 保护内（模型响应面不再调 tracer），失败只丢一条观察，不改事实、不改终态、不改投递。
-- **Langfuse 装配（进程启动时一次）**：`features/telemetry/langfuse.Start` 装的是 `features/telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故 generation span 无需为本仓库写转换代码。**span 只有一条**：框架为每次模型调用开一条同名 `chat <model>` span；本仓 `api/model/observe.go` 只写 INFO 行与 token/latency 渲染，不在同一个 tracer 上开第二条 generation。两种驱动方式下都只有一条：走框架模型步（llmflow）时框架必然开，直调 provider 模型时由宿主的 `openai.WithChatTelemetry(true)` 开——直调且未开该选项的宿主没有 generation span，需要时在模型构造处打开。复跑见 `go test ./api/model/... ./tests/integration/host -run 'ModelCallObservation|ModelRequestIsOneGeneration|FourFacesObservation' -count=1`。
+- **Langfuse 装配（进程启动时一次）**：`trpc-agent-go/telemetry/langfuse.Start` 装的是 `trpc-agent-go/telemetry/trace.Tracer` 与 `TracerProvider`，并把 `gen_ai.operation.name=chat` 的 span 归类为 generation，故 generation span 无需为本仓库写转换代码。**span 只有一条**：框架为每次模型调用开一条同名 `chat <model>` span；本仓 `api/model/observe.go` 只写 INFO 行与 token/latency 渲染，不在同一个 tracer 上开第二条 generation。两种驱动方式下都只有一条：走框架模型步（llmflow）时框架必然开，直调 provider 模型时由宿主的 `openai.WithChatTelemetry(true)` 开——直调且未开该选项的宿主没有 generation span，需要时在模型构造处打开。复跑见 `go test ./api/model/... ./tests/integration/host -run 'ModelCallObservation|ModelRequestIsOneGeneration|FourFacesObservation' -count=1`。
 
 ```go
 clean, err := langfuse.Start(ctx,
@@ -240,7 +240,7 @@ defer clean(ctx)
 | 环境块生成 | `request.go` 的 `environmentBlock` | DEBUG 日志 | reason、agent、tasks、omitted；进程计数 `tagent.EnvironmentBlockGenerations()` | `tagent: environment block generated` |
 
 - **级别纪律与旁路**：写盘失败、屏障失败、装载失败一律 ERROR（静默的语义改变必须显式）；非持久 tier 的"进程退出即失忆"是 WARN；审批的每次裁定 INFO，同一等待的重复判定留 DEBUG；其余逐事件 DEBUG。五个专用观察点的 logger 调用都在 `recover` 保护内，且先判 `log.Default` 非 nil——日志失败只丢一条行，不改判定、不改落定、不改恢复结果、不改请求装配。
-- **可复跑**：`go test ./runtime/agent ./evolution/governance ./runtime/state -run 'Observation' -count=1` 验三个机制（委派、审批、持久化）与事件消费面各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（委派受理与落定、重启折叠）读观测行；环境块计数锚 `go test ./tests/integration/host -run 'EnvironmentBlockGenerationIsObserved' -count=1`。压缩请求没有专用观察行，断言面只到 `telemetry.LogObserver` 的通用事实行。
+- **可复跑**：`go test ./runtime/agent ./features/evolution/governance ./runtime/state -run 'Observation' -count=1` 验三个机制（委派、审批、持久化）与事件消费面各一条输出断言与一条失败不阻断断言；消费者锚 `go test ./tests/integration/history ./tests/integration/execution -run 'Observation' -count=1` 走真实路径（委派受理与落定、重启折叠）读观测行；环境块计数锚 `go test ./tests/integration/host -run 'EnvironmentBlockGenerationIsObserved' -count=1`。压缩请求没有专用观察行，断言面只到 `telemetry.LogObserver` 的通用事实行。
 
 ---
 

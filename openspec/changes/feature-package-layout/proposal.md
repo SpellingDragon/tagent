@@ -8,7 +8,7 @@
 
 ## Why
 
-顶层十个域平级，内核（api/runtime/memory）与可选能力（telemetry/evolution/rl）无目录分界，新能力无统一落点（组合根持续增重的上游原因之一）。裁定（编排者，2026-10-27，承接用户取向指令）：**features/ = 实现内核声明端口、可整体移除而不毁内核的可选能力域**——telemetry（纯 api/plugin 观察）、rl（纯 api capture 面）、evolution（反思域，旁路观察+自有调度，移除不毁内核）入选；tool/ 不入（内核执行面组成，被 host/runtime 直接消费）；api/runtime/memory/cli/根包=内核与装配面不动。
+顶层十个域平级，内核（api/runtime/memory）与可选能力（telemetry/evolution/rl）无目录分界，新能力无统一落点（组合根持续增重的上游原因之一）。裁定（编排者，2026-10-27，承接用户取向指令）：**features/ = 能力从属域：实现内核声明端口或策略面的可选能力**——telemetry（纯 api/plugin 观察）、rl（纯 api capture 面）、evolution（反思+治理策略面）入选；tool/ 不入（内核执行面组成，被 host/runtime 直接消费）；api/runtime/memory/cli/根包=内核与装配面不动。
 
 ## What Changes
 

@@ -52,7 +52,7 @@ durable fact surface beside it lives with the storage tiers in memory/ledger.
 Skeleton compile-time assertions for the read face of the memory package: the
 delivery replay engine. The storage shapes are pinned beside their declarations
 in memory/ledger, the projection shapes in memory/replay and the meditation
-shapes in evolution/meditation; this file pins what this package itself
+shapes in features/evolution/meditation; this file pins what this package itself
 declares, so a renamed field or a widened signature stops it from compiling.
 
 The observation table between the segment store and the query face: a committed

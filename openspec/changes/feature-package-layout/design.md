@@ -2,7 +2,7 @@
 
 ## D1 判据与成员（编排者裁，显式）
 
-features/ = 可选能力域（实现内核端口、整体移除不毁内核）：telemetry、rl、evolution。tool/ 不入（内核执行面）；logs/resources 非 Go 域不动；api/runtime/memory/cli/根包=内核与装配。被否：全收 tool/logs——判据「可选移除」不过反事实（host 直接消费 tool 执行器）。
+features/ = 能力从属域（实现内核端口或策略面的可选能力）：telemetry、rl、evolution。tool/ 不入（内核执行面，host 直接消费执行器）；logs/resources 非 Go 域不动；api/runtime/memory/cli/根包=内核与装配。**判据张力如实登记（W1-E 实证）**：runtime/agent 实依赖 features/evolution/governance（WithCallPass）——「整体移除不毁内核」对 evolution 不严格成立，故判据取「能力从属」而非「严格可移除」；governance 的 WithCallPass 端口化列为后续候选（另案）。被否：全收 tool/logs——反事实不过。
 
 ## D2 cli 留顶层成文
 

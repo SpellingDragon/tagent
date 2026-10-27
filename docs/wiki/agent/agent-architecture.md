@@ -139,7 +139,7 @@
 | `reliability/` | DegradationManager（memory/disk/rustviking/model/mcp 五依赖）、Inbox（durable inbox-v2）、AnchorStore（默认关） | 无 |
 | `compress/` | SmartCompressor、卡片序列 Compactor、SessionProjection、TokenCounter、压缩默认常量单源 | `Compact` + `inputs` |
 | `task/` | TaskManager、settle 探测契约、看板、resume、跨包测试基建（fixture.go） | 无 |
-| `features/rl/`（独立顶级包） | TrajectoryRecorder + HTTPAPI（token 认证 + loopback fail-closed）+ SwappableModel（retired model 延迟回收） | 无 |
+| `features/rl/`（可选能力域，内核经 api 端口消费） | TrajectoryRecorder + HTTPAPI（token 认证 + loopback fail-closed）+ SwappableModel（retired model 延迟回收） | 无 |
 
 依赖方向由编译器执法：`agent → compress`、`agent → task`、`agent → governance`、`agent → reliability`，子包零反向依赖。agent 包内文件按职责分五组：
 

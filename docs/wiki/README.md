@@ -35,8 +35,8 @@
 | 治理分级处置与批准通道 | [agent/governance-enforcement.md](agent/governance-enforcement.md) |
 | 任务层生命周期与回收 | [agent/task-lifecycle.md](agent/task-lifecycle.md) |
 | 执行器代际与生命周期收敛 | [agent/execution-generations.md](agent/execution-generations.md) |
-| 自我改进 | [features/evolution/evolution-architecture.md](features/evolution/evolution-architecture.md) | refine 通道、git 原语安全闸、后验评估窗口与双回滚触发 |
-| RL 侧接口 | [features/rl/rl-architecture.md](features/rl/rl-architecture.md) | 端点allowlist 与逐跳重定向（SSRF）防线、配置面与升级收紧 |
+| 自我改进 | [evolution/evolution-architecture.md](evolution/evolution-architecture.md) | refine 通道、git 原语安全闸、后验评估窗口与双回滚触发 |
+| RL 侧接口 | [rl/rl-architecture.md](rl/rl-architecture.md) | 端点allowlist 与逐跳重定向（SSRF）防线、配置面与升级收紧 |
 | 评估套件 | [platform/evaluation-suites.md](platform/evaluation-suites.md) | 票据零幻觉召回、畸形票据显式拒绝、工具面白名单、handoff 契约存在性 |
 | Prompt | [prompt/prompt-architecture.md](prompt/prompt-architecture.md) | Loader / bootstrap / 内嵌回退 / 热重载 Source |
 | 平台子系统 | [platform/platform-subsystems.md](platform/platform-subsystems.md) | 治理闸 · 自进化(git 原生) · 常驻可靠性 · 配置热重载(候选事务/执行代) · 统一可观测 · 记忆引擎(解耦缝) · MCP 闭环（默认关闭项全部 opt-in） |

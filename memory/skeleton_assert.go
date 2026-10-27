@@ -3,7 +3,7 @@
 // Skeleton compile-time assertions for the read face of the memory package: the
 // delivery replay engine. The storage shapes are pinned beside their
 // declarations in memory/ledger, the projection shapes in memory/replay and the
-// meditation shapes in evolution/meditation; this file pins what this package
+// meditation shapes in features/evolution/meditation; this file pins what this package
 // itself declares, so a renamed field or a widened signature stops it from
 // compiling.
 package memory
