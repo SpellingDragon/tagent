@@ -4,7 +4,6 @@
 
 投影作为事实链（KV LSM 事件日志）的纯回放映射：压缩折叠以一等 compaction 事件（`context_compress_summary`，代际标记滚动 supersede）入事实链，冷启动经「最新 compaction snapshot + 尾部重放」逐字节重建投影（prefix-cache 复用）；单一真相源（事实链），无游离 checkpoint。覆盖 R1（上下文跨重启连续）。
 ## Requirements
-
 ### Requirement: 投影是事实链的纯回放（一等不变量）
 
 投影（SessionProjection）SHALL 恒等于事实链（KV LSM 事件日志）的 fold/回放映射（**正常运行路径精确成立；退化恢复路径最终一致**），兑现「投影是写入的旁路产物、事实链只在 KV 里」。运行期每次 `StoreEvent` SHALL 伴随 `projection.Add`（增量回放；`persistBusEvent` SHALL 对齐 stored-gate：StoreEvent 失败 SHALL NOT Append，交由 spill 恢复双写补回）；压缩折叠 SHALL 作为事实链的一条 compaction 事件（非游离于事实链外的投影态快照）。系统 SHALL NOT 把投影态持久化到事实链之外的独立 checkpoint（避免双真相源）。
@@ -214,3 +213,4 @@ SessionProjection SHALL 支持通道分区（对话/遥测/反思）：assembleR
 - **WHEN** 折叠产物（综述 ref 或 `tool_chain` 合成 ref）再次进入同一 fold 判定
 - **THEN** 折叠 SHALL 短路，MUST NOT 产生对自身的第二轮折叠或递归增长
 - **AND** 被折叠原文 SHALL 仍可经既有 `[evt_key]` 票据 recall 回补（既有冷存义务不变）
+

@@ -160,3 +160,11 @@ A3（3.2）落地后编排者迁移与裁定：
 - **A3 自行决策追认**：noticeCard 下限形态（ticket 先占位→状态→材料头，bound=min(room,300)）；负锚扩为三测；projectionBudget 读 Original 带 keyless 回退；测试并入既有文件（词法门镜像要求）。
 
 **波 3 集成凭据**：build 0；history/acceptance 迁移后 vet 0、TestProjectionReplayAndBudget ok、acceptance 全 ok；docs/api 重生成 GEN=0；delta `openspec validate --strict` 过；G9 numstat 184/0 零改动。
+
+---
+
+## 收尾补记（2026-10-27）
+
+- **03.11 长跑红片最终定性（整夜矩阵）**：18 跑 3 红（s42-w32768×1 / s42-w256×2，同签名 settle-ack 60s 超时）全部重跑恢复绿，含**冻结红树原片三跑转绿**与等价行为树通过——非确定时序 flake；中途「终套两连红→暂定回归→二分（基线/波2 绿）→等价树绿→冻结树绿」全程留档 F2 证据（小样本误判的自纠记录）。WATCH：3/15 vs 0/2 不足以排除本变更轻微加大 settle 时序压力，CI 复现则测 60s 界裕度。
+- **另案 doc-budget-lockstep（用户裁定「应该是0」）**：源于本案波 2 集成的 +27 漂移与手工重锁——严格零差额（两向 error+--tighten 同提交锁步）+ 钩子死路径修复+markdown 暂存守卫，独立立案独立归档（7387d28/2ec21f2），不占本案面。
+- **lint 中间态教训（R16 形）**：openspec archive 搬移文件后、git add 前跑 lint → index 持旧径触发 tracked-hygiene 红伪影；净树复验绿。归档流程中 lint 须在 add 之后跑。
