@@ -15,3 +15,12 @@
 
 - **本机文件数据蒸发事件**：磁盘 99% 满（余 16Gi/926Gi）期间，**615 个 tracked 文件读空（openspec 归档 600、scripts 14、examples 1）+ features/ 53 个 .go**——stat 尺寸完好而 read 返回空（APFS data-less 形态；git 因 stat 吻合而不判变，checkout 空转，须 rm+checkout 强制重写恢复）。已全量恢复（REMAIN_VOID=1，余一为会话前即存在的未跟踪 data-less 文件 `examples/wechat-bot/skills/interview/agent-interview-helper`——其诡异状态之谜至此揭晓）。**受害者含架构检查器与 lib（71 自测败之因）**；早前 verify_restart_prefix「负载下 flake」同族（冷读空）。**建议用户：磁盘清理与备份检查（机器健康级问题，非仓库问题）。**
 - **门禁面四处陈旧随迁**（CI 红的完整清单）：runtime-contracts.yml PRODUCT_PACKAGES、ci.yml race 表（已有）、lint.sh 产品包目录清单、hygiene.go 顶层注册表、examples/contract 五目录名（S4 推导按包路径）、两个自测 fixture 字面量（R23 型：判据对、字面量随契约陈旧——test_check_runtime_architecture 的 evolution 两处、test_check_runtime_workflow 的 RACE_PACKAGES）。
+
+---
+
+## F 门禁归因（2026-10-27/28 夜）
+
+- **short10 RC=1**：repeat-1/10 之 03.6 FoldControl negative 子测（synthetic key 跨重启不等）——同片受控重跑绿+`-count=3` 绿（4/4 复跑全绿）；定性环境时序 flake（本机当晚高压）。余 9/10 match。
+- **race RC=1**：TestMCPFaceBindsTheDeclaredServers 确定性 DATA RACE（2/2）——**基线 8919acf 同红**（继承面实锤）；栈顶=trpc-mcp-go v0.0.10 streamableHTTPClientTransport.setSessionID/send（LEDGER U5 既有双签豁免）；高压下竞态显化为功能性失败（race 污染 session id→网关断言败），race_check 豁免只认 race 报告不认功能败——门红如实记录。**处置=WATCH：升级 trpc-mcp-go 至含上游修复版后删 U5 签名复跑（LEDGER 既定移除条件）。**
+- **mutations/symptom/witnesses/三模块/selftests/lint/openspec/short-root 全 RC=0**；longs 六片进行中（结果入 evidence/F2）。
+- **远端 CI**：push 型 workflow（runtime-contracts）于 44761b9 **SUCCESS**（provider-contract=手动、real-smoke=定时、CI=仅 dev/main 与 PR——next 推送无 CI 型 run，非跳过）。
