@@ -230,3 +230,17 @@ F3 SHALL 含 G1–G10 各自的定点破坏红证（还原对应修复点→该 
 - **WHEN** 两单写集同时含 request.go
 - **THEN** 两单 SHALL NOT 并发
 
+### Requirement: 零差额在检查面强制
+
+check_doc_budget.py SHALL 在实测与基线不相等时（两向）以非零退出码拒绝；锁步（--tighten 或具名重锁）SHALL 与文档体量变更同提交。
+
+#### Scenario: 下漂不锁即红
+
+- **WHEN** 实测 < 基线且未先 --tighten
+- **THEN** 检查 SHALL exit 1 且文案指向 --tighten
+
+#### Scenario: 钩子守卫可达
+
+- **WHEN** 提交暂存任何 *.md/*.markdown
+- **THEN** pre-commit SHALL 运行同一零差额检查
+
