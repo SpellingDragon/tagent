@@ -28,9 +28,9 @@
 # trpc-mcp-go for U5), delete the signature AND the per-test skips, rerun
 # `go test ./agent/... -race` (and the MCP face test for U5).
 #
-# Usage: ./scripts/race_check.sh [packages...]   (default: the ci.yml race set)
+# Usage: ./scripts/gates/race_check.sh [packages...]   (default: the ci.yml race set)
 # Test hook: RACE_CHECK_CLASSIFY_ONLY=1 RACE_CHECK_FAKE_EXIT=<n> feeds stdin
-# to the classifier without running go test (used by scripts/test_race_check.sh).
+# to the classifier without running go test (used by scripts/gates/test_race_check.sh).
 set -uo pipefail
 
 # Bash ERE fragments matched against each race's TOP frame (symbol AND file

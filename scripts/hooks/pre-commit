@@ -38,7 +38,7 @@ if [ -n "$maps" ] && [ -n "$tests" ]; then
       exit 1
     fi
     echo "[pre-commit] test-family consolidation detected ($dir) — running lossless merge check..."
-    "$repo_root/scripts/check_test_merge.sh" HEAD "$dir" --map "$map"
+    "$repo_root/scripts/gates/check_test_merge.sh" HEAD "$dir" --map "$map"
   done <<< "$maps"
 fi
 

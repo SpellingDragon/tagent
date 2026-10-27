@@ -14,8 +14,8 @@
   6. 章节标题 ## 连续（中文数字 一~九 无跳号），### 子节归属父节
 
 用法：
-  python3 scripts/verify_doc.py [path]          # 默认 examples/wechat-bot/tagent_review.md
-  python3 scripts/verify_doc.py --strict-refs  # 额外要求每个 [n] 至少被行内引用一次
+  python3 scripts/scenarios/verify_doc.py [path]          # 默认 examples/wechat-bot/tagent_review.md
+  python3 scripts/scenarios/verify_doc.py --strict-refs  # 额外要求每个 [n] 至少被行内引用一次
 
 退出码：全部通过 0；任一 FAIL 1。幂等、无副作用。
 """
@@ -24,7 +24,7 @@ import re
 import os
 
 DEFAULT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "examples", "wechat-bot", "tagent_review.md",
 )
 

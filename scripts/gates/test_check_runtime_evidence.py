@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-REPO = SCRIPTS.parent
+REPO = SCRIPTS.parents[1]
 CHECKER = SCRIPTS / "check_runtime_evidence.py"
 REAL_CONTRACT = REPO / "golden" / "runtime" / "scenarios.json"
 MODULE = "github.com/SpellingDragon/tagent"

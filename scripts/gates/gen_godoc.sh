@@ -9,11 +9,16 @@
 #   --check  regenerate into a temporary tree and fail if docs/api/ is stale or
 #            contains output this generator would not write
 #
+# The script resolves its own repository root: it names docs/api and the two
+# modules from there, so it runs the same whether called as scripts/gates/gen_godoc.sh
+# or through a forwarding entry point.
+#
 # GODOC_OUT overrides the destination (used to verify the generator before the
 # repository adopts docs/api/). Stale files are reported, never deleted: removal
 # stays a human decision.
 export GOTOOLCHAIN=go1.24.1
 set -euo pipefail
+cd "$(dirname "$0")/../.."
 
 check=0
 [ "${1:-}" = "--check" ] && check=1
@@ -37,7 +42,7 @@ index="$gen_root/index.md"
 {
   echo "# API 文档（生成物）"
   echo
-  echo "本目录由 \`scripts/gen_godoc.sh\` 从源码文档注释生成，禁止手工编辑。"
+  echo "本目录由 \`scripts/gates/gen_godoc.sh\` 从源码文档注释生成，禁止手工编辑。"
   echo
   echo "| 包 | 文件 |"
   echo "|---|---|"
@@ -76,7 +81,7 @@ printf '\n包总数：%d。文档覆盖由 scripts/comment_policy 单点判定�
 
 if [ "$check" -eq 1 ]; then
   if [ ! -d "$out" ]; then
-    echo "gen_godoc: $out does not exist; run scripts/gen_godoc.sh and commit it"
+    echo "gen_godoc: $out does not exist; run scripts/gates/gen_godoc.sh and commit it"
     exit 1
   fi
   stale=0

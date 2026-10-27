@@ -25,7 +25,7 @@ var lowerSnakeGo = regexp.MustCompile(`^[a-z0-9]+(_[a-z0-9]+)*\.go$`)
 
 // contractExamplesDir holds the generated contract samples, whose file name is the
 // interface it implements (`<Iface>_example.go`). That spelling is enforced by
-// scripts/check_concept_budget.py, so a second naming rule here would either
+// scripts/gates/check_concept_budget.py, so a second naming rule here would either
 // duplicate or contradict it.
 const contractExamplesDir = "examples/contract/"
 

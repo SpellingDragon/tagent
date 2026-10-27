@@ -5,7 +5,7 @@
 # Cases 1–13 exercise the classifier via RACE_CHECK_CLASSIFY_ONLY (fast,
 # deterministic, no real go test); cases 14–15 are real end-to-end runs
 # (legal package → OK; illegal package → non-zero — the old script's
-# false-green scenario). Run: bash scripts/test_race_check.sh  (all pass → 0)
+# false-green scenario). Run: bash scripts/gates/test_race_check.sh  (all pass → 0)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/race_check.sh"

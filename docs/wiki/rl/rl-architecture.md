@@ -126,14 +126,14 @@ token 比对是常数时间的，`Bearer` 前缀按大小写无关匹配（RFC 9
 <a id="dual-stream-cli"></a>
 ### 双流消费与运行时核账器
 
-`scripts/convert_trajectories.py --strict` 读**两条流**：`--input` 是 capture 流（主事实源，一次模型调用一行 `CaptureRecord`），`--events` 是授权导出的 `ExportedFact` 流且**只作关联索引**（提供事件键、因果父键与绑定的反馈），`--manifest` 是证明主流完整的 capture 封账。主流不完整时，索引再全也补不出事实。
+`scripts/scenarios/convert_trajectories.py --strict` 读**两条流**：`--input` 是 capture 流（主事实源，一次模型调用一行 `CaptureRecord`），`--events` 是授权导出的 `ExportedFact` 流且**只作关联索引**（提供事件键、因果父键与绑定的反馈），`--manifest` 是证明主流完整的 capture 封账。主流不完整时，索引再全也补不出事实。
 
-`scripts/verify_runtime_acceptance.py` 是这套闭环的**核账器**，不是执行器：它不跑 `go test`、不生成任何数据，只核对已跑完的真实产物之间是否互相自洽（22 个具名检查，覆盖 go test 结果、capture 封账、事实导出、数据集形状、分组不相交、拒绝清单、转换账本七类证据）。任何一项拿不到证据就是 FAIL 而非 SKIP——缺失的输入不能被当作通过的检查。证据输入：`--gojson`（必需用例真的 pass、不是 skip、不是缺失；真实模型面干净；各包通过）｜`--capture-dir`（封账可读且已 seal、账本声明与落盘记录数对得上、目录里确有记录）｜`--facts` `--facts-manifest`（快照存在、manifest 完整、计数与快照行数对得上、`source_sha256` 与快照字节对得上）｜`--dataset-dir`（样本非空、抽样 `labels`/`loss_mask` 形状一致、train ∩ test = ∅（按 `capture_namespace` + `root_session_id` 分组不跨侧））｜数据集目录内 `rejected.jsonl`（存在且逐行含 `reason`）｜`--expect-tests`（必须通过的用例清单，含真实模型场景）。`--report` 写机器可读结果；退出码 0 表示全部必需检查通过。
+`scripts/scenarios/verify_runtime_acceptance.py` 是这套闭环的**核账器**，不是执行器：它不跑 `go test`、不生成任何数据，只核对已跑完的真实产物之间是否互相自洽（22 个具名检查，覆盖 go test 结果、capture 封账、事实导出、数据集形状、分组不相交、拒绝清单、转换账本七类证据）。任何一项拿不到证据就是 FAIL 而非 SKIP——缺失的输入不能被当作通过的检查。证据输入：`--gojson`（必需用例真的 pass、不是 skip、不是缺失；真实模型面干净；各包通过）｜`--capture-dir`（封账可读且已 seal、账本声明与落盘记录数对得上、目录里确有记录）｜`--facts` `--facts-manifest`（快照存在、manifest 完整、计数与快照行数对得上、`source_sha256` 与快照字节对得上）｜`--dataset-dir`（样本非空、抽样 `labels`/`loss_mask` 形状一致、train ∩ test = ∅（按 `capture_namespace` + `root_session_id` 分组不跨侧））｜数据集目录内 `rejected.jsonl`（存在且逐行含 `reason`）｜`--expect-tests`（必须通过的用例清单，含真实模型场景）。`--report` 写机器可读结果；退出码 0 表示全部必需检查通过。
 
 <a id="offline-converter"></a>
 ## 七、离线轨迹转换器
 
-`scripts/convert_trajectories.py` 是规格点名的离线工具（`openspec/specs/trajectory-recording`）：读取 `TrajectoryRecorder` 落盘的 JSONL，产出 HuggingFace 数据集——SFT 模式为 `{input_ids, loss_mask}`（prompt 位 0、completion 位 1），RL 模式为 prompt-only 的 `{messages}`。它只用标准库，不依赖任何训练框架的存在，转换在训练环境之外即可完成与校验。用法：SFT `--input data/trajectories/ --output data/sft/ --tokenizer Qwen/Qwen2.5-1.5B-Instruct --mode sft`；RL prompt-only 同形但 `--mode rl` 且无 tokenizer。`--strict` 形态读的是「五、决策采集」与「六、授权离线导出」两节定义的双流输入，见 [双流消费](#dual-stream-cli)。
+`scripts/scenarios/convert_trajectories.py` 是规格点名的离线工具（`openspec/specs/trajectory-recording`）：读取 `TrajectoryRecorder` 落盘的 JSONL，产出 HuggingFace 数据集——SFT 模式为 `{input_ids, loss_mask}`（prompt 位 0、completion 位 1），RL 模式为 prompt-only 的 `{messages}`。它只用标准库，不依赖任何训练框架的存在，转换在训练环境之外即可完成与校验。用法：SFT `--input data/trajectories/ --output data/sft/ --tokenizer Qwen/Qwen2.5-1.5B-Instruct --mode sft`；RL prompt-only 同形但 `--mode rl` 且无 tokenizer。`--strict` 形态读的是「五、决策采集」与「六、授权离线导出」两节定义的双流输入，见 [双流消费](#dual-stream-cli)。
 
 ### 退役记录：AReaL 在线训练桥（2026-10）
 

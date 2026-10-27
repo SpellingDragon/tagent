@@ -19,7 +19,7 @@
 退出码 0 = 全部必需检查通过；1 = 有 FAIL。--report 机器可读结果。
 
 运行:
-  python3 scripts/verify_runtime_acceptance.py --gojson run.json \\
+  python3 scripts/scenarios/verify_runtime_acceptance.py --gojson run.json \\
       --capture-dir var/trajectories --facts out/facts.jsonl \\
       --manifest out/capture-manifest.json --facts-manifest out/export-manifest.json \\
       --dataset-dir out/dataset --expect-tests TestRealModel_Chat,TestRealModel_Tools \\

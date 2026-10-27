@@ -85,7 +85,7 @@ EVENT_SUBTEST_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
 EVENT_WHOLE_CHAIN_ID_RE = re.compile(r"^EI\d{2}$")
 EVENT_TEST_FUNC_RE = re.compile(r"^func (Test[A-Za-z0-9_]+)\(", re.MULTILINE)
 EVENT_RUN_RE = re.compile(r"\bt\.Run\(\s*\"([^\"]+)\"")
-EVENT_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+EVENT_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Fixed policy values from 04 design D1: any shrink or arithmetic drift is rejected.
 EVENT_MATRIX_EXPECTED = {
     "seeds": [1, 7, 42],

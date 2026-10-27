@@ -6,10 +6,12 @@
 # rule that became unreachable. The clean fixture is the positive control: a gate
 # that always fails cannot pass it.
 #
-# usage: scripts/test_check_package_layout.sh
+# usage: scripts/gates/test_check_package_layout.sh
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# The gate builds and runs the real codetools command, so the fixtures are laid out
+# relative to the repository root that owns it.
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT

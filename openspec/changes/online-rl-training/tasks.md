@@ -50,4 +50,4 @@ flowchart LR
 - [ ] F1 契约零改动断言：`git diff <W0 启动 commit>..HEAD -- openspec/specs/decision-capture/spec.md openspec/specs/offline-training-export/spec.md` 为空；若 reader 面对账后确需扩离线导出，则以本变更登记的 `MODIFIED` delta 为准，不得就地改主 spec —— 验证：diff 为空或 delta 与 proposal 的 Capabilities 一致。细化拆分待 post-training-data-loop M2 完成后进行。
 - [ ] F2 全量门禁：`go build ./...` 与 `go test ./rl/... -count=1` exit 0 —— 验证：命令输出入凭据。细化拆分待 post-training-data-loop M2 完成后进行。
 - [ ] F3 DoD 逐项核验记入收尾 run notes：每条完成项附正锚/负锚/消费者锚三类凭据，缺一不计完成 —— 验证：run notes 中三锚逐条可复跑。细化拆分待 post-training-data-loop M2 完成后进行。
-- [ ] F4 `openspec archive online-rl-training` + 导览（域 → 证据/踩坑链接，run-id 逐字符核对）—— 验证：archive 命令 exit 0 且 `scripts/check-openspec.sh` 全绿。细化拆分待 post-training-data-loop M2 完成后进行。
+- [ ] F4 `openspec archive online-rl-training` + 导览（域 → 证据/踩坑链接，run-id 逐字符核对）—— 验证：archive 命令 exit 0 且 `scripts/gates/check-openspec.sh` 全绿。细化拆分待 post-training-data-loop M2 完成后进行。

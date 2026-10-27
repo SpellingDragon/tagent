@@ -1,6 +1,6 @@
 # API 文档（生成物）
 
-本目录由 `scripts/gen_godoc.sh` 从源码文档注释生成，禁止手工编辑。
+本目录由 `scripts/gates/gen_godoc.sh` 从源码文档注释生成，禁止手工编辑。
 
 | 包 | 文件 |
 |---|---|

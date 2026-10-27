@@ -13,10 +13,10 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 CHECKER = SCRIPTS / "check_concept_budget.py"
-REPO_ROOT = SCRIPTS.parent
+REPO_ROOT = SCRIPTS.parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
-import check_concept_budget as budget  # noqa: E402  (needs scripts/ on sys.path)
+import check_concept_budget as budget  # noqa: E402  (needs scripts/gates/ on sys.path)
 import runtime_checklib as lib  # noqa: E402
 
 ARCH = {
@@ -465,8 +465,8 @@ class WorkflowRegistrationTest(unittest.TestCase):
         text = (REPO_ROOT / ".github" / "workflows" / "runtime-contracts.yml").read_text(
             encoding="utf-8")
         self.assertIn("- name: Concept budget (S1\u2013S4)", text)
-        self.assertIn("python scripts/check_concept_budget.py --json", text)
-        self.assertIn("python scripts/test_check_concept_budget.py -v", text)
+        self.assertIn("python scripts/gates/check_concept_budget.py --json", text)
+        self.assertIn("python scripts/gates/test_check_concept_budget.py -v", text)
 
 
 class SelfCheckTest(unittest.TestCase):

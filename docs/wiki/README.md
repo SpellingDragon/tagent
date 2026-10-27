@@ -2,11 +2,11 @@
 
 ## 当前架构速览
 
-**当期架构**＝`golden/runtime/architecture.json` 登记的第一方产品包 ＋ module 根组合根。顶层产品目录为 `*.go`（根包）、`api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`）、`cli`；这一集合与 CI 的 `PRODUCT_PACKAGES` 逐项对准（由 `scripts/test_check_runtime_workflow.py` 对 golden 钉住，防漂移）。`go list ./...` 同时列出 tests/examples/scripts 等非产品包，不计入；交付侧的 10 个二级领域 `00-foundation`…`09-acceptance` 是责任与验收单位，不构成包边界。
+**当期架构**＝`golden/runtime/architecture.json` 登记的第一方产品包 ＋ module 根组合根。顶层产品目录为 `*.go`（根包）、`api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`）、`cli`；这一集合与 CI 的 `PRODUCT_PACKAGES` 逐项对准（由 `scripts/gates/test_check_runtime_workflow.py` 对 golden 钉住，防漂移）。`go list ./...` 同时列出 tests/examples/scripts 等非产品包，不计入；交付侧的 10 个二级领域 `00-foundation`…`09-acceptance` 是责任与验收单位，不构成包边界。
 
 **本文档树的定位**：本目录 24 篇为历史设计记录（historical-verbatim），逐断言校对的是已移除的生产实现；下方"历史设计声明"说明这一定位。**当期现实的权威入口如下**：
 
-- **当期 API 与包面**：[docs/api/](../api/index.md)——由 `scripts/gen_godoc.sh` 从码面注释生成（索引自报包总数 68：根 module 67 个包 + `examples/wechat-bot` 独立 module 1 个），与源码同步由 `scripts/lint.sh` 的 docs/api freshness 步判定，是唯一不漂移的 API 参考。
+- **当期 API 与包面**：[docs/api/](../api/index.md)——由 `scripts/gates/gen_godoc.sh` 从码面注释生成（索引自报包总数 68：根 module 67 个包 + `examples/wechat-bot` 独立 module 1 个），与源码同步由 `scripts/lint.sh` 的 docs/api freshness 步判定，是唯一不漂移的 API 参考。
 - **码面分层**（`golden/runtime/architecture.json` 钉定包边；职责自下而上）：**词汇与协议** `event`（纯叶子）· `model`（锁定 tRPC 原生模型协议）→ **声明与状态** `config`（纯组织声明）· `state`（生效绑定、session/mailbox、消费位置的唯一持有者）→ **执行与义务** `agent`（事件调度与单次决策）· `task`（转移与通知义务）· `plugin`（两相位六端口的窄口扩展点）→ **事实与投影** `memory`（原文与可重建投影）→ **适配** `tool/exec` · `tool/file` · `tool/knowledge` · `tool/mcp` · `tool/recall` · `tool/spec` · `tool/subagent` → **观察与派生** `telemetry`（观测旁路）· `memory/query`（只读投影）· `rl`（训练数据）· `evolution`（自演进）→ **组合根** module 根包（唯一装配与发布点）→ **宿主** `examples/wechat-bot`（独立 module）。
 - **实施台账（架构事实）**：[openspec/changes/archive/2026-10-18-runtime-rebuild/](../../openspec/changes/archive/2026-10-18-runtime-rebuild/)——123 叶实施记录/波次台账/问题脉络分析/DoD 终验；当期包边、领域边界与验收口径以该台账与 `golden/runtime/` 为准。
 - **历史文档索引**：下方"历史设计声明"一节；各篇引用按其快照提交锚定（doc-refs 历史锚定口径）。

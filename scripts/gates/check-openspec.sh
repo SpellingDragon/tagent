@@ -6,7 +6,7 @@
 # ## Purpose), leaving openspec/specs/ un-strict-validatable.
 #
 # Run this BEFORE archiving a change and BEFORE committing spec changes:
-#   scripts/check-openspec.sh
+#   scripts/gates/check-openspec.sh
 # Wire it into CI or a pre-commit hook (core.hooksPath) to enforce.
 #
 # It fails (exit 1) if any main spec is not strict-valid. Active in-flight

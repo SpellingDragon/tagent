@@ -97,8 +97,8 @@ go test -run '^$' -bench '^BenchmarkInvokeSharedSession$' -benchtime=5000x -coun
 
 新增顶层 `bench/` 包会触发三条仓库门禁，它们的修改面不在 `bench/**` 白名单内：
 
-1. `scripts/check_runtime_architecture.py --implementation` 报 `unknown first-party package 'bench'`：需在架构策略里登记 `bench` 的显式边（禁止通配）。
+1. `scripts/gates/check_runtime_architecture.py --implementation` 报 `unknown first-party package 'bench'`：需在架构策略里登记 `bench` 的显式边（禁止通配）。
 2. `scripts/codetools` 的 `tracked-hygiene` 只允许登记过的顶层目录（`scripts/codetools/hygiene.go` 的 `registeredTopDirs`）：需登记 `bench`，并同步根 `README.md` 的目录说明。
-3. `scripts/gen_godoc.sh --check` 会因新包生成 `docs/api/github_com__SpellingDragon__tagent__bench.md` 而报 stale：需重新生成 `docs/api` 并纳入本仓文档预算。
+3. `scripts/gates/gen_godoc.sh --check` 会因新包生成 `docs/api/github_com__SpellingDragon__tagent__bench.md` 而报 stale：需重新生成 `docs/api` 并纳入本仓文档预算。
 
 在上述三项补齐前，`bash scripts/lint.sh` 会在最后两步失败；`go test`/`go vet` 与 `tests/integration` 不受影响。

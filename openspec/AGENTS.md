@@ -10,14 +10,14 @@
 
 ## 归档纪律
 
-1. 归档前先跑门禁：`scripts/check-openspec.sh`（等价 `openspec validate --all --strict`，仅在主 spec 失败时阻断）。
+1. 归档前先跑门禁：`scripts/gates/check-openspec.sh`（等价 `openspec validate --all --strict`，仅在主 spec 失败时阻断）。
 2. 用 `openspec archive <change>` 归档；**不要**用 `--skip-specs` / `--no-validate` 绕过 spec 同步与校验——绕过正是历史 delta-直写问题的根因。
 3. 若 `archive` 因某个主 spec 的**既有**结构问题而中止：先修好那个主 spec（补 Purpose / 转正结构）再归档，而非跳过。
-4. 归档后再次跑 `scripts/check-openspec.sh` 确认 `openspec/specs/` 仍全绿。
+4. 归档后再次跑 `scripts/gates/check-openspec.sh` 确认 `openspec/specs/` 仍全绿。
 
 ## 门禁接线（可选，推荐）
 
-`scripts/check-openspec.sh` 可手动运行，或接入 CI / 本地 pre-commit：
+`scripts/gates/check-openspec.sh` 可手动运行，或接入 CI / 本地 pre-commit：
 
 ```sh
 # 本地启用（opt-in，不改动仓库外配置）

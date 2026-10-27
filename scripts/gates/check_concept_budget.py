@@ -35,8 +35,8 @@
 productVerified 恒为 null：静态上限通过不等于产品成立。
 
 用法：
-  python3 scripts/check_concept_budget.py [--rule S1] [--json]
-  python3 scripts/check_concept_budget.py --self-check
+  python3 scripts/gates/check_concept_budget.py [--rule S1] [--json]
+  python3 scripts/gates/check_concept_budget.py --self-check
 退出码：0=通过（含豁免 warn）；1=有 error 或输入不可用。
 """
 from __future__ import annotations

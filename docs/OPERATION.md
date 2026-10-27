@@ -9,7 +9,7 @@
 ## 一、结论层：接手第一天只需三件事
 
 1. **仓库是三个 module**：根 module、`examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远到不了这两个示例 module，构建/测试/vet 都必须各跑一遍。
-2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+九个文档/脚本门）、`go mod verify`、`bash scripts/check-openspec.sh`、`./scripts/race_check.sh`、`bash scripts/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
+2. **五个门禁入口**：`bash scripts/lint.sh`（格式+构建+vet+注释棘轮+九个文档/脚本门）、`go mod verify`、`bash scripts/gates/check-openspec.sh`、`./scripts/gates/race_check.sh`、`bash scripts/gates/gen_godoc.sh --check`。CI 与本地跑的是同一批脚本，所以"本地绿"与"CI 绿"不会是两个意思。
 3. **三条风险面**：配置严格解码（未知键**拒启动**）、pre-release 无迁移承诺、依赖 pin 与白盒测试欠账（§七·D）。
 
 ---
@@ -50,7 +50,7 @@ go test ./... -short -count=1                                  # 常规单元面
 (cd examples/wechat-bot && go test ./... -short -count=1)      # 示例 module
 (cd examples/cli-host && go test ./... -short -count=1)        # 示例 module
 GOMAXPROCS=1 go test ./tests/integration/execution/ -short -count=1   # 调度下限：归因见证不被"先到的轮"满足
-./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
+./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
 ```
 
 实测（2026-10-21）：根 module `-short` 全量 exit 0（38 个包 `ok`、29 个包 `[no test files]`）。race 门的退出码是唯一判定——`race_check.sh` 只在上游已知竞态签名**逐个**匹配且**无**普通失败时才放行豁免，日志看着绿而命令失败不可能被报成通过。
@@ -76,7 +76,7 @@ CI 与本地的命令逐字相同。分阶段：
 | `fmt` | `gofmt -l` 覆盖 `POLICY_DIRS`（根 + 两个示例 module） | 有文件未格式化 |
 | `build` / `vet` | 根 + `examples/wechat-bot` 各一遍；`examples/cli-host` 由 `ci.yml` 的 Build/Vet/Test (cli-host module) 覆盖 | 编译或静态检查失败 |
 | `policy` | 注释策略**棘轮**（只许降不许升，按规则计数） | 新增了规则外注释 |
-| `doc budget` | markdown 总量**棘轮**（`scripts/doc_budget.json`，只降不升） | 文档总量超基线 |
+| `doc budget` | markdown 总量**棘轮**（`scripts/gates/doc_budget.json`，只降不升） | 文档总量超基线 |
 | `event-ownership` | 冻结归属表（`golden/runtime/architecture.json`）按 `go/types` 核对 owner 的直接调用点；方法值/反射等解析不到的记 uncovered、不折算 | 事件归属结论出现未登记漂移 |
 | `name-check` | 测试标识不得承载迭代编号 | 标识里带了批次/轮次号 |
 | `doc-refs` | markdown 引用的文件必须存在（历史树按快照锚定） | 文档引用了已删除/改名的文件 |
@@ -102,17 +102,17 @@ bash scripts/lint.sh --update-baseline   # 批量降低注释计数后重写基�
 ### 5.2 其余门与常用工具
 
 ```bash
-bash scripts/check-openspec.sh                        # 主 specs 严格校验（in-flight change 只报告不判红）
-bash scripts/gen_godoc.sh                             # 重新生成 docs/api（唯一作者，禁止手改）
-bash scripts/gen_godoc.sh --check                     # 生成面新鲜度
-bash scripts/check_dependency_debt.sh                 # 依赖 pin 登记提醒（恒 exit 0，见 §七·D1）
-python3 scripts/test_verify_restart_prefix.py         # 重启前缀校验器的负例自测
-bash scripts/test_race_check.sh                       # race 门分类器的自测（防"掩盖真实失败"）
+bash scripts/gates/check-openspec.sh                        # 主 specs 严格校验（in-flight change 只报告不判红）
+bash scripts/gates/gen_godoc.sh                             # 重新生成 docs/api（唯一作者，禁止手改）
+bash scripts/gates/gen_godoc.sh --check                     # 生成面新鲜度
+bash scripts/gates/check_dependency_debt.sh                 # 依赖 pin 登记提醒（恒 exit 0，见 §七·D1）
+python3 scripts/scenarios/test_verify_restart_prefix.py         # 重启前缀校验器的负例自测
+bash scripts/gates/test_race_check.sh                       # race 门分类器的自测（防"掩盖真实失败"）
 ```
 
 实测（2026-10-21）：`check-openspec.sh` exit 0，`Totals: 124 passed, 4 failed (128 items)`（4 个 failed 均为活跃 change，主规格全绿）；`gen_godoc --check` exit 0（`68 packages`）；`proc-refs`/`tracked-hygiene`/`dotted-refs` 均 exit 0。
 
-批次作业时另有两个证明工具（不属常规门）：`bash scripts/check_comment_only.sh <baseline-ref> <paths...>` 证明这批只动了注释，`bash scripts/check_test_merge.sh <baseline-ref> <dir>` 证明测试合并没有丢用例/断言。
+批次作业时另有两个证明工具（不属常规门）：`bash scripts/gates/check_comment_only.sh <baseline-ref> <paths...>` 证明这批只动了注释，`bash scripts/gates/check_test_merge.sh <baseline-ref> <dir>` 证明测试合并没有丢用例/断言。
 
 ### 5.3 两个"本地红但代码没问题"的已知形态
 
@@ -127,7 +127,7 @@ bash scripts/test_race_check.sh                       # race 门分类器的自�
 
 <a id="event-gates"></a>
 ### 5.4 事件门：每 MR 三档 + required 汇总（已落地，远端 required 待 F4）
-**四个 job 与 artifact 同名**：`event-integrity-short` 跑 `python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10`——十次独立 runner 进程、十份日志、逐轮 UUID run-id（`repeat_index=1..10`），不用 `-count` 放大、不跑 `--test-id` 子集；`event-integrity-long` 用 matrix `seed [1,7,42] × window [256,32768]`、`fail-fast: false`，每片 `--scope event-long --seed <s> --window <w> --repeat 1`，**单片 1200 输入/120 重启、六片合计 7200/720（单片不得写成 7200/720）**；`event-integrity-mutations` 跑 `python3 scripts/check_event_integrity_mutations.py --all --json`，只启用已证实的冻结变异；`event-integrity-required` 用 `if: always()` + `needs` 三个生产 job，经 `env` 传上游结果并逐个 `test "$X_RESULT" = "success"`（`cancelled`/`failure`/`skipped` 一律失败），再以 `python3 scripts/check_runtime_evidence.py --bundle <目录> --contract golden/runtime/event_integrity_scenarios.json --json` 汇总。required 只是新增事件三档的汇总检查，不替代 `test`/`race`/`validators`/`openspec`/`soak`，旧检查名继续保留。事件合同是 `golden/runtime/event_integrity_scenarios.json`（profile `event-integrity`）；旧 deterministic 图与旧合同不被当作已支持事件语义。**状态：已落地（L1）**——`ci.yml` 与 `scripts/preflight.sh` 已由 `CiWorkflowTest` 结构验收，并以真实 17 份证据（6 long + 10 short + 1 mutation）跑通 bundle 门；远端 required 生效属 L2/F4，未授权，保持待验。
+**四个 job 与 artifact 同名**：`event-integrity-short` 跑 `python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10`——十次独立 runner 进程、十份日志、逐轮 UUID run-id（`repeat_index=1..10`），不用 `-count` 放大、不跑 `--test-id` 子集；`event-integrity-long` 用 matrix `seed [1,7,42] × window [256,32768]`、`fail-fast: false`，每片 `--scope event-long --seed <s> --window <w> --repeat 1`，**单片 1200 输入/120 重启、六片合计 7200/720（单片不得写成 7200/720）**；`event-integrity-mutations` 跑 `python3 scripts/gates/check_event_integrity_mutations.py --all --json`，只启用已证实的冻结变异；`event-integrity-required` 用 `if: always()` + `needs` 三个生产 job，经 `env` 传上游结果并逐个 `test "$X_RESULT" = "success"`（`cancelled`/`failure`/`skipped` 一律失败），再以 `python3 scripts/gates/check_runtime_evidence.py --bundle <目录> --contract golden/runtime/event_integrity_scenarios.json --json` 汇总。required 只是新增事件三档的汇总检查，不替代 `test`/`race`/`validators`/`openspec`/`soak`，旧检查名继续保留。事件合同是 `golden/runtime/event_integrity_scenarios.json`（profile `event-integrity`）；旧 deterministic 图与旧合同不被当作已支持事件语义。**状态：已落地（L1）**——`ci.yml` 与 `scripts/preflight.sh` 已由 `CiWorkflowTest` 结构验收，并以真实 17 份证据（6 long + 10 short + 1 mutation）跑通 bundle 门；远端 required 生效属 L2/F4，未授权，保持待验。
 
 **判据与证据边界**：killed = 控制树先绿、变异进程非零退出，且失败输出命中该变异登记的具名业务断言（`expect_assertion`）；uncovered = 没有具名断言命中（编译失败、超时、零测试命中、无该断言的 panic、测试照绿都算），进入 uncovered 并让门失败；新增缺陷必须登记进冻结清单，不得用 `--mutation` 子集绕过。L1 本地 = `bash scripts/preflight.sh` 默认跑 short 十轮、long 六组合与 mutations；`--skip-smoke` 只跳微信 smoke，事件三段照跑并打印"不具备完整 MR 等价证据"，退出码不变；`--test-id` 或单 scope 子集不是 MR 等价。L2 远端 = required 经分支保护生效（未授权，保持待验）；L3 = 72h 长跑与真实服务面（未授权，保持待验）。失败处置：按 artifact 名取证据（`event-integrity-short`、`event-integrity-long-seed-<s>-window-<w>`、`event-integrity-mutations`、`event-integrity-required`），用 run-id 区分独立轮次与分片，不重跑覆盖先前的 fail；required 红先看是哪个上游 job 红。
 
@@ -178,7 +178,7 @@ bash scripts/test_race_check.sh                       # race 门分类器的自�
 
 - **回正条件（四条，按序）**：① 上游 PR `#2637` 合并且官方 tag 携带同一组提交；② 该 tag 与 fork tag 提交集一致（无待复评的行为差）；③ 全门禁在官方 tag 上绿（short / race / lint / openspec / bot module）；④ 移除动作与 CHANGELOG 记录在同一提交。
 - **移除步骤**：`go mod edit -dropreplace=…` → `go get …@<官方 tag>` → `go mod tidy && go mod verify` → 复跑 ③ 的门禁 → 删注释块并在 CHANGELOG `Unreleased` 记录。
-- **检查命令**：`bash scripts/check_dependency_debt.sh`（恒 exit 0，只提醒不拦截；pin 存在时打印上述条件与步骤）。真正会咬人的门是 `go mod verify`——pin 的内容与 `go.sum` 不符即失败。
+- **检查命令**：`bash scripts/gates/check_dependency_debt.sh`（恒 exit 0，只提醒不拦截；pin 存在时打印上述条件与步骤）。真正会咬人的门是 `go mod verify`——pin 的内容与 `go.sum` 不符即失败。
 - 回正条件与移除步骤就写在 `go.mod` 的 replace 指令旁，随依赖一起被每个 clone 与每次 review 看到。
 
 **D2 白盒测试欠账。** 判定命令（随时可复跑）：
@@ -260,7 +260,7 @@ find . -name "*.md" -not -path "./.git/*" | sed 's|^\./||' | awk -F/ '{print $1}
 | 分区 | 篇数 | 入库 | 真源（谁能改） | 现状定性 |
 |---|---|---|---|---|
 | `docs/wiki` | 24 | 是 | 各篇的快照提交（历史快照） | 已分区：historical-verbatim，引用按快照锚定 |
-| `docs/api` | 69 | 是 | 源码注释（`scripts/gen_godoc.sh` 生成） | 已分区：生成面（live），禁止手改 |
+| `docs/api` | 69 | 是 | 源码注释（`scripts/gates/gen_godoc.sh` 生成） | 已分区：生成面（live），禁止手改 |
 | `docs` 根 | 8 | 是 | 今天的树 | 长期事实/操作面（含本文） |
 | `docs/notes` | 2 | 是 | 当时的会话 | 工作笔记 |
 | `docs/archive` | 1 | 是 | 当时的会话 | 历史归档 |
@@ -284,7 +284,7 @@ find . -name "*.md" -not -path "./.git/*" | sed 's|^\./||' | awk -F/ '{print $1}
 ```
 docs/
 ├── OPERATION.md     运行手册（本文：长期事实）
-├── api/             生成面 —— 作者 = scripts/gen_godoc.sh
+├── api/             生成面 —— 作者 = scripts/gates/gen_godoc.sh
 ├── wiki/            历史快照 —— 锚定根 = docRefs 的 historicalDocRoots
 ├── notes/           工作笔记（默认不入库；入库即按长期事实标准）
 ├── architecture/    [提议] 当期长期事实（docs 根既有的 8 篇归此；本文自身留根）
@@ -296,7 +296,7 @@ docs/
 ### 8.4 迁移原则（保全 + 重链接）
 
 1. **保全**：一律 `git mv`（历史可追），内容逐字不改；迁移只换位置，不改断言。
-2. **重链接**：迁完必须 ① 跑 `doc-refs`；② 全仓 grep 旧路径并修引用（`openspec` 归档里的引用属历史，不改，只在迁移记录中登记）；③ 若迁 `docs/wiki`，同步改 `scripts/codetools/check.go` 的 `historicalDocRoots`；④ 若迁 `docs/api`，同步改 `scripts/gen_godoc.sh` 的输出路径——两处都是硬编码边界，漏改等于把锚定/生成语义留在旧路径。
+2. **重链接**：迁完必须 ① 跑 `doc-refs`；② 全仓 grep 旧路径并修引用（`openspec` 归档里的引用属历史，不改，只在迁移记录中登记）；③ 若迁 `docs/wiki`，同步改 `scripts/codetools/check.go` 的 `historicalDocRoots`；④ 若迁 `docs/api`，同步改 `scripts/gates/gen_godoc.sh` 的输出路径——两处都是硬编码边界，漏改等于把锚定/生成语义留在旧路径。
 3. **分批**：一批只迁一个分区，每批独立 exit 0；迁完跑 `bash scripts/lint.sh --only fmt`（九个文档/脚本门全跑）。**不要在同一个未提交批次里既改 `docs/wiki` 内容又迁它的路径**（§五·3(a)：那会让 43 条锚定引用同时失效，无法判断是迁移错还是锚定基准失效）。
 4. **不迁**：`docs/.dev` 与 `docs/notes` 的过程记录除非确定入库，否则保持本地，避免把一次性纪要变成需要长期维护的引用面。
 
@@ -308,8 +308,8 @@ docs/
 go build ./... && go mod verify && (cd examples/wechat-bot && go build ./...) && (cd examples/cli-host && go build ./...)
 go test ./... -short -count=1
 bash scripts/lint.sh
-bash scripts/check-openspec.sh
-bash scripts/check_dependency_debt.sh
+bash scripts/gates/check-openspec.sh
+bash scripts/gates/check_dependency_debt.sh
 ```
 
 任一步红，先读 §五·3（两条已知形态）与 §七（风险面），再判断是不是真缺陷。**"看起来过了"不是判定**：本文列的每条结论都对应一条能重跑的命令。

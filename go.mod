@@ -130,10 +130,10 @@ require (
 //   b. go get trpc.group/trpc-go/trpc-agent-go@<official tag>
 //   c. go mod tidy && go mod verify
 //   d. re-run the gate suite named in condition 3 (an untested swap is not a fix)
-//   e. `bash scripts/check_dependency_debt.sh` must then report no pinned module;
+//   e. `bash scripts/gates/check_dependency_debt.sh` must then report no pinned module;
 //      only then delete this block and note the removal in CHANGELOG.md.
 //
-// CHECK COMMAND: `bash scripts/check_dependency_debt.sh` re-prints this register
+// CHECK COMMAND: `bash scripts/gates/check_dependency_debt.sh` re-prints this register
 // from go.mod on demand and always exits 0 — it is a reminder, never a gate, so a
 // pin stays visible without being able to block a build. The maintainer-facing
 // copy of this register is docs/OPERATION.md.

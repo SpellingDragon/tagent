@@ -27,9 +27,9 @@ from pathlib import Path
 from unittest import mock
 
 SCRIPTS = Path(__file__).resolve().parent
-REPO = SCRIPTS.parent
+REPO = SCRIPTS.parents[1]
 RUNNER = SCRIPTS / "run_runtime_scenarios.py"
-CHECKER = SCRIPTS / "check_runtime_evidence.py"
+CHECKER = SCRIPTS.parent / "gates" / "check_runtime_evidence.py"
 REAL_CONTRACT = REPO / "golden" / "runtime" / "scenarios.json"
 REAL_EVENT_CONTRACT = REPO / "golden" / "runtime" / "event_integrity_scenarios.json"
 MODULE = "github.com/SpellingDragon/tagent"

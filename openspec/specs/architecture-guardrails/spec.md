@@ -249,7 +249,7 @@ CI SHALL 覆盖next与既有集成分支，产品门覆盖根与微信两module�
 
 ### Requirement: 直接调用归属检查不冒充完整调用图
 
-架构门 SHALL 保留 `golden/runtime/architecture.json` 与 `scripts/check_runtime_architecture.py --implementation` 的包依赖方向判据；事件写入/消费归属 SHALL 以人工冻结的 `event_ownership` 表为输入，由 `scripts/codetools` 使用 Go 标准库（`go list`、`go/parser`、`go/types` 与类型信息）核对冻结所有者的**可解析直接调用点**。允许调用者放行，禁止调用者命中 MUST 非零；owner 无法解析、类型信息缺失、接口/反射/间接调用 MUST 计入 `uncovered` 并如实输出（`file:line` + 调用者 + 原因），MUST NOT 计为已覆盖，MUST NOT 用名字相似或字符串相邻补洞。`uncovered` SHALL 由独立复核记录逐条判定可达性，MUST NOT 静默放行。政策表 MUST NOT 从现存代码自动学习。该检查 MUST NOT 声称构建了完整调用图，也 MUST NOT 声称可静态识别任意“第二状态仓”语义；语义级重复状态判断留给 00.3 与独立评审。该检查 MUST NOT 替代包依赖门；`scripts/lint.sh` SHALL 调用该检查作为正式消费者。
+架构门 SHALL 保留 `golden/runtime/architecture.json` 与 `scripts/gates/check_runtime_architecture.py --implementation` 的包依赖方向判据；事件写入/消费归属 SHALL 以人工冻结的 `event_ownership` 表为输入，由 `scripts/codetools` 使用 Go 标准库（`go list`、`go/parser`、`go/types` 与类型信息）核对冻结所有者的**可解析直接调用点**。允许调用者放行，禁止调用者命中 MUST 非零；owner 无法解析、类型信息缺失、接口/反射/间接调用 MUST 计入 `uncovered` 并如实输出（`file:line` + 调用者 + 原因），MUST NOT 计为已覆盖，MUST NOT 用名字相似或字符串相邻补洞。`uncovered` SHALL 由独立复核记录逐条判定可达性，MUST NOT 静默放行。政策表 MUST NOT 从现存代码自动学习。该检查 MUST NOT 声称构建了完整调用图，也 MUST NOT 声称可静态识别任意“第二状态仓”语义；语义级重复状态判断留给 00.3 与独立评审。该检查 MUST NOT 替代包依赖门；`scripts/lint.sh` SHALL 调用该检查作为正式消费者。
 
 #### Scenario: 合法直接调用通过
 
@@ -268,7 +268,7 @@ CI SHALL 覆盖next与既有集成分支，产品门覆盖根与微信两module�
 
 ### Requirement: 故障变异必须由具名业务断言杀死
 
-故障变异门 SHALL 在隔离树或 Go overlay 中恢复**已被 00.3 或后续复现证实**的缺陷形态；五类候选（双路正文、忙时忽略、身份破坏、提前确认、错误路由）MUST NOT 在未证实前启用。变异清单 SHALL 随 `scripts/check_event_integrity_mutations.py` 保存，MUST NOT 依赖进行中 change 目录存活。每个 00.3 `confirmed` 缺陷 MUST 恰有一个 mutation `basis` 指向；00.3 新证实的实际缺陷 MUST 登记，MUST NOT 漏项；未证实候选 SHALL 标为 `not_evidence_backed`，MUST NOT 计入 killed。检查 SHALL 先证明控制树在正式 selector 下全绿，再逐个应用变异并运行同一正式测试。只有进程非零且输出命中预先登记的具名业务断言 `expect_assertion` 时，才可记为 killed；编译失败、超时、零测试命中、panic 但无该断言、测试被改绿 MUST 判该变异验证失败，MUST NOT 计为成功杀死。未知/失效变异、清单与源码锚点失配、控制树不绿 MUST 使总门失败。原始证据 SHALL 记录基线源树摘要、实际补丁/overlay 摘要、实际命令与原始退出码，并写入 `--out` 指定的仓库外临时目录；证据摘要与 `log_ref` MAY 记入根 `ORCHESTRATION.md` 台账。
+故障变异门 SHALL 在隔离树或 Go overlay 中恢复**已被 00.3 或后续复现证实**的缺陷形态；五类候选（双路正文、忙时忽略、身份破坏、提前确认、错误路由）MUST NOT 在未证实前启用。变异清单 SHALL 随 `scripts/gates/check_event_integrity_mutations.py` 保存，MUST NOT 依赖进行中 change 目录存活。每个 00.3 `confirmed` 缺陷 MUST 恰有一个 mutation `basis` 指向；00.3 新证实的实际缺陷 MUST 登记，MUST NOT 漏项；未证实候选 SHALL 标为 `not_evidence_backed`，MUST NOT 计入 killed。检查 SHALL 先证明控制树在正式 selector 下全绿，再逐个应用变异并运行同一正式测试。只有进程非零且输出命中预先登记的具名业务断言 `expect_assertion` 时，才可记为 killed；编译失败、超时、零测试命中、panic 但无该断言、测试被改绿 MUST 判该变异验证失败，MUST NOT 计为成功杀死。未知/失效变异、清单与源码锚点失配、控制树不绿 MUST 使总门失败。原始证据 SHALL 记录基线源树摘要、实际补丁/overlay 摘要、实际命令与原始退出码，并写入 `--out` 指定的仓库外临时目录；证据摘要与 `log_ref` MAY 记入根 `ORCHESTRATION.md` 台账。
 
 #### Scenario: 控制树先绿
 

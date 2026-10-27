@@ -3,7 +3,7 @@
 
 风险来源：R-H「文档/规格熵」。本仓库的 markdown 体量约为 Go 代码的数倍，历史上
 没有上限，任何一次「顺手写一篇说明」都能让总量单调增长且无人对账。本门把总量冻结
-成 `scripts/doc_budget.json` 里的两个数，此后只允许下降。
+成 `scripts/gates/doc_budget.json` 里的两个数，此后只允许下降。
 
 口径（改这里等于改验收面）：
   * 统计对象：**git 索引里的文档面**——`git ls-files --cached --others
@@ -14,11 +14,11 @@
     `.agents`）、21 篇 `node_modules` 第三方包文档、19 篇 `.git/review-notes` 草稿、
     12 篇 submodule 内容。它们在 CI 的干净 checkout 里不存在，若入预算，基线会凭空
     多出约 9.4 万行余量——棘轮等于不设，且本地判红/CI 判绿会不一致；
-  * 不计生成物：`docs/api/` 是 `scripts/gen_godoc.sh` 从源码注释生成的，体量由生成器
+  * 不计生成物：`docs/api/` 是 `scripts/gates/gen_godoc.sh` 从源码注释生成的，体量由生成器
     和包数决定（现有 48 篇/17805 行）；它的新鲜度已由 `gen_godoc.sh --check` 强制，
     拿它进预算只会让「新增一个 Go 包」逼作者删等量散文——那不是本门要拦的熵；
   * 不计过程工件：`openspec/changes/**` 是变更期的计划件与归档件（活跃 change 与
-    archive 同属过程记录），其体量由变更自身的评审与 `scripts/check-openspec.sh`
+    archive 同属过程记录），其体量由变更自身的评审与 `scripts/gates/check-openspec.sh`
     把关；进预算则每开一个变更都要先删等量散文，归档还会把历史计划永久抬进基线，
     与本门「长期文档只降不升」的口径相反。`openspec/specs/` 是权威规格，仍然计入；
   * 行数：换行符个数，末尾未终止的半行也算一行（`wc -l` 会漏掉它）；
@@ -33,7 +33,7 @@
   * 扫描到 0 篇不判绿（扫描坏了/树是空的都不能冒充通过）。
 
 2026-10-19 实测（旧口径，含 `openspec/changes/**`）：1150 篇 / 97916 行（
-`python3 scripts/check_doc_budget.py --json`，HEAD 7610629 之上的索引（含未提交的批内
+`python3 scripts/gates/check_doc_budget.py --json`，HEAD 7610629 之上的索引（含未提交的批内
 改动）；基线文件里的 measured_at / measured_on 是同一快照）。2026-10-22 口径调整：
 `openspec/changes/**`（活跃计划件与归档件）退出预算，基线随之收紧到长期文档面的
 实测值 206 篇 / 21917 行——变更计划的体量不再需要用删散文来对冲。
@@ -45,8 +45,8 @@
 基线以本门口径的实测为准。
 
 用法：
-  python3 scripts/check_doc_budget.py [--repo-root DIR] [--baseline PATH] [--json]
-  python3 scripts/check_doc_budget.py --tighten      # 只下调基线，拒绝上调
+  python3 scripts/gates/check_doc_budget.py [--repo-root DIR] [--baseline PATH] [--json]
+  python3 scripts/gates/check_doc_budget.py --tighten      # 只下调基线，拒绝上调
 退出码：0=通过（含可下调 warn）；1=超基线或输入不可用。
 """
 from __future__ import annotations
@@ -70,7 +70,7 @@ RUNTIME_PROMPT_PREFIXES = ("examples/wechat-bot/resources/prompts/",
                            "examples/cli-host/resources/prompts/")
 # 过程工件不进预算：变更计划/归档件是 openspec change 的过程记录，不是长期文档面。
 PROCESS_DOC_PREFIXES = ("openspec/changes/",)
-DEFAULT_BASELINE = os.path.join("scripts", "doc_budget.json")
+DEFAULT_BASELINE = os.path.join("scripts", "gates", "doc_budget.json")
 SCHEMA_VERSION = 1
 METRICS = ("files", "lines")
 METRIC_LABELS = {"files": "篇数", "lines": "行数"}
@@ -205,7 +205,7 @@ def compare(report, baseline, totals):
         elif observed < limit:
             report.warn(
                 "文档体量低于基线（{}）：实测 {} < 基线 {}（-{}）。棘轮可下调："
-                "跑 `python3 scripts/check_doc_budget.py --tighten` 把减少量锁住，"
+                "跑 `python3 scripts/gates/check_doc_budget.py --tighten` 把减少量锁住，"
                 "否则基线虚高、下一批又能涨回去。"
                 .format(label, observed, limit, limit - observed))
 
@@ -232,7 +232,7 @@ def tighten(report, path, payload, baseline, totals, root):
 
     payload = dict(payload)
     payload["measured_at"] = datetime.date.today().isoformat()
-    payload["measured_by"] = "python3 scripts/check_doc_budget.py --json"
+    payload["measured_by"] = "python3 scripts/gates/check_doc_budget.py --json"
     payload["measured_on"] = describe_tree(root) or payload.get("measured_on", "")
     payload["baseline"] = {metric: totals[metric] for metric in METRICS}
     with open(path, "w", encoding="utf-8") as handle:

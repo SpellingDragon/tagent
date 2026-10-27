@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-REPO = SCRIPTS.parent
+REPO = SCRIPTS.parents[1]
 CHECKER = SCRIPTS / "check_runtime_architecture.py"
 REAL_GOLDEN = REPO / "golden" / "runtime" / "architecture.json"
 MODULE = "github.com/SpellingDragon/tagent"

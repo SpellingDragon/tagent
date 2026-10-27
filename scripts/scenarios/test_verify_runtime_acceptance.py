@@ -5,7 +5,7 @@
 **它必须拒绝的那些情形**：skip 冒充 pass、缺失当通过、manifest 说写了 0 条也叫完整、
 快照行数与 digest 对不上、分组跨越 train/test、拒绝清单缺 reason、账本自相矛盾。
 
-数据集一侧用真实的 scripts/convert_trajectories.run_strict 双流产物（fixture 形状与
+数据集一侧用真实的 scripts/scenarios/convert_trajectories.run_strict 双流产物（fixture 形状与
 test_convert_trajectories.py 共用，即与 rl/ 写出形状同源），其余按手工文件驱动。
 不执行 go test：go test -json 的输入用逐行 Action 记录手工构造。
 

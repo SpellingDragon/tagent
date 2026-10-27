@@ -9,7 +9,7 @@
     末尾无换行的残行计一行；`openspec/changes/**`（活跃计划与归档）作为过程工件
     不入预算，而 `openspec/specs/` 作为权威规格仍然计入；
   * 消费者锚：仓库基线文件与现树实测一致（基线=实测，不是抄来的数），
-    scripts/lint.sh 把门接进了 comment policy 同一位置。
+    scripts/gates/lint.sh 把门接进了 comment policy 同一位置。
 """
 import json
 import subprocess
@@ -20,11 +20,11 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 CHECKER = SCRIPTS / "check_doc_budget.py"
-REPO_ROOT = SCRIPTS.parent
-BASELINE_NAME = Path("scripts") / "doc_budget.json"
+REPO_ROOT = SCRIPTS.parents[1]
+BASELINE_NAME = Path("scripts") / "gates" / "doc_budget.json"
 sys.path.insert(0, str(SCRIPTS))
 
-import check_doc_budget as budget  # noqa: E402  (needs scripts/ on sys.path)
+import check_doc_budget as budget  # noqa: E402  (needs scripts/gates/ on sys.path)
 
 
 class FixtureCase(unittest.TestCase):
@@ -327,7 +327,7 @@ class RepoBaselineTest(unittest.TestCase):
         self.assertEqual(
             stored, {metric: totals[metric] for metric in budget.METRICS},
             "baseline 与现树不符：现树 {}。若刚压缩过文档，跑 "
-            "`python3 scripts/check_doc_budget.py --tighten` 锁住减少量；"
+            "`python3 scripts/gates/check_doc_budget.py --tighten` 锁住减少量；"
             "若刚新增文档，先压掉等量体量（基线只降不升）".format(totals))
 
     def test_baseline_records_its_measurement(self):
@@ -342,7 +342,7 @@ class LintRegistrationTest(unittest.TestCase):
     """门不许被静默摘掉：接入位置与 comment policy 同段，且不提供放宽开关。"""
 
     def setUp(self):
-        self.text = (REPO_ROOT / "scripts" / "lint.sh").read_text(encoding="utf-8")
+        self.text = (REPO_ROOT / "scripts" / "gates" / "lint.sh").read_text(encoding="utf-8")
 
     def test_gate_is_wired_next_to_comment_policy(self):
         policy_at = self.text.index("lint: comment policy")

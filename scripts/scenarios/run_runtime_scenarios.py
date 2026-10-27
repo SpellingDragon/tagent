@@ -15,7 +15,7 @@
      差异只如实报告；golden 是对照物不是金标准，修正 golden 或修产品的裁决不在这里。
 
 证据产物（RUN-file）按 golden `evidence_contract` 的字段集写出，供
-`python3 scripts/check_runtime_evidence.py --evidence <RUN-file> --test-log <PATH>
+`python3 scripts/gates/check_runtime_evidence.py --evidence <RUN-file> --test-log <PATH>
 --scope <同一 scope>` 二次核账。
 
 退出码：
@@ -25,8 +25,8 @@
   3  全部有记录但存在与 golden 的差异（差异明细逐条打印，不静默通过）
 
 运行:
-  python3 scripts/run_runtime_scenarios.py --scope deterministic
-  python3 scripts/run_runtime_scenarios.py --scope complete --out /tmp/scenarios
+  python3 scripts/scenarios/run_runtime_scenarios.py --scope deterministic
+  python3 scripts/scenarios/run_runtime_scenarios.py --scope complete --out /tmp/scenarios
 
 schema v2（`event-integrity` 合同）额外能力，v1 行为不变：
 
@@ -54,7 +54,12 @@ import tempfile
 import time
 import uuid
 
-import runtime_checklib as lib
+# runtime_checklib is one shared library, so it lives in one place: scripts/gates/.
+# The runners reach it by adding that directory to the import path, which keeps a
+# single definition of the fingerprint/diff/contract helpers.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "gates"))
+import runtime_checklib as lib  # noqa: E402
 
 MODULE_PATH = "github.com/SpellingDragon/tagent"
 SCHEMA_VERSION = 1
@@ -445,7 +450,7 @@ def build_evidence(scope: str, command: list, exit_code: int, fingerprint: dict,
         "schema_version": SCHEMA_VERSION,
         "runner": {
             "name": "run_runtime_scenarios",
-            "entrypoint": "scripts/run_runtime_scenarios.py",
+            "entrypoint": "scripts/scenarios/run_runtime_scenarios.py",
             "scope": scope,
         },
         "execution": {
@@ -1012,7 +1017,7 @@ def format_report(report: dict) -> str:
     lines.append("scenarios: required={} attested={} drift={} unattested={}".format(
         report["counts"]["required"], report["counts"]["attested"],
         report["counts"]["drift"], report["counts"]["unattested"]))
-    lines.append("follow-up: python3 scripts/check_runtime_evidence.py --evidence {} "
+    lines.append("follow-up: python3 scripts/gates/check_runtime_evidence.py --evidence {} "
                  "--test-log {} --scope {}".format(report["evidence"], report["test_log"],
                                                   report["scope"]))
     return "\n".join(lines)

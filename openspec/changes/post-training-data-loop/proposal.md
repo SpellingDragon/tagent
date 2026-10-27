@@ -31,7 +31,7 @@ tagent 要从"能跑"走向"能学"：把每次真实任务执行变成可验证
 ## Impact
 
 - 新增：`golden/training/`（或 contracts/）三份 Schema+负例、`scripts/validate_training_bundle.py`（或等价 Go 工具）、训练观察面采集代码（挂在现有 rl/host_capture 边界）、离线规范化层（单向读取 tagent.record.v1，不回写运行时）、任务/验收/奖励/导出的新包（位置由现有 owner 定，不建平行子系统）。
-- 修改：`memory/search/store_searcher.go`（候选语义）、`memory/replay/replay_budget.go`（完整请求预算）、`runtime/agent/loop.go`（有效请求固定边界）、`rl/export_chain.go` 与 `scripts/convert_trajectories.py`（reader 适配）。
+- 修改：`memory/search/store_searcher.go`（候选语义）、`memory/replay/replay_budget.go`（完整请求预算）、`runtime/agent/loop.go`（有效请求固定边界）、`rl/export_chain.go` 与 `scripts/scenarios/convert_trajectories.py`（reader 适配）。
 - 不改：业务事实账本语义（M0 已由 event-consumption-integrity 完成）、在线 RL 实现、真实模型服务调用（本次全部本地替身）。
 - 用户已裁定：M0-M2 范围、本地替身先行、骨架双门（每域硬门+跨域集中评审）。
 

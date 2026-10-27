@@ -27,7 +27,7 @@
       "pattern": ".",
       "role": "composition",
       "required": true,
-      "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。根 allow 列表是登记表：列全每个已登记包供未登记包检出，不是依赖边；宿主壳 cli 位于组合根之上，其指向 . 的回边不算环（真环仍在其余包之间检出，判据见 scripts/check_runtime_architecture.py 的 find_cycle）。"
+      "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。根 allow 列表是登记表：列全每个已登记包供未登记包检出，不是依赖边；宿主壳 cli 位于组合根之上，其指向 . 的回边不算环（真环仍在其余包之间检出，判据见 scripts/gates/check_runtime_architecture.py 的 find_cycle）。"
     },
     {
       "pattern": "cli",

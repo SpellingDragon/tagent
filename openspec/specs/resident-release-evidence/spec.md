@@ -198,7 +198,7 @@ race 验收 SHALL 保留全部失败，包括全上游访问栈；family 和 bro
 
 ### Requirement: 文档只陈述已落地能力与可证明边界
 
-`README.md`、`docs/OPERATION.md`、`docs/FACT-VOCABULARY.md`、`docs/GLOSSARY.md` SHALL 登记事件双档、故障变异、required 汇总、证据档位与失败处置，且只陈述已完成并有真实命令/退出码的能力。未落地的作业、合同或检查器 MUST 标注为“拟新增/未启用”，MUST NOT 让旧 `check_runtime_evidence.py`、旧 `scenarios.json` 或旧十域 graph 被描述为已支持新合同/新图。文档中的每条命令 MUST 可在当前树复跑且与 CI 稳定检查名一致。历史文档 SHALL 只就地勘误并标注日期与原因，MUST NOT 改写历史结论或追溯修改归档 change。05.3 的最终验收 SHALL 以 05.2 的真实输出与 workflow 自测通过为前置；在此之前只允许写“拟新增/未启用”草稿，MUST NOT 勾选完成，也 MUST NOT 把 CI 段落写成“可用”。文档更新 MUST NOT 新增 `.md` 篇目，MUST NOT 上调 `scripts/doc_budget.json`；净增行 SHALL 用同篇删减等量置换，确无可删减内容时 MUST 停止上报而非放宽基线。
+`README.md`、`docs/OPERATION.md`、`docs/FACT-VOCABULARY.md`、`docs/GLOSSARY.md` SHALL 登记事件双档、故障变异、required 汇总、证据档位与失败处置，且只陈述已完成并有真实命令/退出码的能力。未落地的作业、合同或检查器 MUST 标注为“拟新增/未启用”，MUST NOT 让旧 `check_runtime_evidence.py`、旧 `scenarios.json` 或旧十域 graph 被描述为已支持新合同/新图。文档中的每条命令 MUST 可在当前树复跑且与 CI 稳定检查名一致。历史文档 SHALL 只就地勘误并标注日期与原因，MUST NOT 改写历史结论或追溯修改归档 change。05.3 的最终验收 SHALL 以 05.2 的真实输出与 workflow 自测通过为前置；在此之前只允许写“拟新增/未启用”草稿，MUST NOT 勾选完成，也 MUST NOT 把 CI 段落写成“可用”。文档更新 MUST NOT 新增 `.md` 篇目，MUST NOT 上调 `scripts/gates/doc_budget.json`；净增行 SHALL 用同篇删减等量置换，确无可删减内容时 MUST 停止上报而非放宽基线。
 
 #### Scenario: 旧检查器不得宣称新图
 
@@ -223,7 +223,7 @@ race 验收 SHALL 保留全部失败，包括全上游访问栈；family 和 bro
 #### Scenario: 文档预算只降不升
 
 - **WHEN** 四篇文档需要新增内容
-- **THEN** 篇数不增、总行数不超 `scripts/doc_budget.json` 基线；`test_extra_file_fails`、`test_extra_lines_fail` 与 `test_tighten_refuses_to_raise_and_leaves_the_file_alone` 保持红，`--tighten` 拒绝任何上升
+- **THEN** 篇数不增、总行数不超 `scripts/gates/doc_budget.json` 基线；`test_extra_file_fails`、`test_extra_lines_fail` 与 `test_tighten_refuses_to_raise_and_leaves_the_file_alone` 保持红，`--tighten` 拒绝任何上升
 
 ### Requirement: 本地完成与远端必跑门分层登记
 

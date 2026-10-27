@@ -49,7 +49,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 SCRIPTS = Path(__file__).resolve().parent
-DEFAULT_ROOT = SCRIPTS.parent
+# The gate lives in scripts/gates/, so the repository root is two levels up.
+DEFAULT_ROOT = SCRIPTS.parents[1]
 PROFILE = "event-integrity"
 SCHEMA_VERSION = 2
 DEFAULT_TIMEOUT_SECONDS = 900
@@ -1420,7 +1421,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", default=None,
                         help="evidence directory outside the repository")
     parser.add_argument("--root", default=str(DEFAULT_ROOT),
-                        help="repository root (default: parent of scripts/)")
+                        help="repository root (default: two levels above scripts/gates/)")
     parser.add_argument("--frozen-contract", default=None,
                         help="override the 00.3 frozen contract path")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS,

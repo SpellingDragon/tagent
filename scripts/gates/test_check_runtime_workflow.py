@@ -47,7 +47,7 @@ from pathlib import Path
 
 import yaml
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO / ".github" / "workflows" / "runtime-contracts.yml"
 GOLDEN_ARCHITECTURE = REPO / "golden" / "runtime" / "architecture.json"
 
@@ -57,7 +57,7 @@ INTEGRATION_BRANCHES = ("main", "dev", "next")
 # make the gate real. A step that disappears or loses its command fails here.
 GATE_STEPS = [
     ("Checker selftests",
-     ["unittest discover -s scripts", "test_check_runtime_*.py"]),
+     ["unittest discover -s scripts/gates", "test_check_runtime_*.py"]),
     ("Plan contract",
      ["check_runtime_plan.py", "--json"]),
     ("Architecture policy",
@@ -217,7 +217,7 @@ class WorkflowTest(unittest.TestCase):
 
     def test_contract_job_runs_all_four_gates(self):
         for needle in (
-            "python -m unittest discover -s scripts -p 'test_check_runtime_*.py'",
+            "python -m unittest discover -s scripts/gates -p 'test_check_runtime_*.py'",
             "check_runtime_plan.py",
             "check_runtime_architecture.py --check-policy",
             "check_runtime_evidence.py --check-contract",
@@ -244,7 +244,7 @@ class WorkflowTest(unittest.TestCase):
 
 
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
-PREFLIGHT = REPO / "scripts" / "preflight.sh"
+PREFLIGHT = REPO / "scripts" / "gates" / "preflight.sh"
 
 EVENT_CONTRACT = "golden/runtime/event_integrity_scenarios.json"
 EVENT_PRODUCER_JOBS = ("event-integrity-short",
@@ -1200,7 +1200,7 @@ class CiWorkflowTest(unittest.TestCase):
                     json.dumps(evidence(index, digest), ensure_ascii=False, indent=2),
                     encoding="utf-8")
             proc = subprocess.run(
-                [sys.executable, str(REPO / "scripts" / "check_runtime_evidence.py"),
+                [sys.executable, str(REPO / "scripts" / "gates" / "check_runtime_evidence.py"),
                  "--bundle", str(bundle), "--contract", str(contract_path), "--json"],
                 capture_output=True, text=True)
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)

@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPTS.parents[1]
 CHECKER = SCRIPTS / "check_runtime_plan.py"
 
 DOMAIN_SPEC = (
@@ -860,21 +861,28 @@ class LintObjectSelectionTest(unittest.TestCase):
         archive = self.root / "openspec" / "changes" / "archive" / "2026-10-18-runtime-rebuild"
         shutil.copytree(str(self.fixture.change), str(archive))
 
+        # 夹具照真布局铺开：wrapper 在 scripts/ 根，实体与检查器在 scripts/gates/，
+        # 运行器族在 scripts/scenarios/。这样 lint 的相对路径与转发入口都被真跑一遍，
+        # 而不是让夹具停在搬家前的形状上。
         scripts = self.root / "scripts"
-        scripts.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(SCRIPTS / "lint.sh"), str(scripts / "lint.sh"))
-        shutil.copy2(str(CHECKER), str(scripts / "real_check_runtime_plan.py"))
+        gates = scripts / "gates"
+        scenarios = scripts / "scenarios"
+        gates.mkdir(parents=True, exist_ok=True)
+        scenarios.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(REPO_ROOT / "scripts" / "lint.sh"), str(scripts / "lint.sh"))
+        shutil.copy2(str(SCRIPTS / "lint.sh"), str(gates / "lint.sh"))
+        shutil.copy2(str(CHECKER), str(gates / "real_check_runtime_plan.py"))
         shutil.copy2(str(SCRIPTS / "runtime_checklib.py"),
-                     str(scripts / "runtime_checklib.py"))
-        write(scripts / "check_runtime_plan.py", PLAN_WRAPPER)
+                     str(gates / "runtime_checklib.py"))
+        write(gates / "check_runtime_plan.py", PLAN_WRAPPER)
         for name in ("check_runtime_evidence.py", "check_runtime_architecture.py",
-                     "check_concept_budget.py", "test_check_concept_budget.py",
-                     "test_verify_restart_prefix.py"):
-            write(scripts / name, PY_STUB)
+                     "check_concept_budget.py", "test_check_concept_budget.py"):
+            write(gates / name, PY_STUB)
+        write(scenarios / "test_verify_restart_prefix.py", PY_STUB)
         for name in ("gen_godoc.sh", "test_race_check.sh", "test_check_package_layout.sh"):
-            write(scripts / name, SH_STUB)
-        write(scripts / "test_check_runtime_stub.py", SELFTEST_STUB)
-        write(scripts / "test_check_doc_budget.py", SELFTEST_STUB)
+            write(gates / name, SH_STUB)
+        write(gates / "test_check_runtime_stub.py", SELFTEST_STUB)
+        write(gates / "test_check_doc_budget.py", SELFTEST_STUB)
 
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -903,7 +911,7 @@ class LintObjectSelectionTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertIn("lint: runtime plan contract", proc.stdout)
         self.assertNotIn("no active task-graph.json", proc.stdout)
-        log = self.root / "scripts" / "plan_invocations.log"
+        log = self.root / "scripts" / "gates" / "plan_invocations.log"
         lines = log.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1, proc.stdout)
         expected = "--change-dir " + "/".join(["openspec", "changes", "runtime-rebuild"])
@@ -914,7 +922,7 @@ class LintObjectSelectionTest(unittest.TestCase):
         # 旧固定对象（归档路径）在新命名下本身就不自洽：图声明 change=runtime-rebuild，
         # 目录名带日期前缀。规则不放宽，因此直接跑真实检查器必须红。
         proc = subprocess.run(
-            [sys.executable, "scripts/real_check_runtime_plan.py",
+            [sys.executable, "scripts/gates/real_check_runtime_plan.py",
              "--change-dir", "/".join(["openspec", "changes", "archive",
                                         "2026-10-18-runtime-rebuild"]),
              "--json"], cwd=str(self.root), capture_output=True, text=True)

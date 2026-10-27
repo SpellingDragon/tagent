@@ -9,7 +9,7 @@
 - 正例：完整逐字节恢复 → EXACT + exit 0。
 - 看板：仅看板行差异 → BOARD_DIFF（不计 EXACT/CRITICAL）+ exit 0。
 
-运行: python3 scripts/test_verify_restart_prefix.py   （全过 → exit 0）
+运行: python3 scripts/scenarios/test_verify_restart_prefix.py   （全过 → exit 0）
 """
 import json
 import os

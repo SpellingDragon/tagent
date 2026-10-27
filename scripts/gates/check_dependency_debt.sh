@@ -2,7 +2,7 @@
 # check_dependency_debt.sh — prints every pinned module in go.mod together with
 # the condition and the steps that retire it.
 #
-# usage: scripts/check_dependency_debt.sh
+# usage: scripts/gates/check_dependency_debt.sh
 #
 # Exit status is always 0 (or 2 only when go.mod itself is unreadable). This is a
 # register, not a gate. A pin here is a deliberate, recorded decision — the

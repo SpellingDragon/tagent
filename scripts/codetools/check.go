@@ -1102,22 +1102,22 @@ func shortSHA(sha string) string {
 // their calling shape, the same self-reference the earlier keys carry, not a
 // citation of a process artifact.
 var procRefSkip = map[string]bool{
-	"scripts/comment_policy/main.go":                true,
-	"scripts/comment_policy/main_test.go":           true,
-	"scripts/comment_policy/testdata/violations.go": true,
-	"scripts/check-openspec.sh":                     true,
-	"scripts/hooks/pre-commit":                      true,
-	"scripts/codetools/check.go":                    true,
-	"scripts/codetools/check_test.go":               true,
-	"scripts/lint.sh":                               true,
-	"scripts/check_concept_budget.py":               true,
-	"scripts/check_runtime_plan.py":                 true,
-	"scripts/check_event_integrity_mutations.py":    true,
-	"scripts/check_doc_budget.py":                   true,
-	"scripts/test_check_doc_budget.py":              true,
-	"scripts/doc_budget.json":                       true,
-	"scripts/test_check_runtime_workflow.py":        true,
-	".github/workflows/runtime-contracts.yml":       true,
+	"scripts/comment_policy/main.go":                   true,
+	"scripts/comment_policy/main_test.go":              true,
+	"scripts/comment_policy/testdata/violations.go":    true,
+	"scripts/gates/check-openspec.sh":                  true,
+	"scripts/hooks/pre-commit":                         true,
+	"scripts/codetools/check.go":                       true,
+	"scripts/codetools/check_test.go":                  true,
+	"scripts/gates/lint.sh":                            true,
+	"scripts/gates/check_concept_budget.py":            true,
+	"scripts/gates/check_runtime_plan.py":              true,
+	"scripts/gates/check_event_integrity_mutations.py": true,
+	"scripts/gates/check_doc_budget.py":                true,
+	"scripts/gates/test_check_doc_budget.py":           true,
+	"scripts/gates/doc_budget.json":                    true,
+	"scripts/gates/test_check_runtime_workflow.py":     true,
+	".github/workflows/runtime-contracts.yml":          true,
 }
 
 // procRefViolations reports "file:line" of each change-artifact citation under dir.

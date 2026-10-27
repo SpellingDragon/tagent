@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # proc_fingerprint.sh — 进程身份权威指纹核验（防 pgrep 误匹配 / PID 复用）
-# 用法: ./scripts/proc_fingerprint.sh <PID> [expect_binary_substring]
+# 用法: ./scripts/scenarios/proc_fingerprint.sh <PID> [expect_binary_substring]
 # 输出: 每行 KEY=VALUE；BIN_MATCH=yes/no 为最终判定行。退出码 0=指纹成立, 1=不成立
 # 依据: /proc/<pid>/exe（真实二进制，防 cmdline 子串误匹配）+ starttime（防 PID 复用）
 #       + go version -m vcs.revision（Go 二进制构建版本，判"跑的是哪版代码"）

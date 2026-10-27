@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check_coverage_floor.sh — package-level coverage floor for memory, rl and evolution.
 #
-# usage: scripts/check_coverage_floor.sh
+# usage: scripts/gates/check_coverage_floor.sh
 #
 # Each package's measured statement coverage is compared against the floor
 # recorded below. A package below its floor exits 1, so a suite that loses

@@ -21,7 +21,7 @@
 | `go.mod:103-141` | DEPENDENCY DEBT 登记块 + `replace` 指令（第 141 行） |
 | `go.sum:7-8` | `github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1` 的 `h1:` 与 `/go.mod` 校验和 |
 | `docs/OPERATION.md:170-175` | 面向维护者的 D1 技术债登记与回正条件 |
-| `scripts/check_dependency_debt.sh:51-60` | 从 go.mod 重新打印登记内容（恒 exit 0，只提醒不拦截） |
+| `scripts/gates/check_dependency_debt.sh:51-60` | 从 go.mod 重新打印登记内容（恒 exit 0，只提醒不拦截） |
 
 `go mod verify` 实测输出：`all modules verified`。`go list -m` 实测：
 `trpc.group/trpc-go/trpc-agent-go v1.11.2 => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1`。
@@ -165,7 +165,7 @@ go test -run '^$' -bench '^(BenchmarkAssemble|BenchmarkAssembleInvoke|BenchmarkI
 回正后仍需保留的说明：
 
 - `go.mod` 的 DEPENDENCY DEBT 块按既有步骤 e 删除，并在 `CHANGELOG.md` 记一条。
-- `docs/OPERATION.md` D1 与 `scripts/check_dependency_debt.sh` 的登记同步删除/更新。
+- `docs/OPERATION.md` D1 与 `scripts/gates/check_dependency_debt.sh` 的登记同步删除/更新。
 - 若 #2637 之后才合入，回正时以官方 tag 的提交集与 tag `v1.11.2-tagent.1` 逐条对比（4 条），确认无行为差。
 
 ## 六、最终取舍
