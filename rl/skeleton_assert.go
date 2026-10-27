@@ -247,6 +247,12 @@ var (
 
 	_ func(AttemptRecord) error                                                             = ValidateAttempt
 	_ func(event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) AttemptRecord = AttemptOf
+
+	_ func(*TrajectoryCapture) []DecisionSnapshot                    = (*TrajectoryCapture).Snapshots
+	_ func(*TrajectoryCapture) []SnapshotRef                         = (*TrajectoryCapture).SnapshotRefs
+	_ func(*TrajectoryCapture, SnapshotRef) (RequestSnapshot, error) = (*TrajectoryCapture).SnapshotOf
+
+	_ = DecisionSnapshot{Decision: "", Snapshot: RequestSnapshot{}}
 )
 
 // The redaction value is a compile-time constant and the named snapshot errors

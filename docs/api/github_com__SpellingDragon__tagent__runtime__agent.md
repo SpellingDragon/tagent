@@ -168,18 +168,25 @@ type BoundaryView struct {
 	Messages []model.Message
 	// PromptVersion is the content version the request boundary fixed.
 	PromptVersion string
+	// VisibleSkills lists the skill names the boundary material makes visible to
+	// the request, in name order and once each: the skill bodies it fixed into
+	// the prefix beside the bodies the binding already loaded. A boundary that
+	// names no skill reports none, and the names carry no version of their own.
+	VisibleSkills []string
 }
     BoundaryView is what the request boundary settled on: the prefix messages
     the request carries in front of the transcript, in the fixed layout the
-    request face assembles, and the content version the request runs on.
-    An empty PromptVersion keeps the version the binding already carries:
-    a binding that names no files fixes no content version of its own.
+    request face assembles, the content version the request runs on, and the
+    skill names that material makes visible. An empty PromptVersion keeps the
+    version the binding already carries: a binding that names no files fixes no
+    content version of its own.
 
 type Capture interface {
 	// Snapshot fixes the view one decision's request runs on before the request
-	// starts: the model name, the prompt version and the tools visible to it,
-	// beside the request as it stands. The request is observed, never edited.
-	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+	// starts: the model name, the prompt version, the tools visible to it and the
+	// skills visible to it, beside the request as it stands. The request is
+	// observed, never edited.
+	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error
 	// Record admits one observed attempt beside the response that produced it:
 	// the outcome arrives reduced, and the record side shares that terminal
 	// rather than deriving a second one.
@@ -553,8 +560,11 @@ type HistoryFace interface {
     HistoryFace is the session transcript face the loop reads the accumulated
     history of a session from and writes one ended drive's transcript back to:
     the invocations of one session share the history the drives that already
-    ended on it committed, while each drive aggregates only its own ready input
-    beside that history and never batches with a neighbour.
+    ended on it committed, while each drive aggregates only its own ready
+    input beside that history and never batches with a neighbour. A session
+    whose transcript a mapped sequence carries needs no second face here:
+    that sequence is the one history of the session, so an implementation may
+    answer none of its own beside it.
 
     The redline list (3 rules): MUST report the history the named session
     accumulated, as a copy the caller owns. MUST NOT batch the ready input of
@@ -752,12 +762,6 @@ func (l *Loop) SetRequestFace(face RequestFace)
     keeps every request at its transcript alone. The setter is separate from the
     constructor so the declared construction shape of the loop stays as it is.
 
-func (l *Loop) SetRequestSnapshotFace(face RequestSnapshotFace)
-    SetRequestSnapshotFace attaches the safe request snapshot face this loop
-    fixes each decision's request boundary snapshot through before that
-    request starts. A nil face fixes nothing. The setter is separate from the
-    constructor so the declared construction shape of the loop stays as it is.
-
 func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) error)
     SetWatch attaches the registration the close of this agent confirms the
     real stop of every in-flight production through: the whole drive of one
@@ -875,7 +879,7 @@ type Recorder interface {
 
 type RecordingLoss struct {
 	// Kind names the record kind the failed write belonged to: "episode",
-	// "decision", "attempt" or "snapshot".
+	// "decision" or "attempt".
 	Kind string
 	// ID is the identity of the record the failed write belonged to.
 	ID string
@@ -936,24 +940,6 @@ type RequestFace func(ctx context.Context, boundary RequestBoundary) (BoundaryVi
     MUST assemble the prefix in the fixed layout from contents read fresh at
     this boundary. MUST refuse a chain that names no session by name. MUST NOT
     cross any package edge into the projection layer.
-
-type RequestSnapshotFace func(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, binding state.AgentBinding, req model.Request) error
-    RequestSnapshotFace fixes the safe request snapshot of one decision's
-    request at the formal request boundary: the face is handed the request as
-    it stands before the model entry is called — the full message set the model
-    will see and the tools visible to it — beside the model view material the
-    request runs on and the borrowed binding its visible skill set is read from.
-    The face keeps a projected copy of the request and never edits the request
-    itself, and a face error never reaches the model decision: capture is
-    observation, not execution, and the refused fix is counted as an explicit
-    recording loss beside its decision identity. The face crosses built-in,
-    event, model and state types only, so the capture side attaches through it
-    with no package edge into the execution core.
-
-    The redline list (3 rules): MUST keep a projected copy of the request and
-    say whether the fix was kept. MUST NOT edit the request it was handed,
-    and MUST NOT hold it past the fix. MUST NOT let a refused fix reach the
-    model decision: it is a counted recording loss.
 
 type Shutdown struct {
 	// Has unexported fields.

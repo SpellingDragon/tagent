@@ -602,12 +602,12 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 file="facts.go",
                 # The originals write answers as committed.
                 old=(
-                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {\n"
+                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {\n"
                     "\t\treturn err\n"
                     "\t}\n"
                 ),
                 new=(
-                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {\n"
+                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {\n"
                     "\t\treturn nil\n"
                     "\t}\n"
                 ),

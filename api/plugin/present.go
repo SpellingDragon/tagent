@@ -29,7 +29,7 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
 	for _, face := range p.observers {
 		started := time.Now()
 		err := face.impl.ObserveCommit(ctx, fact)
-		observePhase(PhaseConsume, faceObserve, Port{Reads: MaterialFact, Produces: ProductObservation}, face.name, phaseResult(err), "fact="+string(fact), started)
+		observeFace(Port{Reads: MaterialFact, Produces: ProductObservation}, faceObserve, face.name, faceResult(err), "fact="+string(fact), started)
 		if err != nil {
 			out.Gaps = append(out.Gaps, face.gap(fact, err))
 		}
@@ -37,15 +37,15 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
 	for _, face := range p.presenters {
 		started := time.Now()
 		text, dropped := face.impl.Present(ctx, fact)
-		observePhase(PhaseConsume, facePresent, Port{Reads: MaterialFact, Produces: ProductView}, face.name, phasePresentation(dropped), "fact="+string(fact), started)
+		observeFace(Port{Reads: MaterialFact, Produces: ProductView}, facePresent, face.name, facePresentation(dropped), "fact="+string(fact), started)
 		out.Views = append(out.Views, view.RenderedView{Plugin: face.name, Text: text, Dropped: dropped})
 	}
 	return out
 }
 
-// phasePresentation spells the outcome one presenting face reported: the text it
+// facePresentation spells the outcome one presenting face reported: the text it
 // rendered, or the drop it declared instead of a silent empty view.
-func phasePresentation(dropped bool) string {
+func facePresentation(dropped bool) string {
 	if dropped {
 		return "dropped"
 	}

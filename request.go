@@ -35,28 +35,24 @@ type RequestSnapshotRecord struct {
 	Snapshot rl.RequestSnapshot
 }
 
-// snapshotRequest fixes the safe request snapshot of one decision beside the
-// request the model entry is about to be called with: the fixed copy is taken
-// at the formal request boundary before the call starts and holds what the
-// model actually sees — the assembled prompt, skill bodies, projection and
-// transcript of the request as it stands then. The snapshot observes the
-// request and never edits it: the projection runs over copies, so the request
-// keeps every original value including its credentials.
-func (r *Run) snapshotRequest(_ context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, binding state.AgentBinding, req model.Request) error {
-	view := rl.ModelViewRef{
-		Model:         modelName,
-		PromptVersion: promptVersion,
-		VisibleTools:  unversionedNames(visibleTools),
-		VisibleSkills: unversionedNames(visibleSkillsOf(binding)),
+// snapshotReader reads back the safe request snapshots a capture fixed: every
+// snapshot it keeps, in fix order, each beside the decision whose request it was
+// fixed for. A run holds no snapshot copy of its own, so the read face is the
+// capture's own account and never a second one beside it.
+type snapshotReader interface {
+	Snapshots() []rl.DecisionSnapshot
+}
+
+// requestSnapshots reports the safe request snapshots the capture of this run
+// fixed, in fix order, or none while the assembly carries no capture: a run
+// beside no capture fixes no request view and answers an empty read face rather
+// than a copy kept beside the capture.
+func (r *Run) requestSnapshots() []rl.DecisionSnapshot {
+	reader, ok := r.capture.(snapshotReader)
+	if !ok {
+		return nil
 	}
-	snapshot, err := rl.SnapshotRequest(view, req, rl.SnapshotPolicy{})
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.snapshots = append(r.snapshots, RequestSnapshotRecord{Decision: decisionID, Snapshot: snapshot})
-	return nil
+	return reader.Snapshots()
 }
 
 // RequestSnapshots reports the safe request snapshots this assembly fixed
@@ -64,29 +60,18 @@ func (r *Run) snapshotRequest(_ context.Context, decisionID event.DecisionID, mo
 // owns: each Message, VisibleTools and VisibleSkills slice is copied, while
 // nested ContentParts share the underlying parts of the fixed snapshot.
 // Writing a shared part would be a caller bug; the snapshots themselves were
-// fixed before the call. The snapshots are read-out material beside the
-// requests they were fixed for; reading them moves nothing.
+// fixed before the call. The snapshots are read back from the capture that fixed
+// them — their one home — and a run assembled beside no capture answers none.
+// Reading them moves nothing.
 func (r *Run) RequestSnapshots() []RequestSnapshotRecord {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]RequestSnapshotRecord, 0, len(r.snapshots))
-	for _, record := range r.snapshots {
-		got := record
-		got.Snapshot.Messages = append([]model.Message(nil), record.Snapshot.Messages...)
-		got.Snapshot.VisibleTools = append([]rl.VersionedName(nil), record.Snapshot.VisibleTools...)
-		got.Snapshot.VisibleSkills = append([]rl.VersionedName(nil), record.Snapshot.VisibleSkills...)
-		out = append(out, got)
-	}
-	return out
-}
-
-// unversionedNames records a list of visible names as unversioned view members:
-// the snapshot pins each name exactly as the request saw it and never invents
-// a version beside a member that carries none.
-func unversionedNames(names []string) []rl.VersionedName {
-	out := make([]rl.VersionedName, 0, len(names))
-	for _, name := range names {
-		out = append(out, rl.VersionedName{Name: name})
+	fixed := r.requestSnapshots()
+	out := make([]RequestSnapshotRecord, 0, len(fixed))
+	for _, one := range fixed {
+		record := RequestSnapshotRecord{Decision: one.Decision, Snapshot: one.Snapshot}
+		record.Snapshot.Messages = append([]model.Message(nil), one.Snapshot.Messages...)
+		record.Snapshot.VisibleTools = append([]rl.VersionedName(nil), one.Snapshot.VisibleTools...)
+		record.Snapshot.VisibleSkills = append([]rl.VersionedName(nil), one.Snapshot.VisibleSkills...)
+		out = append(out, record)
 	}
 	return out
 }
@@ -497,7 +482,7 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	if err != nil {
 		return agent.BoundaryView{}, err
 	}
-	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion}, nil
+	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}, nil
 }
 
 // fixedFiles reads the declared prompt and skill bodies afresh at this boundary
@@ -836,14 +821,14 @@ func (r *Run) callIdentityOf(fact event.Event) (callID, toolName string) {
 // callArgumentsOf reports the arguments one call was issued with, read from the
 // request snapshot whose transcript carried the assistant tool_calls message of
 // that call: the projection keeps no arguments and the snapshot is the record
-// of what the model actually saw. A call no snapshot carried reads as the empty
-// argument object, so the pair stays complete on the wire instead of breaking
-// the conversation the call opened.
+// of what the model actually saw. The snapshots are the capture's own account —
+// the same source the read face answers from — so a call is never paired from a
+// second copy kept beside the capture. A call no snapshot carried reads as the
+// empty argument object, so the pair stays complete on the wire instead of
+// breaking the conversation the call opened.
 func (r *Run) callArgumentsOf(callID string) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, record := range r.snapshots {
-		for _, message := range record.Snapshot.Messages {
+	for _, fixed := range r.requestSnapshots() {
+		for _, message := range fixed.Snapshot.Messages {
 			for _, call := range message.ToolCalls {
 				if call.ID == callID && len(call.Function.Arguments) > 0 {
 					return string(call.Function.Arguments)

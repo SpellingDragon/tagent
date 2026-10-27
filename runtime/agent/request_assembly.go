@@ -45,14 +45,20 @@ type RequestBoundary struct {
 
 // BoundaryView is what the request boundary settled on: the prefix messages
 // the request carries in front of the transcript, in the fixed layout the
-// request face assembles, and the content version the request runs on. An
-// empty PromptVersion keeps the version the binding already carries: a
-// binding that names no files fixes no content version of its own.
+// request face assembles, the content version the request runs on, and the
+// skill names that material makes visible. An empty PromptVersion keeps the
+// version the binding already carries: a binding that names no files fixes no
+// content version of its own.
 type BoundaryView struct {
 	// Messages are the prefix messages of the request, in fixed layout order.
 	Messages []model.Message
 	// PromptVersion is the content version the request boundary fixed.
 	PromptVersion string
+	// VisibleSkills lists the skill names the boundary material makes visible to
+	// the request, in name order and once each: the skill bodies it fixed into
+	// the prefix beside the bodies the binding already loaded. A boundary that
+	// names no skill reports none, and the names carry no version of their own.
+	VisibleSkills []string
 }
 
 // RequestFace assembles the request-boundary material of one decision: the

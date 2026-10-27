@@ -271,7 +271,7 @@ func TestFourFacesObservationThroughTheFormalEntry(t *testing.T) {
 	if !logger.mentions("debug", "tool call", "tool=echo", "call=call-1") {
 		t.Fatalf("debug lines = %v, want the committed tool-call fact of the turn", logger.at("debug"))
 	}
-	if !logger.mentions("debug", "plugin phase", "phase=consume", "face=observe", "plugin=commit-observer", "result=ok") {
+	if !logger.mentions("debug", "plugin face", "port=fact->observation", "face=observe", "plugin=commit-observer", "result=ok") {
 		t.Fatalf("debug lines = %v, want the dispatched post-commit face of the pipeline", logger.at("debug"))
 	}
 	if !logger.mentions("debug", "consumer drive start", "agent=agent-a", "session=session-faces", "invocation=inv-faces") {

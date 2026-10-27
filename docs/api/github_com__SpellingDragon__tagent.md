@@ -977,13 +977,18 @@ func (r *Run) CloseMCPServers() error
     calls it beside the close of the run; a repeated call releases nothing anew.
 
 func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
-    CommitHistory appends the transcript one ended drive accumulated to the
-    history of its session, so the next invocation of the session reads the
-    range's history as it actually ended while no two invocations ever batch
-    their ready input together. A session whose chain carries a mapped sequence
-    commits no transcript here: that sequence carried every fact of the range
-    as it committed, and the range reads back from it instead of from a second
-    transcript of the same facts.
+    CommitHistory is the write side of the same one face: the transcript one
+    ended drive accumulated is already carried by the mapped sequence of the
+    session — every fact of the range entered it as it committed, in commit
+    order, with the boundary the next request presents — so committing it here
+    keeps no second copy and appends nothing.
+
+    The call is kept as the seam the loop commits an ended drive's transcript
+    through: a loop beside this face needs no branch of its own, and a run
+    beside no mapped sequence records no transcript at all, exactly as a chain
+    whose facts committed nothing has nothing to present. The history a restart
+    reads comes back from the durable fact chain by replay, never from this
+    seam.
 
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error)
     CommitToSession commits one event into the fact chain of an explicit
@@ -1173,9 +1178,10 @@ func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     before its model calls, in call order, as a structural-layer copy the
     caller owns: each Message, VisibleTools and VisibleSkills slice is copied,
     while nested ContentParts share the underlying parts of the fixed snapshot.
-    Writing a shared part would be a caller bug; the snapshots themselves
-    were fixed before the call. The snapshots are read-out material beside the
-    requests they were fixed for; reading them moves nothing.
+    Writing a shared part would be a caller bug; the snapshots themselves were
+    fixed before the call. The snapshots are read back from the capture that
+    fixed them — their one home — and a run assembled beside no capture answers
+    none. Reading them moves nothing.
 
 func (r *Run) SessionFacts(addr event.Address) []event.Event
     SessionFacts reports the facts of one session in the order they committed:
@@ -1186,12 +1192,18 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event
 
 func (r *Run) SessionHistory(addr event.Address) []model.Message
     SessionHistory reports the transcript the named session accumulated across
-    the drives that already ended on it, as a copy the caller owns. The history
-    of one session never mixes with the history of another.
+    the drives that already ended on it, as a copy the caller owns.
 
-    This ledger is the read-out face of the execution scene the run holds, not a
-    durability record: what a restarted process reads back is recovered from the
-    durable fact chain by replay, so no body snapshot is kept beside the facts.
+    The history of one session chain is one face: the mapped sequence its
+    commits record, read through the request boundary of the next invocation.
+    This face carries no second copy of it, so it answers an empty transcript
+    for every chain — a session whose material exists reads it from that
+    sequence, and a session whose commits recorded none has none to read.
+    A reader that keeps a transcript beside the sequence would present the same
+    facts twice, once from the sequence and once from the copy, and a restart
+    would present a different history than the live process, because the copy is
+    not a durability record while the sequence is replayed from the durable fact
+    chain.
 
 type SessionFolds interface {
 	// SessionOf reports the session chain one committed fact belongs to.
@@ -1234,6 +1246,12 @@ func NewSettleDriver(
     the mailbox account of that run and the follow-up drive of its host.
     The pump starts beside the driver and rests until a wake or an observation
     asks it to read the account.
+
+func (d *SettleDriver) DrivesObligation()
+    DrivesObligation marks this face's duty: the observation wakes the pump,
+    and the work it woke is owed on the mailbox account, so a failed observation
+    leaves the follow-up turn owed and the account hands it to the next
+    decision.
 
 func (d *SettleDriver) Name() string
     Name reports the stable name of this plugin instance.

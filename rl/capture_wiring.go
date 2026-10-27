@@ -72,11 +72,21 @@ type TrajectoryCapture struct {
 
 	mu        sync.Mutex
 	seq       uint64
-	refs      []SnapshotRef
+	fixed     []fixedSnapshot
 	snapshots map[string]RequestSnapshot
 }
 
 var _ CaptureScope = (*TrajectoryCapture)(nil)
+
+// fixedSnapshot is one fixed request snapshot beside the decision whose request
+// it was fixed for: the reference is the read handle the decision records, and
+// the decision names whose request the content answers. The pair is kept as one
+// entry rather than two indexes, so a decision is never read beside a snapshot
+// that was fixed for another one.
+type fixedSnapshot struct {
+	decision event.DecisionID
+	ref      SnapshotRef
+}
 
 // NewTrajectoryCapture returns the capture of one trajectory over its bounded
 // sink, under the projection policy its snapshots are taken with. A missing
@@ -145,14 +155,15 @@ func (c *TrajectoryCapture) Ledger() CaptureLedger {
 	return c.sink.Ledger()
 }
 
-// keep records one fixed snapshot beside the reference it is read back under.
-// The snapshot is kept once per reference: the same decision fixing a second
-// snapshot keeps both, each under its own identity.
-func (c *TrajectoryCapture) keep(ref SnapshotRef, snapshot RequestSnapshot) {
+// keep records one fixed snapshot beside the reference it is read back under and
+// the decision whose request it was fixed for. The snapshot is kept once per
+// reference: the same decision fixing a second snapshot keeps both, each under
+// its own identity.
+func (c *TrajectoryCapture) keep(decisionID event.DecisionID, ref SnapshotRef, snapshot RequestSnapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.seq++
-	c.refs = append(c.refs, ref)
+	c.fixed = append(c.fixed, fixedSnapshot{decision: decisionID, ref: ref})
 	c.snapshots[ref.SnapshotID] = snapshot
 }
 
@@ -173,7 +184,46 @@ func (c *TrajectoryCapture) SnapshotRefs() []SnapshotRef {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]SnapshotRef(nil), c.refs...)
+	refs := make([]SnapshotRef, 0, len(c.fixed))
+	for _, one := range c.fixed {
+		refs = append(refs, one.ref)
+	}
+	return refs
+}
+
+// DecisionSnapshot is one safe request snapshot read back beside the decision
+// whose request it was fixed for: the snapshot is the content, the decision is
+// whose request that content answers. A snapshot read without its decision
+// would be content no request is owed for, so the two are read together.
+type DecisionSnapshot struct {
+	// Decision is the decision whose request the snapshot was fixed for.
+	Decision event.DecisionID
+	// Snapshot is the safe fixed copy of what the model actually saw.
+	Snapshot RequestSnapshot
+}
+
+// Snapshots reports every safe request snapshot this capture fixed, in fix
+// order, each beside the decision whose request it was fixed for, answered from
+// the copies the capture keeps: a snapshot reads back as the content it fixed
+// and is never rebuilt from the options of a finished call. The slices of one
+// snapshot are the kept slices, so a caller that writes them edits the kept
+// copy; SnapshotOf is the persisted read that rechecks a reference's digest.
+// A capture beside no fixed snapshot answers none.
+func (c *TrajectoryCapture) Snapshots() []DecisionSnapshot {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]DecisionSnapshot, 0, len(c.fixed))
+	for _, one := range c.fixed {
+		snapshot, held := c.snapshots[one.ref.SnapshotID]
+		if !held {
+			continue
+		}
+		out = append(out, DecisionSnapshot{Decision: one.decision, Snapshot: snapshot})
+	}
+	return out
 }
 
 // SnapshotOf reads one fixed snapshot back through its reference: the content
@@ -230,7 +280,7 @@ func (s *scopedCapture) Snapshot(ctx context.Context, req model.Request) (ModelV
 	if err != nil {
 		return ModelViewRef{}, err
 	}
-	s.owner.keep(ref, snapshot)
+	s.owner.keep(s.decisionID, ref, snapshot)
 	view := s.view
 	view.Snapshot = ref
 	view.ParametersDigest = digestBytes(snapshot.Parameters)
@@ -266,7 +316,7 @@ type CaptureAdapter struct {
 }
 
 var _ interface {
-	Snapshot(context.Context, event.DecisionID, string, string, []string, model.Request) error
+	Snapshot(context.Context, event.DecisionID, string, string, []string, []string, model.Request) error
 	Record(context.Context, event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) error
 	Seal(context.Context) error
 } = (*CaptureAdapter)(nil)
@@ -284,12 +334,15 @@ func NewCaptureAdapter(scope CaptureScope) (*CaptureAdapter, error) {
 
 // Snapshot fixes the view of one decision's request before the request starts
 // and keeps the scope that carries it, so the attempt of the same decision
-// records against the very view its request was fixed on.
-func (a *CaptureAdapter) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error {
+// records against the very view its request was fixed on. The visible tools and
+// skills are the names the loop observed the request run with, each recorded
+// without a version the loop invented.
+func (a *CaptureAdapter) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error {
 	view := ModelViewRef{
 		Model:         modelName,
 		PromptVersion: promptVersion,
 		VisibleTools:  unversionedMembers(visibleTools),
+		VisibleSkills: unversionedMembers(visibleSkills),
 	}
 	scoped := a.scope.Scope(view, decisionID)
 	if _, err := scoped.Snapshot(ctx, req); err != nil {
@@ -342,8 +395,8 @@ func (a *CaptureAdapter) scopeOf(decisionID event.DecisionID) Capture {
 }
 
 // unversionedMembers records visible names as unversioned view members: the
-// loop names each visible tool it runs with and never invents a version beside
-// a member that carries none.
+// loop names each visible tool and skill the request runs with and never
+// invents a version beside a member that carries none.
 func unversionedMembers(names []string) []VersionedName {
 	out := make([]VersionedName, 0, len(names))
 	for _, name := range names {

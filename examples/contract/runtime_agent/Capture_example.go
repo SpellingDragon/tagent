@@ -14,7 +14,7 @@ import (
 
 type turnCapture struct{ sealed int }
 
-func (c *turnCapture) Snapshot(context.Context, event.DecisionID, string, string, []string, model.Request) error {
+func (c *turnCapture) Snapshot(context.Context, event.DecisionID, string, string, []string, []string, model.Request) error {
 	return nil
 }
 func (c *turnCapture) Record(context.Context, event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) error {

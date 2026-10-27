@@ -438,13 +438,6 @@ func TestPolicyDeclaresTheRulingPort(t *testing.T) {
 	if got, want := policy.Port().String(), "call->ruling"; got != want {
 		t.Fatalf("policy port reads = %q, want %q", got, want)
 	}
-	phase, err := plugin.RouteOf(policy.Port())
-	if err != nil {
-		t.Fatalf("route the policy port: %v", err)
-	}
-	if phase != plugin.PhaseProduce {
-		t.Fatalf("policy phase = %v, want the producing phase %v", phase, plugin.PhaseProduce)
-	}
 	if _, err := plugin.NewFlow([]plugin.Instance{policy}); err != nil {
 		t.Fatalf("assemble the policy into the flow: %v", err)
 	}

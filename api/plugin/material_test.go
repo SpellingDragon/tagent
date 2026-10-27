@@ -11,7 +11,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 )
 
-// flowInstance is one phase instance carrying the name and the port it declares.
+// flowInstance is one flow instance carrying the name and the port it declares.
 type flowInstance struct {
 	name string
 	port Port
@@ -147,51 +147,38 @@ func shapeOf(p Pipeline) faceShape {
 	}
 }
 
-// TestRouteOfClosedTable pins the closed port table the flow routes by.
-// - each of the six declared ports reads as its producing or consuming phase
+// TestPortClosedTable pins the closed port table the flow dispatches by.
+// - each of the six declared ports is accepted as one port of the flow
 // - an undeclared material, an undeclared product and an undeclared port pair are each refused by name
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
-func TestRouteOfClosedTable(t *testing.T) {
-	declared := []struct {
-		port Port
-		want Phase
-	}{
-		{Port{Reads: MaterialCall, Produces: ProductCall}, PhaseProduce},
-		{Port{Reads: MaterialCall, Produces: ProductRuling}, PhaseProduce},
-		{Port{Reads: MaterialRequest, Produces: ProductEnvironment}, PhaseProduce},
-		{Port{Reads: MaterialFact, Produces: ProductObservation}, PhaseConsume},
-		{Port{Reads: MaterialFact, Produces: ProductView}, PhaseConsume},
-		{Port{Reads: MaterialFact, Produces: ProductCompression}, PhaseConsume},
+func TestPortClosedTable(t *testing.T) {
+	declared := []Port{
+		{Reads: MaterialCall, Produces: ProductCall},
+		{Reads: MaterialCall, Produces: ProductRuling},
+		{Reads: MaterialRequest, Produces: ProductEnvironment},
+		{Reads: MaterialFact, Produces: ProductObservation},
+		{Reads: MaterialFact, Produces: ProductView},
+		{Reads: MaterialFact, Produces: ProductCompression},
 	}
-	for _, row := range declared {
-		t.Run(row.port.String(), func(t *testing.T) {
-			phase, err := RouteOf(row.port)
-			if err != nil {
-				t.Fatalf("route %s: %v", row.port, err)
-			}
-			if phase != row.want {
-				t.Fatalf("route %s = %q, want %q", row.port, phaseName(phase), phaseName(row.want))
+	for _, port := range declared {
+		t.Run(port.String(), func(t *testing.T) {
+			if err := validatePort(port); err != nil {
+				t.Fatalf("declare %s: %v, want one port of the closed table", port, err)
 			}
 		})
 	}
 
 	t.Run("an undeclared material is refused by name", func(t *testing.T) {
-		phase, err := RouteOf(Port{Reads: Material("ticket"), Produces: ProductCall})
+		err := validatePort(Port{Reads: Material("ticket"), Produces: ProductCall})
 		if err == nil || !strings.Contains(err.Error(), `"ticket" is not a declared material`) {
-			t.Fatalf("route an undeclared material = (%q, %v), want a named refusal", phaseName(phase), err)
-		}
-		if phase != phaseUnstated {
-			t.Fatalf("refused material reads as %q, want no phase of the flow", phaseName(phase))
+			t.Fatalf("declare an undeclared material = %v, want a named refusal", err)
 		}
 	})
 
 	t.Run("an undeclared product is refused by name", func(t *testing.T) {
-		phase, err := RouteOf(Port{Reads: MaterialCall, Produces: Product("summary")})
+		err := validatePort(Port{Reads: MaterialCall, Produces: Product("summary")})
 		if err == nil || !strings.Contains(err.Error(), `"summary" is not a declared product`) {
-			t.Fatalf("route an undeclared product = (%q, %v), want a named refusal", phaseName(phase), err)
-		}
-		if phase != phaseUnstated {
-			t.Fatalf("refused product reads as %q, want no phase of the flow", phaseName(phase))
+			t.Fatalf("declare an undeclared product = %v, want a named refusal", err)
 		}
 	})
 
@@ -202,12 +189,9 @@ func TestRouteOfClosedTable(t *testing.T) {
 			{Reads: MaterialCall, Produces: ProductObservation},
 			{Reads: MaterialRequest, Produces: ProductView},
 		} {
-			phase, err := RouteOf(port)
+			err := validatePort(port)
 			if err == nil || !strings.Contains(err.Error(), port.String()+" is not one of the declared ports") {
-				t.Fatalf("route %s = (%q, %v), want a named refusal", port, phaseName(phase), err)
-			}
-			if phase != phaseUnstated {
-				t.Fatalf("refused port %s reads as %q, want no phase of the flow", port, phaseName(phase))
+				t.Fatalf("declare %s = %v, want a named refusal", port, err)
 			}
 		}
 	})

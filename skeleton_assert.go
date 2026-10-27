@@ -105,12 +105,6 @@ var _ agent.Recorder = rl.RecorderAdapter{}
 // invocation's shared transcript from is proven here.
 var _ agent.HistoryFace = (*Run)(nil)
 
-// The safe request snapshot face of the execution loop is satisfied by the
-// run's own request-boundary snapshot production across the package boundary:
-// the composition root is where both sides meet, so the snapshot the loop
-// fixes before its model calls is proven here.
-var _ agent.RequestSnapshotFace = (*Run)(nil).snapshotRequest
-
 // The age fold plugin of the request-context window is an instance of the
 // material flow beside the reflection driver: it serves the same
 // fact→observation port, observes every commit of the run, and reads the run's

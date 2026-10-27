@@ -502,10 +502,12 @@ func (a *CaptureAdapter) Seal(ctx context.Context) error
     bounded: a writer that does not confirm in time leaves the sink's explicit
     partial account, never a completed seal invented here.
 
-func (a *CaptureAdapter) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+func (a *CaptureAdapter) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error
     Snapshot fixes the view of one decision's request before the request starts
     and keeps the scope that carries it, so the attempt of the same decision
-    records against the very view its request was fixed on.
+    records against the very view its request was fixed on. The visible
+    tools and skills are the names the loop observed the request run with,
+    each recorded without a version the loop invented.
 
 type CaptureAdmission struct {
 	// Admitted reports whether the record was admitted.
@@ -760,6 +762,17 @@ type DecisionRecord struct {
     DecisionRecord is one model decision as data: the input events it was
     reduced from, the model view it actually ran on and the invocation it
     belongs to.
+
+type DecisionSnapshot struct {
+	// Decision is the decision whose request the snapshot was fixed for.
+	Decision event.DecisionID
+	// Snapshot is the safe fixed copy of what the model actually saw.
+	Snapshot RequestSnapshot
+}
+    DecisionSnapshot is one safe request snapshot read back beside the decision
+    whose request it was fixed for: the snapshot is the content, the decision
+    is whose request that content answers. A snapshot read without its decision
+    would be content no request is owed for, so the two are read together.
 
 type DependencyKind string
 
@@ -1517,6 +1530,15 @@ func (c *TrajectoryCapture) SnapshotOf(ref SnapshotRef) (RequestSnapshot, error)
 func (c *TrajectoryCapture) SnapshotRefs() []SnapshotRef
     SnapshotRefs reports the references of the snapshots this capture fixed,
     in fix order, as a copy the caller owns.
+
+func (c *TrajectoryCapture) Snapshots() []DecisionSnapshot
+    Snapshots reports every safe request snapshot this capture fixed,
+    in fix order, each beside the decision whose request it was fixed for,
+    answered from the copies the capture keeps: a snapshot reads back as the
+    content it fixed and is never rebuilt from the options of a finished call.
+    The slices of one snapshot are the kept slices, so a caller that writes
+    them edits the kept copy; SnapshotOf is the persisted read that rechecks a
+    reference's digest. A capture beside no fixed snapshot answers none.
 
 type VersionedModel struct {
 	// Has unexported fields.

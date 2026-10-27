@@ -192,11 +192,13 @@ type Run struct {
 	// could not commit, so a failed judgment is readable beside the run.
 	leaseLosses []error
 	// capture is the trajectory capture this run fixes, admits and seals
-	// through, or nil beside no capture.
+	// through, or nil beside no capture. It is the one home of the safe request
+	// views too: a decision's request is fixed once, through the capture's scope,
+	// and the run's read face answers from that same account rather than beside a
+	// second copy of its own.
 	capture      rl.Capture
 	captureScope rl.CaptureScope
 	presented    []view.Presentation
-	snapshots    []RequestSnapshotRecord
 	fixers       map[event.AgentID]*fileFixer
 	// replays holds the mapped sequence every registered chain replays into a
 	// request, keyed by the full address — the agent beside its session — so two
@@ -334,7 +336,6 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
-	r.loop.SetRequestSnapshotFace(r.snapshotRequest)
 	if cfg.recorder != nil {
 		r.loop.SetRecorder(rl.NewRecorderAdapter(cfg.recorder))
 	}

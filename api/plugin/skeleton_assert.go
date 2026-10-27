@@ -54,7 +54,7 @@ var (
 
 	_ func(Decision) bool = Decision.Refused
 
-	_ func(Port) (Phase, error) = RouteOf
+	_ func(Port) error = validatePort
 
 	_ func(Port) string = Port.String
 
@@ -97,13 +97,10 @@ var (
 	}
 )
 
-// Phase values, materials, products, dispositions and risk grades must stay
-// compile-time constants of their declared types: a variable or a bare string
-// stops this block from compiling.
+// Materials, products, dispositions and risk grades must stay compile-time
+// constants of their declared types: a variable or a bare string stops this
+// block from compiling.
 const (
-	_ Phase = PhaseProduce
-	_ Phase = PhaseConsume
-
 	_ Material = MaterialCall
 	_ Material = MaterialRequest
 	_ Material = MaterialFact

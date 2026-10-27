@@ -55,9 +55,10 @@ const (
 	ProductEnvironment Product = "environment"
 )
 
-// Port is the declaration of one phase instance: the material it reads and the
-// product it answers. The pair is the whole routing of the flow — the phase and
-// the narrow interface are both readings of it.
+// Port is the declaration of one flow instance: the material it reads and the
+// product it answers. The pair is the whole routing of the flow — the narrow
+// interface the instance is held to and the pass that dispatches it are both
+// readings of it.
 //
 // The redline list (2 rules):
 // MUST declare exactly one read material and one product; an element serving two ports is two instances.
@@ -73,42 +74,40 @@ type Port struct {
 // String spells one port as the material it reads beside the product it answers.
 func (p Port) String() string { return string(p.Reads) + "->" + string(p.Produces) }
 
-// RouteOf reports the phase one port serves, by the closed table of the flow:
-// the producing ports grow a product out of the material they read, and the
-// consuming ports answer a consumption of it.
-//
-//   - call->call, call->ruling and request->environment are producing ports;
-//   - fact->observation, fact->view and fact->compression are consuming ports.
+// validatePort refuses a port the closed table of the flow does not declare, by
+// name. The table declares six ports — call->call, call->ruling,
+// request->environment, fact->observation, fact->view and fact->compression — so
+// a face is dispatched by the one narrow interface its port names, never by a
+// classification of the port.
 //
 // A material the table does not declare, a product it does not declare, and a
 // pair no port serves are each refused by name instead of falling back to a
-// phase.
-func RouteOf(port Port) (Phase, error) {
+// declared port.
+func validatePort(port Port) error {
 	switch port.Reads {
 	case MaterialCall, MaterialRequest, MaterialFact:
 	default:
-		return phaseUnstated, fmt.Errorf("plugin: %q is not a declared material of the flow", string(port.Reads))
+		return fmt.Errorf("plugin: %q is not a declared material of the flow", string(port.Reads))
 	}
 	switch port.Produces {
 	case ProductCall, ProductRuling, ProductObservation, ProductView, ProductCompression, ProductEnvironment:
 	default:
-		return phaseUnstated, fmt.Errorf("plugin: %q is not a declared product of the flow", string(port.Produces))
+		return fmt.Errorf("plugin: %q is not a declared product of the flow", string(port.Produces))
 	}
 	switch port {
 	case Port{Reads: MaterialCall, Produces: ProductCall},
 		Port{Reads: MaterialCall, Produces: ProductRuling},
-		Port{Reads: MaterialRequest, Produces: ProductEnvironment}:
-		return PhaseProduce, nil
-	case Port{Reads: MaterialFact, Produces: ProductObservation},
+		Port{Reads: MaterialRequest, Produces: ProductEnvironment},
+		Port{Reads: MaterialFact, Produces: ProductObservation},
 		Port{Reads: MaterialFact, Produces: ProductView},
 		Port{Reads: MaterialFact, Produces: ProductCompression}:
-		return PhaseConsume, nil
+		return nil
 	default:
-		return phaseUnstated, fmt.Errorf("plugin: the port %s is not one of the declared ports of the flow", port)
+		return fmt.Errorf("plugin: the port %s is not one of the declared ports of the flow", port)
 	}
 }
 
-// Instance is one phase instance of the material flow. The drive that runs one
+// Instance is one instance of the material flow. The drive that runs one
 // decision, the tick that runs one reflection and the assembler that builds one
 // request are built-in instances; a plugin is an instance the composition root
 // mounts. What an instance is differs only in who mounts it: the flow dispatches

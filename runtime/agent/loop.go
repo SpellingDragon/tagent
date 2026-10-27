@@ -158,9 +158,10 @@ type Recorder interface {
 // MUST NOT let a capture failure reach the model decision, and MUST NOT make admission wait on a writer.
 type Capture interface {
 	// Snapshot fixes the view one decision's request runs on before the request
-	// starts: the model name, the prompt version and the tools visible to it,
-	// beside the request as it stands. The request is observed, never edited.
-	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+	// starts: the model name, the prompt version, the tools visible to it and the
+	// skills visible to it, beside the request as it stands. The request is
+	// observed, never edited.
+	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error
 	// Record admits one observed attempt beside the response that produced it:
 	// the outcome arrives reduced, and the record side shares that terminal
 	// rather than deriving a second one.
@@ -223,7 +224,6 @@ type Loop struct {
 	notices   NoticeFeed
 	present   PresentationSink
 	boundary  RequestFace
-	snapshot  RequestSnapshotFace
 	watch     func(taskID event.TaskID, stopped func() bool) error
 	final     FinalRoundPolicy
 	finals    map[event.AgentID]FinalRoundPolicy
@@ -706,51 +706,6 @@ func (l *Loop) SetRequestFace(face RequestFace) {
 	l.boundary = face
 }
 
-// RequestSnapshotFace fixes the safe request snapshot of one decision's
-// request at the formal request boundary: the face is handed the request as it
-// stands before the model entry is called — the full message set the model
-// will see and the tools visible to it — beside the model view material the
-// request runs on and the borrowed binding its visible skill set is read from.
-// The face keeps a projected copy of the request and never edits the request
-// itself, and a face error never reaches the model decision: capture is
-// observation, not execution, and the refused fix is counted as an explicit
-// recording loss beside its decision identity. The face crosses built-in,
-// event, model and state types only, so the capture side attaches through it
-// with no package edge into the execution core.
-//
-// The redline list (3 rules):
-// MUST keep a projected copy of the request and say whether the fix was kept.
-// MUST NOT edit the request it was handed, and MUST NOT hold it past the fix.
-// MUST NOT let a refused fix reach the model decision: it is a counted recording loss.
-type RequestSnapshotFace func(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, binding state.AgentBinding, req model.Request) error
-
-// SetRequestSnapshotFace attaches the safe request snapshot face this loop
-// fixes each decision's request boundary snapshot through before that request
-// starts. A nil face fixes nothing. The setter is separate from the constructor
-// so the declared construction shape of the loop stays as it is.
-func (l *Loop) SetRequestSnapshotFace(face RequestSnapshotFace) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.snapshot = face
-}
-
-// fixRequestSnapshot fixes the safe request snapshot of one decision's request
-// through the attached face before that request starts, or fixes nothing while
-// no face is attached. A fix the face refused is counted as an explicit
-// recording loss beside its decision identity and never carried into the model
-// decision.
-func (l *Loop) fixRequestSnapshot(ctx context.Context, decisionID event.DecisionID, view modelView, binding state.AgentBinding, req model.Request) {
-	l.mu.Lock()
-	face := l.snapshot
-	l.mu.Unlock()
-	if face == nil {
-		return
-	}
-	if err := face(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, binding, req); err != nil {
-		l.noteRecordingLoss("snapshot", string(decisionID), err)
-	}
-}
-
 // fixCapture fixes the request view of one decision through the attached
 // capture before that request starts, or fixes nothing while no capture is
 // attached. A fix the capture refused is counted as an explicit recording loss
@@ -762,7 +717,7 @@ func (l *Loop) fixCapture(ctx context.Context, decisionID event.DecisionID, view
 	if capture == nil {
 		return
 	}
-	if err := capture.Snapshot(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, req); err != nil {
+	if err := capture.Snapshot(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, view.visibleSkills, req); err != nil {
 		l.noteRecordingLoss("capture-snapshot", string(decisionID), err)
 	}
 }
@@ -879,7 +834,7 @@ func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding stat
 // execution.
 type RecordingLoss struct {
 	// Kind names the record kind the failed write belonged to: "episode",
-	// "decision", "attempt" or "snapshot".
+	// "decision" or "attempt".
 	Kind string
 	// ID is the identity of the record the failed write belonged to.
 	ID string
@@ -952,7 +907,7 @@ func (l *Loop) publish(presentation view.Presentation) {
 // a background task and holds no slot.
 // - One decision boundary is one observable model attempt: a retry hidden below this boundary never mints a second attempt identity.
 // - The model view is fixed before the request starts and is never rebuilt from the options of a finished call.
-// - The safe request snapshot is fixed before the model entry is called and observes the request without editing it; a refused fix is counted as a recording loss.
+// - The safe request snapshot is fixed through the attached capture before the model entry is called and observes the request without editing it; a refused fix is counted as a recording loss.
 // - The model entry error is presented with failure polarity through the same reduction: a synthesized failure response is reduced like any stream, so the terminal judgement stays in the model package alone.
 // - The model decision reached its terminal: the session slot is free again while the admitted tools run as background tasks.
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
@@ -997,6 +952,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if boundary.PromptVersion != "" {
 		view.promptVersion = boundary.PromptVersion
 	}
+	view.visibleSkills = boundary.VisibleSkills
 	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript)+1)
 	messages = append(messages, boundary.Messages...)
 	messages = append(messages, transcript...)
@@ -1004,7 +960,6 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
 	}
 	req := model.Request{Messages: messages, Tools: tools}
-	l.fixRequestSnapshot(ctx, decisionID, view, handle.Binding, req)
 	l.fixCapture(ctx, decisionID, view, req)
 
 	production := &inFlightProducer{}
@@ -1529,20 +1484,24 @@ func (l *Loop) recordDecisionAttempt(ctx context.Context, inv Invocation, decisi
 
 // modelView is the model view material one request actually runs on, carried
 // across the recording face in the built-in shapes that face crosses: the model
-// and prompt version of the borrowed generation and the names of the tools
-// visible to the request. A member that ran unversioned is named unversioned
-// rather than assumed current: the record side pins each visible member by the
-// material it is handed and invents no version of its own.
+// and prompt version of the borrowed generation, the names of the tools visible
+// to the request and the names of the skills visible to it. A member that ran
+// unversioned is named unversioned rather than assumed current: the record side
+// pins each visible member by the material it is handed and invents no version
+// of its own.
 type modelView struct {
 	modelName     string
 	promptVersion string
 	visibleTools  []string
+	visibleSkills []string
 }
 
 // modelViewOf fixes the model view one request actually runs on before the
 // request starts: the model and prompt version of the borrowed generation and
-// the tools visible to the request. The view is never rebuilt from the options
-// of a finished call.
+// the tools visible to the request. The skills visible to it are read off the
+// request boundary view beside this, because the boundary assembly is the one
+// home of the rule naming which skills a request makes visible. The view is
+// never rebuilt from the options of a finished call.
 func modelViewOf(binding state.AgentBinding) modelView {
 	view := modelView{
 		modelName:     binding.Model.Info().Name,

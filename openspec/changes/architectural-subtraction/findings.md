@@ -130,3 +130,21 @@ wrapper 与实体自解析根，revert 后两者一并消失，无残留状态�
 - **归属待裁（随波2-A2）**：rl LeaseObserver 分类——Driver 需自有持久账户（现无）vs Observer-only+边界登记。
 
 **波 1 集成凭据**（逐条原始退出码）：build RC=0；gofmt 空；vet RC=0；TestFactFidelity/RequestFidelity(冷启动)/TestHistoryRestoresWithoutBudget/TestFoldCommitFailureSurfaces|TestSingleHistoryPath/TestDecodeEventBodyLegacyRefused/TestObserverLayering 全 RC=0；TestSettleWakeSingleDrive -count=3 RC=0（10.1s）；runtime/agent+telemetry+rl -short RC=0；全 host 29.8s RC=0；全仓 short 38 包 RC=0；history[/snapshots grep=0、settle grep=0。
+
+---
+
+## 波 2 集成裁定（2026-10-27，集成-2，波前 HEAD a63429c）
+
+双轨（A2: 2.2 ∥ C2: 3.1）+ 补差单 A2b 落地后的编排者裁定与跨域修复：
+
+- **裁定⑤（2.2-P1 语义收窄）**：capture 关闭时快照读面由「有」变「空」——接受方案 A：快照=capture 材料（评审减法原文「过去模型实际看到什么由请求快照记录」的正式读法），无条件 Run.snapshots 正是被删的重复权威；formal 三夹具补挂 WithCapture（断言一字未改）。
+- **裁定⑥（2.2-P2 能力缺口）**：VisibleSkills 经 `agent.BoundaryView.VisibleSkills` 传入（A2b 越白名单一处 request_assembly.go，追认：避免 loop 侧第三份技能命名规则复制）；唯一新增导出字段，概念预算实测无新债。
+- **死面删除**：runtime/agent 的 RequestSnapshotFace/SetRequestSnapshotFace/fixRequestSnapshot 族全仓零引用后删除（loop.go 净 −42 行）；`Recorder.RecordDecision` 仍只传 visibleTools（decision 记录面非 capture 面，签名被钉住）——遗留边界登记，不动。
+- **LeaseObserver=Observer-only**（A2 裁）：无自有持久重试账户（五项接线直发 Replace，失败只上抛记 gap）——按 C1 机制「仅自有 durable 义务账户方可标记 Driver」；replacement 失败的补装版义务无自动账户，边界留此。
+- **3.1 跨白名单三处由编排者落地**：evolution/governance/policy_test 删 6 行（闭表覆盖经 NewFlow→validatePort 承载，M3b 变异实证）；host log_observation 日志断言迁移（phase=consume→port=fact->observation）；wiki §1.1 两处+EXTENSIONS.md 去相位改写、docs/api 重生成（GEN_RC=0）。
+- **doc-budget 棘轮重锁（先例㉕）**：+27 全来自归档/发布交付面（fidelity 归档 orchestration 三 requirement 并入=口径边界迁移；v0.4.0 CHANGELOG/README=前批漏锁），本变更对语料净 0——具名记账后直接落基线 22764（doc_budget.json rebaseline_reason 追加）。
+- **变异伴锚迁移（先例裁定③）**：MUT-CAND-01.8-storage-success 伴锚 2 `[]byte(body.Content)`→`[]byte(body.Message.Content)`（集成字段派生所致）；主锚仍健在（count=1）；迁移后主树全量 11/11 killed（evidence /tmp/w2-mutations，MUT_RC=0）。
+- **继承红登记**：check_runtime_structure（tmux_executor.go 547>500）为评审基线前既有（720df14/bc1a3ad 早于 8afa6cfc），不在 CI/lint 门面、不在本变更 diff——登记不修（拆文件=增量工作，越减法案范围）。
+- **波 1 门禁终态**：worktree(a63429c) 13 门 RC=0；lint 红=doc-budget（已重锁）、mutations 红=伴锚陈旧（已迁移+主树 11/11）——两者均已在主树修复复验；long 六片后台进行中（结果落 evidence）。
+
+**波 2 集成凭据**：build 0；snapshots grep=0；RequestSnapshotFace 族 grep=0；plugin.Phase/RouteOf 全仓 grep=0；TestRequestSnapshotsSingleSource/TestFormalRequestSnapshotHasNoSecrets（三子测红→绿）/RequestFidelity|TestRuntimeVisibility/settle/api-plugin/evolution 三包/telemetry/rl/runtime-agent 全 RC=0；全仓 short 39 包 RC=0；全 host RC=0；变异 11/11；doc-budget RESULT ok。

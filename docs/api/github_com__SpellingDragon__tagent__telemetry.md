@@ -60,7 +60,9 @@ type CommitObserver struct {
     A failed read or a failed sink is returned so the After pass records it as
     a named gap beside this plugin's name: the committed fact is never rolled
     back, never withheld from any reader, and the observed work is never re-run
-    to satisfy an observer.
+    to satisfy an observer. The face is observer-only and declares no driver
+    duty: the reading owes nothing of the fact, so its failure stays the missing
+    line of a reading rather than an obligation somebody must retry.
 
 func NewCommitObserver(facts plugin.FactLookup, sink plugin.ObservationSink) *CommitObserver
     NewCommitObserver wires one fact lookup and one observation sink behind the

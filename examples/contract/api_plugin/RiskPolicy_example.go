@@ -9,7 +9,7 @@ import (
 	"github.com/SpellingDragon/tagent/evolution/governance"
 )
 
-// sizeAndRuling is the element that serves both faces of the risk phase: it grades one
+// sizeAndRuling is the element that serves both faces of the risk port: it grades one
 // call and renders the one pre-execution ruling over that same grade.
 type sizeAndRuling struct{}
 
@@ -42,12 +42,12 @@ var (
 	_ plugin.Governor     = sizeAndRuling{}
 )
 
-// ExamplePhase_riskPolicy drives the two faces of the risk phase beside each other: one
+// ExamplePort_riskPolicy drives the two faces of the risk port beside each other: one
 // element grades a call and renders the ruling over that grade, and a pass that carries
 // no grade is ruled as an ordinary mutating call instead of passing ungraded.
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#disposition-and-risk
-func ExamplePhase_riskPolicy() {
+func ExamplePort_riskPolicy() {
 	element := sizeAndRuling{}
 	pipeline, err := plugin.NewFlow([]plugin.Instance{element})
 	if err != nil {

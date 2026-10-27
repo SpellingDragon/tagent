@@ -16,20 +16,18 @@
 
 | 轨/单 | 孙任务 | 前置 | 状态 | 文件簇（独占） |
 |---|---|---|---|---|
-| **波1-A1** | 1.1→1.3（同簇串行） | 启动门✅ | **ready** | facts.go/tools.go/age_fold.go/run.go/request.go + tests/integration/host 新建两测 |
-| **波1-B** | 1.2 | 启动门✅ | **ready** | memory/event_body.go + memory 新建测试 |
-| **波1-C1** | 2.3 | 启动门✅（与批1无文件交） | **ready** | api/plugin/*、telemetry/*、settle_turn.go（仅增量标记）、api/plugin 新建测试 |
-| 集成-1 | 编排者：host 级锚全量 + 2.1 核验 + 五查/勾选 | 波1 三轨落 | blocked | 只读 + 账目 |
-| **波2-A2** | 2.2 | 集成-1 放行 | blocked | run.go/request.go/rl/*/host_face.go + rl 新建测试 |
-| **波2-C2** | 3.1 | 集成-1 放行（C 轨串行） | blocked | api/plugin/present.go·phases.go·material.go、examples/contract/api_plugin/* |
-| 集成-2 | 编排者：host 级锚 + 2.1 若未毕 | 波2 落 | blocked | 只读 + 账目 |
-| **波3-A3** | 3.2（前置=2.2） | 集成-2 放行 | blocked | memory/replay/* + request.go + memory/replay 新建测试 |
-| 3.3 | 编排者：D5 四锚全量+定点破坏 | 波3 落 | blocked | 只读 + evidence |
-| F1–F4 | 编排者 | 3.3 | blocked | specs/golden/evidence/归档 |
+| **波1-A1** | 1.1→1.3 | 启动门✅ | done | 根包五文件 + host 两新测 |
+| **波1-B** | 1.2 | 启动门✅ | done | memory/event_body.go + 新测 |
+| **波1-C1** | 2.3 | 启动门✅ | done | api/plugin、telemetry、settle_turn.go（增量）+新测 |
+| 集成-1 | host 锚全量+2.1 核验+勾选 | 波1 落 | done | 只读+账目 |
+| **波2-A2(A2b)** | 2.2 | 集成-1 ✅ | done | run.go/request.go/rl/host_face.go+新测 |
+| **波2-C2** | 3.1 | 集成-1 ✅ | done | api/plugin 三文件、examples/contract/api_plugin |
+| 集成-2 | host 锚+收尾 | 波2 落 | in-flight | 只读+账目 |
+| **波3-A3** | 3.2（前置 2.2✅） | 集成-2 | ready | memory/replay + request.go + 新测 |
+| 3.3 | D5 四锚+定点破坏 | 波3 落 | blocked | 只读+evidence |
+| F1–F4 | 编排者 | 3.3 | blocked | specs/golden/evidence |
 
-- 并发准入=文件簇零相交（上表逐单核过）；**跨轨编译闭包相交为既知事实**（根包 import memory/api/plugin/telemetry），按 2.3 三约缓解，不作为禁并依据（用户裁定充分并发）。
-- 关键路径：A1→集成1→A2→集成2→A3→3.3→F（C 轨傍行）。
-- 本轮做不了：F 任务（三波全毕）；2.1 并行化改造（出案另行）。
+- 并发准入=文件簇零相交；跨轨闭包相交按 2.3 三约缓解（用户裁定充分并发）。关键路径 A1→集成1→A2→集成2→A3→3.3→F。本轮做不了：F（三波毕）；pump 并行化（另行）。
 
 ### 2.2 授权 —— 谁准写什么
 
@@ -48,11 +46,9 @@
 
 ### 2.3 凭据 —— 什么才算完成
 
-- **分层验证约**：①**包内锚**（只编译本轨包及其上游者：`go test ./memory/...`、`./api/plugin`、`./telemetry`、`./rl`、`./runtime/agent`——注意 runtime/agent 为根包上游、不编译根包）窗口内由代理跑至绿；②**host 级锚**（tests/integration/host 全家：TestFactFidelity/RequestFidelity/TestHistoryRestoresWithoutBudget/TestSettleWakeSingleDrive/冷启动/新建两测——编译根包+memory+api/plugin+telemetry 全链）由**编排者集成时统一跑**，代理窗口内可试跑但不作完成依据；③**勾选**在集成验证全绿后由编排者执行（五查按单核）。
-- **R21 轮询协议**：验证遇**白名单外文件**的编译错/测试红 → `sleep 45` 重跑，≤5 次；仍红则如实归因上报（「异轨半成品波及」），不修不绕不猜。
-- 非空转证明：passed>0；退出码为唯一判定。
-- 必亲验数字（编排者）：各锚 passed 数、grep 结构断言值（history[/snapshots/retained=0）、F2 逐门退出码、每波 diff --stat。
-- 批收尾门禁（F2 全套逐批，用户裁定）：lint/selftests/check-openspec/三模块 short/short 十轮/long 六片（后台）/mutations --all/症状 job——长跑后台 shell（R32b）。
+- **分层验证约**：①包内锚（只编译本轨包及上游：memory/api-plugin/telemetry/rl/runtime-agent）代理窗口内验；②host 级锚（编译全链）编排者集成统一验；③勾选在集成绿后由编排者执行（五查按单核）。
+- **R21 轮询协议**：遇白名单外文件编译错/红 → `sleep 45` 重跑 ≤5 次，仍红归因上报（禁修异文件）。非空转：passed>0，退出码唯一判定。
+- 必亲验数字：锚 passed 数、结构 grep 值、F2 逐门退出码、每波 diff --stat。批收尾门禁=F2 全套（用户裁定），长跑后台（R32b）。
 
 ### 2.4 释放 —— 锁与等待表
 
@@ -64,19 +60,17 @@
 | host 级验证面 | 编排者 | 各波三/两单齐落 | 集成锚全量+勾选 |
 | git 提交权 | 编排者 | 波集成绿+验证记录 | 波提交（用户已授权） |
 
-- 释放=触发：集成绿即当场派下一波（R31：连续推进至法定停点——DoD/提交归档明示/重大取向/blocked）。
+- 释放=触发：集成绿即派下一波（R31 连续推进，法定停点=DoD/提交明示/取向/blocked）。
 
 ## 三、明细层
 
 - 派发矩阵：波1{A1(1.1,1.3) B(1.2) C1(2.3)} → 集成1{host 锚全量+2.1} → 波2{A2(2.2) C2(3.1)} → 集成2 → 波3{A3(3.2)}+3.3 → F。
-- 2.1 于集成-1 执行（核验单：`go test ./tests/integration/host -run 'TestSettleWakeSingleDrive' -count=3` + `grep -cE 'retained|firing|rearm' settle_turn.go`=0 + findings 登记）——避免与 C1 的 settle_turn.go 增量并发互踩。
-- 档位：无外部模型依赖；真实 tmux/real-smoke 不在面内。
-- R10–R14 核对：无性能主张/无新档位/消费者锚已点名/冷启动真实路径入 1.2/1.3 面。
-- 每波三问模板：①`git diff --stat <波前>..HEAD`②波报告（责任归谁）③锚复跑+定点破坏。
+- 2.1 于集成-1 执行（与 C1 的 settle_turn.go 增量避开并发）。无外部模型依赖；R10–R14 核对无欠账。每波三问：diff --stat/责任归谁/锚复跑+破坏。
 
 ## 四、波次台账（边打边回填）
 
 | 波次/单 | 五查结论 | 集成验证（命令+退出码） | 跨域裁决 | 账目勾选凭据 | 下轮情报 | 锁释放与队列消费 |
 |---|---|---|---|---|---|---|
 | 波1 派发（A1/B/C1 三轨并发，2026-10-27） | — | — | — | — | R21 三约随令下发 | — |
-| 波1 集成-1（2026-10-27） | 五查过：勾选真实（锚复跑全 RC=0）/产物盘点（白名单内+编排者修复 5 处越轨引用）/数字溯源（38 包/settle×3 10.1s/双 grep=0）/遗漏检测（2.2 留波2）/消费者实测（冷启动+全 host） | build 0·锚电池 7 组全 0·settle×3 0·全 host 29.8s 0·全仓 short 38 包 0 | 裁定①-④+read.go 缺口修复+词法清零（findings 波1 节） | 1.1/1.2/1.3/2.1/2.3 勾选附凭据 | rl LeaseObserver 归属→A2；F2 门禁进行中 | 根包/memory 放行→波2 派发 |
+| 波1 集成-1（2026-10-27） | 五查过：勾选/产物/数字/遗漏/消费者实测 | build 0·锚电池 7 组 0·settle×3 0·全 host 0·short 38 包 0 | 裁定①-④+read.go 修复+词法清零 | 1.1/1.2/1.3/2.1/2.3 勾选 | LeaseObserver→A2 | 波2 派发 |
+| 波2 集成-2（2026-10-27） | 五查过：A2b 补差（P1 夹具/P2 链/死面）纳入核验 | build 0·snapshots/Phase/死面 grep=0·formal 红→绿·short 39 包 0·全 host 0·变异 11/11·doc-budget ok | 裁定⑤⑥+C2 三处落地+变异伴锚迁移+doc-budget 重锁（findings 波2 节） | 2.2/3.1 勾选附凭据 | tmux 结构门=继承红登记 | 波3-A3 派发 |
