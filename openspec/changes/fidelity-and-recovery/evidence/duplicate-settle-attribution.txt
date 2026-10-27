@@ -1,0 +1,113 @@
+裁定② 归因核实（2026-10-27，终清障单步骤 1；结论：duplicate≠0 → 按裁定停报分支）
+执行依据：编排者裁定②原文「对账断言若报 duplicate 则是 G6b 违约=真缺陷须停报」。
+本文件为停报依据登记；smoke_test.go:2894 未做任何修改（修订=掩盖缺陷，禁止项）。
+
+────────────────────────────────────────────────────────────────
+一、判别结论（一句话）
+超发 100% = 同一任务（同 TaskID）的结算通知被驱动两个回合（重复投递/G6b 违约签名），
+0% = 新任务结算增长；裁定假设「超发来源=通知数增（settled 任务多）」被证伪。
+
+────────────────────────────────────────────────────────────────
+二、算术收口（13/13 超发 run，可复跑）
+数据源：/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/*/report-window-*.json
+        （recon 字段）+ <run_dir>/provider-requests-failed.json（全部 1968 条模型请求本体）
+
+run                      notif_req  expected  dup_count  47+dup==req  unique_taskids
+s1-w256-20261027-044132  49         47        2          True         47
+s1-w256-20261027-060509  49         47        2          True         47
+s1-w256-20261027-070923  51         47        4          True         47
+s1-w256-20261027-082731  49         47        2          True         47   （受控重跑片）
+s1-w32768-20261027-045245 48        47        1          True         47
+s1-w32768-20261027-072058 50        47        3          True         47
+s42-w256-20261027-052423 50         47        3          True         47
+s42-w256-20261027-080048 50         47        3          True         47
+s42-w32768-20261027-053550 51       47        4          True         47
+s42-w32768-20261027-081213 51       47        4          True         47
+s7-w256-20261027-073516  50         47        3          True         47
+s7-w32768-20261027-051017 49        47        2          True         47
+s7-w32768-20261027-074646 51        47        4          True         47
+
+- notif_req = 47 + dup_count 在 13/13 run 成立：每一条超发都是重复，没有一条是新增。
+- unique_taskids 恒 = 47（settled 通知里的任务身份集合恰为计划的 47 个 delegate 任务，
+  一个新任务都没有）——「settled 任务多」假设两侧（算术/身份）均被证伪。
+- missing_notifications 全部为空（13/13 + 干净基线全部 run）：无丢失。
+
+────────────────────────────────────────────────────────────────
+三、重复投递本体证据（同 TaskID 双请求，逐字相同正文）
+复跑：python3 - <<'EOF' 读 <run>/provider-requests-failed.json，过滤
+      last_user_text.startswith("tagent: task ") and "settled" in body and <marker> in body
+
+run-s1-w256-20261027-070923：
+  SMOKE-R10597 → task-58  ×2  idx=923/924   body="tagent: task task-58 settled\nresult:\nworker result SMOKE-R10597"
+  SMOKE-R10796 → task-87  ×2  idx=1250/1251 body 同上（task-87 版本）
+  SMOKE-R10799 → task-95  ×2  idx=1277/1278
+  SMOKE-R11198 → task-164 ×2  idx=1952/1953
+run-s42-w32768-20261027-081213：
+  SMOKE-R420599 → task-66  ×2  idx=949/951
+  SMOKE-R420996 → task-120 ×2  idx=1588/1590
+  SMOKE-R421199 → task-163 ×2  idx=1959/1961
+
+判读：两条请求的 TaskID 与正文逐字相同 = 同一条结算通知驱动了两个 entry 回合
+（host.go:779 正文格式 "tagent: task %s %s" 携带 TaskID，身份可判）。
+若为「两个 settled 任务共用 marker」应见不同 TaskID —— 实测无一例。
+
+外发面对照（report 的 outbound）：
+  SMOKE-R10796 在 070923 落了 2 条 "settle-ack SMOKE-R10796"（dup_actions）= 双答复交付；
+  另 3 个 marker 只落 1 条 settle-ack（第二次驱动的交付被吞/合并），但模型已被双次驱动
+  （预算双花）——无论交付几次，"重复 fire 不双回合" 均已被破。
+
+重启相关性：070923 的 4 对重复中 3 对位于 rebind（重启代际边界）后 4 个请求内
+  （923/924 距 rebind@919 = 4；1277/1278 距 1273 = 4；1952/1953 距 1948 = 4），
+  指向恢复/Wake 路径与直接 fire 并存双触发（Claim→drive→Consume 同账被竞态击穿）。
+
+────────────────────────────────────────────────────────────────
+四、基线与时间线
+- 2026-10-24 ~ 10-27 01:35 的全部 run（33 片）：notif 47/47、dup 空、missing 空 —— 零基线。
+- 首个超发 run：20261027-044132。中间提交：G7 0f96892（10-27 02:05）、G6b a3e7441（10-27 03:47）。
+  02:05~03:47 之间无 run，时相无法单切 G7/G6b；竞态非确定（脏期内 054950 一片仍 47/47 干净）。
+- F2 期 seed-7-window-256（050656）另有 settle-ack 交付丢失型红（60s 超时、generation 聚合失败），
+  与计数红不同型；干净树六片重采未复现该型。
+
+────────────────────────────────────────────────────────────────
+五、测试级绿证 vs 生产路径（消费者锚缺口，R30 签名）
+$ go test ./tests/integration/host -run 'TestSettleWakeUnified' -count=1 -v
+  → 2026-10-27 10:43 全 PASS（4/4，3.71s），含
+    a_repeated_fire_starts_one_follow-up_turn（1.63s PASS）与 a_consumed_notice_never_replays。
+即：「重复 fire 不双回合」在集成测试面绿，而 03.11 长程生产路径（4 会话共 host +
+120 次 SIGKILL 重启）13/13 超发 run 同任务双驱动 —— 组件绿 ≠ 消费者成立。
+注：裁定②引 evidence/3-2-wake-unified-red.txt 作「绿证」，该文件实为红证（修复前，
+16 行，a_repeated_fire… FAIL）；现绿证即本节复跑，文件名与引用不符已报疑惑点。
+
+────────────────────────────────────────────────────────────────
+六、复跑命令（全部只读）
+# 1) 算术收口 + 任务身份计数
+python3 - <<'EOF'
+import json, glob
+for p in sorted(glob.glob('/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/*/report-window-*.json')):
+    d=json.load(open(p)); r=d['reconciliation']
+    dn=r.get('duplicate_notifications') or []
+    print(p.split('/03.11/')[1].split('/')[0], r['notification_requests'], r['expected_notifications'], len(dn))
+EOF
+# 2) 同 TaskID 双请求（示例 run）
+python3 - <<'EOF'
+import json
+d=json.load(open('/var/folders/6x/nhts7g654qd9_91w1c6m2zym0000gn/T/event-consumption-integrity/03.11/run-s1-w256-20261027-070923/provider-requests-failed.json'))
+for r in d['requests']:
+    t=r['last_user_text']
+    if t.startswith('tagent: task ') and 'settled' in t and 'SMOKE-R10597' in t:
+        print(r['index'], t.splitlines()[0])
+EOF
+# 3) 测试级绿证
+go test ./tests/integration/host -run 'TestSettleWakeUnified' -count=1 -v
+
+────────────────────────────────────────────────────────────────
+七、处置（按裁定停报）
+1. smoke_test.go:2894 期望修订：未执行（duplicate≠0 → 裁定停报分支；修订=掩盖真缺陷）。
+2. long 六片重采：未执行（前提已破；既有干净树 6/6 fail + 受控重跑 1/1 fail 红证据仍有效）。
+3. bundle/short/mutations/lint/三模块/selftests/check-openspec 全绿采集：未执行（停报分支
+   无修订可验；既有 F2 清障段口径仍成立，唯 long/bundle 红即本缺陷）。
+4. 建议选项（待编排者裁）：
+   A) 立真缺陷单修 G6b/G7 恢复-Wake 双触发（同任务双驱动），修后以 03.11 六片 dup=0 +
+      notif=47 复转绿为验收（症状直译锚=「重复 fire 不双回合」在长程生产路径成立）；
+   B) 先加长程级重复驱动负锚（对账断言 duplicate 面已有，可作回归锚）再修；
+   C) 若裁定仍判合法增长 —— 与本证据冲突，须重裁（本文件数据可复跑否证）。

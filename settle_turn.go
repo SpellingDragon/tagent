@@ -12,6 +12,7 @@
 //   - Only a delivery fact carries the settle-lineage meta key, so a backflow settle never fires.
 //   - The fired turn commits no settle fact with a lineage, so it can never fire itself again.
 //   - The mailbox is the one account that answers whether work waits: a notification waits there until a turn claims it, drives it and consumes it on that same account, so one notification starts one turn however often it is observed.
+//   - The attempt record is the second fence a restart reads: a turn that already landed its terminal is closed with its consumption receipt instead of driven again, so a stop between the terminal fact and the receipt replays no second turn.
 package tagent
 
 import (
@@ -20,6 +21,7 @@ import (
 	"sync"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -56,6 +58,62 @@ func noticeTaskIDOf(fact event.Event) event.TaskID {
 	return event.TaskID(fact.Meta[event.MetaKeyTaskID])
 }
 
+// settleCompletedTerminal is the one terminal a follow-up turn reports when its
+// notification was delivered: the settled, failed and cancelled notifications
+// all ask the same question of the turn, and a turn that ended on any other
+// terminal never delivered anything.
+var settleCompletedTerminal = model.KindCompleted.String()
+
+// settleAttempts is the attempt face one mailbox may serve beside the seats it
+// owes: the durable record of the one follow-up turn a notification started,
+// beside the terminal that turn ended on. A mailbox that serves it lets the pump
+// tell a turn that already landed from one that never reached its terminal, so a
+// restart closes the landed turn with its receipt instead of driving a second
+// one. A mailbox that serves no attempt face keeps the bare at-least-once
+// replay: a restart drives the owed entry again.
+type settleAttempts interface {
+	// Attempt reports the attempt record of one notification and whether the
+	// account holds one at all.
+	Attempt(ctx context.Context, notice task.Notice) (state.SettleAttempt, bool, error)
+	// RecordAttempt records one attempt of a notification's follow-up turn: the
+	// empty terminal marks the turn in flight, a terminal the one it ended on.
+	RecordAttempt(ctx context.Context, notice task.Notice, attempt state.SettleAttempt) error
+}
+
+// settleBarrier is the account position one follow-up turn closes, carried on the
+// context the driver hands its fire face: the terminal the turn ended on and the
+// consumption receipt of its entry are written in the same barrier the terminal
+// fact landed behind, before the drive returns and before the answer is
+// delivered. A fire face that reads no barrier still settles its seat through the
+// pump's own fallback beside the returned turn.
+type settleBarrier struct {
+	// notice is the notification the driven turn answers, in its own four-part
+	// identity: task, round, kind and sequence.
+	notice task.Notice
+	// settle records the terminal the turn ended on as the attempt of its
+	// notification.
+	settle func(ctx context.Context, terminal model.Kind) error
+	// consume writes the consumption receipt of the entry the turn drove.
+	consume func(ctx context.Context) error
+}
+
+// settleBarrierKey is the context key the barrier of one follow-up drive travels
+// under.
+type settleBarrierKey struct{}
+
+// withSettleBarrier stamps the barrier of one follow-up drive on the context its
+// fire face reads.
+func withSettleBarrier(ctx context.Context, barrier settleBarrier) context.Context {
+	return context.WithValue(ctx, settleBarrierKey{}, barrier)
+}
+
+// settleBarrierFrom reports the barrier one drive carries and whether one is
+// stamped: a user turn carries none.
+func settleBarrierFrom(ctx context.Context) (settleBarrier, bool) {
+	barrier, ok := ctx.Value(settleBarrierKey{}).(settleBarrier)
+	return barrier, ok
+}
+
 // ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
 // mailbox account or follow-up face was never wired: a gap by name instead of
 // a silent no-op that reads as a delivered turn.
@@ -73,8 +131,9 @@ var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not com
 // release and consumption on the same ledger. The state store behind one run
 // satisfies it.
 //
-// The redline list (3 rules):
-// MUST start exactly one follow-up turn per claimed entry and close it only beside its consumption receipt.
+// The redline list (4 rules):
+// MUST start exactly one follow-up turn per claimed entry and close it beside its consumption receipt.
+// MUST close an entry whose recorded attempt already landed its terminal with that turn's receipt and drive no second turn.
 // MUST NOT replay an entry whose consumption receipt is already recorded.
 // MUST NOT hold a claimed entry beside a turn that stopped before its delivery.
 type SettleWake interface {
@@ -278,13 +337,20 @@ func (d *SettleDriver) drain() {
 }
 
 // driveSeat drives the one follow-up turn one mailbox seat owes and settles the
-// entry on the same account its claim was taken from: the turn runs beside the
-// committed fact the notification points at, a turn that returned settles the
-// entry as consumed, and a turn that failed hands the entry back so the next
-// wake retries it. A stop ends the turn in flight and leaves the entry
-// unconsumed, so the work survives the stop instead of dying with it; beside a
-// turn that completed, the consumption receipt is written without the pump's
-// cancellation and closes the entry even as the driver stops.
+// entry on the same account its claim was taken from: before any turn is driven
+// the in-flight marker of the attempt lands durably, so a process that starts
+// over the same account reads the attempt rather than a blank seat, and the turn
+// runs beside the committed fact the notification points at. The entry is closed
+// beside the terminal the turn landed through the barrier this drive stamps on
+// the context its fire face reads. A turn that returned settles the entry as
+// consumed, and a turn that failed hands the entry back so the next wake retries
+// it. A seat whose recorded attempt already landed a completed terminal is closed
+// with its receipt and no turn is driven for it: the receipt the stopped process
+// never wrote is written here, so one notification starts one turn however many
+// processes over the same account read it. A stop ends the turn in flight and
+// leaves the entry unconsumed, so the work survives the stop instead of dying with
+// it; beside a turn that completed, the consumption receipt is written without
+// the pump's cancellation and closes the entry even as the driver stops.
 func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat state.WorkSeat) {
 	fact, err := d.lookup(ctx, settleDeliveryKey(seat.Notice))
 	if err != nil {
@@ -297,17 +363,50 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 		return
 	}
 
+	attempts, _ := wake.(settleAttempts)
+	if attempts != nil {
+		landed, held, err := attempts.Attempt(ctx, seat.Notice)
+		switch {
+		case err != nil:
+			assemblyWarn("tagent: the settle attempt of %s could not be read: %v", seat.Notice.FactKey(), err)
+			d.releaseSeat(wake, seat)
+			return
+		case held && landed.Terminal == settleCompletedTerminal:
+			if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
+				assemblyWarn("tagent: the settle consumption of %s beside its landed attempt reported: %v", seat.Notice.FactKey(), err)
+			}
+			return
+		}
+		if err := attempts.RecordAttempt(ctx, seat.Notice, state.SettleAttempt{}); err != nil {
+			assemblyWarn("tagent: the settle attempt of %s was not recorded: %v", seat.Notice.FactKey(), err)
+			d.releaseSeat(wake, seat)
+			return
+		}
+	}
+
 	fireCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(d.stopCtx, cancel)
 	defer stop()
 
-	if err := d.fire(fireCtx, seat.Address, fact); err != nil {
+	barrier := settleBarrier{
+		notice: seat.Notice,
+		settle: func(bctx context.Context, terminal model.Kind) error {
+			if attempts == nil {
+				return nil
+			}
+			return attempts.RecordAttempt(context.WithoutCancel(bctx), seat.Notice, state.SettleAttempt{Terminal: terminal.String()})
+		},
+		consume: func(bctx context.Context) error {
+			return wake.Consume(context.WithoutCancel(bctx), seat.Address, seat.Instance, seat.AcceptSeq)
+		},
+	}
+	if err := d.fire(withSettleBarrier(fireCtx, barrier), seat.Address, fact); err != nil {
 		assemblyWarn("tagent: the settle follow-up of %s ended by error: %v", seat.Address.SessionID, err)
 		d.releaseSeat(wake, seat)
 		return
 	}
-	if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+	if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 		assemblyWarn("tagent: the settle consumption of %s beside the finished turn reported: %v", seat.Notice.FactKey(), err)
 	}
 }

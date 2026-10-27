@@ -72,7 +72,9 @@ type MemoryStore struct {
 	current      map[event.Address]event.InstanceID
 	deliveries   map[event.TaskID]task.HandoffTarget
 	accepted     map[noticeKey]acceptedNotice
+	attempts     map[noticeKey]SettleAttempt
 	consumptions durableConsumption
+	attemptsLog  attemptRecorder
 }
 
 // MemoryStore satisfies the Store face.
@@ -82,8 +84,8 @@ var _ Store = (*MemoryStore)(nil)
 // against the given authority. An authority that is not present refuses every
 // read. A consumption recorder, when one is supplied, receives the receipt of
 // every completed logical consumption behind its own sync barrier before the
-// mailbox confirms the entry; a store beside none keeps the consumption in its
-// own bookkeeping alone.
+// mailbox confirms the entry, and serves the attempt record of every follow-up
+// turn beside it; a store beside none keeps both in its own bookkeeping alone.
 func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *MemoryStore {
 	store := &MemoryStore{
 		authority:  authority,
@@ -91,9 +93,11 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
 		current:    map[event.Address]event.InstanceID{},
 		deliveries: map[event.TaskID]task.HandoffTarget{},
 		accepted:   map[noticeKey]acceptedNotice{},
+		attempts:   map[noticeKey]SettleAttempt{},
 	}
 	if len(consumptions) > 0 && consumptions[0] != nil {
 		store.consumptions = consumptions[0]
+		store.attemptsLog = consumptions[0]
 	}
 	return store
 }
@@ -256,6 +260,57 @@ func (m *MemoryStore) Unconsumed() []WorkSeat {
 		return left.AcceptSeq < right.AcceptSeq
 	})
 	return seats
+}
+
+// Attempt reports the attempt record of one notification and whether this
+// mailbox holds one at all: the record of the one follow-up turn the
+// notification started, beside the terminal that turn ended on. A durable
+// account behind the mailbox answers from the log, so a process that starts over
+// the same log reads the attempt the stopped process left; a mailbox beside none
+// answers from its own bookkeeping alone.
+func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error) {
+	if notice.TaskID == "" {
+		return SettleAttempt{}, false, ErrNoticeIdentityMissing
+	}
+	if err := ctx.Err(); err != nil {
+		return SettleAttempt{}, false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.attemptsLog != nil {
+		attempt, held := m.attemptsLog.attemptOf(notice)
+		return attempt, held, nil
+	}
+	attempt, held := m.attempts[noticeKeyOf(notice)]
+	return attempt, held, nil
+}
+
+// RecordAttempt records one attempt of a notification's follow-up turn: the
+// empty terminal marks the turn in flight, and a terminal marks the one it ended
+// on. A durable account behind the mailbox stages the record behind its sync
+// barrier before this returns, so a caller that read the record back from a
+// second process reads the same attempt; a record the account already holds with
+// the same content stages no second pair, and a write the account refused is
+// reported instead of confirmed.
+func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, attempt SettleAttempt) error {
+	if notice.TaskID == "" {
+		return ErrNoticeIdentityMissing
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := noticeKeyOf(notice)
+	if m.attemptsLog != nil {
+		if err := m.attemptsLog.recordAttempt(ctx, notice, attempt); err != nil {
+			return err
+		}
+		m.attempts[key] = attempt
+		return nil
+	}
+	if held, done := m.attempts[key]; done && held == attempt {
+		return nil
+	}
+	m.attempts[key] = attempt
+	return nil
 }
 
 // RestoreOwed folds the notifications the durable account behind this mailbox

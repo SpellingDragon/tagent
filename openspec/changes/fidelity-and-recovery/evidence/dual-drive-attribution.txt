@@ -1,0 +1,460 @@
+fidelity-and-recovery 零基 review · 归因实验：双驱动（dual-drive attribution）
+执行日期：2026-10-27　　仓库：/Users/pengweiye/Documents/codes/tagent　　HEAD：c868230
+（复验：实验与绿证在 HEAD b0af340 上各重跑一次，结果逐行一致。c868230→b0af340 只动 scripts/（gates/scenarios 搬家），
+  `git diff --name-only c868230 b0af340 | grep -E 'runtime/state|settle_turn|facts\.go|event_body|delegate\.go|tests/integration/host'` 无输出，
+  即本文件审计过的运行时代码路径一字未变。）
+性质：只读归因。产品代码零改动（git status 仅新增本文件与两份实验件 .txt）。
+产出用途：修复方向决策材料（不是修复本身）。
+
+────────────────────────────────────────────────────────────────
+零、结论速览
+────────────────────────────────────────────────────────────────
+
+机制一句话：
+  一条结算通知只有一个账（mailbox 单 seat）、一个赢家（Claim 原子）、一条身份（同键同文）；
+  重复驱动不是"两条 produce 路径各造一份"，而是**同一个 owed seat 跨进程被驱动了两次**——
+  上一次进程死在「通知已交给回合」与「Consume 回执已落盘」之间，下一次 Boot 的
+  RestoreOwed+Wake 把同一个 owed 再驱动一次。这是 facts.go:596 sink 注释里写明的
+  at-least-once 语义，G6b（a3e7441）的 Boot Wake 把它从"纸面不变量"变成了"实际执行者"。
+
+三实验结论（逐条带锚）：
+
+  实验 1 并发 claim 原子性：**不是 TOCTOU**。
+    Claim 在 m.mu 下检查-置位（mailbox.go:195），64 并发 → 1 winner / 63 ErrClaimConflict；
+    两 pump 一 seat → 1 fire；pump 与活路径对撞 → 一方被 ErrClaimConflict 拒绝，总 fire=1。
+    ⇒ 修法 a) claim CAS/加锁收口：**无证据支持**（本来就已经原子）。
+
+  实验 2 双路径副本审计：**没有双 Accept 副本**。
+    产品 AcceptNotice 入库点只有 3 处（tools.go:56 活投递、facts.go:626 sink 记账、
+    memory.go:286 重启恢复）；前三者同键幂等（同一进程 accept 两次 → 仍 1 entry），
+    恢复路径只在"回执缺失"时才把同键重新 Accept（跨进程，1 entry/进程）。
+    清空 `m.accepted` 的进程边界是唯一的"破幂等"原因；能造出 2 entry/2 fire 的唯一杠杆是
+    "同键不同 Seq 重发"，而结算通知的 Seq 在 delegate.go:404 硬编码为 0，产品不可达。
+    同键异内容：mailbox 层严格拒绝（ErrNoticeConflict）；事实层 SameFact 仍把
+    "未声明 Source/Target"当通配（unstated vs declared → same fact），是独立风险点，
+    但 38/38 重复对**正文逐字相同**，所以它跟本次重复驱动无关。
+
+  实验 3 消费完成点窗口：**窗口可复现，且是唯一的 fence**。
+    E3a：回合被截断（无回执）→ 下一代 Boot 重放（gen1=1, gen2=1）；回执一旦落盘 → 停止重放
+    （gen3 写回执后 gen4=0）。E3b：回合正常返回 → 下一代 0 次。E3c：claim 已取但回执未写 →
+    owed 仍在（unconsumed=1）。⇒ 回执（Consume 落盘）是唯一的围栏，窗口 = 整个回合。
+
+  运行数据自洽（38/38 无一例外）：
+    口径说明：重复对计 38 条 = 按 provider 请求本体（14 片有 provider dump 的 run，含无 report.json
+    的 050656 那 1 条）数出来的；harness 自带对账（report.json）口径为 37 条（14 片有 report 的 run，
+    其中 054950 干净）。两口径差额 = 050656 那一条，其余逐片数字完全一致。
+    38 个重复对 **全部** 来自"该代最后一轮（round%10==9，其后紧跟 restart 步骤）"的输入；
+    同一批数据里 mid-generation（round%10==4）的 363 个结算任务 **0 重复**（对照 10.1% vs 0%）。
+    38/38 两次驱动的正文逐字相同；第二次驱动出现在**下一代第一条 rebind 之前 1~2 个请求**，
+    与 host.go:483 Boot 尾部 settleDriver.Wake() 的时序完全吻合。
+    纵向分界：G6b 之前（10-25 共 31 run / 1457 条期望通知、10-26 共 7 run / 329 条）dup=0；
+    G6b 之后（10-27 共 14 run / 658 条）dup=37，其中 11 条变成用户可见的第二次 settle-ack。
+
+修复方向推荐组合（详见第四节）：
+  主方向 **c) 消费点前移**（把围栏从"回合完成后"前移到"交付前"，并让"已尝试"在账上可判）+
+  同批 **e) 通知事实身份按通知分域**（否则回放仍会在 transcript 里追加第二条相同指令）+
+  独立硬化 **d) absent-wildcard 收紧**（与本症无关，但属真风险）。
+  **不采纳 a)**（Claim 已原子，无的放矢）；
+  **不采纳 b) 单路径收口**（删 Wake/删 fire 等于把 at-least-once 静默换成 at-most-once 且
+  丢掉 sink 注释自认的重启重交不变量）——除决意裁定 at-most-once。
+
+与既有 evidence/duplicate-settle-attribution.txt 的两处修正（本文件为准，理由见三、四节）：
+  1) "13/13 超发" → 实测 **14/15 run 有重复**（10-27 共 15 片；054950 一片 dup=0 干净），
+     重复通知总数 37（14 片有 report.json 的合计），不是"13/13 全超发"。
+  2) "重复对紧邻 rebind **后** 4 个请求内" → 方向反了：第二次驱动在 rebind **之前** 1~2 个请求
+     （gap 分布：1 个请求 26 例、2 个请求 12 例），即"Boot 恢复 Wake 重放"，
+     不是"rebind 之后两条触发并存"。原文把"距 rebind=4"的测量方向取反了。
+
+────────────────────────────────────────────────────────────────
+一、实验 1 · 并发 claim 原子性
+────────────────────────────────────────────────────────────────
+
+1.1 接缝
+  不碰产品代码，用真实接缝搭最小驱动（临时包 zzdualattr，实验后删除，源码留档见
+  evidence/dual-drive-attribution-harness_test.go.txt）：
+  - 真 mailbox：state.NewMemoryStore(state.NewAuthority())，Establish → TrackDelivery →
+    AcceptNotice 造出一个 ClaimPending 的 owed seat（等价于"生产侧已 produce、驱动侧未取"）。
+  - 真账本：Claim / Consume 直接打在 MemoryStore 上（mailbox.go:195 / :222），不经过任何桩。
+  - 真泵：tagent.NewSettleDriver(lookup, wake, fire)，wake 返回同一个 store，
+    fire 只数次数（hold 可调），即生产 host.go:427 的装配形状。
+  - -race 下跑。
+
+1.2 复跑命令
+  # 实验件就位（只读 + 一次性，跑完即删；产品代码不动）
+  mkdir -p zzdualattr
+  cp openspec/changes/fidelity-and-recovery/evidence/dual-drive-attribution-harness_test.go.txt \
+     zzdualattr/attribution_test.go
+  go test ./zzdualattr/ -count=1 -run TestE1ClaimAtomicity -v -race
+  rm -rf zzdualattr
+
+1.3 原始输出
+  === RUN   TestE1ClaimAtomicity
+  === RUN   TestE1ClaimAtomicity/a_concurrent_claim_has_one_winner
+      attribution_test.go:215: E1a goroutines=64 wins=1 err_claim_conflict=63 other=0
+  === RUN   TestE1ClaimAtomicity/b_two_pumps_one_store_one_seat
+      attribution_test.go:234: E1b pumps=2 seats=1 fires=1
+  === RUN   TestE1ClaimAtomicity/c_pump_and_live_claimer_race
+      attribution_test.go:263: E1c live path: claim refused: state: the mailbox entry is already claimed
+      attribution_test.go:265: E1c fires=1
+  --- PASS: TestE1ClaimAtomicity (0.23s)
+      --- PASS: TestE1ClaimAtomicity/a_concurrent_claim_has_one_winner (0.00s)
+      --- PASS: TestE1ClaimAtomicity/b_two_pumps_one_store_one_seat (0.15s)
+      --- PASS: TestE1ClaimAtomicity/c_pump_and_live_claimer_race (0.08s)
+
+1.4 结论
+  (1) 64 个 goroutine 同时对同一 seat 调 Claim：**恰好 1 个成功**，其余 63 个都以
+      ErrClaimConflict 落在 `if entry.Claim != ClaimPending` 上（检查与置位同在 m.mu 内，
+      mailbox.go:195-208）。不存在"检查-执行非原子"的 TOCTOU 窗口。
+  (2) 两个真实 SettleDriver 叠在同一 store 上：1 seat → **1 fire**。第二个泵的 Claim 被拒，
+      drain() 里 `if err := wake.Claim(...); err != nil { continue }`（settle_turn.go:266）
+      直接跳过——G6b 的"单账单赢家"在同进程内成立。
+  (3) 泵 vs 活路径（sink 的 Claim→Consume，facts.go:596-612 同序）对撞：活路径拿到
+      "already claimed"，泵 fire 一次，**总 fire=1**。
+  ⇒ 实验 1 的失败模式（双通过）**没有出现**。这条不支持修复方向 a)，
+    并把"并发抢跑"这一假设从候选里剔除。重复必须发生在"进程边界之外"。
+
+────────────────────────────────────────────────────────────────
+二、实验 2 · 双路径副本审计（同一 settle fact 是否被 Accept 两次）
+────────────────────────────────────────────────────────────────
+
+2.1 静态盘点：产品里 AcceptNotice 的入库点只有 3 处
+  $ grep -rn "AcceptNotice(" --include='*.go' . | grep -v _test.go | grep -v zzdualattr
+    facts.go:626        r.store.AcceptNotice(ctx, notice)         ← sink/bookNotice：活投递记账
+    tools.go:56         r.store.AcceptNotice(ctx, envelope.Notice) ← deliver：工具投递记账
+    runtime/state/memory.go:286  m.AcceptNotice(ctx, envelope.Notice) ← RestoreOwed：重启恢复
+  前两处是**同一个运行时路径的两个入口**（都在本进程、都幂等于同一 `m.accepted`）；
+  第三处是**跨进程**的恢复路径，只在 `durableConsumption.OwedNotices()` 仍含该键时执行
+  （memory.go:270-291）。所以"两条 produce 路径各造一份"在本设计里不可能发生：
+  同进程第二次 Accept 被 `noticeSeat` 的 `prior.notice != notice` / 命中即返回挡掉（mailbox.go:78-95）。
+
+2.2 动态：同一 NoticeFactKey 在重启场景下的入库次数
+  复跑（同一实验件）：go test ./zzdualattr/ -count=1 -run TestE2DualPath -v -race
+  原始输出：
+      attribution_test.go:283: E2a seats before=1 after=1
+      attribution_test.go:287: E2a entry site instance=inst-1 (the retired one still answers the seat)
+      attribution_test.go:294: E2a fires over the retired site's seat=1
+      attribution_test.go:311: E2b seats=2
+      attribution_test.go:318: E2b fires=2 for two entries whose rendered material is byte-identical
+      attribution_test.go:328: E2c same noticeKey, different Text -> state: notification identity carries different content
+      attribution_test.go:374: E2d unstated-vs-declared same fact? true
+      attribution_test.go:375: E2d declared-vs-declared, same source (commit stamps moved)? true
+      attribution_test.go:376: E2d declared-vs-declared, different source? false
+      attribution_test.go:403: E2e seats: process1=1 (restore + repeat accept) process2=1 (restore after restart)
+      attribution_test.go:413: E2f notice.FactKey()=task-58:1:settled:0
+      attribution_test.go:414: E2f NoticeFactKey(invocation-1)=6e6f7469636500313200696e766f636174696f6e2d31007461736b2d35383a313a736574746c65643a30
+      attribution_test.go:415: E2f NoticeFactKey(invocation-2)=6e6f7469636500313200696e766f636174696f6e2d32007461736b2d35383a313a736574746c65643a30
+  --- PASS: TestE2DualPath (0.22s)（6 个子测全 PASS，-race）
+
+  逐条判读：
+  E2a 路由改写 + 实例 retire（同一地址被 inst-2 接管）：seats 仍是 1，且 seat 仍在 inst-1 的
+      旧 site 上可被驱动（fires=1）。⇒ "新实例接管 + 恢复"不制造第二条 entry。
+  E2b **唯一的 fork 杠杆**：同 task/round/kind/正文，只把 Seq 从 0 改成 1 重发 → seats=2、
+      fires=2，而两次渲染出来的材料逐字相同。⇒ 只有"重发时换了 Seq"才会变成 2 条 entry。
+      产品是否可达：settle 通知的 Seq 在 delegate.go:404 硬编码 `Seq: 0`，且
+      `MutationID = settle:<task>:<round>`（delegate.go:411）对同一轮去重 ⇒ **不可达**。
+  E2e **跨进程计数**：进程 1 = RestoreOwed（恢复 Accept）+ 运行路径再 Accept 同一条 →
+      seats=1；进程 2（无回执）再 RestoreOwed → seats=1。
+      ⇒ 同一 NoticeFactKey 在**一个** mailbox 里永远只有 1 条 entry；
+        "被 Accept 两次"只发生在两个**不同进程**的 mailbox 之间（各自 1 条）。
+  E2f **事实层**：notice.FactKey() 是四元组 `task-58:1:settled:0`（不含正文），
+      但 NoticeFactKey 把 invocation 前缀拼进去了（loop.go:452-454）⇒ 同一条通知
+      在不同 invocation 下算出**不同的 EventID**（上面两个 hex 只在 invocation-1/2 处不同）。
+      ⇒ 回放不会在事实层被"同键"吸收：新一次驱动 = 新 invocation = 新 key = 追加第二条指令。
+      这是重复答复（而非仅预算双花）的**第二层缺陷**，与窗口无关，见四节 e)。
+
+2.3 absent-wildcard（SameFact 的 Source/Target 未声明语义）
+  E2c：同一个 noticeKey、只改 Text 再 Accept → `state: notification identity carries different content`
+       （ErrNoticeConflict，mailbox.go:99）。**mailbox 层是严格的**，不存在"同键异内容被判幂等"。
+  E2d：事实层 `EventBody.SameFact`（memory/event_body.go:289-317）——
+       `unstatedRange(stamp, owner)` 把"零地址或等于 owner"视为**未声明 = 通配**：
+         unstated(零) vs declared(agent-other)          → true   ← 通配
+         declared(agent-other) vs declared(agent-other)，只动 commit stamp → true
+         declared(agent-other) vs declared(agent-third)  → false
+       ⇒ 事实层**确实**存在"同一 EventID 下，一侧未声明范围就与任意声明兼容"的通配。
+       风险面：一条重新提交的 settle 事实若一侧没写 Source/Target，会被判为"同一个事实"
+       而返回原身份（不报冲突），范围信息被静默吞掉。
+  **与本次重复驱动的关系：无。** 38/38 重复对正文逐字相同（见 3.3），
+  SameFact 的通配从未被触发；收紧它不会消掉任何一条重复。
+
+2.4 结论
+  "fire 与 Wake 各自 Accept 一份副本"这一假设**被否证**：同进程永远 1 entry；
+  能 fork 成 2 entry 的只有"换 Seq 重发"，而产品对该路径不可达。
+  重复的真实形态是**同一条 owed entry 在两个进程里各被驱动一次**（3.2 的 E3a/E3c），
+  因此修复点不在 Accept/幂等面，而在"回执何时落盘"。
+
+────────────────────────────────────────────────────────────────
+三、实验 3 · 消费完成点窗口（回合 KindCompleted → Consume 落盘之间重启）
+────────────────────────────────────────────────────────────────
+
+3.1 推演（源码顺序，全部只读）
+  （a）produce：delegate.go:404-422 提交 settle 记录，Outbox 携带通知 ⇒ DurableCommit.Commit
+      把该键写进 owed（durable.go 的 outbox→owed）。**此刻通知已"欠"，尚未交付。**
+  （b）交付前记账：facts.go:619-651 bookNotice = TrackDelivery → AcceptNotice → Claim，
+      再由 facts.go:596-612 sink 把结果 Backflow 进发起调用的 invocation，**最后**才
+      `r.store.Consume(...)`。sink 的注释原文自认了这个语义：
+        "a notification whose consumption receipt the log holds is no longer owed, so the
+         receipt MUST follow the handover, and a stop between the two leaves the notification
+         owed and the restart hands the same result over again."
+      ⇒ at-least-once 是**写进注释的设计不变量**，不是意外。
+  （c）泵路径同序：settle_turn.go:288-313 driveSeat = fire（整回合）→ 成功才
+      `wake.Consume(context.WithoutCancel(ctx), ...)`；fire 出错 → releaseSeat（Release 回
+      Pending，不写回执）。settle_turn.go:262 只驱动 `seat.Claim == ClaimPending`。
+  （d）重启：memory.go:270-291 RestoreOwed 把 owed 重新 TrackDelivery + restoreSeat +
+      AcceptNotice 进新进程的 mailbox；host.go:483 Boot 尾部 settleDriver.Wake() 触发
+      drain()（settle_turn.go:240-274），drain 每轮开头再调一次 wake.RestoreOwed。
+      ⇒ 上一进程死在 (b)/(c) 的"已交付、未回执"之间，下一进程就会把同一 seat 再 fire 一次。
+  窗口宽度：不是"毫秒级竞态"，而是**一整个回合**（一次模型调用 + 交付），生产里可达秒~分钟。
+
+3.2 最小实证（kill 注入的可复现）
+  复跑：go test ./zzdualattr/ -count=1 -run TestE3ConsumptionWindow -v -race
+  模型：memLog 充当 FactLog；openDurable 写入真实 DurableCommit.Declare+Commit（Outbox 携通知）；
+        oneGeneration = 新开一个 MemoryStore(durable) + 真 SettleDriver + Boot Wake；
+        cutTurn = 回合被截断（fire 返回 error，等价于 SIGKILL 落在回合内、无回执）。
+  原始输出：
+      attribution_test.go:517: E3 receipt written: owed_in_durable=0 unconsumed_after=0
+      attribution_test.go:519: E3a fires per generation: gen1=1 gen2=1 gen3(consumed)=1 gen4=0
+      attribution_test.go:520: E3a entries: gen1 unconsumed=1 owed_in_durable=1 gen2 unconsumed=1
+      attribution_test.go:534: E3b fires per generation (turn returned in gen1): gen1=1 gen2=0 unconsumed_after_gen1=0
+      attribution_test.go:548: E3c gen1: fires=1 unconsumed entries left=1 (claim taken, receipt not written)
+  --- PASS: TestE3ConsumptionWindow (0.74s)（3 个子测全 PASS，-race）
+
+  判读：
+  E3a：gen1 回合被截断 → gen2（重启）**又 fire 1 次**，且 owed_in_durable 仍是 1；
+       gen3 显式补写回执（Claim→Consume）后 owed=0、unconsumed=0 → **gen4 fire=0**。
+       ⇒ "重启 → Wake 重放 → 二次驱动"可复现；同时证明回执是唯一 fence。
+  E3b：回合正常返回（泵自己 Consume）→ gen2 fire=0。⇒ 差异不在 claim，在回执。
+  E3c：claim 已取、回执未写时 entry 留在账上（unconsumed=1），重启必再驱动。
+  （注：cutTurn 后 entry 被 releaseSeat 置回 Pending，所以补写回执必须 Claim 再 Consume——
+    这正是 sink 的顺序；这不是产品缺陷，是实验装置要照着活路径写。）
+
+3.3 运行数据核对（38 个重复对，可复跑）
+  数据源：$TMPDIR/event-consumption-integrity/03.11/run-*/（smoke 长程 03.11 的产物）
+  复跑：python3 evidence/dual-drive-attribution-analyze.py.txt proof   # 或命名为 analyze.py 后运行
+  （脚本只读 run 目录，不写任何文件；ROOT 可用 ATTR_ROOT 覆盖）
+
+  (1) 结构性：38/38 都来自"该代最后一轮"
+      输出末行：
+        dups: 38 by round%10: {9: 38} by session: {1: 10, 0: 12, 3: 10, 2: 6}
+        settle task ids by round%10 of the producing input: {4: 363, 9: 376}
+      逐行样例（run-s1-w32768-20261027-072058）：
+        task-32  first=597 second=599 input_seq=396 round=99  round%10=9 session=0 next_rebind_gen=37 gap=2
+        task-65  first=948 second=950 input_seq=599 round=149 round%10=9 session=3 next_rebind_gen=60 gap=1
+        task-164 first=1959 second=1961 input_seq=1199 round=299 round%10=9 session=3 next_rebind_gen=120 gap=1
+      判读：产生该结算的输入都在 round%10==9（该代最后一轮，其后紧跟 plan.json 的 restart 步骤），
+            mid-generation（round%10==4）的 363 条结算任务 **0 重复**。
+            10.1%（38/376） vs 0%（0/363）——窗口不是均匀撒在 47 条通知上，而是**只落在重启点**。
+  (2) 时序：第二次驱动在下一代 rebind **之前**
+      38/38 的 `gap`（第二次驱动 → 下一代第一条 rebind 的请求距离）只有 1 或 2（26:12）。
+      run-s1-w32768-20261027-072058 的原文序列：
+        req 1959  "tagent: task task-164 settled\nresult:\nworker result SMOKE-R11199"
+        req 1961  同一条（逐字相同）
+        req 1962  "SMOKE-R8712000 rebind smoke-chat-a"      ← gen=120 的第一条 rebind
+      与 host.go:483（Boot 尾部 Wake，位于子进程 drive rebind 之前）严格同序。
+      ⇒ 第二次驱动**就是**下一代 Boot 的恢复重放，不是"rebind 之后两路并存"。
+  (3) 内容：38/38 两次驱动正文逐字相同；消息条数 second>first 22 例、== 15 例、< 1 例
+      复跑：analyze.py pair
+        {'second carries more messages': 22, 'both carry the same message count': 15, 'second carries fewer messages': 1}
+        {'identical text': 38}
+      ⇒ 同键同文，mailbox 的 ErrNoticeConflict 从不触发（与 2.3 一致）；
+        不同的只是"上下文里多了一条相同的通知"，这正是 E2f 的后果。
+  (4) 规模与用户可见面（harness 自带对账，report.json 的 reconciliation）
+      复跑：analyze.py reconcile
+        run-s1-w256-20261027-044132: expected=47 requests=49 dup_notices=2 dup_actions=1 [...]
+        ...
+        TOTAL expected=2444 requests=2481 dup_notices=37 dup_actions=11
+      按日期分组（复跑：analyze.py dates）：
+        20261025 runs=31 expected=1457 requests=1457 dup_notices=0  dup_actions=0
+        20261026 runs=7  expected=329  requests=329  dup_notices=0  dup_actions=0
+        20261027 runs=14 expected=658  requests=695  dup_notices=37 dup_actions=11
+      判读：
+        - G6b（a3e7441，2026-10-27 03:47，引入 Boot 尾部 settleDriver.Wake()）之前，
+          48 个 run、1786 条期望通知，**dup=0**；之后 14 个 run、658 条，**dup=37**。
+          同一 harness 形状（gen 121 / restarts 120 / every 10 / inputs 1200，10-25 与 10-27 一致），
+          harness 文件最后一次改动是 10-26 12:51（4911479），不跨越 10-27 → 变的是产品。
+        - dup_actions=11/37：只有 30% 的重放让用户看到**第二次 settle-ack**；
+          其余 26 次重跑回合但没再吐出 ack 标记（模型被重复驱动、预算双花，答复面未双出）。
+        - 10-27 共 15 片 run：**14 片有重复，1 片（054950）干净** ⇒ 单事件非确定、单 run 近乎必现。
+  (5) 与"确定 vs 偶发"的自洽
+      窗口本身是确定的（E3a：只要死在"已交付、未回执"之间，下一 Boot 必重放）；
+      "哪一次死在那里"是概率的（每次 restart 一个 kill 点，10-27 数据 38/376≈10%）。
+      所以"13/13 全超发"应改写为"每个 run 有 120 个重启点，命中率≈10%，因而单 run 近乎必现 1~4 条"。
+      这也解释了为什么集成测试能全绿：TestSettleWakeUnified 在**同一进程**里重复 fire，被
+      Claim 原子性与 tried 集合挡住（实验 1b/1c 复现了这一点）；它从不跨进程。
+
+3.4 与实验 1/2 的自洽性
+  - 实验 1 说"同进程只有一个赢家" ↔ 数据说"重复只在重启点"：吻合（重复必须跨进程边界）。
+  - 实验 2 说"同键只 1 entry、同键同文不冲突" ↔ 数据说"38/38 正文逐字相同、
+    mailbox 未报冲突"：吻合。
+  - 唯一"不吻合"的旧表述是"rebind 之后并存双触发"：数据是 rebind 之前 1~2 个请求，
+    原因是旧文件把"距 rebind=4"当作"之后"，方向取反（见零节修正 2）。
+  - E2f 补上了"为什么重复会被模型第二次回答"：通知事实身份按 invocation 分域，
+    回放必然追加第二条相同指令。
+
+3.5 结论
+  重复驱动 = 设计上的 at-least-once 语义（sink 注释自认）× G6b 引入的 Boot 重放执行者
+  × 回执写在交付之后（窗口=整个回合）。不是并发竞态，不是双 Accept 副本，
+  不是 absent-wildcard 误判幂等。
+
+────────────────────────────────────────────────────────────────
+四、修复方向建议（a/b/c/d + 一条新发现，按证据排序）
+────────────────────────────────────────────────────────────────
+
+先给判定表，再逐条给证据与取舍。
+
+  方向                              证据判定       是否解决已观测的 38 条重复   建议
+  a) claim CAS / 加锁收口            与事实相反     0%（Claim 已原子）           不采纳
+  b) 单路径收口（删 Wake 或 fire）   能消重复       100%，但同时删掉已测行为     仅作 at-most-once 裁定分支
+  c) 消费点前移（回执/交付同屏障）   唯一命中       用户可见面 100%，回合面大幅    主方向（c1+c2）
+  d) absent-wildcard 收紧            与本病无关     0%（38/38 正文逐字相同）     独立硬化，单开一条
+  e) 通知事实身份按通知分域（新）    第二层缺陷     0%（但它解释"为何会答复两次"） 必须与 c 同批
+
+4.1 a) claim CAS 收口 —— 不采纳（无的放矢）
+  证据：E1a 64 并发 → wins=1 / ErrClaimConflict=63；E1b 两泵一 seat → fires=1；
+        E1c 泵 vs 活路径 → 一方被拒，总 fires=1。
+  Claim 的"检查-置位"本来就在 `m.mu` 内（mailbox.go:195-208），`drain()` 还额外用
+  `tried[seatKey]` 做同一轮去重（settle_turn.go:250/264）。加 CAS 只是把互斥实现换个写法，
+  对"两个进程各自的 mailbox"毫无作用——而重复 100% 发生在进程边界上。
+  判定：收益 0，且会让人误以为竞态已修。**不采纳**。
+
+4.2 b) 单路径收口（删 Boot Wake 或删 fire 之一）—— 只在 at-most-once 裁定下成立
+  证据：38/38 重复的第二次驱动出现在"下一代 boot Wake"处（3.3(2)：gap=1~2 且一定在 rebind 之前，
+        与 host.go:483 同序），所以删掉 host.go:483 的 `settleDriver.Wake()` 确实能让
+        `duplicate_notifications` 归零。
+  代价（两笔都不可忽略）：
+  (i) 删掉的是**被测试要求的行为**：tests/integration/host/settle_wake_unified_test.go:28 的
+      `an_unconsumed_notice_resumes_across_a_restart`（:179-272）断言
+      `entryCalls >= 3`（"the delegating decision, the stopped attempt and the resumed follow-up"），
+      即**要求**重启后再起一个回合；删 Wake 会让这条绿测变红。
+      本文件已复跑确认它现在全绿（见第五节绿证）。
+  (ii) 删掉的是 sink 注释（facts.go:589-595）自认的语义：
+      "a stop between the two leaves the notification owed and the restart hands the same
+       result over again." 删掉等于把"崩溃时已结算但未交付的结果"从**必达**改成**永久丢失**——
+      对用户而言 丢失 > 重复（重复可去重，丢失不可恢复）。
+  判定：b) 不是"收口"，是**语义反转**。只有在上级裁定"结算通知按 at-most-once 交付、
+       崩溃窗口内的结果允许丢失"时才可选，且必须同批改测试与文档，不能静默删一行。
+
+4.3 c) 消费点前移 —— 唯一命中机制的方向（推荐主方向）
+  证据：E3a（无回执 → 下一代 fire=1；写上回执 → 下一代 fire=0）、E3b（回合返回即 fence）、
+        E3c（claim 已取、回执未写 → owed 仍在）、3.3(1)（38/38 只落在重启点，mid-generation 0/363）。
+        即**回执是唯一围栏，围栏位置决定重复**。
+  落法分两段（对应窗口被切成两半，两半的代价不同）：
+    c2（先做，保正确性/用户面）：把"已交付"这一事实写进与交付同一个持久化屏障里。
+       现状：sink 先 `Backflow`（把结果交进发起调用）再 `Consume`（facts.go:596-612），
+             泵先 `fire`（整回合）再 `Consume`（settle_turn.go:305-312）——回执永远在交付之后。
+       改法：在"交付已提交"的那一刻（outbound/backflow 落盘处）写回执/已交付标记，两者同屏障。
+       效果：杀掉"已交付→重放→再交付"这一段窗口 ⇒ 用户可见的第二次 settle-ack（实测 11/37）归零；
+             "未交付→重放→交付一次"（26/37）保留，at-least-once 不变量仍成立。
+       代价：多一次持久化屏障（与 outbound 同一屏障，理论上可零额外 fsync，需实现时确认）。
+    c1（再做，保预算面）：在 `fire` 之前写一条 durable attempt（同一 FactLog，键 = noticeKey）。
+       重放时若 attempt 已存在且无回执 → **不再起新回合**，收敛为"记一条缺口 + 一次告警"。
+       效果：把剩余窗口从"整个回合（秒~分钟）"缩到"attempt 写盘 → fire 发起"的一段（一次 fsync）。
+       代价：这一段里死的通知不再重交（这一小段是 at-most-once）；"重启重交"不变量需改述为
+             "重启重交**未尝试过**的"。
+  推荐组合：**c2 必做，c1 建议做**。c2 单独就能把"用户看见两次"消掉且不动语义；
+  c1 进一步消掉模型预算双花，但需要上级接受"attempt 后死掉不再重交"这一处窄化。
+  注意：不改 reconciliation 断言的话，改完 c1/c2 仍会红（见 4.6 S2）。
+
+4.4 d) absent-wildcard 收紧 —— 与本病无关，但确是真风险（单开硬化）
+  证据：E2c 同键异内容 → ErrNoticeConflict（mailbox 层严格，**不需要收紧**）；
+        E2d 事实层 SameFact：unstated vs declared → true，declared(不同) → false。
+        38/38 重复对的正文逐字相同 ⇒ 通配逻辑在本次 38 条里**一次都没参与**。
+  结论：d) 不能修本症（0/38），把它当修复方向会白改一遍。
+  但 E2d 暴露的独立风险是真的：同一 EventID 下"一侧未声明范围"会与任意声明兼容，
+  范围（Source/Target）信息被静默吞掉，且 `unstatedRange` 还把"等于 owner"当未声明
+  （对 settle 这类 owner=self 的事实，等于天然通配）。建议单开一条硬化，
+  与本修复解耦、不阻塞。
+
+4.5 e)（新发现，必须与 c 同批）通知事实的身份按 invocation 分域
+  证据：E2f —— `NoticeFactKey(invocationID, notice)`（loop.go:452-454）=
+        `"notice\0<len>\0<invocation>\0" + hex(notice.FactKey())`。
+        同一条通知（FactKey=task-58:1:settled:0）在不同 invocation 下算出**不同 EventID**
+        （输出里两个 hex 只在 invocation-1/invocation-2 处不同）。
+  后果：重放时事实层不会"幂等命中"，必然追加第二条逐字相同的通知事实 ⇒ transcript 里
+        出现两条相同指令 ⇒ 模型被要求回答两次。这正是"用户可见重复答复"（11/37）的前置条件；
+        也是 26/37 "重跑了回合但没再吐 ack"的机制解释。
+  建议：notice 事实身份只由通知四元组（+ 稳定范围）决定，回放时读**已有** fact 而不是追加。
+        这样 c1/c2 之外，transcript 层也不会双写；即便 c1 不做，代价也从"双答复"降为"双请求"。
+  与 c 的关系：c 管"要不要再驱动"，e 管"再驱动时事实层是否幂等"，互补而非替代。
+
+4.6 需上级裁定的语义项（本文件不自行裁定）
+  S1（阻断项）目标语义：结算通知是 at-least-once（现状：sink 注释自认 + 集成测试断言）还是
+     at-most-once？——决定 c1 能否做、b) 是否合法、以及"崩溃窗口内结果可丢失"是否可接受。
+  S2（阻断项）对账判据：`duplicate_notifications` 是否拆成
+     "同一进程内同键重复 = 违约" / "跨进程重放 = 已声明语义，按 attempt 计数"？
+     不拆的话，即便 c1+c2 落地，只要重放还会发生（未尝试过的 owed）就仍会计入 duplicate。
+  S3（涉及冻结验收面）是否接受把"跨进程重放"写进验收基线（smoke 期望从"dup=0"改为
+     "每 notice 每进程至多一次"）。这条改动验收面，须上级裁（R31 法定停点）。
+
+  与既有 evidence 的处置建议更新：duplicate-settle-attribution.txt 第七节的 A/B/C 三选项，
+  建议收敛为：A 改为"按 4.3 c2(+c1) 修，验收锚改为『用户面 settle-ack 每 marker 恰 1 次』
+  （现有 duplicate_actions 面可直接复用）+『模型面每 notice 至多 1 次 attempt』（需新增 attempt 维度）"；
+  B（先加长程负锚）与 A 不冲突，建议并入 A 的验收；
+  C（判为合法增长）在 S1 裁定为 at-least-once 时其实与 A 不矛盾——两者的差别只是"是否承认
+  模型面双跑为违约"。
+
+────────────────────────────────────────────────────────────────
+五、复跑清单（全部只读；产品代码零改动）
+────────────────────────────────────────────────────────────────
+
+# 0) 实验件就位（一次性；跑完删除，产品树不留痕）
+mkdir -p zzdualattr
+cp openspec/changes/fidelity-and-recovery/evidence/dual-drive-attribution-harness_test.go.txt \
+   zzdualattr/attribution_test.go
+
+# 1) 三实验（-race；11 个子测全 PASS）
+go test ./zzdualattr/ -count=1 -v -race
+
+# 2) 运行数据（只读 $TMPDIR/event-consumption-integrity/03.11）
+cp openspec/changes/fidelity-and-recovery/evidence/dual-drive-attribution-analyze.py.txt \
+   /tmp/analyze.py
+python3 /tmp/analyze.py table       # 每 run：请求数 / 结算任务数 / 重复任务数
+python3 /tmp/analyze.py proof       # 38 个重复对的结构与时序（round%10、gap、next_rebind_gen）
+python3 /tmp/analyze.py pair        # 两次驱动的正文与消息条数对比
+python3 /tmp/analyze.py reconcile   # harness 自带对账逐 run
+python3 /tmp/analyze.py dates       # 按日期汇总（G6b 前后分界）
+
+# 3) 测试级绿证（消费者锚对照：组件绿 ≠ 长程绿）
+go test ./tests/integration/host -run 'TestSettleWakeUnified' -count=1 -v
+
+# 4) 静态盘点（Accept 入库点 / Boot Wake 的引入提交）
+grep -rn "AcceptNotice(" --include='*.go' . | grep -v _test.go
+grep -n "settleDriver.Wake()" host.go
+git log -S 'settleDriver.Wake()' --format='%h %ad %s' --date=iso -- host.go
+
+# 5) 清理
+rm -rf zzdualattr
+
+已验证的绿证原文（2026-10-27 12:22 在 c868230 上本机跑）：
+  --- PASS: TestSettleWakeUnified (3.32s)
+      --- PASS: TestSettleWakeUnified/a_repeated_fire_starts_one_follow_up_turn (1.61s)
+      --- PASS: TestSettleWakeUnified/an_unconsumed_notice_resumes_across_a_restart (0.07s)
+      --- PASS: TestSettleWakeUnified/a_stop_keeps_what_no_turn_consumed (0.09s)
+      --- PASS: TestSettleWakeUnified/a_consumed_notice_never_replays (1.55s)
+复跑确认（2026-10-27 12:31 在 b0af340 上）：`=== RUN` 4 个子测全列，`--- PASS: TestSettleWakeUnified (6.04s)`，
+`ok github.com/SpellingDragon/tagent/tests/integration/host 6.471s`（耗时随机器负载浮动，结论不变；
+更早一次同样 4/4 PASS，`ok ... 4.922s`）。
+  即：同一套语义在集成面全绿（含"重启后恢复未消费通知"这条**要求**重放的断言），
+      而 03.11 长程生产路径 14/15 run 出现重复 —— 消费者锚缺口（R30）依旧成立。
+      特别注意 `an_unconsumed_notice_resumes_across_a_restart` 断言 `entryCalls >= 3`
+      （delegating + stopped attempt + resumed follow-up），即**重放本身是被测试要求的**；
+      任何"删重放"的修法都会让它变红（见 4.2）。
+
+────────────────────────────────────────────────────────────────
+六、边界与未覆盖（诚实清单）
+────────────────────────────────────────────────────────────────
+1. 只读：产品代码零改动。两份实验件以 .txt 形式存证
+   （dual-drive-attribution-harness_test.go.txt / dual-drive-attribution-analyze.py.txt），
+   运行方式见第五节；实验后临时包已删除。
+2. 未能从持久账直读回执条数：14 个有 report.json 的 run 的 storage.root **全部已被清理**
+   （逐片 os.path.isdir 为假，0/14 存在），"回执是否存在"由 E3 的最小实证 + DurableCommit.load() 语义推断，
+   未做磁盘级计数。若需硬证，须重跑 03.11 并保留 storage root（成本：一轮长程）。
+3. 时间戳不可得：logs/genNN.log 每条仅 2 行（SIGKILL 前未 flush），
+   两次驱动的先后只能靠 provider 请求 index（父侧单调登记）判定，粒度是"请求序"不是"时刻"。
+4. 26/37（只交付一次 ack）无法再细分为"第一次被截断"与"第二次答复不含 ack"——日志空缺，
+   该细分不影响结论（两种都属"模型被双驱动"）。
+5. 窗口宽度的**生产值**未测：本数据来自 smoke 的 kill 点（每代 1 个，紧贴该代最后一轮），
+   真实崩溃点分布不同；本文件只能给出"窗口=整个回合"的上界论证与 10% 的 harness 命中率。
+6. 未覆盖多实例并发驱动同一 session（Authority 的 retire 面在 E2a 只覆盖"换实例接管"，
+   未覆盖"两实例同时活、各自持 owed"）——但 2.1 的静态盘点表明 owed 只有一份（durable 键唯一），
+   该场景是否会制造第二份 owed 需另测。
+7. c2 的性能影响未评估（多一次持久化屏障的开销需实现时实测）。

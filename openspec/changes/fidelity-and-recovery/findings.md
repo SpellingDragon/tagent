@@ -441,3 +441,69 @@ retained/firing/rearm 三态内存队列删除，通知待消费责任归 mailbo
 - 裁定③：`python3 scripts/check_event_integrity_mutations.py --all --json` → 11/11 killed（全 named_assertion 命中、control_tree_green=true）；registry 迁移 M1/M2/M3 + M4 注入补全（M4 超裁定③字面、已申报）；静态锚复核 24 处 patch 锚逐处 hits=1（evidence/mutation-anchor-migration.txt）。
 - 收尾门禁：三模块 build/vet/test -short、lint、selftests（Ran 233 tests / OK）、check-openspec（本单 ✓）、症状 job（ok wechat-bot 12.944s）全 RC=0；bundle 总门 RC=1（17 证据结构过：short=10/long=6/mutation=1，红源=long 透传）。
 - 证据根：/tmp/tagent-clear-evidence（run-long.sh / event-short / event-long（含 rerun 片）/ event-integrity-mutations / bundle / gates.log）。
+
+### 裁定②终清障归因核实（2026-10-27 二次派发，结论：duplicate≠0 → 按裁定停报）
+- 编排者裁定②假设「超发=settled 任务多（合法增长）」，并预设 duplicate=0。实测证伪：
+  13/13 超发 run 全部 notif_req = 47 + dup_count，unique taskids 恒 47（零新增任务）；
+  重复对同 TaskID 同正文（task-58/87/95/164… 各 ×2，请求序号相邻），是同一结算通知
+  双驱动（重复投递/G6b 违约签名），非新增结算。missing 恒 0。
+- 3/4 重复对紧邻 rebind（重启代际边界）后 4 个请求内，指向恢复-Wake 与直接 fire 双触发。
+- 测试级 TestSettleWakeUnified 4/4 PASS（含 a_repeated_fire…）而长程生产路径双发 =
+  消费者锚缺口（R30 签名）。裁定引的 3-2-wake-unified-red.txt 实为红证（非绿证）。
+- 处置：smoke_test.go:2894 未改（修订=掩盖真缺陷，禁止项）；六片重采/全绿采集未执行
+  （停报分支）。逐条数据与复跑命令：evidence/duplicate-settle-attribution.txt（未提交，待裁）。
+- 待裁决：修 G6b/G7 双触发（dup=0 + notif=47 为转绿验收）或重裁前提——见证据文件 §七。
+
+## 缺陷修复：双驱动（c2 同屏障 + c1 前置 attempt + e 通知身份去分域，2026-10-27）
+
+来源：evidence/dual-drive-attribution.txt（460 行归因）+ 上级 S1–S3 裁定。基线 HEAD b0af340。
+修复证据（代码锚/三锚/回滚即红/六片逐片数字/门禁 RC/flake 台账）：evidence/F3b-dual-drive-fix.txt。
+
+### 归因结论（本单只按此三处落地）
+
+- E1 并发 claim 原子：64 并发 1 winner，`ErrClaimConflict` 63——重复不是 TOCTOU，不加 CAS。
+- E2 无双 Accept：产品 AcceptNotice 三处入库点同键幂等；38/38 重复对正文逐字相同，absent-wildcard 未参与（d 单开）。
+- E3 唯一 fence = 消费回执；窗口 = 整个回合；38/38 重复只落在该代最后一轮（round%10==9，紧跟 restart），mid-generation 363 个结算 0 重复。
+- 4.5 E2f：`NoticeFactKey(invocationID, notice)` 以 invocation 分域 → 同通知换进程算出不同 EventID → transcript 追加第二条相同指令。
+
+### 三裁定落地
+
+- **S1（at-least-once 保留 + 幂等兑现到「回合驱动恰一次」）**：仍允许跨进程重放（in-flight 的 owed 照旧驱动），
+  但「已落终态的回合」不再驱动第二个回合，只补回执；`TestSettleWakeUnified/an_unconsumed_notice_resumes_across_a_restart`
+  的 `entryCalls>=3` 合法面原样保留。
+- **S2（跨进程双驱动 = 缺陷）**：Boot 的 RestoreOwed+Wake 读 durable attempt（c1）与消费回执（c2）两个 fence，
+  同一通知跨进程只驱动恰一次。
+- **S3（dup=0 / notif=47 / transcript 无重复）**：03.11 长程六片 6/6 verdict=match，每片 notif=47、dup=0、
+  action 1728/1728；`TestSettleWakeSingleDrive` ①重启后 entryCalls/followUps 双冻结且不补发答复。
+
+### 窗口收窄语义（与归因 4.3 的对齐与差额）
+
+- 旧窗口 = 整个回合（「通知已交给回合」→「回执落盘」）：崩在窗口内 → 重启再驱动 → 用户看见第二次 ack / 模型预算双花。
+- 新窗口 = **回合终态落定那一刻的同事务边界**（host.driveLocked: run.Invoke 返回 → settleTerminal 落 attempt 终态 +
+  消费回执 → 才 deliverFresh）：终态与回执同屏障，先于任何返回与下一次调度。
+- 收窄后的代价（如实登记）：崩溃若落在「终态/回执已落」与「答复已交出」之间，重启读到 landed completed →
+  补回执、**不再重驱**，这一段是 at-most-once（答案丢失而非重复）。这是 S1「重放前先查 in-flight 标记」在本实现的
+  取舍方向：宁可这一窄段不重交，也不把「已完成回合的答案」重投第二遍。
+- 反向窗口（答复已交出、回执未落）在新形态里不再存在：回执落盘先于交付，故不会出现「已交付→重放→再交付」。
+
+### e 的身份改动（不改 NoticeFactKey 签名）
+
+- follow-up 回合的 invocation 由通知本体派生：`noticeInvocation(notice) = "notice:" + notice.FactKey()`
+  （task:round:kind:seq，无 invocation 计数、无 instance）；事实键仍是 `NoticeFactKey(invocationID, notice)` 的形状。
+- 同通知重放 → 同键 → `CommitToSession` 幂等命中 → transcript 只有一条指令（回滚 e → notice 事实 2 条，实测红）。
+- EVID 家族合同锚未改写：断言读事实键本体与 meta（MetaKeyNoticeKind/TaskID/TriggerSource），不读 invocation 前缀；
+  `settleDeliveryKey(notice)` 按四元组寻回通知事实，本就与 invocation 无关。故不需要裁定①的逐行登记程序，
+  且 event-short 十轮 9/10 match（唯一红是既有 03.6 FoldControl，基线 worktree 复现同一句）。
+
+### 回滚即红（三点，逐条原文见 F3b-ddual-drive-fix.txt §三）
+
+- 还原 c2 → `follow-up turns after the restart = 2, want the 1 the landed attempt closes`
+- 还原 c1 → `follow-up turns beside a landed attempt = 1, want none`
+- 还原 e → `notice facts after the resume = 2, want the one instruction`
+
+### 未纳入本单（各单开）
+
+- d) absent-wildcard 收紧（归因 4.4：0/38，与本病无关）。
+- 「重启重放委派 admission 冲突 → ack 缺」（`ErrSpecConflict`：Spec 带进程级 InvocationID/CallID）——
+  03.11 seed42/window32768 首跑即此形态，受控重跑转绿；基线期 10 片命中同一行（含 G6b 前），判既有面。
+- 03.6 FoldControl/negative（重启后重折重铸 synthetic 键）——基线 worktree 同样红，归档 EVID-05 同一句。

@@ -676,6 +676,14 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 // never run beside each other. The baseline of a user turn is read after the
 // gate is held and before the drive: the delivery of that turn reads exactly
 // the assistant bodies its own range committed past it.
+//
+// A follow-up drive carries the barrier of the settle account it answers on, and
+// the barrier is closed right after the terminal fact of the drive landed: the
+// terminal the turn ended on is recorded, a completed turn writes its
+// consumption receipt there, and only then is the answer delivered. So the
+// receipt never lags the delivery it confirms by a whole turn, and a stop
+// between the two leaves a landed attempt the next process closes with its
+// receipt instead of driving a second turn.
 func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	h.mu.Lock()
 	if h.closed {
@@ -697,10 +705,36 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 		assemblyWarn("tagent: the invocation %s of %s ended by error: %v", req.InvocationID, req.Address.SessionID, err)
 		return turn, err
 	}
+	h.settleTerminal(ctx, turn)
 	if user {
 		h.deliverFresh(ctx, req.Address, baseline, sender, lineage, turn)
 	}
 	return turn, nil
+}
+
+// settleTerminal closes the settle account of one follow-up drive beside the
+// terminal fact it just landed: the terminal the turn ended on is recorded as
+// the attempt of the notification that fired it, and a turn that completed its
+// delivery writes the consumption receipt of its entry here — before the answer
+// leaves through the sender and before the drive returns to its caller. A turn
+// that ended on any other terminal records that terminal and leaves the entry
+// owed, so the next wake retries the delivery instead of reading a stopped turn
+// as a delivered one. A drive that carries no barrier is a user turn and settles
+// nothing here.
+func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) {
+	barrier, held := settleBarrierFrom(ctx)
+	if !held {
+		return
+	}
+	if err := barrier.settle(ctx, turn.Terminal); err != nil {
+		assemblyWarn("tagent: the settle attempt of %s was not recorded: %v", barrier.notice.FactKey(), err)
+	}
+	if turn.Terminal != model.KindCompleted {
+		return
+	}
+	if err := barrier.consume(ctx); err != nil && !errors.Is(err, state.ErrClaimSettled) {
+		assemblyWarn("tagent: the settle consumption of %s beside its terminal fact reported: %v", barrier.notice.FactKey(), err)
+	}
 }
 
 // fireNoticeTurn drives one unattended follow-up turn at the user address a
@@ -710,13 +744,20 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 // identity prefix. The turn is stamped "task" and holds the same address gate a
 // user turn holds, so the two never run beside each other.
 //
-// The fact it commits is a feedback fact, never a terminal settle with a settle
-// lineage, so the driver that fired this turn never fires on its output. The
-// assistant body the turn produces is delivered through the message sender by
-// the ordinary drive path, exactly as a user turn's output is. Only a turn that
-// really delivered its answer closes the mailbox entry it drove from: a stopped
-// or failed turn reports the incomplete delivery by name, so the entry stays
-// owed for the next wake instead of a receipt recording a turn nobody read.
+// The invocation is the notification's own four-part identity rather than a
+// minted counter: the same notification always drives the same range, so a
+// second attempt commits the same notice fact and is answered as the fact the
+// chain already holds — the transcript carries the instruction once, however
+// many processes try the notification. The fact it commits is a feedback fact,
+// never a terminal settle with a settle lineage, so the driver that fired this
+// turn never fires on its output. The assistant body the turn produces is
+// delivered through the message sender by the ordinary drive path, exactly as a
+// user turn's output is, and the entry the turn drove is closed beside its
+// terminal fact by the barrier the driver stamped on the context. Only a turn
+// that really delivered its answer closes the mailbox entry it drove from: a
+// stopped or failed turn reports the incomplete delivery by name, so the entry
+// stays owed for the next wake instead of a receipt recording a turn nobody
+// read.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {
 		return ErrHostClosed
@@ -735,9 +776,13 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		return err
 	}
 	defer unlock()
-	invocationID := h.nextInvocation(addr)
 	kind := noticeKindOf(fact)
 	notice := task.Notice{TaskID: noticeTaskIDOf(fact), Kind: kind, Event: fact.Key}
+	identified := notice
+	if barrier, held := settleBarrierFrom(ctx); held {
+		identified = barrier.notice
+	}
+	invocationID := noticeInvocation(identified)
 	material := strings.TrimSpace(fact.Message.Content)
 	if material == "" {
 		material = settleNoticeText(notice)
@@ -770,6 +815,16 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, invocationID, turn.Terminal)
 	}
 	return nil
+}
+
+// noticeInvocation reports the invocation identity one follow-up turn of a
+// notification drives under: the notification's own four-part identity — task,
+// round, kind and sequence — with no counter and no instance in it. The identity
+// is what makes the notice fact idempotent across processes: two attempts at one
+// notification commit the same key, the second is answered as the fact already
+// stored, and the transcript appends the instruction once.
+func noticeInvocation(notice task.Notice) event.InvocationID {
+	return event.InvocationID("notice:" + notice.FactKey())
 }
 
 // settleNoticeText renders the input material one unattended settle reads as:

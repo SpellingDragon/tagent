@@ -237,6 +237,9 @@ var (
 	_ task.OwnerBinding              = (*BindingOwners)(nil)
 	_ func(*Bindings) *BindingOwners = NewBindingOwners
 
+	_ func(*MemoryStore, context.Context, task.Notice) (SettleAttempt, bool, error) = (*MemoryStore).Attempt
+	_ func(*MemoryStore, context.Context, task.Notice, SettleAttempt) error         = (*MemoryStore).RecordAttempt
+
 	_ error = ErrNoticeNotOwed
 	_ error = ErrSpecConflict
 )

@@ -728,3 +728,141 @@ func watchDurableLog(t *testing.T, observer trpclog.Logger) func() {
 	t.Cleanup(restore)
 	return restore
 }
+
+// attemptWriteErr is the failure a refused attempt write reports.
+var attemptWriteErr = errors.New("state: the log refused the attempt")
+
+// countingFactLog counts the pairs staged through one fact log, so a check reads
+// whether a repeated record staged a second pair.
+type countingFactLog struct {
+	FactLog
+	mu   sync.Mutex
+	puts int
+}
+
+// Put stages one pair and counts it.
+func (l *countingFactLog) Put(ctx context.Context, key string, value []byte) error {
+	l.mu.Lock()
+	l.puts++
+	l.mu.Unlock()
+	return l.FactLog.Put(ctx, key, value)
+}
+
+// writes reports how many pairs were staged.
+func (l *countingFactLog) writes() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.puts
+}
+
+// TestSettleAttemptRecordInvariants pins the attempt record the settle pump reads before a second drive.
+// - the in-flight marker lands first and the terminal replaces it, so one notification holds one attempt record
+// - a carrier opened over the same log reads the attempt the stopped process left
+// - a repeated record of the same content stages no second pair
+// - a refused write confirms no attempt and reports the failure of the log
+// - a mailbox beside no durable account answers from its own bookkeeping alone, and refuses a notice without identity
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestSettleAttemptRecordInvariants(t *testing.T) {
+	ctx := context.Background()
+	notice := task.Notice{TaskID: "task-1", Round: 1, Kind: task.NoticeSettled, Seq: 0,
+		Event: event.EventID("task-1-settled")}
+
+	t.Run("the in-flight marker and the terminal are one record per notification", func(t *testing.T) {
+		log := &countingFactLog{FactLog: newInvariantFactLog()}
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		if err := carrier.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
+			t.Fatalf("record the in-flight attempt: %v", err)
+		}
+		read, held := carrier.attemptOf(notice)
+		if !held || read.Terminal != "" {
+			t.Fatalf("attempt = (%+v, %v), want the in-flight marker the drive lands before its turn", read, held)
+		}
+		if err := carrier.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
+			t.Fatalf("record the terminal: %v", err)
+		}
+		read, held = carrier.attemptOf(notice)
+		if !held || read.Terminal != "completed" {
+			t.Fatalf("attempt = (%+v, %v), want the terminal the turn ended on", read, held)
+		}
+		staged, err := log.Scan(ctx, attemptPrefix)
+		if err != nil {
+			t.Fatalf("scan the attempt records: %v", err)
+		}
+		if len(staged) != 1 {
+			t.Fatalf("attempt records = %d, want the one record the notification holds", len(staged))
+		}
+		if writes := log.writes(); writes != 2 {
+			t.Fatalf("staged writes = %d, want the marker and the terminal", writes)
+		}
+	})
+
+	t.Run("a carrier opened over the same log reads the attempt back", func(t *testing.T) {
+		log := newInvariantFactLog()
+		first, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		if err := first.recordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
+			t.Fatalf("record the attempt: %v", err)
+		}
+		second, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("reopen the carrier: %v", err)
+		}
+		read, held := second.attemptOf(notice)
+		if !held || read.Terminal != "completed" {
+			t.Fatalf("attempt read by the second carrier = (%+v, %v), want the terminal the first one landed", read, held)
+		}
+	})
+
+	t.Run("a repeated record of the same content stages no second pair", func(t *testing.T) {
+		log := &countingFactLog{FactLog: newInvariantFactLog()}
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			if err := carrier.recordAttempt(ctx, notice, SettleAttempt{}); err != nil {
+				t.Fatalf("record the in-flight attempt %d: %v", i+1, err)
+			}
+		}
+		if writes := log.writes(); writes != 1 {
+			t.Fatalf("staged writes = %d, want the one in-flight marker the repeated records share", writes)
+		}
+	})
+
+	t.Run("a refused write confirms no attempt", func(t *testing.T) {
+		log := newInvariantFactLog()
+		carrier, err := NewDurableCommit(log, nil)
+		if err != nil {
+			t.Fatalf("open the carrier: %v", err)
+		}
+		log.refusePut(attemptWriteErr)
+		if err := carrier.recordAttempt(ctx, notice, SettleAttempt{}); !errors.Is(err, attemptWriteErr) {
+			t.Fatalf("record beside a refused write = %v, want the failure of the log", err)
+		}
+		if _, held := carrier.attemptOf(notice); held {
+			t.Fatalf("attempt held beside a refused write = true, want nothing confirmed")
+		}
+	})
+
+	t.Run("a mailbox beside no durable account answers from its own bookkeeping", func(t *testing.T) {
+		store := NewMemoryStore(nil)
+		if _, held, err := store.Attempt(ctx, notice); held || err != nil {
+			t.Fatalf("attempt of a notification nothing drove = (%v, %v), want no record and no failure", held, err)
+		}
+		if err := store.RecordAttempt(ctx, notice, SettleAttempt{Terminal: "completed"}); err != nil {
+			t.Fatalf("record the attempt in the mailbox: %v", err)
+		}
+		read, held, err := store.Attempt(ctx, notice)
+		if err != nil || !held || read.Terminal != "completed" {
+			t.Fatalf("attempt read back = (%+v, %v, %v), want the terminal the mailbox recorded", read, held, err)
+		}
+		if err := store.RecordAttempt(ctx, task.Notice{}, SettleAttempt{}); !errors.Is(err, ErrNoticeIdentityMissing) {
+			t.Fatalf("record beside no notice identity = %v, want the missing identity by name", err)
+		}
+	})
+}

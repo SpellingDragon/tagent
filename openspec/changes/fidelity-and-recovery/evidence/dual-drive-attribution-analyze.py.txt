@@ -1,0 +1,197 @@
+"""Read-only re-derivation of the duplicate settle drives from the 03.11 run
+artifacts. It touches no product code and no repository file: it only reads the
+run directory the smoke harness leaves under $TMPDIR.
+
+Usage: python3 analyze.py [table|proof|reconcile|pair]
+
+  table      per run: requests, distinct settle task ids, duplicated task ids
+  proof      every duplicated task id beside the input that produced it
+  reconcile  the harness' own reconciliation counters per run
+  pair       how the two drives of one notice compare
+"""
+import collections
+import glob
+import json
+import os
+import re
+import sys
+
+ROOT = os.environ.get('ATTR_ROOT') or os.path.join(
+    os.environ.get('TMPDIR', '/tmp'), 'event-consumption-integrity', '03.11')
+SETTLE = re.compile(r'^tagent: task ([\w.-]+) settled', re.S)
+# One input of the long run: SMOKE-R<seed><seq:04d> <text>.
+INPUT = re.compile(r'^SMOKE-R(\d{5,6})\s')
+# One rebind of a booted generation: SMOKE-R87<gen:03d><session:02d> rebind.
+REBIND = re.compile(r'^SMOKE-R87(\d{3})(\d{2})\s')
+
+
+def runs():
+    return sorted(p for p in glob.glob(os.path.join(ROOT, 'run-*')) if os.path.isdir(p))
+
+
+def requests(run):
+    path = os.path.join(run, 'provider-requests-failed.json')
+    if not os.path.exists(path):
+        return None
+    return json.load(open(path))['requests']
+
+
+def reconciliation(run):
+    path = os.path.join(run, 'report.json')
+    if not os.path.exists(path):
+        return None
+    return json.load(open(path))['reconciliation']
+
+
+def kind(req):
+    text = req.get('last_user_text') or ''
+    if text.startswith('tagent: task '):
+        match = SETTLE.match(text)
+        return ('settle', match.group(1) if match else '?')
+    if INPUT.match(text):
+        return ('input', None)
+    if REBIND.match(text):
+        return ('rebind', None)
+    if text.startswith('[reflection]'):
+        return ('reflection', None)
+    if text.startswith('[deliver_summary'):
+        return ('deliver_summary', None)
+    return ('other', text[:40])
+
+
+def settles(reqs):
+    seen = collections.defaultdict(list)
+    for req in reqs:
+        what, extra = kind(req)
+        if what == 'settle':
+            seen[extra].append(req)
+    return seen
+
+
+def producing_input(reqs, first):
+    """The last input text before one settle drive, skipping the child's own
+    turns (the worker prompt and its call frame carry the marker too)."""
+    for index in range(first - 1, max(0, first - 40), -1):
+        text = reqs[index]['last_user_text'] or ''
+        if INPUT.match(text):
+            return int(INPUT.match(text).group(1)[-4:])
+    return None
+
+
+def next_rebind(reqs, last):
+    """The generation the next rebind names, beside how many requests separate
+    the second drive from it: the boot of that generation wakes the pump before
+    it drives its first rebind."""
+    for index in range(last + 1, min(len(reqs), last + 12)):
+        match = REBIND.match(reqs[index]['last_user_text'] or '')
+        if match:
+            return int(match.group(1)), index - last
+    return None, None
+
+
+def table():
+    for run in runs():
+        reqs = requests(run)
+        if not reqs:
+            continue
+        seen = settles(reqs)
+        dups = {k: v for k, v in seen.items() if len(v) > 1}
+        print(f'{os.path.basename(run)}: requests={len(reqs)} settle_taskids={len(seen)} '
+              f'dup_taskids={len(dups)} settle_requests={sum(len(v) for v in seen.values())}')
+        for task, group in sorted(dups.items(), key=lambda kv: kv[1][0]['index']):
+            print(f'   dup {task}: indices={[r["index"] for r in group]} '
+                  f'messages={[r["messages"] for r in group]}')
+
+
+def proof():
+    rounds = collections.Counter()
+    sessions = collections.Counter()
+    population = collections.Counter()
+    for run in runs():
+        reqs = requests(run)
+        if not reqs:
+            continue
+        seen = settles(reqs)
+        if len(seen) < 10:
+            continue
+        for task, group in seen.items():
+            seq = producing_input(reqs, group[0]['index'])
+            if seq is not None:
+                population[seq // 4 % 10] += 1
+            if len(group) < 2:
+                continue
+            rounds[seq // 4 % 10] += 1
+            sessions[seq % 4] += 1
+            gen, gap = next_rebind(reqs, group[1]['index'])
+            print(f'{os.path.basename(run)} {task} '
+                  f'first={group[0]["index"]} second={group[1]["index"]} '
+                  f'input_seq={seq} round={seq // 4} round%10={seq // 4 % 10} '
+                  f'session={seq % 4} next_rebind_gen={gen} gap={gap}')
+    print('dups:', sum(rounds.values()), 'by round%10:', dict(rounds), 'by session:', dict(sessions))
+    print('settle task ids by round%10 of the producing input:', dict(sorted(population.items())))
+
+
+def reconcile():
+    total = [0, 0, 0, 0]
+    for run in runs():
+        rec = reconciliation(run)
+        if rec is None:
+            continue
+        dups = rec.get('duplicate_notifications') or []
+        actions = rec.get('duplicate_actions') or []
+        print(f'{os.path.basename(run)}: expected={rec["expected_notifications"]} '
+              f'requests={rec["notification_requests"]} dup_notices={len(dups)} '
+              f'dup_actions={len(actions)} {dups} {actions}')
+        total[0] += rec['expected_notifications']
+        total[1] += rec['notification_requests']
+        total[2] += len(dups)
+        total[3] += len(actions)
+    print('TOTAL expected=%d requests=%d dup_notices=%d dup_actions=%d' % tuple(total))
+
+
+def pair():
+    messages = collections.Counter()
+    texts = collections.Counter()
+    for run in runs():
+        reqs = requests(run)
+        if not reqs:
+            continue
+        for group in settles(reqs).values():
+            if len(group) < 2:
+                continue
+            first, second = group[0], group[1]
+            if second['messages'] > first['messages']:
+                messages['second carries more messages'] += 1
+            elif second['messages'] == first['messages']:
+                messages['both carry the same message count'] += 1
+            else:
+                messages['second carries fewer messages'] += 1
+            texts['identical text' if first['last_user_text'] == second['last_user_text']
+                  else 'different text'] += 1
+    print(dict(messages))
+    print(dict(texts))
+
+
+def dates():
+    """Totals per run date: the boundary the G6b commit a3e7441 (2026-10-27
+    03:47) sits on."""
+    buckets = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
+    for run in runs():
+        rec = reconciliation(run)
+        if rec is None:
+            continue
+        bucket = buckets[os.path.basename(run).split('-')[3]]
+        bucket[0] += 1
+        bucket[1] += rec['expected_notifications']
+        bucket[2] += rec['notification_requests']
+        bucket[3] += len(rec.get('duplicate_notifications') or [])
+        bucket[4] += len(rec.get('duplicate_actions') or [])
+    for day, bucket in sorted(buckets.items()):
+        print(f'{day} runs={bucket[0]} expected={bucket[1]} requests={bucket[2]} '
+              f'dup_notices={bucket[3]} dup_actions={bucket[4]}')
+
+
+MODES = {'table': table, 'proof': proof, 'reconcile': reconcile, 'pair': pair, 'dates': dates}
+
+if __name__ == '__main__':
+    MODES[sys.argv[1] if len(sys.argv) > 1 else 'table']()

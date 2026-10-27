@@ -81,6 +81,10 @@ blacklist:
     a notification waits there until a turn claims it, drives it and consumes it
     on that same account, so one notification starts one turn however often it
     is observed.
+  - The attempt record is the second fence a restart reads: a turn that already
+    landed its terminal is closed with its consumption receipt instead of driven
+    again, so a stop between the terminal fact and the receipt replays no second
+    turn.
 
 Package tagent is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
@@ -1282,7 +1286,9 @@ type SettleWake interface {
     release and consumption on the same ledger. The state store behind one run
     satisfies it.
 
-    The redline list (3 rules): MUST start exactly one follow-up turn per
-    claimed entry and close it only beside its consumption receipt. MUST NOT
-    replay an entry whose consumption receipt is already recorded. MUST NOT hold
-    a claimed entry beside a turn that stopped before its delivery.
+    The redline list (4 rules): MUST start exactly one follow-up turn per
+    claimed entry and close it beside its consumption receipt. MUST close an
+    entry whose recorded attempt already landed its terminal with that turn's
+    receipt and drive no second turn. MUST NOT replay an entry whose consumption
+    receipt is already recorded. MUST NOT hold a claimed entry beside a turn
+    that stopped before its delivery.

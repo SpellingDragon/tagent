@@ -1,0 +1,553 @@
+// Package zzdualattr is a read-only attribution harness: it drives the real
+// mailbox (runtime/state) and the real settle pump (SettleDriver) to answer
+// three questions about the duplicate settle drives. It changes no product
+// code and is deleted once the evidence file is written.
+package zzdualattr
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/SpellingDragon/tagent"
+	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/runtime/agent"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
+)
+
+// memLog is a FactLog over a map: the durable account the restart experiments
+// reopen, kept in this process so a "kill" is dropping the store instead of the
+// log.
+type memLog struct {
+	mu sync.Mutex
+	m  map[string][]byte
+}
+
+func newMemLog() *memLog { return &memLog{m: map[string][]byte{}} }
+
+func (l *memLog) Put(_ context.Context, key string, value []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.m[key] = append([]byte(nil), value...)
+	return nil
+}
+
+func (l *memLog) Get(_ context.Context, key string) ([]byte, bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	v, ok := l.m[key]
+	return append([]byte(nil), v...), ok, nil
+}
+
+func (l *memLog) Scan(_ context.Context, prefix string) (map[string][]byte, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := map[string][]byte{}
+	for k, v := range l.m {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			out[k] = append([]byte(nil), v...)
+		}
+	}
+	return out, nil
+}
+
+func (l *memLog) Sync(context.Context) error { return nil }
+
+const (
+	agentID   = event.AgentID("agent-x")
+	sessionID = event.SessionID("session-x")
+	instance  = event.InstanceID("inst-1")
+	taskID    = event.TaskID("task-58")
+)
+
+func address() event.Address {
+	return event.Address{AgentID: agentID, SessionID: sessionID}
+}
+
+func settleNotice() task.Notice {
+	return task.Notice{
+		TaskID: taskID,
+		Round:  1,
+		Kind:   task.NoticeSettled,
+		Seq:    0,
+		Event:  event.EventID("result-fact"),
+		Text:   "worker result SMOKE-R10597",
+	}
+}
+
+// settleFactOf renders the committed fact one settle notification points at:
+// the only fact the pump fires on.
+func settleFactOf(notice task.Notice) event.Event {
+	return event.Event{
+		Key:       event.EventID(fmt.Sprintf("settle-%x", notice.FactKey())),
+		Type:      event.TypeTaskSettled,
+		Timestamp: time.Unix(0, 0),
+		Meta: map[string]string{
+			event.MetaKeyNoticeKind:          string(notice.Kind),
+			event.MetaKeySettleTriggerSource: string(notice.Kind),
+			event.MetaKeyTaskID:              string(notice.TaskID),
+		},
+		Message: model.Message{Role: model.RoleUser, Content: "tagent: task " + string(notice.TaskID) + " settled"},
+		Owner:   address(),
+		Source:  address(),
+		Target:  address(),
+		TaskID:  notice.TaskID,
+	}
+}
+
+// newStore opens one mailbox account over the optional durable carrier.
+func newStore(t *testing.T, durable *state.DurableCommit) *state.MemoryStore {
+	t.Helper()
+	ctx := context.Background()
+	authority := state.NewAuthority()
+	var store *state.MemoryStore
+	if durable != nil {
+		store = state.NewMemoryStore(authority, durable)
+	} else {
+		store = state.NewMemoryStore(authority)
+	}
+	if err := authority.GrantRead(ctx, "subject-a", address()); err != nil {
+		t.Fatalf("grant the read face: %v", err)
+	}
+	return store
+}
+
+// deliverRoute registers the route a live delivery names and accepts one
+// notice into the site that route opens.
+func deliverRoute(t *testing.T, store *state.MemoryStore, addr event.Address, inst event.InstanceID, notice task.Notice) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := store.Establish(ctx, addr, inst); err != nil {
+		t.Fatalf("establish %s@%s: %v", addr.SessionID, inst, err)
+	}
+	if err := store.TrackDelivery(ctx, notice.TaskID, task.HandoffTarget{Target: addr, TargetInstance: inst}); err != nil {
+		t.Fatalf("track delivery: %v", err)
+	}
+	if err := store.AcceptNotice(ctx, notice); err != nil {
+		t.Fatalf("accept the notice: %v", err)
+	}
+}
+
+// drivePump starts one real settle pump over the store and counts the turns it
+// fires. The returned wake func is the driver's own Wake, exactly the signal the
+// host's Boot and its commit observations leave behind; the stop func ends it.
+func drivePump(t *testing.T, store *state.MemoryStore, notice task.Notice, fired *int32, hold time.Duration) (func(), func()) {
+	t.Helper()
+	fact := settleFactOf(notice)
+	lookup := func(context.Context, event.EventID) (event.Event, error) { return fact, nil }
+	wake := func() tagent.SettleWake { return store }
+	fire := func(ctx context.Context, addr event.Address, got event.Event) error {
+		atomic.AddInt32(fired, 1)
+		if hold > 0 {
+			time.Sleep(hold)
+		}
+		return nil
+	}
+	driver := tagent.NewSettleDriver(lookup, wake, fire)
+	return driver.Wake, func() { driver.Stop() }
+}
+
+// settleQuiet waits until no further fire lands for a quiet window.
+func settleQuiet(t *testing.T, fired *int32, quiet time.Duration) int32 {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	last := atomic.LoadInt32(fired)
+	stable := time.Now()
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+		now := atomic.LoadInt32(fired)
+		if now != last {
+			last = now
+			stable = time.Now()
+			continue
+		}
+		if time.Since(stable) >= quiet {
+			return now
+		}
+	}
+	return atomic.LoadInt32(fired)
+}
+
+// TestE1ClaimAtomicity asks whether two executors can both claim one seat, and
+// whether two pumps can both drive it.
+func TestE1ClaimAtomicity(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a_concurrent_claim_has_one_winner", func(t *testing.T) {
+		store := newStore(t, nil)
+		deliverRoute(t, store, address(), instance, settleNotice())
+		seats := store.Unconsumed()
+		if len(seats) != 1 {
+			t.Fatalf("seats = %d, want 1", len(seats))
+		}
+		seat := seats[0]
+
+		const racers = 64
+		var wins, conflicts, other int32
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				err := store.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq)
+				switch {
+				case err == nil:
+					atomic.AddInt32(&wins, 1)
+				case errors.Is(err, state.ErrClaimConflict):
+					atomic.AddInt32(&conflicts, 1)
+				default:
+					atomic.AddInt32(&other, 1)
+					t.Logf("unexpected claim outcome: %v", err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		t.Logf("E1a goroutines=%d wins=%d err_claim_conflict=%d other=%d", racers, wins, conflicts, other)
+		if wins != 1 {
+			t.Fatalf("claim winners = %d, want exactly 1 (a second winner is a TOCTOU)", wins)
+		}
+	})
+
+	t.Run("b_two_pumps_one_store_one_seat", func(t *testing.T) {
+		store := newStore(t, nil)
+		notice := settleNotice()
+		deliverRoute(t, store, address(), instance, notice)
+		var fired int32
+		wake1, stop1 := drivePump(t, store, notice, &fired, 40*time.Millisecond)
+		wake2, stop2 := drivePump(t, store, notice, &fired, 40*time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
+		wake1()
+		wake2()
+		total := settleQuiet(t, &fired, 120*time.Millisecond)
+		stop1()
+		stop2()
+		t.Logf("E1b pumps=2 seats=1 fires=%d", total)
+	})
+
+	t.Run("c_pump_and_live_claimer_race", func(t *testing.T) {
+		store := newStore(t, nil)
+		notice := settleNotice()
+		deliverRoute(t, store, address(), instance, notice)
+		seats := store.Unconsumed()
+		seat := seats[0]
+
+		var fired int32
+		wake, stop := drivePump(t, store, notice, &fired, 30*time.Millisecond)
+		defer stop()
+
+		// The live path of the same notice: bookNotice's claim, then the sink's
+		// consumption beside the handover.
+		live := make(chan string, 1)
+		go func() {
+			if err := store.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+				live <- fmt.Sprintf("claim refused: %v", err)
+				return
+			}
+			if err := store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+				live <- fmt.Sprintf("consume refused: %v", err)
+				return
+			}
+			live <- "claim+consume won"
+		}()
+		wake()
+		t.Logf("E1c live path: %s", <-live)
+		total := settleQuiet(t, &fired, 80*time.Millisecond)
+		t.Logf("E1c fires=%d", total)
+	})
+}
+
+// TestE2DualPath asks whether one notice can become two mailbox entries, and
+// how the notification identity judges a same-key different-content repeat.
+func TestE2DualPath(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a_route_rewrite_and_retire_do_not_fork_the_entry", func(t *testing.T) {
+		store := newStore(t, nil)
+		notice := settleNotice()
+		deliverRoute(t, store, address(), instance, notice)
+		before := len(store.Unconsumed())
+
+		// A second instance takes the address over: the first site is retired.
+		deliverRoute(t, store, address(), "inst-2", notice)
+		after := store.Unconsumed()
+		t.Logf("E2a seats before=%d after=%d", before, len(after))
+		if len(after) != before {
+			t.Fatalf("seats = %d, want %d: one notice identity must own one entry", len(after), before)
+		}
+		t.Logf("E2a entry site instance=%s (the retired one still answers the seat)", after[0].Instance)
+
+		var fired int32
+		wake, stop := drivePump(t, store, notice, &fired, 0)
+		defer stop()
+		wake()
+		total := settleQuiet(t, &fired, 80*time.Millisecond)
+		t.Logf("E2a fires over the retired site's seat=%d", total)
+	})
+
+	t.Run("b_a_reseated_seq_forks_one_notice_into_two_entries", func(t *testing.T) {
+		store := newStore(t, nil)
+		first := settleNotice()
+		deliverRoute(t, store, address(), instance, first)
+
+		// The re-issued copy of the same settle: same task, same round, same
+		// kind and the same body, a fresh sequence number.
+		second := settleNotice()
+		second.Seq = 1
+		second.Event = event.EventID("result-fact-again")
+		if err := store.AcceptNotice(ctx, second); err != nil {
+			t.Fatalf("accept the reseated copy: %v", err)
+		}
+		seats := store.Unconsumed()
+		t.Logf("E2b seats=%d", len(seats))
+
+		var fired int32
+		wake, stop := drivePump(t, store, second, &fired, 0)
+		defer stop()
+		wake()
+		total := settleQuiet(t, &fired, 120*time.Millisecond)
+		t.Logf("E2b fires=%d for two entries whose rendered material is byte-identical", total)
+	})
+
+	t.Run("c_same_key_different_content_is_refused_by_the_mailbox", func(t *testing.T) {
+		store := newStore(t, nil)
+		first := settleNotice()
+		deliverRoute(t, store, address(), instance, first)
+		altered := first
+		altered.Text = "worker result SMOKE-OTHER"
+		err := store.AcceptNotice(ctx, altered)
+		t.Logf("E2c same noticeKey, different Text -> %v", err)
+		if !errors.Is(err, state.ErrNoticeConflict) {
+			t.Fatalf("altered repeat = %v, want %v", err, state.ErrNoticeConflict)
+		}
+	})
+
+	t.Run("d_fact_identity_treats_an_unstated_range_as_wildcard", func(t *testing.T) {
+		owner := address()
+		other := event.Address{AgentID: "agent-other", SessionID: "session-other"}
+		base := event.Event{
+			Key:       event.EventID("settle-abc"),
+			Type:      event.TypeTaskSettled,
+			Timestamp: time.Unix(0, 0),
+			Message:   model.Message{Role: model.RoleUser, Content: "tagent: task task-58 settled"},
+			Owner:     owner,
+			TaskID:    taskID,
+		}
+		unstated := base // Source and Target left unstated (zero)
+		declared := base
+		declared.Source = other
+		declared.Target = other
+
+		left, err := memory.BodyFromEvent(unstated, "", "")
+		if err != nil {
+			t.Fatalf("body of the unstated fact: %v", err)
+		}
+		right, err := memory.BodyFromEvent(declared, "", "")
+		if err != nil {
+			t.Fatalf("body of the declared fact: %v", err)
+		}
+		moved := declared
+		moved.Source = event.Address{AgentID: "agent-third", SessionID: "session-third"}
+		fourth, err := memory.BodyFromEvent(moved, "", "")
+		if err != nil {
+			t.Fatalf("body of the moved fact: %v", err)
+		}
+		// A second commit of the same declared range: only the stamps the
+		// commit protocol generates beside the fact move.
+		restamped := declared
+		restamped.Timestamp = time.Unix(5, 0)
+		restamped.InvocationID = event.InvocationID("invocation-9")
+		restamped.InstanceID = event.InstanceID("inst-9")
+		fifth, err := memory.BodyFromEvent(restamped, "", "")
+		if err != nil {
+			t.Fatalf("body of the restamped fact: %v", err)
+		}
+		t.Logf("E2d unstated-vs-declared same fact? %v", left.SameFact(right))
+		t.Logf("E2d declared-vs-declared, same source (commit stamps moved)? %v", right.SameFact(fifth))
+		t.Logf("E2d declared-vs-declared, different source? %v", right.SameFact(fourth))
+	})
+
+	t.Run("e_a_restart_reopens_one_entry_and_an_in_process_repeat_adds_none", func(t *testing.T) {
+		notice := settleNotice()
+		log := newMemLog()
+		openDurable(t, log, notice, false)
+
+		// Process one: the boot restore accepts the owed notice, then the live
+		// fire path accepts the same notification beside it, the way a wake and
+		// a fire each holding a copy of one settle fact would.
+		one := newStore(t, openDurable(t, log, notice, true))
+		if err := one.RestoreOwed(ctx); err != nil {
+			t.Fatalf("restore the owed notice: %v", err)
+		}
+		if err := one.AcceptNotice(ctx, notice); err != nil {
+			t.Fatalf("accept beside the restored entry: %v", err)
+		}
+		seatsOne := len(one.Unconsumed())
+
+		// Process two: no receipt was written, so the same identity is accepted
+		// again into a fresh mailbox and still owns exactly one entry.
+		two := newStore(t, openDurable(t, log, notice, true))
+		if err := two.RestoreOwed(ctx); err != nil {
+			t.Fatalf("restore after the restart: %v", err)
+		}
+		seatsTwo := len(two.Unconsumed())
+		t.Logf("E2e seats: process1=%d (restore + repeat accept) process2=%d (restore after restart)", seatsOne, seatsTwo)
+		if seatsOne != 1 || seatsTwo != 1 {
+			t.Fatalf("seats process1=%d process2=%d, want 1 and 1: one notification identity owns one entry per mailbox", seatsOne, seatsTwo)
+		}
+	})
+
+	t.Run("f_the_notice_fact_key_is_scoped_to_the_invocation_not_the_notice", func(t *testing.T) {
+		notice := settleNotice()
+		first := agent.NoticeFactKey(event.InvocationID("invocation-1"), notice)
+		second := agent.NoticeFactKey(event.InvocationID("invocation-2"), notice)
+		t.Logf("E2f notice.FactKey()=%s", notice.FactKey())
+		t.Logf("E2f NoticeFactKey(invocation-1)=%s", first)
+		t.Logf("E2f NoticeFactKey(invocation-2)=%s", second)
+		if first == second {
+			t.Fatalf("both invocations hash one identity: the fact layer would fence the replay")
+		}
+	})
+}
+
+// openDurable returns the durable carrier of one log, reopened as a fresh
+// process would. Seeded false writes the settle record a delegation commits:
+// the record carries the notice in its outbox, so the owed entry exists in the
+// log before any turn runs — exactly the state a produced-but-undriven settle
+// leaves behind.
+func openDurable(t *testing.T, log *memLog, notice task.Notice, seeded bool) *state.DurableCommit {
+	t.Helper()
+	ctx := context.Background()
+	durable, err := state.NewDurableCommit(log, nil)
+	if err != nil {
+		t.Fatalf("open the durable carrier: %v", err)
+	}
+	if !seeded {
+		if err := durable.Declare(ctx, notice.TaskID, task.Spec{
+			InvocationID: "inv-1",
+			InstanceID:   instance,
+			Description:  "delegate",
+			Source:       address(),
+			Target:       address(),
+		}); err != nil {
+			t.Fatalf("declare the task: %v", err)
+		}
+		if _, err := durable.Commit(ctx, task.CommitRecord{
+			MutationID:       "settle:task-58:1",
+			TaskID:           notice.TaskID,
+			ExpectedRevision: 0,
+			Status:           task.StatusSettled,
+			Outbox: []task.Envelope{{
+				Notice:         notice,
+				Target:         address(),
+				Source:         address(),
+				TargetInstance: instance,
+			}},
+		}); err != nil {
+			t.Fatalf("commit the settle record: %v", err)
+		}
+	}
+	return durable
+}
+
+// TestE3ConsumptionWindow reproduces the restart window: a settle whose turn
+// was cut before its consumption receipt landed, replayed by the next boot.
+func TestE3ConsumptionWindow(t *testing.T) {
+	ctx := context.Background()
+	notice := settleNotice()
+
+	// oneGeneration boots one process over the durable account, drives the pump
+	// through the boot wake, and reports the turns started beside the account
+	// state it leaves behind. cutTurn models the death landing inside the turn:
+	// the turn reports an error, so the entry is handed back and no consumption
+	// receipt is ever written, exactly the durable state a SIGKILL leaves.
+	oneGeneration := func(t *testing.T, durable *state.DurableCommit, cutTurn bool, consume bool) (int32, int) {
+		t.Helper()
+		store := newStore(t, durable)
+		var fired int32
+		fact := settleFactOf(notice)
+		lookup := func(context.Context, event.EventID) (event.Event, error) { return fact, nil }
+		fire := func(context.Context, event.Address, event.Event) error {
+			atomic.AddInt32(&fired, 1)
+			if cutTurn {
+				return fmt.Errorf("the turn was cut by the stop")
+			}
+			return nil
+		}
+		driver := tagent.NewSettleDriver(lookup, func() tagent.SettleWake { return store }, fire)
+		driver.Wake()
+		total := settleQuiet(t, &fired, 100*time.Millisecond)
+		driver.Stop()
+		left := len(store.Unconsumed())
+		if consume {
+			// The entry a cut turn handed back sits at ClaimPending, so the
+			// receipt is written the way a live sink writes it: claim, then
+			// consume. What lands in the log is the same consumption record.
+			for _, seat := range store.Unconsumed() {
+				if err := store.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+					t.Logf("claim %d before the receipt: %v", seat.AcceptSeq, err)
+					continue
+				}
+				if err := store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq); err != nil {
+					t.Logf("consume %d: %v", seat.AcceptSeq, err)
+				}
+			}
+			left = len(store.Unconsumed())
+			t.Logf("E3 receipt written: owed_in_durable=%d unconsumed_after=%d", len(durable.OwedNotices()), left)
+		}
+		return total, left
+	}
+
+	t.Run("a_turn_cut_before_its_receipt_is_replayed_by_the_next_boot", func(t *testing.T) {
+		log := newMemLog()
+		durable := openDurable(t, log, notice, false)
+
+		gen1, left1 := oneGeneration(t, durable, true, false)
+		owed1 := len(openDurable(t, log, notice, true).OwedNotices())
+		gen2, left2 := oneGeneration(t, openDurable(t, log, notice, true), true, false)
+		gen3, _ := oneGeneration(t, openDurable(t, log, notice, true), true, true)
+		gen4, _ := oneGeneration(t, openDurable(t, log, notice, true), true, false)
+		t.Logf("E3a fires per generation: gen1=%d gen2=%d gen3(consumed)=%d gen4=%d", gen1, gen2, gen3, gen4)
+		t.Logf("E3a entries: gen1 unconsumed=%d owed_in_durable=%d gen2 unconsumed=%d", left1, owed1, left2)
+		if gen1 != 1 || gen2 != 1 {
+			t.Fatalf("fires gen1=%d gen2=%d, want 1 and 1: one notice, two turns, one restart apart", gen1, gen2)
+		}
+		if gen4 != 0 {
+			t.Fatalf("gen4 fires = %d, want 0: a consumption receipt closes the account", gen4)
+		}
+	})
+
+	t.Run("b_a_turn_that_returned_fences_the_replay", func(t *testing.T) {
+		log := newMemLog()
+		durable := openDurable(t, log, notice, false)
+		gen1, left := oneGeneration(t, durable, false, false)
+		gen2, _ := oneGeneration(t, openDurable(t, log, notice, true), false, false)
+		t.Logf("E3b fires per generation (turn returned in gen1): gen1=%d gen2=%d unconsumed_after_gen1=%d", gen1, gen2, left)
+		if gen2 != 0 {
+			t.Fatalf("gen2 fires = %d, want 0: the pump consumes beside the returned turn", gen2)
+		}
+	})
+
+	t.Run("c_the_window_is_the_turn_not_the_claim", func(t *testing.T) {
+		log := newMemLog()
+		durable := openDurable(t, log, notice, false)
+		store := newStore(t, durable)
+		if seats := store.Unconsumed(); len(seats) != 0 {
+			t.Fatalf("seats before the boot restore = %d, want 0 (nothing accepted yet)", len(seats))
+		}
+		gen1, left := oneGeneration(t, durable, true, false)
+		t.Logf("E3c gen1: fires=%d unconsumed entries left=%d (claim taken, receipt not written)", gen1, left)
+		if left != 1 {
+			t.Fatalf("unconsumed entries = %d, want 1: the claimed entry stays owed without a receipt", left)
+		}
+	})
+}

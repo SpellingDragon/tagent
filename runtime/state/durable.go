@@ -40,16 +40,18 @@ type FactLog interface {
 	Sync(ctx context.Context) error
 }
 
-// factPrefix, specPrefix and consumePrefix locate the three durable record kinds
-// the carrier keeps on one log: the commit facts, the admission material of their
-// tasks, and the receipt of each logical consumption a notification completed.
-// Each reuses the existing persistent identity material (the task_spawned record,
-// the settle records and the notice identity), so the durable commit needs no
-// other database and no second consumption state.
+// factPrefix, specPrefix, consumePrefix and attemptPrefix locate the four
+// durable record kinds the carrier keeps on one log: the commit facts, the
+// admission material of their tasks, the receipt of each logical consumption a
+// notification completed, and the attempt the follow-up turn of one notification
+// is. Each reuses the existing persistent identity material (the task_spawned
+// record, the settle records and the notice identity), so the durable commit
+// needs no other database and no second consumption state.
 const (
 	factPrefix    = "tagent/task/v1/fact:"
 	specPrefix    = "tagent/task/v1/spec:"
 	consumePrefix = "tagent/task/v1/consume:"
+	attemptPrefix = "tagent/task/v1/attempt:"
 )
 
 // mutationKey is the idempotency identity of one mutation: the task it changes
@@ -69,6 +71,31 @@ type consumeRecord struct {
 	Kind   task.NoticeKind `json:"kind"`
 	Seq    int64           `json:"seq"`
 	Event  event.EventID   `json:"event,omitempty"`
+}
+
+// SettleAttempt is the durable record of the one follow-up turn a notification
+// started: the terminal that turn ended on, and empty while the turn is in
+// flight. The record answers one question for the settle pump — whether a turn
+// already drove this notification to its terminal — so a process that starts
+// over the same log closes the entry beside the landed turn instead of driving a
+// second one. It says nothing about delivery: the consumption receipt is the
+// record of a delivered answer, and the two records are read as one account.
+type SettleAttempt struct {
+	// Terminal is the terminal the driven turn ended on, empty while the turn
+	// is in flight.
+	Terminal string `json:"terminal,omitempty"`
+}
+
+// attemptRecorder is the durable record of the attempt one notification's
+// follow-up turn is: it is staged beside the consumption receipts, so a mailbox
+// restored over the same log reads the attempt the stopped process left.
+type attemptRecorder interface {
+	// recordAttempt stages one attempt record behind the sync barrier, and a
+	// repeated record of the same content stages no second pair.
+	recordAttempt(ctx context.Context, notice task.Notice, attempt SettleAttempt) error
+	// attemptOf reports the attempt record of one notification and whether the
+	// log holds one at all.
+	attemptOf(notice task.Notice) (SettleAttempt, bool)
 }
 
 // ErrNoticeNotOwed reports an acceptance of a notification the carrier holds no
@@ -102,6 +129,7 @@ type DurableCommit struct {
 	mutations map[mutationKey]task.CommitRecord
 	owed      map[noticeKey]task.OutboxNotice
 	consumed  map[noticeKey]struct{}
+	attempts  map[noticeKey]SettleAttempt
 }
 
 // DurableCommit satisfies the task commit port.
@@ -123,6 +151,7 @@ func NewDurableCommit(log FactLog, uncertain task.UncertainProbe) (*DurableCommi
 		mutations: map[mutationKey]task.CommitRecord{},
 		owed:      map[noticeKey]task.OutboxNotice{},
 		consumed:  map[noticeKey]struct{}{},
+		attempts:  map[noticeKey]SettleAttempt{},
 	}
 	if err := d.load(context.Background()); err != nil {
 		durableError("tagent: durable commit load failed err=%v", err)
@@ -161,6 +190,18 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		d.consumed[noticeKey{task: receipt.TaskID, round: receipt.Round,
 			kind: receipt.Kind, seq: receipt.Seq}] = struct{}{}
 	}
+	attempts, err := d.log.Scan(ctx, attemptPrefix)
+	if err != nil {
+		return err
+	}
+	for _, body := range attempts {
+		var record attemptRecord
+		if err := json.Unmarshal(body, &record); err != nil {
+			return err
+		}
+		d.attempts[noticeKey{task: record.TaskID, round: record.Round,
+			kind: record.Kind, seq: record.Seq}] = record.Attempt
+	}
 	facts, err := d.log.Scan(ctx, factPrefix)
 	if err != nil {
 		return err
@@ -196,6 +237,70 @@ func (d *DurableCommit) load(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// attemptRecord is the durable form of one attempt: the four-part notice
+// identity it belongs to beside the terminal the driven turn ended on.
+type attemptRecord struct {
+	TaskID  event.TaskID    `json:"task_id"`
+	Round   int64           `json:"round"`
+	Kind    task.NoticeKind `json:"kind"`
+	Seq     int64           `json:"seq"`
+	Attempt SettleAttempt   `json:"attempt"`
+}
+
+// recordAttempt stores the attempt of one notification's follow-up turn behind
+// the sync barrier, so a carrier opened over the same log reads the terminal the
+// stopped process's turn ended on. The record is keyed by the notice's
+// four-part identity and a repeated record of the same content stages no second
+// pair. A barrier that did not complete reports the write failure and confirms
+// nothing, so the caller never reports an attempt the log does not hold.
+func (d *DurableCommit) recordAttempt(ctx context.Context, notice task.Notice, attempt SettleAttempt) error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if notice.TaskID == "" {
+		return ErrNoticeIdentityMissing
+	}
+	key := noticeKeyOf(notice)
+	if held, done := d.attempts[key]; done && held == attempt {
+		return nil
+	}
+	body, err := json.Marshal(attemptRecord{TaskID: notice.TaskID, Round: notice.Round,
+		Kind: notice.Kind, Seq: notice.Seq, Attempt: attempt})
+	if err != nil {
+		durableError("tagent: durable attempt encode failed task=%s notice=%s err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	if err := d.log.Put(ctx, attemptKey(notice), body); err != nil {
+		durableError("tagent: durable attempt write failed task=%s notice=%s err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	if err := d.log.Sync(ctx); err != nil {
+		durableError("tagent: durable attempt barrier failed task=%s notice=%s err=%v",
+			notice.TaskID, notice.FactKey(), err)
+		return err
+	}
+	d.attempts[key] = attempt
+	return nil
+}
+
+// attemptOf reports the attempt record of one notification, and whether the
+// carrier holds one at all: no record means no turn ever started for the
+// notification, and a record beside an empty terminal means the turn started
+// and has not reported a terminal yet.
+func (d *DurableCommit) attemptOf(notice task.Notice) (SettleAttempt, bool) {
+	if d == nil {
+		return SettleAttempt{}, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	attempt, ok := d.attempts[noticeKeyOf(notice)]
+	return attempt, ok
 }
 
 // recordConsumption stores the receipt of one completed logical consumption
@@ -499,6 +604,13 @@ func factKey(taskID event.TaskID, mutation task.MutationID) string {
 // the four parts of the notice identity it confirms.
 func consumeKey(notice task.Notice) string {
 	return consumePrefix + string(notice.TaskID) + "\x00" + strconv.FormatInt(notice.Round, 10) +
+		"\x00" + string(notice.Kind) + "\x00" + strconv.FormatInt(notice.Seq, 10)
+}
+
+// attemptKey locates the attempt of one notification's follow-up turn on the log
+// by the same four parts, so the record and its receipt name one identity.
+func attemptKey(notice task.Notice) string {
+	return attemptPrefix + string(notice.TaskID) + "\x00" + strconv.FormatInt(notice.Round, 10) +
 		"\x00" + string(notice.Kind) + "\x00" + strconv.FormatInt(notice.Seq, 10)
 }
 

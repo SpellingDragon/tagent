@@ -1,0 +1,132 @@
+fidelity-and-recovery · 缺陷修复证据：双驱动（c2 同屏障 + c1 前置 attempt + e 通知身份去分域）
+执行日期：2026-10-27　　仓库：/Users/pengweiye/Documents/codes/tagent
+基线 HEAD：b0af340（工作树 = 本单改动，未提交；本文所有数字均在该树上采集）
+归因输入：evidence/dual-drive-attribution.txt（460 行；E1 并发单赢家 / E2 无双 Accept / E3 回执唯一 fence /
+38-38 确定性窗口 / 4.5 NoticeFactKey invocation 分域 / 4.6 修复方向）
+裁定（上级）：S1 at-least-once 保留 + 幂等兑现到「回合驱动恰一次」；S2 跨进程双驱动 = 缺陷；
+S3 验收 dup=0 / notif=47 / transcript 无重复。
+
+复跑命令一律相对仓库根；证据目录：
+  /tmp/tagent-six/           六片 runner 产物（runner.log / repeat-1/test-log.jsonl / repeat-1/evidence.json）
+  /tmp/tagent-six/event-short/  event-short 十轮（合同面）
+  /tmp/redA2_kill.txt /tmp/redB.txt /tmp/redC.txt  回滚即红三点原文
+  /tmp/green_final.txt      回滚还原后的绿证
+
+────────────────────────────────────────────────────────────────
+一、三 fence（代码锚，逐条对应归因 4.3 c1/c2 与 4.5 e）
+────────────────────────────────────────────────────────────────
+c2 回执与交付同屏障（窗口：整个回合 → 同屏障内的崩溃）
+  settle_turn.go:342-403  driveSeat 在 fire 之前把 settleBarrier{notice, settle, consume} 盖到 fire 的 ctx 上；
+                          settle → attempts.RecordAttempt(terminal)；consume → wake.Consume（context.WithoutCancel）。
+  host.go:705-736         driveLocked: run.Invoke 返回后立即 settleTerminal(ctx, turn)（= 回合终态落定的同事务边界），
+                          然后才 deliverFresh；settleTerminal 先落 attempt 终态，KindCompleted 才落消费回执。
+  host.go:816-825         noticeInvocation：follow-up 回合的 invocation = "notice:" + notice.FactKey()。
+  settle_turn.go:404-411  fire 正常返回后仍有一次 Consume（容忍 state.ErrClaimSettled），作为无 barrier 面
+                          （自定义 driver）的兜底；同键重复消费由 account 具名拒绝。
+c1 fire 前写 durable attempt（双重 fence）
+  settle_turn.go:366-385  driveSeat: attempts.Attempt(notice) 读门 →
+                            held && Terminal==completed → 只 Consume（补回执）并 return，不再驱动第二个回合；
+                            err → release；
+                            否则 RecordAttempt({Terminal:""}) 先落 in-flight 标记，再 fire。
+  runtime/state/durable.go:73-99,242-303  SettleAttempt / attemptRecord / attemptRecorder；
+                          attemptPrefix = "tagent/task/v1/attempt:"，键 = task\x00round\x00kind\x00seq；
+                          recordAttempt 走 Put+Sync（同屏障），同内容重复不发第二对，写失败如实报错不确认；
+                          load() 扫描 attemptPrefix 回填 → Boot 后 RestoreOwed/Wake 读到跨进程 attempt。
+  runtime/state/memory.go:265-314  MemoryStore.Attempt / RecordAttempt（有 durable 账走 attemptsLog，无则自账，
+                          空 TaskID → ErrNoticeIdentityMissing）。
+  runtime/state/mailbox.go:49-56   durableConsumption 收窄为 consumptionRecorder+OwedNotices（attempt 走独立窄口，
+                          S1 iface-methods 3 门）。
+e 通知身份去 invocation 分域（transcript 不追加第二条指令）
+  host.go:775-790         fireNoticeTurn: identified 取 barrier.notice（补齐四元组）→ invocationID := noticeInvocation(identified)；
+                          notice 事实键仍是 NoticeFactKey(invocationID, notice) 的**形状**，身份改由通知本体决定。
+                          同通知 → 同键 → CommitToSession 幂等命中，transcript 只有一条指令。
+  NoticeFactKey 生成/消费点核对：agent.NoticeFactKey（api/agent）签名不变；调用点=fireNoticeTurn（生成）；
+  settleDeliveryKey(notice)（settle_turn.go:355 读回通知事实，四元组寻址，与 invocation 无关）；
+  facts.go sink 的 EVID 家族断言读的是事实键本体与 meta，不读 invocation 前缀 → 无合同断言随本改动改写。
+
+────────────────────────────────────────────────────────────────
+二、三 fence 验收锚（tests/integration/host，新文件 settle_wake_single_drive_test.go）
+────────────────────────────────────────────────────────────────
+命令：
+  go test ./tests/integration/host -run 'TestSettleWakeSingleDrive|TestSettleWakeUnified' -count=1 -v
+结果（/tmp/green_final.txt，ok 7.216s）：
+  --- PASS: TestSettleWakeSingleDrive (3.41s)
+      --- PASS: a_kill_after_the_terminal_fact_drives_exactly_one_follow-up_turn (3.15s)   ← ①真子进程 SIGKILL + 重启
+      --- PASS: a_landed_attempt_is_closed_beside_its_receipt_instead_of_driven_again (0.02s) ← ②in-flight 不盲重放
+      --- PASS: a_stopped_attempt_resumes_without_a_second_instruction (0.24s)            ← ③同进程重放（entryCalls≥3）
+  --- PASS: TestSettleWakeUnified (3.44s)  4 子测（重复 fire 单回合 / 跨重启续跑 / Stop 保留 / 已消费不重放）
+子测①的 shape：真子进程执行同一 test binary（-test.run=^TestSettleWakeSingleDrive$ + 工作单 env），
+  provider 脚本 worker→entry→follow-up；child 的 sender 在 body==followUpBody 时写 deliveries.jsonl
+  并 file.Sync() 后阻塞 → 父侧见到 "delivering" 即 SIGKILL（断言 exitCode=-1、stderr 无 DATA RACE）
+  → 断言 entryCalls==3 && followUps==1 → 同一 root 重启（bootRestoredSettleDrive）→ 静置 3s →
+  followAfter==1、entryAfter==3、重启后交付 body 数=0、notice 事实=1、链上带 follow-up body。
+  即：回执/终态与交付同屏障后，重启**恰一驱动**且不再补发第二条答复。
+
+────────────────────────────────────────────────────────────────
+三、回滚即红三点（逐点实测，原位还原后复绿）
+────────────────────────────────────────────────────────────────
+① 还原 c2 同屏障（barrier 闭包撤掉 + host.settleTerminal 短路 + 终态/回执退回 fire 之后）
+   → go test ./tests/integration/host -run 'TestSettleWakeSingleDrive/a_kill' -count=1
+   → FAIL: settle_wake_single_drive_test.go:312: follow-up turns after the restart = 2,
+     want the 1 the landed attempt closes                                   （/tmp/redA2_kill.txt）
+② 还原 c1 标记门（`case false && held && landed.Terminal == settleCompletedTerminal`）
+   → go test ./tests/integration/host -run 'TestSettleWakeSingleDrive/a_landed' -count=1
+   → FAIL: settle_wake_single_drive_test.go:339: follow-up turns beside a landed attempt = 1,
+     want none: the entry is closed with its receipt                       （/tmp/redB.txt）
+③ 还原 e 分域（invocationID := h.nextInvocation(addr)）
+   → go test ./tests/integration/host -run 'TestSettleWakeSingleDrive/a_stopped' -count=1
+   → FAIL: settle_wake_single_drive_test.go:457: notice facts after the resume = 2,
+     want the one instruction the notification commits under its own identity （/tmp/redC.txt）
+三点各自原位还原 → 第四节的绿证。每点只单独打补丁并只跑该点对应的子测（"-run 'TestSettleWakeSingleDrive/a_kill|a_landed|a_stopped'"），
+未在同一轮里同时采集另两点的状态；未采信的组合不在本文声称。
+
+────────────────────────────────────────────────────────────────
+四、生产消费者锚：03.11 长程六片（seed 1/7/42 × window 256/32768）
+────────────────────────────────────────────────────────────────
+命令（串行，长跑后台 + 轮询；runner 加 -race 由合同 race:true 决定）：
+  python3 scripts/scenarios/run_runtime_scenarios.py \
+    --contract golden/runtime/event_integrity_scenarios.json --scope event-long \
+    --seed <S> --window <W> --repeat 1 --timeout 1200 --out /tmp/tagent-six/s<S>-w<W>
+逐片数字（report-*.json 的 reconciliation；dup=0 指 duplicate_notifications / duplicate_input_requests 皆空）：
+
+  seed/window    verdict  notif(requests/expected)  dup  miss  actions     wall     run_dir(03.11)
+  1/256          match    47/47                      ∅    ∅     1728/1728  732.61s  run-s1-w256-20261027-131039
+  1/32768        match    47/47                      ∅    ∅     1728/1728  895.04s  run-s1-w32768-20261027-132301
+  7/256          match    47/47                      ∅    ∅     1728/1728  713.29s  run-s7-w256-20261027-133800
+  7/32768        match    47/47                      ∅    ∅     1728/1728  845.43s  run-s7-w32768-20261027-134958
+  42/256         match    47/47                      ∅    ∅     1728/1728  751.92s  run-s42-w256-20261027-140408
+  42/32768*      match    47/47                      ∅    ∅     1728/1728  857.84s  run-s42-w32768-20261027-143646
+  合计 6/6 verdict=match，每片 notif=47、dup=0、missing=0、action 对账 1728/1728。
+
+  * 受控重跑：42/32768 首跑（run-s42-w32768-20261027-141644）红，形态与 dup 无关：
+    gen48 smoke_test.go:2853 等不到 "settle-ack SMOKE-R420496" 60s（recorded=21）；provider 尾部 dump 显示
+    该 marker 的入口回合被重启后重驱，最后一次工具结果 = 
+    "state: the task's admission material is already declared with other content"（ErrSpecConflict：重放
+    委派的 admission Spec 里带进程级 InvocationID/CallID → 同 TaskID 异内容被拒 → 该委派不再结算 →
+    通知永不发出 → ack 缺失）。该形态在基线期同样出现：/tmp 里 2026102* 历史 run 的
+    provider-requests-failed.json 有 10 片命中同一行（含 20261025=G6b 之前的 run），与本单三 fence 无关；
+    属「重启重放委派 admission」的独立缺陷（待单开），按 flake 台账受控重跑一片后转绿，六片锚成立。
+
+────────────────────────────────────────────────────────────────
+五、门禁（全量复跑，逐条 RC）
+────────────────────────────────────────────────────────────────
+- go build ./...、go vet ./...                                          RC=0
+- go test ./... -short -count=1（根模块 38 包 ok，0 FAIL）             RC=0（/tmp/root_short.txt）
+- ./scripts/gates/race_check.sh ./tests/integration/host/ ./tests/integration/execution/ ./runtime/state/ ./runtime/agent/
+                                                                       RC=0（host 44.5s / execution 25.3s / state 1.3s / agent 1.7s）
+- 三模块 build+vet+test -short：examples/cli-host RC=0（ok 0.337s）、examples/wechat-bot RC=0（ok 0.406s）
+- bash scripts/lint.sh                                                  RC=0（lint: ok；comment_policy 0 finding；
+                                                                       gen_godoc docs/api 与源码一致）
+- 症状全家：go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom'   RC=0（ok 13.136s）
+- 合同面 event-short 十轮：9/10 verdict=match；repeat-6 红在 03.6/TestEventIntegrityFoldControl/negative
+  （"the restart minted the synthetic key -hist-…"）。归因为既有面：同一断言在基线 HEAD b0af340 的
+  git worktree（/tmp/tagent-base，无本单改动）单跑同样红、形态逐字相同；历史归档
+  openspec/changes/archive/2026-10-25-…/EVID-05-fix-summary.json 也是同一句。与本单三 fence 无关（留待单开）。
+
+────────────────────────────────────────────────────────────────
+六、flake 台账（本单）
+────────────────────────────────────────────────────────────────
+- 03.11 seed42/window32768 首跑红（委派 admission 重放冲突 → ack 缺）→ 受控重跑 1 次绿（14:36:43–14:51:05）；
+  基线期 10 片命中同一冲突行，判 flake/既有缺陷，不计为本单回归。
+- event-short repeat-6 红（03.6 FoldControl/negative 折叠 synthetic 键在重启后重铸）→ 基线 worktree 复现，
+  判既有（归档 EVID-05 同一句），不计为本单回归；其余 9 轮 match。

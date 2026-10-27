@@ -1055,8 +1055,8 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
     against the given authority. An authority that is not present refuses every
     read. A consumption recorder, when one is supplied, receives the receipt of
     every completed logical consumption behind its own sync barrier before the
-    mailbox confirms the entry; a store beside none keeps the consumption in its
-    own bookkeeping alone.
+    mailbox confirms the entry, and serves the attempt record of every follow-up
+    turn beside it; a store beside none keeps both in its own bookkeeping alone.
 
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error
 
@@ -1069,6 +1069,14 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
     and the notification that produced it. Acceptance is idempotent by the
     notification's stable identity, so a replayed delivery records no second
     fact and keeps the target the first acceptance recorded.
+
+func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error)
+    Attempt reports the attempt record of one notification and whether
+    this mailbox holds one at all: the record of the one follow-up turn the
+    notification started, beside the terminal that turn ended on. A durable
+    account behind the mailbox answers from the log, so a process that starts
+    over the same log reads the attempt the stopped process left; a mailbox
+    beside none answers from its own bookkeeping alone.
 
 func (m *MemoryStore) Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
     Claim moves one accepted input from pending to claimed in the mailbox of the
@@ -1109,6 +1117,15 @@ func (m *MemoryStore) Reclaim(ctx context.Context, addr event.Address, instance 
     as acceptance and the first claim recorded them: an entry still pending is
     claimed through Claim, and an entry whose consumption completed is refused
     by name.
+
+func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, attempt SettleAttempt) error
+    RecordAttempt records one attempt of a notification's follow-up turn:
+    the empty terminal marks the turn in flight, and a terminal marks the one it
+    ended on. A durable account behind the mailbox stages the record behind its
+    sync barrier before this returns, so a caller that read the record back from
+    a second process reads the same attempt; a record the account already holds
+    with the same content stages no second pair, and a write the account refused
+    is reported instead of confirmed.
 
 func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
     Release returns one claimed input to the pending pool of the mailbox of
@@ -1649,6 +1666,19 @@ type Session struct {
 
     Session is the state owner's site for one explicit (agent, session) address:
     the mailbox bookkeeping of the site.
+
+type SettleAttempt struct {
+	// Terminal is the terminal the driven turn ended on, empty while the turn
+	// is in flight.
+	Terminal string `json:"terminal,omitempty"`
+}
+    SettleAttempt is the durable record of the one follow-up turn a notification
+    started: the terminal that turn ended on, and empty while the turn is in
+    flight. The record answers one question for the settle pump — whether a turn
+    already drove this notification to its terminal — so a process that starts
+    over the same log closes the entry beside the landed turn instead of driving
+    a second one. It says nothing about delivery: the consumption receipt is the
+    record of a delivered answer, and the two records are read as one account.
 
 type SkillLoad struct {
 	// Skill is the skill name the load was asked for.
