@@ -1,4 +1,4 @@
-// from one face and one face only — the mapped sequence the commits record — so
+// The history of one session chain is read from one face and one face only — the mapped sequence the commits record — so
 // what a chain restores is the same sequence whether or not its declaration
 // names a presentation budget. A budget shapes what a request presents; it never
 // decides whether the chain's history exists, so two chains of one session that

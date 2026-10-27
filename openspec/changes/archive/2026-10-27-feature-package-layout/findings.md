@@ -24,3 +24,14 @@
 - **race RC=1**：TestMCPFaceBindsTheDeclaredServers 确定性 DATA RACE（2/2）——**基线 8919acf 同红**（继承面实锤）；栈顶=trpc-mcp-go v0.0.10 streamableHTTPClientTransport.setSessionID/send（LEDGER U5 既有双签豁免）；高压下竞态显化为功能性失败（race 污染 session id→网关断言败），race_check 豁免只认 race 报告不认功能败——门红如实记录。**处置=WATCH：升级 trpc-mcp-go 至含上游修复版后删 U5 签名复跑（LEDGER 既定移除条件）。**
 - **mutations/symptom/witnesses/三模块/selftests/lint/openspec/short-root 全 RC=0**；longs 六片进行中（结果入 evidence/F2）。
 - **远端 CI**：push 型 workflow（runtime-contracts）于 44761b9 **SUCCESS**（provider-contract=手动、real-smoke=定时、CI=仅 dev/main 与 PR——next 推送无 CI 型 run，非跳过）。
+
+---
+
+## 终态 CodeReview 补记（2026-10-28，归档后追加勘误段）
+
+独立 CodeReview（净变更 8afa6cfc..0066ca8）：Critical 0 / Major 1 / Minor 2——
+- **M1 已修**：smoke_exec_test 之 Wave2Exec watchdog 子测残留断言恒空的 SessionHistory（单面契约下的迁移遗漏消费者；基线即红、tmux 缺失环境从未踩到=门禁盲区）。修复=改读单面真义：被受理两轮 exec 留痕于映射序列恰 2 条、被拒第三轮不留事实（回执轮内范围）。修后三连绿+smoke 全套中本会话面绿；死助手 smokeExecHistoryCarries 与失用 import 一并清除。
+- **m1 已修**：single_history_path_test.go 文件头注释首句残缺（磁盘故障恢复期内容异常）——补全首句。
+- **m2 证伪**：幻影 ADD replay_presentation_test.go 经磁盘核实不存在（索引恢复陈旧记录），无行动。
+- **继承面登记（基线 8919acf 同红、不扩面）**：TestLocalSmokeWave2Data（call_subagent 装配）/TestLocalSmokeWave2Recall 为本会话前已破的 smoke 项（同静默失效家族——不在 F2 门禁清单）；FoldControl 为当晚已定性时序 flake。留档待修。
+数值/不变量核验（评审出具）：noticeCard 边界、快照单源链路、EventBody 单格式、SameFact 排除面、提交单入口、迁移残留零、Observer 分层——全部通过。

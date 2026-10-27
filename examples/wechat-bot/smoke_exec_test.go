@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	tagentplugin "github.com/SpellingDragon/tagent/api/plugin"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 )
@@ -120,10 +119,19 @@ func smokeExecWatchdogRefusal(t *testing.T) {
 		t.Fatalf("the closing request's last message = %q, want the closing instruction", got)
 	}
 
-	history := rig.host.Run().SessionHistory(rig.addressOf(chat))
-	if !smokeExecHistoryCarries(history, "exec_run", smokeExecRefusal) {
-		t.Fatalf("the closing round's exec_run call left no refusal receipt in the session history (%d message(s)): %+v\nrecent requests:\n%s",
-			len(history), history, rig.recentRequests(6))
+	entries, _ := rig.host.Run().ReplayEntries(rig.addressOf(chat).SessionID)
+	admitted := 0
+	for _, entry := range entries {
+		if strings.Contains(entry.Content, "smoke-exec-ok") {
+			admitted++
+		}
+		if strings.Contains(entry.Content, smokeExecRefusal) {
+			t.Fatalf("the refused closing-round call left a fact on the mapped sequence (one face: a refused call's receipt is round-scoped): %q", entry.Content)
+		}
+	}
+	if admitted != 2 {
+		t.Fatalf("the mapped sequence carries %d admitted exec receipt(s), want the two admitted rounds (%d entries): recent requests:\n%s",
+			admitted, len(entries), rig.recentRequests(6))
 	}
 
 	if after := len(rig.gateway.Manager().Pending()); after != before {
@@ -317,16 +325,6 @@ func smokeExecToolArgs(messages []smokeModelMessage, name string) (string, bool)
 // smokeExecClosingRequest 报告这次请求是否已是收尾轮：最后一条用户消息是收尾指令。
 func smokeExecClosingRequest(messages []smokeModelMessage) bool {
 	return strings.Contains(smokeLastUserText(messages), smokeExecClosingPrompt)
-}
-
-// smokeExecHistoryCarries 报告会话历史里是否有一条指定工具、携带给定正文的回执。
-func smokeExecHistoryCarries(messages []tagentmodel.Message, tool, want string) bool {
-	for _, msg := range messages {
-		if msg.ToolName == tool && strings.Contains(msg.Content, want) {
-			return true
-		}
-	}
-	return false
 }
 
 // smokeExecTextCount 报告替身通道向该会话投递过多少条携带给定子串的文本。
