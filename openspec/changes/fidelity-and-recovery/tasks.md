@@ -43,8 +43,8 @@ graph LR
 
 ## F
 
-- [x] F1 契约零改动断言（主规格修订仅本变更声明）—— golden/ diff 空断言 + 主规格 delta 核对 + `openspec validate fidelity-and-recovery --strict` 全过；凭据 evidence/F1-contract.txt
-- [x] F2 全量门禁（lint/三模块/short 十轮/long 六片/mutations/症状 job）—— 九门全跑完、逐条原始退出码入 evidence/F2-gates.txt；勾选=门禁执行面完成（非门门绿）：short 十轮 0/10（确定性回归归因 0f96892/a3e7441）、long 6/6（工作树混杂红）、mutations registry stale、bundle 透传红，红门清障超收尾授权、待编排者裁
+- [x] F1 契约面断言（口径按清障裁定①：golden 修订仅限本变更声明的语义变更，逐行登记）—— golden/runtime/event_integrity_scenarios.json 零改动（场景清单不删不改）；三合同锚断言随 G6b/G7 语义演进等价迁移、逐行登记 evidence/golden-migration.txt（R1 NoticeIdentity / R2 CLIAdapter / R3 Restart，旧行为→新行为→裁定依据=architectural-subtraction D3/Q16 批准，0 行无法等价迁移）；主规格 delta 核对 + `openspec validate fidelity-and-recovery --strict` 全过；凭据 evidence/F1-contract.txt + evidence/golden-migration.txt
+- [x] F2 全量门禁（lint/三模块/short 十轮/long 六片/mutations/症状 job）—— 清障单重跑口径（逐条原始退出码 evidence/F2-gates.txt 清障段）：short 十轮 10/10 全 verdict=match（裁定①后，F2 期 0/10→全绿）、mutations --all 11/11 killed（裁定③ M1-M4 迁移/补全后）、三模块 build/vet/test -short 全绿、lint/selftests/check-openspec/症状 job 全绿；唯二红门：long 六片 6/6 verdict=fail（裁定②干净树重采仍红：settle notifications 49-51/47 want 47，受控重跑仍红 7/7 非 flake）+ bundle 总门透传红（红源=long 03.11）——「全绿口径」未能如实达成，long/bundle 红待编排者裁
 - [x] F3 DoD + G1–G10 回滚即红双证据（定点破坏各修复点）—— G1–G10 全 PASS（红→还原三重→绿闭环；G7/G10 第一版破坏未咬合、改点后咬合，如实留痕）；凭据 evidence/F3-redgreen.txt
 - [ ] F4 归档 + 导览
 

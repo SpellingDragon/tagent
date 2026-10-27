@@ -175,3 +175,41 @@ $ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -co
 SYMPTOM_RC=0            证据 symptom.log（ok wechat-bot 13.676s）
 含 G10 红锚 TestLocalSmokeSymptomNoSendTool（乱序负锚在内）全绿。
 
+
+================================================================================
+清障单重跑段（编排者三项裁定落地后，2026-10-27；HEAD d248d05+清障改动，证据根 /tmp/tagent-clear-evidence）
+================================================================================
+裁定①验证面：
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-short --repeat 10 --out /tmp/tagent-clear-evidence/event-short
+SHORT_RC=0   passed=10/10，10 轮全 verdict=match exit=0（event-short/repeat-1..10/
+  evidence.json + event-short.log；F2 时 0/10 → 清障后 10/10）。
+裁定②long 干净重采（gitlink 指针 888fc16 未动、untracked 杂项留置、干净树串行防互抢）：
+$ bash /tmp/tagent-clear-evidence/run-long.sh（六片 seed 1/7/42 × window 256/32768，
+  --repeat 1 --timeout 1200）
+LONG_RC=1   6/6 verdict=fail（07:09-08:26 串行；smoke_test.go:2894 settle notifications
+  = 51/50/50/51/50/51 每 47，want 47）；受控重跑 1 片（rerun-seed-1-window-256）仍 fail
+  （49/47），累计 7/7 同向非 flake。裁定②「六片 match」目标落空；F2 期「工作树混杂红」
+  假设被否定（d248d05 纯 openspec 提交、产品面=a3e7441 与 F2 纯净树一致），同产品面
+  两棵树结果分叉之谜未解 → 待编排者裁（详见战报②）。
+裁定③registry 迁移（M1/M2/M3 + M4 注入补全，逐行登记 mutation-anchor-migration.txt）：
+$ python3 scripts/check_event_integrity_mutations.py --all --json \
+    --out /tmp/tagent-clear-evidence/event-integrity-mutations
+MUTATIONS_RC=0   11/11 killed（全 named_assertion 命中，control_tree_green=true；
+  证据 event-integrity-mutations/evidence.json + mutations-all.log）。静态锚复核：
+  24 处 patch 锚在工作树逐处 hits=1（python importlib 复核，命令见战报①）。
+收尾门禁（串行；完整原始输出 gates.log + 各门日志）：
+  三模块 build/vet/test -short：root 0/0/0、wechat-bot 0/0/0、cli-host 0/0/0（TEST_RC 均 0）
+  LINT_RC=0（lint: ok）
+  SELFTESTS_RC=0（Ran 233 tests in 11.889s / OK）
+  CHECK_OPENSPEC_RC=0（change/fidelity-and-recovery ✓；唯一 ✗=change/post-training-data-loop
+    为 WIP 非门内项，脚本注明 not gated）
+  SYMPTOM_RC=0（ok wechat-bot 12.944s）
+bundle 总门：
+$ python3 scripts/check_runtime_evidence.py --bundle /tmp/tagent-clear-evidence/bundle \
+    --contract golden/runtime/event_integrity_scenarios.json --json
+BUNDLE_RC=1   counts: bundle_evidence_files=17（short=10 / long=6 / mutation=1），
+  结构校验过（矩阵齐全、repeat 1..10 齐全、mutation evidence 在位）；红源=long 六片
+  透传（03.11/TestEventIntegrityLongRun recorded fail），short/mutation 面干净。
+  红因同 §8 非 bundle 组装问题；随裁定② 待裁项一并待编排者裁。
+

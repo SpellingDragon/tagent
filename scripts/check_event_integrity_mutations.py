@@ -140,15 +140,19 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         replacement=Replacement(
             file="host.go",
+            # Anchor migrated per the clearance ruling (G5/G6b follow-up turn
+            # checking turn.Terminal): the call assigns the returned turn now.
+            # The injected defect is unchanged — the notice material re-enters
+            # the follow-up range as a second input fact beside its notice fact.
             old=(
-                "\t_, err = h.driveLocked(ctx, InvokeRequest{\n"
+                "\tturn, err := h.driveLocked(ctx, InvokeRequest{\n"
                 "\t\tInvocationID:  invocationID,\n"
                 "\t\tAddress:       addr,\n"
                 "\t\tTriggerSource: \"task\",\n"
                 "\t})\n"
             ),
             new=(
-                "\t_, err = h.driveLocked(ctx, InvokeRequest{\n"
+                "\tturn, err := h.driveLocked(ctx, InvokeRequest{\n"
                 "\t\tInvocationID:  invocationID,\n"
                 "\t\tAddress:       addr,\n"
                 "\t\tTriggerSource: \"task\",\n"
@@ -172,22 +176,78 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         description=(
             "Restore the settle driver dropping a notice that arrives while a "
-            "follow-up turn is in flight instead of retaining it."
+            "follow-up turn is in flight instead of retaining it. Under the G6b "
+            "mailbox account the retention is the account plus the wake and the "
+            "drain re-read, so the mutant swallows the observation's wake while "
+            "the pump is driving and ends the drain after its one round: "
+            "the busy notice is dropped instead of kept."
         ),
         replacement=Replacement(
             file="settle_turn.go",
+            # Patch 1 — the observation of a notice arriving while the pump
+            # drives (busy) wakes nothing: the busy notice is dropped instead of
+            # kept on the account for a later round.
             old=(
-                "\tif d.firing {\n"
-                "\t\td.retained = append(d.retained, notice)\n"
-                "\t\td.mu.Unlock()\n"
+                "\tif !terminalSettleKinds[noticeKindOf(fact)] {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
+                "\td.Wake()\n"
+                "\treturn nil\n"
+                "}\n"
             ),
             new=(
-                "\tif d.firing {\n"
-                "\t\td.mu.Unlock()\n"
+                "\tif !terminalSettleKinds[noticeKindOf(fact)] {\n"
                 "\t\treturn nil\n"
                 "\t}\n"
+                "\td.mu.Lock()\n"
+                "\tbusy := d.busy\n"
+                "\td.mu.Unlock()\n"
+                "\tif !busy {\n"
+                "\t\td.Wake()\n"
+                "\t}\n"
+                "\treturn nil\n"
+                "}\n"
+            ),
+        ),
+        companion=(
+            Replacement(
+                file="settle_turn.go",
+                # Patch 2 — the driving flag the busy swallow reads.
+                old="\tmu      sync.Mutex\n\tstopped bool\n",
+                new="\tmu      sync.Mutex\n\tstopped bool\n\tbusy    bool\n",
+            ),
+            Replacement(
+                file="settle_turn.go",
+                # Patch 3 — the pump is busy while it drives its round.
+                old=(
+                    "func (d *SettleDriver) drain() {\n"
+                    "\tctx := d.stopCtx\n"
+                    "\ttried := map[seatKey]bool{}\n"
+                ),
+                new=(
+                    "func (d *SettleDriver) drain() {\n"
+                    "\tctx := d.stopCtx\n"
+                    "\td.mu.Lock()\n"
+                    "\td.busy = true\n"
+                    "\td.mu.Unlock()\n"
+                    "\tdefer func() {\n"
+                    "\t\td.mu.Lock()\n"
+                    "\t\td.busy = false\n"
+                    "\t\td.mu.Unlock()\n"
+                    "\t}()\n"
+                    "\ttried := map[seatKey]bool{}\n"
+                ),
+            ),
+            Replacement(
+                file="settle_turn.go",
+                # Patch 4 — the drain ends after its one round instead of
+                # re-reading the account, so nothing picks the swallowed notice
+                # up later. (The first form of this patch reversed the exit
+                # condition — `if worked { return }` — and spun forever on a
+                # round that drove nothing; the unconditional return keeps the
+                # one-round-then-out semantics of the drop without the spin.)
+                old="\t\tif !worked {\n\t\t\treturn\n\t\t}\n",
+                new="\t\t_ = worked\n\t\treturn\n",
             ),
         ),
         test_package="./tests/integration/host",
@@ -389,22 +449,26 @@ MUTATIONS: Tuple[Mutation, ...] = (
             ),
             Replacement(
                 file="request.go",
+                # Anchor migrated per the clearance ruling (G4 full-address
+                # index key): same registration site, the full addr key now.
                 old=(
-                    "\tr.replays[chain.SessionID] = replayEntry{projection: projection, window: window}\n"
+                    "\tr.replays[addr] = replayEntry{projection: projection, window: window}\n"
                 ),
                 new=(
-                    "\tr.replays[chain.SessionID] = replayEntry{projection: projection, "
+                    "\tr.replays[addr] = replayEntry{projection: projection, "
                     "window: window, ended: projection.Len()}\n"
                 ),
             ),
             Replacement(
                 file="request.go",
+                # Anchor migrated per the clearance ruling (the projected
+                # segment carries the run handle now).
                 old=(
-                    "\treturn projectedSegment(ctx, a.sequence.projection, a.sequence.window, "
+                    "\treturn projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, "
                     "a.sequence.endedPrefix())\n"
                 ),
                 new=(
-                    "\treturn projectedSegment(ctx, a.sequence.projection, a.sequence.window, "
+                    "\treturn projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, "
                     "a.sequence.ended)\n"
                 ),
             ),
@@ -488,12 +552,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "registered by 计划回写③ (task-graph 04.4 gate)"
         ),
         description=(
-            "Report a segment the storage tier refused as a committed fact: the fact "
-            "enters the live ledger and the turn keeps going, so the barrier failure is "
-            "answered as success instead of reported by name."
+            "Report a segment the storage tier refused as a committed fact: every "
+            "storage-tier refusal in the persist path is answered as a committed "
+            "fact, the fact enters the live ledger and the turn keeps going, so the "
+            "barrier failure is answered as success instead of reported by name."
         ),
         replacement=Replacement(
             file="facts.go",
+            # The refusal exits of the persist path all answer as committed. The
+            # first registry form swallowed the segment store error alone; the
+            # live persist path splits one refusal over several exits (the read
+            # that flushes staged writes, the originals put, the conflict read),
+            # so one swallow left the turn failing beside an unnamed error or hid
+            # the mutant entirely. The defect claim is unchanged — a refused
+            # segment is reported as a committed fact and the barrier failure is
+            # answered as success.
             old=(
                 "\tif err != nil {\n"
                 "\t\treturn err\n"
@@ -505,6 +578,60 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "\t\treturn nil\n"
                 "\t}\n"
                 "\tif supply == nil {\n"
+            ),
+        ),
+        companion=(
+            Replacement(
+                file="facts.go",
+                # The read that flushes staged writes answers as committed.
+                old=(
+                    "\tstored, held, err := tier.Segments.GetEvent(ctx, evt.Key)\n"
+                    "\tif err != nil {\n"
+                    "\t\treturn err\n"
+                    "\t}\n"
+                ),
+                new=(
+                    "\tstored, held, err := tier.Segments.GetEvent(ctx, evt.Key)\n"
+                    "\tif err != nil {\n"
+                    "\t\treturn nil\n"
+                    "\t}\n"
+                ),
+            ),
+            Replacement(
+                file="facts.go",
+                # The originals write answers as committed.
+                old=(
+                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {\n"
+                    "\t\treturn err\n"
+                    "\t}\n"
+                ),
+                new=(
+                    "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {\n"
+                    "\t\treturn nil\n"
+                    "\t}\n"
+                ),
+            ),
+            Replacement(
+                file="facts.go",
+                # The conflict-branch read answers as committed.
+                old=(
+                    "\t\tprior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)\n"
+                    "\t\tif getErr != nil {\n"
+                    "\t\t\treturn getErr\n"
+                    "\t\t}\n"
+                ),
+                new=(
+                    "\t\tprior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)\n"
+                    "\t\tif getErr != nil {\n"
+                    "\t\t\treturn nil\n"
+                    "\t\t}\n"
+                ),
+            ),
+            Replacement(
+                file="facts.go",
+                # The conflict-branch refusal answers as committed.
+                old="\t\tif !held {\n\t\t\treturn err\n\t\t}\n",
+                new="\t\tif !held {\n\t\t\treturn nil\n\t\t}\n",
             ),
         ),
         test_package="./tests/integration/history",

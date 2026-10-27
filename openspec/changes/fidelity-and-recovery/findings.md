@@ -406,3 +406,38 @@ retained/firing/rearm 三态内存队列删除，通知待消费责任归 mailbo
 ## 白名单
 
 白名单内：settle_turn.go、runtime/state/{mailbox,memory,durable}.go、tests/integration/{host,execution}/**、openspec/changes/fidelity-and-recovery/**。白名单外触点（申报）：host.go（fireNoticeTurn 终态检查与 doc 合并、Boot 恢复后 Wake）、runtime/state/durable_test.go（冻结断言改造）。
+
+## 清障裁定（编排者三项已批裁定的落地记录）
+
+来源：fidelity-and-recovery 清障单，HEAD d248d05；批准依据=architectural-subtraction D3.4
+（改语义断言=编排者批准+登记）/ Q16；掩盖缺陷的改断言为禁止项，三裁定落地均逐行登记、
+负锚意图逐字保留。F4（归档+导览）留授权，不在本清障单内。
+
+### 裁定① golden 合同锚随语义演进（登记 evidence/golden-migration.txt）
+- 三个合同锚（01.1 NoticeIdentity / 01.7 CLIAdapter / 03.9 Restart）随 G6b（mailbox 统一）
+  与 G7（MaxTokens 注册门删除、one face per fact）合法修订断言形态；golden JSON 零改动、
+  0 个场景删除、0 行无法等价迁移。逐行修订登记=R1/R2/R3（旧行为→新行为→裁定依据）。
+- F1 断言口径改为「golden 修订仅限本变更声明的语义变更（逐行登记）」（tasks.md 已更新）。
+- 可回滚点：三处断言/读出面修改全在 tests/integration/{execution,history} 与
+  examples/cli-host/main.go，revert 三文件即回到修订前形态，无数据迁移面。
+
+### 裁定② long 干净重采（登记 F2-gates 清障段 + /tmp/tagent-clear-evidence）
+- gitlink examples/wechat-bot/skills/interview/agent-interview-helper 指针未被改动
+  （888fc16=888fc16，porcelain=v2 可复核）；内部 untracked 杂项（plan.md/question.md）
+  按裁定「untracked 杂项不动」留置。干净树长跑六片（seed 1/7/42 × window 256/32768，
+  --repeat 1 --timeout 1200，串行防 2 核互抢假红）。
+- 可回滚点：纯证据采集，无代码改动，无需回滚；证据目录 /tmp/tagent-clear-evidence。
+
+### 裁定③ mutations registry anchor 迁移（登记 evidence/mutation-anchor-migration.txt）
+- MUT-EVID-02/03/04 共 4 处失效锚迁到 G6b/G7 语义后的等价新锚（M1 host.go turn 形态、
+  M2 settle_turn.go busy 丢通知注入形态重构为 4 补丁组、M3 request.go 全地址键+run 句柄）；
+  缺陷主张与 expect_assertion 全部冻结不变；其余 8 mutation 未动。
+- 可回滚点：仅 scripts/check_event_integrity_mutations.py 的 registry 行，revert 即回
+  旧锚形态；产品面零写入（写树纪律 R26 不变）。
+
+### 清障实测数字（2026-10-27，逐条可复跑，完整退出码 evidence/F2-gates.txt 清障段）
+- 裁定①：`python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out /tmp/tagent-clear-evidence/event-short` → passed=10/10 全 verdict=match（F2 期 0/10 → 清障后全绿）；golden 逐行登记 3 行（R1/R2/R3）、0 行无法等价迁移、0 场景删除、golden JSON 零改动（evidence/golden-migration.txt）。
+- 裁定②：干净树六片（seed 1/7/42 × window 256/32768）6/6 verdict=fail——smoke_test.go:2894 settle notifications=51/50/50/51/50/51 每 47（want 47）；受控重跑 1 片仍 fail（49/47），累计 7/7 同向非 flake；「六片 match」目标落空，待裁。
+- 裁定③：`python3 scripts/check_event_integrity_mutations.py --all --json` → 11/11 killed（全 named_assertion 命中、control_tree_green=true）；registry 迁移 M1/M2/M3 + M4 注入补全（M4 超裁定③字面、已申报）；静态锚复核 24 处 patch 锚逐处 hits=1（evidence/mutation-anchor-migration.txt）。
+- 收尾门禁：三模块 build/vet/test -short、lint、selftests（Ran 233 tests / OK）、check-openspec（本单 ✓）、症状 job（ok wechat-bot 12.944s）全 RC=0；bundle 总门 RC=1（17 证据结构过：short=10/long=6/mutation=1，红源=long 透传）。
+- 证据根：/tmp/tagent-clear-evidence（run-long.sh / event-short / event-long（含 rerun 片）/ event-integrity-mutations / bundle / gates.log）。

@@ -145,8 +145,8 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	if delegatedNotice.Ref.Address != addr {
 		t.Fatalf("delegated notice target = %+v, want the issuing address %+v", delegatedNotice.Ref.Address, addr)
 	}
-	if delegatedNotice.State.NoticePhase != query.NoticePhaseAccepted {
-		t.Fatalf("delegated notice phase = %q, want the acceptance the unattended delivery records", delegatedNotice.State.NoticePhase)
+	if delegatedNotice.State.NoticePhase != query.NoticePhaseConsumed {
+		t.Fatalf("delegated notice phase = %q, want consumed after the mailbox claim and completion", delegatedNotice.State.NoticePhase)
 	}
 
 	followUp := eventIntegrityNoticeFacts(facts)

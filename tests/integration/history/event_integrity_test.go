@@ -3265,13 +3265,13 @@ func restartAssertNothingCommitted(t *testing.T, o restartOutcome) {
 }
 
 // restartAssertOwed proves an interruption after the commit, after the claim or
-// before the confirmation leaves the notification owed. The restart rebuilds
-// the task and keeps the duty honest in one of the two ways the contract
-// admits: it reports the duty open beside the durable boundary that still owes
-// it (the retained branch, because a duty frozen to the interrupted process is
-// never delivered into a later instance), or it really delivered the duty and
-// left the receipt the boundary reads. Both branches read the restart's own
-// first actual request and send.
+// before the confirmation leaves the notification owed or really delivered, and
+// never silently dropped. The restart rebuilds the task and keeps the duty
+// honest in one of the two ways the contract admits: the unconsumed notice
+// stays owed beside the durable boundary that still holds it (the mailbox
+// branch, because an unconsumed notice is kept across the restart until a wake
+// claims it), or it really delivered the duty and left the receipt the boundary
+// reads. Both branches read the restart's own first actual request and send.
 func restartAssertOwed(t *testing.T, o restartOutcome) {
 	t.Helper()
 	taskID, ok := restartSoleTask(o.Recover)
@@ -3280,14 +3280,14 @@ func restartAssertOwed(t *testing.T, o restartOutcome) {
 	}
 	switch o.Recover.Boundary.Owed {
 	case 1:
-		if o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 1 {
-			t.Fatalf("the %s restart drain = %+v, want the recovered obligation reported open", o.Phase, o.Recover.Drain)
+		if len(o.Recover.Notices) != 1 || o.Recover.Notices[0].TaskID != taskID {
+			t.Fatalf("the %s restart reads %+v, want the one unconsumed notice of the task %s kept owed across the restart", o.Phase, o.Recover.Notices, taskID)
 		}
-		if open := o.Recover.Drain.Unsettled[0]; !strings.Contains(open, taskID) || !strings.Contains(open, string(task.ObligationAwaitingDelivery)) {
-			t.Fatalf("the %s restart reports %q open, want the awaited delivery of the task %s kept visible", o.Phase, open, taskID)
+		if phase := o.Recover.Notices[0].Phase; phase == string(query.NoticePhaseConsumed) {
+			t.Fatalf("the %s restart reads the notification of %s as %q, want an unconsumed notice kept owed", o.Phase, taskID, phase)
 		}
-		if o.Recover.Settles != 0 {
-			t.Fatalf("the %s restart committed %d settle facts for a duty it never delivered", o.Phase, o.Recover.Settles)
+		if restartNoticeDelivered(o.Recover) {
+			t.Fatalf("the %s restart delivered %q beside an owed unconsumed notice, want no delivery without a wake claiming it", o.Phase, o.Recover.Sends)
 		}
 		if o.Recover.Boundary.Accept != "accepted" || o.Recover.Boundary.AcceptErr != "" {
 			t.Fatalf("the durable boundary answered the seeded notification %q err=%q, want its delivery still open to acceptance", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
@@ -3296,8 +3296,8 @@ func restartAssertOwed(t *testing.T, o restartOutcome) {
 		if !o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 0 {
 			t.Fatalf("the %s restart drain = %+v, want a drained run beside the delivered duty", o.Phase, o.Recover.Drain)
 		}
-		if o.Recover.Settles != 1 || !strings.Contains(o.Recover.SettleBody, restartNoticeBody) {
-			t.Fatalf("the %s restart committed %d settle facts carrying %q, want the one delivery fact of the recovered notification", o.Phase, o.Recover.Settles, o.Recover.SettleBody)
+		if !restartNoticeDelivered(o.Recover) {
+			t.Fatalf("the %s restart sent %q, want the one delivery of the recovered notification carrying %q", o.Phase, o.Recover.Sends, restartNoticeBody)
 		}
 		if !strings.Contains(o.Recover.Boundary.AcceptErr, "no delivery obligation") {
 			t.Fatalf("the durable boundary answered the delivered notification %q err=%q, want its receipt to close the delivery", o.Recover.Boundary.Accept, o.Recover.Boundary.AcceptErr)
@@ -3305,6 +3305,18 @@ func restartAssertOwed(t *testing.T, o restartOutcome) {
 	default:
 		t.Fatalf("the durable boundary owes %d notifications, want the unconfirmed notification kept owed or really delivered", o.Recover.Boundary.Owed)
 	}
+}
+
+// restartNoticeDelivered reports whether the restart really delivered the
+// seeded notification body through its own sender face, so a delivery is read
+// from the face that sends and never from a bookkeeping mirror.
+func restartNoticeDelivered(recovered restartChildReport) bool {
+	for _, body := range recovered.Sends {
+		if strings.Contains(body, restartNoticeBody) {
+			return true
+		}
+	}
+	return false
 }
 
 // restartAssertConfirmed proves an interruption after the confirmation leaves a
@@ -3350,8 +3362,8 @@ func restartAssertConfirmedNotResent(t *testing.T, o restartOutcome) {
 
 // restartAssertUnconfirmedNotLost fails when a notification whose consumption
 // receipt never landed is dropped by the restart: the rebuilt task is gone, the
-// duty is neither kept open beside the durable boundary nor really delivered
-// beside a receipt, or an open duty is kept silently without being named.
+// duty is neither kept owed beside the durable boundary nor really delivered
+// beside a receipt, or an open duty is kept owed and delivered a second time.
 func restartAssertUnconfirmedNotLost(t *testing.T, o restartOutcome) {
 	t.Helper()
 	if _, ok := restartSoleTask(o.Recover); !ok {
@@ -3359,13 +3371,15 @@ func restartAssertUnconfirmedNotLost(t *testing.T, o restartOutcome) {
 	}
 	switch o.Recover.Boundary.Owed {
 	case 1:
-		if o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 1 {
-			t.Fatalf("the restart kept a duty whose consumption receipt never landed but dropped it from the drain: drain=%+v", o.Recover.Drain)
+		if len(o.Recover.Notices) != 1 {
+			t.Fatalf("the restart kept a duty whose consumption receipt never landed but dropped it from the account: notices=%+v boundary=%+v", o.Recover.Notices, o.Recover.Boundary)
+		}
+		if restartNoticeDelivered(o.Recover) {
+			t.Fatalf("the restart kept a duty whose consumption receipt never landed owed and delivered it too: sends=%q: an unconfirmed notification MUST NOT be delivered a second time", o.Recover.Sends)
 		}
 	case 0:
-		if !o.Recover.Drain.Drained || o.Recover.Settles != 1 {
-			t.Fatalf("the restart closed the duty without a real delivery: settles=%d drain=%+v: an unconfirmed notification MUST stay owed or be delivered once",
-				o.Recover.Settles, o.Recover.Drain)
+		if !restartNoticeDelivered(o.Recover) {
+			t.Fatalf("the restart closed the duty without a real delivery: sends=%q: an unconfirmed notification MUST stay owed or be delivered once", o.Recover.Sends)
 		}
 	default:
 		t.Fatalf("the durable boundary owes %d notifications for a duty whose consumption receipt never landed: an unconfirmed notification MUST NOT be lost", o.Recover.Boundary.Owed)

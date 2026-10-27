@@ -1,0 +1,87 @@
+golden 合同锚修订登记 —— 裁定①（编排者已批）
+变更：fidelity-and-recovery    HEAD：d248d05
+裁定：golden/runtime/event_integrity_scenarios.json 三个合同锚随 G6b/G7 语义演进合法修订，
+      只改断言形态不删场景；每行修订登记：旧行为 → 新行为 → 裁定依据。
+裁定依据（统一）：architectural-subtraction D3.4（改语义断言=编排者批准+登记）/ Q16 批准；
+      掩盖缺陷的改断言为禁止项，本次三行均为断言面等价迁移，负锚意图逐字保留。
+golden JSON 本身零改动（tests[] 清单不含 observations，不删场景、不改 name/mandatory）；
+"修订"落地在 Go 断言形态上，随各锚场景保留。
+
+================================================================================
+R1  01.1 / TestEventIntegrityNoticeIdentity
+    subtest: tool_and_subagent_notice_reaches_original_invocation [consumer]
+    文件：tests/integration/execution/event_integrity_test.go（delegatedNotice phase 断言）
+--------------------------------------------------------------------------------
+旧行为：delegated 通知完成回投后读 NoticePhaseAccepted ——
+        "the acceptance the unattended delivery records"（旧语义：无人值守投递记录一次
+        acceptance，通知停留在 accepted）。
+新行为：读 NoticePhaseConsumed ——
+        "consumed after the mailbox claim and completion"（G6b 语义：通知待消费归 mailbox，
+        消费=Claim→drive→Consume 同账；delegated 通知被 mailbox claim 并完成后即为
+        consumed，不存在独立的 accepted 停留态）。
+场景保留：01.1 全部 6 个 subtest 不删（handoff / multiple_progress / tool_and_subagent…
+          [consumer] / conflicting_body / cross_invocation / duplicate_delivery）。
+同簇先例：同函数 toolNotice 断言在 3.2 G6b 波次已迁移到 consumed，本次 delegatedNotice
+          随同语义补齐，非新口径。
+裁定依据：G6b（a3e7441 mailbox 统一：retained/firing/rearm 删除，通知待消费归 mailbox）
+          合法语义演进；architectural-subtraction D3/Q16 批准。
+验证：go test ./tests/integration/execution -run '^TestEventIntegrityNoticeIdentity$'
+      → ok（2026-10-27，见战报①）。
+
+================================================================================
+R2  01.7 / TestEventIntegrityCLIAdapter
+    subtest: formal_cli_turn [consumer]（同簇 TestCLISingleShotMockModel 同红同修）
+    文件：examples/cli-host/main.go（printFresh 读出面）+ 调用点 invoke
+--------------------------------------------------------------------------------
+旧行为：回复读出面 = rt.SessionHistory（mapped 会话 transcript），printFresh 消费
+        []model.Message 打印 assistant 文本。
+新行为：回复读出面 = rt.SessionFacts（提交事实面），printFresh 消费 []event.Event、
+        过滤 TypeAgentOutput 事实（Role=assistant 且无 ToolCalls、非空 body）逐行打印。
+        语义注记（随改动写入 Godoc）："one face per fact keeps no second transcript, so
+        the facts are the read-out face of the reply"。
+原因：G7（0f96892）"one face per fact"——mapped 会话 CommitHistory 不积累 transcript，
+      SessionHistory 恒空，旧读出面在新语义下无内容可读（stdout="" 断言红）。
+场景意图与断言文本不变：仍在正式入口（run→invoke→printFresh→stdout）读回 mock 回复
+"mock reply: …"，subtest 保留（formal_cli_turn[consumer] / missing_model_key_fails_closed）。
+【申报】此行改动落在产品面 main.go 而非纯测试断言，超出裁定①"只改断言形态"字面。
+      定性：读出面等价迁移（旧面被 G7 合法废除，回复出口必须随语义换到事实面），
+      属断言锚等价迁移的必要连带，非掩盖缺陷（负锚 missing_model_key_fails_closed 不变）。
+      已列入战报④偏离记录。
+裁定依据：G7（0f96892 MaxTokens 注册门删除 + one face per fact）合法语义演进；
+          architectural-subtraction D3/Q16 批准。
+验证：go -C examples/cli-host test ./... → ok tagent-cli-host 0.343s（含
+      TestEventIntegrityCLIAdapter 与 TestCLISingleShotMockModel）。
+
+================================================================================
+R3  03.9 / TestEventIntegrityRestart
+    subtests: positive / negative / consumer（3 组全部保留）
+    文件：tests/integration/history/event_integrity_test.go
+      （restartAssertOwed / restartAssertUnconfirmedNotLost / 新增 restartNoticeDelivered）
+--------------------------------------------------------------------------------
+旧行为：义务证据面 = drain unsettled（Owed=1 分支要求 Drained:false + Unsettled 恰 1 条
+        含 taskID 与 ObligationAwaitingDelivery 字样 + Settles==0）；
+        投递证据面 = settle facts（Owed=0 分支要求 Settles==1 且 SettleBody 含通知 body）。
+新行为：义务证据面 = mailbox/durable 账面（Owed=1 分支要求 Notices 恰 1 条且 TaskID 匹配、
+        Phase≠consumed、Boundary.Accept=="accepted"；G6b 后未消费通知跨 Stop/重启保持 owed、
+        等下次 wake，无 wake 不投递，故新增"不投递"负锚：sends 不得含通知 body）；
+        投递证据面 = sender 面（Owed=0 分支要求 drain Drained:true + sends 含通知 body
+        （新 helper restartNoticeDelivered）+ Boundary.AcceptErr 含 "no delivery obligation"
+        = 消费回执已闭合投递）。
+        unconfirmedNotLost 负锚意图逐字保留："MUST stay owed or be delivered once"、
+        "MUST NOT be delivered a second time"（新增 owed+delivered 双态禁止断言）、
+        "MUST NOT be lost"；duty 证据面从 drain 迁到 Notices/Boundary 账面。
+原因：G6b（a3e7441）retained/firing/rearm 删除，通知待消费归 mailbox；durable.go load()
+      将未消费通知 load 回 owed/pending（见 runtime/state/durable.go load/recordConsumption），
+      drain 不再承载义务可见性，义务在 mailbox+durable 账面；投递以 sender 真发为准，
+      不读记账镜像（旧 SettleBody 面随 settle 语义降解）。
+场景保留：03.9 positive/negative/consumer 不删；两种合法分支（保持 owed / 真投递一次）
+          语义与旧断言的"两分支契约"结构一一对应，仅证据面迁移。
+裁定依据：G6b（a3e7441 mailbox 统一）合法语义演进；architectural-subtraction D3/Q16 批准。
+验证：go test ./tests/integration/history -run '^TestEventIntegrityRestart$' → ok 3.632s；
+      整包 go test ./tests/integration/history → ok 6.040s。
+
+================================================================================
+汇总：3 行修订 = R1/R2/R3；0 行无法等价迁移（无"停报待裁"项）；0 个场景删除；
+      golden/runtime/event_integrity_scenarios.json 零改动。
+F1 断言口径（同批修订）："golden 修订仅限本变更声明的语义变更（逐行登记）"
+      —— 本登记文件即逐行登记面，修订全集=G6b（R1/R3）+ G7（R2），无第三类语义变更。
