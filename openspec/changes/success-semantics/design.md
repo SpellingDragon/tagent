@@ -27,3 +27,5 @@ D15 不分包、文件级职责重组：host 簇是组合根（Host 横跨驱动
 - host_face.go ← host.go 尾部真 HTTP face（现 host_face.go 实为诊断面，更名 host_diagnostics.go——名实相符）；
 - host.go 剩 Boot/options/驱动/settle/生命周期/地址锁（~1100 行）。
 门禁随迁：comment_policy 文件头、package-layout 镜像、gen_godoc 重生成；host_test.go 仍镜像 host.go。
+
+D16 根目录整体迁移 assembly/（2026-10-28 用户裁定，上位 D15）：根 23 个 .go（host 簇 10+会话/事实面 13）同包整体 git mv 进 assembly/，目录=包名=assembly（D15 的同包文件级拆分全部随迁保留）；包内互引零改动，外部限定符 tagent.→assembly. 全改（仓内 import 枚举重写）；根目录只剩 README/go.mod/子目录。门禁随迁：package-layout 清单/comment_policy 扫描集/gen_godoc/concept-budget baseline 键/docs 引用路径。D15「不分包」的导出化顾虑由同包整体迁移消解（无跨包边界产生）。
