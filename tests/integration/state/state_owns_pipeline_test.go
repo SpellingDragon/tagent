@@ -90,8 +90,8 @@ func TestStateOwnsPipeline(t *testing.T) {
 			Model: first,
 			Tools: []trpctool.Tool{&stubTool{name: "tool-1"}, &stubTool{name: "tool-2"}},
 			Plugins: []plugin.Instance{
-				&stubPlugin{name: "enrich", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}},
-				&stubPlugin{name: "risk", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}},
+				&stubPlugin{name: "enrich", port: plugin.PortCallTransform},
+				&stubPlugin{name: "risk", port: plugin.PortCallRuling},
 			},
 			PromptSource: orgstate.PromptSource{Files: []config.FileRef{{Path: "prompts/a.md", Kind: config.FileKindPrompt}}},
 			Set:          set,

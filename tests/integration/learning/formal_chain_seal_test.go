@@ -47,7 +47,7 @@ func sealAnswer(req *model.Request) *model.Response {
 }
 
 // TestFormalChainSealsCapture drives the assembled runtime over its formal entry and seals the capture its record writes land in.
-//   - the episode, decision and attempt records of the formal chain reach the capture writer and seal under their real identities
+//   - the attempt record of every model decision reaches the capture writer and seals under its real identity
 //   - a record write the capture refused is counted in the run's explicit recording-loss account beside the turn it never touched
 //   - a seal accounts only the records that reached storage, so refused and unwritten events seal as loss and never as records
 //
@@ -74,8 +74,8 @@ func TestFormalChainSealsCapture(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seal the formal capture: %v", err)
 		}
-		if !manifest.Sealed || manifest.Partial || manifest.Records != 5 || manifest.Dropped != 0 || manifest.InFlight != 0 {
-			t.Fatalf("manifest = %+v, want a complete seal over the 5 written records", manifest)
+		if !manifest.Sealed || manifest.Partial || manifest.Records != 2 || manifest.Dropped != 0 || manifest.InFlight != 0 {
+			t.Fatalf("manifest = %+v, want a complete seal over the 2 written records", manifest)
 		}
 		if !manifest.Sync.Synced {
 			t.Fatalf("manifest sync = %+v, want the writer's own completed sync", manifest.Sync)
@@ -87,8 +87,8 @@ func TestFormalChainSealsCapture(t *testing.T) {
 			t.Fatalf("file digest = %s, want the digest of the bytes on disk (%s)", got, manifest.Files[0].SHA256)
 		}
 		ledger := sink.Ledger()
-		if ledger.Admitted != 5 || ledger.Written != 5 || ledger.InFlight != 0 {
-			t.Fatalf("ledger = %+v, want the sink account of the 5 records it took and wrote", ledger)
+		if ledger.Admitted != 2 || ledger.Written != 2 || ledger.InFlight != 0 {
+			t.Fatalf("ledger = %+v, want the sink account of the 2 records it took and wrote", ledger)
 		}
 		if losses := run.RecordingLosses(); len(losses) != 0 {
 			t.Fatalf("recording losses = %+v, want none beside the complete seal", losses)
@@ -98,55 +98,29 @@ func TestFormalChainSealsCapture(t *testing.T) {
 			t.Fatalf("read the stored records: %v", err)
 		}
 		lines := strings.Split(strings.TrimSuffix(string(stored), "\n"), "\n")
-		if len(lines) != 5 {
-			t.Fatalf("stored history holds %d records, want the 5 the formal chain produced", len(lines))
+		if len(lines) != 2 {
+			t.Fatalf("stored history holds %d records, want the 2 attempts the formal chain produced", len(lines))
 		}
-		var episodes []rl.EpisodeRecord
-		var decisions []rl.DecisionRecord
 		var attempts []rl.AttemptRecord
 		for i, raw := range lines {
 			line, err := rl.ParseLine([]byte(raw))
 			if err != nil {
 				t.Fatalf("parse record %d: %v", i, err)
 			}
-			switch line.Kind {
-			case rl.RecordKindEpisode:
-				episodes = append(episodes, *line.Episode)
-			case rl.RecordKindDecision:
-				decisions = append(decisions, *line.Decision)
-			case rl.RecordKindAttempt:
-				attempts = append(attempts, *line.Attempt)
-			default:
-				t.Fatalf("record %d kind = %q, want one of the three record kinds", i, line.Kind)
+			if line.Kind != rl.RecordKindAttempt || line.Attempt == nil {
+				t.Fatalf("record %d kind = %q, want the attempt line the capture admission writes", i, line.Kind)
 			}
+			attempts = append(attempts, *line.Attempt)
 		}
-		if len(episodes) != 1 || len(decisions) != 2 || len(attempts) != 2 {
-			t.Fatalf("stored records = (%d episodes, %d decisions, %d attempts), want the production points' account", len(episodes), len(decisions), len(attempts))
-		}
-		if episodes[0].Schema != rl.SchemaCurrent || episodes[0].ID != "ep-seal-1" {
-			t.Fatalf("episode record = (schema %q, id %q), want the versioned record of ep-seal-1", episodes[0].Schema, episodes[0].ID)
-		}
-		if len(episodes[0].Sessions) != 1 || episodes[0].Sessions[0] != "session-seal-1" {
-			t.Fatalf("episode sessions = %v, want the session the invocation ran on", episodes[0].Sessions)
-		}
-		if episodes[0].Lineage != rl.LineageUnknown || episodes[0].Timestamp.IsZero() {
-			t.Fatalf("episode lineage and time = (%v, %v), want an explicit unknown lineage beside the write time", episodes[0].Lineage, episodes[0].Timestamp)
-		}
-		for i, decision := range decisions {
-			if decision.ID != turn.Decisions[i].DecisionID {
-				t.Fatalf("decision %d id = %q, want the real decision identity %q", i, decision.ID, turn.Decisions[i].DecisionID)
+		for i, attempt := range attempts {
+			if attempt.Schema != rl.SchemaCurrent || attempt.ID == "" || attempt.DecisionID != turn.Decisions[i].DecisionID {
+				t.Fatalf("attempt %d = (schema %q, id %q, decision %q), want the versioned attempt of decision %q", i, attempt.Schema, attempt.ID, attempt.DecisionID, turn.Decisions[i].DecisionID)
 			}
-			if decision.InvocationID != "inv-seal-1" || decision.EpisodeID != "ep-seal-1" {
-				t.Fatalf("decision %d scope = (%q, %q), want the invocation and episode it belongs to", i, decision.InvocationID, decision.EpisodeID)
+			if attempt.EpisodeID != "ep-seal-1" || attempt.Terminal != model.KindCompleted {
+				t.Fatalf("attempt %d = (episode %q, terminal %v), want the shared completed terminal of ep-seal-1", i, attempt.EpisodeID, attempt.Terminal)
 			}
-			if decision.ModelView.Model != "model-a" || decision.Timestamp.IsZero() {
-				t.Fatalf("decision %d model view and time = (%+v, %v), want the request material beside the write time", i, decision.ModelView, decision.Timestamp)
-			}
-			if attempts[i].ID == "" || attempts[i].DecisionID != decision.ID {
-				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempts[i].ID, attempts[i].DecisionID, decision.ID)
-			}
-			if attempts[i].EpisodeID != "ep-seal-1" || attempts[i].Terminal != model.KindCompleted {
-				t.Fatalf("attempt %d = (episode %q, terminal %v), want the shared completed terminal of ep-seal-1", i, attempts[i].EpisodeID, attempts[i].Terminal)
+			if attempt.Timestamp.IsZero() {
+				t.Fatalf("attempt %d timestamp = %v, want the time the record was written", i, attempt.Timestamp)
 			}
 		}
 		read, err := rl.ReadCaptureSeal(dir)
@@ -179,39 +153,35 @@ func TestFormalChainSealsCapture(t *testing.T) {
 		}
 		losses := run.RecordingLosses()
 		counts := map[string]int{}
-		decisionLosses := map[string]bool{}
+		named := map[string]bool{}
 		for _, loss := range losses {
 			if loss.ID == "" || loss.Err == nil || !errors.Is(loss.Err, rl.ErrCaptureRefused) {
 				t.Fatalf("recording loss = %+v, want the record identity beside the named capture refusal", loss)
 			}
 			counts[loss.Kind]++
-			if loss.Kind == "decision" {
-				decisionLosses[loss.ID] = true
-			}
+			named[loss.ID] = true
 		}
-		if counts["episode"] != 1 || counts["decision"] != 2 || counts["attempt"] != 2 {
-			t.Fatalf("recording loss counts = %v, want one episode, two decision and two attempt refusals", counts)
+		if counts["capture-attempt"] != 2 || len(counts) != 1 {
+			t.Fatalf("recording loss counts = %v, want the two attempt refusals and nothing else", counts)
 		}
-		for _, decision := range turn.Decisions {
-			if !decisionLosses[string(decision.DecisionID)] {
-				t.Fatalf("decision loss identities = %v, want the real decision identity %q named", decisionLosses, decision.DecisionID)
-			}
+		if len(named) != 2 {
+			t.Fatalf("lost attempt identities = %v, want one identity per refused admission", named)
 		}
 		ledger := sink.Ledger()
-		if ledger.Admitted != 0 || ledger.DroppedRecordSize != 5 || ledger.Written != 0 || ledger.InFlight != 0 {
-			t.Fatalf("ledger = %+v, want the 5 refusals counted under the record size bound", ledger)
+		if ledger.Admitted != 0 || ledger.DroppedRecordSize != 2 || ledger.Written != 0 || ledger.InFlight != 0 {
+			t.Fatalf("ledger = %+v, want the 2 refusals counted under the record size bound", ledger)
 		}
 		manifest, err := sink.Seal(ctx)
 		if err != nil {
 			t.Fatalf("seal the refused capture: %v", err)
 		}
-		if manifest.Records != 0 || manifest.Dropped != 5 || !manifest.Partial {
-			t.Fatalf("manifest = %+v, want 0 sealed records beside the 5 counted refusals", manifest)
+		if manifest.Records != 0 || manifest.Dropped != 2 || !manifest.Partial {
+			t.Fatalf("manifest = %+v, want 0 sealed records beside the 2 counted refusals", manifest)
 		}
 		if len(manifest.Files) != 0 {
 			t.Fatalf("manifest files = %+v, want no record file accounted over events that never committed", manifest.Files)
 		}
-		if !strings.Contains(strings.Join(manifest.Reasons, "; "), "5 records were refused under an admission bound") {
+		if !strings.Contains(strings.Join(manifest.Reasons, "; "), "2 records were refused under an admission bound") {
 			t.Fatalf("manifest reasons = %v, want the counted refusals named", manifest.Reasons)
 		}
 		if _, err := os.Stat(filepath.Join(dir, rl.SinkRecordsFile)); !errors.Is(err, os.ErrNotExist) {
@@ -236,19 +206,19 @@ func TestFormalChainSealsCapture(t *testing.T) {
 			t.Fatalf("seal the failed capture: %v", err)
 		}
 		ledger := sink.Ledger()
-		if ledger.Admitted != 5 || ledger.WriteErrors != 5 || ledger.Written != 0 || ledger.InFlight != 0 {
-			t.Fatalf("ledger = %+v, want the 5 admitted records accounted as write failures", ledger)
+		if ledger.Admitted != 2 || ledger.WriteErrors != 2 || ledger.Written != 0 || ledger.InFlight != 0 {
+			t.Fatalf("ledger = %+v, want the 2 admitted records accounted as write failures", ledger)
 		}
 		if losses := run.RecordingLosses(); len(losses) != 0 {
 			t.Fatalf("recording losses = %+v, want the storage failures held in the capture ledger alone", losses)
 		}
 		if manifest.Sealed || manifest.Records != 0 || manifest.Dropped != 0 {
-			t.Fatalf("manifest = %+v, want no record and no confirmed seal over the 5 events that never committed", manifest)
+			t.Fatalf("manifest = %+v, want no record and no confirmed seal over the 2 events that never committed", manifest)
 		}
 		if !manifest.Partial {
 			t.Fatalf("manifest = %+v, want the failed capture accounted partial", manifest)
 		}
-		if !strings.Contains(strings.Join(manifest.Reasons, "; "), "5 admitted records failed to reach storage") {
+		if !strings.Contains(strings.Join(manifest.Reasons, "; "), "2 admitted records failed to reach storage") {
 			t.Fatalf("manifest reasons = %v, want the write failures named", manifest.Reasons)
 		}
 		err = sink.RecordAttempt(context.Background(), attemptRecordOf("attempt-after-seal", "answer after seal"))

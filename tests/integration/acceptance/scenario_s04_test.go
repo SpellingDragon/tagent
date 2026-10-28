@@ -5,11 +5,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -28,7 +28,7 @@ func (p *scenarioTransform) Name() string { return "scenario-transform" }
 
 // Port reports the call->call port.
 func (p *scenarioTransform) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformCall rewrites one call's arguments to the final body.
@@ -61,7 +61,7 @@ func (p *scenarioPolicy) Name() string { return "scenario-policy" }
 
 // Port reports the call->ruling port the ruling belongs to.
 func (p *scenarioPolicy) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // Judge renders the one ruling of a call.
@@ -120,7 +120,7 @@ func (p *scenarioPresenter) Name() string { return "scenario-presenter" }
 
 // Port reports the fact->view port.
 func (p *scenarioPresenter) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present renders the presentation text of one fact identity.
@@ -161,17 +161,17 @@ func TestScenario04PluginPhaseAndGovernance(t *testing.T) {
 	}
 	decl := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}}}
 	governance := &scenarioGovernance{answers: scenarioPassingChecks("eval", "benchmark", "apply-gate")}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {
 			Model:   provider,
 			Tools:   []trpctool.CallableTool{allowed, refused},
 			Plugins: []plugin.Instance{transform, policy, presenter},
 		},
-	}, tagent.WithGovernance(governance), tagent.WithPolicy(policy))
+	}, assembly.WithGovernance(governance), assembly.WithPolicy(policy))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-plugin",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-plugin"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "run both calls"}},

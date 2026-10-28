@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
@@ -53,9 +53,9 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 				EnvironmentBlock: true,
 			}},
 		}
-		run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -169,7 +169,7 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
-	before := tagent.EnvironmentBlockGenerations()
+	before := assembly.EnvironmentBlockGenerations()
 	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("回答第1轮")
 	}}
@@ -181,9 +181,9 @@ func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
 			MaxTokens: assemblyBudget,
 		}},
 	}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
 	invokeTurn(t, run, "inv-no-assembly-1", addr, assemblyFullText)
 	invokeTurn(t, run, "inv-no-assembly-2", addr, "第二轮输入")
 
-	if got := tagent.EnvironmentBlockGenerations() - before; got != 0 {
+	if got := assembly.EnvironmentBlockGenerations() - before; got != 0 {
 		t.Fatalf("environment block generations = %d, want none for the undeclared agent", got)
 	}
 	requests := provider.recorded()
@@ -225,9 +225,9 @@ func assembleWithBudget(t *testing.T, session string, budget int) []model.Messag
 			EnvironmentBlock: true,
 		}},
 	}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}

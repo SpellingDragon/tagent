@@ -3,6 +3,7 @@ package history
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -20,6 +21,32 @@ type stubTool struct{ name string }
 
 func (s stubTool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{Name: s.name}
+}
+
+// settleRecordsOf returns the settled notification of one admitted task beside
+// the settle mutation that carries it: the task identity is minted at admission
+// and never enumerable, so every round trip builds its records from the receipt
+// of its own admission.
+func settleRecordsOf(taskID event.TaskID, spec task.Spec) (task.Notice, task.CommitRecord) {
+	notice := task.Notice{
+		TaskID: taskID,
+		Round:  1,
+		Kind:   task.NoticeSettled,
+		Seq:    0,
+		Event:  "evt-settle-1",
+	}
+	return notice, task.CommitRecord{
+		MutationID:       task.MutationID("settle:" + string(taskID)),
+		TaskID:           taskID,
+		ExpectedRevision: 1,
+		Status:           task.StatusSettled,
+		Outbox: []task.Envelope{{
+			Notice:         notice,
+			Target:         spec.Target,
+			Source:         spec.Source,
+			TargetInstance: spec.InstanceID,
+		}},
+	}
 }
 
 // TestDurableTaskRoundTrip proves the durable task commit, the idempotent acceptance and the delivery replay:
@@ -42,26 +69,6 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		Source:       event.Address{AgentID: owner, SessionID: "s1"},
 		Target:       event.Address{AgentID: target, SessionID: "s1"},
 		Execution:    "serialized",
-	}
-	notice := task.Notice{
-		TaskID: "task-1",
-		Round:  1,
-		Kind:   task.NoticeSettled,
-		Seq:    0,
-		Event:  "evt-settle-1",
-	}
-	envelope := task.Envelope{
-		Notice:         notice,
-		Target:         spec.Target,
-		Source:         spec.Source,
-		TargetInstance: spec.InstanceID,
-	}
-	settle := task.CommitRecord{
-		MutationID:       "settle:task-1",
-		TaskID:           "task-1",
-		ExpectedRevision: 1,
-		Status:           task.StatusSettled,
-		Outbox:           []task.Envelope{envelope},
 	}
 	holdTarget := func(t *testing.T, names ...string) *state.Bindings {
 		t.Helper()
@@ -93,9 +100,10 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Register: %v", err)
 		}
-		if receipt.TaskID != "task-1" || receipt.Kind != task.AdmissionFresh {
-			t.Fatalf("Register receipt = %+v, want task-1 fresh", receipt)
+		if !strings.HasPrefix(string(receipt.TaskID), "task-") || receipt.Kind != task.AdmissionFresh {
+			t.Fatalf("Register receipt = %+v, want one fresh admission of a task identity", receipt)
 		}
+		_, settle := settleRecordsOf(receipt.TaskID, spec)
 		if landed, err := durable.Records(ctx, receipt.TaskID); err != nil || len(landed) != 1 || landed[0].Spec != spec {
 			t.Fatalf("chain after the first submission = %+v (%v), want one admission link carrying %+v", landed, err, spec)
 		}
@@ -171,6 +179,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Register: %v", err)
 		}
+		_, settle := settleRecordsOf(receipt.TaskID, spec)
 		if landed, err := durable.Records(ctx, receipt.TaskID); err != nil || len(landed) != 1 || landed[0].Spec != spec {
 			t.Fatalf("chain after the first submission = %+v (%v), want one admission link carrying %+v", landed, err, spec)
 		}
@@ -241,6 +250,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Register: %v", err)
 		}
+		notice, settle := settleRecordsOf(receipt.TaskID, spec)
 		if landed, err := durable.Records(ctx, receipt.TaskID); err != nil || len(landed) != 1 || landed[0].Spec != spec {
 			t.Fatalf("chain after the first submission = %+v (%v), want one admission link carrying %+v", landed, err, spec)
 		}
@@ -350,6 +360,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Register: %v", err)
 		}
+		_, settle := settleRecordsOf(receipt.TaskID, spec)
 		if landed, err := durable.Records(ctx, receipt.TaskID); err != nil || len(landed) != 1 || landed[0].Spec != spec {
 			t.Fatalf("chain after the first submission = %+v (%v), want one admission link carrying %+v", landed, err, spec)
 		}
@@ -451,6 +462,7 @@ func TestDurableTaskRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Register: %v", err)
 		}
+		_, settle := settleRecordsOf(receipt.TaskID, spec)
 		if landed, err := durable.Records(ctx, receipt.TaskID); err != nil || len(landed) != 1 || landed[0].Spec != spec {
 			t.Fatalf("chain after the first submission = %+v (%v), want one admission link carrying %+v", landed, err, spec)
 		}

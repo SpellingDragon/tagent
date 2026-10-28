@@ -33,21 +33,23 @@ func TestDelegationObservationThroughTheSubagentTool(t *testing.T) {
 		}}, nil, issuer)
 
 		answered := make(chan error, 1)
-		var receipt task.AdmissionReceipt
 		go func() {
 			out, err := tool.Call(task.WithCallFrame(context.Background(), subagentCallFrame(issuer, "call-review")), reviewCallArgs())
 			if err == nil {
-				receipt, _ = out.(task.AdmissionReceipt)
+				if receipt, ok := out.(task.AdmissionReceipt); !ok || !receipt.Accepted {
+					err = fmt.Errorf("call result = %v, want one accepted admission", out)
+				}
 			}
 			answered <- err
 		}()
 		if err := awaitAnswered(t, answered); err != nil {
 			t.Fatalf("call the tool = %v, want the admission receipt", err)
 		}
-		if receipt.TaskID == "" || !receipt.Accepted {
-			t.Fatalf("call result = %+v, want one accepted admission beside its task identity", receipt)
+		taskID := rig.tasks.admitted()
+		if taskID == "" {
+			t.Fatalf("the call was admitted as no task beside its receipt")
 		}
-		if !observer.mentions("debug", "delegation admitted result=fresh", "task="+string(receipt.TaskID),
+		if !observer.mentions("debug", "delegation admitted result=fresh", "task="+string(taskID),
 			"agent=agent-caller", "call=call-review") {
 			t.Fatalf("debug lines = %v, want the admission beside its task, agent and call", observer.all())
 		}
@@ -58,7 +60,7 @@ func TestDelegationObservationThroughTheSubagentTool(t *testing.T) {
 		}
 		close(delegated.gate)
 		awaitEnvelope(t, rig.arrived)
-		awaitSettledLine(t, observer, "info", "delegation settled", "task="+string(receipt.TaskID), "agent=agent-caller",
+		awaitSettledLine(t, observer, "info", "delegation settled", "task="+string(taskID), "agent=agent-caller",
 			"status=settled", "elapsed=")
 	})
 }

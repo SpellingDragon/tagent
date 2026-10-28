@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
@@ -79,19 +79,19 @@ func ageBandProjection(t *testing.T, facts []replay.ChainFact) *replay.ReplayPro
 
 // ageBandRun assembles one runtime whose session carries the given projection,
 // so the request the model is driven with is the consumer of the sequence.
-func ageBandRun(t *testing.T, projection *replay.ReplayProjection) (*tagent.Run, *replayModel) {
+func ageBandRun(t *testing.T, projection *replay.ReplayProjection) (*assembly.Run, *replayModel) {
 	t.Helper()
 	provider := &replayModel{name: "model-a"}
-	run, err := tagent.Assemble(context.Background(), &config.Declaration{
+	run, err := assembly.Assemble(context.Background(), &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(replayPolicy{}))
+	}, assembly.WithGovernance(replayPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: ageChainKey.PartitionID, SessionID: ageChainKey.SessionID}, tagent.FoldWindow{MaxTokens: 1 << 16}, projection); err != nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: ageChainKey.PartitionID, SessionID: ageChainKey.SessionID}, assembly.FoldWindow{MaxTokens: 1 << 16}, projection); err != nil {
 		t.Fatalf("AttachReplay: %v", err)
 	}
 	return run, provider
@@ -99,9 +99,9 @@ func ageBandRun(t *testing.T, projection *replay.ReplayProjection) (*tagent.Run,
 
 // ageBandRequest drives one turn through the assembled runtime and returns the
 // messages of the single formal request.
-func ageBandRequest(t *testing.T, run *tagent.Run, provider *replayModel, input string) []model.Message {
+func ageBandRequest(t *testing.T, run *assembly.Run, provider *replayModel, input string) []model.Message {
 	t.Helper()
-	if _, err := run.Invoke(context.Background(), tagent.InvokeRequest{
+	if _, err := run.Invoke(context.Background(), assembly.InvokeRequest{
 		InvocationID: "inv-age",
 		Address:      event.Address{AgentID: "agent-a", SessionID: ageChainKey.SessionID},
 		Input:        []model.Message{{Role: model.RoleUser, Content: input}},

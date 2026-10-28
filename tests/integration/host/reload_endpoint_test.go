@@ -11,16 +11,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
 // reloadAnswer is the endpoint's answer as the supervisor reads it back: the
-// publication result beside the model changes the reload judged.
+// publication result beside the model changes the reload judged. The receipt
+// names the generation in effect after the attempt and whether that attempt
+// published it, so a carried document is answered as one instead of leaving a
+// reader to infer it from an empty change list.
 type reloadAnswer struct {
-	Reloaded     bool `json:"reloaded"`
+	Reloaded    bool `json:"reloaded"`
+	Publication struct {
+		Generation uint64 `json:"generation"`
+		Published  bool   `json:"published"`
+	} `json:"publication"`
 	ModelChanges []struct {
 		Agent string `json:"agent"`
 		From  string `json:"from"`
@@ -44,7 +51,7 @@ func TestReloadEndpointSwapsModel(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -134,7 +141,7 @@ func TestReloadEndpointRefusesStructuralChange(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -180,9 +187,9 @@ func TestReloadEndpointRefusesStructuralChange(t *testing.T) {
 
 // invokeScriptedTurn drives one user turn of the booted host and answers its
 // turn.
-func invokeScriptedTurn(t *testing.T, ctx context.Context, host *tagent.Host, sessionID string) agent.Turn {
+func invokeScriptedTurn(t *testing.T, ctx context.Context, host *assembly.Host, sessionID string) agent.Turn {
 	t.Helper()
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: event.Address{AgentID: "user", SessionID: event.SessionID(sessionID)},
 		Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 	})

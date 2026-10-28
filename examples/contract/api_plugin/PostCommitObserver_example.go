@@ -17,7 +17,7 @@ func (auditObserver) Name() string { return "audit-observer" }
 
 // Port reports the fact->observation port the element serves.
 func (auditObserver) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit observes one committed fact as a read-only duty: a failure returns an

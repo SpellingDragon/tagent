@@ -168,16 +168,18 @@ class WorkflowTest(unittest.TestCase):
     def test_product_scope_matches_golden_architecture(self):
         # PRODUCT_PACKAGES must cover exactly the first-party product packages
         # registered in golden/runtime/architecture.json (its scope excludes
-        # scripts/tests/prototype/examples/docs/resources). The root package is
-        # `*.go` because `gofmt -l .` would recurse the whole root module. A new
-        # golden top-level package must land here and in the workflow together.
+        # scripts/tests/prototype/examples/docs/resources). Every registered package
+        # is spelled by its own directory, the composition root included; a bare `.`
+        # would recurse the whole root module, so the root names its directory too.
+        # A new golden top-level package must land here and in the workflow together.
         scope = self.workflow["jobs"]["contracts"]["env"]["PRODUCT_PACKAGES"].split()
-        self.assertIn("*.go", scope, "the root package must be covered by *.go")
         golden = json.loads(GOLDEN_ARCHITECTURE.read_text(encoding="utf-8"))
+        root = golden["root_package"]
+        self.assertIn(root, scope, "the composition root must be covered by its directory")
         expected = set()
         for package in golden["packages"]:
             pattern = package["pattern"]
-            expected.add("*.go" if pattern == "." else pattern.split("/")[0])
+            expected.add(pattern if pattern == root else pattern.split("/")[0])
         self.assertEqual(set(scope), expected,
                          "PRODUCT_PACKAGES must equal the golden product packages")
 
@@ -393,10 +395,10 @@ def assert_event_producer_jobs(workflow):
     long_step = step_with(long_job, "--scope event-long")
     long_run = long_step.get("run") or ""
     # --timeout bounds ONE go test process, cold compile included: 03.11
-    # measured 533-878s per shard, so 1200s (~1.4x the 878s maximum) must fit
-    # inside the 25m job cap.
+    # re-measured 2026-10-28 at up to 1149s per shard (and over the old
+    # 1200s on slow push runs), so 2400s must fit inside the 45m job cap.
     for needle in ('--seed "$SEED"', '--window "$WINDOW"', "--repeat 1",
-                   "--timeout 1200",
+                   "--timeout 2400",
                    '--out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"'):
         if needle not in long_run:
             raise AssertionError(
@@ -408,10 +410,10 @@ def assert_event_producer_jobs(workflow):
     long_env = long_step.get("env") or {}
     if long_env.get("SEED") != "${{ matrix.seed }}" or long_env.get("WINDOW") != "${{ matrix.window }}":
         raise AssertionError("matrix values must reach the long command via env")
-    if long_job.get("timeout-minutes") != 25:
+    if long_job.get("timeout-minutes") != 45:
         raise AssertionError(
             "event-integrity-long timeout-minutes must be the 03.11 measurement "
-            "(878s max shard, 1200s --timeout, 25m job cap)")
+            "(1149s max shard, 2400s --timeout, 45m job cap)")
     assert_single_artifact_upload(
         "event-integrity-long", long_job,
         "event-integrity-long-seed-${{ matrix.seed }}-window-${{ matrix.window }}",

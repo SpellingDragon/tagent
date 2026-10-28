@@ -10,9 +10,9 @@ import (
 	"context"
 	"io"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 )
 
@@ -53,7 +53,7 @@ var (
 // opens the diagnostic endpoints only beside a configured request credential
 // and answers every unauthenticated request by name.
 var (
-	_ func(*tagent.Run, query.AuthorizationScope, ...CLIOption) *CLI = NewCLI
+	_ func(*assembly.Run, query.AuthorizationScope, ...CLIOption) *CLI = NewCLI
 
 	_ func(string) CLIOption = WithRequestCredential
 

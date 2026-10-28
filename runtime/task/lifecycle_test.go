@@ -94,7 +94,7 @@ func TestLifecycleStateMachineInvariants(t *testing.T) {
 		if got := carrier.Revision(taskID); got != revision {
 			t.Fatalf("revision after a repeated mutation = %d, want it unmoved", got)
 		}
-		if _, err := registry.Advance(ctx, taskID, StatusProgress, "running", nil); !errors.Is(err, ErrMutationConflict) {
+		if _, err := registry.Advance(ctx, taskID, StatusSettled, "running", nil); !errors.Is(err, ErrMutationConflict) {
 			t.Fatalf("one mutation identity beside another status = %v, want %v", err, ErrMutationConflict)
 		}
 	})

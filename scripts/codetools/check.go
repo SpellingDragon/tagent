@@ -816,10 +816,10 @@ var (
 	docRefSkip    = regexp.MustCompile(`[{}*]|https?://|^\./\$|TODO`)
 	// knownTopDirs scopes the check to citations that claim this repository.
 	knownTopDirs = map[string]bool{
-		"agent": true, "memory": true, "event": true, "plugin": true, "prompt": true,
-		"tool": true, "rl": true, "evolution": true, "docs": true, "openspec": true,
-		"examples": true, "scripts": true, "internal": true, "testutil": true,
-		"train": true, "evals": true, "resources": true,
+		"assembly": true, "agent": true, "memory": true, "event": true, "plugin": true,
+		"prompt": true, "tool": true, "rl": true, "evolution": true, "docs": true,
+		"openspec": true, "examples": true, "scripts": true, "internal": true,
+		"testutil": true, "train": true, "evals": true, "resources": true,
 	}
 )
 

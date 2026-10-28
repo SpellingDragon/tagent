@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -63,7 +63,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			}
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{ruleProbe, plainProbe},
@@ -72,12 +72,12 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 					"critical_plain": plugin.RiskCritical,
 				}}},
 			},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(recorder))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithPolicy(recorder))
 		if err != nil {
 			t.Fatalf("assemble the approval runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-approval"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-approval",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -196,7 +196,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			}
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
@@ -204,12 +204,12 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 					"danger_tool": plugin.RiskHigh,
 				}}},
 			},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(recorder))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithPolicy(recorder))
 		if err != nil {
 			t.Fatalf("assemble the refusal runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-refusal"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-refusal",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -308,7 +308,7 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 			}
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
@@ -316,12 +316,12 @@ func TestCriticalCallsHoldThroughFormalPath(t *testing.T) {
 					"critical_tool": plugin.RiskCritical,
 				}}},
 			},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(recorder))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithPolicy(recorder))
 		if err != nil {
 			t.Fatalf("assemble the approved runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-approved"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-approved",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -400,7 +400,7 @@ func (g *criticalGrader) Name() string { return "critical-grader" }
 
 // Port returns the single port the test instance serves.
 func (g *criticalGrader) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk grades one tool call from the table the grader carries.

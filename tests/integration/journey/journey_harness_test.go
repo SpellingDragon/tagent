@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
@@ -364,7 +364,7 @@ type journeySpec struct {
 
 // journeyHost is one booted host beside the faces a journey asserts on.
 type journeyHost struct {
-	host       *tagent.Host
+	host       *assembly.Host
 	sender     *journeySender
 	provider   *journeyProvider
 	root       string
@@ -377,7 +377,7 @@ type journeyHost struct {
 // the test under a bounded context: a journey that parks a call in the approval
 // wait leaves one task obligation beside no settlement face, so the close
 // reports it as unsettled instead of waiting the whole drain window here.
-func bootJourney(t *testing.T, provider *journeyProvider, spec journeySpec, options ...tagent.HostOption) *journeyHost {
+func bootJourney(t *testing.T, provider *journeyProvider, spec journeySpec, options ...assembly.HostOption) *journeyHost {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
@@ -401,8 +401,8 @@ func bootJourney(t *testing.T, provider *journeyProvider, spec journeySpec, opti
 	configPath := filepath.Join(root, "tagent.yaml")
 	writeJourneyDocument(t, configPath, journeyDocument(root, provider.endpoint(), spec))
 	sender := &journeySender{}
-	options = append([]tagent.HostOption{tagent.WithSender(sender)}, options...)
-	host, err := tagent.Boot(configPath, options...)
+	options = append([]assembly.HostOption{assembly.WithSender(sender)}, options...)
+	host, err := assembly.Boot(configPath, options...)
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -507,7 +507,7 @@ func (h *journeyHost) rewrite(t *testing.T, spec journeySpec) {
 // delivers to, one user message, and the user trigger the meditation driver
 // and the delivery face both read.
 func (h *journeyHost) invoke(ctx context.Context, session, input string) (agent.Turn, error) {
-	return h.host.Invoke(ctx, tagent.InvokeRequest{
+	return h.host.Invoke(ctx, assembly.InvokeRequest{
 		Address:       event.Address{AgentID: journeyEntryAgent, SessionID: event.SessionID(session)},
 		Input:         []model.Message{{Role: model.RoleUser, Content: input}},
 		TriggerSource: "user",

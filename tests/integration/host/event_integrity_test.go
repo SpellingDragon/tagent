@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -57,7 +57,7 @@ func reproductionEnv(t *testing.T) {
 // the entry agent keeps the send tool beside the declared worker agent, and the
 // model window is declared so the session chain carries the projection and the
 // notice feed the follow-up range reads.
-func bootReproductionHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *tagent.Host {
+func bootReproductionHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *assembly.Host {
 	t.Helper()
 	return bootIntegrityHostWithAgents(t, provider, sender,
 		"  user:\n"+
@@ -231,7 +231,7 @@ func reproductionFactsSummary(facts []event.Event) string {
 
 // reproductionWaitForSettleFact waits until the chain carries exactly one
 // settled delivery fact for the named worker body and answers it.
-func reproductionWaitForSettleFact(t *testing.T, host *tagent.Host, addr event.Address, body string, timeout time.Duration) event.Event {
+func reproductionWaitForSettleFact(t *testing.T, host *assembly.Host, addr event.Address, body string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	var last []event.Event
@@ -769,7 +769,7 @@ func expectContinuationFollowUp(script *integrityScript, name, workerOut, follow
 
 // driveContinuationTurn drives one user turn and requires the completed turn of
 // its declared decisions.
-func driveContinuationTurn(t *testing.T, ctx context.Context, host *tagent.Host, addr event.Address, input string, decisions int) agent.Turn {
+func driveContinuationTurn(t *testing.T, ctx context.Context, host *assembly.Host, addr event.Address, input string, decisions int) agent.Turn {
 	t.Helper()
 	turn, err := driveIntegrityTurn(ctx, host, addr, input)
 	if err != nil {
@@ -901,7 +901,7 @@ func continuationRequireAction(t *testing.T, sender recordingSender, body string
 
 // continuationSettle waits for the one settled delivery fact of the body and
 // answers it beside its notice identity and material.
-func continuationSettle(t *testing.T, host *tagent.Host, addr event.Address, body string) (event.Event, task.Notice, string) {
+func continuationSettle(t *testing.T, host *assembly.Host, addr event.Address, body string) (event.Event, task.Notice, string) {
 	t.Helper()
 	settle := reproductionWaitForSettleFact(t, host, addr, body, 30*time.Second)
 	return settle, reproductionNoticeOf(settle), strings.TrimSpace(settle.Message.Content)
@@ -1669,14 +1669,14 @@ func (s *deliverySender) bodies() []string {
 // bootDeliveryHost boots the entry document the delivery checks drive: the
 // entry agent beside the declared send tool, resolved at the scripted provider
 // and attached to the controlled sender through the formal option.
-func bootDeliveryHost(t *testing.T, provider *scriptedProvider, sender tagent.MessageSender) *tagent.Host {
+func bootDeliveryHost(t *testing.T, provider *scriptedProvider, sender assembly.MessageSender) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-entry",
 		"    tools:\n"+
 			"      - { kind: tool, id: send }\n"))
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the delivery host: %v", err)
 	}
@@ -1737,7 +1737,7 @@ func deliveryUnframedAction(t *testing.T, sender *deliverySender) deliveryAction
 // deliveryResultFact reports the one committed action-result fact the wrapped
 // call left in the chain: the fact the formal assembly records under the call
 // identity the admission frame carried.
-func deliveryResultFact(t *testing.T, host *tagent.Host, addr event.Address, callID string) event.Event {
+func deliveryResultFact(t *testing.T, host *assembly.Host, addr event.Address, callID string) event.Event {
 	t.Helper()
 	var matched []event.Event
 	for _, fact := range host.Run().SessionFacts(addr) {
@@ -1754,7 +1754,7 @@ func deliveryResultFact(t *testing.T, host *tagent.Host, addr event.Address, cal
 // deliveryAssistantFacts reports the committed assistant-output facts of the
 // session that carry the body: the source identities a turn answer was
 // delivered from.
-func deliveryAssistantFacts(host *tagent.Host, addr event.Address, body string) []event.Event {
+func deliveryAssistantFacts(host *assembly.Host, addr event.Address, body string) []event.Event {
 	body = strings.TrimSpace(body)
 	var matched []event.Event
 	for _, fact := range host.Run().SessionFacts(addr) {
@@ -1770,7 +1770,7 @@ func deliveryAssistantFacts(host *tagent.Host, addr event.Address, body string) 
 
 // deliveryAssistantFact reports the one committed assistant-output fact of the
 // session carrying the body.
-func deliveryAssistantFact(t *testing.T, host *tagent.Host, addr event.Address, body string) event.Event {
+func deliveryAssistantFact(t *testing.T, host *assembly.Host, addr event.Address, body string) event.Event {
 	t.Helper()
 	matched := deliveryAssistantFacts(host, addr, body)
 	if len(matched) != 1 {
@@ -2523,7 +2523,7 @@ func (s *controlledReflectionSink) deliveredWrites() []event.Event {
 // call the tool against: the run is the formal cross-session entry and the
 // formal live-binding query, so the tool reads the very faces the host binds.
 type reflectionDeliveryRun struct {
-	run    *tagent.Run
+	run    *assembly.Run
 	models map[string]*entryModel
 }
 
@@ -2532,14 +2532,14 @@ type reflectionDeliveryRun struct {
 func newReflectionDeliveryRun(t *testing.T, agents ...string) *reflectionDeliveryRun {
 	t.Helper()
 	decl := &config.Declaration{Entry: agents[0]}
-	natives := make(map[event.AgentID]tagent.NativeAgent, len(agents))
+	natives := make(map[event.AgentID]assembly.NativeAgent, len(agents))
 	models := make(map[string]*entryModel, len(agents))
 	for _, id := range agents {
 		m := &entryModel{name: "model-" + id, answer: func(*model.Request) *model.Response {
 			return entryFinalTurn("the turn settled")
 		}}
 		decl.Agents = append(decl.Agents, config.AgentSpec{ID: id, Model: m.name, MaxTokens: 32000})
-		natives[event.AgentID(id)] = tagent.NativeAgent{Model: m}
+		natives[event.AgentID(id)] = assembly.NativeAgent{Model: m}
 		models[id] = m
 	}
 	run := assembleReflectionDelivery(t, decl, natives)
@@ -2548,11 +2548,11 @@ func newReflectionDeliveryRun(t *testing.T, agents ...string) *reflectionDeliver
 
 // assembleReflectionDelivery assembles one runtime over the given declaration and
 // native agents and closes it with the check.
-func assembleReflectionDelivery(t *testing.T, decl *config.Declaration, natives map[event.AgentID]tagent.NativeAgent) *tagent.Run {
+func assembleReflectionDelivery(t *testing.T, decl *config.Declaration, natives map[event.AgentID]assembly.NativeAgent) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(context.Background(), decl, natives,
-		tagent.WithGovernance(passPolicy{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}),
+	run, err := assembly.Assemble(context.Background(), decl, natives,
+		assembly.WithGovernance(passPolicy{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}),
 	)
 	if err != nil {
 		t.Fatalf("assemble the reflection delivery run: %v", err)
@@ -2648,7 +2648,7 @@ func reflectionDeliveryHostDocument(root, endpoint, deliverTo string) string {
 // bootReflectionDeliveryHost writes and boots the reflection delivery document
 // beside the given white list, answering the boot result so a refusal check
 // reads the named refusal.
-func bootReflectionDeliveryHost(t *testing.T, provider *scriptedProvider, deliverTo string) (*tagent.Host, error) {
+func bootReflectionDeliveryHost(t *testing.T, provider *scriptedProvider, deliverTo string) (*assembly.Host, error) {
 	t.Helper()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
@@ -2656,7 +2656,7 @@ func bootReflectionDeliveryHost(t *testing.T, provider *scriptedProvider, delive
 	if err := os.WriteFile(filepath.Join(root, "meditation.md"), []byte("reflect on the user session"), 0o644); err != nil {
 		t.Fatalf("write the meditation prompt: %v", err)
 	}
-	host, err := tagent.Boot(configPath, tagent.WithSender(newRecordingSender()))
+	host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
 	if err != nil {
 		return nil, err
 	}
@@ -2714,7 +2714,7 @@ func runSameBatchYieldIsLegalSuccess(t *testing.T) {
 	decl := &config.Declaration{Entry: "user", Agents: []config.AgentSpec{
 		{ID: "user", Model: "model-user", MaxTokens: 32000},
 	}}
-	run := assembleReflectionDelivery(t, decl, map[event.AgentID]tagent.NativeAgent{
+	run := assembleReflectionDelivery(t, decl, map[event.AgentID]assembly.NativeAgent{
 		"user": {Model: userModel},
 	})
 	t.Cleanup(func() {
@@ -2727,7 +2727,7 @@ func runSameBatchYieldIsLegalSuccess(t *testing.T) {
 
 	driven := make(chan integrityOutcome, 1)
 	go func() {
-		turn, err := run.Invoke(context.Background(), tagent.InvokeRequest{
+		turn, err := run.Invoke(context.Background(), assembly.InvokeRequest{
 			InvocationID:  "inv-reflection-busy",
 			Address:       reflectionDeliveryAddr,
 			TriggerSource: "user",
@@ -3075,7 +3075,7 @@ func runBootDeliverToTargetRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID:  "inv-boot-reflection-delivery",
 		Address:       reflectionDeliveryAddr,
 		TriggerSource: "user",
@@ -3121,7 +3121,7 @@ func runBootDeliverToTargetRequest(t *testing.T) {
 		t.Fatalf("meditation-stamped facts = %+v, want exactly the one delivered summary", delivered)
 	}
 
-	next, err := host.Invoke(ctx, tagent.InvokeRequest{
+	next, err := host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID:  "inv-boot-reflection-delivery-next",
 		Address:       reflectionDeliveryAddr,
 		TriggerSource: "user",
@@ -3238,7 +3238,7 @@ func replacementPartial(content string) *model.Response {
 // replacementRig is one assembled runtime carrying the event-driven model lease
 // the replacement checks drive.
 type replacementRig struct {
-	run   *tagent.Run
+	run   *assembly.Run
 	lease *rl.ModelLease
 }
 
@@ -3255,11 +3255,11 @@ func newReplacementRig(t *testing.T, initial model.Model, version string, rebuil
 		Model:     initial.Info().Name,
 		MaxTokens: 32000,
 	}}}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"user": {Model: initial},
-	}, tagent.WithGovernance(passPolicy{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}),
-		tagent.WithModelLease("user", lease, tagent.WithLeaseRebuild(rebuild)),
+	}, assembly.WithGovernance(passPolicy{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}),
+		assembly.WithModelLease("user", lease, assembly.WithLeaseRebuild(rebuild)),
 	)
 	if err != nil {
 		t.Fatalf("assemble the replacement runtime: %v", err)
@@ -3276,8 +3276,8 @@ func newReplacementRig(t *testing.T, initial model.Model, version string, rebuil
 }
 
 // replacementInvokeRequest builds one user turn of the replacement checks.
-func replacementInvokeRequest(id, input string) tagent.InvokeRequest {
-	return tagent.InvokeRequest{
+func replacementInvokeRequest(id, input string) assembly.InvokeRequest {
+	return assembly.InvokeRequest{
 		InvocationID:  event.InvocationID(id),
 		Address:       event.Address{AgentID: "user", SessionID: replacementSession},
 		TriggerSource: "user",
@@ -3286,7 +3286,7 @@ func replacementInvokeRequest(id, input string) tagent.InvokeRequest {
 }
 
 // invokeReplacementTurn drives one user turn and requires it to return.
-func invokeReplacementTurn(t *testing.T, run *tagent.Run, id, input string) agent.Turn {
+func invokeReplacementTurn(t *testing.T, run *assembly.Run, id, input string) agent.Turn {
 	t.Helper()
 	turn, err := run.Invoke(context.Background(), replacementInvokeRequest(id, input))
 	if err != nil {
@@ -3297,7 +3297,7 @@ func invokeReplacementTurn(t *testing.T, run *tagent.Run, id, input string) agen
 
 // replacementGapOf reports the observation gaps the named plugin left on the
 // run's After pass presentations, joined so a named refusal is read by errors.Is.
-func replacementGapOf(run *tagent.Run, plugin string) error {
+func replacementGapOf(run *assembly.Run, plugin string) error {
 	var found error
 	for _, presentation := range run.Presentations() {
 		for _, gap := range presentation.Gaps {
@@ -3424,7 +3424,7 @@ func runDuplicateSameVersionNotReinstalled(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	host, err := tagent.Boot(configPath, tagent.WithSender(newRecordingSender()))
+	host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
 	if err != nil {
 		t.Fatalf("boot the replacement host: %v", err)
 	}
@@ -3546,7 +3546,7 @@ func runFormalReloadEntry(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	host, err := tagent.Boot(configPath, tagent.WithSender(newRecordingSender()))
+	host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
 	if err != nil {
 		t.Fatalf("boot the reload host: %v", err)
 	}
@@ -4014,7 +4014,7 @@ func driveIdentityMatrix(t *testing.T) identityMatrixScene {
 // commitIdentityRows commits the same input body into one session under the
 // given identities, then re-sends the first identity, and requires each commit
 // to answer the identity the caller stated.
-func commitIdentityRows(t *testing.T, ctx context.Context, host *tagent.Host, addr event.Address, keys []event.EventID) []event.EventID {
+func commitIdentityRows(t *testing.T, ctx context.Context, host *assembly.Host, addr event.Address, keys []event.EventID) []event.EventID {
 	t.Helper()
 	answered := make([]event.EventID, 0, len(keys)+1)
 	for _, pass := range [][]event.EventID{keys, keys[:1]} {
@@ -5202,11 +5202,11 @@ var formalAssemblyAddr = event.Address{AgentID: "user", SessionID: "session-even
 // bootFormalAssemblyHost boots the default assembly over the bare host
 // document: no tool is declared, no option is added beyond the formal sender,
 // so what the check reads is the wiring Boot establishes on its own.
-func bootFormalAssemblyHost(t *testing.T, provider *scriptedProvider, sender tagent.MessageSender) *tagent.Host {
+func bootFormalAssemblyHost(t *testing.T, provider *scriptedProvider, sender assembly.MessageSender) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the formal assembly host: %v", err)
 	}
@@ -5299,12 +5299,12 @@ func runMissingSenderFailsClosed(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
-	host, err := tagent.Boot(configPath)
+	host, err := assembly.Boot(configPath)
 	if err != nil {
 		t.Fatalf("boot the bare document beside no sender: %v", err)
 	}
-	if _, err := driveIntegrityTurn(ctx, host, formalAssemblyAddr, input); !errors.Is(err, tagent.ErrHostSenderMissing) {
-		t.Fatalf("the user turn beside no sender ended by %v, want the named refusal %v", err, tagent.ErrHostSenderMissing)
+	if _, err := driveIntegrityTurn(ctx, host, formalAssemblyAddr, input); !errors.Is(err, assembly.ErrHostSenderMissing) {
+		t.Fatalf("the user turn beside no sender ended by %v, want the named refusal %v", err, assembly.ErrHostSenderMissing)
 	}
 	if got := len(provider.recorded()); got != 0 {
 		t.Fatalf("the provider served %d requests beside a refused user turn, want zero", got)
@@ -5319,13 +5319,13 @@ func runMissingSenderFailsClosed(t *testing.T) {
 	writeHostDocumentFile(t, deniedPath, scriptedHostDocumentWithAgent(deniedRoot, deniedProvider.endpoint(), "model-entry",
 		"    tools:\n"+
 			"      - { kind: tool, id: send }\n"))
-	denied, err := tagent.Boot(deniedPath)
+	denied, err := assembly.Boot(deniedPath)
 	if err == nil {
 		_ = denied.Close(ctx)
 		t.Fatalf("Boot accepted a document that grants the %q tool beside no sender; the Boot gate must refuse it", "send")
 	}
-	if !errors.Is(err, tagent.ErrHostSenderMissing) {
-		t.Fatalf("Boot beside a granted send tool ended by %v, want the named refusal %v", err, tagent.ErrHostSenderMissing)
+	if !errors.Is(err, assembly.ErrHostSenderMissing) {
+		t.Fatalf("Boot beside a granted send tool ended by %v, want the named refusal %v", err, assembly.ErrHostSenderMissing)
 	}
 	if got := len(deniedProvider.recorded()); got != 0 {
 		t.Fatalf("the provider served %d requests beside a refused Boot, want zero", got)
@@ -5341,7 +5341,7 @@ func runMissingSenderFailsClosed(t *testing.T) {
 // long run declares — the 0.3 share of the window and one recent task kept
 // whole — so a new segment start folds the segment before it, the accumulation
 // rhythm the long-run failure was found under.
-func bootSmallWindowHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *tagent.Host {
+func bootSmallWindowHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *assembly.Host {
 	t.Helper()
 	return bootIntegrityHostWithAgents(t, provider, sender,
 		"  user:\n"+
@@ -5512,7 +5512,7 @@ type projectionlessState struct {
 // window declaration is the given line verbatim: an empty line declares no
 // window — the no-budget shape — and the loop reads the notice material from
 // the committed facts in every shape.
-func bootProjectionlessHost(t *testing.T, provider *scriptedProvider, sender recordingSender, window string) *tagent.Host {
+func bootProjectionlessHost(t *testing.T, provider *scriptedProvider, sender recordingSender, window string) *assembly.Host {
 	t.Helper()
 	return bootIntegrityHostWithAgents(t, provider, sender,
 		"  user:\n"+

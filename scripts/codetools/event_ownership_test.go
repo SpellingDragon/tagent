@@ -36,7 +36,7 @@ func TestEventOwnership(t *testing.T) {
 
 	t.Run("negative_forbidden_call_is_rejected", func(t *testing.T) {
 		files := baseFixtureFiles()
-		files["run.go"] = strings.Replace(files["run.go"], "\treturn r.store.AcceptNotice(ctx, notice)",
+		files["assembly/run.go"] = strings.Replace(files["assembly/run.go"], "\treturn r.store.AcceptNotice(ctx, notice)",
 			"\tif err := r.store.AcceptNotice(ctx, notice); err != nil {\n\t\treturn err\n\t}\n\treturn r.store.Claim(ctx, notice)", 1)
 		fixture := newOwnershipFixture(t, files, nil)
 		report, code := executeEventOwnership(ownershipOptions{Golden: fixture.golden, RepoRoot: fixture.root})
@@ -51,9 +51,9 @@ func TestEventOwnership(t *testing.T) {
 
 	t.Run("unregistered_edge_is_rejected", func(t *testing.T) {
 		files := baseFixtureFiles()
-		files["facts.go"] = strings.Replace(files["facts.go"], "\tr.loop.Backflow(notice)",
+		files["assembly/facts.go"] = strings.Replace(files["assembly/facts.go"], "\tr.loop.Backflow(notice)",
 			"\t_, _, _ = r.feed.NoticesFrom(\"chain\", 0)\n\tr.loop.Backflow(notice)", 1)
-		files["run.go"] = strings.Replace(files["run.go"], "\tloop  *agent.Loop",
+		files["assembly/run.go"] = strings.Replace(files["assembly/run.go"], "\tloop  *agent.Loop",
 			"\tloop  *agent.Loop\n\tfeed  agent.NoticeFeed", 1)
 		fixture := newOwnershipFixture(t, files, nil)
 		report, code := executeEventOwnership(ownershipOptions{Golden: fixture.golden, RepoRoot: fixture.root})
@@ -68,7 +68,7 @@ func TestEventOwnership(t *testing.T) {
 
 	t.Run("unowned_call_site_is_rejected", func(t *testing.T) {
 		files := baseFixtureFiles()
-		files["ledger.go"] = "package gate\n\nimport (\n\t\"context\"\n\n\t\"" + fixtureModule + "/runtime/task\"\n)\n\n" +
+		files["assembly/ledger.go"] = "package assembly\n\nimport (\n\t\"context\"\n\n\t\"" + fixtureModule + "/runtime/task\"\n)\n\n" +
 			"func (r *Run) note(ctx context.Context, notice task.Notice) error {\n\treturn r.store.AcceptNotice(ctx, notice)\n}\n"
 		fixture := newOwnershipFixture(t, files, nil)
 		report, code := executeEventOwnership(ownershipOptions{Golden: fixture.golden, RepoRoot: fixture.root})
@@ -82,7 +82,7 @@ func TestEventOwnership(t *testing.T) {
 
 	t.Run("same_name_non_target_is_not_misjudged", func(t *testing.T) {
 		files := baseFixtureFiles()
-		files["misc.go"] = "package gate\n\nimport \"context\"\n\n" +
+		files["assembly/misc.go"] = "package assembly\n\nimport \"context\"\n\n" +
 			"type AnchorStore struct{}\n\nfunc (a *AnchorStore) Advance(ctx context.Context, moment int) error { return nil }\n\n" +
 			"type toolbox struct{ sink func(string) }\n\n" +
 			"func drive(anchor *AnchorStore, box toolbox) error {\n\tbox.sink(\"material\")\n\treturn anchor.Advance(context.Background(), 1)\n}\n"
@@ -325,7 +325,7 @@ func (l *Loop) read(feed NoticeFeed) {
 	_, _, _ = feed.NoticesFrom("chain", 0)
 }
 `,
-		"run.go": `package gate
+		"assembly/run.go": `package assembly
 
 import (
 	"context"
@@ -355,7 +355,7 @@ func assemble(r *Run, register func(func(context.Context, task.Notice) error),
 	_ = deliver
 }
 `,
-		"facts.go": `package gate
+		"assembly/facts.go": `package assembly
 
 import (
 	"context"
@@ -384,7 +384,7 @@ func (r *Run) bookNotice(ctx context.Context, notice task.Notice) error {
 	return nil
 }
 `,
-		"commit.go": `package gate
+		"assembly/commit.go": `package assembly
 
 import (
 	"context"

@@ -19,7 +19,7 @@ func (sizeAndRuling) Name() string { return "size-and-ruling" }
 // Port reports the call->ruling port the element serves; the two faces of that port are
 // the ones this element implements.
 func (sizeAndRuling) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk renders the grade of one call before its side effect.

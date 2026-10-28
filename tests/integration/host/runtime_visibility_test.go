@@ -21,11 +21,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/cli"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
@@ -85,7 +85,7 @@ func (o *visibilityObserver) observed() int {
 // entry harness. Every scripted response names the model that served it, as a
 // provider reports it, so the model-response face of the observation reads the
 // very name the declaration registered.
-func visibilityRun(t *testing.T, ctx context.Context, opts ...tagent.Option) (*tagent.Run, *entryTool) {
+func visibilityRun(t *testing.T, ctx context.Context, opts ...assembly.Option) (*assembly.Run, *entryTool) {
 	t.Helper()
 	provider := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		if last := req.Messages[len(req.Messages)-1]; last.Content == "hello" {
@@ -98,9 +98,9 @@ func visibilityRun(t *testing.T, ctx context.Context, opts ...tagent.Option) (*t
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-	}, append([]tagent.Option{tagent.WithGovernance(passPolicy{})}, opts...)...)
+	}, append([]assembly.Option{assembly.WithGovernance(passPolicy{})}, opts...)...)
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -136,9 +136,9 @@ func visibilityNamed(resp *model.Response) *model.Response {
 
 // visibilityInvoke drives one invocation through the formal runtime entry at the
 // session the caller names.
-func visibilityInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID) {
+func visibilityInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID) {
 	t.Helper()
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -184,16 +184,16 @@ func TestRuntimeVisibility(t *testing.T) {
 		}
 		observer := &visibilityObserver{}
 		run, tool := visibilityRun(t, ctx,
-			tagent.WithReflectionAnchors(anchors),
-			tagent.WithRecorder(visibilityRecorder{}),
-			tagent.WithTelemetry(observer),
-			tagent.WithCapture(visibilityCapture(t)))
+			assembly.WithReflectionAnchors(anchors),
+			assembly.WithRecorder(visibilityRecorder{}),
+			assembly.WithTelemetry(observer),
+			assembly.WithCapture(visibilityCapture(t)))
 		visibilityInvoke(t, ctx, run, "inv-visible", "session-visible")
 		if tool.calls() != 1 {
 			t.Fatalf("tool executions = %d, want the admitted call executed exactly once", tool.calls())
 		}
 		filter := query.ListFilter{Scope: visibilityScope("session-visible")}
-		opened, err := run.Diagnostics(ctx, filter, tagent.DiagnosticSwitches{Reflection: true, Training: true, Telemetry: true})
+		opened, err := run.Diagnostics(ctx, filter, assembly.DiagnosticSwitches{Reflection: true, Training: true, Telemetry: true})
 		if err != nil {
 			t.Fatalf("read the open diagnostic faces: %v", err)
 		}
@@ -227,7 +227,7 @@ func TestRuntimeVisibility(t *testing.T) {
 			t.Fatal("recording losses = none, want the attempt writes the recorder refused counted in the account")
 		}
 		for _, loss := range opened.Training.Losses {
-			if loss.Kind != "attempt" || loss.Reason == "" {
+			if loss.Kind != "capture-attempt" || loss.Reason == "" {
 				t.Fatalf("recording loss = %+v, want the refused attempt write beside its named reason", loss)
 			}
 		}
@@ -235,7 +235,7 @@ func TestRuntimeVisibility(t *testing.T) {
 		for len(run.Presentations()) == 0 && time.Now().Before(deadline) {
 			time.Sleep(2 * time.Millisecond)
 		}
-		opened, err = run.Diagnostics(ctx, filter, tagent.DiagnosticSwitches{Reflection: true, Training: true, Telemetry: true})
+		opened, err = run.Diagnostics(ctx, filter, assembly.DiagnosticSwitches{Reflection: true, Training: true, Telemetry: true})
 		if err != nil {
 			t.Fatalf("re-read the open diagnostic faces: %v", err)
 		}
@@ -249,11 +249,11 @@ func TestRuntimeVisibility(t *testing.T) {
 			t.Fatalf("observation gaps = %d, want none beside an observer that accepted every fact", opened.Telemetry.Gaps)
 		}
 
-		closed, err := run.Diagnostics(ctx, filter, tagent.DiagnosticSwitches{})
+		closed, err := run.Diagnostics(ctx, filter, assembly.DiagnosticSwitches{})
 		if err != nil {
 			t.Fatalf("read the closed diagnostic faces: %v", err)
 		}
-		for _, face := range []tagent.DiagnosticFace{closed.Reflection.Face, closed.Training.Face, closed.Telemetry.Face} {
+		for _, face := range []assembly.DiagnosticFace{closed.Reflection.Face, closed.Training.Face, closed.Telemetry.Face} {
 			if face.Open || !face.Available || !strings.Contains(face.Reason, "switch") {
 				t.Fatalf("closed face = %+v, want the wired subsystem reported closed by its switch", face)
 			}
@@ -270,7 +270,7 @@ func TestRuntimeVisibility(t *testing.T) {
 		run, _ := visibilityRun(t, ctx)
 		visibilityInvoke(t, ctx, run, "inv-no-otel", "session-no-otel")
 		report, err := run.Diagnostics(ctx, query.ListFilter{Scope: visibilityScope("session-no-otel")},
-			tagent.DiagnosticSwitches{Reflection: true, Training: true, Telemetry: true})
+			assembly.DiagnosticSwitches{Reflection: true, Training: true, Telemetry: true})
 		if err != nil {
 			t.Fatalf("read the diagnostic faces: %v", err)
 		}
@@ -298,10 +298,10 @@ func TestRuntimeVisibility(t *testing.T) {
 	t.Run("诊断不复制状态: the reading follows the owners and keeps no copy", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		run, _ := visibilityRun(t, ctx, tagent.WithCapture(visibilityCapture(t)))
+		run, _ := visibilityRun(t, ctx, assembly.WithCapture(visibilityCapture(t)))
 		visibilityInvoke(t, ctx, run, "inv-copy-1", "session-copy")
 		filter := query.ListFilter{Scope: visibilityScope("session-copy")}
-		switches := tagent.DiagnosticSwitches{Training: true}
+		switches := assembly.DiagnosticSwitches{Training: true}
 		first, err := run.Diagnostics(ctx, filter, switches)
 		if err != nil {
 			t.Fatalf("read the scene once: %v", err)
@@ -337,10 +337,10 @@ func TestRuntimeVisibility(t *testing.T) {
 	})
 
 	t.Run("启动关闭与信号: the host serves its reading and closes through the drain", func(t *testing.T) {
-		t.Setenv(tagent.DiagnosticSwitchEnv, "reflection,training")
+		t.Setenv(assembly.DiagnosticSwitchEnv, "reflection,training")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		run, _ := visibilityRun(t, ctx, tagent.WithReflectionAnchors(filepath.Join(t.TempDir(), "anchors.json")), tagent.WithRecorder(visibilityRecorder{}))
+		run, _ := visibilityRun(t, ctx, assembly.WithReflectionAnchors(filepath.Join(t.TempDir(), "anchors.json")), assembly.WithRecorder(visibilityRecorder{}))
 		visibilityInvoke(t, ctx, run, "inv-host", "session-host")
 		scope := visibilityScope("session-host")
 		shell := cli.NewCLI(run, scope, cli.WithRequestCredential(entryCredential))
@@ -349,7 +349,7 @@ func TestRuntimeVisibility(t *testing.T) {
 		if served.status != http.StatusOK {
 			t.Fatalf("diagnostic request status = %d (%s), want the reading behind the request gate", served.status, served.body)
 		}
-		var report tagent.DiagnosticReport
+		var report assembly.DiagnosticReport
 		if err := json.Unmarshal([]byte(served.body), &report); err != nil {
 			t.Fatalf("decode the diagnostic reading: %v", err)
 		}
@@ -367,14 +367,14 @@ func TestRuntimeVisibility(t *testing.T) {
 			t.Fatalf("send the termination signal: %v", err)
 		}
 		stop()
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-after-close",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-host"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
 		}); !errors.Is(err, agent.ErrShutdownRefused) {
 			t.Fatalf("invoke after the close = %v, want the named refusal of the closed gate", err)
 		}
-		closed, err := run.Diagnostics(context.Background(), query.ListFilter{Scope: scope}, tagent.DiagnosticSwitches{})
+		closed, err := run.Diagnostics(context.Background(), query.ListFilter{Scope: scope}, assembly.DiagnosticSwitches{})
 		if err != nil {
 			t.Fatalf("read the closed host: %v", err)
 		}
@@ -387,7 +387,7 @@ func TestRuntimeVisibility(t *testing.T) {
 	})
 
 	t.Run("未知开关具名拒: an unknown switch refuses the start by name", func(t *testing.T) {
-		t.Setenv(tagent.DiagnosticSwitchEnv, "reflection,sparkles")
+		t.Setenv(assembly.DiagnosticSwitchEnv, "reflection,sparkles")
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		run, _ := visibilityRun(t, ctx)
@@ -410,7 +410,7 @@ func TestRuntimeVisibility(t *testing.T) {
 		root := t.TempDir()
 		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}
 		anchors := filepath.Join(root, "anchors.json")
-		first, _ := visibilityRun(t, ctx, tagent.WithStorage(cfg), tagent.WithReflectionAnchors(anchors))
+		first, _ := visibilityRun(t, ctx, assembly.WithStorage(cfg), assembly.WithReflectionAnchors(anchors))
 		visibilityInvoke(t, ctx, first, "inv-durable", "session-durable")
 		scope := visibilityScope("session-durable")
 		admitted, err := first.Query(ctx, visibilityTaskFilter(scope))
@@ -433,8 +433,8 @@ func TestRuntimeVisibility(t *testing.T) {
 		if err := store.Advance(ctx, moment); err != nil {
 			t.Fatalf("record the consumed reflection turn: %v", err)
 		}
-		second, _ := visibilityRun(t, ctx, tagent.WithStorage(cfg), tagent.WithReflectionAnchors(anchors))
-		report, err := second.Diagnostics(ctx, query.ListFilter{Scope: scope}, tagent.DiagnosticSwitches{Reflection: true})
+		second, _ := visibilityRun(t, ctx, assembly.WithStorage(cfg), assembly.WithReflectionAnchors(anchors))
+		report, err := second.Diagnostics(ctx, query.ListFilter{Scope: scope}, assembly.DiagnosticSwitches{Reflection: true})
 		if err != nil {
 			t.Fatalf("read the restarted host: %v", err)
 		}

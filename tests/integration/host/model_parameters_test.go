@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 )
@@ -63,7 +63,7 @@ func TestBootPassesModelParameters(t *testing.T) {
 			document := scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-a", tc.agentBlock)
 			configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 			writeHostDocumentFile(t, configPath, document)
-			host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+			host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 			if err != nil {
 				t.Fatalf("boot the host: %v", err)
 			}
@@ -121,7 +121,7 @@ func TestBootAppliesMaxToolIterations(t *testing.T) {
 		"      - { kind: tool, id: send }\n"
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-a", agentBlock))
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSubAgentDeclaredParametersReachRequest(t *testing.T) {
 				"    temperature: 0.3\n"+
 				"    thinking_enabled: true\n"+
 				"    reasoning_effort: high\n"))
-		host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+		host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 		if err != nil {
 			t.Fatalf("boot the host: %v", err)
 		}
@@ -183,7 +183,7 @@ func TestSubAgentDeclaredParametersReachRequest(t *testing.T) {
 			{AgentID: "user", SessionID: "session-entry-params"},
 			{AgentID: "knowledge", SessionID: "session-knowledge-params"},
 		} {
-			turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+			turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 				Address: addr,
 				Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 			})
@@ -259,15 +259,15 @@ func TestSubAgentDeclaredParametersReachRequest(t *testing.T) {
 				},
 			},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"caller":    {Model: caller},
 			"knowledge": {Model: knowledge},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "caller", SessionID: "session-declared-sampling"}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-declared-sampling",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "delegate the probe"}},

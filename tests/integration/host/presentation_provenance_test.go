@@ -5,11 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // provenancePresenter is one final presenter of the formal assembly: it records
@@ -25,7 +25,7 @@ func (p *provenancePresenter) Name() string { return p.name }
 
 // Port reports the fact->view port the presenter serves.
 func (p *provenancePresenter) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present records the source fact and answers the view this presenter writes.
@@ -52,9 +52,9 @@ func TestMultiplePresentersEachAnswerATraceableView(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Plugins: []plugin.Instance{summary, detail}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}

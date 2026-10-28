@@ -431,7 +431,7 @@ func TestPolicyDeclaresTheRulingPort(t *testing.T) {
 	if got, want := policy.Name(), "governance-policy"; got != want {
 		t.Fatalf("policy name = %q, want %q", got, want)
 	}
-	want := plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	want := plugin.PortCallRuling
 	if got := policy.Port(); got != want {
 		t.Fatalf("policy port = %s, want %s", got, want)
 	}
@@ -460,7 +460,7 @@ type misdeclaredPolicy struct{ *Policy }
 
 // Port reports a port the embedded policy does not implement.
 func (misdeclaredPolicy) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+	return plugin.PortFactCompression
 }
 
 // TestHoldRegistersApprovalRequest pins the registration a critical hold leaves on the approval book, over the real manager and a persisted request directory.

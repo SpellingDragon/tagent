@@ -162,9 +162,12 @@ func (p Policy) classify(status Status, s stamps, at time.Time) LogicalStatus {
 }
 
 // isExecuting reports whether a status holds an execution whose result the caller
-// still waits for.
+// still waits for. A running round is the one that does: progress reported
+// beside it is a fact on the task's chain rather than a phase of its own, so the
+// execution timeout that is read off this answer covers a task that reports
+// progress exactly as it covers one that has reported none yet.
 func isExecuting(status Status) bool {
-	return status == StatusRunning || status == StatusProgress
+	return status == StatusRunning
 }
 
 // WithPolicy sets the threshold set every task of the registry is read under. A

@@ -298,10 +298,12 @@ func smokeErrorsShortTTLDocument(c *smokeConfig) string {
 }
 
 // smokeErrorsBadProviderDocument 让入口 agent 引用未声明的 provider，并改到热换
-// 后的模型名：热换期的重建因此被拒，agent 集合与工具面保持不变。
+// 后的模型名：热换期的重建因此被拒，agent 集合与工具面保持不变。文档以起机
+// 渲染（smokeApprovalDocument，即起机文档）为底注入 provider 行，变更面只有
+// 这一行（一档），不会先撞二档拒绝。
 func smokeErrorsBadProviderDocument(c *smokeConfig) string {
 	base := *c
-	base.Doc = nil
+	base.Doc = smokeApprovalDocument
 	entry := fmt.Sprintf("  %s:\n    model: %s\n", smokeSessionTag, c.Model)
 	document := base.document()
 	patched := strings.Replace(document, entry,

@@ -81,6 +81,52 @@ func TestDecodeEventBodyLegacyRefused(t *testing.T) {
 	}
 }
 
+// TestDecodeEventBodyRefusesKeyContentSummaryShape refuses the other shape the earlier writer committed: key, content and summary with no message.
+//   - the bytes carry an identity of their own and are still refused, because the schema is named by the keys the bytes carry
+//   - the refusal wraps ErrEventBody, names the missing message key and returns no half decoded body
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestDecodeEventBodyRefusesKeyContentSummaryShape(t *testing.T) {
+	legacy := `{"key":"e-1","content":"正文","summary":"摘要"}`
+	decoded, err := DecodeEventBody([]byte(legacy))
+	if err == nil {
+		t.Fatalf("decode %s: accepted the key/content/summary bytes as %+v", legacy, decoded)
+	}
+	if !errors.Is(err, ErrEventBody) {
+		t.Fatalf("decode %s: error %v does not wrap ErrEventBody", legacy, err)
+	}
+	if !strings.Contains(err.Error(), "carries no message") {
+		t.Fatalf("decode %s: error %q does not name the missing message key", legacy, err)
+	}
+	if decoded.Key != "" || decoded.Message.Content != "" {
+		t.Fatalf("decode %s: returned %+v for bytes it refused", legacy, decoded)
+	}
+}
+
+// TestDecodeEventBodyAcceptsDeclaredEmptyMessage holds the other end of the same rule: presence of the key is what the schema asks.
+//   - a body that declares an empty message decodes, because an audit fact with an empty message is a legal body
+//   - the zero value a decode leaves behind decides nothing, so only bytes carrying no message key are refused
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestDecodeEventBodyAcceptsDeclaredEmptyMessage(t *testing.T) {
+	declared := `{"key":"fact-empty-message","type":"agent_output",` +
+		`"message":{"role":"assistant","content":""},` +
+		`"meta":{"` + event.MetaKeyEventSummary + `":"s"}}`
+	decoded, err := DecodeEventBody([]byte(declared))
+	if err != nil {
+		t.Fatalf("decode %s: refused a body that declares an empty message: %v", declared, err)
+	}
+	if decoded.Key != "fact-empty-message" {
+		t.Fatalf("decode %s: key %q, want the one the bytes carry", declared, decoded.Key)
+	}
+	if decoded.Message.Content != "" {
+		t.Fatalf("decode %s: content %q, want the empty one the bytes carry", declared, decoded.Message.Content)
+	}
+	if decoded.Meta[event.MetaKeyEventSummary] != "s" {
+		t.Fatalf("decode %s: summary %q, want the one the bytes carry", declared, decoded.Meta[event.MetaKeyEventSummary])
+	}
+}
+
 // TestEventBodyKeepsEveryFieldAcrossTheRoundTrip pins one committed body restored field for field.
 //   - the restored event equals the committed one in meta, payload and every lineage identity
 //

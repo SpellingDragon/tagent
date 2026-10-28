@@ -311,8 +311,8 @@ func TestFileAndStructuralChange(t *testing.T) {
 		rig := newFileRig(t)
 		tools := []trpctool.Tool{&stubTool{name: "tool-1"}}
 		pipeline := []plugin.Instance{
-			&stubPlugin{name: "enrich", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}},
-			&stubPlugin{name: "risk", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}},
+			&stubPlugin{name: "enrich", port: plugin.PortCallTransform},
+			&stubPlugin{name: "risk", port: plugin.PortCallRuling},
 		}
 		first := fileCandidate(t, rig.pub.Baseline(), "fp-1", &stubModel{name: "gen-1"}, tools, pipeline, rig.files, orgstate.NewLeases())
 		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionPlugins, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 4}, first); err != nil {
@@ -326,7 +326,7 @@ func TestFileAndStructuralChange(t *testing.T) {
 
 		second := fileCandidate(t, rig.pub.Baseline(), "fp-2", &stubModel{name: "gen-2"},
 			[]trpctool.Tool{&stubTool{name: "tool-2"}},
-			[]plugin.Instance{&stubPlugin{name: "present", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}}},
+			[]plugin.Instance{&stubPlugin{name: "present", port: plugin.PortFactView}},
 			rig.files, orgstate.NewLeases())
 		if _, err := rig.router.Commit(ctx, orgstate.Change{Dimension: orgstate.DimensionPlugins, Via: orgstate.ChannelFP, Source: "org.yaml", Line: 5}, second); err != nil {
 			t.Fatalf("publish the second generation beside the in-flight request: %v", err)

@@ -217,7 +217,7 @@ func TestDelegationCompletion(t *testing.T) {
 		rig.deliverProgress(t, ctx, t1, 0)
 		rig.deliverProgress(t, ctx, t1, 1)
 		record := rig.ledger.View("inv-a")[0]
-		if record.Status != task.StatusProgress || len(record.Progress) != 2 {
+		if record.Status != task.StatusRunning || len(record.Progress) != 2 {
 			t.Fatalf("record after progress = (status %v, %d notices), want the running phase under both identities", record.Status, len(record.Progress))
 		}
 		if err := rig.ledger.Observe(ctx, delegationNotice(t1, task.NoticeProgress, 0)); err != nil {
@@ -517,7 +517,7 @@ func (r *delegationRig) deliverProgress(t *testing.T, ctx context.Context, taskI
 		t.Fatalf("look up the delegated task: %v", err)
 	}
 	notice := delegationNotice(taskID, task.NoticeProgress, seq)
-	result, err := r.tasks.Advance(ctx, taskID, task.StatusProgress,
+	result, err := r.tasks.Advance(ctx, taskID, task.StatusRunning,
 		task.MutationID(fmt.Sprintf("progress:%s:%d", taskID, seq)),
 		[]task.Envelope{{
 			Notice:         notice,

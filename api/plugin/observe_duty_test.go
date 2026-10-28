@@ -56,12 +56,12 @@ func TestObserverLayering(t *testing.T) {
 		var seen []event.EventID
 		failure := errors.New("the reading did not land")
 		broken := &layeredReading{
-			invariantPlugin: invariantPlugin{name: "reading-broken", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+			invariantPlugin: invariantPlugin{name: "reading-broken", port: PortFactObservation},
 			seen:            &seen,
 			err:             failure,
 		}
 		sound := &layeredReading{
-			invariantPlugin: invariantPlugin{name: "reading-sound", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+			invariantPlugin: invariantPlugin{name: "reading-sound", port: PortFactObservation},
 			seen:            &seen,
 		}
 		pipeline, err := NewFlow([]Instance{broken, sound})
@@ -90,7 +90,7 @@ func TestObserverLayering(t *testing.T) {
 		failure := errors.New("the settle fact could not be read")
 		driver := &layeredDriver{
 			layeredReading: layeredReading{
-				invariantPlugin: invariantPlugin{name: "driver", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+				invariantPlugin: invariantPlugin{name: "driver", port: PortFactObservation},
 				seen:            &seen,
 				err:             failure,
 			},
@@ -128,13 +128,13 @@ func TestObserverLayering(t *testing.T) {
 		readingFailure := errors.New("the reading did not land")
 		driverFailure := errors.New("the settle fact could not be read")
 		reading := &layeredReading{
-			invariantPlugin: invariantPlugin{name: "reading", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+			invariantPlugin: invariantPlugin{name: "reading", port: PortFactObservation},
 			seen:            &seen,
 			err:             readingFailure,
 		}
 		driver := &layeredDriver{
 			layeredReading: layeredReading{
-				invariantPlugin: invariantPlugin{name: "driver", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+				invariantPlugin: invariantPlugin{name: "driver", port: PortFactObservation},
 				seen:            &seen,
 				err:             driverFailure,
 			},
@@ -165,14 +165,14 @@ func TestObserverLayering(t *testing.T) {
 		owed := true
 		driver := &layeredDriver{
 			layeredReading: layeredReading{
-				invariantPlugin: invariantPlugin{name: "driver", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+				invariantPlugin: invariantPlugin{name: "driver", port: PortFactObservation},
 				seen:            &seen,
 				err:             errors.New("the settle fact could not be read"),
 			},
 			owed: &owed,
 		}
 		presenter := invariantPresenter{
-			invariantPlugin: invariantPlugin{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}},
+			invariantPlugin: invariantPlugin{name: "presenter", port: PortFactView},
 			order:           &order,
 			text:            "rendered",
 		}

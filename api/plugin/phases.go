@@ -207,12 +207,12 @@ func assemble(declarations []declaration) (Pipeline, error) {
 		}
 		servedAny := false
 		switch element.port {
-		case Port{Reads: MaterialCall, Produces: ProductCall}:
+		case PortCallTransform:
 			if impl, ok := element.impl.(TransformCall); ok {
 				out.transforms = append(out.transforms, served[TransformCall]{element.name, impl})
 				servedAny = true
 			}
-		case Port{Reads: MaterialCall, Produces: ProductRuling}:
+		case PortCallRuling:
 			if impl, ok := element.impl.(RiskAssessor); ok {
 				out.risks = append(out.risks, served[RiskAssessor]{element.name, impl})
 				servedAny = true
@@ -221,12 +221,12 @@ func assemble(declarations []declaration) (Pipeline, error) {
 				out.governors = append(out.governors, served[Governor]{element.name, impl})
 				servedAny = true
 			}
-		case Port{Reads: MaterialRequest, Produces: ProductEnvironment}:
+		case PortRequestEnvironment:
 			if impl, ok := element.impl.(EnvironmentInject); ok {
 				out.injects = append(out.injects, served[EnvironmentInject]{element.name, impl})
 				servedAny = true
 			}
-		case Port{Reads: MaterialFact, Produces: ProductObservation}:
+		case PortFactObservation:
 			if impl, ok := element.impl.(PostCommitObserver); ok {
 				out.observers = append(out.observers, observedFace{
 					served: served[PostCommitObserver]{element.name, impl},
@@ -234,12 +234,12 @@ func assemble(declarations []declaration) (Pipeline, error) {
 				})
 				servedAny = true
 			}
-		case Port{Reads: MaterialFact, Produces: ProductView}:
+		case PortFactView:
 			if impl, ok := element.impl.(FinalPresenter); ok {
 				out.presenters = append(out.presenters, served[FinalPresenter]{element.name, impl})
 				servedAny = true
 			}
-		case Port{Reads: MaterialFact, Produces: ProductCompression}:
+		case PortFactCompression:
 			if impl, ok := element.impl.(CompressTrigger); ok {
 				out.triggers = append(out.triggers, served[CompressTrigger]{element.name, impl})
 				servedAny = true
@@ -278,6 +278,32 @@ type CallPass struct {
 	TriggerSource string
 }
 
+// callPassKey is the context key one Before pass is carried under. It lives
+// beside CallPass because the value the key carries is this package's own type:
+// the dispatch that produced the pass and the admission ruling that reads it
+// meet on the value, not on the package that wired them together.
+type callPassKey struct{}
+
+// WithCallPass carries the one Before pass of a tool call on the context of that
+// call, so the admission ruling of the composition root rules over the very pass
+// the dispatch produced. The dispatch is its production writer. The pass is the
+// seam's only value: what triggered the call travels inside it, and no second
+// context key is ever introduced.
+func WithCallPass(ctx context.Context, pass CallPass) context.Context {
+	return context.WithValue(ctx, callPassKey{}, pass)
+}
+
+// CallPassFrom reports the Before pass the context carries and whether one is
+// set. It is this seam's single typed accessor: a call site reads the pass
+// through it and never through a bare context value, and the composition root's
+// admission ruling is its production reader. A call driven beside no pass reads
+// not-ok, and that caller decides the default — the admission ruling refuses
+// such a call closed rather than ruling at a guess.
+func CallPassFrom(ctx context.Context) (CallPass, bool) {
+	pass, ok := ctx.Value(callPassKey{}).(CallPass)
+	return pass, ok
+}
+
 // ErrCallIdentityChanged reports a transform that changed the identity of the
 // call it was handed: a transform may correct the tool name and parameters of a
 // call and must never change its CallID, which stays as resolved. The Before pass
@@ -303,7 +329,7 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
 	for _, face := range p.transforms {
 		started := time.Now()
 		err := face.impl.TransformCall(ctx, &final)
-		observeFace(Port{Reads: MaterialCall, Produces: ProductCall}, faceTransform, face.name, faceResult(err), "call="+call.ID, started)
+		observeFace(PortCallTransform, faceTransform, face.name, faceResult(err), "call="+call.ID, started)
 		if err != nil {
 			return CallPass{}, fmt.Errorf("plugin: transform %s: %w", face.name, err)
 		}
@@ -315,7 +341,7 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
 	for _, face := range p.risks {
 		started := time.Now()
 		graded := face.impl.AssessRisk(ctx, &final)
-		observeFace(Port{Reads: MaterialCall, Produces: ProductRuling}, faceRisk, face.name, faceGrade(graded), "call="+call.ID, started)
+		observeFace(PortCallRuling, faceRisk, face.name, faceGrade(graded), "call="+call.ID, started)
 		if graded.Rank() > risk.Rank() {
 			risk = graded
 		}
@@ -339,7 +365,7 @@ func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressReq
 	for _, face := range p.triggers {
 		started := time.Now()
 		err := face.impl.TriggerCompress(ctx, request)
-		observeFace(Port{Reads: MaterialFact, Produces: ProductCompression}, faceTrigger, face.name, faceResult(err), "request="+string(request.ID), started)
+		observeFace(PortFactCompression, faceTrigger, face.name, faceResult(err), "request="+string(request.ID), started)
 		if err != nil {
 			return fmt.Errorf("plugin: compress trigger %s: %w", face.name, err)
 		}
@@ -364,7 +390,7 @@ func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequ
 	for _, face := range p.injects {
 		started := time.Now()
 		texts, err := face.impl.InjectEnvironment(ctx, request)
-		observeFace(Port{Reads: MaterialRequest, Produces: ProductEnvironment}, faceInject, face.name, faceResult(err), "agent="+string(request.Agent), started)
+		observeFace(PortRequestEnvironment, faceInject, face.name, faceResult(err), "agent="+string(request.Agent), started)
 		if err != nil {
 			return nil, fmt.Errorf("plugin: environment inject %s: %w", face.name, err)
 		}

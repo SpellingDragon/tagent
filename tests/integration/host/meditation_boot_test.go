@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // TestHostBootWiresTheMeditationDriver boots a host whose meditation session carries deliver_summary, then closes it:
@@ -24,7 +24,7 @@ func TestHostBootWiresTheMeditationDriver(t *testing.T) {
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	root := t.TempDir()
 	configPath := writeMeditationHostDocument(t, root, []string{"send"}, []string{"deliver_summary"})
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -65,11 +65,11 @@ func TestHostBootRefusesMisplacedMeditationTools(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			configPath := writeMeditationHostDocument(t, root, tc.userTools, tc.meditationTools)
-			host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+			host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 			if host != nil {
 				t.Fatal("a refused boot returned a host")
 			}
-			if !errors.Is(err, tagent.ErrHostMeditationToolMisplaced) || !strings.Contains(err.Error(), tc.want) {
+			if !errors.Is(err, assembly.ErrHostMeditationToolMisplaced) || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("boot error = %v, want the misplaced %q refusal", err, tc.want)
 			}
 		})

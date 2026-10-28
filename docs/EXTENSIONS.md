@@ -8,16 +8,16 @@
 <a id="pipeline-phases"></a>
 ## 一、plugin：六个端口，每个端口一个窄接口
 
-扩展者只需做两件事：实现 `plugin.Instance`（报一个稳定名字**和恰好一个** `plugin.Port`），再实现该端口的那一个窄接口。端口是「读哪一种材料、产哪一种产物」的一对（`plugin.Material` × `plugin.Product`）：它既决定实例在流程里的位置，也决定它被派发进哪个接口集；`plugin.NewFlow` 按声明序分组时逐个核对，越界即拒绝：端口即派发依据。名字是产物的溯源标签：f 的产物（presenter 的视图、环境块——每块各自一个产物）可回查来源，g 的产物（新事实）自己就是源头——两类义务的差别正在这里，而一个名字只标识写它的那一个元素，重复即按破坏溯源拒绝。
+扩展者只需做两件事：实现 `plugin.Instance`（报一个稳定名字**和恰好一个** `plugin.Port`），再实现该端口的那一个窄接口。端口是一个**具名常量**（`plugin.PortCallTransform` 到 `plugin.PortFactCompression` 六个之一）：常量名直接拼出它代表的转向——读的那一面材料挨着答的那一面产物——它既决定实例在流程里的位置，也决定它被派发进哪个接口集；`plugin.NewFlow` 按声明序逐个核对，闭集外的名字一律具名拒绝：端口即派发依据。名字是产物的溯源标签：f 的产物（presenter 的视图、环境块——每块各自一个产物）可回查来源，g 的产物（新事实）自己就是源头——两类义务的差别正在这里，而一个名字只标识写它的那一个元素，重复即按破坏溯源拒绝。
 
-| 端口（`Port{Reads, Produces}`） | 扩展者实现的接口 | 出现在哪一趟 | 与什么有关系 | 拒绝语义 |
+| 端口（具名 `plugin.Port` 常量） | 扩展者实现的接口 | 出现在哪一趟 | 与什么有关系 | 拒绝语义 |
 |---|---|---|---|---|
-| `call->call`（`MaterialCall`→`ProductCall`） | `TransformCall(ctx, *model.ToolCall) error` | Before 趟，admission 之前、副作用之前 | 这一次工具调用本身：可改工具名与参数，不改 `CallID` 与已解析的可信作用域 | 返回 error 即拒绝**整趟**：该调用不执行、不记录，也不产生 `CallPass`；移动 `CallID` 报 `plugin.ErrCallIdentityChanged` |
-| `call->ruling`（`MaterialCall`→`ProductRuling`） | `RiskAssessor.AssessRisk(ctx, *model.ToolCall) RiskLevel` 与 `Governor` | Before 趟，全部 transform 之后 | 同一个调用的风险等级与执行前裁决：等级只评级一次，裁决读它而不重算 | 端口内两个面可只实现其一或都实现，一个都不实现按"端口无实现"拒绝 |
-| `request->environment`（`MaterialRequest`→`ProductEnvironment`） | `EnvironmentInject.InjectEnvironment(ctx, plugin.EnvironmentRequest) ([]string, error)` | 请求装配的 InjectEnvironment 趟 | 一次请求装配持有的动态环境材料：每块是一个产物，回查发起它的请求；不写运行时、不改请求 | 返回 error 拒绝**这次装配**：不在失败的块之上构建请求；空面必须如实报空，不得以"无块"藏起 |
-| `fact->observation`（`MaterialFact`→`ProductObservation`） | `ObserveCommit(ctx, event.EventID) error` | After 趟，先于全部 presenter | 一个**已提交**事实的只读观察 | 失败不返回错误、不回滚事实：失败落成 `view.ObservationGap`（插件名+事实+错误） |
-| `fact->view`（`MaterialFact`→`ProductView`） | `Present(ctx, event.EventID) (string, bool)` | After 趟，最后 | 一个已提交事实的呈现文本：每个 presenter 各产一视图，视图带源事实与写它的插件名，可回查 | 丢弃只丢呈现（`view.RenderedView.Dropped`），不撤回事实；丢弃必须如实报出 |
-| `fact->compression`（`MaterialFact`→`ProductCompression`） | `TriggerCompress(ctx, event.CompressRequest) error` | 已归档压缩请求的 TriggerCompress 趟 | 一个已归档压缩请求驱动的可溯源映射链的启动：请求身份与 subject 保持原样，本面不压缩、不退役请求 | 返回 error 拒绝该请求：材料不压缩，请求保持待处理 |
+| `call->call`（`plugin.PortCallTransform`） | `TransformCall(ctx, *model.ToolCall) error` | Before 趟，admission 之前、副作用之前 | 这一次工具调用本身：可改工具名与参数，不改 `CallID` 与已解析的可信作用域 | 返回 error 即拒绝**整趟**：该调用不执行、不记录，也不产生 `CallPass`；移动 `CallID` 报 `plugin.ErrCallIdentityChanged` |
+| `call->ruling`（`plugin.PortCallRuling`） | `RiskAssessor.AssessRisk(ctx, *model.ToolCall) RiskLevel` 与 `Governor` | Before 趟，全部 transform 之后 | 同一个调用的风险等级与执行前裁决：等级只评级一次，裁决读它而不重算 | 端口内两个面可只实现其一或都实现，一个都不实现按"端口无实现"拒绝 |
+| `request->environment`（`plugin.PortRequestEnvironment`） | `EnvironmentInject.InjectEnvironment(ctx, plugin.EnvironmentRequest) ([]string, error)` | 请求装配的 InjectEnvironment 趟 | 一次请求装配持有的动态环境材料：每块是一个产物，回查发起它的请求；不写运行时、不改请求 | 返回 error 拒绝**这次装配**：不在失败的块之上构建请求；空面必须如实报空，不得以"无块"藏起 |
+| `fact->observation`（`plugin.PortFactObservation`） | `ObserveCommit(ctx, event.EventID) error` | After 趟，先于全部 presenter | 一个**已提交**事实的只读观察 | 失败不返回错误、不回滚事实：失败落成 `view.ObservationGap`（插件名+事实+错误） |
+| `fact->view`（`plugin.PortFactView`） | `Present(ctx, event.EventID) (string, bool)` | After 趟，最后 | 一个已提交事实的呈现文本：每个 presenter 各产一视图，视图带源事实与写它的插件名，可回查 | 丢弃只丢呈现（`view.RenderedView.Dropped`），不撤回事实；丢弃必须如实报出 |
+| `fact->compression`（`plugin.PortFactCompression`） | `TriggerCompress(ctx, event.CompressRequest) error` | 已归档压缩请求的 TriggerCompress 趟 | 一个已归档压缩请求驱动的可溯源映射链的启动：请求身份与 subject 保持原样，本面不压缩、不退役请求 | 返回 error 拒绝该请求：材料不压缩，请求保持待处理 |
 
 三趟的边界是这段接口的全部意义：
 
@@ -25,7 +25,7 @@
 - **After 一趟**：提交之后才跑，先 observers 再 presenters，每个 presenter 各产一视图、按声明序追加（视图数即注册 presenter 数，可为 0），返回 `view.Presentation{Fact, Views, Gaps}` 且**没有 error 返回值**——这个趟的任何失败都不能成为动已提交事实的理由。被拒绝的调用与提交失败的调用不产生呈现。
 - **Request 一趟**：每次请求装配跑一次，只跑 `request->environment` 端口的面，按声明序追加每个块（块数即各面回答的块数和，可为 0）。
 
-装配上的四条拒绝（`plugin.NewFlow` 的原文）：nil 实例报 `plugin: the flow holds a nil instance`；端口不在闭合表内报 `plugin: %q declares ...`，内层原文分别是 `plugin: %q is not a declared material of the flow`、`plugin: %q is not a declared product of the flow` 与 `plugin: the port %s is not one of the declared ports of the flow`；端口合法但没实现该端口的窄接口报 `plugin: %q declares the port %s but implements no narrow interface of that port`；同一个名字声明两次报 `plugin: %q is declared twice: a product's name must trace back to the one element that wrote it`。实例也不得服务两个端口：一个注册实例一个端口，ruling 端口的两个面可以同时带。
+装配上的四条拒绝（`plugin.NewFlow` 的原文）：nil 实例报 `plugin: the flow holds a nil instance`；端口不在闭合表内报 `plugin: %q declares ...`，内层原文是 `plugin: %q is not one of the declared ports of the flow`；端口合法但没实现该端口的窄接口报 `plugin: %q declares the port %s but implements no narrow interface of that port`；同一个名字声明两次报 `plugin: %q is declared twice: a product's name must trace back to the one element that wrote it`。实例也不得服务两个端口：一个注册实例一个端口，ruling 端口的两个面可以同时带。
 
 **与什么有关系**：`Pipeline` 每次派发从借用代（borrowed generation）的实例装配一次，请求中途不重组；所以扩展者看到的次序就是宿主贡献实例的次序，pipeline 不改写它。契约在 `api/plugin/phases.go` 与 `api/plugin/present.go`，呈现词汇（`Presentation`/`RenderedView`/`ObservationGap`）在 `api/view/presentation.go`，只引用 `event` 的事实身份。观测面复用框架面、不自造第二套：已提交事实由 `telemetry.LogObserver` 写进 `trpc-agent-go/log.Logger`，端口派发与消费器执行两面直接写 `log.Default`，模型响应只写 `log.Default` 的一行 INFO（generation span 归驱动模型的一方，本仓不再开），四类的观察点与 Langfuse 装配见 OPERATION §七·E。
 
@@ -66,7 +66,7 @@
 1. **`Invocation.Ready []event.Event`** 是一次责任范围**独占**的输入。`Loop.Drive` 把它拼在会话历史之后交给 `aggregateReady`：事件的 `Message` 原样保留（多工具 assistant 消息与逐调用配对的工具消息不被拆开），只有自身没带角色的消息才用 `agent.RoleOf` 按类型补。
 2. **消费即一次决策**。模型产出的工具调用经受理路径变成**受理回执**与**结算观察**，两者在下一次决策前进入 transcript；当一次决策既没有回执也没有观察时，这一趟以终态收束并提交 transcript。
 3. **`Loop.Backflow(invocationID, notice)` 只驱动发起了该调用的那次 invocation 的下一次决策**，不驱动别的。它只接受 `settled` / `failed` / `cancelled` 三种终态：非终态通知没有可配对的结果，在这里被忽略，而不是被当作空结果。
-4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`facts.go`）。loop 自己不选传输、不猜目标。
+4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`assembly/facts.go`）。loop 自己不选传输、不猜目标。
 
 **自定义事件类型就是运行期消息**：`Ready` 里没有类型白名单，一个不在上表里的类型（例如宿主自己的 `meditation_tick`）照样被消费成它自己的那条消息、照样能调用模型与工具、照样经 `Backflow` 回填。唯一不许的是"消费了但什么都没产出还静默返回"：空结果必须以具名错误拒绝投递，而不是投一条空消息——对照用例 `tests/integration/execution/custom_event_loop_test.go` 用 `errCustomEventNoResult` 固定这条语义，S12 用同一消费链固定通知定向（`tests/integration/acceptance/scenario_s12_test.go`）。
 
@@ -185,18 +185,18 @@ agents:
 
 拒绝都点名：`preset: the declared tool carries no wiring`（声明了 `recall` 或 `call_subagent` 却没有对应面）、`knowledge: the reference names no local source`、`knowledge: a remote endpoint is not wired`、`knowledge: the reference names no known tool`、`preset: the parameter value cannot be read`。契约在 `tool/subagent/presets.go`，装配面核对见 `tests/integration/config/preset_tools_test.go`。
 
-**当前边界（写在这里以免扩展者猜）**：pipeline 元素由宿主经 `tagent.NativeAgent.Plugins` 贡献，声明里的 `plugins:` 名单是声明侧的次序意图，`tagent.Assemble` 不把它解析成元素。所以"声明序"要生效，宿主按同一名单贡献元素；S11 正是这么驱动的（`tests/integration/acceptance/scenario_s11_test.go`）。运行手册与门禁清单见 `docs/OPERATION.md`。
+**当前边界（写在这里以免扩展者猜）**：pipeline 元素由宿主经 `assembly.NativeAgent.Plugins` 贡献，声明里的 `plugins:` 名单是声明侧的次序意图，`assembly.Assemble` 不把它解析成元素。所以"声明序"要生效，宿主按同一名单贡献元素；S11 正是这么驱动的（`tests/integration/acceptance/scenario_s11_test.go`）。运行手册与门禁清单见 `docs/OPERATION.md`。
 
 ---
 
 <a id="reduction-map"></a>
 ## 七、化归判据对照表：18 面三问归位
 
-新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：module 根加 17 个一级产品面（`tool` 的 exec/file/knowledge/mcp/recall/spec/subagent 适配器算一族，`memory` 的存储档与检索子包算子包，`api` 的词汇包按面单列）。
+新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：组合根加 17 个一级产品面（`tool` 的 exec/file/knowledge/mcp/recall/spec/subagent 适配器算一族，`memory` 的存储档与检索子包算子包，`api` 的词汇包按面单列）。
 
 | # | 面（包） | ① 是不是事实 | ② 谁消费它 | ③ 什么时态 | 归位轴 |
 |---|---|---|---|---|---|
-| 1 | `tagent`（module 根） | 否：只装配与发布 | 宿主导入入口；`Assemble` 读声明 | 无（组合） | 边界 |
+| 1 | `assembly`（组合根，住在 `assembly/`） | 否：只装配与发布 | 宿主导入入口；`Assemble` 读声明 | 无（组合） | 边界 |
 | 2 | `runtime/agent` | 否：消费 ready 与回填，产物经 `rl.Recorder` 提交 | 回合驱动自己消费；宿主读回执与终态 | 在途（决策） | 执行器 |
 | 3 | `api/config` | 是：声明族（规范指纹身份） | 组合根与热重载候选；`runtime/state` 读绑定 | 存续 | 事实 |
 | 4 | `api/event` | 是：核心事件族（`Key` 身份） | 全部消费面的输入词汇 | 事实本体 | 事实 |

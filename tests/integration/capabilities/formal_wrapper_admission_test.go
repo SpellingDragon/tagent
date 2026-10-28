@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -79,14 +79,14 @@ func TestFormalWrapperAdmission(t *testing.T) {
 			}
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithEnforcement(governance.EnforcementStrict))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithEnforcement(governance.EnforcementStrict))
 		if err != nil {
 			t.Fatalf("assemble the strict runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-strict"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-strict",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -170,14 +170,14 @@ func TestFormalWrapperAdmission(t *testing.T) {
 			}
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{fnTool}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithEnforcement(governance.EnforcementStrict), tagent.WithApprover(approve))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithEnforcement(governance.EnforcementStrict), assembly.WithApprover(approve))
 		if err != nil {
 			t.Fatalf("assemble the ruled runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-ruled"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-ruled",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},

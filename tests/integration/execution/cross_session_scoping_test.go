@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
@@ -97,12 +97,12 @@ func TestConcurrentRunsStayScoped(t *testing.T) {
 		return convFinalTurn("answer of sess-" + strconv.Itoa(own))
 	}}
 
-	run, err := tagent.Assemble(ctx, &config.Declaration{
+	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestConcurrentRunsStayScoped(t *testing.T) {
 			defer drives.Done()
 			<-start
 			for round := 1; round <= rounds; round++ {
-				turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+				turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 					InvocationID: event.InvocationID(fmt.Sprintf("inv-sess-%d-round-%d", session, round)),
 					Address:      event.Address{AgentID: "agent-a", SessionID: event.SessionID(fmt.Sprintf("session-%d", session))},
 					Input:        []model.Message{{Role: model.RoleUser, Content: sessionInputOf(session, round)}},
@@ -247,34 +247,34 @@ func TestCrossSessionContentIsRefused(t *testing.T) {
 	provider := &convModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return convFinalTurn("answered")
 	}}
-	run, err := tagent.Assemble(ctx, &config.Declaration{
+	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1}, tagent.FoldWindow{MaxTokens: 100}, projection); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1}, assembly.FoldWindow{MaxTokens: 100}, projection); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
 		t.Fatalf("replay registration without a session = %v, want %v", err, agent.ErrRequestChainSessionRequired)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: "session-beta"}, tagent.FoldWindow{MaxTokens: 100}, nil); err == nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: "session-beta"}, assembly.FoldWindow{MaxTokens: 100}, nil); err == nil {
 		t.Fatalf("replay registration without a projection = %v, want the named refusal", err)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: event.SessionID(alpha.SessionID)}, tagent.FoldWindow{MaxTokens: 100}, projection); err != nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: 1, SessionID: event.SessionID(alpha.SessionID)}, assembly.FoldWindow{MaxTokens: 100}, projection); err != nil {
 		t.Fatalf("register the alpha chain: %v", err)
 	}
 
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-session-beta",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-beta"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "beta asks its own question"}},
 	}); err != nil {
 		t.Fatalf("invoke session beta: %v", err)
 	}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-session-alpha",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-alpha"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "alpha asks its own question"}},

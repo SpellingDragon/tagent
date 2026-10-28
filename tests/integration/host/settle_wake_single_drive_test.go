@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
@@ -85,14 +85,14 @@ func settleDriveChild(t *testing.T, mode string) {
 		t.Fatalf("unknown single-drive work order %q", mode)
 	}
 	ledger := filepath.Join(os.Getenv(settleDriveOutEnv), settleDriveLedgerName)
-	host, err := tagent.Boot(os.Getenv(settleDriveConfigEnv), tagent.WithSender(&settleDriveHeldSender{ledger: ledger}))
+	host, err := assembly.Boot(os.Getenv(settleDriveConfigEnv), assembly.WithSender(&settleDriveHeldSender{ledger: ledger}))
 	if err != nil {
 		t.Fatalf("boot the resident host: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	addr := event.Address{AgentID: "user", SessionID: settleDriveSession}
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
 		Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 	}); err != nil {
@@ -267,7 +267,9 @@ func (a *settleDriveTally) counts() (entryCalls, followUps int) {
 // that process after the follow-up turn landed its terminal fact and while its
 // answer is held in the sender, and boots the same root again: the restarted
 // process reads the landed attempt beside its receipt, so the notification
-// starts exactly one follow-up turn and no second answer is delivered.
+// starts exactly one follow-up turn, and the answer the kill left owed is
+// delivered once by the restart instead of being lost with the sender that never
+// confirmed it.
 func runSingleDriveAcrossKill(t *testing.T) {
 	wakeEnv(t)
 
@@ -314,8 +316,8 @@ func runSingleDriveAcrossKill(t *testing.T) {
 	if entryAfter != entryCalls {
 		t.Fatalf("entry turns after the restart = %d, want the %d the landed attempt closes", entryAfter, entryCalls)
 	}
-	if bodies := sender.bodies(); len(bodies) != 0 {
-		t.Fatalf("the restarted process delivered %q, want nothing: the answer was already written", bodies)
+	if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != settleDriveFollowUpBody {
+		t.Fatalf("the restarted process delivered %q, want the one owed copy of %q the kill left behind", bodies, settleDriveFollowUpBody)
 	}
 	facts := restored.Run().SessionFacts(event.Address{AgentID: "user", SessionID: settleDriveSession})
 	if got := settleDriveNoticeFacts(facts); got != 1 {
@@ -401,7 +403,7 @@ func runSingleDriveResume(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", wakeAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -412,7 +414,7 @@ func runSingleDriveResume(t *testing.T) {
 	invokeCtx, invokeCancel := context.WithCancel(ctx)
 	invoked := make(chan error, 1)
 	go func() {
-		_, err := host.Invoke(invokeCtx, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtx, assembly.InvokeRequest{
 			Address: addr,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 		})
@@ -594,7 +596,7 @@ func driveScriptedSeat(t *testing.T, wake *settleDriveWake) int {
 		wake.mu.Unlock()
 		return nil
 	}
-	driver := tagent.NewSettleDriver(lookup, func() tagent.SettleWake { return wake }, fire)
+	driver := assembly.NewSettleDriver(lookup, func() assembly.SettleWake { return wake }, fire)
 	defer driver.Stop()
 	driver.Wake()
 	waitForSettle(t, "the settle pump to close the scripted seat", func() bool {
@@ -605,10 +607,10 @@ func driveScriptedSeat(t *testing.T, wake *settleDriveWake) int {
 
 // bootRestoredSettleDrive boots the host over the root the check already wrote
 // and answers the host beside the recorder of what it delivers.
-func bootRestoredSettleDrive(t *testing.T, configPath string) (*tagent.Host, *deliveryRecorder) {
+func bootRestoredSettleDrive(t *testing.T, configPath string) (*assembly.Host, *deliveryRecorder) {
 	t.Helper()
 	sender := &deliveryRecorder{}
-	restored, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	restored, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the restored host: %v", err)
 	}

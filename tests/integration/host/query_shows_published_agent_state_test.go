@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -223,10 +223,10 @@ func TestQueryShowsPublishedAgentState(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	agentsA := map[event.AgentID]tagent.NativeAgent{
+	agentsA := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 	}
-	run, err := tagent.Assemble(ctx, declA, agentsA, tagent.WithGovernance(passPolicy{}))
+	run, err := assembly.Assemble(ctx, declA, agentsA, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the formal run: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestQueryShowsPublishedAgentState(t *testing.T) {
 				{ID: "agent-b", Model: "model-b"},
 			},
 		}
-		agentsB := map[event.AgentID]tagent.NativeAgent{
+		agentsB := map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 			"agent-b": {Model: providerB},
 		}
@@ -311,7 +311,7 @@ func TestQueryShowsPublishedAgentState(t *testing.T) {
 	t.Run("②决策在途 busy 读数: the busy reading marks the model decision in flight", func(t *testing.T) {
 		driven := make(chan driveResult, 1)
 		go func() {
-			turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-1",
 				Address:      addr1,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -381,7 +381,7 @@ func TestQueryShowsPublishedAgentState(t *testing.T) {
 	t.Run("②任务状态与通知阶段同场可辨: the native task statuses and the notice phases read apart", func(t *testing.T) {
 		driven := make(chan driveResult, 1)
 		go func() {
-			turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-2",
 				Address:      addr2,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "hello again"}},

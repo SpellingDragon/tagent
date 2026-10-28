@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
@@ -46,9 +46,9 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-sep"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{slow, fast}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 	}
 	result := make(chan driven, 1)
 	go func() {
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-sep-1",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "turn-1"}},
@@ -161,7 +161,7 @@ func TestReceiptAndBackgroundStaySeparate(t *testing.T) {
 		t.Fatalf("tool executions = (%d, %d), want each admitted call executed exactly once", slow.calls(), fast.calls())
 	}
 
-	turnTwo, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turnTwo, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-sep-2",
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "turn-2"}},

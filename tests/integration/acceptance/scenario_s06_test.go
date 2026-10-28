@@ -3,6 +3,7 @@ package acceptance
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -62,16 +63,16 @@ func scenarioSettleSpec() task.Spec {
 
 // scenarioSettleRecord is the settle mutation of the task scenarioSettleSpec
 // admits, beside the notification it owes.
-func scenarioSettleRecord() task.CommitRecord {
+func scenarioSettleRecord(taskID event.TaskID) task.CommitRecord {
 	spec := scenarioSettleSpec()
 	return task.CommitRecord{
-		MutationID:       "settle:task-1",
-		TaskID:           "task-1",
+		MutationID:       task.MutationID("settle:" + string(taskID)),
+		TaskID:           taskID,
 		ExpectedRevision: 1,
 		Status:           task.StatusSettled,
 		Outbox: []task.Envelope{{
 			Notice: task.Notice{
-				TaskID: "task-1",
+				TaskID: taskID,
 				Round:  1,
 				Kind:   task.NoticeSettled,
 				Seq:    0,
@@ -114,8 +115,6 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	refs := []string{}
 
 	spec := scenarioSettleSpec()
-	settle := scenarioSettleRecord()
-	taskID := settle.TaskID
 	cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 	tier, err := ledger.OpenTier(ctx, cfg)
 	if err != nil {
@@ -130,9 +129,11 @@ func TestScenario06DurableCommitAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register the task: %v", err)
 	}
-	if receipt.TaskID != taskID || receipt.Kind != task.AdmissionFresh {
-		t.Fatalf("register receipt = %+v, want the fresh admission of %s", receipt, taskID)
+	taskID := receipt.TaskID
+	if receipt.Kind != task.AdmissionFresh || !strings.HasPrefix(string(taskID), "task-") {
+		t.Fatalf("register receipt = %+v, want the fresh admission of a task identity", receipt)
 	}
+	settle := scenarioSettleRecord(taskID)
 	result, settleErr := registry.Advance(ctx, taskID, settle.Status, settle.MutationID, settle.Outbox)
 	observations["accepted_settled_conflict"] = result == task.CommitNotCommitted && errors.Is(settleErr, task.ErrMutationConflict)
 

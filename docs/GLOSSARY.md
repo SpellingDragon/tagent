@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 冥想（meditation） | 一个按节奏自己跑的后台回合：读已提交的事实、让模型反思，再产出一条新输入把主循环往前推；同时给上下文卡片定去留、超预算时浓缩。全程不训练模型。 | 值夜班的同事：趁没人找时理清账本，留一张"下一步做什么"的便条在你桌上。 | `features/evolution/meditation/`；[FACT-VOCABULARY](FACT-VOCABULARY.md) 族 7 |
 | 转世（reincarnation） | 进程被自己换掉（重启／换装）后，新进程启动时把上一进程的现场组织成一条消息注入自己的事件流；整个进程生命周期只投一次，任何一步失败只记日志、不阻断启动。 | 换班交接单：接班的人第一眼看到"上一班做到哪、断在哪"。 | `examples/wechat-bot/wechat_notice.go`（`maybeInjectReincarnationNotice`） |
-| 结算（settle） | 任务进入终态时在通知义务上盖的回执：一次结算一份回执，重启后凭账本恢复未消费的结算义务。回放呈现不再落账——视图属于那一次装配。 | 值班交接：交完班签一次字，签过的不签第二遍。 | `settle_turn.go`；`runtime/state` mailbox |
+| 结算（settle） | 任务进入终态时在通知义务上盖的回执：一次结算一份回执，重启后凭账本恢复未消费的结算义务。回放呈现不再落账——视图属于那一次装配。 | 值班交接：交完班签一次字，签过的不签第二遍。 | `assembly/settle_turn.go`；`runtime/state` mailbox |
 | 血统（lineage） | 一轮对话的触发来源戳（用户、冥想、http、回执…），按回合盖一次、回合进行中不改；投递侧据此决定这轮产出能不能直接送到用户。 | 快递面单上的寄件人：收件规则看寄件人，不看包裹里装了什么。 | `api/event/meta.go`（`trigger_source`）；`features/evolution/meditation/judgment.go`（`DeliverableLineage` 白名单）；`cli/host_face.go`（`DeliveryReceipt`） |
 | 义务（obligation） | 任务尚未兑现的承诺，按"在等什么"分类（等工具、等投递、已移交），带归属方与推进方；队列空不等于义务已清。 | 欠条：写下才算数，划掉要有回执。 | `runtime/task/registry.go`（`Obligations`）；`memory/query/reading.go`（`Reading.Obligations`） |
 | 退位（retire） | 一个部件或条目不再担任主职责，但记录保留、不删除也不改写：`SummaryPlugin` 退位为元数据标注、压缩请求被消费时 retire 一次、模型版本被换下后标记 retired 但仍服务已持有的流。 | 退居二线：岗位交出去，档案留在册。 | [memory-curation 契约](../openspec/specs/memory-curation/spec.md)；`api/event/compress_request.go`；`features/rl/replacement.go` |
@@ -35,10 +35,10 @@
 | 事实 | 有身份、可被引用的产出：产出即锁定，之后只追加。 | `api/event/fact.go` |
 | 投影 | 由事实链装配出的有界读视图：只读，不写回事实链。 | `memory/query/` |
 | 回合 | 一次从输入到产出终态的完整处理；血统按回合盖。 | `runtime/agent/loop.go`（`Drive`） |
-| 装配根 | 把组织声明变成活动运行时的唯一入口。 | `run.go`（`Assemble`） |
+| 装配根 | 把组织声明变成活动运行时的唯一入口。 | `assembly/run.go`（`Assemble`） |
 
 ## 四、新增词的判据
 机制名就是学习成本。判据一句话：**一句话说不清（且不含本页未出现的词）就不加词，把它写成既有能力的字段**——完整判据见 [CONTRIBUTING](../CONTRIBUTING.md)「七、文档要求」。自检形式：把这句定义念给没参与讨论的人，他能复述，才写进文档。
-| 终结转轮 | settle-driver：任务终结事实主动驱动随动回合——委派结果不经用户第二句即送达 | host.go SettleDriver |
+| 终结转轮 | settle-driver：任务终结事实主动驱动随动回合——委派结果不经用户第二句即送达 | `assembly/settle_turn.go` `SettleDriver` |
 | 风险规则 | risk_rules：声明式工具风险分级（精确名/前缀→级），critical 自动 Hold 并登记审批簿 | governance.risk_rules |
 | 轨迹封印 | trajectory capture：全部模型调用（含委派 worker）入 attempts.jsonl 并 Seal 对账 | features/rl/capture_wiring |

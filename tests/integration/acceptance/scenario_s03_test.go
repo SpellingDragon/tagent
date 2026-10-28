@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -53,13 +53,13 @@ func TestScenario03ToolReceiptAndBackground(t *testing.T) {
 	toolB := &scenarioTool{name: "receipt-marker-b", output: "background-marker-b"}
 	decl := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}}}
 	governance := &scenarioGovernance{answers: scenarioPassingChecks("eval", "benchmark", "apply-gate")}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{toolA, toolB}},
-	}, tagent.WithGovernance(governance))
+	}, assembly.WithGovernance(governance))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-receipt",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-receipt"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},

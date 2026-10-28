@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 )
 
@@ -32,11 +32,11 @@ func TestReplacementFactInstallsNewVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build the model lease: %v", err)
 	}
-	run, err := tagent.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: first},
-	}, tagent.WithGovernance(formalPolicy{}),
-		tagent.WithRecorder(records),
-		tagent.WithModelLease("agent-a", lease, tagent.WithLeaseRebuild(func(version string) (model.Model, error) {
+	}, assembly.WithGovernance(formalPolicy{}),
+		assembly.WithRecorder(records),
+		assembly.WithModelLease("agent-a", lease, assembly.WithLeaseRebuild(func(version string) (model.Model, error) {
 			if version != "v2" {
 				return nil, fmt.Errorf("the rebuild was asked for version %q", version)
 			}
@@ -122,18 +122,18 @@ func TestDeclaredModelChangeFilesReplacementFact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build the model lease: %v", err)
 	}
-	run, err := tagent.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: first},
-	}, tagent.WithGovernance(formalPolicy{}),
-		tagent.WithRecorder(records),
-		tagent.WithModelLease("agent-a", lease))
+	}, assembly.WithGovernance(formalPolicy{}),
+		assembly.WithRecorder(records),
+		assembly.WithModelLease("agent-a", lease))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	replacementInvoke(t, ctx, run, "inv-fingerprint-1", "session-fingerprint", "ep-fingerprint")
 
 	second := newReplacementModel("model-a", "version two answer")
-	if _, err := run.Publish(ctx, replacementDecl("model-a@v2"), map[event.AgentID]tagent.NativeAgent{
+	if _, err := run.Publish(ctx, replacementDecl("model-a@v2"), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: second},
 	}); err != nil {
 		t.Fatalf("publish the changed declaration: %v", err)
@@ -184,9 +184,9 @@ func TestCaptureSealsAttemptsFile(t *testing.T) {
 	provider := &learnModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return learnFinalTurn("settled")
 	}}
-	run, err := tagent.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(capture))
+	}, assembly.WithGovernance(formalPolicy{}), assembly.WithCapture(capture))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -263,11 +263,11 @@ func TestFailedReplacementKeepsOldVersion(t *testing.T) {
 		t.Fatalf("build the model lease: %v", err)
 	}
 	cause := errors.New("the rebuild could not build the model")
-	run, err := tagent.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, replacementDecl("model-a"), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: first},
-	}, tagent.WithGovernance(formalPolicy{}),
-		tagent.WithRecorder(records),
-		tagent.WithModelLease("agent-a", lease, tagent.WithLeaseRebuild(func(string) (model.Model, error) {
+	}, assembly.WithGovernance(formalPolicy{}),
+		assembly.WithRecorder(records),
+		assembly.WithModelLease("agent-a", lease, assembly.WithLeaseRebuild(func(string) (model.Model, error) {
 			return nil, cause
 		})))
 	if err != nil {
@@ -329,7 +329,7 @@ func TestFailedReplacementKeepsOldVersion(t *testing.T) {
 // replacementGapOf reports the observation gap the named fact presented through
 // the agent's pipeline: the refusal the lease observer reported beside the fact
 // that stayed committed as it committed.
-func replacementGapOf(t *testing.T, run *tagent.Run, key event.EventID) error {
+func replacementGapOf(t *testing.T, run *assembly.Run, key event.EventID) error {
 	t.Helper()
 	for _, presentation := range run.Presentations() {
 		if presentation.Fact != key {

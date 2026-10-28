@@ -1,9 +1,9 @@
 main.go 只做 wiring：读应用配置 → Boot 装配 → 绑定微信通道 → 运行。 微信协议语义（收发/文件/路由/去重/审批/通知）在
-wechat*.go； 声明、模型、工具面、storage、meditation 与注入面全部由 tagent.Boot 装配。
+wechat*.go； 声明、模型、工具面、storage、meditation 与注入面全部由 assembly.Boot 装配。
 
 wechat.go 是微信宿主的适配文件：SDK 生命周期、收发、路由、去重、send 端口、审批与启动通知
 都是微信协议语义的一部分。装配（声明→agents→models→工具面→storage→meditation→注入面） 一律走
-tagent.Boot；应用侧只填 Boot 留出的两个端口：出站消息面与审批面。
+assembly.Boot；应用侧只填 Boot 留出的两个端口：出站消息面与审批面。
 
 wechat_approval.go 是微信审批面：审批请求经微信下发、审批裁决按白名单解析，
 以及把治理策略适配到宿主每一次调用的准入席位。审批的传输是微信语义，裁决语义 仍由核心的治理策略决定，应用侧只做接线。

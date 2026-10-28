@@ -59,9 +59,13 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 		}
 		receipt, ok := got.out.(task.AdmissionReceipt)
 		if !ok || !receipt.Accepted || receipt.Kind != task.AdmissionFresh || receipt.TaskID == "" {
-			t.Fatalf("call result = %+v, want one accepted fresh admission beside its task identity", got.out)
+			t.Fatalf("call result = %v, want the minimal admission receipt %q", got.out, task.AdmissionReceiptText)
 		}
-		spec, _, err := rig.tasks.Lookup(context.Background(), receipt.TaskID)
+		taskID := rig.tasks.admitted()
+		if taskID == "" {
+			t.Fatalf("the call was admitted as no task beside its receipt")
+		}
+		spec, _, err := rig.tasks.Lookup(context.Background(), taskID)
 		if err != nil || spec.TriggerSource != event.LineageDelegation {
 			t.Fatalf("admitted task material = (%+v, %v), want the delegation lineage on the record", spec, err)
 		}
@@ -83,8 +87,8 @@ func TestSubagentCallAdmitsTask(t *testing.T) {
 			t.Fatalf("terminal notification instance = %q, want %q", envelope.TargetInstance, rig.instance)
 		}
 		notice := envelope.Notice
-		if notice.TaskID != receipt.TaskID || notice.Kind != task.NoticeSettled || notice.Round != 1 || notice.Seq != 0 {
-			t.Fatalf("terminal notification = %+v, want the settled identity of %s", notice, receipt.TaskID)
+		if notice.TaskID != taskID || notice.Kind != task.NoticeSettled || notice.Round != 1 || notice.Seq != 0 {
+			t.Fatalf("terminal notification = %+v, want the settled identity of %s", notice, taskID)
 		}
 		if got := rig.ledger.View(rig.invocationID); len(got) != 1 || got[0].Status != task.StatusSettled {
 			t.Fatalf("delegation view = %+v, want the call landed at its terminal", got)
@@ -150,10 +154,40 @@ type subagentCallRig struct {
 	instance     event.InstanceID
 	invocationID event.InvocationID
 	bindings     *state.Bindings
-	tasks        *delegationFace
+	tasks        *admissionFace
 	ledger       *agent.Delegator
 	loop         *agent.Loop
 	arrived      chan task.Envelope
+}
+
+// admissionFace is the task face the rig admits a call through: the delegation
+// face as it is, beside the identity of the task the last accepted admission
+// minted. The receipt the model reads is a bare ok and carries no task id, so a
+// check that reads the task an admission created takes the identity here.
+type admissionFace struct {
+	*delegationFace
+
+	mu       sync.Mutex
+	lastTask event.TaskID
+}
+
+// Admit admits one declaration through the delegation face and records the
+// identity of the task an accepted admission minted.
+func (f *admissionFace) Admit(ctx context.Context, spec task.Spec) (task.AdmissionReceipt, error) {
+	receipt, err := f.delegationFace.Admit(ctx, spec)
+	if receipt.Accepted {
+		f.mu.Lock()
+		f.lastTask = receipt.TaskID
+		f.mu.Unlock()
+	}
+	return receipt, err
+}
+
+// admitted reports the identity of the task the last accepted admission minted.
+func (f *admissionFace) admitted() event.TaskID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastTask
 }
 
 // newSubagentCallRig returns the real faces of one sub-agent call, before any generation
@@ -169,7 +203,7 @@ func newSubagentCallRig(t *testing.T) *subagentCallRig {
 	admission := task.NewMemoryAdmission()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
 	manager := task.NewMemoryManager(registry, nil, task.WithEnvelopeDeliverer(rig.accept))
-	rig.tasks = &delegationFace{MemoryManager: manager, MemoryRegistry: registry}
+	rig.tasks = &admissionFace{delegationFace: &delegationFace{MemoryManager: manager, MemoryRegistry: registry}}
 	rig.ledger = agent.NewDelegator(rig.tasks, rig.bindings, rig.instance)
 	return rig
 }

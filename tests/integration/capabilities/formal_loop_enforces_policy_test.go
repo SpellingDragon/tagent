@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -67,18 +67,18 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			checkPair(t, req.Messages[5], "call-danger-2", "danger_tool", "rule: no-danger")
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model:   provider,
 				Tools:   []trpctool.CallableTool{probe},
 				Plugins: []plugin.Instance{&policyGrader{high: map[string]bool{"danger_tool": true}}},
 			},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(governor))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithPolicy(governor))
 		if err != nil {
 			t.Fatalf("assemble the policy runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-policy"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-policy",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -132,7 +132,7 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			checkObservation(t, req.Messages[5], "call-echo", "echo_tool", "probe-out:echo_tool")
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
@@ -141,12 +141,12 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 					&policyPresenter{name: "final-presenter"},
 				},
 			},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the presentation runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-presentation"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-presentation",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -233,7 +233,7 @@ func (g *policyGrader) Name() string { return "policy-grader" }
 
 // Port returns the single port the test instance serves.
 func (g *policyGrader) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk grades one tool call from the name it carries.
@@ -280,7 +280,7 @@ func (o *policyObserver) Name() string { return o.name }
 
 // Port returns the single port the test instance serves.
 func (o *policyObserver) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit fails the observation beside the plugin name and the fact.
@@ -299,7 +299,7 @@ func (p *policyPresenter) Name() string { return p.name }
 
 // Port returns the single port the test instance serves.
 func (p *policyPresenter) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present renders the presentation text of one committed fact.

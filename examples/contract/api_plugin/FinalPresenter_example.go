@@ -16,7 +16,7 @@ func (presentText) Name() string { return "present-text" }
 
 // Port reports the fact->view port the element serves.
 func (presentText) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present renders the presentation of one committed fact and reports it beside whether

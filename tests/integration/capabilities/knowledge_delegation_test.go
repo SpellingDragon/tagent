@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
@@ -90,16 +90,16 @@ func TestKnowledgeDelegationRunsTheKnowledgeSurface(t *testing.T) {
 			},
 		},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"caller":    {Model: caller, Tools: []trpctool.CallableTool{probe}},
 		"knowledge": {Model: delegated, Tools: surface},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 
 	addr := event.Address{AgentID: "caller", SessionID: "session-knowledge-delegation"}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-knowledge-delegation",
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "how do we deploy?"}},

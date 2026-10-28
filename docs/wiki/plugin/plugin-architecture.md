@@ -9,9 +9,9 @@
 <a id="overview"></a>
 ### 1.1 词汇与窄接口
 
-一个 **plugin 是注册单元**（`plugin.Instance`）：它报告一个稳定名字与**恰好一个** `plugin.Port`，并实现该端口的那**一个窄接口**。端口是「读哪一种材料（`plugin.Material`）、产哪一种产物（`plugin.Product`）」的一对；`plugin.NewFlow` 按声明序收编它们——**窄接口与派发趟都是端口的读法，不是时间位置**。
+一个 **plugin 是注册单元**（`plugin.Instance`）：它报告一个稳定名字与**恰好一个** `plugin.Port`，并实现该端口的那**一个窄接口**。端口是一个具名常量——`plugin.PortCallTransform` 到 `plugin.PortFactCompression` 六个之一，常量名直接拼出它代表的转向：读的那一面材料挨着答的那一面产物，闭集即派发依据；`plugin.NewFlow` 按声明序收编它们——**窄接口与派发趟都是端口的读法，不是时间位置**。
 
-| 端口（`Port{Reads, Produces}`） | 窄接口 | 时点与判据 |
+| 端口（具名 `plugin.Port` 常量） | 窄接口 | 时点与判据 |
 |---|---|---|
 | `call->call` | `TransformCall` | 副作用之前、准入之前，每 call 一次；改工具名/参数，**不得改 call 身份（CallID 与已解析的信任域）** |
 | `call->ruling` | `RiskAssessor` + `Governor` | 同一裁定的两张脸：`AssessRisk` 出 grade，`Governor` 在 grade 上出唯一执行前裁定；grade 只读一次，绝不重算 |
@@ -20,7 +20,7 @@
 | `fact->view` | `FinalPresenter` | 为渠道渲染呈现文本并回答是否被丢弃；**丢弃必须报告**，不撤回事实 |
 | `fact->compression` | `CompressTrigger` | 已归档压缩请求的 TriggerCompress 趟；请求身份与 subject 保持原样，本面不压缩、不退役请求 |
 
-六个端口就是闭合表：`call->call`、`call->ruling`、`request->environment` 自读到的材料长出一个产物，`fact->observation`、`fact->view`、`fact->compression` 对一个已提交材料作答。闭合表之外的读材料、产产物与端口对都按名拒绝。
+六个端口就是闭合表：`call->call`、`call->ruling`、`request->environment` 自读到的材料长出一个产物，`fact->observation`、`fact->view`、`fact->compression` 对一个已提交材料作答。闭合表之外的名字一律按名拒绝，连读材料、产产物分开声明的写法也不再存在。
 
 红线（码面 `Instance` doc 的三条）：必须报告自己服务的那一个端口并实现它的窄接口；不得报告未实现其窄接口的端口；**一个注册元素只服务一个端口**（风险端口可同时带两张脸）。
 

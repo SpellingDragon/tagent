@@ -18,7 +18,7 @@ func (refusingTransform) Name() string { return "refusing-transform" }
 
 // Port reports the call->call port the element serves.
 func (refusingTransform) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformCall refuses the call it was handed by answering an error.
@@ -35,7 +35,7 @@ func (identityMover) Name() string { return "identity-mover" }
 
 // Port reports the call->call port the element serves.
 func (identityMover) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformCall rewrites the CallID, which a transform is never allowed to move.

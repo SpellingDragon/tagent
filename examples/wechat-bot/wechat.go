@@ -1,6 +1,6 @@
 // wechat.go 是微信宿主的适配文件：SDK 生命周期、收发、路由、去重、send 端口、审批与启动通知
 // 都是微信协议语义的一部分。装配（声明→agents→models→工具面→storage→meditation→注入面）
-// 一律走 tagent.Boot；应用侧只填 Boot 留出的两个端口：出站消息面与审批面。
+// 一律走 assembly.Boot；应用侧只填 Boot 留出的两个端口：出站消息面与审批面。
 //
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#module-layout
 package main
@@ -26,9 +26,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/wechat-robot-go/wechat"
 	"gopkg.in/yaml.v3"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -123,7 +123,7 @@ func (c *WechatAppConfig) EnsureDirs() error {
 
 // wechatConfig is the application-side view of the one configuration source: the
 // entry agent, the approval section and the WeChat section. Everything else is
-// read by tagent.Boot, which refuses an unknown key before anything starts.
+// read by assembly.Boot, which refuses an unknown key before anything starts.
 type wechatConfig struct {
 	Entry      string          `yaml:"entry"`
 	Governance governanceEntry `yaml:"governance"`
@@ -208,7 +208,7 @@ func dieIf(err error, what string) {
 // hostRuntime is the application side of one assembled host: the one outbound
 // path, the session router and the internal inbox the channel drives. The
 // runtime itself (models, tools, storage, meditation, injection face) belongs to
-// tagent.Host.
+// assembly.Host.
 type hostRuntime struct {
 	invoke invokeFunc
 	router *SessionRouter
@@ -220,7 +220,7 @@ type hostRuntime struct {
 
 // invokeFunc drives one admitted delivery through the assembled host and reports
 // whether its terminal was a failure.
-type invokeFunc func(ctx context.Context, req tagent.InvokeRequest) (failed bool, err error)
+type invokeFunc func(ctx context.Context, req assembly.InvokeRequest) (failed bool, err error)
 
 // inboundMessage is one channel delivery the host admits.
 type inboundMessage struct {
@@ -266,7 +266,7 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 	if h.invoke == nil {
 		return addr, errors.New("wechat-bot: the host runtime is not bound")
 	}
-	failed, err := h.invoke(ctx, tagent.InvokeRequest{
+	failed, err := h.invoke(ctx, assembly.InvokeRequest{
 		InvocationID:  h.router.NextInvocation(addr),
 		Address:       addr,
 		TriggerSource: "user",
@@ -362,7 +362,7 @@ type hostSender struct {
 	sends        atomic.Uint64
 }
 
-// Send implements tagent.MessageSender: one body to the address the turn carries.
+// Send implements assembly.MessageSender: one body to the address the turn carries.
 func (h *hostSender) Send(ctx context.Context, addr event.Address, content string) error {
 	return h.sendWithLineage(ctx, addr, sendToolLineage, content)
 }
@@ -926,12 +926,12 @@ func newWechatApp(cfg wechatConfig, gateway *approvalGateway) (*wechatApp, error
 }
 
 // options reports the ports this application fills on the host.
-func (a *wechatApp) options() []tagent.HostOption {
-	options := []tagent.HostOption{
-		tagent.WithSender(a.host.sender),
+func (a *wechatApp) options() []assembly.HostOption {
+	options := []assembly.HostOption{
+		assembly.WithSender(a.host.sender),
 	}
 	if a.gateway.Enabled() {
-		options = append(options, tagent.WithApprover(approvalRuling(a.gateway)))
+		options = append(options, assembly.WithApprover(approvalRuling(a.gateway)))
 	}
 	return options
 }
@@ -939,8 +939,8 @@ func (a *wechatApp) options() []tagent.HostOption {
 // bindWechat completes the application side once Boot assembled the runtime: the bot
 // logs in, the one outbound path and the inbound hooks are bound, and the
 // one-shot startup notices wait beside them.
-func (a *wechatApp) bindWechat(ctx context.Context, host *tagent.Host) error {
-	a.host.invoke = func(ctx context.Context, req tagent.InvokeRequest) (bool, error) {
+func (a *wechatApp) bindWechat(ctx context.Context, host *assembly.Host) error {
+	a.host.invoke = func(ctx context.Context, req assembly.InvokeRequest) (bool, error) {
 		turn, err := host.Invoke(ctx, req)
 		if err != nil {
 			return false, err
@@ -981,7 +981,7 @@ func (a *wechatApp) run(ctx context.Context) error {
 }
 
 // close drains the host and reports what stayed open.
-func (a *wechatApp) close(host *tagent.Host) {
+func (a *wechatApp) close(host *assembly.Host) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := host.Close(ctx); err != nil {

@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -506,7 +506,7 @@ func lastRequestMessage(req model.Request) model.Message {
 // injects into the meditator's own loop session: the same construction the host
 // wires, driven through Run.Invoke and the real loop.
 type formalMeditationRig struct {
-	run       *tagent.Run
+	run       *assembly.Run
 	userModel *meditationEntryModel
 	medModel  *meditationEntryModel
 	userAddr  event.Address
@@ -533,14 +533,14 @@ func newFormalMeditationRig(t *testing.T, medAnswer func(*model.Request) *model.
 			{ID: "meditator", Model: "model-meditator"},
 		},
 	}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"user-agent": {Model: userModel},
 		"meditator":  {Model: medModel},
 	},
-		tagent.WithGovernance(meditationPassPolicy{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
-		tagent.WithReflectionAnchors(filepath.Join(root, "anchors.json")),
-		tagent.WithPlugins(func(assembled *tagent.Run) ([]plugin.Instance, error) {
+		assembly.WithGovernance(meditationPassPolicy{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
+		assembly.WithReflectionAnchors(filepath.Join(root, "anchors.json")),
+		assembly.WithPlugins(func(assembled *assembly.Run) ([]plugin.Instance, error) {
 			reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
 				Loop: meditation.ReflectionLoop{Agent: "meditator", Session: "meditator-loop"},
 				Face: meditation.ReflectionFace{
@@ -584,7 +584,7 @@ func newFormalMeditationRig(t *testing.T, medAnswer func(*model.Request) *model.
 // where the production commit face offers the material to the reflection driver.
 func (r *formalMeditationRig) invokeUserTurn(t *testing.T, ctx context.Context, invocation event.InvocationID, content string) {
 	t.Helper()
-	turn, err := r.run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := r.run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID:  invocation,
 		Address:       r.userAddr,
 		TriggerSource: "user",

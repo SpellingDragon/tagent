@@ -15,7 +15,7 @@ func (allowReads) Name() string { return "allow-reads" }
 
 // Port reports the call->ruling port the element serves.
 func (allowReads) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // Judge renders the ruling of one call over the one Before pass that call carries:

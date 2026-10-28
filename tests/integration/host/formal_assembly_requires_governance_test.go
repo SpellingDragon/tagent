@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -55,7 +55,7 @@ func (p rejectPolicy) Check(context.Context, state.StatePlan) (map[state.CheckNa
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestFormalAssemblyRequiresGovernance(t *testing.T) {
-	assemble := func(t *testing.T, ctx context.Context, opts ...tagent.Option) (*tagent.Run, error) {
+	assemble := func(t *testing.T, ctx context.Context, opts ...assembly.Option) (*assembly.Run, error) {
 		t.Helper()
 		provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 			return entryFinalTurn("settled")
@@ -65,7 +65,7 @@ func TestFormalAssemblyRequiresGovernance(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 		}
-		return tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		return assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 		}, opts...)
 	}
@@ -74,7 +74,7 @@ func TestFormalAssemblyRequiresGovernance(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		run, err := assemble(t, ctx)
-		if !errors.Is(err, tagent.ErrGovernanceMissing) {
+		if !errors.Is(err, assembly.ErrGovernanceMissing) {
 			t.Fatalf("assemble beside no governance = (%v, %v), want the named refusal of the missing governance", run, err)
 		}
 		if run != nil {
@@ -85,7 +85,7 @@ func TestFormalAssemblyRequiresGovernance(t *testing.T) {
 	t.Run("a governance that refuses the candidate refuses the publication", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		run, err := assemble(t, ctx, tagent.WithGovernance(rejectPolicy{name: "eval"}))
+		run, err := assemble(t, ctx, assembly.WithGovernance(rejectPolicy{name: "eval"}))
 		if !errors.Is(err, state.ErrCheckRefused) {
 			t.Fatalf("assemble beside a refusing governance = (%v, %v), want the publication refused by the injected policy", run, err)
 		}
@@ -97,11 +97,11 @@ func TestFormalAssemblyRequiresGovernance(t *testing.T) {
 	t.Run("a governance that answers the required checks assembles one live run", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		run, err := assemble(t, ctx, tagent.WithGovernance(passPolicy{}))
+		run, err := assemble(t, ctx, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble beside a passing governance: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-governed",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-governed"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},

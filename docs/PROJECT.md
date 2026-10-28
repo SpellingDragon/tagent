@@ -12,7 +12,7 @@
 
 ```mermaid
 flowchart LR
-    CH["渠道<br/>微信 / CLI / HTTP"] -->|"用户消息"| BOOT["tagent.Boot<br/>一条路装配"]
+    CH["渠道<br/>微信 / CLI / HTTP"] -->|"用户消息"| BOOT["assembly.Boot<br/>一条路装配"]
     BOOT --> CHAIN[("会话链<br/>不可变事实 = 唯一真相")]
     CHAIN --> PROD["生产挂点<br/>事实落链带来源戳"]
     CHAIN --> PIPE["管线挂点（插件）<br/>治理 / 呈现 / 观测"]

@@ -97,20 +97,15 @@ var (
 	}
 )
 
-// Materials, products, dispositions and risk grades must stay compile-time
-// constants of their declared types: a variable or a bare string stops this
-// block from compiling.
+// Ports, dispositions and risk grades must stay compile-time constants of their
+// declared types: a variable or a bare string stops this block from compiling.
 const (
-	_ Material = MaterialCall
-	_ Material = MaterialRequest
-	_ Material = MaterialFact
-
-	_ Product = ProductCall
-	_ Product = ProductRuling
-	_ Product = ProductObservation
-	_ Product = ProductView
-	_ Product = ProductCompression
-	_ Product = ProductEnvironment
+	_ Port = PortCallTransform
+	_ Port = PortCallRuling
+	_ Port = PortRequestEnvironment
+	_ Port = PortFactObservation
+	_ Port = PortFactView
+	_ Port = PortFactCompression
 
 	_ Disposition = DispositionAllow
 	_ Disposition = DispositionRecord
@@ -143,16 +138,17 @@ var (
 
 // The flow declarations keep every documented field.
 var (
-	_ = Port{
-		Reads:    MaterialCall,
-		Produces: ProductCall,
-	}
-
 	_ = CallPass{
 		Final:         trpcmodel.ToolCall{},
 		Risk:          "",
 		TriggerSource: "",
 	}
+
+	// The pass of one call travels on the context beside the call itself, so a
+	// tool that never sees the pipeline still reads the verdict it ran under.
+	_ func(context.Context, CallPass) context.Context = WithCallPass
+
+	_ func(context.Context) (CallPass, bool) = CallPassFrom
 
 	_ = AuditRecord{
 		Fact:     "",

@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // singleHistoryInputOne and the markers beside it spell the turns both chains
@@ -111,7 +111,7 @@ func driveSingleHistoryChain(t *testing.T, window string) singleHistoryChain {
 	}
 	closeIntegrityHost(t, ctx, host)
 
-	rebooted, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	rebooted, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("re-boot the arm over the same storage root: %v", err)
 	}

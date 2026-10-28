@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -190,6 +188,12 @@ func (r *MemoryRegistry) Restore(ctx context.Context, chain []TaskRecord, owners
 // already folded reports no recovery and adds no second fact; a fresh link
 // rebuilds its task from the admission material the chain carries and derives
 // its obligations from the facts alone.
+//
+// The fold is where a stored status is read back, so the replay mapping sits
+// here: a link written while progress was still a status stores the reserved
+// ordinal, and replayedStatus reads it as the running phase that fact
+// described. The progress notification the same link carries stays on the
+// chain, so the task still answers progress through ProgressReported.
 func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	fact := record.Fact
 	if fact.MutationID == "" {
@@ -198,6 +202,7 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 	if fact.Status == StatusUnknown {
 		return false, ErrStatusUnknown
 	}
+	fact.Status = replayedStatus(fact.Status)
 	taskID := fact.TaskID
 	entry, held := r.tasks[taskID]
 	recovered := false
@@ -219,9 +224,6 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 		r.tasks[taskID] = entry
 		if record.Spec.DedupKey != "" {
 			r.admission.AdmitKey(record.Spec.DedupKey, record.Spec.CallID, taskID)
-		}
-		if serial := taskSerial(taskID); serial > r.last {
-			r.last = serial
 		}
 	} else if prior, ok := entry.mutations[fact.MutationID]; ok {
 		if prior.Status != fact.Status || !slices.Equal(prior.Outbox, fact.Outbox) {
@@ -252,19 +254,4 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 		entry.closeExecutionObligation("")
 	}
 	return recovered, nil
-}
-
-// taskSerial reports the serial number a task identity carries, so a restored
-// chain advances the registry's task numbering past every identity it rebuilt.
-func taskSerial(taskID event.TaskID) int64 {
-	const prefix = "task-"
-	identity := string(taskID)
-	if !strings.HasPrefix(identity, prefix) {
-		return 0
-	}
-	serial, err := strconv.ParseInt(identity[len(prefix):], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return serial
 }

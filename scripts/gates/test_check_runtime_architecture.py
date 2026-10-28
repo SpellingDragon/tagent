@@ -79,15 +79,16 @@ def ownership_report(policy, **overrides):
 
 def go_list_stream(policy, omit=(), extra_imports=None):
     """Build a fake `go list -deps -json` stream for every registered package."""
+    root = policy["root_package"]
     records = []
     registered = patterns(policy)
     for pattern in registered:
         if pattern in omit:
             continue
         imports = []
-        if pattern == ".":
+        if pattern == root:
             imports = [import_path(other) for other in registered
-                       if other != "." and other not in omit]
+                       if other != root and other not in omit]
         records.append({
             "ImportPath": import_path(pattern),
             "Name": pattern.split("/")[-1].replace(".", "tagent"),
@@ -108,6 +109,9 @@ class PolicyTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.policy = real_policy()
+        # The composition root is read from the policy, never assumed: the gate's job
+        # is to check that the named package is registered, not to fix its spelling.
+        self.root_pkg = self.policy["root_package"]
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -127,6 +131,16 @@ class PolicyTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
         self.assertIsNone(payload["productVerified"])
+
+    def test_unregistered_composition_root_is_rejected(self):
+        # Negative anchor for the "root is data" rule: naming a root package the
+        # policy never registers must fail, otherwise the gate would check the
+        # registry table of a package that does not exist.
+        policy = copy.deepcopy(self.policy)
+        policy["root_package"] = "nowhere"
+        code, out, _ = self.check_policy(policy)
+        self.assertNotEqual(code, 0)
+        self.assertIn("must register the composition root package", out)
 
     def test_wildcard_allow_is_rejected(self):
         policy = copy.deepcopy(self.policy)
@@ -158,12 +172,13 @@ class PolicyTest(unittest.TestCase):
 
     def test_back_edge_to_composition_root_is_not_a_cycle(self):
         # Positive anchor: the host shell sits above the composition root
-        # (cli -> "."), and the root lists every package as a registry. Traversing
-        # the root's outbound entries plus that back edge must not read as a cycle.
+        # (cli -> the root package), and the root lists every package as a registry.
+        # Traversing the root's outbound entries plus that back edge must not read
+        # as a cycle.
         policy = copy.deepcopy(self.policy)
         self.assertIn("cli", patterns(policy), "the host shell is registered")
         shell = next(edge for edge in policy["edges"] if edge["from"] == "cli")
-        self.assertIn(".", shell["allow"], "the host shell drives the composition root")
+        self.assertIn(self.root_pkg, shell["allow"], "the host shell drives the composition root")
         code, out, err = self.check_policy(policy)
         self.assertEqual(code, 0, out + err)
         self.assertNotIn("cycle", out)
@@ -244,9 +259,9 @@ class PolicyTest(unittest.TestCase):
 
     def test_real_golden_root_lists_every_package_without_wildcard(self):
         by_pattern = {entry["pattern"] for entry in self.policy["packages"]}
-        root = next(edge for edge in self.policy["edges"] if edge["from"] == ".")
+        root = next(edge for edge in self.policy["edges"] if edge["from"] == self.root_pkg)
         self.assertNotIn("*", root["allow"])
-        self.assertEqual(set(root["allow"]), by_pattern - {"."})
+        self.assertEqual(set(root["allow"]), by_pattern - {self.root_pkg})
 
     def test_real_golden_external_has_no_name_heuristic(self):
         external = self.policy["external"]
@@ -297,7 +312,7 @@ class PolicyTest(unittest.TestCase):
         policy = copy.deepcopy(self.policy)
         policy["event_ownership"]["owners"].append({
             "id": "shadow",
-            "packages": ["."],
+            "packages": [self.root_pkg],
             "allowed": ["host.deliver"],
             "forbidden": [],
             "reason": "a package-wide claim beside file-scoped owners",
@@ -338,6 +353,7 @@ class ImplementationTest(unittest.TestCase):
         self.repo.mkdir()
         self.policy_path = self.root / "architecture.json"
         self.policy = real_policy()
+        self.root_pkg = self.policy["root_package"]
         self.policy_path.write_text(json.dumps(self.policy, ensure_ascii=False, indent=2),
                                     encoding="utf-8")
 
@@ -453,10 +469,10 @@ class ImplementationTest(unittest.TestCase):
 
     def test_host_shell_back_edge_to_root_is_allowed(self):
         # Consumer anchor: the real cli package imports the composition root. That
-        # edge is registered on the cli entry, and pointing it at "." must not read
-        # as a violation while the root also lists cli in its registry.
+        # edge is registered on the cli entry, and pointing it at the root package
+        # must not read as a violation while the root also lists cli in its registry.
         text = go_list_stream(self.policy, extra_imports={
-            import_path("cli"): [import_path(".")]})
+            import_path("cli"): [import_path(self.root_pkg)]})
         code, out, err = self.run_impl(text)
         self.assertEqual(code, 0, out + err)
 

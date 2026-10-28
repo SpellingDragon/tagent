@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 )
 
@@ -42,15 +42,15 @@ func TestMCPFaceBindsTheDeclaredServers(t *testing.T) {
 			return ntFinalTurn("the declared server answered")
 		}}
 
-		run, err := tagent.Assemble(ctx, mcpFaceDeclaration(map[string]config.MCPServerSpec{
+		run, err := assembly.Assemble(ctx, mcpFaceDeclaration(map[string]config.MCPServerSpec{
 			"alpha": {Transport: "streamable-http", URL: alpha.url},
-		}), map[event.AgentID]tagent.NativeAgent{
+		}), map[event.AgentID]assembly.NativeAgent{
 			"agent-mcp": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-mcp-face",
 			Address:      event.Address{AgentID: "agent-mcp", SessionID: "session-mcp-face"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "search the web"}},
@@ -83,13 +83,13 @@ func TestMCPFaceBindsTheDeclaredServers(t *testing.T) {
 			return ntFinalTurn("the undeclared server was refused")
 		}}
 
-		run, err := tagent.Assemble(ctx, mcpFaceDeclaration(nil), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, mcpFaceDeclaration(nil), map[event.AgentID]assembly.NativeAgent{
 			"agent-mcp": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-mcp-face-undeclared",
 			Address:      event.Address{AgentID: "agent-mcp", SessionID: "session-mcp-face-undeclared"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "search the web"}},

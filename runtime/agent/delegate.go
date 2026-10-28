@@ -324,7 +324,7 @@ func (d *Delegator) Observe(_ context.Context, notice task.Notice) error {
 		d.pendLocked(entry, task.StatusCancelled)
 	case task.NoticeProgress:
 		if entry.pending == task.StatusUnknown {
-			entry.record.Status = task.StatusProgress
+			entry.record.Status = task.StatusRunning
 		}
 	case task.NoticeAccepted:
 		if entry.pending == task.StatusUnknown {
@@ -619,8 +619,6 @@ func delegationStatusName(status task.Status) string {
 		return "accepted"
 	case task.StatusRunning:
 		return "running"
-	case task.StatusProgress:
-		return "progress"
 	case task.StatusSettled:
 		return "settled"
 	case task.StatusFailed:

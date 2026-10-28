@@ -1,6 +1,6 @@
 # 配置迁移指南
 
-> **本篇是历史篇**：它描述的是 legacy 生产树（已随 `prototype rewrite` 移除）的 `config.go` 三代格式。仓库现在没有根 `config.go`，也没有「配置参考」章；当期声明面是 `api/config` 的 `Declaration`/`AgentSpec`/`ToolRef`，宿主文档由根包 `host.go` 的 `hostDocument` 经 `api/config.DecodeStrict` 严格解码（未知键拒启动），再经 `api/document.Document` 映射为声明。字段对照仍可参考，但**不要拿本篇当当前格式的权威**：当期 schema 以 `examples/wechat-bot/tagent.yaml` 头部注释与 `hostDocument` 为准。
+> **本篇是历史篇**：它描述的是 legacy 生产树（已随 `prototype rewrite` 移除）的 `config.go` 三代格式。仓库现在没有根 `config.go`，也没有「配置参考」章；当期声明面是 `api/config` 的 `Declaration`/`AgentSpec`/`ToolRef`，宿主文档由 `assembly/host_document.go` 的 `hostDocument` 经 `api/config.DecodeStrict` 严格解码（未知键拒启动），再经 `api/document.Document` 映射为声明。字段对照仍可参考，但**不要拿本篇当当前格式的权威**：当期 schema 以 `examples/wechat-bot/tagent.yaml` 头部注释与 `hostDocument` 为准。
 
 ## 概述
 
@@ -14,7 +14,7 @@ tagent 的配置格式经历过三代。仓内部分早期文档/示例仍残留
 |------|------|------|
 | 第一代（扁平） | 顶层直接写 `tagent.name` / `system_prompt_file` / `knowledge_agent.enabled` 等平铺字段 | **已废弃**，字段在当前码面不存在 |
 | 第二代（`tagent:` 包裹 + `name`/`type`） | `tagent.agents.<x>` 外层再包一个 `tagent:` 根键；工具用 `name` + `type` + `config` | **已废弃**，当前宿主文档顶层无 `tagent:` 根键，工具引用用 `kind` + `id`/`agent` |
-| 第三代（声明式） | 顶层直接是 `entry` / `model` / `provider` / `providers` / `agents` / `mcp_servers` / `governance` / `app` 等 | **宿主文档沿此形态**：`hostDocument` 读取的键见 `host.go`；未声明的键拒启动 |
+| 第三代（声明式） | 顶层直接是 `entry` / `model` / `provider` / `providers` / `agents` / `mcp_servers` / `governance` / `app` 等 | **宿主文档沿此形态**：`hostDocument` 读取的键见 `assembly/host_document.go`；未声明的键拒启动 |
 
 ## 宿主文档示例（以 `examples/wechat-bot/tagent.yaml` 为准）
 
@@ -40,7 +40,7 @@ agents:
 加载（严格解码 → 映射声明 → 装配）：
 
 ```go
-host, err := tagent.Boot("tagent.yaml")
+host, err := assembly.Boot("tagent.yaml")
 if err != nil {
     return err
 }
@@ -75,6 +75,6 @@ defer host.Close(ctx)
 - [ ] 运行参数（`max_rounds`/`max_tokens`/`temperature`）写在 agent 自身定义处，不是工具引用内
 - [ ] `memory.type: file` 已确认目标环境有 rustviking CLI，否则改 `localfile`
 - [ ] 平台子系统由 `governance`/`app` 段声明（schema 见 `hostDocument`）；其他顶层键拒启动
-- [ ] 迁移后跑一次 `tagent.Boot`（严格解码 + 映射 + 装配）确认无解析/映射错误
+- [ ] 迁移后跑一次 `assembly.Boot`（严格解码 + 映射 + 装配）确认无解析/映射错误
 
-> **严格解码提醒**：未知字段名会让加载**点名拒启动**（`unknown field`），不再被静默忽略。迁移必须以一次真实 `tagent.Boot` 验证。
+> **严格解码提醒**：未知字段名会让加载**点名拒启动**（`unknown field`），不再被静默忽略。迁移必须以一次真实 `assembly.Boot` 验证。

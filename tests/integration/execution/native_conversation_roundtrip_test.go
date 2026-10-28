@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
@@ -65,14 +65,14 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{toolA, toolB}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
 
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-roundtrip",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-roundtrip"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -161,9 +161,9 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -183,7 +183,7 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			{"inv-b", "turn-b"},
 		} {
 			go func(id event.InvocationID, input string) {
-				turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+				turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 					InvocationID: id,
 					Address:      address,
 					Input:        []model.Message{{Role: model.RoleUser, Content: input}},
@@ -256,9 +256,9 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-gen-2"}},
 		}
-		run, err := tagent.Assemble(ctx, declOne, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declOne, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: first, Tools: []trpctool.CallableTool{gated}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -269,7 +269,7 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 		}
 		result := make(chan driven, 1)
 		go func() {
-			turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-backflow",
 				Address:      event.Address{AgentID: "agent-a", SessionID: "session-backflow"},
 				Input:        []model.Message{{Role: model.RoleUser, Content: "run"}},
@@ -282,7 +282,7 @@ func TestNativeConversationRoundTrip(t *testing.T) {
 			t.Fatal("timed out waiting for the gated tool to be entered")
 		}
 
-		published, err := run.Publish(ctx, declTwo, map[event.AgentID]tagent.NativeAgent{
+		published, err := run.Publish(ctx, declTwo, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: second, Tools: []trpctool.CallableTool{&convTool{name: "gated-tool", output: "never"}}},
 		})
 		if err != nil {

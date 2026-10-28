@@ -20,10 +20,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	openaimodel "trpc.group/trpc-go/trpc-agent-go/model/openai"
@@ -140,7 +140,7 @@ func parseFlags(args []string, stderr io.Writer) (cliConfig, error) {
 // assemble builds the one runtime this process runs: the declaration, the
 // native model behind it and the governance every publication is decided
 // under, published through the sole public assembly entry.
-func assemble(ctx context.Context, cfg cliConfig) (*tagent.Run, error) {
+func assemble(ctx context.Context, cfg cliConfig) (*assembly.Run, error) {
 	native, err := newNativeModel(cfg)
 	if err != nil {
 		return nil, err
@@ -149,16 +149,16 @@ func assemble(ctx context.Context, cfg cliConfig) (*tagent.Run, error) {
 		Entry:  cfg.agentID,
 		Agents: []config.AgentSpec{{ID: cfg.agentID, Model: cfg.modelName}},
 	}
-	opts := []tagent.Option{
-		tagent.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
+	opts := []assembly.Option{
+		assembly.WithGovernance(evolution.NewPolicy(evolution.NewStructuralGate())),
 	}
 	if cfg.dataDir != "" {
-		opts = append(opts, tagent.WithStorage(ledger.StorageConfig{
+		opts = append(opts, assembly.WithStorage(ledger.StorageConfig{
 			Type: ledger.StorageLocalFile,
 			Root: cfg.dataDir,
 		}))
 	}
-	return tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	return assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		event.AgentID(cfg.agentID): {Model: native},
 	}, opts...)
 }
@@ -195,7 +195,7 @@ type cliSession struct {
 
 // invoke drives one user line through the assembled runtime and prints the
 // assistant messages the drive added to the session transcript.
-func (s *cliSession) invoke(ctx context.Context, rt *tagent.Run, text string) error {
+func (s *cliSession) invoke(ctx context.Context, rt *assembly.Run, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
@@ -203,7 +203,7 @@ func (s *cliSession) invoke(ctx context.Context, rt *tagent.Run, text string) er
 	s.seq++
 	callCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	turn, err := rt.Invoke(callCtx, tagent.InvokeRequest{
+	turn, err := rt.Invoke(callCtx, assembly.InvokeRequest{
 		InvocationID: event.InvocationID(fmt.Sprintf("cli-%d", s.seq)),
 		Address:      s.addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: text}},
@@ -239,7 +239,7 @@ func (s *cliSession) printFresh(facts []event.Event) {
 }
 
 // repl reads one line at a time until stdin ends or the user types /exit.
-func (s *cliSession) repl(ctx context.Context, rt *tagent.Run, stdin io.Reader, stderr io.Writer) int {
+func (s *cliSession) repl(ctx context.Context, rt *assembly.Run, stdin io.Reader, stderr io.Writer) int {
 	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for {
@@ -269,7 +269,7 @@ func (s *cliSession) repl(ctx context.Context, rt *tagent.Run, stdin io.Reader, 
 }
 
 // close drains the runtime for this session and reports what stayed open.
-func (s *cliSession) close(ctx context.Context, rt *tagent.Run) error {
+func (s *cliSession) close(ctx context.Context, rt *assembly.Run) error {
 	closeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	report, err := rt.Close(closeCtx, agent.CloseRequest{

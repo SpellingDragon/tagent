@@ -149,16 +149,16 @@ func shapeOf(p Pipeline) faceShape {
 
 // TestPortClosedTable pins the closed port table the flow dispatches by.
 // - each of the six declared ports is accepted as one port of the flow
-// - an undeclared material, an undeclared product and an undeclared port pair are each refused by name
+// - a name outside the six is refused by name, so a routing nobody declared never reaches a face
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestPortClosedTable(t *testing.T) {
 	declared := []Port{
-		{Reads: MaterialCall, Produces: ProductCall},
-		{Reads: MaterialCall, Produces: ProductRuling},
-		{Reads: MaterialRequest, Produces: ProductEnvironment},
-		{Reads: MaterialFact, Produces: ProductObservation},
-		{Reads: MaterialFact, Produces: ProductView},
-		{Reads: MaterialFact, Produces: ProductCompression},
+		PortCallTransform,
+		PortCallRuling,
+		PortRequestEnvironment,
+		PortFactObservation,
+		PortFactView,
+		PortFactCompression,
 	}
 	for _, port := range declared {
 		t.Run(port.String(), func(t *testing.T) {
@@ -168,29 +168,10 @@ func TestPortClosedTable(t *testing.T) {
 		})
 	}
 
-	t.Run("an undeclared material is refused by name", func(t *testing.T) {
-		err := validatePort(Port{Reads: Material("ticket"), Produces: ProductCall})
-		if err == nil || !strings.Contains(err.Error(), `"ticket" is not a declared material`) {
-			t.Fatalf("declare an undeclared material = %v, want a named refusal", err)
-		}
-	})
-
-	t.Run("an undeclared product is refused by name", func(t *testing.T) {
-		err := validatePort(Port{Reads: MaterialCall, Produces: Product("summary")})
-		if err == nil || !strings.Contains(err.Error(), `"summary" is not a declared product`) {
-			t.Fatalf("declare an undeclared product = %v, want a named refusal", err)
-		}
-	})
-
-	t.Run("a pair outside the closed table is refused by name", func(t *testing.T) {
-		for _, port := range []Port{
-			{Reads: MaterialRequest, Produces: ProductCall},
-			{Reads: MaterialFact, Produces: ProductCall},
-			{Reads: MaterialCall, Produces: ProductObservation},
-			{Reads: MaterialRequest, Produces: ProductView},
-		} {
+	t.Run("a name outside the closed table is refused by name", func(t *testing.T) {
+		for _, port := range []Port{"ticket->call", "call->summary", "request->call", "fact->view->compression"} {
 			err := validatePort(port)
-			if err == nil || !strings.Contains(err.Error(), port.String()+" is not one of the declared ports") {
+			if err == nil || !strings.Contains(err.Error(), `"`+port.String()+`" is not one of the declared ports`) {
 				t.Fatalf("declare %s = %v, want a named refusal", port, err)
 			}
 		}
@@ -208,16 +189,16 @@ func TestFlowDispatchesByMaterial(t *testing.T) {
 	var order []string
 
 	presenter := flowPresenter{
-		flowInstance: flowInstance{name: "presenter", port: Port{Reads: MaterialFact, Produces: ProductView}},
+		flowInstance: flowInstance{name: "presenter", port: PortFactView},
 		order:        &order,
 		text:         "the view",
 	}
 	observer := flowObserver{
-		flowInstance: flowInstance{name: "observer", port: Port{Reads: MaterialFact, Produces: ProductObservation}},
+		flowInstance: flowInstance{name: "observer", port: PortFactObservation},
 		order:        &order,
 	}
 	transform := flowTransform{
-		flowInstance: flowInstance{name: "transformer", port: Port{Reads: MaterialCall, Produces: ProductCall}},
+		flowInstance: flowInstance{name: "transformer", port: PortCallTransform},
 		run: func(call *trpcmodel.ToolCall) error {
 			order = append(order, "call->call")
 			call.Function.Name = "write"
@@ -225,15 +206,15 @@ func TestFlowDispatchesByMaterial(t *testing.T) {
 		},
 	}
 	risk := flowRisk{
-		flowInstance: flowInstance{name: "risk-assessor", port: Port{Reads: MaterialCall, Produces: ProductRuling}},
+		flowInstance: flowInstance{name: "risk-assessor", port: PortCallRuling},
 		grade:        RiskHigh,
 	}
 	trigger := flowTrigger{
-		flowInstance: flowInstance{name: "trigger", port: Port{Reads: MaterialFact, Produces: ProductCompression}},
+		flowInstance: flowInstance{name: "trigger", port: PortFactCompression},
 		order:        &order,
 	}
 	inject := flowInject{
-		flowInstance: flowInstance{name: "injector", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}},
+		flowInstance: flowInstance{name: "injector", port: PortRequestEnvironment},
 		order:        &order,
 		blocks:       []string{"env:one", "", "env:two"},
 	}
@@ -308,7 +289,7 @@ func TestNewFlowRefusals(t *testing.T) {
 	t.Run("a nil instance refuses the flow", func(t *testing.T) {
 		var unset Instance
 		pipeline, err := NewFlow([]Instance{
-			flowTransform{flowInstance: flowInstance{name: "transform", port: Port{Reads: MaterialCall, Produces: ProductCall}}, run: func(*trpcmodel.ToolCall) error { return nil }},
+			flowTransform{flowInstance: flowInstance{name: "transform", port: PortCallTransform}, run: func(*trpcmodel.ToolCall) error { return nil }},
 			unset,
 		})
 		if err == nil || !strings.Contains(err.Error(), "nil instance") {
@@ -319,45 +300,23 @@ func TestNewFlowRefusals(t *testing.T) {
 		}
 	})
 
-	t.Run("an undeclared material is refused beside its instance", func(t *testing.T) {
-		pipeline, err := NewFlow([]Instance{
-			flowInstance{name: "foreign", port: Port{Reads: Material("ticket"), Produces: ProductCall}},
-		})
-		if err == nil || !strings.Contains(err.Error(), `"ticket" is not a declared material`) {
-			t.Fatalf("assemble an undeclared material = (%v, %v), want a named refusal", pipeline, err)
-		}
-		if !strings.Contains(err.Error(), "foreign") {
-			t.Fatalf("refusal = %q, want the declaring instance named", err)
-		}
-	})
-
-	t.Run("an undeclared product is refused beside its instance", func(t *testing.T) {
-		pipeline, err := NewFlow([]Instance{
-			flowInstance{name: "foreign", port: Port{Reads: MaterialCall, Produces: Product("summary")}},
-		})
-		if err == nil || !strings.Contains(err.Error(), `"summary" is not a declared product`) {
-			t.Fatalf("assemble an undeclared product = (%v, %v), want a named refusal", pipeline, err)
-		}
-		if !strings.Contains(err.Error(), "foreign") {
-			t.Fatalf("refusal = %q, want the declaring instance named", err)
-		}
-	})
-
-	t.Run("a port pair outside the closed table is refused beside its instance", func(t *testing.T) {
-		pipeline, err := NewFlow([]Instance{
-			flowInstance{name: "crossed", port: Port{Reads: MaterialRequest, Produces: ProductCall}},
-		})
-		if err == nil || !strings.Contains(err.Error(), "request->call is not one of the declared ports") {
-			t.Fatalf("assemble a crossed port = (%v, %v), want a named refusal", pipeline, err)
-		}
-		if !strings.Contains(err.Error(), "crossed") {
-			t.Fatalf("refusal = %q, want the declaring instance named", err)
+	t.Run("a port outside the closed table is refused beside its instance", func(t *testing.T) {
+		for _, port := range []Port{"ticket->call", "call->summary", "request->call"} {
+			pipeline, err := NewFlow([]Instance{
+				flowInstance{name: "foreign", port: port},
+			})
+			if err == nil || !strings.Contains(err.Error(), `"`+port.String()+`" is not one of the declared ports`) {
+				t.Fatalf("assemble %s = (%v, %v), want a named refusal", port, pipeline, err)
+			}
+			if !strings.Contains(err.Error(), "foreign") {
+				t.Fatalf("refusal = %q, want the declaring instance named", err)
+			}
 		}
 	})
 
 	t.Run("a declared port without its narrow face is refused by name", func(t *testing.T) {
 		pipeline, err := NewFlow([]Instance{
-			flowInstance{name: "faceless", port: Port{Reads: MaterialCall, Produces: ProductCall}},
+			flowInstance{name: "faceless", port: PortCallTransform},
 		})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("assemble a faceless instance = (%v, %v), want a named refusal", pipeline, err)
@@ -369,7 +328,7 @@ func TestNewFlowRefusals(t *testing.T) {
 
 	t.Run("a face of another port is refused by name", func(t *testing.T) {
 		pipeline, err := NewFlow([]Instance{
-			flowPresenter{flowInstance: flowInstance{name: "misplaced", port: Port{Reads: MaterialFact, Produces: ProductObservation}}},
+			flowPresenter{flowInstance: flowInstance{name: "misplaced", port: PortFactObservation}},
 		})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("assemble a misplaced face = (%v, %v), want a named refusal", pipeline, err)
@@ -381,8 +340,8 @@ func TestNewFlowRefusals(t *testing.T) {
 
 	t.Run("a name declared twice is refused and keeps provenance", func(t *testing.T) {
 		pipeline, err := NewFlow([]Instance{
-			flowTransform{flowInstance: flowInstance{name: "same", port: Port{Reads: MaterialCall, Produces: ProductCall}}, run: func(*trpcmodel.ToolCall) error { return nil }},
-			flowObserver{flowInstance: flowInstance{name: "same", port: Port{Reads: MaterialFact, Produces: ProductObservation}}},
+			flowTransform{flowInstance: flowInstance{name: "same", port: PortCallTransform}, run: func(*trpcmodel.ToolCall) error { return nil }},
+			flowObserver{flowInstance: flowInstance{name: "same", port: PortFactObservation}},
 		})
 		if err == nil || !strings.Contains(err.Error(), "is declared twice") {
 			t.Fatalf("assemble a duplicate name = (%v, %v), want a named refusal", pipeline, err)

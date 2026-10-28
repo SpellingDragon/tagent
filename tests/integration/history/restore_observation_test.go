@@ -11,9 +11,9 @@ import (
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -32,18 +32,18 @@ func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
 		defer cancel()
 		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-chain"}
-		first, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		first, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 				if len(req.Messages) == 1 {
 					return chainToolTurn(chainCall("call-1", "probe", `{"x":1}`))
 				}
 				return chainFinalTurn("settled")
 			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("assemble the durable runtime: %v", err)
 		}
-		if _, err := first.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := first.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-chain",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -53,11 +53,11 @@ func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
 
 		observer := &historyObserver{}
 		defer watchHistoryLog(t, observer)()
-		restarted, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		restarted, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 				return chainFinalTurn("settled")
 			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("restart the durable runtime: %v", err)
 		}
@@ -85,11 +85,11 @@ func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
 
 		observer := &historyObserver{}
 		defer watchHistoryLog(t, observer)()
-		run, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 				return chainFinalTurn("settled")
 			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("assemble beside the damaged chain: %v", err)
 		}
@@ -106,11 +106,11 @@ func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
 		defer cancel()
 		observer := &historyObserver{}
 		defer watchHistoryLog(t, observer)()
-		if _, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		if _, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 				return chainFinalTurn("settled")
 			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory})); err != nil {
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageMemory})); err != nil {
 			t.Fatalf("assemble over the in-process tier: %v", err)
 		}
 		if !observer.mentions("info", "storage tier opened", "tier=memory", "durable=false") {
@@ -132,11 +132,11 @@ func TestRestoreObservationThroughTheFormalEntry(t *testing.T) {
 				}
 				observer := &historyObserver{refuse: face}
 				defer watchHistoryLog(t, observer)()
-				run, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+				run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 					"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 						return chainFinalTurn("settled")
 					}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-				}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+				}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 				if err != nil {
 					t.Fatalf("assemble beside a failing logger: %v", err)
 				}

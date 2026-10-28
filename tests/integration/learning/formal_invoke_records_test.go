@@ -1,7 +1,7 @@
 // Package learning exercises the training records the assembled runtime
-// produces over its formal entry: the episode, decision and attempt lines of
-// real model decisions, beside the explicit account of the writes a record
-// pipeline refused.
+// produces over its formal entry: the attempt line of every real model
+// decision, beside the explicit account of the writes a record pipeline
+// refused.
 package learning
 
 import (
@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -59,16 +59,16 @@ func (failingRecorder) RecordAttempt(context.Context, rl.AttemptRecord) error {
 // formalRun assembles one runtime through the sole assembly entry beside the
 // record pipeline it names: a scripted native model over one native echo tool,
 // driven over a declaration naming the single agent.
-func formalRun(t *testing.T, ctx context.Context, records rl.Recorder, answer func(req *model.Request) *model.Response) *tagent.Run {
+func formalRun(t *testing.T, ctx context.Context, records rl.Recorder, answer func(req *model.Request) *model.Response) *assembly.Run {
 	t.Helper()
 	provider := &learnModel{name: "model-a", answer: answer}
 	decl := &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-	}, tagent.WithGovernance(formalPolicy{}), tagent.WithRecorder(records))
+	}, assembly.WithGovernance(formalPolicy{}), assembly.WithRecorder(records))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -77,9 +77,9 @@ func formalRun(t *testing.T, ctx context.Context, records rl.Recorder, answer fu
 
 // formalInvoke drives one invocation through the formal runtime entry beside
 // the episode boundary it names.
-func formalInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID) agent.Turn {
+func formalInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID) agent.Turn {
 	t.Helper()
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      episode,
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},
@@ -92,13 +92,15 @@ func formalInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation
 }
 
 // TestFormalInvokeProducesTrainingRecords drives one formal Invoke and reads the training records its production points write.
-//   - the formal invoke produces one episode record beside one decision and one attempt record per model decision
-//   - an invocation whose input names no episode writes no episode record and never guesses one
+//   - the formal invoke admits one attempt record per model decision, so every decision's outcome is replayable
+//   - the intermediate decision's outcome survives in its own attempt response, which no committed output restates
+//   - the episode identity a drive was handed rides the attempt and is never written as a record of its own
+//   - an invocation whose input names no episode admits no episode onto its attempt and never guesses one
 //   - a record write the pipeline refused is counted in the explicit recording-loss account of the run
 //
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
-	t.Run("the formal invoke produces episode, decision and attempt records", func(t *testing.T) {
+	t.Run("the formal invoke produces one replayable attempt per decision", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		records := &collector{}
@@ -113,44 +115,8 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
 		}
 		snap := records.snapshot()
-		if len(snap.episodes) != 1 {
-			t.Fatalf("episode records = %d, want exactly one for the named episode boundary", len(snap.episodes))
-		}
-		episode := snap.episodes[0]
-		if episode.Schema != rl.SchemaCurrent || episode.ID != "ep-formal-1" {
-			t.Fatalf("episode record = (schema %q, id %q), want the versioned record of ep-formal-1", episode.Schema, episode.ID)
-		}
-		if len(episode.Sessions) != 1 || episode.Sessions[0] != "session-formal-1" {
-			t.Fatalf("episode sessions = %v, want the session the invocation ran on", episode.Sessions)
-		}
-		if episode.Lineage != rl.LineageUnknown || episode.ParentID != "" || episode.RootID != "" {
-			t.Fatalf("episode lineage = (%v, parent %q, root %q), want an explicit unknown lineage with no guessed parent", episode.Lineage, episode.ParentID, episode.RootID)
-		}
-		if episode.Timestamp.IsZero() {
-			t.Fatalf("episode timestamp = %v, want the time the record was written", episode.Timestamp)
-		}
-		if len(snap.decisions) != 2 {
-			t.Fatalf("decision records = %d, want one per real decision boundary", len(snap.decisions))
-		}
-		for i, decision := range snap.decisions {
-			if decision.Schema != rl.SchemaCurrent {
-				t.Fatalf("decision %d schema = %q, want %q", i, decision.Schema, rl.SchemaCurrent)
-			}
-			if decision.ID != turn.Decisions[i].DecisionID {
-				t.Fatalf("decision %d id = %q, want the real decision identity %q", i, decision.ID, turn.Decisions[i].DecisionID)
-			}
-			if decision.InvocationID != "inv-formal-1" || decision.EpisodeID != "ep-formal-1" {
-				t.Fatalf("decision %d scope = (%q, %q), want the invocation and episode it belongs to", i, decision.InvocationID, decision.EpisodeID)
-			}
-			if len(decision.InputEvents) == 0 {
-				t.Fatalf("decision %d input events = %v, want the stored events it reduced", i, decision.InputEvents)
-			}
-			if decision.ModelView.Model != "model-a" {
-				t.Fatalf("decision %d model view model = %q, want the model the request ran on", i, decision.ModelView.Model)
-			}
-			if decision.Timestamp.IsZero() {
-				t.Fatalf("decision %d timestamp = %v, want the time the record was written", i, decision.Timestamp)
-			}
+		if len(snap.episodes) != 0 || len(snap.decisions) != 0 {
+			t.Fatalf("records = (%d episodes, %d decisions), want the attempt line alone", len(snap.episodes), len(snap.decisions))
 		}
 		if len(snap.attempts) != 2 {
 			t.Fatalf("attempt records = %d, want one per observable model attempt", len(snap.attempts))
@@ -159,11 +125,11 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 			if attempt.Schema != rl.SchemaCurrent {
 				t.Fatalf("attempt %d schema = %q, want %q", i, attempt.Schema, rl.SchemaCurrent)
 			}
-			if attempt.ID == "" || attempt.DecisionID != snap.decisions[i].ID {
-				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, snap.decisions[i].ID)
+			if attempt.ID == "" || attempt.DecisionID != turn.Decisions[i].DecisionID {
+				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, turn.Decisions[i].DecisionID)
 			}
 			if attempt.EpisodeID != "ep-formal-1" {
-				t.Fatalf("attempt %d episode = %q, want the episode it belongs to", i, attempt.EpisodeID)
+				t.Fatalf("attempt %d episode = %q, want the episode boundary the invocation named", i, attempt.EpisodeID)
 			}
 			if attempt.Terminal != turn.Decisions[i].Terminal || attempt.Terminal != model.KindCompleted {
 				t.Fatalf("attempt %d terminal = %v, want the shared terminal %v", i, attempt.Terminal, turn.Decisions[i].Terminal)
@@ -172,9 +138,22 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 				t.Fatalf("attempt %d timestamp = %v, want the time the record was written", i, attempt.Timestamp)
 			}
 		}
+		first := snap.attempts[0].Response
+		if len(first.Choices) != 1 || len(first.Choices[0].Message.ToolCalls) != 1 ||
+			first.Choices[0].Message.ToolCalls[0].ID != "call-1" ||
+			first.Choices[0].Message.ToolCalls[0].Function.Name != "echo-a" {
+			t.Fatalf("first attempt response = %+v, want the intermediate tool call kept byte-identical", first)
+		}
+		second := snap.attempts[1].Response
+		if len(second.Choices) != 1 || second.Choices[0].Message.Content != "settled" {
+			t.Fatalf("second attempt response = %+v, want the native final content kept as it stood", second)
+		}
+		if second := turn.Decisions[1].Request.Messages; !carriesToolOutput(second, "out-a") {
+			t.Fatalf("second decision request = %+v, want the settled tool observation of the first round", second)
+		}
 	})
 
-	t.Run("an invocation that names no episode records no episode", func(t *testing.T) {
+	t.Run("an invocation that names no episode admits no episode onto its attempt", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		records := &collector{}
@@ -186,14 +165,14 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside one decision", turn.Terminal, len(turn.Decisions))
 		}
 		snap := records.snapshot()
-		if len(snap.episodes) != 0 {
-			t.Fatalf("episode records = %d, want none for an input that names no episode", len(snap.episodes))
+		if len(snap.episodes) != 0 || len(snap.decisions) != 0 {
+			t.Fatalf("records = (%d episodes, %d decisions), want the attempt line alone", len(snap.episodes), len(snap.decisions))
 		}
-		if len(snap.decisions) != 1 || len(snap.attempts) != 1 {
-			t.Fatalf("records = (%d decisions, %d attempts), want one decision and one attempt beside no episode", len(snap.decisions), len(snap.attempts))
+		if len(snap.attempts) != 1 {
+			t.Fatalf("attempt records = %d, want the one attempt the drive admitted", len(snap.attempts))
 		}
-		if snap.decisions[0].EpisodeID != "" || snap.attempts[0].EpisodeID != "" {
-			t.Fatalf("record episodes = (%q, %q), want empty beside an input that names no episode", snap.decisions[0].EpisodeID, snap.attempts[0].EpisodeID)
+		if snap.attempts[0].EpisodeID != "" {
+			t.Fatalf("attempt episode = %q, want empty beside an input that names no episode", snap.attempts[0].EpisodeID)
 		}
 	})
 
@@ -217,8 +196,8 @@ func TestFormalInvokeProducesTrainingRecords(t *testing.T) {
 			}
 			counts[loss.Kind]++
 		}
-		if counts["episode"] != 1 || counts["decision"] != 2 || counts["attempt"] != 2 {
-			t.Fatalf("recording loss counts = %v, want one episode, two decision and two attempt refusals", counts)
+		if counts["capture-attempt"] != 2 || len(counts) != 1 {
+			t.Fatalf("recording loss counts = %v, want the two attempt refusals and nothing else", counts)
 		}
 	})
 }

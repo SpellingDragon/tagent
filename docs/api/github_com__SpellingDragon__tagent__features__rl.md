@@ -1248,44 +1248,51 @@ type Recorder interface {
 type RecorderAdapter struct {
 	// Has unexported fields.
 }
-    RecorderAdapter adapts the execution loop's narrow recording face onto this
-    package's record pipeline: the scattered observations one production point
-    writes are assembled here into the versioned episode, decision and attempt
-    records and handed to the wrapped recorder exactly as the production point
-    observed them. The adapter edits no field of the record it assembles and
-    derives nothing: the attempt record is built through the single observation
-    face AttemptOf, and a visible member that ran unversioned is recorded
-    unversioned rather than assumed current.
+    RecorderAdapter adapts the execution loop's surviving narrow face onto this
+    package's record pipeline: the loop hands over the attempt it admitted — the
+    request view material of a decision and the reduced outcome of an attempt —
+    and the adapter assembles the versioned attempt record and hands it to the
+    wrapped recorder exactly as the attempt observed it. The adapter edits no
+    field of the record it assembles and derives nothing: the attempt record is
+    built through the single observation face AttemptOf, and a visible member
+    that ran unversioned is recorded unversioned rather than assumed current.
+
+    - The attempt admission is the one production point this adapter writes:
+    the loop merged its attempt record into the capture admission, so one
+    observable model attempt is one write here and never two. - The episode
+    boundary and the stored input of a decision are not observed at this point,
+    so no episode or decision record is assembled here: a consumer that needs
+    them derives them from the capture's own evidence beside the chain the run
+    keeps, and this adapter invents neither. - The snapshot and the seal belong
+    to the capture that fixes and closes them; accepting them here keeps one
+    loop observation crossing one face, and writes nothing of its own.
 
     The methods below carry built-in, event and model types only — the same
-    shapes the execution loop's recording face crosses — so this adapter
-    satisfies that face with no package edge into the execution core.
+    shapes the execution loop's capture face crosses — so this adapter satisfies
+    that face with no package edge into the execution core.
 
 func NewRecorderAdapter(inner Recorder) RecorderAdapter
-    NewRecorderAdapter wraps one record pipeline in the recording face the
-    execution loop attaches: every record assembled from one production point's
-    observations is written through inner.
+    NewRecorderAdapter wraps one record pipeline in the capture face the
+    execution loop attaches: the attempt assembled from the one admission the
+    loop hands over is written through inner.
 
-func (a RecorderAdapter) RecordAttempt(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
-    RecordAttempt builds the attempt record through the single observation face
-    and writes it through the wrapped pipeline: the terminal it records is the
-    one the model reduction derived, and none is re-derived here.
+func (a RecorderAdapter) Record(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
+    Record builds the attempt record of one observed attempt through the single
+    observation face and writes it through the wrapped pipeline: the terminal it
+    records is the one the model reduction derived, and none is re-derived here.
+    The attempt's decision is named by the identity the loop admitted it under,
+    so an attempt of an intermediate decision stays replayable exactly like the
+    last.
 
-func (a RecorderAdapter) RecordDecision(ctx context.Context, decisionID event.DecisionID, invocationID event.InvocationID, episodeID event.EpisodeID, inputs []event.EventID, modelName, promptVersion string, visibleTools []string, at time.Time) error
-    RecordDecision assembles the decision record of one model decision from
-    the identities, stored input events and model view material the production
-    point observed and writes it through the wrapped pipeline. A visible tool
-    that ran unversioned is recorded unversioned rather than assumed current,
-    and the snapshot reference stays empty at this production point: the safe
-    request snapshot is the capture port's to produce, and a digest alone is
-    never a snapshot reference.
+func (a RecorderAdapter) Seal(ctx context.Context) error
+    Seal accepts the close of the turn's capture without sealing anything of
+    its own: the seal is the capture's account of what its writer confirmed,
+    and this adapter keeps no queue to close.
 
-func (a RecorderAdapter) RecordEpisode(ctx context.Context, episodeID event.EpisodeID, sessionID event.SessionID, at time.Time) error
-    RecordEpisode assembles the episode record of one business process from the
-    boundary the production point observed and writes it through the wrapped
-    pipeline. The lineage is recorded as unknown with no parent invented:
-    no origin is read at this production point, and an unknown lineage is never
-    reported as a known parent.
+func (a RecorderAdapter) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error
+    Snapshot accepts the view material of one decision's request without writing
+    a record of its own: the snapshot is the capture's to fix, and the view is
+    read back from that evidence rather than restated as a decision record here.
 
 type ReplacementRecord struct {
 	// Schema is the record schema version the attempt was recorded under.

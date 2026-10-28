@@ -6,7 +6,7 @@
 
 - **三个 Go module**：根 module `github.com/SpellingDragon/tagent`，以及 `examples/wechat-bot`、`examples/cli-host`（各自独立 module，无 `go.work`）。根 `./...` 永远不覆盖这两个示例 module，三者都要构建与测试。
 - **Go 下限** `go 1.24.1`（见 [`go.mod`](go.mod)）。
-- **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`），加 `cli` 宿主壳与 module 根组合根；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
+- **代码面**：顶层产品包为 `api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`），加 `cli` 宿主壳与 `assembly` 组合根（组合根住 `assembly/`，目录名即包名）；包边界登记在 [`golden/runtime/architecture.json`](golden/runtime/architecture.json)。
 - **门禁工具**：bash、Go、git；spec 门另需 openspec CLI 1.2.0；校验器自测需 python3。
 
 ## 二、包结构
@@ -20,7 +20,7 @@
 | **扩展策略** | 哪一面可插拔：策略、Condenser、判定函数 | 策略接口与默认实现 |
 
 - **业务逻辑不属机制子包**：领域规则本身（分级表、状态机、预算算法）回领域包；机制子包只回答"怎么被事实化、被驱动、被替换"。
-- **宿主壳 `cli/` 在组合根之上**（对外装配面，嵌入者经 `NewCLI` 驱动）：命令面与宿主转换面（`HostBridge`/回执/审批）从根包拆出，只依赖根 package tagent 的公共面与词汇/只读投影，运行时不反向依赖它；宿主不嵌壳时整包丢弃。
+- **宿主壳 `cli/` 在组合根之上**（对外装配面，嵌入者经 `NewCLI` 驱动）：命令面与宿主转换面（`HostBridge`/回执/审批）从根包拆出，只依赖包 `assembly` 的公共面与词汇/只读投影，运行时不反向依赖它；宿主不嵌壳时整包丢弃。
 - **能力域 `features/`**：可选能力（`telemetry`/`evolution`/`rl`）住 `features/` 下——一能力一包、一个组合根装配点、`api/plugin` 端口声明；后续能力迭代统一走此形，不再平级顶层开新域。
 - **新包准入三问**（逐问写下答案，答不全就不开新包，先落进既有包的文件）：
   1. **业务还是机制？** 业务 → 领域包；机制 → 领域包下的机制子包。

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	tagentfile "github.com/SpellingDragon/tagent/tool/file"
@@ -45,14 +45,14 @@ func TestFileChangesReachNextRequest(t *testing.T) {
 			Files: []config.FileRef{{Path: promptPath, Kind: config.FileKindPrompt}},
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	address := event.Address{AgentID: "agent-a", SessionID: "session-file-change"}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-file-change-1",
 		Address:      address,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "first"}},
@@ -68,7 +68,7 @@ func TestFileChangesReachNextRequest(t *testing.T) {
 	}
 
 	writePromptAt(t, promptPath, "prompt body v2\n")
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-file-change-2",
 		Address:      address,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "second"}},
@@ -129,13 +129,13 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 			},
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-skill-body-1",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-skill-body"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "load the skills"}},
@@ -186,17 +186,17 @@ func TestRequestCarriesProjectedBudget(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	chain := agent.RequestChain{PartitionID: 7, SessionID: event.SessionID("session-projection")}
-	if err := run.AttachReplay(chain, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
+	if err := run.AttachReplay(chain, assembly.FoldWindow{MaxTokens: 100}, proj); err != nil {
 		t.Fatalf("AttachReplay: %v", err)
 	}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-projection-1",
 		Address:      event.Address{AgentID: "agent-a", SessionID: chain.SessionID},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "带投影的请求"}},
@@ -270,13 +270,13 @@ func TestNativeToolFamiliesAdmitted(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{spec},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{fnTool}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-tool-families",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-tool-families"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "use the tools"}},
@@ -360,17 +360,17 @@ func TestProjectedContextKeepsItsFixedLayout(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{spec},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	chain := agent.RequestChain{PartitionID: 7, SessionID: event.SessionID("session-layout")}
-	if err := run.AttachReplay(chain, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
+	if err := run.AttachReplay(chain, assembly.FoldWindow{MaxTokens: 100}, proj); err != nil {
 		t.Fatalf("AttachReplay: %v", err)
 	}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-layout",
 		Address:      event.Address{AgentID: "agent-a", SessionID: chain.SessionID},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "装配序的请求"}},

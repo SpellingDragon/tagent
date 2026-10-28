@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -154,7 +154,7 @@ func (c *benchChannel) waitTexts(b *testing.B, before, want int) []string {
 type benchRig struct {
 	b        *testing.B
 	app      *wechatApp
-	host     *tagent.Host
+	host     *assembly.Host
 	channel  *benchChannel
 	provider *smokeProvider
 	cfg      *smokeConfig
@@ -249,12 +249,12 @@ func bootBenchRig(b *testing.B, maxTokens int) *benchRig {
 		b.Fatalf("assemble the wechat application: %v", err)
 	}
 	channel := newBenchChannel()
-	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
-	host, err := tagent.Boot(cfg.ConfigPath, options...)
+	options := append(app.options(), assembly.WithApprovals(gateway.Manager()))
+	host, err := assembly.Boot(cfg.ConfigPath, options...)
 	if err != nil {
 		b.Fatalf("boot the host: %v", err)
 	}
-	app.host.invoke = func(ctx context.Context, req tagent.InvokeRequest) (bool, error) {
+	app.host.invoke = func(ctx context.Context, req assembly.InvokeRequest) (bool, error) {
 		turn, err := host.Invoke(ctx, req)
 		if err != nil {
 			return false, err

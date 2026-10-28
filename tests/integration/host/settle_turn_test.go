@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
@@ -70,7 +70,7 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 			"  worker:\n"+
 			"    model: model-worker\n"))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 	invokeCtx, invokeCancel := context.WithCancel(ctx)
 	invoked := make(chan error, 1)
 	go func() {
-		_, err := host.Invoke(invokeCtx, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtx, assembly.InvokeRequest{
 			Address: addr,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 		})
@@ -203,7 +203,7 @@ func TestSettleDriverIgnoresNonTerminalFacts(t *testing.T) {
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}

@@ -73,7 +73,7 @@ func (d *Driver) Name() string { return "meditation-driver" }
 // Port reports the consumption the driver serves: one committed fact in, one
 // observation out. The observation is the reflection pass the fact may fire.
 func (d *Driver) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // SetObserver attaches the reading of each pass this driver runs. It is the

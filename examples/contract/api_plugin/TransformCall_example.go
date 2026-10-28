@@ -17,7 +17,7 @@ func (argumentDefaults) Name() string { return "argument-defaults" }
 
 // Port reports the call->call port the element serves.
 func (argumentDefaults) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformCall fills in the argument a call left out, keeping the ID the call was

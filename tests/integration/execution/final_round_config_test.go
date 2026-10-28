@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -51,7 +51,7 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		}
 		run := assembleBudgeted(t, ctx, decl, provider, tool)
 
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-budget",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-budget"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "start"}},
@@ -96,10 +96,10 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 				},
 			},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: modelA, Tools: []trpctool.CallableTool{tool}},
 			"agent-b": {Model: modelB, Tools: []trpctool.CallableTool{tool}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -112,7 +112,7 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 			{agent: "agent-b", decisions: 2, prompt: "close agent b out"},
 		}
 		for _, tc := range cases {
-			turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+			turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: event.InvocationID("inv-budget-" + string(tc.agent)),
 				Address:      event.Address{AgentID: tc.agent, SessionID: event.SessionID("session-budget-" + string(tc.agent))},
 				Input:        []model.Message{{Role: model.RoleUser, Content: "start"}},
@@ -158,7 +158,7 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		}
 		run := assembleBudgeted(t, ctx, decl, provider, tool)
 
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-unbounded",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-unbounded"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "start"}},
@@ -197,7 +197,7 @@ func TestDeclarationDrivesTheClosingRound(t *testing.T) {
 		}
 		run := assembleBudgeted(t, ctx, decl, provider, tool)
 
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-budget-seconds",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-budget-seconds"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "start"}},
@@ -234,11 +234,11 @@ func alwaysToolTurn(tool *convTool) func(*model.Request) *model.Response {
 // assembleBudgeted assembles the formal runtime over one declaration and
 // registers the tool it declares, so the budget reaches the loop the way a host
 // hands it over.
-func assembleBudgeted(t *testing.T, ctx context.Context, decl *config.Declaration, provider model.Model, tool *convTool) *tagent.Run {
+func assembleBudgeted(t *testing.T, ctx context.Context, decl *config.Declaration, provider model.Model, tool *convTool) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}

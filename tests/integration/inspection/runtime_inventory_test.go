@@ -172,6 +172,18 @@ type runtimeFixture struct {
 	refusal   error
 }
 
+// taskEntry looks one task reading up by its identity: task identities are
+// minted from random hex, so the order the owner answers its ids in carries no
+// meaning and a check that wants one task names it.
+func taskEntry(tasks []query.TaskEntry, id event.TaskID) (query.TaskEntry, bool) {
+	for _, entry := range tasks {
+		if entry.TaskID == id {
+			return entry, true
+		}
+	}
+	return query.TaskEntry{}, false
+}
+
 // newRuntimeFixture assembles the real owners and drives them into one known
 // multi-dimensional state: three session sites, one held execution slot, two
 // tasks, four notifications standing in four delivery phases and two held
@@ -420,21 +432,23 @@ func TestRuntimeInventory(t *testing.T) {
 		if len(tasks) != 2 {
 			t.Fatalf("tasks = %+v, want 2 entries", tasks)
 		}
-		if tasks[0].TaskID != f.task1 || tasks[0].Spec != f.spec1 || tasks[0].Status != task.StatusSettled {
-			t.Fatalf("first task = %+v, want %s settled with its own declaration", tasks[0], f.task1)
+		settledTask, ok := taskEntry(tasks, f.task1)
+		if !ok || settledTask.Spec != f.spec1 || settledTask.Status != task.StatusSettled {
+			t.Fatalf("task %s = %+v, want it settled with its own declaration", f.task1, settledTask)
 		}
 		ownerObligations, err := f.manager.Obligations(f.ctx, f.task1)
 		if err != nil {
 			t.Fatalf("Obligations(%s): %v", f.task1, err)
 		}
-		if !reflect.DeepEqual(tasks[0].Obligations, ownerObligations) {
-			t.Fatalf("task-1 obligations = %+v, want owner reading %+v", tasks[0].Obligations, ownerObligations)
+		if !reflect.DeepEqual(settledTask.Obligations, ownerObligations) {
+			t.Fatalf("task-1 obligations = %+v, want owner reading %+v", settledTask.Obligations, ownerObligations)
 		}
-		if tasks[0].Obligations.Count != 1 || tasks[0].Obligations.Blocked[0].Reason != f.refusal.Error() {
-			t.Fatalf("task-1 obligations = %+v, want one refused delivery beside its reason", tasks[0].Obligations)
+		if settledTask.Obligations.Count != 1 || settledTask.Obligations.Blocked[0].Reason != f.refusal.Error() {
+			t.Fatalf("task-1 obligations = %+v, want one refused delivery beside its reason", settledTask.Obligations)
 		}
-		if tasks[1].TaskID != f.task2 || tasks[1].Spec != f.spec2 || tasks[1].Status != task.StatusAccepted || tasks[1].Obligations.Count != 1 || tasks[1].Obligations.Open[0].Kind != task.ObligationAwaitingTool {
-			t.Fatalf("second task = %+v, want %s accepted with its admission obligation open", tasks[1], f.task2)
+		acceptedTask, ok := taskEntry(tasks, f.task2)
+		if !ok || acceptedTask.Spec != f.spec2 || acceptedTask.Status != task.StatusAccepted || acceptedTask.Obligations.Count != 1 || acceptedTask.Obligations.Open[0].Kind != task.ObligationAwaitingTool {
+			t.Fatalf("task %s = %+v, want it accepted with its admission obligation open", f.task2, acceptedTask)
 		}
 		wantNotices := []query.NoticeEntry{
 			{Notice: f.notices[0], Target: f.addrB, TargetInstance: f.instance, Phase: query.NoticePhaseConsumed, Delivery: task.DeliveryAccepted, AcceptSeq: 1, Claim: state.ClaimConsumed, Completed: true},
@@ -626,8 +640,17 @@ func TestRuntimeInventory(t *testing.T) {
 		}
 		mutatedAgents := view.Agents()
 		mutatedAgents[0].Busy = false
+		settledTask, ok := taskEntry(view.Tasks(), f.task1)
+		if !ok || len(settledTask.Obligations.Blocked) == 0 {
+			t.Fatalf("task %s = %+v, want the refused delivery it holds", f.task1, settledTask)
+		}
 		mutatedTasks := view.Tasks()
-		mutatedTasks[0].Obligations.Blocked[0].Reason = "tampered"
+		for i := range mutatedTasks {
+			if mutatedTasks[i].TaskID != f.task1 {
+				continue
+			}
+			mutatedTasks[i].Obligations.Blocked[0].Reason = "tampered"
+		}
 		mutatedNotices := view.Notices()
 		mutatedNotices[3].Blocked[0].Reason = "tampered"
 		mutatedInvocations := view.Invocations()
@@ -635,8 +658,8 @@ func TestRuntimeInventory(t *testing.T) {
 		if !view.Agents()[0].Busy {
 			t.Fatalf("agent reading changed through a returned slice: %+v", view.Agents()[0])
 		}
-		if view.Tasks()[0].Obligations.Blocked[0].Reason == "tampered" {
-			t.Fatalf("blocked reason changed through a returned slice: %+v", view.Tasks()[0].Obligations)
+		if reread, ok := taskEntry(view.Tasks(), f.task1); !ok || reread.Obligations.Blocked[0].Reason == "tampered" {
+			t.Fatalf("blocked reason changed through a returned slice: %+v", reread.Obligations)
 		}
 		if view.Notices()[3].Blocked[0].Reason == "tampered" {
 			t.Fatalf("notice blocked reason changed through a returned slice: %+v", view.Notices()[3])

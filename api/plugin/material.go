@@ -7,103 +7,56 @@ import (
 
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 //
-// Material names one kind of material the flow moves between its faces: the call
-// a tool is about to run, the request an assembly builds, and the fact a commit
-// wrote. A face reads exactly one material and never rewrites it in place.
-type Material string
-
-const (
-	// MaterialCall is the call material: one tool call before its side effect.
-	MaterialCall Material = "call"
-
-	// MaterialRequest is the request material: one request assembly.
-	MaterialRequest Material = "request"
-
-	// MaterialFact is the fact material: one committed fact.
-	MaterialFact Material = "fact"
-)
-
-// Product names what one face answers out of the material it reads: the
-// corrected call, the ruling over a call, the observation of a fact, the view of
-// a fact, the compression a filed request asks for and the environment blocks of
-// a request.
-type Product string
-
-const (
-	// ProductCall is the corrected call: the same identity, a corrected name and
-	// corrected arguments.
-	ProductCall Product = "call"
-
-	// ProductRuling is the ruling over one call: the grade of the call beside the
-	// one pre-execution decision.
-	ProductRuling Product = "ruling"
-
-	// ProductObservation is the observation of one fact: a read-only reading that
-	// never rewrites the fact.
-	ProductObservation Product = "observation"
-
-	// ProductView is the presentation of one fact: one view per presenter, traced
-	// to the fact it was rendered from.
-	ProductView Product = "view"
-
-	// ProductCompression is the compression one filed request asks for: the chain
-	// the request drives, never the curation itself.
-	ProductCompression Product = "compression"
-
-	// ProductEnvironment is the environment material one request assembly carries:
-	// one block per product, each block traced to the request.
-	ProductEnvironment Product = "environment"
-)
-
-// Port is the declaration of one flow instance: the material it reads and the
-// product it answers. The pair is the whole routing of the flow — the narrow
-// interface the instance is held to and the pass that dispatches it are both
-// readings of it.
+// Port names one declared port of the material flow. Exactly six exist, each
+// spelling the routing it stands for — the material the face reads beside the
+// product it answers — and a face serves one of them by name. Nothing routes by
+// a material or a product read on its own, because no pass ever walks the
+// materials as a set: a port constant is the whole declaration.
 //
 // The redline list (2 rules):
-// MUST declare exactly one read material and one product; an element serving two ports is two instances.
+// MUST serve one of the six declared ports; a name outside the set is refused rather than matched to a port.
 // MUST implement the narrow interface of the declared port.
-type Port struct {
-	// Reads is the material this instance reads.
-	Reads Material
+type Port string
 
-	// Produces is the product this instance answers.
-	Produces Product
-}
+const (
+	// PortCallTransform is the port a call transform serves: it reads the call a
+	// tool is about to run and answers the corrected call of the same identity.
+	PortCallTransform Port = "call->call"
 
-// String spells one port as the material it reads beside the product it answers.
-func (p Port) String() string { return string(p.Reads) + "->" + string(p.Produces) }
+	// PortCallRuling is the port the pre-execution ruling serves: it reads the
+	// call and answers the ruling over it, the risk grade beside the decision.
+	PortCallRuling Port = "call->ruling"
 
-// validatePort refuses a port the closed table of the flow does not declare, by
-// name. The table declares six ports — call->call, call->ruling,
-// request->environment, fact->observation, fact->view and fact->compression — so
-// a face is dispatched by the one narrow interface its port names, never by a
-// classification of the port.
-//
-// A material the table does not declare, a product it does not declare, and a
-// pair no port serves are each refused by name instead of falling back to a
-// declared port.
+	// PortRequestEnvironment is the port environment injection serves: it reads
+	// one request assembly and answers the environment blocks of it.
+	PortRequestEnvironment Port = "request->environment"
+
+	// PortFactObservation is the port a post-commit observer serves: it reads one
+	// committed fact and answers a read-only observation that never rewrites it.
+	PortFactObservation Port = "fact->observation"
+
+	// PortFactView is the port a final presenter serves: it reads one committed
+	// fact and answers the views rendered from it.
+	PortFactView Port = "fact->view"
+
+	// PortFactCompression is the port a compress trigger serves: it reads one
+	// committed fact and answers the compression a filed request asks for.
+	PortFactCompression Port = "fact->compression"
+)
+
+// String spells one port as the routing it stands for.
+func (p Port) String() string { return string(p) }
+
+// validatePort refuses a port the closed table does not declare, by name. The
+// table holds the six ports above, so a face is dispatched by the one narrow
+// interface its port names, never by a classification of the parts the name
+// spells.
 func validatePort(port Port) error {
-	switch port.Reads {
-	case MaterialCall, MaterialRequest, MaterialFact:
-	default:
-		return fmt.Errorf("plugin: %q is not a declared material of the flow", string(port.Reads))
-	}
-	switch port.Produces {
-	case ProductCall, ProductRuling, ProductObservation, ProductView, ProductCompression, ProductEnvironment:
-	default:
-		return fmt.Errorf("plugin: %q is not a declared product of the flow", string(port.Produces))
-	}
 	switch port {
-	case Port{Reads: MaterialCall, Produces: ProductCall},
-		Port{Reads: MaterialCall, Produces: ProductRuling},
-		Port{Reads: MaterialRequest, Produces: ProductEnvironment},
-		Port{Reads: MaterialFact, Produces: ProductObservation},
-		Port{Reads: MaterialFact, Produces: ProductView},
-		Port{Reads: MaterialFact, Produces: ProductCompression}:
+	case PortCallTransform, PortCallRuling, PortRequestEnvironment, PortFactObservation, PortFactView, PortFactCompression:
 		return nil
 	default:
-		return fmt.Errorf("plugin: the port %s is not one of the declared ports of the flow", port)
+		return fmt.Errorf("plugin: %q is not one of the declared ports of the flow", string(port))
 	}
 }
 
@@ -111,7 +64,7 @@ func validatePort(port Port) error {
 // decision, the tick that runs one reflection and the assembler that builds one
 // request are built-in instances; a plugin is an instance the composition root
 // mounts. What an instance is differs only in who mounts it: the flow dispatches
-// every instance by the material its port reads.
+// every instance by the port it declares.
 //
 // The redline list (3 rules):
 // MUST declare the one port it serves and implement that port's narrow interface.
@@ -121,7 +74,7 @@ type Instance interface {
 	// Name returns the stable name of this instance.
 	Name() string
 
-	// Port reports the material this instance reads and the product it answers.
+	// Port reports the port this instance serves.
 	Port() Port
 }
 

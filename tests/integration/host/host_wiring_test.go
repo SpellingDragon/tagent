@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 	"github.com/SpellingDragon/tagent/tool/subagent"
@@ -41,7 +41,7 @@ func TestMetricsEndpointServesCounters(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestCallSubagentGrantableByHostDocument(t *testing.T) {
 		"      - { kind: tool, id: " + subagent.CallSubagentRef + " }\n"
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, ""))
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot a document granting %q: %v", subagent.CallSubagentRef, err)
 	}
@@ -130,7 +130,7 @@ func TestCallSubagentGrantableByHostDocument(t *testing.T) {
 		"    model: model-a\n"+
 			"    tools:\n"+
 			"      - { kind: tool, id: call_subagents }\n", ""))
-	if _, err := tagent.Boot(misspelledPath, tagent.WithSender(recordingSender{})); !errors.Is(err, tagent.ErrUnknownHostTool) {
+	if _, err := assembly.Boot(misspelledPath, assembly.WithSender(recordingSender{})); !errors.Is(err, assembly.ErrUnknownHostTool) {
 		t.Fatalf("boot of the misspelled id = %v, want the named unknown-host-tool refusal", err)
 	}
 }
@@ -164,7 +164,7 @@ func TestRiskRulesFlowFromDocument(t *testing.T) {
 	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, topBlock))
 	approvals := approval.NewApprovalManager("", time.Hour)
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender), tagent.WithApprovals(approvals))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender), assembly.WithApprovals(approvals))
 	if err != nil {
 		t.Fatalf("boot a document declaring a critical risk rule: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestRiskRulesAbsentKeepsTheSendFace(t *testing.T) {
 	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, ""))
 	approvals := approval.NewApprovalManager("", time.Hour)
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender), tagent.WithApprovals(approvals))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender), assembly.WithApprovals(approvals))
 	if err != nil {
 		t.Fatalf("boot a document beside no risk rules: %v", err)
 	}
@@ -308,7 +308,7 @@ func TestExecFaceWiredFromDocument(t *testing.T) {
 		"      monitor: { interval: 20ms, stable_duration: 40ms, interactive_stable_duration: 40ms, fake_dead_duration: 200ms }\n"
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, ""))
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot a document granting %q: %v", tagentexec.PresetName, err)
 	}
@@ -372,7 +372,7 @@ func TestExecFaceDeclaredBesideNoTmuxRefusesTheBoot(t *testing.T) {
 		"      - { kind: tool, id: " + tagentexec.PresetName + " }\n"
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 	writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), agentBlock, ""))
-	if _, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{})); err == nil {
+	if _, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{})); err == nil {
 		t.Fatal("boot of a declared exec face beside no tmux = nil, want the named refusal")
 	} else if !strings.Contains(err.Error(), tagentexec.PresetName) {
 		t.Fatalf("boot error = %v, want the declared %q face named", err, tagentexec.PresetName)
@@ -395,7 +395,7 @@ func TestTelemetrySwitchFromDocument(t *testing.T) {
 		configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 		writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(),
 			"    model: model-a\n", "telemetry:\n  otel_enabled: true\n"))
-		host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+		host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 		if err != nil {
 			t.Fatalf("boot a document enabling OTel: %v", err)
 		}
@@ -414,7 +414,7 @@ func TestTelemetrySwitchFromDocument(t *testing.T) {
 		configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 		writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(),
 			"    model: model-a\n", "telemetry:\n  otel_enable: true\n"))
-		_, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+		_, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 		if err == nil || !strings.Contains(err.Error(), "otel_enable") {
 			t.Fatalf("boot of the misspelled telemetry key = %v, want the unknown key named", err)
 		}
@@ -425,7 +425,7 @@ func TestTelemetrySwitchFromDocument(t *testing.T) {
 		configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
 		writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(),
 			"    model: model-a\n", "telemetry:\n  otel_enabled: false\n  endpoint: localhost:4317\n"))
-		_, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+		_, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 		if err == nil || !strings.Contains(err.Error(), "endpoint") {
 			t.Fatalf("boot of an endpoint beside otel_enabled false = %v, want the endpoint named", err)
 		}
