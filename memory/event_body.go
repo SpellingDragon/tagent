@@ -136,19 +136,37 @@ func (b EventBody) Encode() ([]byte, error) {
 // DecodeEventBody decodes one committed body under the body schema, or names
 // the refusal for bytes that carry no body of this schema.
 //
-// One body format exists. Bytes an earlier writer committed spell their
-// identity as event_key beside event_type and event_summary, which is no
-// identity under this schema: they are refused by name so an event key can
-// never be invented from the bytes beside it. Such state is not migrated — a
-// store holding it is rebuilt cold (the kv.json precedent), so the refusal names
-// the bytes that must be dropped rather than standing in for a migration path.
+// One body format exists, and the shape of it is decided by the keys the bytes
+// carry, never by the values a decode leaves behind. Bytes an earlier writer
+// committed spell their identity as event_key beside event_type and
+// event_summary, which is no identity under this schema: they are refused by
+// name so an event key can never be invented from the bytes beside it. Bytes of
+// the same earlier writer's other shape carry key, content and summary instead,
+// and are refused by the same rule at the other end: a body whose top level
+// carries no message key is not this schema and is refused by name, so its
+// content is refused rather than decoded into an empty payload beside a key
+// that reads back as if it committed nothing. The judgment is made on the raw
+// top-level keys because the message field of this schema has no way to say
+// "absent": an audit fact that commits an empty message is a legal body and its
+// zero value is the very thing the bytes of the older shape would decode to, so
+// a zero-value judgment would refuse a fact this schema holds. Such state is not
+// migrated — a store holding it is rebuilt cold (the kv.json precedent), so the
+// refusal names the bytes that must be dropped rather than standing in for a
+// migration path.
 func DecodeEventBody(body []byte) (EventBody, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return EventBody{}, fmt.Errorf("%w: %w", ErrEventBody, err)
+	}
 	var decoded EventBody
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return EventBody{}, fmt.Errorf("%w: %w", ErrEventBody, err)
 	}
 	if decoded.Key == "" {
 		return EventBody{}, fmt.Errorf("%w: the body carries no event key", ErrEventBody)
+	}
+	if _, carried := fields["message"]; !carried {
+		return EventBody{}, fmt.Errorf("%w: the body is not this schema: it carries no message", ErrEventBody)
 	}
 	return decoded, nil
 }
