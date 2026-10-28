@@ -140,7 +140,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "so one notice identity enters the follow-up range as two new input facts."
         ),
         replacement=Replacement(
-            file="host.go",
+            file="assembly/host.go",
             # Anchor migrated per the clearance ruling (G5/G6b follow-up turn
             # checking turn.Terminal): the call assigns the returned turn now.
             # The injected defect is unchanged — the notice material re-enters
@@ -184,7 +184,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "the busy notice is dropped instead of kept."
         ),
         replacement=Replacement(
-            file="settle_turn.go",
+            file="assembly/settle_turn.go",
             # Patch 1 — the observation of a notice arriving while the pump
             # drives (busy) wakes nothing: the busy notice is dropped instead of
             # kept on the account for a later round.
@@ -212,13 +212,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         companion=(
             Replacement(
-                file="settle_turn.go",
+                file="assembly/settle_turn.go",
                 # Patch 2 — the driving flag the busy swallow reads.
                 old="\tmu      sync.Mutex\n\tstopped bool\n",
                 new="\tmu      sync.Mutex\n\tstopped bool\n\tbusy    bool\n",
             ),
             Replacement(
-                file="settle_turn.go",
+                file="assembly/settle_turn.go",
                 # Patch 3 — the pump is busy while it drives its round.
                 old=(
                     "func (d *SettleDriver) drain() {\n"
@@ -240,7 +240,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="settle_turn.go",
+                file="assembly/settle_turn.go",
                 # Patch 4 — the drain ends after its one round instead of
                 # re-reading the account, so nothing picks the swallowed notice
                 # up later. (The first form of this patch reversed the exit
@@ -407,7 +407,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "of its material."
         ),
         replacement=Replacement(
-            file="request.go",
+            file="assembly/request.go",
             old=(
                 "\t// endedAt names the first entry of the range in flight: everything before\n"
                 "\t// it is the ended material a request presents. The boundary is recorded by\n"
@@ -422,7 +422,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         companion=(
             Replacement(
-                file="request.go",
+                file="assembly/request.go",
                 old=(
                     "// endedPrefix reports the position the ended material of the registered sequence\n"
                     "// ends at, resolved against the sequence as it stands now: the position of the\n"
@@ -449,7 +449,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 new="",
             ),
             Replacement(
-                file="request.go",
+                file="assembly/request.go",
                 # Anchor migrated per the clearance ruling (G4 full-address
                 # index key): same registration site, the full addr key now.
                 old=(
@@ -461,7 +461,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="request.go",
+                file="assembly/request.go",
                 # Anchor migrated per the clearance ruling (the projected
                 # segment carries the run handle now).
                 old=(
@@ -474,7 +474,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 old=(
                     "\theld.projection.Append(context.Background(), entry)\n"
                     "\tif admitsRange(evt) && held.rangeInvocation != evt.InvocationID {\n"
@@ -490,7 +490,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 old="\treturn held.endedPrefix(), true\n",
                 new="\treturn held.ended, true\n",
             ),
@@ -498,7 +498,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # mutant keeps the position too, so the read compiles and stays
             # wrong in the same way as the boundary it follows.
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 old="\tboundary := held.endedPrefix()\n",
                 new="\tboundary := held.ended\n",
             ),
@@ -525,7 +525,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "the process left."
         ),
         replacement=Replacement(
-            file="run.go",
+            file="assembly/run.go",
             old=(
                 "\t\tseed.projection.Append(ctx, entry)\n"
                 "\t\tif err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {\n"
@@ -559,7 +559,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "barrier failure is answered as success instead of reported by name."
         ),
         replacement=Replacement(
-            file="facts.go",
+            file="assembly/facts.go",
             # The refusal exits of the persist path all answer as committed. The
             # first registry form swallowed the segment store error alone; the
             # live persist path splits one refusal over several exits (the read
@@ -583,7 +583,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         ),
         companion=(
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 # The read that flushes staged writes answers as committed.
                 old=(
                     "\tstored, held, err := tier.Segments.GetEvent(ctx, evt.Key)\n"
@@ -599,7 +599,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 # The originals write answers as committed.
                 old=(
                     "\tif err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {\n"
@@ -613,7 +613,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 # The conflict-branch read answers as committed.
                 old=(
                     "\t\tprior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)\n"
@@ -629,7 +629,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 ),
             ),
             Replacement(
-                file="facts.go",
+                file="assembly/facts.go",
                 # The conflict-branch refusal answers as committed.
                 old="\t\tif !held {\n\t\t\treturn err\n\t\t}\n",
                 new="\t\tif !held {\n\t\t\treturn nil\n\t\t}\n",
@@ -656,7 +656,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "longer owed, so the restart has no result to hand over again."
         ),
         replacement=Replacement(
-            file="facts.go",
+            file="assembly/facts.go",
             old=(
                 "\tr.loop.Backflow(frame.Identity.InvocationID, notice)\n"
                 "\treturn r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)\n"
