@@ -1686,7 +1686,8 @@ func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery pl
 // ruling that could not be rendered parks it too instead of delivering
 // unreviewed content. A send the channel refuses parks the body as the
 // redelivery it owes. The second result names the cause of a hold or a refusal
-// for the caller's receipt; a delivered body carries none.
+// for the caller's receipt; a delivered body carries none beside the
+// unconfirmed-receipt note below.
 //
 // An obligation the sender accepted is recorded as sent behind its write
 // barrier: a receipt the tier refused leaves the obligation owed, so a restart
