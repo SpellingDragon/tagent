@@ -158,7 +158,7 @@ Material×Product 组合词汇若不做真正组合推导 SHALL 删除；六具�
 
 ### Requirement: 热更新三档明示
 
-模型/提示词 SHALL 走新代发布；工具与插件（MCP）声明、存储根/持久化格式/资源所有权变更 SHALL 具名拒绝并要求重启（natives 随 Boot 绑定，无新代重绑路径）；固定配置 SHALL 一次发布。
+模型/提示词 SHALL 走新代发布；工具与插件声明、存储根/持久化格式/资源所有权变更 SHALL 具名拒绝并要求重启（natives 随 Boot 绑定，无新代重绑路径）；固定配置 SHALL 一次发布。MCP 服务器声明除外：其随新代发布重绑（fingerprint 含 servers，真实改动必换代热生效）。
 
 #### Scenario: 越档变更具名拒绝
 

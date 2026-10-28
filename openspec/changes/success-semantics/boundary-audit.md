@@ -16,6 +16,8 @@
 
 取证口径：分支 `next`、`HEAD = 4494dfb8`，`runtime/task/` 全目录（含 `approval/` 子包），共 22 个文件、全部为 `.go`（根 19 + `approval/` 3）。
 
+行号快照于叶 14 重组前（host.go 3215 行时点）；重组后活文件见 assembly/ 迁移与 host_delivery.go/host_document.go 等拆分。
+
 ## 一、搜索面与命中计数
 
 | # | 检索面（`runtime/task/` 全目录，`--include='*.go'`） | 命中 |
