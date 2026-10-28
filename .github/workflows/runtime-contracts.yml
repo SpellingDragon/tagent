@@ -15,7 +15,7 @@
 # comment_policy -no-baseline、codetools tracked-hygiene，加 openspec strict。
 # 产品包口径 = golden/runtime/architecture.json 登记的第一方包（其 scope 明确排除
 # scripts/tests/examples/docs/resources）；PRODUCT_PACKAGES 的顶层目录集由
-# scripts/test_check_runtime_workflow.py 对 golden 钉住，防漂移。根包用 *.go 是因为
+# scripts/gates/test_check_runtime_workflow.py 对 golden 钉住，防漂移。根包用 *.go 是因为
 # `gofmt -l .`/`comment_policy .` 会递归整个根 module（含 scripts/tests）。
 #
 # 多 module 现状：examples/wechat-bot 与 examples/cli-host 都是独立 module（无 go.work，
@@ -27,7 +27,7 @@
 # 承担；本 workflow 只管根 module 产品门，不重复示例 module 步骤（重复会造两处升级点）。
 #
 # 本 workflow 不代表产品行为通过；openspec strict 步骤以 `--specs` 只校验主规格
-# （openspec/specs/ 是唯一真源；in-flight change 属 WIP，由 scripts/check-openspec.sh
+# （openspec/specs/ 是唯一真源；in-flight change 属 WIP，由 scripts/gates/check-openspec.sh
 # 报告而不判红），任一主规格未 strict-valid 即如实红。不替代 ci.yml/lint.sh/
 # race_check.sh/gen_godoc.sh。不使用 continue-on-error，不内嵌第二套校验器；检查器本体
 # 纯标准库，只有 workflow 自测解析本文件需要 PyYAML（自测步骤安装这一件）。
@@ -66,7 +66,7 @@ jobs:
       # First-party product packages per golden/runtime/architecture.json (its
       # scope excludes scripts/tests/examples/docs/resources). The root
       # package is *.go: a bare `.` would recurse the whole root module.
-      PRODUCT_PACKAGES: "*.go api runtime memory evolution telemetry rl tool internal cli"
+      PRODUCT_PACKAGES: "*.go api runtime memory features tool internal cli"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4
@@ -96,28 +96,28 @@ jobs:
       - name: Checker selftests
         run: |
           python -m pip install --quiet pyyaml
-          python -m unittest discover -s scripts -p 'test_check_runtime_*.py' -v
-          python scripts/test_check_concept_budget.py -v
+          python -m unittest discover -s scripts/gates -p 'test_check_runtime_*.py' -v
+          python scripts/gates/test_check_concept_budget.py -v
 
       # Fails honestly while the domain artifacts are still being written; no bypass.
       - name: Plan contract
-        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/check_runtime_plan.py --change-dir openspec/changes/archive/2026-10-18-runtime-rebuild --json; else echo 'no active change; the plan contract gate has no object (archive-only), skipped'; fi"
+        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/gates/check_runtime_plan.py --change-dir openspec/changes/archive/2026-10-18-runtime-rebuild --json; else echo 'no active change; the plan contract gate has no object (archive-only), skipped'; fi"
 
       - name: Architecture policy
-        run: "python scripts/check_runtime_architecture.py --check-policy --json"
+        run: "python scripts/gates/check_runtime_architecture.py --check-policy --json"
 
       # 概念预算（S1–S4，concept-slim-plan.md §一）：多态接口 ≤2 方法 / 消费者侧窄口 ≤3 /
       # 导出结构 ≤5 导出字段 / 裸 ctx.Value=0 / 每窄口 canonical 范例＋MUST/MUST NOT 红线清单。
       # baseline 是检查器文件内的显式债务表（只降不升）：命中豁免仍 warn 计数，豁免表外的
       # 新增超标即 error。与 Architecture policy 同链、同 exit 语义（0 过 / 1 findings）。
       - name: Concept budget (S1–S4)
-        run: "python scripts/check_concept_budget.py --json"
+        run: "python scripts/gates/check_concept_budget.py --json"
 
       - name: Architecture implementation coverage
-        run: "python scripts/check_runtime_architecture.py --implementation --json"
+        run: "python scripts/gates/check_runtime_architecture.py --implementation --json"
 
       - name: Scenarios contract
-        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json; else echo 'no active change; the scenarios contract gate has no object (archive-only), skipped'; fi"
+        run: "if compgen -G 'openspec/changes/*/task-graph.json' > /dev/null; then python scripts/gates/check_runtime_evidence.py --check-contract --plan-graph openspec/changes/archive/2026-10-18-runtime-rebuild/task-graph.json --json; else echo 'no active change; the scenarios contract gate has no object (archive-only), skipped'; fi"
 
       # ---- root-module product gates (same scope as local verification) ----
       - name: Build (root module)
@@ -194,7 +194,7 @@ jobs:
       # keep the default signal about format/contract alone.
       - name: Architecture implementation coverage
         if: ${{ inputs.run_implementation == 'true' }}
-        run: "python scripts/check_runtime_architecture.py --implementation --json"
+        run: "python scripts/gates/check_runtime_architecture.py --implementation --json"
 
       # Real evidence comparison: both artifacts must be supplied explicitly and
       # are injected via env (never interpolated into a quoted shell argument), so
@@ -204,7 +204,7 @@ jobs:
         env:
           EVIDENCE_JSON: ${{ inputs.evidence_json }}
           TEST_LOG: ${{ inputs.test_log }}
-        run: python scripts/check_runtime_evidence.py --evidence "$EVIDENCE_JSON" --test-log "$TEST_LOG" --json
+        run: python scripts/gates/check_runtime_evidence.py --evidence "$EVIDENCE_JSON" --test-log "$TEST_LOG" --json
 
       - name: Note when no evidence was compared
         if: ${{ inputs.evidence_json == '' }}

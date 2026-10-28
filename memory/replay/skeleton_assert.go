@@ -1,11 +1,10 @@
 // 契约: docs/wiki/memory/memory-architecture.md#overview
 //
-// Skeleton compile-time assertions for the replay shapes: the presentation
-// decision, the chain-isolated replay source and relation store, the compaction
-// payload and its refs, the cold-start rebuild that replays a fact chain into
-// an empty projection, and the segment-age axis the bands and their folds are
-// declared under. A renamed field or a widened signature stops this file from
-// compiling.
+// Skeleton compile-time assertions for the replay shapes: the projection entry,
+// the chain-isolated replay source and relation store, the compaction payload and
+// its refs, the cold-start rebuild that replays a fact chain into an empty
+// projection, and the segment-age axis the bands and their folds are declared
+// under. A renamed field or a widened signature stops this file from compiling.
 package replay
 
 import (
@@ -24,21 +23,6 @@ var (
 		Content: "",
 		Time:    time.Time{},
 	}
-
-	_ = PresentationDecision{
-		Key:     "",
-		Mode:    PresentationUnrecorded,
-		Preview: "",
-	}
-)
-
-// The presentation modes must stay compile-time constants: a variable or a
-// computed value stops this block from compiling.
-const (
-	_ = PresentationUnrecorded
-	_ = PresentationFull
-	_ = PresentationSummary
-	_ = PresentationTicket
 )
 
 // The replay projection keeps its declared methods.
@@ -52,8 +36,6 @@ var (
 	_ func(*ReplayProjection, context.Context, int, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudgetPrefix
 
 	_ func(*ReplayProjection, context.Context, AgeFoldPlan) (AgeFoldReport, error) = (*ReplayProjection).FoldByAge
-
-	_ func(*ReplayProjection) []ReplaySettle = (*ReplayProjection).Settles
 )
 
 // The segment-age axis keeps its declared shapes: one band per age band, the
@@ -97,7 +79,6 @@ var (
 	_ = ChainFact{Key: "", Chain: ChainKey{}, Type: "", Summary: "", Content: "", Time: time.Time{}}
 	_ = CompactionFact{Summary: CompactionRef{}, Refs: []CompactionRef{}, FullBoundary: "", ConsumedKeys: []event.EventID{}}
 	_ = CompactionRef{Key: "", Type: "", Summary: "", Content: "", Time: time.Time{}}
-	_ = ReplaySettle{ID: "", Entry: "", Mode: PresentationUnrecorded, Preview: "", At: time.Time{}}
 	_ = RebuildOptions{PageSize: 0, FallbackBound: 0}
 	_ = RebuildReport{Entries: 0, Fallback: false, Dropped: 0, Scanned: false, Skipped: "", Partial: false, Missing: []event.EventID{}, Consumed: []event.EventID{}, FullBoundary: ""}
 
@@ -114,7 +95,6 @@ var (
 	_ func(context.Context, *ReplayProjection, EventChain, *MemoryRelations, ChainKey, RebuildOptions) (RebuildReport, error) = RebuildProjectionFromWAL
 	_ func([]ProjectionEntry) []byte                                                                                          = RenderProjection
 	_ func(string) bool                                                                                                       = RetainRefType
-	_ func(PresentationDecision) ReplaySettle                                                                                 = ReplaySettleFor
 
 	_ error = ErrChainKeyRequired
 	_ error = ErrRebuildUnwired

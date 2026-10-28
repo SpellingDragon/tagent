@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // refusingWriter is the capture writer whose storage refuses every write and

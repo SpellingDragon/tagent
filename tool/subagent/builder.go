@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpcagent "trpc.group/trpc-go/trpc-agent-go/agent"

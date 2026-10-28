@@ -1,12 +1,14 @@
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 //
-// Presentation decisions and budget assembly.
+// Budget assembly of one projection.
 //
-// The projection layers the original text, the model view and the presentation
-// decision: the original is kept apart from what the model sees, and only a
-// full-text decision makes the two identical. A recorded decision is the basis a
-// replay follows, so a recorded preview is never promoted back to the full text
-// and the original is never reconstructed from a decision.
+// A projection keeps the canonical text of every fact it holds and nothing about
+// how a request presented it: the view a request carries is computed for that
+// request alone, from the facts, the declaration and the budget it names. A later
+// assembly under another budget is judged on its own, so material a tight budget
+// shortened is presented whole again once the budget allows it and no assembly
+// inherits the shape of an earlier one. What a past request actually showed is
+// the request snapshot's record, never a decision the projection keeps.
 package replay
 
 import (
@@ -17,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -35,7 +38,7 @@ const (
 	// assembly convert at the one ratio, so they never disagree about how much
 	// window the material costs.
 	BudgetCharsPerToken = budgetCharsPerToken
-	// ticketPreviewBytes bounds the preview a ticket decision records and shows.
+	// ticketPreviewBytes bounds the preview a ticket presentation shows.
 	ticketPreviewBytes = 128
 	// noticeCardChars bounds the identity card a request presents for a notice
 	// the budget cannot carry in any fuller form: the notice's status, the head
@@ -44,6 +47,9 @@ const (
 	// noticeStatusChars bounds the status a notice card names, so a long stored
 	// summary never eats the room the identity and the ticket need.
 	noticeStatusChars = 60
+	// noticeStatusFrame is the card frame the status is stated in: the room the
+	// status may take is what the bound leaves beside this frame and the ticket.
+	noticeStatusFrame = "[notice ] "
 	// recoveryHintBytes bounds the recovery hint entry text.
 	recoveryHintBytes = 200
 )
@@ -57,27 +63,26 @@ var (
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
 //
 // ReplayProjection is the replayable projection: the ordered model view of one
-// fact chain, the recorded presentation decisions that view was assembled
-// under, and the compaction payload a fold left on the chain. It is what
+// fact chain and the compaction payload a fold left on the chain. It is what
 // RebuildProjectionFromWAL replays into.
 //
 // A projection holds no state outside the fact chain, so replaying the recorded
-// decisions reproduces the same view. The entries hold the canonical form (the
-// original text of each keyed fact), while a recorded decision shapes what an
-// assembly presents, and the layering is never collapsed. Constraints:
+// facts reproduces the same entries, and it holds no presentation decision: the
+// view a request carries belongs to that request and is computed when it is
+// assembled. The entries hold the canonical form (the original text of each
+// keyed fact), and an assembly shapes a copy of it rather than the entry.
+// Constraints:
 //
 //   - a keyed entry already present is appended once, and a keyless entry always is;
-//   - the original text, the model view and the presentation decision stay layered;
+//   - the original text of an entry is immutable input, and the model view is the assembly's output;
 //   - a rebuild recomputes the deduplication key set from the entries it keeps.
 type ReplayProjection struct {
 	mu        sync.Mutex
 	entries   []ProjectionEntry
 	seen      map[event.EventID]struct{}
 	originals map[event.EventID]string
-	decisions map[event.EventID]PresentationDecision
 	consumed  map[event.EventID]struct{}
 	fold      *CompactionFact
-	settles   []ReplaySettle
 	boundary  event.EventID
 	recovery  *ProjectionEntry
 }
@@ -87,16 +92,16 @@ func NewReplayProjection() *ReplayProjection {
 	return &ReplayProjection{
 		seen:      map[event.EventID]struct{}{},
 		originals: map[event.EventID]string{},
-		decisions: map[event.EventID]PresentationDecision{},
 		consumed:  map[event.EventID]struct{}{},
 	}
 }
 
 // Append adds the canonical entry of one committed fact: a keyed entry already
-// present is appended once, a keyless entry always is. The original text is
-// kept apart from the model view, and a recorded decision shapes the view —
-// never the original. An append is an in-memory mutation, so it takes the port's
-// context with nothing to cancel.
+// present is appended once, a keyless entry always is. The entry carries the
+// fact's own text, which is what the projection keeps — an append never shapes
+// the text for a model, so the same entry presents differently under different
+// budgets and the fact reads back unchanged either way. An append is an
+// in-memory mutation, so it takes the port's context with nothing to cancel.
 func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -106,9 +111,6 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 		}
 		p.seen[entry.Key] = struct{}{}
 		p.originals[entry.Key] = entry.Content
-		if decision, recorded := p.decisions[entry.Key]; recorded {
-			entry.Content = p.viewOf(decision, entry)
-		}
 		if entry.Type == event.TypeThinkingPlan {
 			p.consumed[entry.Key] = struct{}{}
 		}
@@ -118,19 +120,20 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry) {
 
 // AssembleBudget packs the projection into one agent request of the given token
 // budget and returns the entries the request is assembled from, recovery hint
-// first when one applies. A recorded decision is followed unconditionally — the
-// view a replay reproduces never drifts with the remaining budget — while an
-// unrecorded entry degrades from the full text to a ticket and then to the
-// summary until the budget is met, settling on the decision it recorded as one
-// replay-settle fact. An entry that fits none of them is skipped without a
-// record and without a settle fact, so a later assembly under a larger budget
-// can still present it in full — except a notice entry, which the budget may
-// shorten to its identity card but never drop: a notice the model never read is
-// an event the model never saw arrive.
+// first when one applies. Every entry is presented at the first form that fits
+// the room the budget leaves — the full text, the ticket, the stored summary and
+// for a notice its identity card — computed for this assembly alone: nothing is
+// read back from how an earlier assembly presented the same fact, so a budget
+// that shrinks presents less and a budget that widens presents more again. The
+// source facts are read and never written, and the assembly files no settle fact
+// and keeps no decision, so the projection is left as the next assembly found it.
 //
-// The source facts are read and never written: the assembly files settle facts
-// on the projection's own settle account, so the fact chain it replayed is
-// exactly as it stood.
+// The assembled request never runs past the budget it names: every entry it
+// carries, the recovery hint and the notice card included, is cut to the room
+// that remains. An entry that fits none of the forms is skipped, so a later
+// assembly under a larger budget can still present it in full — except a notice
+// entry, which the budget may shorten to its identity card but never drop: a
+// notice the model never read is an event the model never saw arrive.
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error) {
 	return p.AssembleBudgetPrefix(ctx, budget, -1)
 }
@@ -151,7 +154,7 @@ func (p *ReplayProjection) AssembleBudgetPrefix(ctx context.Context, budget, pre
 }
 
 // assembleBudgetLocked runs the assembly over the leading prefix of the entries
-// under the recorded decisions and the remaining budget.
+// under the room the budget leaves.
 func (p *ReplayProjection) assembleBudgetLocked(budget, prefix int) []ProjectionEntry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -164,138 +167,95 @@ func (p *ReplayProjection) assembleBudgetLocked(budget, prefix int) []Projection
 	out := make([]ProjectionEntry, 0, len(entries)+1)
 	if p.recovery != nil {
 		hint := *p.recovery
+		hint.Content = cutBytes(hint.Content, limit)
 		out = append(out, hint)
 		used += len(hint.Content)
 	}
 	for _, entry := range entries {
-		if entry.Key != "" {
-			if decision, recorded := p.decisions[entry.Key]; recorded {
-				view := p.viewOf(decision, entry)
-				shown := entry
-				shown.Content = view
-				out = append(out, shown)
-				used += len(view)
-				continue
-			}
+		if view, ok := presentWithin(entry, p.originalOf(entry), limit-used); ok {
+			out = append(out, view)
+			used += len(view.Content)
 		}
-		original := p.originalOf(entry)
-		if used+len(original) <= limit {
-			if entry.Key != "" {
-				p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationFull})
-			}
-			shown := entry
-			shown.Content = original
-			out = append(out, shown)
-			used += len(original)
-			continue
-		}
-		preview := boundedText(original, ticketPreviewBytes)
-		ticket := preview + "\n" + ticketText(entry.Key)
-		if used+len(ticket) <= limit {
-			if entry.Key != "" {
-				p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationTicket, Preview: preview})
-			}
-			shown := entry
-			shown.Content = ticket
-			out = append(out, shown)
-			used += len(ticket)
-			continue
-		}
-		if used+len(entry.Summary) <= limit {
-			if entry.Key != "" {
-				p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationSummary, Preview: entry.Summary})
-			}
-			shown := entry
-			shown.Content = entry.Summary
-			out = append(out, shown)
-			used += len(entry.Summary)
-			continue
-		}
-		if entry.Type != event.TypeFeedback {
-			continue
-		}
-		card := noticeCard(entry, original)
-		if entry.Key != "" {
-			p.recordLocked(entry.Key, PresentationDecision{Key: entry.Key, Mode: PresentationSummary, Preview: card})
-		}
-		shown := entry
-		shown.Content = card
-		out = append(out, shown)
-		used += len(card)
 	}
 	return out
 }
 
 // noticeCard renders the least a request may present for a notice the budget
-// cannot carry in any fuller form: the notice's status, the head of its material
-// and the ticket that reaches the full original. The notice fact family commits
-// as a feedback fact (the progress and settled reports of a call, and the
+// cannot carry in any fuller form: the notice's status, the head of its
+// material and the ticket that reaches the full original. The notice fact family
+// commits as a feedback fact (the progress and settled reports of a call, and the
 // execution-state reports of the host), so a feedback entry is identity-bearing
 // material: the model must be able to tell that it arrived and what it reported,
 // and budget pressure may shorten it but never drop it from the prefix the way
-// it drops a plain entry. The ticket is reserved before the head is cut, so the
-// identity reaches its original even when the bound leaves the head no room.
-func noticeCard(entry ProjectionEntry, original string) string {
+// it drops a plain entry.
+//
+// The card is bounded by the room the assembly leaves and by noticeCardChars,
+// and the ticket is reserved first: the identity that reaches the original is the
+// last part the bound takes away, so a bound with no room left for the material
+// head still presents the status and the ticket, and a bound with no room left
+// for the status still presents the ticket.
+func noticeCard(entry ProjectionEntry, original string, room int) string {
+	bound := room
+	if bound > noticeCardChars {
+		bound = noticeCardChars
+	}
+	ticket := ticketText(entry.Key)
+	if bound <= len(ticket) {
+		return cutBytes(ticket, bound)
+	}
 	status := boundedText(entry.Summary, noticeStatusChars)
 	if status == "" {
 		status = "notice"
+	}
+	if statusRoom := bound - len(ticket) - 1 - len(noticeStatusFrame); statusRoom < len(status) {
+		status = cutBytes(status, statusRoom)
+	}
+	if status == "" {
+		return ticket
 	}
 	head := original
 	if at := strings.IndexByte(head, '\n'); at >= 0 {
 		head = head[:at]
 	}
 	prefix := "[notice " + status + "] "
-	ticket := ticketText(entry.Key)
-	room := noticeCardChars - len(prefix) - len(ticket) - 2
-	if room < 0 {
-		room = 0
+	headRoom := bound - len(prefix) - len(ticket) - 1
+	if headRoom <= 0 || head == "" {
+		return prefix + ticket
 	}
-	return prefix + boundedText(head, room) + " " + ticket
+	return prefix + cutBytes(head, headRoom) + " " + ticket
 }
 
-// RecordDecision records the presentation decision of one entry and reshapes
-// its model view accordingly. First time wins: a decision already recorded is
-// never upgraded, so a recorded preview is never promoted back to the full
-// text.
-func (p *ReplayProjection) RecordDecision(key event.EventID, decision PresentationDecision) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.recordLocked(key, decision)
+// shown returns one entry as the assembly presents it: the fact's own text stays
+// where the projection keeps it, and the view the request carries is the copy
+// beside it, so presenting never writes back into the entry.
+func shown(entry ProjectionEntry, content string) ProjectionEntry {
+	entry.Content = content
+	return entry
 }
 
-func (p *ReplayProjection) recordLocked(key event.EventID, decision PresentationDecision) {
-	if key == "" {
-		return
+// presentWithin presents one entry at the first form from the full text down
+// that fits the room the assembly leaves: the full text, the ticket, the stored
+// summary and, for a notice, the identity card. An entry no form fits is
+// presented by nothing at all, so a roomier assembly can still present it in
+// full; a notice card is the one form cut to the room instead of skipped, because
+// the arrival of a notice is material the model must see.
+func presentWithin(entry ProjectionEntry, original string, room int) (ProjectionEntry, bool) {
+	if room <= 0 {
+		return ProjectionEntry{}, false
 	}
-	if _, recorded := p.decisions[key]; recorded {
-		return
+	if len(original) <= room {
+		return shown(entry, original), true
 	}
-	p.decisions[key] = decision
-	settle := ReplaySettleFor(decision)
-	settle.At = time.Now().UTC()
-	p.settles = append(p.settles, settle)
-	for i, entry := range p.entries {
-		if entry.Key == key {
-			p.entries[i].Content = p.viewOf(decision, entry)
-		}
+	if ticket := boundedText(original, ticketPreviewBytes) + "\n" + ticketText(entry.Key); len(ticket) <= room {
+		return shown(entry, ticket), true
 	}
-}
-
-// viewOf renders the model view one decision describes: the full original only
-// for a full-text decision, the recorded text otherwise. The original is never
-// reconstructed from the decision — it is only ever read back from the layer
-// that kept it.
-func (p *ReplayProjection) viewOf(decision PresentationDecision, entry ProjectionEntry) string {
-	switch decision.Mode {
-	case PresentationFull:
-		return p.originalOf(entry)
-	case PresentationSummary:
-		return decision.Preview
-	case PresentationTicket:
-		return decision.Preview + "\n" + ticketText(decision.Key)
-	default:
-		return p.originalOf(entry)
+	if len(entry.Summary) <= room {
+		return shown(entry, entry.Summary), true
 	}
+	if entry.Type != event.TypeFeedback {
+		return ProjectionEntry{}, false
+	}
+	return shown(entry, noticeCard(entry, original, room)), true
 }
 
 // originalOf returns the original text of an entry: the kept original of a keyed
@@ -325,6 +285,21 @@ func boundedText(text string, n int) string {
 		return text
 	}
 	return string(runes[:n]) + "…"
+}
+
+// cutBytes bounds text to n bytes on a rune boundary without a cut mark, so the
+// cut result never runs past the hard byte bound it is cut for.
+func cutBytes(text string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(text) <= n {
+		return text
+	}
+	for n > 0 && !utf8.RuneStart(text[n]) {
+		n--
+	}
+	return text[:n]
 }
 
 // seedConsumed marks one consumed key as reseeded, so the consumed state a
@@ -379,25 +354,6 @@ func (p *ReplayProjection) Original(key event.EventID) (string, bool) {
 	defer p.mu.Unlock()
 	original, kept := p.originals[key]
 	return original, kept
-}
-
-// Decision returns the recorded presentation decision of one key.
-func (p *ReplayProjection) Decision(key event.EventID) (PresentationDecision, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	decision, recorded := p.decisions[key]
-	return decision, recorded
-}
-
-// Settles returns a copy of the replay-settle facts the assembly recorded, in
-// settlement order: one fact per decision the assembly settled on, and none for
-// an entry it skipped.
-func (p *ReplayProjection) Settles() []ReplaySettle {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([]ReplaySettle, len(p.settles))
-	copy(out, p.settles)
-	return out
 }
 
 // Compaction returns the compaction payload the last fold left, nil before any.

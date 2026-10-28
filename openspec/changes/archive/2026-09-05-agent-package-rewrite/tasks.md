@@ -191,11 +191,11 @@
 ### Task 2.5: 更新外部引用（移除 compat alias）
 
 - [x] 更新 `tagent.go`：
-  - import `"github.com/SpellingDragon/tagent/rl"` 替代 `agent.TrajectoryRecorder` 等
+  - import `"github.com/SpellingDragon/tagent/features/rl"` 替代 `agent.TrajectoryRecorder` 等
   - 替换 `agent.NewTrajectoryRecorder` → `rl.NewTrajectoryRecorder`
   - 替换 `agent.TrajectoryRecorder` → `rl.TrajectoryRecorder`
 - [x] 更新 `examples/wechat-bot/main.go`：
-  - import `"github.com/SpellingDragon/tagent/rl"`
+  - import `"github.com/SpellingDragon/tagent/features/rl"`
   - 替换 `agent.NewSwappableModel` → `rl.NewSwappableModel`
   - 替换 `agent.NewHTTPAPI` → `rl.NewHTTPAPI`
 - [x] 删除 `agent/trajectory_compat.go`、`agent/swappable_compat.go`、`agent/http_api_compat.go`
@@ -248,7 +248,7 @@
 ### 对下游应用的影响
 
 1. **import 路径变更**：
-   - `agent.TrajectoryRecorder` → `rl.TrajectoryRecorder`（import `"github.com/SpellingDragon/tagent/rl"`）
+   - `agent.TrajectoryRecorder` → `rl.TrajectoryRecorder`（import `"github.com/SpellingDragon/tagent/features/rl"`）
    - `agent.NewHTTPAPI` → `rl.NewHTTPAPI`
    - `agent.NewSwappableModel` → `rl.NewSwappableModel`
    - `agent.SwappableModel` → `rl.SwappableModel`

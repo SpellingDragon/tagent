@@ -752,10 +752,10 @@ func TestDocRefsFailsClosedOnTruncatedHistory(t *testing.T) {
 // - The scanners implementing it must name the pattern without tripping it: without that exemption the gate is noise and gets switched off.
 func TestProcRefsIgnoresScannerSelfReferences(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "scripts"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "scripts", "gates"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "scripts", "build.sh"),
 		[]byte("# see openspec/changes/add-x/design.md for the contract\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "scripts", "check-openspec.sh"),
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "scripts", "gates", "check-openspec.sh"),
 		[]byte("# reports changes under openspec/changes/ but does not fail\n"), 0o644))
 	hits := procRefViolations(filepath.Join(dir, "scripts"))
 	require.Equal(t, []string{"scripts/build.sh:1"}, hits, "tooling self-reference must not be reported")

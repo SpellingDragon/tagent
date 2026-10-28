@@ -1,0 +1,14 @@
+=== RUN   TestMailboxSnapshotInvariants
+=== RUN   TestMailboxSnapshotInvariants/a_read_hands_out_a_copy_instead_of_a_reference_into_the_site
+=== RUN   TestMailboxSnapshotInvariants/an_instance_another_instance_replaced_keeps_refusing_input_while_its_accepted_entries_stay_readable
+=== RUN   TestMailboxSnapshotInvariants/the_consumption_position_stops_before_the_first_unfinished_entry
+=== RUN   TestMailboxSnapshotInvariants/claim,_settlement_and_acceptance_each_move_only_from_their_own_predecessor_state
+    durable_test.go:350: repeat the consumption = <nil>, want state: the mailbox entry is already consumed beside a settled entry refusing the repeat by name
+--- FAIL: TestMailboxSnapshotInvariants (0.00s)
+    --- PASS: TestMailboxSnapshotInvariants/a_read_hands_out_a_copy_instead_of_a_reference_into_the_site (0.00s)
+    --- PASS: TestMailboxSnapshotInvariants/an_instance_another_instance_replaced_keeps_refusing_input_while_its_accepted_entries_stay_readable (0.00s)
+    --- PASS: TestMailboxSnapshotInvariants/the_consumption_position_stops_before_the_first_unfinished_entry (0.00s)
+    --- FAIL: TestMailboxSnapshotInvariants/claim,_settlement_and_acceptance_each_move_only_from_their_own_predecessor_state (0.00s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/runtime/state	0.177s
+FAIL

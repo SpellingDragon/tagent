@@ -66,7 +66,7 @@ single reduction entry.
 
 SettleDriver is the event-driven face of one unattended settle: it observes the
 delivery facts this run commits for a terminal task notification and drives one
-follow-up turn at the user session the task belongs to.
+follow-up turn at the address the notification froze its routing to.
 
 The trigger surface is closed, and the anti-loop is semantic rather than a
 blacklist:
@@ -77,8 +77,14 @@ blacklist:
     settle never fires.
   - The fired turn commits no settle fact with a lineage, so it can never fire
     itself again.
-  - A notice that arrives while a follow-up is in flight is retained, in arrival
-    order, and re-evaluated when that turn ends: it is never dropped.
+  - The mailbox is the one account that answers whether work waits:
+    a notification waits there until a turn claims it, drives it and consumes it
+    on that same account, so one notification starts one turn however often it
+    is observed.
+  - The attempt record is the second fence a restart reads: a turn that already
+    landed its terminal is closed with its consumption receipt instead of driven
+    again, so a stop between the terminal fact and the receipt replays no second
+    turn.
 
 Package tagent is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
@@ -211,6 +217,13 @@ var ErrMemoryEngine = errors.New("tagent: the memory engine declaration is inval
     assemble: an unknown backend, a negative retrieval bound, or an embedding
     connection that does not name what its provider needs.
 
+var ErrNoticeTurnIncomplete = errors.New("tagent: the follow-up turn did not complete its delivery")
+    ErrNoticeTurnIncomplete reports a follow-up turn that ended without the
+    completed delivery its notification owed: a stopped or failed turn hands
+    its mailbox entry back unconsumed, so the work stays owed and the next wake
+    drives it again, while only a turn that really delivered closes the entry
+    beside its consumption receipt.
+
 var ErrObservationUnwired = errors.New("tagent: the run is assembled beside no observable storage tier")
     ErrObservationUnwired reports an observation read attempted on a run
     assembled beside no storage tier: the face is refused by name rather than
@@ -225,8 +238,8 @@ var ErrRetrievalUnwired = errors.New("tagent: the run carries no retrieval face 
 
 var ErrSettleDriverUnwired = errors.New("tagent: the settle driver is not wired")
     ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
-    user-address memory or follow-up face was never wired: a gap by name instead
-    of a silent no-op that reads as a delivered turn.
+    mailbox account or follow-up face was never wired: a gap by name instead of
+    a silent no-op that reads as a delivered turn.
 
 var ErrUnknownAgentReference = errors.New("tagent: the agent reference names no declared agent")
     ErrUnknownAgentReference reports an agent reference that names no declared
@@ -531,8 +544,10 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
 func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     ApproveDelivery re-delivers one held body exactly once: the body is sent to
     the target it named, and the hold is consumed, so a repeated approval names
-    no hold and delivers no second copy. A send the channel refuses restores the
-    hold for a later approval and is reported to the caller.
+    no hold and delivers no second copy. A send the channel refuses restores
+    the hold for a later approval and is reported to the caller. Every hold is
+    recorded beside the review table, so the approval resolves the body across a
+    restart as well.
 
 func (h *Host) Close(ctx context.Context) error
     Close stops the endpoints and the reflection driver, drains the run and
@@ -544,9 +559,10 @@ func (h *Host) FaceAddr() string
     address beside a host that serves none.
 
 func (h *Host) HeldDeliveries() []HeldDelivery
-    HeldDeliveries reports the bodies the review plugin is holding before
-    delivery, oldest first. The result is a copy the caller owns: reading here
-    changes no hold, and only ApproveDelivery or RefuseDelivery resolves one.
+    HeldDeliveries reports the bodies the host owes a target before delivery:
+    the holds the review plugin parked and the redeliveries a refused send owes,
+    oldest first. The result is a copy the caller owns: reading here changes no
+    hold, and only ApproveDelivery or RefuseDelivery resolves one.
 
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
     Invoke drives one invocation through the assembled run. An invocation at the
@@ -556,7 +572,8 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
     consumed, and an audit feedback fact without a model payload records the
-    refusal at the target address.
+    refusal at the target address. The refusal consumes the durable record as
+    well, so no later boot owes the body again.
 
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
     Reload reads the configuration source again, publishes the declaration
@@ -929,10 +946,14 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
     The entries a registration carries were replayed from the chain, so they
     are ended material and are presented at once; the facts the run commits
     from here on present themselves once their range ends. A chain that names
-    no session is refused by name: assembling one would join every user of the
-    partition into one transcript. A window of no tokens is refused the same
-    way: it bounds every request to an empty prefix and leaves the age fold no
-    share of a window to measure.
+    no session is refused by name: assembling one would join every user of
+    the partition into one transcript. A window of no tokens is accepted as
+    the no-budget window it means: the requests present the whole projection
+    with no budget bound, and the age fold measures against the default window
+    instead of none. The seam carries no agent identity, so the registration
+    is kept for every user of the session it names; the chains this run commits
+    register under the full address of the agent that owns them through
+    attachScopedReplay, so they never cross agents that share a session id.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
     Close closes the runtime's own side for the named session address and
@@ -956,13 +977,18 @@ func (r *Run) CloseMCPServers() error
     calls it beside the close of the run; a repeated call releases nothing anew.
 
 func (r *Run) CommitHistory(addr event.Address, msgs []model.Message)
-    CommitHistory appends the transcript one ended drive accumulated to the
-    history of its session, so the next invocation of the session reads the
-    range's history as it actually ended while no two invocations ever batch
-    their ready input together. A session whose chain carries a mapped sequence
-    commits no transcript here: that sequence carried every fact of the range
-    as it committed, and the range reads back from it instead of from a second
-    transcript of the same facts.
+    CommitHistory is the write side of the same one face: the transcript one
+    ended drive accumulated is already carried by the mapped sequence of the
+    session — every fact of the range entered it as it committed, in commit
+    order, with the boundary the next request presents — so committing it here
+    keeps no second copy and appends nothing.
+
+    The call is kept as the seam the loop commits an ended drive's transcript
+    through: a loop beside this face needs no branch of its own, and a run
+    beside no mapped sequence records no transcript at all, exactly as a chain
+    whose facts committed nothing has nothing to present. The history a restart
+    reads comes back from the durable fact chain by replay, never from this
+    seam.
 
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error)
     CommitToSession commits one event into the fact chain of an explicit
@@ -976,17 +1002,20 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
     The commit is a write of this run, never a second store beside it: the fact
     lands in the same live ledger, on the same durable log and in the same
     mapped sequence as the target session's own input, so that session's next
-    assembly reads it like any other external input.
+    assembly reads it like any other external input. The address block of the
+    event is backfilled, never overwritten: a source, target or owner the caller
+    already stamped is kept as the caller wrote it, and only an unstated stamp
+    reads as the target address of the commit.
 
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error)
     CommittedEvent reports the fact an identity names: the live fact of this
     process when it holds one, and otherwise the event the storage tier already
-    committed. A committed body carries the light fields and no trigger source,
-    so a fact restored from the tier carries the lineage its bytes carry and
-    never an invented one.
+    committed. A committed body carries every field the event committed with,
+    so a fact restored from the tier carries the whole metadata projection, the
+    native payload and the lineage its bytes carry and never an invented one.
 
 func (r *Run) CommittedFacts() int
-    CommittedFacts reports how many live facts this run holds: the counter the
+    CommittedFacts reports how many facts this run holds: the counter the
     metrics endpoint reports beside the turns and deliveries of the host.
 
 func (r *Run) Diagnostics(ctx context.Context, filter query.ListFilter, switches DiagnosticSwitches) (DiagnosticReport, error)
@@ -1013,8 +1042,12 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
     InjectEvent commits one explicit input event of the named responsibility
     range and drives the loop session of its address with it, exactly as the
     Invoke entry drives a range the host admitted. The caller owns the event's
-    address and lineage; this entry stamps only the identities that scope it to
-    this run and range, and reports the identity the fact committed under.
+    address and lineage; this entry backfills only the stamps the caller left
+    unstated — an unstated source and target read as the owner of the event, an
+    unstated invocation identity as the one this call names — while the runtime
+    instance stamp is always this run's own and never the caller's to write.
+    The fact commits under the identity the event carries after the backfill,
+    and the drive runs the range under that same identity.
 
 func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 
@@ -1145,24 +1178,32 @@ func (r *Run) RequestSnapshots() []RequestSnapshotRecord
     before its model calls, in call order, as a structural-layer copy the
     caller owns: each Message, VisibleTools and VisibleSkills slice is copied,
     while nested ContentParts share the underlying parts of the fixed snapshot.
-    Writing a shared part would be a caller bug; the snapshots themselves
-    were fixed before the call. The snapshots are read-out material beside the
-    requests they were fixed for; reading them moves nothing.
+    Writing a shared part would be a caller bug; the snapshots themselves were
+    fixed before the call. The snapshots are read back from the capture that
+    fixed them — their one home — and a run assembled beside no capture answers
+    none. Reading them moves nothing.
 
 func (r *Run) SessionFacts(addr event.Address) []event.Event
-    SessionFacts reports the live facts of one session in the order they
-    committed: the chain one address wrote, as the run holds it. Only facts
-    still in the live ledger are answered; a chain restored from the durable
-    tier is read through the committed-event face instead.
+    SessionFacts reports the facts of one session in the order they committed:
+    the chain one address wrote, as the run holds it — the facts this process
+    committed beside every fact the storage tier already held at assembly,
+    both read through the one ledger. A fact outside the session the address
+    names is answered never.
 
 func (r *Run) SessionHistory(addr event.Address) []model.Message
     SessionHistory reports the transcript the named session accumulated across
-    the drives that already ended on it, as a copy the caller owns. The history
-    of one session never mixes with the history of another.
+    the drives that already ended on it, as a copy the caller owns.
 
-    This ledger is the read-out face of the execution scene the run holds, not a
-    durability record: what a restarted process reads back is recovered from the
-    durable fact chain by replay, so no body snapshot is kept beside the facts.
+    The history of one session chain is one face: the mapped sequence its
+    commits record, read through the request boundary of the next invocation.
+    This face carries no second copy of it, so it answers an empty transcript
+    for every chain — a session whose material exists reads it from that
+    sequence, and a session whose commits recorded none has none to read.
+    A reader that keeps a transcript beside the sequence would present the same
+    facts twice, once from the sequence and once from the copy, and a restart
+    would present a different history than the live process, because the copy is
+    not a durability record while the sequence is replayed from the durable fact
+    chain.
 
 type SessionFolds interface {
 	// SessionOf reports the session chain one committed fact belongs to.
@@ -1190,40 +1231,82 @@ type SettleDriver struct {
 	// Has unexported fields.
 }
     SettleDriver is the fact->observation face of the one turn a terminal notice
-    fires at the session it belongs to. It reads the fact one commit identity
-    names, judges it against the terminal table above, and runs the injected
-    follow-up face when the owning session carries a remembered user address.
+    fires at the address its routing froze. An observation wakes the pump,
+    and the pump reads the mailbox account: every entry there is claimed, driven
+    beside the committed fact its notification points at, and consumed on that
+    same account once the turn returned. The driver keeps no queue of its own,
+    so nothing it holds can be lost by a stop or a restart.
 
 func NewSettleDriver(
 	lookup func(context.Context, event.EventID) (event.Event, error),
-	userAddressOf func(event.SessionID) (event.Address, bool),
+	wake func() SettleWake,
 	fire func(context.Context, event.Address, event.Event) error,
 ) *SettleDriver
     NewSettleDriver assembles the settle face over the fact lookup of one run,
-    the user-address memory of one host and the follow-up drive of that host.
+    the mailbox account of that run and the follow-up drive of its host.
+    The pump starts beside the driver and rests until a wake or an observation
+    asks it to read the account.
+
+func (d *SettleDriver) DrivesObligation()
+    DrivesObligation marks this face's duty: the observation wakes the pump,
+    and the work it woke is owed on the mailbox account, so a failed observation
+    leaves the follow-up turn owed and the account hands it to the next
+    decision.
 
 func (d *SettleDriver) Name() string
     Name reports the stable name of this plugin instance.
 
 func (d *SettleDriver) ObserveCommit(ctx context.Context, id event.EventID) error
-    ObserveCommit reads the fact one commit wrote and fires the follow-up turn
-    the terminal notice asks for.
-
-    The turn itself runs detached from the committing delivery: a follow-up
-    spends a model turn, and the flush that delivered the notification never
-    waits for it. A notice that arrives while a turn is in flight joins the
-    driver's retained queue and is re-evaluated as soon as that turn ends,
-    so the busy window defers the turn instead of dropping the notice. A fact
-    that is not a terminal delivery fact, or whose session carries no remembered
-    user address, is ignored in silence: those are not settles nobody drives,
-    they are settles somebody already read or addresses the host was never asked
-    to turn. A failed read is reported back and never rolls the committed fact
-    back.
+    ObserveCommit reads the fact one commit wrote and wakes the pump when the
+    fact is one the settle trigger table fires on. The observation itself starts
+    nothing: the mailbox is the one account that answers whether work waits,
+    so a repeated observation of one delivered notification claims no second
+    turn — the entry is either consumed already or claimed by the turn it
+    started. A fact that is not a terminal delivery fact is ignored in silence:
+    those are not settles nobody drives, they are settles somebody already read.
+    A failed read is reported back and never rolls the committed fact back.
 
 func (d *SettleDriver) Port() plugin.Port
     Port reports the consumption this driver serves: one committed fact in, one
     observation out. The observation is the follow-up turn the fact may fire.
 
 func (d *SettleDriver) Stop()
-    Stop ends the driver: no further commit fires a turn, a turn in flight is
-    cancelled, and Stop waits for it to return. A repeated stop is a no-op.
+    Stop ends the driver: no further commit wakes the pump, the turn in flight
+    is cancelled, and Stop waits for the pump to return. What the mailbox
+    still holds is kept as it stands — an unconsumed notice outlives the stop,
+    so the next process resumes the turn it owes. A repeated stop is a no-op.
+
+func (d *SettleDriver) Wake()
+    Wake asks the pump to read the mailbox account again. The boot calls it once
+    the restored account is in place, and any number of wakes collapse into the
+    work the account already carries: a wake starts no turn of its own.
+
+type SettleWake interface {
+	// RestoreOwed folds the unconsumed work a durable account still owes back
+	// into the mailbox, so a stopped run's notices wait for the next decision
+	// instead of dying with the process that accepted them.
+	RestoreOwed(ctx context.Context) error
+	// Unconsumed reports every mailbox entry whose consumption has not
+	// completed, in the one order the account answers in.
+	Unconsumed() []state.WorkSeat
+	// Claim takes one pending entry for this executor alone, so one
+	// notification starts one turn however often it is observed.
+	Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+	// Release hands one claimed entry back to the pending pool, so an executor
+	// that stopped beside a claim keeps the work owed instead of holding it.
+	Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+	// Consume records the completed consumption of one claimed entry, on the
+	// same account the claim was taken from.
+	Consume(ctx context.Context, addr event.Address, instance event.InstanceID, seq state.AcceptSeq) error
+}
+    SettleWake is the mailbox account the settle pump drives its turns from:
+    one face that answers whether work waits and moves one entry through claim,
+    release and consumption on the same ledger. The state store behind one run
+    satisfies it.
+
+    The redline list (4 rules): MUST start exactly one follow-up turn per
+    claimed entry and close it beside its consumption receipt. MUST close an
+    entry whose recorded attempt already landed its terminal with that turn's
+    receipt and drive no second turn. MUST NOT replay an entry whose consumption
+    receipt is already recorded. MUST NOT hold a claimed entry beside a turn
+    that stopped before its delivery.

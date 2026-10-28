@@ -203,3 +203,116 @@ F3 SHALL 含 G-A/G-B 的回滚即红双证据：还原 entry 的 send 授权→G
 - **WHEN** 两单写集同时含 host.go
 - **THEN** 两单 SHALL NOT 并发
 
+### Requirement: 协议保真麻雀先行
+
+G1 协议保真红转绿 SHALL 先于其余实施；G10 测试去假设同批完成（根治 CI flaky）。
+
+#### Scenario: 麻雀未闭环不扩面
+
+- **WHEN** G1 三场景未红转绿
+- **THEN** 2.1/2.2/3.x/4.x SHALL NOT 派发
+
+### Requirement: 十锚回滚即红
+
+F3 SHALL 含 G1–G10 各自的定点破坏红证（还原对应修复点→该 G 测试必红）。
+
+#### Scenario: 缺回滚证据不得收口
+
+- **WHEN** F3 只有修复后绿证
+- **THEN** F3 SHALL NOT 勾选
+
+### Requirement: 协议保真热点串行
+
+`request.go` 触碰的叶（1.0、2.1、4.x）SHALL 串行；`facts.go`/`loop.go` 簇（2.2）与 `host.go` 簇（3.1/3.2）合单。
+
+#### Scenario: 同文件并发被拒
+
+- **WHEN** 两单写集同时含 request.go
+- **THEN** 两单 SHALL NOT 并发
+
+### Requirement: 零差额在检查面强制
+
+check_doc_budget.py SHALL 在实测与基线不相等时（两向）以非零退出码拒绝；锁步（--tighten 或具名重锁）SHALL 与文档体量变更同提交。
+
+#### Scenario: 下漂不锁即红
+
+- **WHEN** 实测 < 基线且未先 --tighten
+- **THEN** 检查 SHALL exit 1 且文案指向 --tighten
+
+#### Scenario: 钩子守卫可达
+
+- **WHEN** 提交暂存任何 *.md/*.markdown
+- **THEN** pre-commit SHALL 运行同一零差额检查
+
+### Requirement: 启动门
+
+批 1 SHALL 以 fidelity-and-recovery 全部完成为前置（G4/3.2/1.2）。
+
+#### Scenario: 前置未齐不派发
+
+- **WHEN** fidelity-and-recovery 尚有未勾叶
+- **THEN** 批 1 SHALL NOT 派发
+
+### Requirement: 每批三问
+
+每批收尾 SHALL 回答：删了什么状态（diff）/责任归谁（报告）/原有验收仍成立（全量+定点破坏）。
+
+#### Scenario: 三问缺一不勾批
+
+- **WHEN** 任一问无证据
+- **THEN** 该批 SHALL NOT 勾选
+
+### Requirement: 不变量红即违例
+
+D5 锚测试任一红 SHALL 视为对应不变量违例，阻断收口。
+
+#### Scenario: 锚红不得收口
+
+- **WHEN** 任一锚测试红
+- **THEN** F3 SHALL NOT 勾选
+
+### Requirement: 验收锚随任务行冻结
+
+每叶验收面（正锚/负锚/消费者锚）SHALL 随任务行冻结于派发前（design D6）；执行期只对账，追认缩小验收面=该叶重开。
+
+#### Scenario: 缩水即重开
+
+- **WHEN** 完成时以替代测试或缩小的验收面勾选
+- **THEN** 该叶 SHALL 重开
+
+### Requirement: 波后独立偏差评估
+
+每批执行完、任务勾选前 SHALL 派独立验证子代理（与实施者分离）对照原任务行验收面五面核查（产物/正式链路/负锚/勾选/目标覆盖），偏差分级处置，返工止于波内。
+
+#### Scenario: 无偏差报告不得勾批
+
+- **WHEN** 波后无独立偏差报告
+- **THEN** 该批 SHALL NOT 勾选收口
+
+### Requirement: 旧路径零残留
+
+迁移 SHALL 使旧顶层包路径在 Go 源、CI、门禁基线与文档中零残留（结构负锚）。
+
+#### Scenario: 旧路径残留即红
+
+- **WHEN** 任一 `tagent/{telemetry,evolution,rl}"` import 或基线键残留
+- **THEN** 结构断言 SHALL 红
+
+### Requirement: CI 终态确认
+
+收尾 SHALL 本地全套门禁绿后推送，并确认远端 CI 全绿后方可归档。
+
+#### Scenario: 远端未绿不归档
+
+- **WHEN** 远端 CI 任一 job 红
+- **THEN** F6 SHALL NOT 勾选
+
+### Requirement: 静默红清零
+
+清理 SHALL 使 smoke 全套（tmux 真实执行）与 race（无 U5 豁免）、结构门全部转绿。
+
+#### Scenario: 全套 smoke 绿
+
+- **WHEN** `go -C examples/wechat-bot test -tags smoke . -count=1`
+- **THEN** SHALL exit 0
+

@@ -1,0 +1,16 @@
+=== RUN   TestSettleWakeUnified
+=== RUN   TestSettleWakeUnified/a_repeated_fire_starts_one_follow-up_turn
+    settle_wake_unified_test.go:167: entry model turns = 3, want the delegating decision beside exactly one follow-up turn
+=== RUN   TestSettleWakeUnified/an_unconsumed_notice_resumes_across_a_restart
+    settle_wake_unified_test.go:271: timed out waiting for the resumed follow-up to deliver its answer
+=== RUN   TestSettleWakeUnified/a_stop_keeps_what_no_turn_consumed
+    settle_wake_unified_test.go:426: timed out waiting for both retained notices to resume
+=== RUN   TestSettleWakeUnified/a_consumed_notice_never_replays
+--- FAIL: TestSettleWakeUnified (131.97s)
+    --- FAIL: TestSettleWakeUnified/a_repeated_fire_starts_one_follow-up_turn (1.67s)
+    --- FAIL: TestSettleWakeUnified/an_unconsumed_notice_resumes_across_a_restart (20.15s)
+    --- FAIL: TestSettleWakeUnified/a_stop_keeps_what_no_turn_consumed (20.12s)
+    --- PASS: TestSettleWakeUnified/a_consumed_notice_never_replays (90.04s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/tests/integration/host	132.460s
+FAIL

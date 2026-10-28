@@ -13,8 +13,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
@@ -35,28 +35,24 @@ type RequestSnapshotRecord struct {
 	Snapshot rl.RequestSnapshot
 }
 
-// snapshotRequest fixes the safe request snapshot of one decision beside the
-// request the model entry is about to be called with: the fixed copy is taken
-// at the formal request boundary before the call starts and holds what the
-// model actually sees — the assembled prompt, skill bodies, projection and
-// transcript of the request as it stands then. The snapshot observes the
-// request and never edits it: the projection runs over copies, so the request
-// keeps every original value including its credentials.
-func (r *Run) snapshotRequest(_ context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, binding state.AgentBinding, req model.Request) error {
-	view := rl.ModelViewRef{
-		Model:         modelName,
-		PromptVersion: promptVersion,
-		VisibleTools:  unversionedNames(visibleTools),
-		VisibleSkills: unversionedNames(visibleSkillsOf(binding)),
+// snapshotReader reads back the safe request snapshots a capture fixed: every
+// snapshot it keeps, in fix order, each beside the decision whose request it was
+// fixed for. A run holds no snapshot copy of its own, so the read face is the
+// capture's own account and never a second one beside it.
+type snapshotReader interface {
+	Snapshots() []rl.DecisionSnapshot
+}
+
+// requestSnapshots reports the safe request snapshots the capture of this run
+// fixed, in fix order, or none while the assembly carries no capture: a run
+// beside no capture fixes no request view and answers an empty read face rather
+// than a copy kept beside the capture.
+func (r *Run) requestSnapshots() []rl.DecisionSnapshot {
+	reader, ok := r.capture.(snapshotReader)
+	if !ok {
+		return nil
 	}
-	snapshot, err := rl.SnapshotRequest(view, req, rl.SnapshotPolicy{})
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.snapshots = append(r.snapshots, RequestSnapshotRecord{Decision: decisionID, Snapshot: snapshot})
-	return nil
+	return reader.Snapshots()
 }
 
 // RequestSnapshots reports the safe request snapshots this assembly fixed
@@ -64,29 +60,18 @@ func (r *Run) snapshotRequest(_ context.Context, decisionID event.DecisionID, mo
 // owns: each Message, VisibleTools and VisibleSkills slice is copied, while
 // nested ContentParts share the underlying parts of the fixed snapshot.
 // Writing a shared part would be a caller bug; the snapshots themselves were
-// fixed before the call. The snapshots are read-out material beside the
-// requests they were fixed for; reading them moves nothing.
+// fixed before the call. The snapshots are read back from the capture that fixed
+// them — their one home — and a run assembled beside no capture answers none.
+// Reading them moves nothing.
 func (r *Run) RequestSnapshots() []RequestSnapshotRecord {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]RequestSnapshotRecord, 0, len(r.snapshots))
-	for _, record := range r.snapshots {
-		got := record
-		got.Snapshot.Messages = append([]model.Message(nil), record.Snapshot.Messages...)
-		got.Snapshot.VisibleTools = append([]rl.VersionedName(nil), record.Snapshot.VisibleTools...)
-		got.Snapshot.VisibleSkills = append([]rl.VersionedName(nil), record.Snapshot.VisibleSkills...)
-		out = append(out, got)
-	}
-	return out
-}
-
-// unversionedNames records a list of visible names as unversioned view members:
-// the snapshot pins each name exactly as the request saw it and never invents
-// a version beside a member that carries none.
-func unversionedNames(names []string) []rl.VersionedName {
-	out := make([]rl.VersionedName, 0, len(names))
-	for _, name := range names {
-		out = append(out, rl.VersionedName{Name: name})
+	fixed := r.requestSnapshots()
+	out := make([]RequestSnapshotRecord, 0, len(fixed))
+	for _, one := range fixed {
+		record := RequestSnapshotRecord{Decision: one.Decision, Snapshot: one.Snapshot}
+		record.Snapshot.Messages = append([]model.Message(nil), one.Snapshot.Messages...)
+		record.Snapshot.VisibleTools = append([]rl.VersionedName(nil), one.Snapshot.VisibleTools...)
+		record.Snapshot.VisibleSkills = append([]rl.VersionedName(nil), one.Snapshot.VisibleSkills...)
+		out = append(out, record)
 	}
 	return out
 }
@@ -271,23 +256,95 @@ func (h replayEntry) endedPrefix() int {
 // on present themselves once their range ends.
 // A chain that names no session is refused by name: assembling one would join
 // every user of the partition into one transcript. A window of no tokens is
-// refused the same way: it bounds every request to an empty prefix and leaves
-// the age fold no share of a window to measure.
+// accepted as the no-budget window it means: the requests present the whole
+// projection with no budget bound, and the age fold measures against the
+// default window instead of none.
+// The seam carries no agent identity, so the registration is kept for every
+// user of the session it names; the chains this run commits register under the
+// full address of the agent that owns them through attachScopedReplay, so they
+// never cross agents that share a session id.
 func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projection *replay.ReplayProjection) error {
 	if chain.SessionID == "" {
 		return agent.ErrRequestChainSessionRequired
 	}
+	return r.attachReplayAt(event.Address{SessionID: chain.SessionID}, window, projection)
+}
+
+// attachScopedReplay registers the mapped sequence of one agent's session chain
+// under its full address — the agent beside its session — so a request of that
+// agent reads its own chain's material and never the chain of another agent
+// sharing the session id. A chain that names no session is refused exactly as
+// the AttachReplay seam refuses it.
+func (r *Run) attachScopedReplay(addr event.Address, window FoldWindow, projection *replay.ReplayProjection) error {
+	if addr.SessionID == "" {
+		return agent.ErrRequestChainSessionRequired
+	}
+	return r.attachReplayAt(addr, window, projection)
+}
+
+// attachReplayAt registers one mapped sequence under the address it names. A
+// registration that carries no projection is refused exactly as the attach
+// seams document; a window of no tokens is the no-budget window, never a
+// refused one.
+func (r *Run) attachReplayAt(addr event.Address, window FoldWindow, projection *replay.ReplayProjection) error {
 	if projection == nil {
 		return errors.New("tagent: the replay registration carries no projection")
-	}
-	if window.MaxTokens <= 0 {
-		return errors.New("tagent: the replay registration carries no model window")
 	}
 	window = normalizeFoldWindow(window)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replays[chain.SessionID] = replayEntry{projection: projection, window: window}
+	r.replays[addr] = replayEntry{projection: projection, window: window}
 	return nil
+}
+
+// replayAddressOf reports the full address one committed fact's mapped sequence
+// registers under: the agent that owns the fact beside the session chain it
+// belongs to, the same address its transcript history is keyed by.
+func replayAddressOf(evt event.Event) event.Address {
+	return event.Address{AgentID: agentOf(evt), SessionID: sessionOf(evt)}
+}
+
+// replaySlotLocked resolves the slot one address's mapped sequence is kept in,
+// beside the registration it holds: the chain registered under the full address
+// first, and the chain a registration naming no agent — the AttachReplay seam —
+// left for every user of the session beside it. A reader that names no agent
+// resolves through replayOfSessionLocked instead. The read is taken under the
+// run lock the caller already holds.
+func (r *Run) replaySlotLocked(addr event.Address) (event.Address, replayEntry, bool) {
+	if held, carried := r.replays[addr]; carried {
+		return addr, held, true
+	}
+	legacy := event.Address{SessionID: addr.SessionID}
+	if held, carried := r.replays[legacy]; carried {
+		return legacy, held, true
+	}
+	return event.Address{}, replayEntry{}, false
+}
+
+// replayOfSessionLocked resolves the mapped sequence a reader that names only
+// the session chain reads: the chain a registration naming no agent left for
+// every user of the session first, and otherwise the chain the session
+// registered — beside several agent-scoped chains sharing one session id, the
+// first of them in agent order, deterministically. The read is taken under the
+// run lock the caller already holds.
+func (r *Run) replayOfSessionLocked(session event.SessionID) (replayEntry, bool) {
+	if session == "" {
+		return replayEntry{}, false
+	}
+	if held, carried := r.replays[event.Address{SessionID: session}]; carried {
+		return held, true
+	}
+	var agents []event.AgentID
+	for addr := range r.replays {
+		if addr.SessionID == session && addr.AgentID != "" {
+			agents = append(agents, addr.AgentID)
+		}
+	}
+	if len(agents) == 0 {
+		return replayEntry{}, false
+	}
+	sort.Slice(agents, func(i, j int) bool { return agents[i] < agents[j] })
+	return r.replays[event.Address{AgentID: agents[0], SessionID: session}], true
 }
 
 // normalizeFoldWindow fills the fold settings a declaration left unset: a
@@ -344,7 +401,7 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 	}
 	r.mu.Lock()
 	fixer := r.fixers[boundary.Agent]
-	sequence, registered := r.replays[boundary.Chain.SessionID]
+	_, sequence, registered := r.replaySlotLocked(event.Address{AgentID: boundary.Agent, SessionID: boundary.Chain.SessionID})
 	r.mu.Unlock()
 	assembly := requestAssembly{
 		run:         r,
@@ -425,7 +482,7 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	if err != nil {
 		return agent.BoundaryView{}, err
 	}
-	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion}, nil
+	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}, nil
 }
 
 // fixedFiles reads the declared prompt and skill bodies afresh at this boundary
@@ -597,7 +654,7 @@ func skillLoadsOf(agent event.AgentID) []knowledge.LoadedSkill {
 // as the main context of the request: the window assembly of the registration
 // the chain fixed, bounded to the entries that already ended.
 func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
-	return projectedSegment(ctx, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
+	return projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
 }
 
 // environmentSegment contributes the dynamic environment material of the
@@ -615,24 +672,183 @@ func (a *requestAssembly) environmentSegment(ctx context.Context) ([]model.Messa
 // full→ticket→summary under one window assembly and neither grows a budget
 // assembly of its own. The token budget is read off the one window the
 // registration carries, so the request side never receives a second budget the
-// registration does not know. A negative prefix assembles the whole projection.
-func projectedSegment(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow, prefix int) ([]model.Message, error) {
+// registration does not know — except the window of no tokens, which names no
+// budget at all and presents the whole projection (see projectionBudget). A
+// negative prefix assembles the whole projection.
+//
+// The projection carries one entry per fact and keeps no call pairing, so the
+// segment restores the pairing the wire requires before the request leaves:
+// every tool entry gains the tool_call_id its fact answers under beside the
+// assistant tool_calls message that issued the call (see restoreCallPairing).
+func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayProjection, window FoldWindow, prefix int) ([]model.Message, error) {
 	if projection == nil {
 		return nil, nil
 	}
-	entries, err := projection.AssembleBudgetPrefix(ctx, window.MaxTokens, prefix)
+	entries, err := projection.AssembleBudgetPrefix(ctx, projectionBudget(projection, window, prefix), prefix)
 	if err != nil {
 		return nil, err
 	}
 	messages := make([]model.Message, 0, len(entries))
+	paired := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		role, err := agent.RoleOf(entry.Type)
 		if err != nil {
 			return nil, err
 		}
-		messages = append(messages, model.Message{Role: role, Content: presentedProjectionContent(entry)})
+		message := model.Message{Role: role, Content: presentedProjectionContent(entry)}
+		if run != nil {
+			run.restoreCallPairing(&messages, &message, entry, paired)
+		}
+		messages = append(messages, message)
 	}
 	return messages, nil
+}
+
+// projectionBudget reports the token budget one request presents its projected
+// material under. A window naming a positive model window presents under that
+// window's budget, so the budget keeps shaping presentation exactly as the
+// window's fold threshold shapes the fold: the two are separate identities of
+// one window. A window naming no tokens presents no bound at all: the budget is
+// measured from the material itself — every entry's kept original text, at the
+// packing ratio the assembly packs under — so the whole projection presents in
+// full and no entry degrades to a ticket the declaration never asked for. The
+// measure reads the original the projection keeps, never the view an assembly
+// shaped, because the view belongs to that assembly alone.
+func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, prefix int) int {
+	if window.MaxTokens > 0 {
+		return window.MaxTokens
+	}
+	entries := projection.Entries()
+	if prefix >= 0 && prefix < len(entries) {
+		entries = entries[:prefix]
+	}
+	total := 0
+	if hint := projection.RecoveryHint(); hint != nil {
+		total += len(hint.Content)
+	}
+	for _, entry := range entries {
+		text, kept := projection.Original(entry.Key)
+		if !kept {
+			text = entry.Content
+		}
+		total += len(text)
+	}
+	return total/replay.BudgetCharsPerToken + 1
+}
+
+// restoreCallPairing restores the call-result pairing one projected entry lost
+// at the projection boundary. A tool entry arrives with its result text alone:
+// the restore reads the fact the entry was minted from and repairs the message
+// the wire requires — the tool_call_id and tool name the result answers under,
+// beside the assistant tool_calls message that issued the call, emitted once
+// per call right before the first tool entry answering it and carrying the
+// arguments the model actually issued (see callArgumentsOf). An assistant entry
+// whose fact committed native tool calls gains them back and marks the calls as
+// paired, so no second assistant message is minted beside them. Material no
+// live fact recovers — a restarted run whose facts left with its process —
+// presents as it stands: the entry keeps no pairing and the protocol gate names
+// the break rather than the request silently carrying a broken pair.
+func (r *Run) restoreCallPairing(out *[]model.Message, message *model.Message, entry replay.ProjectionEntry, paired map[string]bool) {
+	fact, held := r.factOf(entry.Key)
+	switch message.Role {
+	case model.RoleAssistant:
+		if held && len(fact.Message.ToolCalls) > 0 {
+			message.ToolCalls = fact.Message.ToolCalls
+			for _, call := range fact.Message.ToolCalls {
+				paired[call.ID] = true
+			}
+		}
+		return
+	case model.RoleTool:
+	default:
+		return
+	}
+	callID, toolName := r.callIdentityOf(fact)
+	if callID == "" {
+		return
+	}
+	message.ToolID = callID
+	message.ToolName = toolName
+	if paired[callID] {
+		return
+	}
+	paired[callID] = true
+	*out = append(*out, model.Message{
+		Role: model.RoleAssistant,
+		ToolCalls: []model.ToolCall{{
+			Type: "function",
+			ID:   callID,
+			Function: model.FunctionDefinitionParam{
+				Name:      toolName,
+				Arguments: []byte(r.callArgumentsOf(callID)),
+			},
+		}},
+	})
+}
+
+// callIdentityOf reports the call identity one tool fact answers under: the
+// tool message a result fact committed carries the identity directly, and a
+// settled delivery answers under the identity its result fact answered a call
+// with — exactly the tool role the frozen event-type→role table renders a
+// replayed settle under. A fact carrying no recoverable identity answers none.
+func (r *Run) callIdentityOf(fact event.Event) (callID, toolName string) {
+	if fact.Message.ToolID != "" {
+		return fact.Message.ToolID, fact.Message.ToolName
+	}
+	if fact.Type != event.TypeTaskSettled {
+		return "", ""
+	}
+	taskID := fact.TaskID
+	if taskID == "" {
+		taskID = event.TaskID(fact.Meta[event.MetaKeyTaskID])
+	}
+	if taskID == "" {
+		return "", ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range r.factOrder {
+		result, held := r.facts[id]
+		if !held || result.Type != event.TypeActionCommand || result.TaskID != taskID {
+			continue
+		}
+		if result.Message.ToolID != "" {
+			return result.Message.ToolID, result.Message.ToolName
+		}
+	}
+	return "", ""
+}
+
+// callArgumentsOf reports the arguments one call was issued with, read from the
+// request snapshot whose transcript carried the assistant tool_calls message of
+// that call: the projection keeps no arguments and the snapshot is the record
+// of what the model actually saw. The snapshots are the capture's own account —
+// the same source the read face answers from — so a call is never paired from a
+// second copy kept beside the capture. A call no snapshot carried reads as the
+// empty argument object, so the pair stays complete on the wire instead of
+// breaking the conversation the call opened.
+func (r *Run) callArgumentsOf(callID string) string {
+	for _, fixed := range r.requestSnapshots() {
+		for _, message := range fixed.Snapshot.Messages {
+			for _, call := range message.ToolCalls {
+				if call.ID == callID && len(call.Function.Arguments) > 0 {
+					return string(call.Function.Arguments)
+				}
+			}
+		}
+	}
+	return "{}"
+}
+
+// factOf reports the fact one projected entry was minted from, as this run
+// committed it, and whether the run still holds it: a restarted run reads a
+// projection its facts left behind, and an identity it cannot resolve recovers
+// no pairing.
+func (r *Run) factOf(id event.EventID) (event.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fact, held := r.facts[id]
+	return fact, held
 }
 
 // presentedProjectionContent renders one assembled entry as the message the

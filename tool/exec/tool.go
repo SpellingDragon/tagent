@@ -183,7 +183,12 @@ func (t *ReleaseTool) Declaration() *trpctool.Declaration {
 // a second time, and a declared kind the system cannot serve answers as the
 // named degrade refusal beside the rhythm of the call. The lease is kept alive
 // at the cadence of the call's own monitor rhythm until the execution behind it
-// returns, and the renewing ends beside the call.
+// returns, and the renewing ends beside the call. The restart decision of a key
+// nothing is held under runs unknown -> query -> take over or report by name:
+// - a resource observed alive is taken over and its frame reported under the key
+// - a probe that could not decide is refused by name beside the unconfirmed evidence
+// - a settled key reports the saved final output instead of rerunning over it
+// - a dead key beside no record opens a new execution exactly as before
 func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if t.manager == nil {
 		return nil, ErrUnwired
@@ -219,6 +224,32 @@ func (t *RunTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 		}
 		lease = parsed
 		options = append(options, WithTTL(lease))
+	}
+	if !t.manager.held(decl.Resource) && t.manager.available(decl.Resource) {
+		observed, err := t.manager.Query(ctx, decl.Resource)
+		if err != nil {
+			return nil, err
+		}
+		switch observed.State {
+		case ProbeAlive:
+			if err := t.manager.Adopt(ctx, decl.Resource, options...); err != nil {
+				return nil, err
+			}
+			stopRenewing := t.renewForCall(decl.Resource, lease, rhythm)
+			defer stopRenewing()
+			output, err := t.manager.Capture(ctx, decl.Resource)
+			if err != nil {
+				return nil, err
+			}
+			t.manager.watch(decl.Resource)
+			return fmt.Sprintf("reattached %s: %s", decl.Resource, output), nil
+		case ProbeUnknown:
+			return nil, fmt.Errorf("%w: %s: %s", ErrAdoptUnconfirmed, decl.Resource, observed.Detail)
+		case ProbeDead:
+			if settled, err := t.manager.FinalOutput(decl.Resource); err == nil {
+				return fmt.Sprintf("settled %s: exit=%d\nfinal output: %s", settled.Resource, settled.ExitCode, settled.Output), nil
+			}
+		}
 	}
 	key, err := t.manager.Acquire(ctx, decl, options...)
 	if err != nil {
@@ -295,5 +326,9 @@ func (t *ReleaseTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if !evidence.Released {
 		return fmt.Sprintf("retained %s: stop unconfirmed: %s", evidence.Resource, evidence.Reason), nil
 	}
-	return fmt.Sprintf("released %s after confirmed stop: exit=%d", evidence.Resource, evidence.Stop.ExitCode), nil
+	answer := fmt.Sprintf("released %s after confirmed stop: exit=%d", evidence.Resource, evidence.Stop.ExitCode)
+	if settled, err := t.manager.FinalOutput(evidence.Resource); err == nil {
+		answer += fmt.Sprintf("\nfinal output: %s", settled.Output)
+	}
+	return answer, nil
 }

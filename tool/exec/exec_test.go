@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -836,3 +837,389 @@ func assertExecDeclarationsShareOneVocabulary(t *testing.T, run, release *trpcto
 			runKind.Description, runResource.Description, releaseKind.Description, releaseResource.Description)
 	}
 }
+
+// exitFrameExecutor is the executor double the final-output scenes run on: the
+// frame it records grows from the partial frame into the final frame once the
+// execution behind the key ended, and every capture is logged beside the state
+// it was read in, so a check reads what the release path actually captured
+// rather than what the caller once saw.
+type exitFrameExecutor struct {
+	mu        sync.Mutex
+	starts    int
+	dead      bool
+	unknown   bool
+	hangFrame bool
+	captures  []string
+}
+
+func (e *exitFrameExecutor) Start(_ context.Context, decl ExecutionDecl) (ResourceKey, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.starts++
+	return decl.Resource, nil
+}
+
+func (e *exitFrameExecutor) Probe(_ context.Context, _ ResourceKey) (ProbeResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch {
+	case e.unknown:
+		return ProbeResult{State: ProbeUnknown, Detail: "the probe behind this key could not decide"}, nil
+	case e.dead:
+		return ProbeResult{State: ProbeDead, Detail: "the execution behind this key is confirmed absent"}, nil
+	default:
+		return ProbeResult{State: ProbeAlive}, nil
+	}
+}
+
+func (e *exitFrameExecutor) Capture(ctx context.Context, _ ResourceKey) ([]byte, error) {
+	e.mu.Lock()
+	if e.hangFrame {
+		e.mu.Unlock()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	defer e.mu.Unlock()
+	frame := "alpha"
+	if e.dead {
+		frame = "alpha\nomega"
+	}
+	e.captures = append(e.captures, frame)
+	return []byte(frame), nil
+}
+
+func (e *exitFrameExecutor) Stop(_ context.Context, key ResourceKey) (StopEvidence, error) {
+	return StopEvidence{Resource: key, Confirmed: true, ExitCode: 7}, nil
+}
+
+// markExited ends the execution behind the key: probes report its confirmed
+// absence and captures carry the final frame the exit left behind.
+func (e *exitFrameExecutor) markExited() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.dead = true
+}
+
+// markUndetermined turns the probe behind the key into one that cannot decide.
+func (e *exitFrameExecutor) markUndetermined() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.unknown = true
+}
+
+// hangCaptures makes every capture wait for its caller context to give up.
+func (e *exitFrameExecutor) hangCaptures() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.hangFrame = true
+}
+
+// finalFrames counts the captures that carried the final frame (omega): zero
+// beside a release path that never saved the final output before it freed the
+// resource.
+func (e *exitFrameExecutor) finalFrames() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for _, frame := range e.captures {
+		if strings.Contains(frame, "omega") {
+			n++
+		}
+	}
+	return n
+}
+
+// startCount reports how many executions the double started.
+func (e *exitFrameExecutor) startCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.starts
+}
+
+// finalOutputRun drives one formal exec_run call and returns its answer.
+func finalOutputRun(t *testing.T, tool *RunTool, kind, resource, script string) string {
+	t.Helper()
+	args, err := json.Marshal(map[string]any{
+		"command":  "sh",
+		"args":     []string{"-c", script},
+		"kind":     kind,
+		"resource": resource,
+		"ttl":      "1m",
+	})
+	if err != nil {
+		t.Fatalf("run arguments = %v", err)
+	}
+	answer, err := tool.Call(context.Background(), args)
+	if err != nil {
+		t.Fatalf("exec_run over %s/%s = %v", kind, resource, err)
+	}
+	return fmt.Sprint(answer)
+}
+
+// finalOutputRelease drives one formal exec_release call and returns its answer
+// beside the error, with an empty answer standing beside a named refusal.
+func finalOutputRelease(t *testing.T, tool *ReleaseTool, kind, resource string) (string, error) {
+	t.Helper()
+	args, err := json.Marshal(map[string]any{"kind": kind, "resource": resource})
+	if err != nil {
+		t.Fatalf("release arguments = %v", err)
+	}
+	answer, err := tool.Call(context.Background(), args)
+	if answer == nil {
+		return "", err
+	}
+	return fmt.Sprint(answer), err
+}
+
+// TestExecFinalOutputSurvivesTheExit pins the G6 symptom scene end to end.
+// - the first call reads only the partial frame the execution had produced then
+// - the exit that frees the resource saves the final frame before it releases
+// - the tracker anchors two alive observations before it reports the ending
+// - the final output stays readable beside the query faces after the exit
+// - a read of the freed resource stays the named unknown, never a silent empty
+// - every check runs through the formal tool entry or the manager query faces
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
+func TestExecFinalOutputSurvivesTheExit(t *testing.T) {
+	t.Run("the_exit_saves_the_final_output", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		exited := make(chan StateEvent, 8)
+		manager := NewManager(backend, WithStateObserver(func(evt StateEvent) {
+			if evt.Phase == StateExited {
+				exited <- evt
+			}
+		}))
+		run := NewRunTool(manager, WithRunMonitor(MonitorConfig{Interval: 20 * time.Millisecond}))
+		key := ResourceKey{Kind: "probe", Key: "final-exit"}
+
+		answer := finalOutputRun(t, run, key.Kind, key.Key, "echo alpha; sleep 1; echo omega; exit 7")
+		if !strings.Contains(answer, "alpha") {
+			t.Fatalf("exec_run answer = %q, want the partial frame carrying alpha", answer)
+		}
+		if strings.Contains(answer, "omega") {
+			t.Fatalf("exec_run answer = %q carries the final marker before the exit produced it", answer)
+		}
+		if got := backend.finalFrames(); got != 0 {
+			t.Fatalf("final-output captures before the exit = %d, want none beside the call window", got)
+		}
+
+		time.Sleep(80 * time.Millisecond)
+		if _, err := manager.FinalOutput(key); !errors.Is(err, ErrFinalOutputUnsettled) {
+			t.Fatalf("final output beside the held resource = %v, want the named unsettled refusal", err)
+		}
+		backend.markExited()
+
+		select {
+		case evt := <-exited:
+			if evt.ExitCode != 7 {
+				t.Fatalf("the exit event carried exit=%d, want the observed 7", evt.ExitCode)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the tracker never reported the exit of the execution")
+		}
+
+		if got := backend.finalFrames(); got < 1 {
+			t.Fatalf("最终输出捕获次数 = %d, want >= 1: the exit released the resource without saving its final output", got)
+		}
+		settled, err := manager.FinalOutput(key)
+		if err != nil {
+			t.Fatalf("final output of the exited resource = %v, want the saved frame readable beside the exit", err)
+		}
+		if !strings.Contains(string(settled.Output), "alpha") || !strings.Contains(string(settled.Output), "omega") {
+			t.Fatalf("final output = %q, want the full frame carrying alpha and omega", settled.Output)
+		}
+		if settled.ExitCode != 7 {
+			t.Fatalf("final output exit = %d, want the observed 7", settled.ExitCode)
+		}
+		if _, err := manager.Capture(context.Background(), key); !errors.Is(err, ErrResourceUnknown) {
+			t.Fatalf("capture of the freed resource = %v, want the named unknown", err)
+		}
+	})
+
+	t.Run("the_release_answer_carries_the_final_output", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		manager := NewManager(backend)
+		run := NewRunTool(manager, WithRunMonitor(MonitorConfig{Interval: 20 * time.Millisecond}))
+		release := NewReleaseTool(manager)
+		key := ResourceKey{Kind: "probe", Key: "final-release"}
+
+		answer := finalOutputRun(t, run, key.Kind, key.Key, "echo alpha; sleep 1; echo omega; exit 7")
+		if strings.Contains(answer, "omega") {
+			t.Fatalf("exec_run answer = %q carries the final marker before the exit produced it", answer)
+		}
+		backend.markExited()
+
+		released, err := finalOutputRelease(t, release, key.Kind, key.Key)
+		if err != nil {
+			t.Fatalf("exec_release after the exit = %v", err)
+		}
+		if !strings.Contains(released, "released "+key.String()) || !strings.Contains(released, "exit=7") {
+			t.Fatalf("exec_release answer = %q, want the confirmed release beside exit=7", released)
+		}
+		if !strings.Contains(released, "omega") {
+			t.Fatalf("exec_release answer = %q, want the final output carrying omega beside the release", released)
+		}
+		if got := backend.finalFrames(); got < 1 {
+			t.Fatalf("最终输出捕获次数 = %d, want >= 1: the release freed the resource without saving its final output", got)
+		}
+		settled, err := manager.FinalOutput(key)
+		if err != nil {
+			t.Fatalf("final output beside the release = %v, want the saved frame readable", err)
+		}
+		if !strings.Contains(string(settled.Output), "omega") || settled.ExitCode != 7 {
+			t.Fatalf("final output = %q exit=%d, want the full frame beside the observed 7", settled.Output, settled.ExitCode)
+		}
+	})
+
+	t.Run("a_hung_capture_never_holds_the_release", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		backend.hangCaptures()
+		manager := NewManager(backend, WithFinalOutputCaptureWindow(50*time.Millisecond))
+		key := ResourceKey{Kind: "probe", Key: "final-hung"}
+		decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "echo alpha"}, Resource: key}
+		if _, err := manager.Acquire(context.Background(), decl, WithTTL(time.Minute)); err != nil {
+			t.Fatalf("acquire the execution = %v", err)
+		}
+
+		started := time.Now()
+		evidence, err := manager.Release(context.Background(), key)
+		if err != nil || !evidence.Released {
+			t.Fatalf("release beside a hung capture = %+v err=%v, want the release freed anyway", evidence, err)
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Fatalf("the release waited %v beside a hung capture, want the bounded save to give up", elapsed)
+		}
+		if _, err := manager.FinalOutput(key); !errors.Is(err, ErrFinalOutputUnrecorded) {
+			t.Fatalf("final output beside the hung capture = %v, want the named unrecorded refusal, never a silent empty", err)
+		}
+	})
+}
+
+// TestExecTakeoverOrNamedReport pins the D6-4 restart tree of the run tool: unknown -> query -> take over or report by name.
+// - a resource observed alive is reattached instead of opened a second time
+// - a probe that could not decide is reported by name and claims no ending
+// - a settled key reports the saved final output instead of rerunning over it
+// - a dead key with nothing recorded is a new execution
+// - every check runs through the formal tool entry or the manager query faces
+// 契约: docs/wiki/tool/tool-architecture.md#action-tool
+func TestExecTakeoverOrNamedReport(t *testing.T) {
+	t.Run("takes_over_the_running_session", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		manager := NewManager(backend)
+		run := NewRunTool(manager, WithRunMonitor(MonitorConfig{Interval: 20 * time.Millisecond}))
+		key := ResourceKey{Kind: "probe", Key: "takeover-alive"}
+
+		answer := finalOutputRun(t, run, key.Kind, key.Key, "sleep 30")
+		if !strings.HasPrefix(answer, "reattached "+key.String()+": ") {
+			t.Fatalf("exec_run answer = %q, want the reattachment under %s", answer, key)
+		}
+		if !strings.Contains(answer, "alpha") {
+			t.Fatalf("exec_run answer = %q, want the frame the takeover captured", answer)
+		}
+		if got := backend.startCount(); got != 0 {
+			t.Fatalf("backend started %d executions, want none: a takeover must not open a second execution", got)
+		}
+		if got := manager.Adopted(); got != 1 {
+			t.Fatalf("adopted = %d, want the one takeover", got)
+		}
+		if got := manager.Held(); got != 1 {
+			t.Fatalf("held = %d, want the taken-over resource held", got)
+		}
+		explanation, err := manager.Explain(key)
+		if err != nil || !explanation.Adopted {
+			t.Fatalf("explain of the takeover = %+v err=%v, want the reattachment readable through the query face", explanation, err)
+		}
+	})
+
+	t.Run("names_the_unconfirmed_state_without_taking_over", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		backend.markUndetermined()
+		manager := NewManager(backend)
+		run := NewRunTool(manager, WithRunMonitor(MonitorConfig{Interval: 20 * time.Millisecond}))
+		key := ResourceKey{Kind: "probe", Key: "takeover-unknown"}
+
+		args, err := json.Marshal(map[string]any{"command": "sh", "args": []string{"-c", "sleep 30"}, "kind": key.Kind, "resource": key.Key, "ttl": "1m"})
+		if err != nil {
+			t.Fatalf("run arguments = %v", err)
+		}
+		answer, err := run.Call(context.Background(), args)
+		if !errors.Is(err, ErrAdoptUnconfirmed) {
+			t.Fatalf("exec_run behind an undeterminable probe = %v, want the named %v", err, ErrAdoptUnconfirmed)
+		}
+		if answer != nil {
+			t.Fatalf("exec_run behind an undeterminable probe answered %v, want the named refusal only", answer)
+		}
+		if !strings.Contains(err.Error(), key.String()) {
+			t.Fatalf("the refusal = %q, want it to name %s", err, key)
+		}
+		if got := backend.startCount(); got != 0 {
+			t.Fatalf("backend started %d executions, want none behind an undeterminable probe", got)
+		}
+		if got := manager.Adopted(); got != 0 {
+			t.Fatalf("adopted = %d, want no takeover on undeterminable evidence", got)
+		}
+		if got := manager.Held(); got != 0 {
+			t.Fatalf("held = %d, want nothing held beside the named refusal", got)
+		}
+		lower := strings.ToLower(err.Error())
+		for _, claim := range []string{"released", "stopped", "exit="} {
+			if strings.Contains(lower, claim) {
+				t.Fatalf("the refusal claims %q: %q", claim, err)
+			}
+		}
+	})
+
+	t.Run("reports_the_settled_final_output_without_rerunning", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		manager := NewManager(backend)
+		run := NewRunTool(manager, WithRunMonitor(MonitorConfig{Interval: 20 * time.Millisecond}))
+		key := ResourceKey{Kind: "probe", Key: "takeover-settled"}
+		decl := ExecutionDecl{Command: "sh", Args: []string{"-c", "echo alpha; sleep 1; echo omega; exit 7"}, Resource: key}
+		if _, err := manager.Acquire(context.Background(), decl, WithTTL(time.Minute)); err != nil {
+			t.Fatalf("acquire the execution = %v", err)
+		}
+		backend.markExited()
+		evidence, err := manager.Release(context.Background(), key)
+		if err != nil || !evidence.Released {
+			t.Fatalf("release after the exit = %+v err=%v, want the confirmed settlement", evidence, err)
+		}
+
+		answer := finalOutputRun(t, run, key.Kind, key.Key, "echo rerun")
+		if !strings.HasPrefix(answer, "settled "+key.String()+": ") {
+			t.Fatalf("exec_run answer = %q, want the settled report under %s", answer, key)
+		}
+		if !strings.Contains(answer, "exit=7") || !strings.Contains(answer, "omega") {
+			t.Fatalf("exec_run answer = %q, want the observed exit beside the saved final output", answer)
+		}
+		if got := backend.startCount(); got != 1 {
+			t.Fatalf("backend started %d executions, want the one settlement only: a settled key must not rerun", got)
+		}
+		if got := manager.Held(); got != 0 {
+			t.Fatalf("held = %d, want the settled key freed", got)
+		}
+		settled, err := manager.FinalOutput(key)
+		if err != nil || !strings.Contains(string(settled.Output), "omega") {
+			t.Fatalf("final output after the rerun attempt = %q err=%v, want the record kept intact", settled.Output, err)
+		}
+	})
+
+	t.Run("starts_a_new_execution_for_a_dead_key_without_a_record", func(t *testing.T) {
+		backend := &exitFrameExecutor{}
+		backend.markExited()
+		manager := NewManager(backend)
+		run := NewRunTool(manager, WithRunMonitor(MonitorConfig{Interval: 20 * time.Millisecond}))
+		key := ResourceKey{Kind: "probe", Key: "takeover-dead"}
+
+		if _, err := manager.FinalOutput(key); !errors.Is(err, ErrFinalOutputUnrecorded) {
+			t.Fatalf("final output of a key never settled = %v, want the named unrecorded refusal", err)
+		}
+		answer := finalOutputRun(t, run, key.Kind, key.Key, "echo alpha")
+		if !strings.HasPrefix(answer, "executed "+key.String()+": ") {
+			t.Fatalf("exec_run answer = %q, want the new execution under %s", answer, key)
+		}
+		if got := backend.startCount(); got != 1 {
+			t.Fatalf("backend started %d executions, want the one new execution", got)
+		}
+	})
+}
+
+var _ Executor = (*exitFrameExecutor)(nil)

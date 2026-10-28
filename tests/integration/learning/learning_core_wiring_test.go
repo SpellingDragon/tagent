@@ -14,7 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // TestReplacementFactInstallsNewVersion pins the event-driven replacement lifecycle over the formal assembly entry.

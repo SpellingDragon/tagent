@@ -75,23 +75,18 @@ func TestScenario07OwnerIsolation(t *testing.T) {
 	iff := len(assembled) == 2
 	full, other := 0, 0
 	for _, entry := range assembled {
-		decision, recorded := projection.Decision(entry.Key)
 		original, kept := projection.Original(entry.Key)
-		if !recorded || !kept {
+		if !kept {
 			iff = false
 			continue
 		}
-		switch decision.Mode {
-		case replay.PresentationFull:
+		if entry.Content == original {
 			full++
-		default:
+		} else {
 			other++
 		}
-		if (entry.Content == original) != (decision.Mode == replay.PresentationFull) {
-			iff = false
-		}
 	}
-	observations["presentation_full_text_iff_decision_full"] = iff && full > 0 && other > 0
+	observations["presentation_full_text_iff_full_room"] = iff && full > 0 && other > 0
 	refs = append(refs, string(small.Key), string(large.Key))
 
 	EmitScenarioRecord(t, scenario, refs, observations)

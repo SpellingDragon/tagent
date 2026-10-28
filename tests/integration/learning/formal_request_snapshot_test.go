@@ -13,8 +13,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
@@ -67,7 +67,7 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		}
 		assembled, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-		}, tagent.WithGovernance(formalPolicy{}))
+		}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(formalCapture(t)))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -154,7 +154,7 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		}
 		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-		}, tagent.WithGovernance(formalPolicy{}))
+		}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(formalCapture(t)))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -211,7 +211,7 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		}
 		assembled, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-		}, tagent.WithGovernance(formalPolicy{}))
+		}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(formalCapture(t)))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -242,6 +242,25 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 			t.Fatalf("second request snapshot = %s, want the fixed copy of the second model request", later)
 		}
 	})
+}
+
+// formalCapture opens the trajectory capture the assembled run fixes its request views through: a file writer under
+// a temporary directory and one bounded sink over it, so the read face answers the capture's own account.
+func formalCapture(t *testing.T) *rl.TrajectoryCapture {
+	t.Helper()
+	writer, err := rl.NewFileCaptureWriter(t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("open the capture writer: %v", err)
+	}
+	sink, err := rl.NewCaptureSink("formal-request-snapshot", rl.SinkConfig{}, writer)
+	if err != nil {
+		t.Fatalf("open the capture sink: %v", err)
+	}
+	capture, err := rl.NewTrajectoryCapture("formal-request-snapshot", sink, rl.SnapshotPolicy{})
+	if err != nil {
+		t.Fatalf("open the trajectory capture: %v", err)
+	}
+	return capture
 }
 
 // invokeSnapshot drives one invocation of the formal entry carrying the named input beside the episode boundary it names.

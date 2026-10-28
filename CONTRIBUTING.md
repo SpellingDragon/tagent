@@ -20,7 +20,8 @@
 | **扩展策略** | 哪一面可插拔：策略、Condenser、判定函数 | 策略接口与默认实现 |
 
 - **业务逻辑不属机制子包**：领域规则本身（分级表、状态机、预算算法）回领域包；机制子包只回答"怎么被事实化、被驱动、被替换"。
-- **宿主壳 `cli/` 在组合根之上**：命令面与宿主转换面（`HostBridge`/回执/审批）从根包拆出，只依赖根 package tagent 的公共面与词汇/只读投影，运行时不反向依赖它；宿主不嵌壳时整包丢弃。
+- **宿主壳 `cli/` 在组合根之上**（对外装配面，嵌入者经 `NewCLI` 驱动）：命令面与宿主转换面（`HostBridge`/回执/审批）从根包拆出，只依赖根 package tagent 的公共面与词汇/只读投影，运行时不反向依赖它；宿主不嵌壳时整包丢弃。
+- **能力域 `features/`**：可选能力（`telemetry`/`evolution`/`rl`）住 `features/` 下——一能力一包、一个组合根装配点、`api/plugin` 端口声明；后续能力迭代统一走此形，不再平级顶层开新域。
 - **新包准入三问**（逐问写下答案，答不全就不开新包，先落进既有包的文件）：
   1. **业务还是机制？** 业务 → 领域包；机制 → 领域包下的机制子包。
   2. **三类文件各是哪几个？** 逐类点名文件；某类为空要写"无"，不是不写。
@@ -43,7 +44,7 @@ go run ./scripts/codetools package-layout . examples/wechat-bot examples/cli-hos
 # 期望：package-layout: 505 file(s); names, skeleton pins and test mirrors hold（exit 0）
 ```
 
-门自身有负例见证 `scripts/test_check_package_layout.sh`（干净／变体名／撞名／大写／孤儿测试五个 fixture 跑真命令，看退出码）。它也在 `scripts/lint.sh` 里跑：只打印不拒绝的检查器过不了干净 fixture，恒红的检查器过不了负例。
+门自身有负例见证 `scripts/gates/test_check_package_layout.sh`（干净／变体名／撞名／大写／孤儿测试五个 fixture 跑真命令，看退出码）。它也在 `scripts/lint.sh` 里跑：只打印不拒绝的检查器过不了干净 fixture，恒红的检查器过不了负例。
 
 ## 三、本地开发循环
 
@@ -59,17 +60,17 @@ bash scripts/lint.sh
 
 - `-short` 是常规测试面：soak 与需要真实进程/凭据的用例在 `-short` 下跳过。
 - [`scripts/lint.sh`](scripts/lint.sh) 是唯一门禁入口：gofmt、根与 wechat-bot 的 build/vet、注释棘轮、doc budget、`name-check`、`doc-refs`、`docs/api` 新鲜度、`proc-refs`、`tracked-hygiene`、`package-layout`（含负例自测）、`dotted-refs`、`commit-scope`。
-- 只改文档时可用 `bash scripts/lint.sh --only fmt`：只跑 gofmt，九个文档/脚本门仍然照跑；改了源码注释后先 `bash scripts/gen_godoc.sh` 重新生成 [`docs/api/`](docs/api/index.md)，再 `bash scripts/gen_godoc.sh --check`。**不要手改生成面。**
+- 只改文档时可用 `bash scripts/lint.sh --only fmt`：只跑 gofmt，九个文档/脚本门仍然照跑；改了源码注释后先 `bash scripts/gates/gen_godoc.sh` 重新生成 [`docs/api/`](docs/api/index.md)，再 `bash scripts/gates/gen_godoc.sh --check`。**不要手改生成面。**
 - race 门（与 CI 同一条命令，较慢）：
 
 ```bash
-./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
+./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/
 ```
 
 - spec 卫生门（需 openspec 1.2.0）：
 
 ```bash
-bash scripts/check-openspec.sh
+bash scripts/gates/check-openspec.sh
 ```
 
 实测（2026-10-21，go1.27.1 darwin/arm64）：
@@ -81,9 +82,9 @@ bash scripts/check-openspec.sh
 | 两个示例 module 的 build / vet / test | 六步 exit 0 |
 | `go mod verify` | `all modules verified` |
 | `bash scripts/lint.sh` | `lint: ok` |
-| `./scripts/race_check.sh …`（包集同上） | `race_check: OK (go test passed)` |
-| `bash scripts/check-openspec.sh` | `Totals: 124 passed, 4 failed (128 items)`（4 个 failed 均为活跃 change，主规格全绿） |
-| `bash scripts/gen_godoc.sh --check` | `gen_godoc: docs/api matches the source (68 packages)` |
+| `./scripts/gates/race_check.sh …`（包集同上） | `race_check: OK (go test passed)` |
+| `bash scripts/gates/check-openspec.sh` | `Totals: 124 passed, 4 failed (128 items)`（4 个 failed 均为活跃 change，主规格全绿） |
+| `bash scripts/gates/gen_godoc.sh --check` | `gen_godoc: docs/api matches the source (68 packages)` |
 
 ## 四、PR 规范
 
@@ -116,7 +117,7 @@ bash scripts/check-openspec.sh
 
 ## 七、文档要求
 
-- **[`docs/api/`](docs/api/index.md) 是生成面**：真源是源码注释，作者是 `scripts/gen_godoc.sh`，手改必被 `gen_godoc --check` 判红。
+- **[`docs/api/`](docs/api/index.md) 是生成面**：真源是源码注释，作者是 `scripts/gates/gen_godoc.sh`，手改必被 `gen_godoc --check` 判红。
 - **[`docs/wiki/`](docs/wiki/README.md) 是历史快照（historical-verbatim）**：真源是各篇自己的快照提交，断言对已移除的实现成立；**不许"对齐今天"式改写**。引用由 `doc-refs` 按引入该引用的提交锚定保护。
 - **长期事实文档**（`docs/*.md`、根级 `README.md` / `CONTRIBUTING.md`）：真源是今天的树，引用的路径必须存在。`doc-refs` 的扫描面是 `docs/wiki` 与 `docs/*.md`；根级 markdown 不在扫描面内，但同一纪律适用——写下的路径先 `ls` 到。
 - **未提交的 `docs/wiki` 编辑会取消该篇的历史锚定**，使其引用集体报 dangling。文档批次先落盘再跑门禁；需要当场判单篇时用 `go run ./scripts/codetools doc-refs docs/wiki/README.md`。机制说明见 [`docs/OPERATION.md`](docs/OPERATION.md) §五·3(a)。

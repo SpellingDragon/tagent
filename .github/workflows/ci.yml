@@ -114,7 +114,7 @@ jobs:
       # (implementation-hardening 8.1/8.2). Upstream issue to be filed.
       #
       # resident-remaining-hardening 3.5: the gate runs through
-      # scripts/race_check.sh, whose exit-code fidelity is the contract —
+      # scripts/gates/race_check.sh, whose exit-code fidelity is the contract —
       # go test's status is authoritative, waivers apply ONLY when every top
       # offending frame matches a registered upstream signature AND there is
       # no plain (non-race) failure. A green-looking race log from a failed
@@ -125,7 +125,7 @@ jobs:
       # tool, api/{event,plugin} and all six integration trees, and a shrunken
       # set would quietly drop them from the race gate.
       - name: Race (root + memory + runtime + evolution + api + tool + rl + all integration suites)
-        run: ./scripts/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./evolution/... ./api/event/... ./tool/... ./api/plugin/... ./rl/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
+        run: ./scripts/gates/race_check.sh . ./memory/... ./runtime/agent/... ./runtime/task/... ./runtime/state/... ./features/... ./api/event/... ./tool/... ./api/plugin/... ./tests/integration/execution/... ./tests/integration/history/... ./tests/integration/host/... ./tests/integration/capabilities/... ./tests/integration/evolution/... ./tests/integration/learning/...
 
   validators:
     # resident-remaining-hardening 3.5: the doc/restart prefix checkers are the
@@ -140,9 +140,9 @@ jobs:
         with:
           python-version: '3.11'
       - name: restart-prefix verifier negative cases
-        run: python3 scripts/test_verify_restart_prefix.py
+        run: python3 scripts/scenarios/test_verify_restart_prefix.py
       - name: race_check classifier self-test (no masking)
-        run: bash scripts/test_race_check.sh
+        run: bash scripts/gates/test_race_check.sh
 
   openspec:
     # resident-remaining-hardening 3.5: main specs (openspec/specs/) are the
@@ -164,7 +164,7 @@ jobs:
         # implicitly via @latest, or the gate fails on unrelated pre-existing specs.
         run: npm install -g @fission-ai/openspec@1.2.0
       - name: OpenSpec spec-hygiene gate
-        run: ./scripts/check-openspec.sh
+        run: ./scripts/gates/check-openspec.sh
 
   soak:
     # Long-run continuity evidence (implementation-hardening 8.3): manual only.
@@ -211,7 +211,7 @@ jobs:
       # -json`: ten logs, ten UUID run-ids, repeat_index 1..10. No `-count`
       # amplification, and no --test-id subset: CI runs the complete scope.
       - name: Event integrity short (ten independent rounds)
-        run: python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out "$RUNNER_TEMP/event-short"
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --repeat 10 --out "$RUNNER_TEMP/event-short"
       - name: Upload event-short evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -258,7 +258,7 @@ jobs:
         env:
           SEED: ${{ matrix.seed }}
           WINDOW: ${{ matrix.window }}
-        run: python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 1200 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 1200 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
       - name: Upload event-long shard evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -287,7 +287,7 @@ jobs:
       # defect must be registered in the checker's frozen registry, never
       # skipped by narrowing --all here.
       - name: Event integrity fault mutations
-        run: python3 scripts/check_event_integrity_mutations.py --all --json --out "$RUNNER_TEMP/event-integrity-mutations"
+        run: python3 scripts/gates/check_event_integrity_mutations.py --all --json --out "$RUNNER_TEMP/event-integrity-mutations"
       - name: Upload mutation evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -341,7 +341,7 @@ jobs:
       # truncated artifact can never read as "nothing to object to".
       - name: Check event evidence bundle
         if: always()
-        run: python3 scripts/check_runtime_evidence.py --bundle "$RUNNER_TEMP/bundle" --contract golden/runtime/event_integrity_scenarios.json --json
+        run: python3 scripts/gates/check_runtime_evidence.py --bundle "$RUNNER_TEMP/bundle" --contract golden/runtime/event_integrity_scenarios.json --json
       # The report name stays outside the `event-integrity-*` download pattern:
       # a re-run of this job would otherwise download its own first-attempt
       # bundle and duplicate every evidence file inside the next bundle.

@@ -86,9 +86,9 @@ func supplyRetrieval(ctx context.Context, tier *ledger.Tier, embedder memory.Emb
 			seam.Close()
 			return nil, err
 		}
-		text := body.Content
+		text := body.Message.Content
 		if text == "" {
-			text = body.Summary
+			text = body.Meta[event.MetaKeyEventSummary]
 		}
 		seam.Submit(stored.Key, text)
 	}

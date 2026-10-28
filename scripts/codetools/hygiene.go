@@ -23,9 +23,9 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 // space, the latter are the composition-root package's own sources.
 var registeredTopDirs = map[string]bool{
 	".github": true, "api": true, "cli": true, "docs": true,
-	"evolution": true, "examples": true, "golden": true, "internal": true,
-	"memory": true, "openspec": true, "resources": true, "rl": true,
-	"runtime": true, "scripts": true, "telemetry": true, "tests": true, "tool": true,
+	"examples": true, "features": true, "golden": true, "internal": true,
+	"memory": true, "openspec": true, "resources": true,
+	"runtime": true, "scripts": true, "tests": true, "tool": true,
 }
 
 // trackedHygieneFinding is one violation: the path plus the rule that rejected it.

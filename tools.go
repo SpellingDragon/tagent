@@ -12,17 +12,17 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/governance"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/memory/search"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
-	"github.com/SpellingDragon/tagent/telemetry"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 	"github.com/SpellingDragon/tagent/tool/recall"
@@ -108,8 +108,9 @@ func (r *Run) observeSettleDelivery(ctx context.Context, envelope task.Envelope)
 	if held {
 		return
 	}
-	key := r.commitFact(fact)
-	if key == "" {
+	key, err := r.commitFactChecked(ctx, fact)
+	if err != nil || key == "" {
+		assemblyWarn("tagent: the settle of %s at %s did not commit err=%v", notice.TaskID, addr.AgentID, err)
 		return
 	}
 	pipeline, err := r.factPipeline(addr.AgentID)

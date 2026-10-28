@@ -188,16 +188,6 @@ var (
 
 	_ FinalRoundReason = FinalRoundBudget
 
-	// The safe request snapshot face is attached through its own setter, so the
-	// declared construction shape above stays exactly as it is: the face is
-	// fixed beside the request before the model entry is called and crosses
-	// built-in, event, model and state types only.
-	_ RequestSnapshotFace = (RequestSnapshotFace)(nil)
-
-	_ func(context.Context, event.DecisionID, string, string, []string, state.AgentBinding, model.Request) error = RequestSnapshotFace(nil)
-
-	_ func(*Loop, RequestSnapshotFace) = (*Loop).SetRequestSnapshotFace
-
 	_ HistoryFace = (HistoryFace)(nil)
 
 	_ func(HistoryFace, event.Address) []model.Message = HistoryFace.SessionHistory
@@ -214,7 +204,7 @@ var (
 
 	// The model view material the decision record is written from keeps its
 	// documented fields.
-	_ = modelView{modelName: "", promptVersion: "", visibleTools: []string{}}
+	_ = modelView{modelName: "", promptVersion: "", visibleTools: []string{}, visibleSkills: []string{}}
 
 	_ func(event.EventID) (model.Message, bool) = FactResolver(nil)
 
@@ -225,7 +215,7 @@ var (
 	// published generation of its agent.
 	_ FactCommit = (FactCommit)(nil)
 
-	_ func(event.Event) event.EventID = FactCommit(nil)
+	_ func(event.Event) (event.EventID, error) = FactCommit(nil)
 
 	_ func(*Loop, FactCommit) = (*Loop).SetFactCommit
 
@@ -276,7 +266,7 @@ var (
 
 	_ = RequestBoundary{Agent: "", Chain: RequestChain{PartitionID: 0, SessionID: ""}, Binding: state.AgentBinding{}, FinalRound: false}
 
-	_ = BoundaryView{Messages: []model.Message{}, PromptVersion: ""}
+	_ = BoundaryView{Messages: []model.Message{}, PromptVersion: "", VisibleSkills: []string{}}
 
 	_ RequestFace = (RequestFace)(nil)
 

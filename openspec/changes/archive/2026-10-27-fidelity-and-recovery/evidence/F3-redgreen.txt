@@ -1,0 +1,180 @@
+F3 回滚即红双证据（收尾 F3；DoD 见 F1/F2）
+工作树：/Users/pengweiye/Documents/codes/tagent
+HEAD：a3e7441
+采集：2026-10-27 06:24–06:35 CST
+证据根：/tmp/tagent-f2-evidence（f3-gN-{diff,red,green}.log / f3-g10v2-* / f3-plan.txt / f3-baseline-shasum.txt）
+固定动作（每次定点破坏）：留 diff → go build ./...（或 go -C examples/wechat-bot build ./...）→ 精确红锚测试
+（期望 exit≠0 且失败落具名断言）→ git checkout -- <file> → 三重还原校验（git hash-object 与
+git rev-parse HEAD:<file> 比对 + shasum -a 256 对基线 + git diff 字节 0）→ 精确红锚复跑（期望 exit=0）。
+判据：红 = go test exit≠0 且失败落具名断言；绿 = exit 0。
+
+基线（破坏前，10 文件均无未提交改动；f3-baseline-shasum.txt）：
+$ shasum -a 256 request.go memory/event_body.go runtime/agent/loop.go host.go tool/exec/exec.go \
+    facts.go memory/search/store_searcher.go memory/replay/replay_budget.go examples/wechat-bot/smoke_test.go
+9af9bf7f1ad713898b5b4c31270b5752dfb88e823da8c0a894c39e19c9af89ce  request.go
+5a4777d683df7bce79a5bd63dc8f1a95cf921769fb8f6d8c04e2169d7c4b3c85  memory/event_body.go
+0c0d262a576c9c90a6ec74632eb4e5b7c49dd3ed5f183770269c0087065f5f04  runtime/agent/loop.go
+8bb583b410ce0ba473c8d292332f8a7b75e7d2fb6ba6b8e8f4102fbe44028554  host.go
+4e281a4ebe692c8c74fd4cbc5344ade1fc90ce9fecf662ba77a242c65465db6d  tool/exec/exec.go
+fb3063a336e81eb7856097e905c5952647da8a9d1e212390b660bb8e5d05c58e  facts.go
+bdc86c3fe4aae612482e7bce28971c7cf6bbcfd2994b123178345b842aa18e6b  memory/search/store_searcher.go
+dfe184868210cfd5c63d15ba0821c7c4f72b70f40c9be8caa19d1f88ce057229  memory/replay/replay_budget.go
+a22a703bff2f561b3353bee4197b2e1379034ebbd672246d43cc8c6cc16459e7  examples/wechat-bot/smoke_test.go
+run.go（G7 咬合版破坏面，补记基线）：
+fe6148394719aa3dfdbf050541028e73cdd75be05b4bce5ae14eed8a39ae5431  run.go
+
+================================================================================
+G1 还原投影修复（restoreCallPairing 首行短路）→ TestRequestFidelity 红
+================================================================================
+[破坏] request.go restoreCallPairing 函数体首行插 `if true { return // F3 G1 rollback ... }`
+       （f3-g1-diff.txt）；BUILD_RC=0
+[红] go test ./tests/integration/host -run '^TestRequestFidelity$' → RED_RC=1（f3-g1-red.log）
+  request_fidelity_test.go:235: the turn after a tool call: the request stream violates call-result pairing
+  request_fidelity_test.go:328: the request after compression: ... violates call-result pairing
+  request_fidelity_test.go:405: the turn after a cold boot: ... violates call-result pairing
+  FAIL github.com/SpellingDragon/tagent/tests/integration/host 0.950s
+  （三场景全部咬合：工具调用后/压缩后/冷启动后）
+[还原三重] blob=66045106==head、shasum256=9af9bf7f==基线、diff=0
+[绿] GREEN_RC=0  ok .../tests/integration/host 0.633s（f3-g1-green.log）
+
+================================================================================
+G2 还原 EventBody 全字段（InvocationID 置空）→ TestFactFidelity 红
+================================================================================
+[破坏] memory/event_body.go Event() return 结构体 `InvocationID: b.InvocationID,` → `InvocationID: ""`
+       （f3-g2-diff.txt）；BUILD_RC=0
+[红] go test ./tests/integration/host -run '^TestFactFidelity$' → RED_RC=1（f3-g2-red.log）
+  fact_fidelity_test.go:184: the restored fact ... carries invocation = {...  task-fidelity ...},
+    want the committed {... inv-fidelity task-fidelity ...}（InvocationID 丢失=全字段不保真）
+  FAIL .../tests/integration/host 0.534s
+[还原三重] blob=327396ff==head、shasum256=5a4777d6==基线、diff=0
+[绿] GREEN_RC=0  ok .../tests/integration/host 0.534s
+
+================================================================================
+G3 还原吞错（failCommit → return turn, nil）→ TestFactFidelity 红
+================================================================================
+[破坏] runtime/agent/loop.go 两处 `return l.failCommit(turn, commitErr)` → `return turn, nil`
+       （f3-g3-diff.txt）；BUILD_RC=0
+[红] go test ./tests/integration/host -run '^TestFactFidelity$' → RED_RC=1（f3-g3-red.log）
+  fact_fidelity_test.go:460: the turn beside a held segment barrier returned no failure
+    beside the terminal completed（吞错=失败不上抛）
+  FAIL .../tests/integration/host 0.535s
+[还原三重] blob=3da385d0==head、shasum256=0c0d262a==基线、diff=0
+[绿] GREEN_RC=0  ok .../tests/integration/host 0.578s
+
+================================================================================
+G4 还原单键索引（replayAddressOf → SessionID 单键）→ TestAgentSessionIsolation 红
+================================================================================
+[破坏] request.go replayAddressOf 返回 `event.Address{SessionID: sessionOf(evt)}`（AgentID 缺席）
+       （f3-g4-diff.txt）；BUILD_RC=0
+[红] go test ./tests/integration/host -run '^TestAgentSessionIsolation$' → RED_RC=1（f3-g4-red.log）
+  agent_session_isolation_test.go:166: request 2 (model model-beta) carries the foreign markers
+    [alpha-history-marker-A11 alpha-answer-marker] of the other agent's history; the projection index
+    must scope one session chain to its own agent
+  FAIL .../tests/integration/host 0.426s
+[还原三重] blob=66045106==head、shasum256=9af9bf7f==基线、diff=0
+[绿] GREEN_RC=0  ok .../tests/integration/host 0.419s
+
+================================================================================
+G5 还原内存表（recordDeliveryState 首行短路）→ TestDeliveryRecovery 红
+================================================================================
+[破坏] host.go recordDeliveryState 函数体首行插 `if true { return }`（不落持久交付态）
+       （f3-g5-diff.txt）；BUILD_RC=0
+[红] go test ./tests/integration/host -run '^TestDeliveryRecovery$' → RED_RC=1（f3-g5-red.log）
+  delivery_recovery_test.go:83:  held deliveries after the restart = [], want the one body the first boot held
+  delivery_recovery_test.go:145: owed  deliveries after the restart = [], want the refused body still owed
+  delivery_recovery_test.go:193: held deliveries after the restart = [], want the recorded body "delivery-000001"
+  FAIL .../tests/integration/host 0.452s
+  （三断言逐字=红症状与 findings 记载一致）
+[还原三重] blob=283ba909==head、shasum256=8bb583b4==基线、diff=0
+[绿] GREEN_RC=0  ok .../tests/integration/host 0.481s
+
+================================================================================
+G6 还原释放前保存（release() 捕获条件短路）→ TestExecFinalOutputSurvivesTheExit 红
+================================================================================
+[破坏] tool/exec/exec.go release() `if captureErr == nil {` → `if false && captureErr == nil {`
+       （f3-g6-diff.txt）；BUILD_RC=0
+[红] go test ./tool/exec -run '^TestExecFinalOutputSurvivesTheExit$' → RED_RC=1（f3-g6-red.log）
+  exec_test.go:1025: final output of the exited resource = exec: no final output is recorded
+    under that key: probe/final-exit, want the saved frame readable beside the exit
+  exec_test.go:1059: exec_release answer = "released probe/final-release after confirmed stop: exit=7",
+    want the final output carrying omega beside the release
+  FAIL github.com/SpellingDragon/tagent/tool/exec 0.373s
+[还原三重] blob=8e52c4b6==head、shasum256=4e281a4e==基线、diff=0
+[绿] GREEN_RC=0  ok github.com/SpellingDragon/tagent/tool/exec 0.394s
+
+================================================================================
+G7 还原注册门（MaxTokens<=0 不恢复）→ TestHistoryRestoresWithoutBudget 红
+================================================================================
+[咬合记录] 第一版破坏施加于 facts.go attachDeclaredReplay（旧注册门位置）→ RED_RC=0 未咬合
+  （该门不挡恢复路径；findings 271-273：注册门删除跨三处，恢复路径走 run.go seedReplay）。
+  第二版破坏改施于恢复路径本体，咬合。
+[破坏] run.go seedReplay attach 循环内插 `if seed.window.MaxTokens <= 0 { continue }`
+       （f3-g7-diff.txt = 第二版）；BUILD_RC=0
+[红] go test ./tests/integration/host -run '^TestHistoryRestoresWithoutBudget$' → RED_RC=1（f3-g7-red.log）
+  history_restore_budget_test.go:131: the request carries no restored history: the turn-one input (user)
+    material "history-restore turn one input marker" is absent from the wire, which carried 1 messages
+  history_restore_budget_test.go:205: the max_tokens: 0 request presented no full projection: the tail
+    marker "history-restore unbounded tail marker" is absent, so the unbounded material degraded
+  FAIL .../tests/integration/host 0.796s
+[还原三重] blob=2cc0a5f8==head、shasum256=fe614839==基线、diff=0
+[绿] GREEN_RC=0  ok .../tests/integration/host 0.622s
+
+================================================================================
+G8 还原预截断（向量检索按 recent 预截断）→ TestVectorCandidateCompleteness 红
+================================================================================
+[破坏] memory/search/store_searcher.go 检索前 `opts.Limit = 0`（不设=全候选）→ `opts.Limit = s.vectorTopK`
+       （f3-g8-diff.txt）；BUILD_RC=0
+[红] go test ./memory/search -run '^TestVectorCandidateCompleteness$' → RED_RC=1（f3-g8-red.log）
+  store_searcher_test.go:224: vector_top_k=1 answered [], want the old relevant record among the scored candidates
+  FAIL github.com/SpellingDragon/tagent/memory/search 0.257s
+  （逐字=红症状与 findings 记载一致）
+[还原三重] blob=5df0cd32==head、shasum256=bdc86c3f==基线、diff=0
+[绿] GREEN_RC=0  ok github.com/SpellingDragon/tagent/memory/search 0.252s
+
+================================================================================
+G9 还原条件重用（呈现决策改无条件重用旧预览）→ TestRequestBudgetEnforced 红
+================================================================================
+[破坏] memory/replay/replay_budget.go assembleBudgetLocked 决策分支删 settledOn/room 两条件、
+       改无条件 `shown.Content = view; out = append(out, shown); used += len(view); continue`
+       （f3-g9-diff.txt）；BUILD_RC=0
+[红] go test ./memory/replay -run '^TestRequestBudgetEnforced$' → RED_RC=1（f3-g9-red.log）
+  replay_budget_test.go:44: the request carried 200 bytes under a 4-byte budget（硬约束失守）
+  replay_budget_test.go:87: second assembly = "...", want a presentation recomputed over the
+    changed fact, not the stale preview（条件重用失守）
+  FAIL github.com/SpellingDragon/tagent/memory/replay 0.243s
+  （两断言逐字=红症状与 findings 记载一致）
+[还原三重] blob=fc17be39==head、shasum256=dfe18486==基线、diff=0
+[绿] GREEN_RC=0  ok github.com/SpellingDragon/tagent/memory/replay 0.281s
+
+================================================================================
+G10 还原 requests[0] 索引假设 → TestLocalSmokeSymptomNoSendTool 红（乱序负锚）
+================================================================================
+[咬合记录] 第一版破坏只回滚主定位调用点（`turnReq, ok := smokeTurnRequest(...)` → `requests[0], true`）
+  → RED_RC=0 未咬合：正常执行流下 requests[0] 恰为本轮请求，主定位回滚无判别力，且乱序负锚
+  （locating_survives_out_of_order）独立走 smokeTurnRequest 未受影响。
+  第二版破坏改回滚定位函数体本体（= 1.1 G10 修复"按模型身份+标记定位"的整点回滚），咬合。
+[破坏] examples/wechat-bot/smoke_test.go smokeTurnRequest 函数体首行插
+       `if len(requests) > 0 { return requests[0], true }`（到达下标假设复活）
+       （f3-g10v2-diff.txt = 第二版）；BUILD_RC=0（go -C examples/wechat-bot build ./...）
+[红] go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptomNoSendTool$'
+     -count=1 -timeout 600s → RED_RC=1（f3-g10v2-red.log）
+  smoke_test.go:3672: 乱序注入后定位失败/取错：ok=true located.model="smoke-worker"
+    located.text="SMOKE-R9701 干扰（他模型）"，want 本轮请求 "SMOKE-R9701 普通问题"
+  FAIL wechat-bot 0.949s
+  （负锚 locating_survives_out_of_order 咬合：按到达下标取到插队干扰请求，症状=
+    1.1 G10 修复前的"requests[0] 假设"逐字形态）
+[还原三重] blob=1f1a3bcb==head、shasum256=a22a703b==基线、diff=0
+[绿] GREEN_RC=0  ok wechat-bot 0.800s（含正锚+乱序负锚复绿）
+
+================================================================================
+最终残留检查 + 总判
+================================================================================
+$ for f in <上述 10 文件>; do git hash-object $f == git rev-parse HEAD:$f; done → 10/10 一致
+$ git diff --stat <上述 10 文件> → 空（字节 0）
+$ shasum -a 256 <10 文件> == f3-baseline-shasum.txt 基线 → 10/10 一致
+
+总判：G1–G10 全 PASS —— 十组定点破坏各产出"红（exit≠0 + 具名断言）→ 还原三重 → 绿（exit=0）"
+三红三绿闭环；G7/G10 各有一次第一版破坏未咬合的记录（RED_RC=0 不计红，改破坏点后咬合），
+过程如实留痕（f3-g10-red.log 23B / f3-g7 第一版），未以未咬合冒充红。
+红症状三组（G5/G8/G9）与 findings 记载逐字一致；G1 三场景、G5 三断言、G6/G7/G9 双断言
+均为多点咬合，非单点偶然。

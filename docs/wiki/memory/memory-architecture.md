@@ -519,7 +519,7 @@ spill 重放只走 canonical 路径：`ReplayWithNotify` 依赖 store 的 `Event
 | 缺口 | 现状与防线 | 候选方向 |
 |------|-----------|---------|
 | **压缩老化（摘要丢细节）** | 卡片行沉底为 `(earlier n items)` 计数后，约束/日期类细节只剩 recall 票据可达。防线：票据永不丢（key 保留）、固化物豁免 TTL、L0 边界事件保原文；**执行过程（how）经 `recall(turn_key=…)` 因果链召回** | 沉底前抽取“约束型事实”入固化物；对账测试常态化 |
-| **压缩触发 token 估值偏乐观（大上下文溢出风险）** | `DefaultTokenCounter`（`CharsPerToken=2.0`，仅计 `msg.Content`）对**中英混排+代码**长上下文实测**低估 ~15%**（远端语料 ≥8k tok 段 est/real p50=0.846、83% 低估）→ 压缩**晚于** provider 真实上限触发 → **provider 400 溢出风险**；且不含 tools-schema 每请求开销。防线：溢出即显式报错 | 复现：`rl/trajectory_analyze.py [estimator-bias]`；预算线预留 ~15%、tools-schema 开销入模、内容分型/自适应系数 |
+| **压缩触发 token 估值偏乐观（大上下文溢出风险）** | `DefaultTokenCounter`（`CharsPerToken=2.0`，仅计 `msg.Content`）对**中英混排+代码**长上下文实测**低估 ~15%**（远端语料 ≥8k tok 段 est/real p50=0.846、83% 低估）→ 压缩**晚于** provider 真实上限触发 → **provider 400 溢出风险**；且不含 tools-schema 每请求开销。防线：溢出即显式报错 | 复现：`features/rl/trajectory_analyze.py [estimator-bias]`；预算线预留 ~15%、tools-schema 开销入模、内容分型/自适应系数 |
 | **rustviking 原生向量 CLI 未接线** | 引擎 MVP 走内存索引+KV 序列化持久化；`index insert/search/delete` 为预留后端 | 实测后迁移同库向量后端（引擎侧适配，协议不变） |
 | **固化物因果回溯不完整** | legacy L3 归档经 `SetParent` 挂链 + `source_keys` 溯源；骨架路径多段压缩仅产卡片行（无段摘要固化物，溯源靠卡片 [key] 票据）；从"任务结果"反查固化物缺 `task.resultRef` 桥 | resultRef 字段 + MemoryRelations 反向索引 |
 | **LocalFileKV 压实成本** | WAL 已把增量写摊平为 O(ops)；压实时刻仍全量 marshal 且在锁内（4MiB WAL 触发一次） | 分片 snapshot 或锁外压实 |

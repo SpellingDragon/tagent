@@ -145,8 +145,8 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	if delegatedNotice.Ref.Address != addr {
 		t.Fatalf("delegated notice target = %+v, want the issuing address %+v", delegatedNotice.Ref.Address, addr)
 	}
-	if delegatedNotice.State.NoticePhase != query.NoticePhaseAccepted {
-		t.Fatalf("delegated notice phase = %q, want the acceptance the unattended delivery records", delegatedNotice.State.NoticePhase)
+	if delegatedNotice.State.NoticePhase != query.NoticePhaseConsumed {
+		t.Fatalf("delegated notice phase = %q, want consumed after the mailbox claim and completion", delegatedNotice.State.NoticePhase)
 	}
 
 	followUp := eventIntegrityNoticeFacts(facts)
@@ -1552,6 +1552,8 @@ func eventIntegrityAwaitEnvelope(t *testing.T, delivered <-chan task.Envelope) t
 // - stable, suspect and exited observations leave audit facts only: no turn and no model material
 // - the next decision of the range reads no execution state material
 // - the host close releases every resource it still holds, and a restarted host names the resource it cannot confirm
+// - a restarted host takes a running session over instead of opening it twice
+// - the final output of an exited run stays readable through the model's own tool call
 // - two subtests keep frozen names from the old follow-up path while asserting silence; renaming needs the archived graph updated with it
 // 契约: docs/wiki/agent/task-lifecycle.md#ttl-reclaim
 func TestEventIntegrityExecStateEvents(t *testing.T) {
@@ -1563,8 +1565,10 @@ func TestEventIntegrityExecStateEvents(t *testing.T) {
 	t.Run("state_change_emits_followup_notice", runEventIntegrityExecThreeStatesAudit)
 	t.Run("next_turn_consumes_exec_state", runEventIntegrityExecNextTurnCarriesNoState)
 	t.Run("host_close_releases_exec_resources", runEventIntegrityExecHostCloseReleases)
+	t.Run("restart_takes_over_the_running_session", runEventIntegrityExecRestartTakesOver)
 	t.Run("restart_takes_over_or_names_unconfirmed", runEventIntegrityExecRestartNamesUnknown)
 	t.Run("unconfirmed_restart_not_reported_stopped", runEventIntegrityExecRestartNotReportedStopped)
+	t.Run("final_output_survives_the_exit", runEventIntegrityExecFinalOutputSurvives)
 }
 
 const (
@@ -1848,6 +1852,146 @@ func runEventIntegrityExecRestartNotReportedStopped(t *testing.T) {
 	}
 	if explanation, err := host.Run().ExecState(key); err != nil || !explanation.Held {
 		t.Fatalf("the first host no longer holds %s: explanation=%+v err=%v", key, explanation, err)
+	}
+}
+
+// runEventIntegrityExecRestartTakesOver proves the restart path of the run tool
+// takes a running session over instead of opening it twice:
+//   - one host starts one long run and returns from its call
+//   - a second host, booted beside an empty ledger, runs the same key
+//   - the call answers the reattachment beside the frame the session records,
+//     never a second execution, and the takeover is readable through the state
+//     query face of the restarted host
+//   - the session and the first host's hold both survive the takeover
+func runEventIntegrityExecRestartTakesOver(t *testing.T) {
+	const (
+		heldInput     = "start the run one host holds"
+		takeoverInput = "take the running session over"
+	)
+	eventIntegrityEnv(t)
+	provider := newEventIntegrityProvider(t)
+	script := newEventIntegrityScript()
+	resource := eventIntegrityExecResource(t)
+	key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
+	firstModel := eventIntegrityExecModel + "-first"
+	restartModel := eventIntegrityExecModel + "-takeover"
+	script.expect(firstModel, "the first host starts the run", eventIntegrityTail(heldInput)).
+		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-takeover-held",
+			eventIntegrityExecRunArgs(resource, "sh", `["-c","echo taken; sleep 30"]`)))
+	script.expect(firstModel, "the first host accepts the run", eventIntegrityCarriesToolResult("call-exec-takeover-held")).
+		answers(eventIntegrityAnswerOf("the run is held"))
+	script.expect(restartModel, "the restarted host runs the same key", eventIntegrityTail(takeoverInput)).
+		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-takeover",
+			eventIntegrityExecRunArgs(resource, "sh", `["-c","echo taken; sleep 30"]`)))
+	script.expect(restartModel, "the restarted host accepts the takeover", eventIntegrityCarriesToolResult("call-exec-takeover")).
+		answers(eventIntegrityAnswerOf("the session was reattached"))
+	provider.decide = script.decide
+	first := eventIntegrityBootExec(t, provider, newEventIntegritySender(), firstModel, eventIntegrityExecQuietRhythm)
+	eventIntegrityKeepHost(t, first)
+	restarted := eventIntegrityBootExec(t, provider, newEventIntegritySender(), restartModel, eventIntegrityExecQuietRhythm)
+	eventIntegrityKeepHost(t, restarted)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := eventIntegrityInvoke(ctx, first, event.Address{AgentID: "user", SessionID: "session-exec-takeover-first"}, "", heldInput); err != nil {
+		t.Fatalf("the first host turn ended by error: %v", err)
+	}
+	eventIntegrityAwaitExecRenewed(t, first, key, 1)
+	if !eventIntegrityTmuxAlive(resource) {
+		t.Fatalf("the session %s is not alive before the takeover", resource)
+	}
+	if _, err := eventIntegrityInvoke(ctx, restarted, event.Address{AgentID: "user", SessionID: "session-exec-takeover"}, "", takeoverInput); err != nil {
+		t.Fatalf("the restarted host turn ended by error: %v", err)
+	}
+	text := eventIntegrityModelConversation(provider.requests(), restartModel)
+	if !strings.Contains(text, "reattached "+key.String()) {
+		t.Fatalf("the restarted host never read the reattachment of %s: %s", key,
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if !strings.Contains(text, "taken") {
+		t.Fatalf("the takeover answer carries no frame of the session: %s",
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if strings.Contains(text, "executed "+key.String()) {
+		t.Fatalf("the restarted host opened a second execution under %s: %s", key,
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	explanation, err := restarted.Run().ExecState(key)
+	if err != nil || !explanation.Held || !explanation.Adopted {
+		t.Fatalf("the restarted state of %s = %+v err=%v, want the takeover readable through the query face", key, explanation, err)
+	}
+	if firstExplanation, err := first.Run().ExecState(key); err != nil || !firstExplanation.Held {
+		t.Fatalf("the first host no longer holds %s: %+v err=%v", key, firstExplanation, err)
+	}
+	if !eventIntegrityTmuxAlive(resource) {
+		t.Fatalf("the session %s did not survive the takeover", resource)
+	}
+	if violations := script.audit(); len(violations) != 0 {
+		t.Fatalf("the takeover script left violations: %v", violations)
+	}
+}
+
+// runEventIntegrityExecFinalOutputSurvives proves the final output of one exited
+// run is saved before its exit frees the resource and stays readable through
+// the model's own tool call:
+//   - one run produces its final frame and exits beside the observed code 7
+//   - the tracker settles the exit and frees the resource
+//   - the model runs the same key again and reads the settled report carrying
+//     the final output instead of a rerun over the freed resource
+func runEventIntegrityExecFinalOutputSurvives(t *testing.T) {
+	const (
+		input = "start the run whose final output must survive"
+		read  = "read what the settled run left behind"
+	)
+	eventIntegrityEnv(t)
+	provider := newEventIntegrityProvider(t)
+	script := newEventIntegrityScript()
+	resource := eventIntegrityExecResource(t)
+	key := tagentexec.ResourceKey{Kind: tagentexec.KindTmux, Key: resource}
+	script.expect(eventIntegrityExecModel, "the entry starts the run", eventIntegrityTail(input)).
+		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-final",
+			eventIntegrityExecRunArgs(resource, "sh", `["-c","echo alpha; sleep 2; echo omega; exit 7"]`)))
+	script.expect(eventIntegrityExecModel, "the entry accepts the run", eventIntegrityCarriesToolResult("call-exec-final")).
+		answers(eventIntegrityAnswerOf("the run is under way"))
+	script.expect(eventIntegrityExecModel, "the entry reads the settled key", eventIntegrityTail(read)).
+		answers(eventIntegrityToolCallAnswer("exec_run", "call-exec-final-read",
+			eventIntegrityExecRunArgs(resource, "sh", `["-c","echo rerun"]`)))
+	script.expect(eventIntegrityExecModel, "the entry accepts the settled report", eventIntegrityCarriesToolResult("call-exec-final-read")).
+		answers(eventIntegrityAnswerOf("the settled report carries the final output"))
+	provider.decide = script.decide
+	sender := newEventIntegritySender()
+	host := eventIntegrityBootExec(t, provider, sender, eventIntegrityExecModel, eventIntegrityExecQuietRhythm)
+	eventIntegrityKeepHost(t, host)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "user", SessionID: "session-exec-final"}
+	if _, err := eventIntegrityInvoke(ctx, host, addr, "", input); err != nil {
+		t.Fatalf("the entry turn ended by error: %v", err)
+	}
+	fact := eventIntegrityAwaitExecStateFact(t, host, addr, tagentexec.StateExited)
+	eventIntegrityAssertExecAuditFact(t, fact, key, tagentexec.StateExited, 7)
+	if _, err := eventIntegrityInvoke(ctx, host, addr, "", read); err != nil {
+		t.Fatalf("the reading turn ended by error: %v", err)
+	}
+	text := eventIntegrityModelConversation(provider.requests(), eventIntegrityExecModel)
+	lastSettled := strings.LastIndex(text, "settled "+key.String())
+	if lastSettled < 0 {
+		t.Fatalf("the model never read the settled report of %s: %s", key,
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if !strings.Contains(text[lastSettled:], "omega") {
+		t.Fatalf("the settled report carries no final output: %s",
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if !strings.Contains(text[lastSettled:], "exit=7") {
+		t.Fatalf("the settled report carries no observed exit code: %s",
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if lastExecuted := strings.LastIndex(text, "executed "+key.String()); lastExecuted > lastSettled {
+		t.Fatalf("the settled key was rerun instead of reported: %s",
+			eventIntegrityRequestsSummary(provider.requests()))
+	}
+	if violations := script.audit(); len(violations) != 0 {
+		t.Fatalf("the final-output script left violations: %v", violations)
 	}
 }
 

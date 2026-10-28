@@ -158,9 +158,11 @@ type EventRecord struct {
 	PartitionID int
 	// Type is the frozen event type of the event.
 	Type string
-	// Summary is the stored summary of the event.
+	// Summary is the summary the event committed with, read back through its
+	// metadata projection.
 	Summary string
-	// Content is the stored content of the event, matched by the keyword leg.
+	// Content is the content of the event's native message, matched by the
+	// keyword leg.
 	Content string
 	// Timestamp is the event time in Unix milliseconds: the one semantic time
 	// axis sorting, window filtering and age all read.

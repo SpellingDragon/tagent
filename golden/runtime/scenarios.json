@@ -245,7 +245,7 @@
         "owner_references_nonoverwriting": true,
         "same_bytes_content_equal": true,
         "original_bytes_equal_readback": true,
-        "presentation_full_text_iff_decision_full": true
+        "presentation_full_text_iff_full_room": true
       }
     },
     {

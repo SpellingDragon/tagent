@@ -8,9 +8,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -104,12 +104,6 @@ var _ agent.Recorder = rl.RecorderAdapter{}
 // is where both sides meet, so the history source the loop reads one
 // invocation's shared transcript from is proven here.
 var _ agent.HistoryFace = (*Run)(nil)
-
-// The safe request snapshot face of the execution loop is satisfied by the
-// run's own request-boundary snapshot production across the package boundary:
-// the composition root is where both sides meet, so the snapshot the loop
-// fixes before its model calls is proven here.
-var _ agent.RequestSnapshotFace = (*Run)(nil).snapshotRequest
 
 // The age fold plugin of the request-context window is an instance of the
 // material flow beside the reflection driver: it serves the same

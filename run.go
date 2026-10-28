@@ -30,13 +30,13 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
-	"github.com/SpellingDragon/tagent/evolution/governance"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -149,7 +149,6 @@ type Run struct {
 	factOrder []event.EventID
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
-	history map[event.Address][]model.Message
 	factSeq uint64
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
@@ -193,13 +192,20 @@ type Run struct {
 	// could not commit, so a failed judgment is readable beside the run.
 	leaseLosses []error
 	// capture is the trajectory capture this run fixes, admits and seals
-	// through, or nil beside no capture.
+	// through, or nil beside no capture. It is the one home of the safe request
+	// views too: a decision's request is fixed once, through the capture's scope,
+	// and the run's read face answers from that same account rather than beside a
+	// second copy of its own.
 	capture      rl.Capture
 	captureScope rl.CaptureScope
 	presented    []view.Presentation
-	snapshots    []RequestSnapshotRecord
 	fixers       map[event.AgentID]*fileFixer
-	replays      map[event.SessionID]replayEntry
+	// replays holds the mapped sequence every registered chain replays into a
+	// request, keyed by the full address — the agent beside its session — so two
+	// agents sharing a session id keep their projections apart; a registration
+	// the AttachReplay seam made names no agent and is kept under the bare
+	// session for every user of it.
+	replays map[event.Address]replayEntry
 	// ageFold folds a session's projection once its replay fills the window the
 	// declaration gave it; it is mounted on every agent that declares a window.
 	ageFold *AgeFoldPlugin
@@ -254,9 +260,8 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		admission:      task.NewMemoryAdmission(),
 		sites:          map[event.Address]bool{},
 		facts:          map[event.EventID]event.Event{},
-		history:        map[event.Address][]model.Message{},
 		fixers:         map[event.AgentID]*fileFixer{},
-		replays:        map[event.SessionID]replayEntry{},
+		replays:        map[event.Address]replayEntry{},
 		landedSeq:      map[int]int64{},
 		approver:       cfg.approver,
 		policy:         cfg.policy,
@@ -326,10 +331,11 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	r.loop.SetHistory(r)
 	r.loop.SetWatch(r.shutdown.Watch)
 	r.loop.SetPresentations(r.takePresentation)
-	r.loop.SetFactCommit(r.commitFact)
+	r.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		return r.commitFactChecked(context.Background(), evt)
+	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
-	r.loop.SetRequestSnapshotFace(r.snapshotRequest)
 	if cfg.recorder != nil {
 		r.loop.SetRecorder(rl.NewRecorderAdapter(cfg.recorder))
 	}
@@ -954,13 +960,17 @@ func (r *Run) establish(ctx context.Context, addr event.Address) error {
 // InjectEvent commits one explicit input event of the named responsibility
 // range and drives the loop session of its address with it, exactly as the
 // Invoke entry drives a range the host admitted. The caller owns the event's
-// address and lineage; this entry stamps only the identities that scope it to
-// this run and range, and reports the identity the fact committed under.
+// address and lineage; this entry backfills only the stamps the caller left
+// unstated — an unstated source and target read as the owner of the event, an
+// unstated invocation identity as the one this call names — while the runtime
+// instance stamp is always this run's own and never the caller's to write. The
+// fact commits under the identity the event carries after the backfill, and
+// the drive runs the range under that same identity.
 func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID event.InvocationID) (agent.Turn, event.EventID, error) {
 	if !evt.Owner.IsComplete() {
 		return agent.Turn{}, "", fmt.Errorf("tagent: the injected event address is incomplete: %v", evt.Owner)
 	}
-	if invocationID == "" {
+	if invocationID == "" && evt.InvocationID == "" {
 		return agent.Turn{}, "", errors.New("tagent: the injected event carries no invocation identity")
 	}
 	if err := r.establish(ctx, evt.Owner); err != nil {
@@ -975,7 +985,9 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
 	}
-	evt.InvocationID = invocationID
+	if evt.InvocationID == "" {
+		evt.InvocationID = invocationID
+	}
 	evt.InstanceID = r.instance
 	key, err := r.commitFactChecked(ctx, evt)
 	if err != nil {
@@ -983,7 +995,7 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 	}
 	evt.Key = key
 	turn, err := r.loop.Drive(ctx, agent.Invocation{
-		InvocationID: invocationID,
+		InvocationID: evt.InvocationID,
 		Address:      evt.Owner,
 		Instance:     r.instance,
 		Ready:        []event.Event{evt},
@@ -1001,7 +1013,10 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 // The commit is a write of this run, never a second store beside it: the fact
 // lands in the same live ledger, on the same durable log and in the same mapped
 // sequence as the target session's own input, so that session's next assembly
-// reads it like any other external input.
+// reads it like any other external input. The address block of the event is
+// backfilled, never overwritten: a source, target or owner the caller already
+// stamped is kept as the caller wrote it, and only an unstated stamp reads as
+// the target address of the commit.
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
 	if err := r.establish(ctx, addr); err != nil {
 		return "", err
@@ -1009,7 +1024,15 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
 	if evt.Type == "" {
 		return "", errors.New("tagent: the cross-session event carries no frozen type")
 	}
-	evt.Owner, evt.Source, evt.Target = addr, addr, addr
+	if evt.Owner.IsZero() {
+		evt.Owner = addr
+	}
+	if evt.Source.IsZero() {
+		evt.Source = addr
+	}
+	if evt.Target.IsZero() {
+		evt.Target = addr
+	}
 	if evt.Timestamp.IsZero() {
 		evt.Timestamp = time.Now()
 	}
@@ -1055,10 +1078,11 @@ func (r *Run) ActiveSessions(agentID event.AgentID) []event.Address {
 	return out
 }
 
-// SessionFacts reports the live facts of one session in the order they
-// committed: the chain one address wrote, as the run holds it. Only facts still
-// in the live ledger are answered; a chain restored from the durable tier is
-// read through the committed-event face instead.
+// SessionFacts reports the facts of one session in the order they committed:
+// the chain one address wrote, as the run holds it — the facts this process
+// committed beside every fact the storage tier already held at assembly, both
+// read through the one ledger. A fact outside the session the address names is
+// answered never.
 func (r *Run) SessionFacts(addr event.Address) []event.Event {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1083,8 +1107,8 @@ func (r *Run) SessionFacts(addr event.Address) []event.Event {
 	return out
 }
 
-// CommittedFacts reports how many live facts this run holds: the counter the
-// metrics endpoint reports beside the turns and deliveries of the host.
+// CommittedFacts reports how many facts this run holds: the counter the metrics
+// endpoint reports beside the turns and deliveries of the host.
 func (r *Run) CommittedFacts() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1130,9 +1154,9 @@ func (r *Run) ObservedEvents(ctx context.Context, opts memory.QueryOptions) ([]m
 
 // CommittedEvent reports the fact an identity names: the live fact of this
 // process when it holds one, and otherwise the event the storage tier already
-// committed. A committed body carries the light fields and no trigger source,
-// so a fact restored from the tier carries the lineage its bytes carry and
-// never an invented one.
+// committed. A committed body carries every field the event committed with, so
+// a fact restored from the tier carries the whole metadata projection, the
+// native payload and the lineage its bytes carry and never an invented one.
 func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event, error) {
 	if id == "" {
 		return event.Event{}, fmt.Errorf("%w: the identity is empty", ErrCommittedFactMissing)
@@ -1158,18 +1182,9 @@ func (r *Run) CommittedEvent(ctx context.Context, id event.EventID) (event.Event
 	if err != nil {
 		return event.Event{}, err
 	}
-	meta := map[string]string{}
-	if body.Summary != "" {
-		meta[event.MetaKeyEventSummary] = body.Summary
-	}
-	return event.Event{
-		Key:       id,
-		Type:      body.Type,
-		Timestamp: time.UnixMilli(body.Timestamp),
-		Meta:      meta,
-		Message:   model.Message{Content: body.Content},
-		Owner:     body.Owner,
-	}, nil
+	restored := body.Event()
+	restored.Key = id
+	return restored, nil
 }
 
 // seedObservedEvents lands every event the storage tier already committed into
@@ -1198,12 +1213,15 @@ func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryE
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.
-// The whole registered sequence reads as ended material: a cold start has no
-// range in flight, and the next committed input opens the first one, which
+// Every committed fact is held in the live ledger of this run beside the
+// registration (see seedFact), so a projected entry resolves the fact it was
+// minted from and the call-result pairing survives the restart. The whole
+// registered sequence reads as ended material: a cold start has no range in
+// flight, and the next committed input opens the first one, which
 // moves the boundary without dropping a restored entry. A session whose
-// declaration names no model window keeps no registration, matching the live
-// attach path, and a body the schema cannot decode fails the boot instead of
-// silently dropping the material the tier holds.
+// declaration names no model window registers under the no-budget window
+// exactly as the live attach path does, and a body the schema cannot decode
+// fails the boot instead of silently dropping the material the tier holds.
 func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 	events, err := tier.Segments.Events(ctx)
 	if err != nil {
@@ -1213,53 +1231,41 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		projection *replay.ReplayProjection
 		window     FoldWindow
 	}
-	seeds := map[event.SessionID]*sessionSeed{}
-	var order []event.SessionID
+	seeds := map[event.Address]*sessionSeed{}
+	var order []event.Address
 	for _, stored := range events {
 		body, err := memory.DecodeEventBody(stored.Body)
 		if err != nil {
 			return fmt.Errorf("tagent: replay the committed event %s: %w", stored.Key, err)
 		}
-		meta := map[string]string{}
-		if body.Summary != "" {
-			meta[event.MetaKeyEventSummary] = body.Summary
-		}
-		evt := event.Event{
-			Key:       stored.Key,
-			Type:      body.Type,
-			Timestamp: time.UnixMilli(body.Timestamp),
-			Meta:      meta,
-			Message:   model.Message{Content: body.Content},
-			Owner:     body.Owner,
-		}
-		session := sessionOf(evt)
-		if session == "" {
+		evt := body.Event()
+		evt.Key = stored.Key
+		r.seedFact(evt)
+		addr := replayAddressOf(evt)
+		if addr.SessionID == "" {
 			continue
 		}
 		entry, ok := mappedEntryOf(evt)
 		if !ok {
 			continue
 		}
-		seed, held := seeds[session]
+		seed, held := seeds[addr]
 		if !held {
 			r.mu.Lock()
 			window := foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
 			r.mu.Unlock()
 			seed = &sessionSeed{projection: replay.NewReplayProjection(), window: window}
-			seeds[session] = seed
-			order = append(order, session)
+			seeds[addr] = seed
+			order = append(order, addr)
 		}
 		seed.projection.Append(ctx, entry)
 		if err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {
 			return err
 		}
 	}
-	for _, session := range order {
-		seed := seeds[session]
-		if seed.window.MaxTokens <= 0 {
-			continue
-		}
-		if err := r.AttachReplay(agent.RequestChain{SessionID: session}, seed.window, seed.projection); err != nil {
+	for _, addr := range order {
+		seed := seeds[addr]
+		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
 			return err
 		}
 	}
@@ -1269,6 +1275,20 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 	return nil
 }
 
+// seedFact holds one fact the storage tier already committed in the live
+// ledger of this run: the same map every commit of this process lands in, in
+// the commit order the tier recorded. A restarted run then reads its facts
+// back beside the fresh ones — the identity one projected entry was minted from
+// resolves again, so the call-result pairing a request replays is recovered
+// from the facts alone — and a re-commit of an identity the tier already holds
+// is judged against the very fact it names instead of writing a second one.
+func (r *Run) seedFact(evt event.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.facts[evt.Key] = evt
+	r.factOrder = append(r.factOrder, evt.Key)
+}
+
 // restoreFoldForm folds one replayed projection at the commit boundaries the
 // chain recorded, exactly as the age fold plugin judges every live commit: the
 // registered sequence then carries the fold form the process left instead of the
@@ -1276,19 +1296,30 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 // restart reads the same summary the live process read. The fold is
 // projection-derived: every judgment it re-derives is already a compress request
 // on the chain, so the restore files nothing back and writes no fact of its own.
-// A window naming no positive token window folds nothing, matching the live
-// registration, and a fold refused by the context fails the boot instead of
-// silently leaving the material at one shape the chain never had.
+// The fold threshold is one identity of the window and never the registration
+// gate: a window naming no tokens measures its fold against the default model
+// window instead of folding nothing, so the restored chain keeps the fold form
+// the age rules give it. A fold refused by the context fails the boot instead
+// of silently leaving the material at one shape the chain never had.
 func restoreFoldForm(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) error {
-	if projection == nil || window.MaxTokens <= 0 {
+	if projection == nil {
 		return nil
 	}
+	measured := window
+	if measured.MaxTokens <= 0 {
+		measured.MaxTokens = defaultFoldWindowTokens
+	}
 	_, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      window.KeepRecentTasks,
-		VolumeThreshold: window.VolumeThresholdBytes(),
+		KeepRecent:      measured.KeepRecentTasks,
+		VolumeThreshold: measured.VolumeThresholdBytes(),
 	})
 	return err
 }
+
+// defaultFoldWindowTokens is the model window a fold measures against when the
+// declaration names no tokens: the fold threshold is the window's own identity,
+// so a zero window reads the default measure instead of dissolving the fold.
+const defaultFoldWindowTokens = 32000
 
 // seedLandedSeq reports the last sequence slot every partition already
 // committed, so the landing path of a restarted run continues the positions the
@@ -1758,7 +1789,10 @@ func (r *Run) noteModelReplacement(ctx context.Context, agentID event.AgentID, f
 		from = held.lease.CurrentVersion()
 	}
 	fact := event.ModelReplacementFor(agentID, from, to, source, event.ModelReplacementResultRequested)
-	key := r.loop.CommitFactFor(ctx, agentID, fact.Event(time.Now().UTC()))
+	key, commitErr := r.loop.CommitFactFor(ctx, agentID, fact.Event(time.Now().UTC()))
+	if commitErr != nil {
+		return "", fmt.Errorf("tagent: commit the model replacement fact of agent %q: %w", agentID, commitErr)
+	}
 	if key == "" {
 		return "", fmt.Errorf("%w: agent %q", ErrModelChangeUncommitted, agentID)
 	}

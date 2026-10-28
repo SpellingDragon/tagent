@@ -24,7 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/evolution"
+	"github.com/SpellingDragon/tagent/features/evolution"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	openaimodel "trpc.group/trpc-go/trpc-agent-go/model/openai"
 
@@ -211,18 +211,24 @@ func (s *cliSession) invoke(ctx context.Context, rt *tagent.Run, text string) er
 	if err != nil {
 		return fmt.Errorf("invoke: %w", err)
 	}
-	s.printFresh(rt.SessionHistory(s.addr))
+	s.printFresh(rt.SessionFacts(s.addr))
 	if turn.Terminal == model.KindFailed {
 		return errors.New("the model turn failed")
 	}
 	return nil
 }
 
-// printFresh writes the assistant messages committed since the previous print,
-// one line each. Tool-call messages and empty bodies are not part of the reply.
-func (s *cliSession) printFresh(history []model.Message) {
-	for ; s.delivered < len(history); s.delivered++ {
-		msg := history[s.delivered]
+// printFresh writes the assistant outputs committed since the previous print,
+// one line each, read from the committed facts of the run: one face per fact
+// keeps no second transcript, so the facts are the read-out face of the reply.
+// Tool-call messages and empty bodies are not part of the reply.
+func (s *cliSession) printFresh(facts []event.Event) {
+	for ; s.delivered < len(facts); s.delivered++ {
+		fact := facts[s.delivered]
+		if fact.Type != event.TypeAgentOutput {
+			continue
+		}
+		msg := fact.Message
 		if msg.Role != model.RoleAssistant || len(msg.ToolCalls) > 0 {
 			continue
 		}

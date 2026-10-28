@@ -12,7 +12,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -161,8 +161,8 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			t.Fatalf("echo_tool executions = %d, want the allowed call executed once", got)
 		}
 		shown := run.Presentations()
-		if len(shown) != 4 {
-			t.Fatalf("presentations = %+v, want one After presentation per committed fact of the turn (entry input, settled delivery, call result and output)", shown)
+		if len(shown) != 5 {
+			t.Fatalf("presentations = %+v, want one After presentation per committed fact of the turn (entry input, assistant call, settled delivery, call result and output)", shown)
 		}
 		facts := map[event.EventID]bool{}
 		for _, presentation := range shown {

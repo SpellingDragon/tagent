@@ -157,8 +157,10 @@ var (
 	// ErrNotClaimed reports a consumption of a mailbox entry no executor has
 	// claimed yet.
 	ErrNotClaimed = errors.New("state: the mailbox entry is not claimed yet")
-	// ErrClaimSettled reports the reclaiming of a mailbox entry whose consumption
-	// has already completed.
+	// ErrClaimSettled reports the reclaiming or the repeated consumption of a
+	// mailbox entry whose consumption has already completed: the receipt stands
+	// as the settled record, and the repeat is refused by name instead of
+	// answering the success the first consumption already recorded.
 	ErrClaimSettled = errors.New("state: the mailbox entry is already consumed")
 )
 var (
@@ -837,6 +839,12 @@ func (d *DurableCommit) Outbox(taskID event.TaskID) []task.OutboxNotice
     Outbox returns the notifications one task still owes delivery, each paired
     with its delivery-layer state, ordered by round, kind and sequence.
 
+func (d *DurableCommit) OwedNotices() []task.OutboxNotice
+    OwedNotices reports every notification the carrier still owes delivery on,
+    in the stable task, round, kind and sequence order: the open obligations
+    of the account, beside which the ones a consumption receipt confirms never
+    appear again.
+
 func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]task.TaskRecord, error)
     Records returns the durable fact chain of one task as restore links, in
     commit order: the admission link carries the stored task_spawned material,
@@ -1047,8 +1055,8 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
     against the given authority. An authority that is not present refuses every
     read. A consumption recorder, when one is supplied, receives the receipt of
     every completed logical consumption behind its own sync barrier before the
-    mailbox confirms the entry; a store beside none keeps the consumption in its
-    own bookkeeping alone.
+    mailbox confirms the entry, and serves the attempt record of every follow-up
+    turn beside it; a store beside none keeps both in its own bookkeeping alone.
 
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error
 
@@ -1061,6 +1069,14 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
     and the notification that produced it. Acceptance is idempotent by the
     notification's stable identity, so a replayed delivery records no second
     fact and keeps the target the first acceptance recorded.
+
+func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error)
+    Attempt reports the attempt record of one notification and whether
+    this mailbox holds one at all: the record of the one follow-up turn the
+    notification started, beside the terminal that turn ended on. A durable
+    account behind the mailbox answers from the log, so a process that starts
+    over the same log reads the attempt the stopped process left; a mailbox
+    beside none answers from its own bookkeeping alone.
 
 func (m *MemoryStore) Claim(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
     Claim moves one accepted input from pending to claimed in the mailbox of the
@@ -1076,10 +1092,12 @@ func (m *MemoryStore) Consume(ctx context.Context, addr event.Address, instance 
     Consume records the consumption of one claimed input in the mailbox of
     the site named: the entry moves to consumed, its receipt records the
     completion and the consumption position advances over the longest contiguous
-    completed prefix of the acceptance sequences. A completion beside an
-    earlier unfinished entry is recorded on its own entry while the position
-    stays before the hole it leaves. An entry already consumed stays as it is,
-    and an entry no executor claimed is refused.
+    completed prefix of the acceptance sequences. A completion beside an earlier
+    unfinished entry is recorded on its own entry while the position stays
+    before the hole it leaves. An entry already consumed is refused by name
+    — the receipt of the completed consumption stands as the settled record,
+    and a repeat adds nothing the first consumption did not already record — and
+    an entry no executor claimed is refused.
 
 func (m *MemoryStore) Establish(ctx context.Context, addr event.Address, instance event.InstanceID) (*Session, error)
     Establish implements Store.Establish. One explicit address and instance
@@ -1100,6 +1118,34 @@ func (m *MemoryStore) Reclaim(ctx context.Context, addr event.Address, instance 
     claimed through Claim, and an entry whose consumption completed is refused
     by name.
 
+func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, attempt SettleAttempt) error
+    RecordAttempt records one attempt of a notification's follow-up turn:
+    the empty terminal marks the turn in flight, and a terminal marks the one it
+    ended on. A durable account behind the mailbox stages the record behind its
+    sync barrier before this returns, so a caller that read the record back from
+    a second process reads the same attempt; a record the account already holds
+    with the same content stages no second pair, and a write the account refused
+    is reported instead of confirmed.
+
+func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
+    Release returns one claimed input to the pending pool of the mailbox of
+    the site named, so an executor that stopped beside a claim hands the work
+    back instead of holding it forever: the next claim picks the same input up
+    again and finishes it. An entry still pending is refused as not claimed,
+    and an entry whose consumption completed is refused by name: a settled entry
+    never returns to work.
+
+func (m *MemoryStore) RestoreOwed(ctx context.Context) error
+    RestoreOwed folds the notifications the durable account behind this mailbox
+    still owes back into the mailbox: the target site each notification's frozen
+    routing names is opened beside the instance that froze it, so the work a
+    stopped run left unconsumed waits for the next decision instead of being
+    lost with the process. The restore is idempotent — a notification already
+    sitting in its mailbox is accepted once and never appended twice — and the
+    site it opens beside a frozen instance never takes the address over from the
+    instance currently serving it. A mailbox beside no durable account restores
+    nothing, because nothing outside the process owes it work.
+
 func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Address, instance event.InstanceID) (*Session, error)
     Site returns a copy of the bookkeeping one established site holds, for the
     subject and instance named. A read is answered only beside a recorded grant,
@@ -1111,6 +1157,13 @@ func (m *MemoryStore) TrackDelivery(ctx context.Context, taskID event.TaskID, ta
     The registration is the delivery grant a notification is accepted beside,
     a later registration reroutes what is not yet accepted, and the target of an
     accepted notification stays as its acceptance recorded it.
+
+func (m *MemoryStore) Unconsumed() []WorkSeat
+    Unconsumed reports every mailbox entry whose consumption has not completed,
+    across every site this store holds, ordered by address, instance and
+    acceptance sequence so the same account always answers in the same order.
+    An entry an executor claimed but has not consumed yet still owes its work
+    and stays listed until its consumption completes.
 
 type MigratedOriginal struct {
 	// Key is the original identity the bytes landed under.
@@ -1614,6 +1667,19 @@ type Session struct {
     Session is the state owner's site for one explicit (agent, session) address:
     the mailbox bookkeeping of the site.
 
+type SettleAttempt struct {
+	// Terminal is the terminal the driven turn ended on, empty while the turn
+	// is in flight.
+	Terminal string `json:"terminal,omitempty"`
+}
+    SettleAttempt is the durable record of the one follow-up turn a notification
+    started: the terminal that turn ended on, and empty while the turn is in
+    flight. The record answers one question for the settle pump — whether a turn
+    already drove this notification to its terminal — so a process that starts
+    over the same log closes the entry beside the landed turn instead of driving
+    a second one. It says nothing about delivery: the consumption receipt is the
+    record of a delivered answer, and the two records are read as one account.
+
 type SkillLoad struct {
 	// Skill is the skill name the load was asked for.
 	Skill string
@@ -1775,3 +1841,21 @@ func (r *ToolResources) SkillLoads() []SkillLoad
 func (r *ToolResources) Tools(context.Context) []trpctool.Tool
     Tools reports the registered native tools of these resources in registration
     order.
+
+type WorkSeat struct {
+	// Address is the explicit address of the site the entry sits at.
+	Address event.Address
+	// Instance is the runtime instance that owns that site.
+	Instance event.InstanceID
+	// AcceptSeq is the acceptance sequence the entry took at its site.
+	AcceptSeq AcceptSeq
+	// Notice is the stable identity of the notification the entry accepted.
+	Notice task.Notice
+	// Claim is the claim state the entry stands at.
+	Claim ClaimState
+}
+    WorkSeat is one input the mailbox still owes a decision for: the site it
+    sits at, the acceptance sequence it took there, and the notification it
+    accepted beside the claim an executor may hold it under. A seat is the one
+    account a driven turn is started from, so the question whether work waits is
+    answered in one place.

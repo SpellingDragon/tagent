@@ -70,8 +70,8 @@ func ExampleObserver()
     arrives unchanged and is tallied, and a failure to record it is returned as
     an observation gap while the fact itself stays committed.
 
-func ExamplePhase_riskPolicy()
-    ExamplePhase_riskPolicy drives the two faces of the risk phase beside each
+func ExamplePort_riskPolicy()
+    ExamplePort_riskPolicy drives the two faces of the risk port beside each
     other: one element grades a call and renders the ruling over that grade,
     and a pass that carries no grade is ruled as an ordinary mutating call
     instead of passing ungraded.

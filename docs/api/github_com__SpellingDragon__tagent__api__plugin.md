@@ -1,22 +1,27 @@
 package plugin // import "github.com/SpellingDragon/tagent/api/plugin"
 
+This file names the two duties one fact->observation face may carry and the one
+error a retained obligation is reported beside. An observer-only face reads the
+committed fact; a driver face is asked by the fact to start work somebody owes
+— a follow-up turn, a delivery — and the After pass answers the two failures
+differently, because only one of them leaves work owed.
+
 Package plugin declares the material flow through which tagent injects its
-differentiated capabilities into the framework event flow: the producing phase
-and the consuming phase, each dispatched by the material a face reads, and the
-six ports those phases serve.
+differentiated capabilities into the framework event flow: the six ports the
+flow serves, each dispatched by the material its port reads.
 
 An instance is a registration unit: it reports the stable name of one flow
-instance and the port it serves — the material it reads and the product it
-answers — and the instance implements that port's narrow interface. The flow
-derives the phase from the port and dispatches the instance by the material
-that port reads. A built-in consumer — the drive that runs one decision,
-the tick that runs one reflection, the assembler that builds one request — is
-an instance of the same flow: the difference between a built-in instance and a
-mounted plugin is who mounts it, never how it is dispatched.
+instance and the port it serves — the material it reads and the product
+it answers — and the instance implements that port's narrow interface.
+The flow reads the narrow interface from the port and dispatches the instance
+by the material that port reads. A built-in consumer — the drive that runs
+one decision, the tick that runs one reflection, the assembler that builds one
+request — is an instance of the same flow: the difference between a built-in
+instance and a mounted plugin is who mounts it, never how it is dispatched.
 
-  - the extension-face vocabulary: the phases, the ports, the narrow
-    interfaces each port owns, the pipeline that dispatches them by material,
-    the post-commit observation wiring and the presentation pass;
+  - the extension-face vocabulary: the ports, the narrow interfaces each port
+    owns, the pipeline that dispatches them by material, the post-commit
+    observation wiring and the presentation pass;
   - the extension policies at the governance gate: the pre-execution ruling,
     the risk rules, the approval channel, the denial ledger, the goal registry
     and the budget window, each stated in its own file and reaching the pipeline
@@ -30,6 +35,13 @@ var ErrCallIdentityChanged = errors.New("plugin: the transform changed the call 
     a call and must never change its CallID, which stays as resolved. The Before
     pass reports it beside the plugin that moved the identity and errors.Is
     matches it.
+
+var ErrObservationObligationRetained = errors.New("plugin: the observation failed with its obligation retained")
+    ErrObservationObligationRetained reports one post-commit observation that
+    failed while the work it owed stays owed: the driver keeps that obligation
+    in its own durable account, so the After pass reports the failure beside
+    this error and never as a delivered observation. The cause is wrapped beside
+    it, so a reader learns from one error what failed and what stayed owed.
 
 TYPES
 
@@ -262,7 +274,7 @@ type EnvironmentRequest struct {
     EnvironmentRequest names the request assembly the environment blocks are
     rendered for: the agent the request runs as. The material itself is read
     by the face from the runtime it holds, so an assembly never has to hand
-    a bundle of its own state across the phase. The request is every block's
+    a bundle of its own state across the pass. The request is every block's
     provenance: each block traces back to the assembly it was rendered for,
     a block created for an assembly that consumes no fact at all included.
 
@@ -317,11 +329,11 @@ type Instance interface {
 	// Port reports the material this instance reads and the product it answers.
 	Port() Port
 }
-    Instance is one phase instance of the material flow. The drive that runs
-    one decision, the tick that runs one reflection and the assembler that
-    builds one request are built-in instances; a plugin is an instance the
-    composition root mounts. What an instance is differs only in who mounts it:
-    the flow dispatches every instance by the material its port reads.
+    Instance is one instance of the material flow. The drive that runs one
+    decision, the tick that runs one reflection and the assembler that builds
+    one request are built-in instances; a plugin is an instance the composition
+    root mounts. What an instance is differs only in who mounts it: the flow
+    dispatches every instance by the material its port reads.
 
     The redline list (3 rules): MUST declare the one port it serves and
     implement that port's narrow interface. MUST NOT declare a port it does
@@ -429,41 +441,6 @@ type Observer interface {
     observer. MUST NOT roll back the committed fact or re-run the observed work
     to satisfy an observer.
 
-type Phase int
-    Phase names the role one face serves in the material flow, and the roles are
-    two:
-      - PhaseProduce: the face answers a product that grows out of the material
-        it read — a corrected call, a ruling over a call, the environment blocks
-        of a request;
-      - PhaseConsume: the face answers a consumption of the material it read
-        — an observation of a fact, a view of a fact, the compression a filed
-        request asks for.
-
-    The phase is a reading of the port, never a position in time: the flow
-    dispatches a face by the material it reads, and the order inside one
-    material is the order the instances were declared in.
-
-const (
-	// PhaseProduce is the producing phase: the face answers a product of the
-	// material it read.
-	PhaseProduce Phase = iota
-
-	// PhaseConsume is the consuming phase: the face answers a consumption of the
-	// material it read.
-	PhaseConsume
-)
-func RouteOf(port Port) (Phase, error)
-    RouteOf reports the phase one port serves, by the closed table of the flow:
-    the producing ports grow a product out of the material they read, and the
-    consuming ports answer a consumption of it.
-
-      - call->call, call->ruling and request->environment are producing ports;
-      - fact->observation, fact->view and fact->compression are consuming ports.
-
-    A material the table does not declare, a product it does not declare,
-    and a pair no port serves are each refused by name instead of falling back
-    to a phase.
-
 type Pipeline struct {
 	// Has unexported fields.
 }
@@ -507,18 +484,17 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
     already happened: every fact->observation face reads the fact first, then
     every fact->view face renders it. The pass runs after the commit and never
     before it, so a refused call and a call whose commit failed present nothing
-    at all. An observation that fails is recorded as a named gap in the returned
-    presentation and never rolls the committed fact back; a presenter that
-    drops its text drops its own view only. The pass carries no error return:
-    a failure here is a gap or a dropped view, never a reason to touch the
-    committed fact.
+    at all, and it carries no error return: a failure here is a gap or a dropped
+    view, never a reason to touch the committed fact. A fact answers one view,
+    several, or none — each view stands in the order the presenters were
+    declared, names the presenter that wrote it beside the fact it was rendered
+    from, and a presenter that drops its text drops its own view only.
 
-    The fact enters the presentation pass once and every presenter renders it:
-    each answers its own view, the views stand in the order the presenters were
-    declared, and each view names the presenter that wrote it beside the fact
-    it was rendered from, so a fact answers one view, several, or none when
-    the pipeline carries no presenter at all — and every view it answers stays
-    traceable to its source.
+    The redline list (3 rules): MUST answer an observer-only failure as a
+    named gap and dispatch the later faces. MUST report a driver failure beside
+    ErrObservationObligationRetained, and never as a delivered observation or a
+    log line alone. MUST NOT retry, absorb or clear a driver's obligation here:
+    the obligation stays in the driver's own account.
 
 func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass, error)
     Before runs the one producing pass over one tool call: every call->call
@@ -572,9 +548,10 @@ type Port struct {
 	// Produces is the product this instance answers.
 	Produces Product
 }
-    Port is the declaration of one phase instance: the material it reads and the
-    product it answers. The pair is the whole routing of the flow — the phase
-    and the narrow interface are both readings of it.
+    Port is the declaration of one flow instance: the material it reads and the
+    product it answers. The pair is the whole routing of the flow — the narrow
+    interface the instance is held to and the pass that dispatches it are both
+    readings of it.
 
     The redline list (2 rules): MUST declare exactly one read material and one
     product; an element serving two ports is two instances. MUST implement the
@@ -589,11 +566,16 @@ type PostCommitObserver interface {
 }
     PostCommitObserver is the fact->observation port's narrow face:
     ObserveCommit observes one fact after its canonical commit, as a read-only
-    duty.
+    duty. One face carries one of two duties, and the duty is read from the face
+    itself when the flow is assembled: an observer-only face reads the fact and
+    owes nothing of it, while a driver face (driverObservation) is asked by the
+    fact to start work somebody owes, such as a follow-up turn or a delivery.
 
-    The redline list (3 rules): MUST observe a fact whose canonical commit
-    already happened. MUST NOT roll the committed fact back or re-run the work
-    when the observation fails. MUST NOT write the fact it observes.
+    The redline list (4 rules): MUST observe a fact whose canonical commit
+    already happened. MUST NOT roll the committed fact back or re-run the
+    work when the observation fails. MUST NOT write the fact it observes.
+    MUST carry the driver duty when a failed observation leaves work owed,
+    and keep that obligation in a durable account of its own.
 
 type Product string
     Product names what one face answers out of the material it reads:

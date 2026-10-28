@@ -41,26 +41,21 @@ The causal relation ledger: the parent chain one fact chain's replay maintains,
 committed to the append-only journal before the held link moves, and rebuilt
 from that journal when the ledger is opened again.
 
-Presentation decisions and budget assembly.
+Budget assembly of one projection.
 
-The projection layers the original text, the model view and the presentation
-decision: the original is kept apart from what the model sees, and only a
-full-text decision makes the two identical. A recorded decision is the basis a
-replay follows, so a recorded preview is never promoted back to the full text
-and the original is never reconstructed from a decision.
+A projection keeps the canonical text of every fact it holds and nothing about
+how a request presented it: the view a request carries is computed for that
+request alone, from the facts, the declaration and the budget it names. A later
+assembly under another budget is judged on its own, so material a tight budget
+shortened is presented whole again once the budget allows it and no assembly
+inherits the shape of an earlier one. What a past request actually showed is the
+request snapshot's record, never a decision the projection keeps.
 
-The replay settle family: the presentation decision one assembly settled on,
-stated as the fact it is — which entry, which presentation and the text the
-decision carries — and quoted by the identity that decision answers. A settled
-decision lands one fact; an entry the budget skipped settles nothing and lands
-none.
-
-Skeleton compile-time assertions for the replay shapes: the presentation
-decision, the chain-isolated replay source and relation store, the compaction
-payload and its refs, the cold-start rebuild that replays a fact chain into
-an empty projection, and the segment-age axis the bands and their folds are
-declared under. A renamed field or a widened signature stops this file from
-compiling.
+Skeleton compile-time assertions for the replay shapes: the projection entry,
+the chain-isolated replay source and relation store, the compaction payload
+and its refs, the cold-start rebuild that replays a fact chain into an empty
+projection, and the segment-age axis the bands and their folds are declared
+under. A renamed field or a widened signature stops this file from compiling.
 
 CONSTANTS
 
@@ -117,9 +112,6 @@ const CompactionEventType = event.TypeContextCompress
 const RebuildSkipNotEmpty = "projection not empty"
     RebuildSkipNotEmpty is the recorded reason of a rebuild that found a
     non-empty projection: the projection is never replaced by a replay.
-
-const ReplaySettleType = "replay.settle"
-    ReplaySettleType is the frozen type of a replay settle fact.
 
 VARIABLES
 
@@ -398,37 +390,6 @@ func (r *MemoryRelations) VerifyReplay(ctx context.Context) error
     holds, so a caller can assert the durable record and the served chain agree.
     A ledger opened without a journal has no replay source and says so.
 
-type PresentationDecision struct {
-	// Key identifies the entry the decision was recorded for.
-	Key event.EventID
-	// Mode is the presentation chosen for the entry.
-	Mode PresentationMode
-	// Preview is the bounded text shown when Mode is not PresentationFull, and
-	// is empty for a full-text decision.
-	Preview string
-}
-    PresentationDecision is the recorded choice of how one projection entry was
-    presented to the model, and the basis a replay reproduces.
-
-    The recorded decision is what a replay follows, so a recorded preview is
-    never promoted to the full original and the original is never reconstructed
-    from the decision.
-
-type PresentationMode int
-    PresentationMode names how one projection entry is presented to the model.
-
-const (
-	// PresentationUnrecorded is the zero value: no decision was recorded for the
-	// entry, so it is never presented as if one had been.
-	PresentationUnrecorded PresentationMode = iota
-	// PresentationFull presents the full original text of the entry.
-	PresentationFull
-	// PresentationSummary presents the stored summary in place of the original.
-	PresentationSummary
-	// PresentationTicket presents a bounded preview together with the ticket
-	// that reaches the original by segment.
-	PresentationTicket
-)
 type ProjectionEntry struct {
 	// Key is the canonical identity of the fact, in its hex form.
 	Key event.EventID
@@ -436,15 +397,16 @@ type ProjectionEntry struct {
 	Type string
 	// Summary is the stored summary of the fact, which is not the full text.
 	Summary string
-	// Content is what the model view carries for this entry: the full original
-	// when the recorded decision is full text, and otherwise the bounded preview
-	// or ticket that decision recorded.
+	// Content is the original text of the fact: immutable input, never a view.
+	// An assembly shapes the copy a request carries and leaves this text as the
+	// fact stated it, so the same entry presents differently under different
+	// budgets.
 	Content string
 	// Time is the time the fact was recorded.
 	Time time.Time
 }
     ProjectionEntry is one ordered item of a projection: the canonical identity
-    of a committed fact, its type and summary, the content presented for it,
+    of a committed fact, its type and summary, the original text it carries,
     and its time, in the same shape a recall card entry uses.
 
 type RebuildOptions struct {
@@ -506,21 +468,21 @@ type ReplayProjection struct {
 	// Has unexported fields.
 }
 
-    ReplayProjection is the replayable projection: the ordered model view of
-    one fact chain, the recorded presentation decisions that view was assembled
-    under, and the compaction payload a fold left on the chain. It is what
+    ReplayProjection is the replayable projection: the ordered model view of one
+    fact chain and the compaction payload a fold left on the chain. It is what
     RebuildProjectionFromWAL replays into.
 
     A projection holds no state outside the fact chain, so replaying the
-    recorded decisions reproduces the same view. The entries hold the canonical
-    form (the original text of each keyed fact), while a recorded decision
-    shapes what an assembly presents, and the layering is never collapsed.
-    Constraints:
+    recorded facts reproduces the same entries, and it holds no presentation
+    decision: the view a request carries belongs to that request and is computed
+    when it is assembled. The entries hold the canonical form (the original text
+    of each keyed fact), and an assembly shapes a copy of it rather than the
+    entry. Constraints:
 
       - a keyed entry already present is appended once, and a keyless entry
         always is;
-      - the original text, the model view and the presentation decision stay
-        layered;
+      - the original text of an entry is immutable input, and the model view is
+        the assembly's output;
       - a rebuild recomputes the deduplication key set from the entries it
         keeps.
 
@@ -529,27 +491,30 @@ func NewReplayProjection() *ReplayProjection
 
 func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry)
     Append adds the canonical entry of one committed fact: a keyed entry already
-    present is appended once, a keyless entry always is. The original text is
-    kept apart from the model view, and a recorded decision shapes the view —
-    never the original. An append is an in-memory mutation, so it takes the
-    port's context with nothing to cancel.
+    present is appended once, a keyless entry always is. The entry carries the
+    fact's own text, which is what the projection keeps — an append never shapes
+    the text for a model, so the same entry presents differently under different
+    budgets and the fact reads back unchanged either way. An append is an
+    in-memory mutation, so it takes the port's context with nothing to cancel.
 
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error)
     AssembleBudget packs the projection into one agent request of the given
-    token budget and returns the entries the request is assembled from, recovery
-    hint first when one applies. A recorded decision is followed unconditionally
-    — the view a replay reproduces never drifts with the remaining budget —
-    while an unrecorded entry degrades from the full text to a ticket and
-    then to the summary until the budget is met, settling on the decision it
-    recorded as one replay-settle fact. An entry that fits none of them is
-    skipped without a record and without a settle fact, so a later assembly
-    under a larger budget can still present it in full — except a notice entry,
-    which the budget may shorten to its identity card but never drop: a notice
-    the model never read is an event the model never saw arrive.
+    token budget and returns the entries the request is assembled from,
+    recovery hint first when one applies. Every entry is presented at the first
+    form that fits the room the budget leaves — the full text, the ticket,
+    the stored summary and for a notice its identity card — computed for this
+    assembly alone: nothing is read back from how an earlier assembly presented
+    the same fact, so a budget that shrinks presents less and a budget that
+    widens presents more again. The source facts are read and never written, and
+    the assembly files no settle fact and keeps no decision, so the projection
+    is left as the next assembly found it.
 
-    The source facts are read and never written: the assembly files settle facts
-    on the projection's own settle account, so the fact chain it replayed is
-    exactly as it stood.
+    The assembled request never runs past the budget it names: every entry it
+    carries, the recovery hint and the notice card included, is cut to the room
+    that remains. An entry that fits none of the forms is skipped, so a later
+    assembly under a larger budget can still present it in full — except a
+    notice entry, which the budget may shorten to its identity card but never
+    drop: a notice the model never read is an event the model never saw arrive.
 
 func (p *ReplayProjection) AssembleBudgetPrefix(ctx context.Context, budget, prefix int) ([]ProjectionEntry, error)
     AssembleBudgetPrefix assembles the leading prefix of the projection under
@@ -564,9 +529,6 @@ func (p *ReplayProjection) Compaction() *CompactionFact
 
 func (p *ReplayProjection) ConsumedKeys() []event.EventID
     ConsumedKeys returns the reseeded consumed keys in order.
-
-func (p *ReplayProjection) Decision(key event.EventID) (PresentationDecision, bool)
-    Decision returns the recorded presentation decision of one key.
 
 func (p *ReplayProjection) Entries() []ProjectionEntry
     Entries returns a copy of the projection entries in their canonical form.
@@ -608,53 +570,8 @@ func (p *ReplayProjection) Len() int
 func (p *ReplayProjection) Original(key event.EventID) (string, bool)
     Original returns the kept original text of one keyed entry.
 
-func (p *ReplayProjection) RecordDecision(key event.EventID, decision PresentationDecision)
-    RecordDecision records the presentation decision of one entry and reshapes
-    its model view accordingly. First time wins: a decision already recorded
-    is never upgraded, so a recorded preview is never promoted back to the full
-    text.
-
 func (p *ReplayProjection) RecoveryHint() *ProjectionEntry
     RecoveryHint returns the recovery hint entry a rebuild left, nil before one.
-
-func (p *ReplayProjection) Settles() []ReplaySettle
-    Settles returns a copy of the replay-settle facts the assembly recorded,
-    in settlement order: one fact per decision the assembly settled on, and none
-    for an entry it skipped.
-
-type ReplaySettle struct {
-	// ID is the identity of the settled decision: the content-addressed key the
-	// fact is quoted by, derived from the entry, the mode and the preview.
-	ID event.EventID
-	// Entry is the entry the assembly settled.
-	Entry event.EventID
-	// Mode is the presentation the assembly settled on.
-	Mode PresentationMode
-	// Preview is the bounded text the settled presentation carries, empty for a
-	// full-text settlement.
-	Preview string
-	// At is the moment the settlement was recorded.
-	At time.Time
-}
-    ReplaySettle is the fact one presentation decision is filed as: the entry
-    the assembly settled, the presentation it settled on, the bounded text
-    that presentation carries and the moment the settlement was recorded.
-    The identity is the decision's own, so the same decision always answers the
-    same fact.
-
-func ReplaySettleFor(decision PresentationDecision) ReplaySettle
-    ReplaySettleFor returns the settle fact one presentation decision is
-    filed as: the identity is content-addressed over the entry, the mode and
-    the preview, so the same decision always answers the same identity and a
-    repeated settlement adds no second fact. The recording moment stays zero for
-    the caller to stamp.
-
-func (s ReplaySettle) FactKey() string
-    FactKey returns the settle fact's identity: the decision identity the fact
-    is quoted by, unchanged by the moment it was recorded.
-
-func (s ReplaySettle) FactType() string
-    FactType returns the frozen type a settle fact is read as.
 
 type Segment struct {
 	// Index is the position of the segment in the projection, oldest first.

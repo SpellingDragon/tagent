@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )

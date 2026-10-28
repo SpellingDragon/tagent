@@ -2259,7 +2259,7 @@
     {
       "leaf": "04.1",
       "evidence_kind": "checker",
-      "checker": "scripts/check_runtime_evidence.py --check-contract",
+      "checker": "scripts/gates/check_runtime_evidence.py --check-contract",
       "doc_ref": "golden/runtime/event_integrity_scenarios.json"
     },
     {
@@ -2271,7 +2271,7 @@
     {
       "leaf": "04.2",
       "evidence_kind": "checker+production_acceptance",
-      "checker": "scripts/run_runtime_scenarios.py",
+      "checker": "scripts/scenarios/run_runtime_scenarios.py",
       "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/04-regression-gates/tasks.md"
     },
     {
@@ -2283,31 +2283,31 @@
     {
       "leaf": "04.4",
       "evidence_kind": "checker",
-      "checker": "scripts/check_event_integrity_mutations.py",
+      "checker": "scripts/gates/check_event_integrity_mutations.py",
       "doc_ref": "openspec/changes/archive/2026-10-25-event-consumption-integrity/changes/04-regression-gates/design.md"
     },
     {
       "leaf": "04.5",
       "evidence_kind": "checker",
-      "checker": "scripts/check_runtime_plan.py",
-      "doc_ref": "scripts/check_runtime_evidence.py"
+      "checker": "scripts/gates/check_runtime_plan.py",
+      "doc_ref": "scripts/gates/check_runtime_evidence.py"
     },
     {
       "leaf": "05.1",
       "evidence_kind": "workflow_checker",
-      "checker": "scripts/test_check_runtime_workflow.py",
+      "checker": "scripts/gates/test_check_runtime_workflow.py",
       "doc_ref": ".github/workflows/ci.yml"
     },
     {
       "leaf": "05.2",
       "evidence_kind": "workflow_checker",
-      "checker": "scripts/check_runtime_evidence.py --bundle",
+      "checker": "scripts/gates/check_runtime_evidence.py --bundle",
       "doc_ref": ".github/workflows/ci.yml"
     },
     {
       "leaf": "05.3",
       "evidence_kind": "docs",
-      "checker": "scripts/verify_doc.py",
+      "checker": "scripts/scenarios/verify_doc.py",
       "doc_ref": "docs/OPERATION.md"
     },
     {

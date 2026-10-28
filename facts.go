@@ -13,13 +13,13 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
-	"github.com/SpellingDragon/tagent/telemetry"
 )
 
 // mappedSummaryRunes bounds the one-line read a mapped entry carries when the
@@ -28,38 +28,51 @@ import (
 // mapped sequence speaks.
 const mappedSummaryRunes = 120
 
+// factCommitFormat and factCommitRetention name the reference registration
+// every committed fact of this run carries: the original format and the
+// retention policy the recall reference is registered under.
+const (
+	factCommitFormat    = "text/plain"
+	factCommitRetention = "keep"
+)
+
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
-// commitFact stores one fact of this run in the ledger the post-commit
-// observation reads back, and reports the identity it committed under: an event
-// that arrives without an identity is minted one here, and the whole event is
-// kept exactly as it stands, so the observer restores the fact as it committed
+// commitFactChecked is the one commit entry of this run's facts: an event that
+// arrives without an identity is minted one here, and the whole event is kept
+// exactly as it stands, so the observer restores the fact as it committed
 // instead of reconstructing one.
-// - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive and the settled delivery all land here.
+// - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive, the settled delivery and the compression judgment all land here.
 // - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
 // - A committed fact enters the mapped sequence of its own session chain right after it lands, so every consumption of that chain assembles the sequence the commits recorded.
 //
-// The identity is empty beside a commit that did not land: a caller that reads
-// the fact back by the reported identity never reads a fact the storage tier
-// refused, and the failure is reported beside the run instead of answered as a
-// commitment.
-func (r *Run) commitFact(evt event.Event) event.EventID {
-	key, err := r.commitFactChecked(context.Background(), evt)
-	if err != nil {
-		assemblyWarn("tagent: the fact was not committed err=%v", err)
-		return ""
-	}
-	return key
-}
-
-// commitFactChecked commits one fact into the storage tier before it enters the
-// live ledger, and reports the failure of that commit to the caller: a caller
-// told the fact committed holds a fact a later process reads back, and a caller
-// told it failed holds no live copy of it, so no path reports success over a
-// fact the tier refused.
+// The failure is the caller's to observe, never a line this entry writes and
+// swallows: the identity is empty beside a commit that did not land, a caller
+// that reads the fact back by the reported identity never reads a fact the
+// storage tier refused, and a caller that can neither return nor read the
+// failure records it at its own call site. One identity names one immutable
+// fact: a commit that repeats the fact the identity already names is answered
+// as the commitment it already is — the original identity beside no second
+// record — and a commit carrying other content under that identity is refused
+// by name before anything under it moves. The judgment is the same one the
+// storage tier answers under, so the live ledger and the durable record never
+// disagree about what one identity names.
 func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.EventID, error) {
 	if evt.Key == "" {
 		evt.Key = r.mintEventID()
+	}
+	r.mu.Lock()
+	held, seen := r.facts[evt.Key]
+	r.mu.Unlock()
+	if seen {
+		same, err := sameFactOf(held, evt)
+		if err != nil {
+			return "", err
+		}
+		if !same {
+			return "", fmt.Errorf("%w: %s", memory.ErrFactKeyConflict, evt.Key)
+		}
+		return evt.Key, nil
 	}
 	if err := r.persistFact(ctx, evt); err != nil {
 		return "", err
@@ -84,7 +97,7 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 // event so the same process recalls what it just committed.
 // - A run beside no storage tier, and a fact naming no owning agent, keep the fact in memory alone: no tier means no durable carrier to write.
 // - The segment commit is the durable write: nothing enters the live ledger before it returns success, and a refused commit leaves the previous position untouched.
-// - An event the tier already published is not committed twice, so a retry of one fact keeps one record.
+// - An event the tier already published is not committed twice: the very fact the identity already names is answered as the commitment it is, and another content under that identity is refused by name, so a retry of one fact keeps one record and a second fact never lands beside it.
 // - Landing the query record and submitting the vector generation are consequences of a commit that already landed; their failure is reported and never rolls the fact back.
 func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	r.mu.Lock()
@@ -94,7 +107,7 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	if tier == nil || evt.Owner.AgentID == "" {
 		return nil
 	}
-	body, err := memory.BodyFromEvent(evt, "text/plain", "keep")
+	body, err := memory.BodyFromEvent(evt, factCommitFormat, factCommitRetention)
 	if err != nil {
 		return err
 	}
@@ -102,12 +115,14 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	if err != nil {
 		return err
 	}
-	if _, held, err := tier.Segments.GetEvent(ctx, evt.Key); err != nil {
+	stored, held, err := tier.Segments.GetEvent(ctx, evt.Key)
+	if err != nil {
 		return err
-	} else if held {
-		return nil
 	}
-	if err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Content)); err != nil {
+	if held {
+		return storedFactConflict(evt.Key, stored, body)
+	}
+	if err := tier.Originals.Put(ctx, body.Ref(), []byte(body.Message.Content)); err != nil {
 		return err
 	}
 	partition := memory.PartitionIDFromName(string(evt.Owner.AgentID))
@@ -130,7 +145,14 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	}
 	r.landing.Unlock()
 	if errors.Is(err, ledger.ErrContentConflict) {
-		return nil
+		prior, held, getErr := tier.Segments.GetEvent(ctx, evt.Key)
+		if getErr != nil {
+			return getErr
+		}
+		if !held {
+			return err
+		}
+		return storedFactConflict(evt.Key, prior, body)
 	}
 	if err != nil {
 		return err
@@ -138,18 +160,49 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 	if supply == nil {
 		return nil
 	}
-	stored := ledger.StoredEvent{Key: evt.Key, PartitionID: partition, WindowTS: window, Seq: seq, Body: encoded}
-	if err := supply.source.LandEvent(ctx, stored); err != nil {
+	landed := ledger.StoredEvent{Key: evt.Key, PartitionID: partition, WindowTS: window, Seq: seq, Body: encoded}
+	if err := supply.source.LandEvent(ctx, landed); err != nil {
 		assemblyWarn("tagent: the committed fact %s is not landed in the query table err=%v", evt.Key, err)
 	}
 	if supply.seam != nil {
-		text := body.Content
+		text := body.Message.Content
 		if text == "" {
-			text = body.Summary
+			text = body.Meta[event.MetaKeyEventSummary]
 		}
 		supply.seam.Submit(evt.Key, text)
 	}
 	return nil
+}
+
+// sameFactOf reports whether one live fact and one commit name the same fact:
+// the comparison runs on the bodies the two project to, exactly as the storage
+// tier compares the record it holds, so the live ledger and the durable record
+// judge one identity under one semantics.
+func sameFactOf(held, evt event.Event) (bool, error) {
+	existing, err := memory.BodyFromEvent(held, factCommitFormat, factCommitRetention)
+	if err != nil {
+		return false, err
+	}
+	candidate, err := memory.BodyFromEvent(evt, factCommitFormat, factCommitRetention)
+	if err != nil {
+		return false, err
+	}
+	return existing.SameFact(candidate), nil
+}
+
+// storedFactConflict answers one commit that met a record already stored under
+// its identity: the very fact that record carries is the commitment it already
+// is and commits nothing twice, and another content is refused by the named
+// key conflict before anything under the identity moves.
+func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memory.EventBody) error {
+	existing, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return err
+	}
+	if existing.SameFact(body) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s", memory.ErrFactKeyConflict, key)
 }
 
 // recordMapped appends one mapped entry to the sequence of its session and
@@ -166,7 +219,7 @@ func (r *Run) persistFact(ctx context.Context, evt event.Event) error {
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	held, carried := r.replays[sessionOf(evt)]
+	slot, held, carried := r.replaySlotLocked(replayAddressOf(evt))
 	if !carried {
 		return
 	}
@@ -175,7 +228,7 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 		held.endedAt = evt.Key
 	}
 	held.rangeInvocation = evt.InvocationID
-	r.replays[sessionOf(evt)] = held
+	r.replays[slot] = held
 }
 
 // admitsRange reports whether one committed fact starts a range: the ready
@@ -210,21 +263,25 @@ func sessionOf(evt event.Event) event.SessionID {
 // fresh projection through AttachReplay under the window the declaration names,
 // so every later consumption of the chain assembles the sequence the commits
 // record and the age fold measures it against the same window. A held
-// registration is left as it stands, and a session naming no window maps onto
-// no projection: its commits record nothing beside the fact itself and a
-// declaration that declares no window keeps the assembly as it stood.
+// registration is left as it stands, and a session naming no window registers
+// exactly as a budgeted one does: the window is the presentation budget and the
+// fold measurement, never the registration gate — a declaration of no tokens
+// presents its projection under no budget at all, and the fold reads the
+// default window as its measure.
 // A chain beside no projection still reads its notice facts: the notice read
 // face attaches for it too and answers from the committed facts of the session,
 // so the material of a notification reaches the follow-up decision whether or
 // not the declaration registered a mapped sequence. The face is one read of one
 // truth — the fact chain — and never a second input lane beside it.
 func (r *Run) attachDeclaredReplay(evt event.Event) {
-	session := sessionOf(evt)
-	if session == "" {
+	addr := replayAddressOf(evt)
+	if addr.SessionID == "" {
 		return
 	}
 	r.mu.Lock()
-	_, held := r.replays[session]
+	_, scoped := r.replays[addr]
+	_, seam := r.replays[event.Address{SessionID: addr.SessionID}]
+	held := scoped || seam
 	window := FoldWindow{}
 	if !held {
 		window = foldWindowOf(specOfLocked(r.current.Plan.Declaration, agentOf(evt)))
@@ -234,11 +291,7 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 		r.attachNoticeFeed()
 		return
 	}
-	if window.MaxTokens <= 0 {
-		r.attachNoticeFeed()
-		return
-	}
-	err := r.AttachReplay(agent.RequestChain{SessionID: session}, window, replay.NewReplayProjection())
+	err := r.attachScopedReplay(addr, window, replay.NewReplayProjection())
 	if err != nil {
 		return
 	}
@@ -253,7 +306,7 @@ func (r *Run) attachDeclaredReplay(evt event.Event) {
 // request.
 func (r *Run) ReplayEntries(session event.SessionID) ([]replay.ProjectionEntry, bool) {
 	r.mu.Lock()
-	held, carried := r.replays[session]
+	held, carried := r.replayOfSessionLocked(session)
 	r.mu.Unlock()
 	if !carried {
 		return nil, false
@@ -293,7 +346,7 @@ var _ agent.NoticeFeed = noticeProjection{}
 func (p noticeProjection) NoticeBoundary(chain agent.RequestChain) (int, bool) {
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
-	held, carried := p.run.replays[chain.SessionID]
+	held, carried := p.run.replayOfSessionLocked(chain.SessionID)
 	if !carried || held.projection == nil {
 		return 0, true
 	}
@@ -314,7 +367,7 @@ func (p noticeProjection) NoticeBoundary(chain agent.RequestChain) (int, bool) {
 func (p noticeProjection) NoticesFrom(chain agent.RequestChain, prefix event.EventID, cursor int) ([]agent.NoticeView, int, bool) {
 	p.run.mu.Lock()
 	defer p.run.mu.Unlock()
-	held, carried := p.run.replays[chain.SessionID]
+	held, carried := p.run.replayOfSessionLocked(chain.SessionID)
 	if !carried || held.projection == nil {
 		return p.run.noticesOfLocked(chain.SessionID, prefix, cursor)
 	}
@@ -582,33 +635,33 @@ func mailboxSeqOf(site *state.Session, notice task.Notice) (state.AcceptSeq, boo
 }
 
 // SessionHistory reports the transcript the named session accumulated across
-// the drives that already ended on it, as a copy the caller owns. The history
-// of one session never mixes with the history of another.
+// the drives that already ended on it, as a copy the caller owns.
 //
-// This ledger is the read-out face of the execution scene the run holds, not a
-// durability record: what a restarted process reads back is recovered from the
-// durable fact chain by replay, so no body snapshot is kept beside the facts.
+// The history of one session chain is one face: the mapped sequence its commits
+// record, read through the request boundary of the next invocation. This face
+// carries no second copy of it, so it answers an empty transcript for every
+// chain — a session whose material exists reads it from that sequence, and a
+// session whose commits recorded none has none to read. A reader that keeps a
+// transcript beside the sequence would present the same facts twice, once from
+// the sequence and once from the copy, and a restart would present a different
+// history than the live process, because the copy is not a durability record
+// while the sequence is replayed from the durable fact chain.
 func (r *Run) SessionHistory(addr event.Address) []model.Message {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]model.Message(nil), r.history[addr]...)
+	return nil
 }
 
-// CommitHistory appends the transcript one ended drive accumulated to the
-// history of its session, so the next invocation of the session reads the
-// range's history as it actually ended while no two invocations ever batch
-// their ready input together. A session whose chain carries a mapped sequence
-// commits no transcript here: that sequence carried every fact of the range as
-// it committed, and the range reads back from it instead of from a second
-// transcript of the same facts.
-func (r *Run) CommitHistory(addr event.Address, msgs []model.Message) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, mapped := r.replays[addr.SessionID]; mapped {
-		return
-	}
-	r.history[addr] = append(r.history[addr], msgs...)
-}
+// CommitHistory is the write side of the same one face: the transcript one
+// ended drive accumulated is already carried by the mapped sequence of the
+// session — every fact of the range entered it as it committed, in commit order,
+// with the boundary the next request presents — so committing it here keeps no
+// second copy and appends nothing.
+//
+// The call is kept as the seam the loop commits an ended drive's transcript
+// through: a loop beside this face needs no branch of its own, and a run beside
+// no mapped sequence records no transcript at all, exactly as a chain whose
+// facts committed nothing has nothing to present. The history a restart reads
+// comes back from the durable fact chain by replay, never from this seam.
+func (r *Run) CommitHistory(addr event.Address, msgs []model.Message) {}
 
 // resolveFact reports the native tool message one recorded fact carries.
 func (r *Run) resolveFact(id event.EventID) (model.Message, bool) {

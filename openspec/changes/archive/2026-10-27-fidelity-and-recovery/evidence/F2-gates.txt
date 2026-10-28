@@ -1,0 +1,215 @@
+F2 全量门禁 —— fidelity-and-recovery 收尾
+工作树：/Users/pengweiye/Documents/codes/tagent
+HEAD：a3e7441（= 派单标称 0f96892 之后另有 3.2 G6b 收尾提交，见战报疑惑点）
+采集：2026-10-27 04:03– 起 CST
+证据根：/tmp/tagent-f2-evidence
+格式：门名 | 命令 | 原始退出码 | 证据文件
+
+（长跑事件门后台 + 轮询；其余逐条前台跑、原始退出码如下）
+
+================================================================================
+1. lint
+================================================================================
+$ bash scripts/lint.sh
+LINT_RC=0            证据 /tmp/tagent-f2-evidence/lint-3.log（末行 "lint: ok"）
+备注：前两跑 RC=1 已定性处置（非 flake）：
+  - lint-1：concept budget S1/S4 钉 settle_turn.go:SettleWake（3.2 引入面未登记概念债）
+    → 按仓库既有机制修复：BASELINE 债务登记 + examples/contract/root/SettleWake_example.go
+      canonical example + SettleWake Godoc 红线块（先例 da2c8d5）；
+  - lint-2：docs/api is stale（runtime/state 的陈旧来自 3.2 未再生成）
+    → bash scripts/gen_godoc.sh 再生成 3 文件（GEN_RC=0）；
+  - lint-3：ok（本次门禁采信口径）。
+
+================================================================================
+2. checker selftests —— test_check_runtime_*.py
+================================================================================
+$ python3 -m unittest discover -s scripts -p "test_check_runtime_*.py"
+SELFTESTS_RUNTIME_RC=0    证据 /tmp/tagent-f2-evidence/selftests-runtime.log
+（Ran 233 tests in 12.760s — OK；该组亦为 lint.sh 内部阶段，独立留痕）
+
+================================================================================
+3. check-openspec.sh
+================================================================================
+$ ./scripts/check-openspec.sh
+CHECK_OPENSPEC_RC=0       证据 /tmp/tagent-f2-evidence/check-openspec.log
+（Totals: 133 passed, 1 failed (134 items)；失败项 = in-flight change
+ post-training-data-loop，脚本注释 "not gated — WIP"，非本变更面；
+ "OK: all main specs pass validate --strict."）
+
+
+================================================================================
+4. short 十轮（run_runtime_scenarios.py --scope event-short --repeat 10）
+================================================================================
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-short --repeat 10 --out /tmp/tagent-f2-evidence/event-short
+SHORT_RC=1                证据 /tmp/tagent-f2-evidence/event-short.log + repeat-1..10/evidence.json
+repeats: passed=0/10 —— 十轮全红，且每轮红在完全相同的三个测试（确定性，非 flake，不适用受控重跑）：
+  01.1 TestEventIntegrityNoticeIdentity        tests/integration/execution
+      event_integrity_test.go:149: delegated notice phase = "consumed", want the acceptance
+      the unattended delivery records
+  01.7 TestEventIntegrityCLIAdapter            tagent-cli-host (examples/cli-host)
+      main_test.go:50: stdout line = "", want "mock reply: hello from stdin"
+  03.9 TestEventIntegrityRestart               tests/integration/history
+      event_integrity_test.go:2605-2615: the restart drain = {Drained:true Unsettled:[]},
+      want the recovered obligation reported open
+
+[归因]（clone worktree 硬证，findings 45 行先例口径）
+- a3e7441 纯净树（/tmp/tagent-f2-attr，0 改动）三测同红、失败断言逐字一致
+  → 非本收尾单改动引入（本单改动全在 tests/docs/scripts/example 面，零产品行为）；
+  ATTR_NOTICE_RC=1 / ATTR_RESTART_RC=1 / ATTR_CLIADAPTER_RC=1（证据 attr-*.log）
+- 8afa6cf 变更前基线（/tmp/tagent-f2-base）三测全绿
+  BASE_NOTICE_RC=0 / BASE_RESTART_RC=0 / BASE_CLIADAPTER_RC=0（证据 base-*.log）
+  → 三红是 8afa6cf..HEAD 之间的回归（既非历史遗留、亦非并行 untracked 残留）
+- 二分链（同 worktree 逐点 checkout 复跑）：
+  da2c8d5（3.1 G5 前）三测绿          → bisect-da2c8d5.log
+  a68bef6（4.2+4.3 G8G9）三测绿       → bisect-a68bef6.log / bisect-a68bef6-cli.log
+  0f96892（4.1 G7）NoticeIdentity+Restart 绿、CLIAdapter 红 → bisect-0f96892(-cli).log
+  a3e7441（3.2 G6b）三测红            → attr-*.log
+  ⇒ 打破提交定位（两处，均本变更波次产品面回归）：
+    · 0f96892（4.1 G7 历史恢复与预算解耦）打破 TestEventIntegrityCLIAdapter/formal_cli_turn
+    · a3e7441（3.2 G6b 邮箱 settle wake）打破 TestEventIntegrityNoticeIdentity/
+      tool_and_subagent_notice_reaches_original_invocation 与 TestEventIntegrityRestart/positive|negative
+- 定性：确定性回归（十轮逐字一致 + 纯净树复现 + 基线绿），非 flake，不适用台账受控重跑；
+  修复属产品面改动且撞已归档变更 event-consumption-integrity 的验收锚（验收面冻结），
+  超出本收尾单授权，不修不绕，留待编排者裁决归属与修法（详见战报②）。
+
+
+================================================================================
+5. 三模块 build / vet / test -short（ci.yml 口径）
+================================================================================
+[root @ /Users/pengweiye/Documents/codes/tagent]                证据 modules-root.log
+$ go build ./...            BUILD_RC=0
+$ go vet ./...              VET_RC=0
+$ go test ./... -short -count=1
+    TESTSHORT_RC=1          唯一红包 tests/integration/history = TestEventIntegrityRestart
+    （event_integrity_test.go:2605 同断言，与 §4 同一根因 a3e7441/3.2 G6b，不再单列；
+     证据 short-history.log）
+[examples/wechat-bot]                                            证据 modules-wechatbot.log
+$ go build ./...            BUILD_RC=0
+$ go vet ./...              VET_RC=0
+$ go test ./... -short -count=1
+    TESTSHORT_RC=0          ok wechat-bot
+[examples/cli-host]                                              证据 modules-clihost.log
+$ go build ./...            BUILD_RC=0
+$ go vet ./...              VET_RC=0
+$ go test ./... -short -count=1
+    TESTSHORT_RC=1          两红（证据 ch-testshort.log）：
+      TestEventIntegrityCLIAdapter（main_test.go:50，= §4 同根因 0f96892/4.1 G7）
+      TestCLISingleShotMockModel（main_test.go:23: stdout = "", want "mock reply: hello"）
+      —— 二分补证（同 worktree）：a68bef6 绿（bisect-oneshot-a68.log）→
+         0f96892 红同断言（bisect-oneshot-0f9.log）
+      ⇒ 同属 0f96892（4.1 G7）打破的 cli-host stdout 簇，与 CLIAdapter 同根因
+
+
+================================================================================
+6. long 六片（seed 1/7/42 × window 256/32768，--repeat 1 --timeout 1200）
+================================================================================
+$ bash /tmp/tagent-f2-evidence/run-long.sh   （逐片 python3 scripts/run_runtime_scenarios.py
+    --contract golden/runtime/event_integrity_scenarios.json --scope event-long
+    --seed S --window W --repeat 1 --timeout 1200，串行防 2 核互抢假红）
+LONG_RC=6/6 片红（05:48:37 ALL_LONG_DONE）    证据 event-long/long-shards-summary.txt + 各片 repeat-1/
+  seed-1-window-256    RC=1  smoke_test.go:2894: settle notifications = 49/47, want 47
+  seed-1-window-32768  RC=1  smoke_test.go:2894: settle notifications = 48/47, want 47
+  seed-7-window-256    RC=1  smoke_test.go:2853: generation 48 … no text to smoke-chat-a
+                             carrying "settle-ack SMOKE-R70496" after 1m0s (recorded=21)
+                             （settle-ack 投递丢失；generation 聚合失败 @2860）
+  seed-7-window-32768  RC=1  smoke_test.go:2894: settle notifications = 49/47, want 47
+  seed-42-window-256   RC=1  smoke_test.go:2894: settle notifications = 50/47, want 47
+  seed-42-window-32768 RC=1  smoke_test.go:2894: settle notifications = 51/47, want 47
+形态：六片无一绿（确定性，非 flake）；5/6 通知计数超期望 1–4 条（48–51/47 单调漂移）、
+1/6 settle-ack 投递 60s 丢失 —— 全落 settle/通知语义簇（TestEventIntegrityLongRun/positive）。
+[归因终判]（受控重跑一次 + 纯净树对照，findings 45 行先例口径）
+- 受控重跑（台账口径，非 flake 验证）：工作树同参 rerun 仍红（notifications 49/47、settle-ack 丢失），
+  累计 7/7 片红 → 非 flake，不适用再重跑。
+- a3e7441 纯净树（/tmp/tagent-f2-attr，0 改动）同参复跑（-args -seed=1 -window=256）：
+  ATTR_LONG_RC=0 绿（684.8s，证据 attr-long.log）→ 长红非 HEAD（a3e7441）固有。
+- 已硬证的短十轮 NoticeIdentity/Restart 同簇红归因 a3e7441（3.2 G6b）；long 红与其语义同族
+  （settle 通知多发/ack 丢失/obligation 不开）。
+- 排查已排除：本收尾单改动面（settle_turn.go 该文件 diff 纯注释、runner 无自定义 env）；
+  另发现嵌套 gitlink examples/wechat-bot/skills/interview/agent-interview-helper 于当日 06:05
+  被并行活动改动（git status 可见）。
+- 定性：工作树确定性红（7/7 同向）、非 flake、非 HEAD 固有 —— 同 HEAD 两棵树结果分叉
+  （纯净树绿 vs 工作树红），唯一混杂变量=工作树并行残留/嵌套 gitlink，属调用方式混杂，
+  如实申报不硬绕（见战报②③）；long 门红未清，F2 勾选口径留编排者裁。
+
+
+================================================================================
+7. mutations --all（11 mutation 杀伤力验证）
+================================================================================
+$ python3 scripts/check_event_integrity_mutations.py --all --json \
+    --out /tmp/tagent-f2-evidence/event-integrity-mutations
+MUTATIONS_RC=1          证据 mutations.log + event-integrity-mutations/evidence.json
+红因=mutation registry 陈旧（gate 未进入杀伤力验证，control_tree_green=false，mutations=[]）：
+  MUT-EVID-02-dual-material-input: stale mutation, the patch anchor occurs 0 times in host.go
+  MUT-EVID-03-busy-notice-drop: stale mutation, the patch anchor occurs 0 times in settle_turn.go
+  MUT-EVID-04-position-boundary: stale mutation, the patch anchor occurs 0 times in request.go (×2)
+[归因] anchor 脱节面=本变更重构面：
+  · host.go driveLocked 调用 `_` → `turn`（G6b/G5 起检查 turn.Terminal）→ MUT-EVID-02 old 文本失效；
+  · settle_turn.go 的 firing/retained 机制随 3.2 G6b（a3e7441）整体降解为 mailbox（grep firing|retained
+    0 命中）→ MUT-EVID-03 的注入语义（busy 丢通知 vs retained）在新架构无直接等价注入点；
+  · request.go replays 索引随 G4（e46708d）改全地址键、endedAt/endedPrefix 随 G1/G7 重构
+    → MUT-EVID-04 两处 anchor（含 chain.SessionID 单键形态）失效。
+[处置] 不修不动：check_event_integrity_mutations.py 是 event-consumption-integrity 归档变更的
+  frozen registry（00.3-frozen-contract.json 为源；ci.yml 明文 "never skipped by narrowing --all"），
+  anchor 迁移=跨变更验收面资产维护，且 MUT-EVID-03（busy 语义新架构映射多解）与 MUT-EVID-04
+  （大文本重构映射，错映射=假杀伤力）属"多解且选错代价大"，按验收面红线停止上报待裁。
+  建议选项：(i) 编排者指派 G6b/G5/G1/G4/G7 所属波次随重构迁移 4 anchor（保持缺陷语义与
+  expect_assertion 不变）；(ii) 裁定 MUT-EVID-03 缺陷语义在 mailbox 架构下的等价表述后新钉。
+
+================================================================================
+8. bundle 总门（check_runtime_evidence.py --bundle）
+================================================================================
+$ python3 scripts/check_runtime_evidence.py --bundle /tmp/tagent-f2-evidence/bundle \
+    --contract golden/runtime/event_integrity_scenarios.json --json
+BUNDLE_RC=1             证据 bundle-gate.json（counts: bundle_evidence_files=17 / short=10 / long=6 / mutation=1）
+红因=上游 long 六片红的透传（非 bundle 自身组装问题）：
+  "subtests[0]: mandatory anchor (03.11/TestEventIntegrityLongRun, positive) verdict 'fail'；
+   fail/skip/missing/running are all failures"（六片各一组同型）
+bundle 结构校验通过（六片矩阵组合齐全、10 short 轮齐全、mutation evidence 在位），
+唯一红源=03.11/TestEventIntegrityLongRun 的 settle 簇红（见 §6）。
+
+================================================================================
+9. 症状 job（^TestLocalSmokeSymptom 前缀，smoke tag）
+================================================================================
+$ go -C examples/wechat-bot test -tags smoke . -run '^TestLocalSmokeSymptom' -count=1 -timeout 600s
+SYMPTOM_RC=0            证据 symptom.log（ok wechat-bot 13.676s）
+含 G10 红锚 TestLocalSmokeSymptomNoSendTool（乱序负锚在内）全绿。
+
+
+================================================================================
+清障单重跑段（编排者三项裁定落地后，2026-10-27；HEAD d248d05+清障改动，证据根 /tmp/tagent-clear-evidence）
+================================================================================
+裁定①验证面：
+$ python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json \
+    --scope event-short --repeat 10 --out /tmp/tagent-clear-evidence/event-short
+SHORT_RC=0   passed=10/10，10 轮全 verdict=match exit=0（event-short/repeat-1..10/
+  evidence.json + event-short.log；F2 时 0/10 → 清障后 10/10）。
+裁定②long 干净重采（gitlink 指针 888fc16 未动、untracked 杂项留置、干净树串行防互抢）：
+$ bash /tmp/tagent-clear-evidence/run-long.sh（六片 seed 1/7/42 × window 256/32768，
+  --repeat 1 --timeout 1200）
+LONG_RC=1   6/6 verdict=fail（07:09-08:26 串行；smoke_test.go:2894 settle notifications
+  = 51/50/50/51/50/51 每 47，want 47）；受控重跑 1 片（rerun-seed-1-window-256）仍 fail
+  （49/47），累计 7/7 同向非 flake。裁定②「六片 match」目标落空；F2 期「工作树混杂红」
+  假设被否定（d248d05 纯 openspec 提交、产品面=a3e7441 与 F2 纯净树一致），同产品面
+  两棵树结果分叉之谜未解 → 待编排者裁（详见战报②）。
+裁定③registry 迁移（M1/M2/M3 + M4 注入补全，逐行登记 mutation-anchor-migration.txt）：
+$ python3 scripts/check_event_integrity_mutations.py --all --json \
+    --out /tmp/tagent-clear-evidence/event-integrity-mutations
+MUTATIONS_RC=0   11/11 killed（全 named_assertion 命中，control_tree_green=true；
+  证据 event-integrity-mutations/evidence.json + mutations-all.log）。静态锚复核：
+  24 处 patch 锚在工作树逐处 hits=1（python importlib 复核，命令见战报①）。
+收尾门禁（串行；完整原始输出 gates.log + 各门日志）：
+  三模块 build/vet/test -short：root 0/0/0、wechat-bot 0/0/0、cli-host 0/0/0（TEST_RC 均 0）
+  LINT_RC=0（lint: ok）
+  SELFTESTS_RC=0（Ran 233 tests in 11.889s / OK）
+  CHECK_OPENSPEC_RC=0（change/fidelity-and-recovery ✓；唯一 ✗=change/post-training-data-loop
+    为 WIP 非门内项，脚本注明 not gated）
+  SYMPTOM_RC=0（ok wechat-bot 12.944s）
+bundle 总门：
+$ python3 scripts/check_runtime_evidence.py --bundle /tmp/tagent-clear-evidence/bundle \
+    --contract golden/runtime/event_integrity_scenarios.json --json
+BUNDLE_RC=1   counts: bundle_evidence_files=17（short=10 / long=6 / mutation=1），
+  结构校验过（矩阵齐全、repeat 1..10 齐全、mutation evidence 在位）；红源=long 六片
+  透传（03.11/TestEventIntegrityLongRun recorded fail），short/mutation 面干净。
+  红因同 §8 非 bundle 组装问题；随裁定② 待裁项一并待编排者裁。
+

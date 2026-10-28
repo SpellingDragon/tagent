@@ -6,7 +6,7 @@
 
 ## 一、治理闸行为（Governance · `enforcement=warn`）
 
-所有 agent 的非 wrapper leaf 工具（`exec`/`mcp_call`/`save_file`/`replace_content`/`refine`）调用前经 `GovernanceGate.Evaluate` 裁决（`agent/governance/gate.go`）：`classify → critical 批准门 → goal 检查 → 预算闸 → 记账/放行`。
+所有 agent 的非 wrapper leaf 工具（`exec`/`mcp_call`/`save_file`/`replace_content`）调用前经治理策略裁决（`features/evolution/governance/policy.go` 的 `Policy.Judge` 插件端口）：`classify → critical 批准门 → goal 检查 → 预算闸 → 记账/放行`。
 
 ### 1.1 风险分级 → 处置总表（`classifier.go` DefaultRules + `DispositionFor`）
 
@@ -19,7 +19,7 @@
 
 ### 1.2 critical 审批闭环（`gate.go` critical 分支 + `approval.go`）
 
-模型调 `exec {"cmd":"rm -rf /tmp/x"}` → classify=critical（exec.destructive）→ `Check(tool, digest)` 未命中 → `Request` 写 `approvals/<id>.json`（pending）→ 返回 `[governance_denied]` 与请求 ID、**不执行**；外部审批者落盘批准（改 `<id>.json` status=approved，或微信/CLI Decide）→ agent 重试同一 exec（同参数 ⇒ 同 digest）→ `Check` 未命中索引 → 节流重扫目录 → 命中 approved → 放行执行并记 audit 事件。三条关键行为：**digest 绑定防绕过**（批准绑定参数 sha256，批准后改参数再调 → digest 不匹配 → 重新走审批，`approval.go checkIndex`）；**异步不阻塞**（critical 挂起立即返回拒绝 + 请求 ID，`Check` 未命中时节流重扫 `approvals/`，间隔默认 2s、可注入）；**warn 不放松 critical**（critical 未批准仍不执行——warn 只放松 high/medium 的记账放行，不放松不可逆操作）。
+模型调 `exec {"cmd":"rm -rf /tmp/x"}` → classify=critical（exec.destructive）→ `Check(tool, digest)` 未命中 → `Request` 写 `approvals/<id>.json`（pending）→ 返回 `[governance_denied]` 与请求 ID、**不执行**；外部审批者落盘批准（改 `<id>.json` status=approved，或微信/CLI Decide）→ agent 重试同一 exec（同参数 ⇒ 同 digest）→ `Check` 未命中索引 → 节流重扫目录 → 命中 approved → 放行执行并记 audit 事件。三条关键行为：**digest 绑定防绕过**（批准绑定参数 sha256，批准后改参数再调 → digest 不匹配 → 重新走审批，`runtime/task/approval/approval.go` 审批网关）；**异步不阻塞**（critical 挂起立即返回拒绝 + 请求 ID，`Check` 未命中时节流重扫 `approvals/`，间隔默认 2s、可注入）；**warn 不放松 critical**（critical 未批准仍不执行——warn 只放松 high/medium 的记账放行，不放松不可逆操作）。
 
 ### 1.3 预算耗尽（`gate.go` budget 分支 + `budget.go`）
 
@@ -49,7 +49,6 @@
 
 ## 二、自进化行为（Evolution · git 原生）
 
-自进化不采用 bundle 快照/发布道——文件即真源 + git 版本层 + 建议式评估。`refine` 三 op（`evolution/refine.go`）只装配给 entry agent；冥想产物落盘后经它的 register 登记。冥想读到的提示清单由三份组成：巩固候选、上一个评估窗口给出的结论（劣化建议必须在下一趟反思里必然再现）、以及未登记产物的提醒——三份都**只列 key 与计数**，执行权始终在 LLM 与 `memory_consolidate`；evolution 关闭时退回只有巩固候选。这三份在**任何观察面下都是同一段**，冥想线（观察面含他人分区）只是把它排在观察面概况之后（见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)）。
 
 | op | 风险级 | agent 反应 |
 |----|--------|-----------|
@@ -63,13 +62,13 @@
 
 | 场景 | agent/系统反应 | 依据 |
 |------|---------------|------|
-| **受控路径外登记** | 拒绝并列出受控清单（默认三目录 prompts/skills/scripts） | `gitrefine.go` MatchProtectedPaths |
+| **受控路径外登记** | 拒绝并列出受控清单（默认三目录 prompts/skills/scripts） | `tool/file` 受控路径检查（registry 声明） |
 | **产物无改动时 register** | 返回 result「无改动可登记」（非 error） | `evolve.go` ErrNothingToCommit |
 | **非 git 仓运行** | register 明确报错；文件改动仍生效（热重载），如实降级 | 启动自检 Warn |
 | **judge 样本不足** | 结论=insufficient（**不冒充健康**，K7） | `evolve.go` 结论四态 |
 | **外部 reset/amend 使 git 与事件漂移** | status 标注「外部变更，窗口失效」（git=版本事实源，事件=控制面） | tasks 3.1 |
-| **revert 冲突**（后续改进叠加） | 返回冲突详情，由 agent 决定（建议式） | `gitrefine.go` RevertSafe |
-| **rollback 用户提交** | 拒绝（仅可 revert 改进标记 commit） | `gitrefine.go` GitCommitHasTag |
+| **revert 冲突**（后续改进叠加） | 返回冲突详情，由 agent 决定（建议式） | `tool/file` revert 冲突详情（建议式） |
+| **rollback 用户提交** | 拒绝（仅可 revert 改进标记 commit） | `tool/file` 改进标记 commit 检查（建议式） |
 | **重启后** | 版本章惰性恢复（查最新 improvement 事件）；窗口=事件持久 | `evolve.go` LatestSha |
 | 生效时机 | 文件即真源——落盘+热重载即时生效（register 是留痕非生效前提） | mtime 热重载 |
 

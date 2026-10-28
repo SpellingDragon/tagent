@@ -31,9 +31,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/replay"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 )
@@ -3654,12 +3654,41 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 			}
 		}
 	}
-	if !smokeToolsContain(requests[0].Tools, smokeWorkerModel) {
+	turnReq, ok := smokeTurnRequest(requests, smokeEntryModel, marker)
+	if !ok {
+		t.Fatalf("定位不到本轮入口请求：模型 %q 且含 %q 的请求 = 0 条（共 %d 条请求）\nrequests:\n%s",
+			smokeEntryModel, marker, len(requests), smokeRequestHeads(provider))
+	}
+	if !smokeToolsContain(turnReq.Tools, smokeWorkerModel) {
 		t.Fatalf("入口工具面 = %v，want 至少含委派工具 %q（否则空列表会假通过）",
-			requests[0].Tools, smokeWorkerModel)
+			turnReq.Tools, smokeWorkerModel)
+	}
+	decoys := append([]smokeModelRequest{
+		{Model: smokeWorkerModel, Messages: []smokeModelMessage{{Role: "user", Content: marker + " 干扰（他模型）"}}},
+		{Model: smokeEntryModel, Messages: []smokeModelMessage{{Role: "user", Content: "SMOKE-R0000 干扰（他轮）"}}},
+	}, requests...)
+	located, ok := smokeTurnRequest(decoys, smokeEntryModel, marker)
+	if !ok || located.Model != turnReq.Model || located.text() != turnReq.text() {
+		t.Fatalf("乱序注入后定位失败/取错：ok=%v located.model=%q located.text=%q，want 本轮请求 %q",
+			ok, located.Model, located.text(), turnReq.text())
 	}
 	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档无 send；普通回合恰一条投递 %q",
-		requests[0].Tools, texts[0])
+		turnReq.Tools, texts[0])
+	t.Logf("[symptom-ga] 负锚 locating_survives_out_of_order：向前插队两条干扰请求（他模型带本轮标记、本模型带他轮标记）后，仍按模型身份 %q + 标记 %q（非到达下标）定位到同一条请求", smokeEntryModel, marker)
+}
+
+// smokeTurnRequest 定位某一轮的模型请求：模型身份 + 本轮标记。请求到达顺序不是
+// 契约（后台反思/委派请求可能插队），所以按身份与标记取键，不按下标。
+func smokeTurnRequest(requests []smokeModelRequest, model, marker string) (smokeModelRequest, bool) {
+	for _, req := range requests {
+		if req.Model != model {
+			continue
+		}
+		if strings.Contains(req.text(), marker) {
+			return req, true
+		}
+	}
+	return smokeModelRequest{}, false
 }
 
 // smokeToolsContain 报告工具名列表是否含 want。

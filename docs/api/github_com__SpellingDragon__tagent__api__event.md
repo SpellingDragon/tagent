@@ -9,11 +9,12 @@ repeated judgment keeps the identity and the first filing moment of the request
 already on record, so one body of material carries one request however often it
 is judged.
 
-The judgment is vocabulary rather than a domain mechanism: the mechanisms that
-judge it (workspace on a tool result, evolution/meditation on a card sequence)
-and the log that files it (memory) live in three domains, and the event axis is
-the one package all three already speak. The producer and the reason a mechanism
-states stay with that mechanism; this file states the fact they are quoted by.
+The judgment is vocabulary rather than a domain mechanism: the mechanisms
+that judge it (workspace on a tool result, features/evolution/meditation on
+a card sequence) and the log that files it (memory) live in three domains,
+and the event axis is the one package all three already speak. The producer and
+the reason a mechanism states stay with that mechanism; this file states the
+fact they are quoted by.
 
 The model replacement family: the judgment that one agent's model reference
 moves from the version in effect to another version, stated as the fact it is —

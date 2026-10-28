@@ -1,20 +1,19 @@
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 //
 // Package plugin declares the material flow through which tagent injects its
-// differentiated capabilities into the framework event flow: the producing phase
-// and the consuming phase, each dispatched by the material a face reads, and the
-// six ports those phases serve.
+// differentiated capabilities into the framework event flow: the six ports the
+// flow serves, each dispatched by the material its port reads.
 //
 // An instance is a registration unit: it reports the stable name of one flow
 // instance and the port it serves — the material it reads and the product it
 // answers — and the instance implements that port's narrow interface. The flow
-// derives the phase from the port and dispatches the instance by the material
-// that port reads. A built-in consumer — the drive that runs one decision, the
-// tick that runs one reflection, the assembler that builds one request — is an
-// instance of the same flow: the difference between a built-in instance and a
-// mounted plugin is who mounts it, never how it is dispatched.
+// reads the narrow interface from the port and dispatches the instance by the
+// material that port reads. A built-in consumer — the drive that runs one
+// decision, the tick that runs one reflection, the assembler that builds one
+// request — is an instance of the same flow: the difference between a built-in
+// instance and a mounted plugin is who mounts it, never how it is dispatched.
 //
-//   - the extension-face vocabulary: the phases, the ports, the narrow interfaces each port owns, the pipeline that dispatches them by material, the post-commit observation wiring and the presentation pass;
+//   - the extension-face vocabulary: the ports, the narrow interfaces each port owns, the pipeline that dispatches them by material, the post-commit observation wiring and the presentation pass;
 //   - the extension policies at the governance gate: the pre-execution ruling, the risk rules, the approval channel, the denial ledger, the goal registry and the budget window, each stated in its own file and reaching the pipeline only through the one face it serves.
 package plugin
 
@@ -29,29 +28,6 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
-
-// Phase names the role one face serves in the material flow, and the roles are two:
-//   - PhaseProduce: the face answers a product that grows out of the material it read — a corrected call, a ruling over a call, the environment blocks of a request;
-//   - PhaseConsume: the face answers a consumption of the material it read — an observation of a fact, a view of a fact, the compression a filed request asks for.
-//
-// The phase is a reading of the port, never a position in time: the flow
-// dispatches a face by the material it reads, and the order inside one material
-// is the order the instances were declared in.
-type Phase int
-
-const (
-	// PhaseProduce is the producing phase: the face answers a product of the
-	// material it read.
-	PhaseProduce Phase = iota
-
-	// PhaseConsume is the consuming phase: the face answers a consumption of the
-	// material it read.
-	PhaseConsume
-)
-
-// phaseUnstated is the phase of a port the closed table does not declare; it is
-// answered beside the refusal and is never a phase of the flow.
-const phaseUnstated Phase = -1
 
 // TransformCall is the call->call port's narrow face, and it is where the
 // allowed tool-call parameter transform is carried: it runs once per tool call
@@ -91,12 +67,17 @@ type RiskAssessor interface {
 }
 
 // PostCommitObserver is the fact->observation port's narrow face: ObserveCommit
-// observes one fact after its canonical commit, as a read-only duty.
+// observes one fact after its canonical commit, as a read-only duty. One face
+// carries one of two duties, and the duty is read from the face itself when the
+// flow is assembled: an observer-only face reads the fact and owes nothing of it,
+// while a driver face (driverObservation) is asked by the fact to start work
+// somebody owes, such as a follow-up turn or a delivery.
 //
-// The redline list (3 rules):
+// The redline list (4 rules):
 // MUST observe a fact whose canonical commit already happened.
 // MUST NOT roll the committed fact back or re-run the work when the observation fails.
 // MUST NOT write the fact it observes.
+// MUST carry the driver duty when a failed observation leaves work owed, and keep that obligation in a durable account of its own.
 type PostCommitObserver interface {
 	ObserveCommit(ctx context.Context, id event.EventID) error
 }
@@ -119,7 +100,7 @@ type FinalPresenter interface {
 // EnvironmentRequest names the request assembly the environment blocks are
 // rendered for: the agent the request runs as. The material itself is read by
 // the face from the runtime it holds, so an assembly never has to hand a bundle
-// of its own state across the phase. The request is every block's provenance:
+// of its own state across the pass. The request is every block's provenance:
 // each block traces back to the assembly it was rendered for, a block created
 // for an assembly that consumes no fact at all included.
 type EnvironmentRequest struct {
@@ -198,7 +179,7 @@ type Pipeline struct {
 	risks      []served[RiskAssessor]
 	governors  []served[Governor]
 	injects    []served[EnvironmentInject]
-	observers  []served[PostCommitObserver]
+	observers  []observedFace
 	presenters []served[FinalPresenter]
 	triggers   []served[CompressTrigger]
 }
@@ -212,7 +193,7 @@ type declaration struct {
 }
 
 // assemble groups the declarations into their port's face set, in the declared
-// order, reading the phase from the closed port table.
+// order, refusing a port the closed table does not declare.
 func assemble(declarations []declaration) (Pipeline, error) {
 	var out Pipeline
 	names := make(map[string]struct{}, len(declarations))
@@ -221,7 +202,7 @@ func assemble(declarations []declaration) (Pipeline, error) {
 			return Pipeline{}, fmt.Errorf("plugin: %q is declared twice: a product's name must trace back to the one element that wrote it", element.name)
 		}
 		names[element.name] = struct{}{}
-		if _, err := RouteOf(element.port); err != nil {
+		if err := validatePort(element.port); err != nil {
 			return Pipeline{}, fmt.Errorf("plugin: %q declares %v", element.name, err)
 		}
 		servedAny := false
@@ -247,7 +228,10 @@ func assemble(declarations []declaration) (Pipeline, error) {
 			}
 		case Port{Reads: MaterialFact, Produces: ProductObservation}:
 			if impl, ok := element.impl.(PostCommitObserver); ok {
-				out.observers = append(out.observers, served[PostCommitObserver]{element.name, impl})
+				out.observers = append(out.observers, observedFace{
+					served: served[PostCommitObserver]{element.name, impl},
+					drives: dutyOfObserved(element.impl),
+				})
 				servedAny = true
 			}
 		case Port{Reads: MaterialFact, Produces: ProductView}:
@@ -319,7 +303,7 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
 	for _, face := range p.transforms {
 		started := time.Now()
 		err := face.impl.TransformCall(ctx, &final)
-		observePhase(PhaseProduce, faceTransform, Port{Reads: MaterialCall, Produces: ProductCall}, face.name, phaseResult(err), "call="+call.ID, started)
+		observeFace(Port{Reads: MaterialCall, Produces: ProductCall}, faceTransform, face.name, faceResult(err), "call="+call.ID, started)
 		if err != nil {
 			return CallPass{}, fmt.Errorf("plugin: transform %s: %w", face.name, err)
 		}
@@ -331,7 +315,7 @@ func (p Pipeline) Before(ctx context.Context, call trpcmodel.ToolCall) (CallPass
 	for _, face := range p.risks {
 		started := time.Now()
 		graded := face.impl.AssessRisk(ctx, &final)
-		observePhase(PhaseProduce, faceRisk, Port{Reads: MaterialCall, Produces: ProductRuling}, face.name, phaseGrade(graded), "call="+call.ID, started)
+		observeFace(Port{Reads: MaterialCall, Produces: ProductRuling}, faceRisk, face.name, faceGrade(graded), "call="+call.ID, started)
 		if graded.Rank() > risk.Rank() {
 			risk = graded
 		}
@@ -355,7 +339,7 @@ func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressReq
 	for _, face := range p.triggers {
 		started := time.Now()
 		err := face.impl.TriggerCompress(ctx, request)
-		observePhase(PhaseConsume, faceTrigger, Port{Reads: MaterialFact, Produces: ProductCompression}, face.name, phaseResult(err), "request="+string(request.ID), started)
+		observeFace(Port{Reads: MaterialFact, Produces: ProductCompression}, faceTrigger, face.name, faceResult(err), "request="+string(request.ID), started)
 		if err != nil {
 			return fmt.Errorf("plugin: compress trigger %s: %w", face.name, err)
 		}
@@ -380,7 +364,7 @@ func (p Pipeline) InjectEnvironment(ctx context.Context, request EnvironmentRequ
 	for _, face := range p.injects {
 		started := time.Now()
 		texts, err := face.impl.InjectEnvironment(ctx, request)
-		observePhase(PhaseProduce, faceInject, Port{Reads: MaterialRequest, Produces: ProductEnvironment}, face.name, phaseResult(err), "agent="+string(request.Agent), started)
+		observeFace(Port{Reads: MaterialRequest, Produces: ProductEnvironment}, faceInject, face.name, faceResult(err), "agent="+string(request.Agent), started)
 		if err != nil {
 			return nil, fmt.Errorf("plugin: environment inject %s: %w", face.name, err)
 		}
@@ -415,19 +399,6 @@ func copyCall(in trpcmodel.ToolCall) trpcmodel.ToolCall {
 	return out
 }
 
-// phaseName reports the declared name of one phase for a refusal message and
-// one observation line.
-func phaseName(phase Phase) string {
-	switch phase {
-	case PhaseProduce:
-		return "produce"
-	case PhaseConsume:
-		return "consume"
-	default:
-		return fmt.Sprintf("phase-%d", phase)
-	}
-}
-
 // faceTransform names the call->call face in one observation line; the rest
 // name the one face of their own port the same way. The face is the narrow
 // interface the dispatched element was held to, not the port it declared.
@@ -440,35 +411,38 @@ const (
 	faceInject    = "inject"
 )
 
-// observePhase renders one line of one executed phase face at DEBUG: the phase,
-// the face, the plugin that served it, the port it declared, the face's own
-// result, the elapsed time and the identity the face was dispatched for. The
-// line carries no call arguments and no fact content.
+// observeFace renders one line of one executed pipeline face at DEBUG: the port
+// the face declared, the face, the plugin that served it, the face's own result,
+// the elapsed time and the identity the face was dispatched for. The port is the
+// routing key of the line — it names the material the face read beside the
+// product it answered — so one field tells both which pass dispatched the face
+// and which product it stands for. The line carries no call arguments and no
+// fact content.
 //
 // The redline list (3 rules):
 // MUST stay a bypass: a failing logger is a missing line, never a refused pass.
 // MUST render after the face returned, and never stand a second pass outcome of its own.
 // MUST NOT render call arguments, tool output or fact content.
-func observePhase(phase Phase, face string, port Port, name, result, subject string, started time.Time) {
+func observeFace(port Port, face string, name, result, subject string, started time.Time) {
 	if trpclog.Default == nil {
 		return
 	}
 	defer func() { _ = recover() }()
-	trpclog.Default.Debugf("tagent: plugin phase phase=%s face=%s plugin=%s port=%s result=%s elapsed=%s %s",
-		phaseName(phase), face, name, port, result, time.Since(started).Round(time.Microsecond), subject)
+	trpclog.Default.Debugf("tagent: plugin face port=%s face=%s plugin=%s result=%s elapsed=%s %s",
+		port, face, name, result, time.Since(started).Round(time.Microsecond), subject)
 }
 
-// phaseResult spells whether one face answered without an error.
-func phaseResult(err error) string {
+// faceResult spells whether one face answered without an error.
+func faceResult(err error) string {
 	if err != nil {
 		return "refused"
 	}
 	return "ok"
 }
 
-// phaseGrade spells the risk grade one assessing face rendered, and names the
+// faceGrade spells the risk grade one assessing face rendered, and names the
 // absence of a grade instead of rendering an empty result.
-func phaseGrade(graded RiskLevel) string {
+func faceGrade(graded RiskLevel) string {
 	if graded == "" {
 		return "unstated"
 	}

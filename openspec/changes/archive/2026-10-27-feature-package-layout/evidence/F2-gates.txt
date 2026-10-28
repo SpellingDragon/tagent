@@ -1,0 +1,14 @@
+F2 全量门禁 —— feature-package-layout 收尾（树 44761b9，worktree /tmp/tagent-fpl2-gates）
+格式：门 | 退出码 | 备注
+
+lint RC=0（主树复验 lint: ok，含 doc-budget RESULT ok——规约 +1 行已具名锁步 22822）
+selftests RC=0（233+ 检查器自测，含迁移后的 architecture/workflow fixture 字面量）
+openspec RC=0 / short-root RC=0 / build·vet·short bot·cli RC=0 / witnesses RC=0
+short10 RC=1      → repeat-1/10 FoldControl negative（synthetic key 跨重启不等）：受控重跑绿 + -count=3 绿（4/4），定性本机高压环境时序 flake；余 9/10 match
+mutations RC=0（11/11 killed，注册表 features/ 路径生效）
+symptom RC=0
+race RC=1         → TestMCPFaceBindsTheDeclaredServers DATA RACE 确定性显化（2/2）——**基线 8919acf 同红**；栈=trpc-mcp-go v0.0.10 streamableHTTPClientTransport.setSessionID/send（LEDGER U5 双签豁免面）；高压下竞态显化为功能败，豁免不认功能败故门红如实记录；WATCH=升级 trpc-mcp-go（既定移除条件）
+long：s1-w256/s1-w32768/s7-w32768 RC=0；s7-w256 RC=1 → 受控重跑 SHARD_RERUN_RC=0 verdict=match（flake 同前案协议）；s42-w256 RC=0、s42-w32768 RC=0（六片合计：5 直绿+1 重跑 match）
+
+== 远端 CI ==
+runtime-contracts（唯一 push 触发 workflow）@44761b9：**SUCCESS**（run 40533181200）；provider-contract=手动、real-smoke=定时、CI=仅 dev/main 与 PR。

@@ -27,9 +27,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/cli"
-	"github.com/SpellingDragon/tagent/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/evolution/meditation"
+	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/query"
-	"github.com/SpellingDragon/tagent/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -107,6 +107,27 @@ func visibilityRun(t *testing.T, ctx context.Context, opts ...tagent.Option) (*t
 	return run, tool
 }
 
+// visibilityCapture opens the trajectory capture an assembled run fixes its
+// request views through: a file writer under a temporary directory and one
+// bounded sink over it, so the training reading answers the snapshots the
+// capture holds instead of a copy the run would keep beside it.
+func visibilityCapture(t *testing.T) *rl.TrajectoryCapture {
+	t.Helper()
+	writer, err := rl.NewFileCaptureWriter(t.TempDir(), 0)
+	if err != nil {
+		t.Fatalf("open the trajectory writer: %v", err)
+	}
+	sink, err := rl.NewCaptureSink("visibility-trajectory", rl.SinkConfig{}, writer)
+	if err != nil {
+		t.Fatalf("open the trajectory sink: %v", err)
+	}
+	capture, err := rl.NewTrajectoryCapture("visibility-trajectory", sink, rl.SnapshotPolicy{})
+	if err != nil {
+		t.Fatalf("open the trajectory capture: %v", err)
+	}
+	return capture
+}
+
 // visibilityNamed stamps one scripted response with the model that served it.
 func visibilityNamed(resp *model.Response) *model.Response {
 	resp.Model = "model-a"
@@ -165,7 +186,8 @@ func TestRuntimeVisibility(t *testing.T) {
 		run, tool := visibilityRun(t, ctx,
 			tagent.WithReflectionAnchors(anchors),
 			tagent.WithRecorder(visibilityRecorder{}),
-			tagent.WithTelemetry(observer))
+			tagent.WithTelemetry(observer),
+			tagent.WithCapture(visibilityCapture(t)))
 		visibilityInvoke(t, ctx, run, "inv-visible", "session-visible")
 		if tool.calls() != 1 {
 			t.Fatalf("tool executions = %d, want the admitted call executed exactly once", tool.calls())
@@ -276,7 +298,7 @@ func TestRuntimeVisibility(t *testing.T) {
 	t.Run("诊断不复制状态: the reading follows the owners and keeps no copy", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		run, _ := visibilityRun(t, ctx)
+		run, _ := visibilityRun(t, ctx, tagent.WithCapture(visibilityCapture(t)))
 		visibilityInvoke(t, ctx, run, "inv-copy-1", "session-copy")
 		filter := query.ListFilter{Scope: visibilityScope("session-copy")}
 		switches := tagent.DiagnosticSwitches{Training: true}

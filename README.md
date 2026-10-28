@@ -135,7 +135,7 @@ go test -tags smoke -bench Benchmark -benchtime 30x -run '^$' ./...
 | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照 |
 | [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | **扩展面**：18 个扩展模块的边界与契约 |
 | [`docs/OPERATION.md`](docs/OPERATION.md) | **运维/门禁**：观测/工具链/风险面/事件门 |
-| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：源码注释生成（改注释后 `bash scripts/gen_godoc.sh` 重生成，禁止手改） |
+| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：源码注释生成（改注释后 `bash scripts/gates/gen_godoc.sh` 重生成，禁止手改） |
 | [`docs/wiki/README.md`](docs/wiki/README.md) | 历史设计记录（historical-verbatim） |
 | [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账 |
 

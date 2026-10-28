@@ -20,7 +20,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // smokeDataRounds 是导出对账驱动的轮数：落在 5-10 轮的窗口里，每轮一个唯一标记。
@@ -172,8 +172,8 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 				}
 			}
 		}
-		if receipt != "ok" {
-			t.Fatalf("call_subagent receipt = %q, want the minimal ok admission confirmation", receipt)
+		if !strings.HasPrefix(receipt, "{"+callID+" ") || !strings.Contains(receipt, " true ") {
+			t.Fatalf("call_subagent receipt = %q, want the minimal admission receipt {%s <task> true <kind>}", receipt, callID)
 		}
 		if strings.Contains(receipt, "[call_subagent_denied]") {
 			t.Fatalf("call_subagent receipt = %q, want the admission, not a named refusal", receipt)

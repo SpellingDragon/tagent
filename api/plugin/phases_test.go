@@ -49,7 +49,7 @@ type invariantRisk struct {
 // AssessRisk renders the grade the element was built with.
 func (p invariantRisk) AssessRisk(context.Context, *trpcmodel.ToolCall) RiskLevel { return p.grade }
 
-// invariantRiskBoth is one risk element carrying both faces of the risk phase.
+// invariantRiskBoth is one risk element carrying both faces of the risk port.
 type invariantRiskBoth struct {
 	invariantPlugin
 	grade RiskLevel
@@ -151,15 +151,15 @@ func invariantCall(id, tool, args string) trpcmodel.ToolCall {
 // invariantIndex returns a pointer to one streaming index.
 func invariantIndex(index int) *int { return &index }
 
-// TestPipelineRegistrationInvariants pins how one registration list becomes the phase face sets.
-// - one element is dispatched into the one phase it reports, and a risk element may carry both faces of that phase
+// TestPipelineRegistrationInvariants pins how one registration list becomes the port face sets.
+// - one element is dispatched into the face set of the port it reports, and a risk element may carry both faces of that port
 // - a nil element refuses the pipeline by name instead of being trimmed away
-// - an element reporting an undeclared phase is refused by name
-// - an element reporting a phase it does not implement is refused by name
-// - the order inside one phase is the order the elements were declared in
+// - an element reporting a port outside the closed table is refused by name
+// - an element reporting a port it does not implement is refused by name
+// - the order inside one port is the order the elements were declared in
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestPipelineRegistrationInvariants(t *testing.T) {
-	t.Run("every element is dispatched into the face set of the phase it reports", func(t *testing.T) {
+	t.Run("every element is dispatched into the face set of the port it reports", func(t *testing.T) {
 		var order []string
 		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "transform", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
 		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "risk", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskLow}
@@ -169,7 +169,7 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 
 		pipeline, err := NewFlow([]Instance{transform, risk, dual, observer, presenter})
 		if err != nil {
-			t.Fatalf("register one element per phase: %v", err)
+			t.Fatalf("register one element per port: %v", err)
 		}
 		if len(pipeline.transforms) != 1 || len(pipeline.risks) != 2 || len(pipeline.governors) != 1 {
 			t.Fatalf("pre-execution faces = (transforms %d, risks %d, governors %d), want (1, 2, 1)",
@@ -187,7 +187,7 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("the faces inside one phase run in registration order", func(t *testing.T) {
+	t.Run("the faces inside one port run in registration order", func(t *testing.T) {
 		var order []string
 		first := &invariantTransform{
 			invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialCall, Produces: ProductCall}},
@@ -236,7 +236,7 @@ func TestPipelineRegistrationInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("a declared phase without its face is refused by name", func(t *testing.T) {
+	t.Run("a declared port without its face is refused by name", func(t *testing.T) {
 		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "empty", port: Port{Reads: MaterialCall, Produces: ProductCall}}})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
@@ -633,12 +633,12 @@ func TestPipelineCompositionContracts(t *testing.T) {
 	})
 }
 
-// TestCompressTriggerPassInvariants pins the trigger pass of the compress phase.
-// - an element reporting the compress-trigger phase is dispatched into that phase's face set alone
+// TestCompressTriggerPassInvariants pins the trigger pass of the compress-trigger port.
+// - an element reporting the compress-trigger port is dispatched into that port's face set alone
 // - every face answers the request the producer filed, in declared order, and the request is left as filed
 // - a face that refuses refuses the pass by name and stops the later faces
 // - a pipeline carrying no compress face answers nil and refuses nothing
-// - an element reporting the compress phase without its face is refused by name
+// - an element reporting the compress port without its face is refused by name
 // - a port past the declared table is refused by name, so the two further ports open no boundary
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestCompressTriggerPassInvariants(t *testing.T) {
@@ -703,7 +703,7 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("an element of the compress phase without its face is refused by name", func(t *testing.T) {
+	t.Run("an element of the compress port without its face is refused by name", func(t *testing.T) {
 		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "empty", port: Port{Reads: MaterialFact, Produces: ProductCompression}}})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
@@ -724,14 +724,14 @@ func TestCompressTriggerPassInvariants(t *testing.T) {
 	})
 }
 
-// TestEnvironmentInjectPassInvariants pins the injection pass of the request-assembly phase.
+// TestEnvironmentInjectPassInvariants pins the injection pass of the request->environment port.
 // - the face answers the assembly for the agent the request names
 // - every face answers its blocks in declared order and a face answering no text contributes no block
 // - one face may answer several blocks, and each block stands as its own product
 // - a request that consumes no fact still answers every block from the request it was dispatched with
 // - a face that refuses refuses the assembly by name instead of carrying a block it could not render
 // - a pipeline carrying no environment face answers no block
-// - an element reporting the environment phase without its face is refused by name
+// - an element reporting the environment port without its face is refused by name
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
 func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	ctx := context.Background()
@@ -844,7 +844,7 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("an element of the environment phase without its face is refused by name", func(t *testing.T) {
+	t.Run("an element of the environment port without its face is refused by name", func(t *testing.T) {
 		pipeline, err := NewFlow([]Instance{invariantPlugin{name: "empty", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}})
 		if err == nil || !strings.Contains(err.Error(), "implements no narrow interface") {
 			t.Fatalf("register a faceless element = (%v, %v), want a named refusal", pipeline, err)
@@ -855,9 +855,9 @@ func TestEnvironmentInjectPassInvariants(t *testing.T) {
 	})
 }
 
-// phaseLog records the phase lines the pipeline rendered: the DEBUG and INFO
+// faceLog records the face lines the pipeline rendered: the DEBUG and INFO
 // levels the observation writes, and no other level.
-type phaseLog struct {
+type faceLog struct {
 	trpclog.Logger
 	mu         sync.Mutex
 	lines      []string
@@ -865,7 +865,7 @@ type phaseLog struct {
 }
 
 // take records one rendered line or refuses it by panicking.
-func (l *phaseLog) take(level, text string) {
+func (l *faceLog) take(level, text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.panicsLeft > 0 {
@@ -876,17 +876,17 @@ func (l *phaseLog) take(level, text string) {
 }
 
 // Debugf records one formatted debug line.
-func (l *phaseLog) Debugf(format string, args ...any) {
+func (l *faceLog) Debugf(format string, args ...any) {
 	l.take("debug", fmt.Sprintf(format, args...))
 }
 
 // Infof records one formatted info line.
-func (l *phaseLog) Infof(format string, args ...any) {
+func (l *faceLog) Infof(format string, args ...any) {
 	l.take("info", fmt.Sprintf(format, args...))
 }
 
 // at reports the lines taken at the named level.
-func (l *phaseLog) at(level string) []string {
+func (l *faceLog) at(level string) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []string
@@ -899,7 +899,7 @@ func (l *phaseLog) at(level string) []string {
 }
 
 // mentions reports whether one line at the level carries every fragment.
-func (l *phaseLog) mentions(level string, fragments ...string) bool {
+func (l *faceLog) mentions(level string, fragments ...string) bool {
 	for _, line := range l.at(level) {
 		holds := true
 		for _, fragment := range fragments {
@@ -914,28 +914,28 @@ func (l *phaseLog) mentions(level string, fragments ...string) bool {
 	return false
 }
 
-// watchPhaseLog points the phase observation at the given logger for the
+// watchFaceLog points the face observation at the given logger for the
 // duration of one check.
-func watchPhaseLog(tb testing.TB, logger trpclog.Logger) {
+func watchFaceLog(tb testing.TB, logger trpclog.Logger) {
 	tb.Helper()
 	original := trpclog.Default
 	trpclog.Default = logger
 	tb.Cleanup(func() { trpclog.Default = original })
 }
 
-// TestPhaseObservation checks the plugin-phase face of the observation bypass.
-// - every executed face of both passes renders one DEBUG line carrying the phase, the face, the plugin, its result and the dispatched identity
+// TestFaceObservation checks the plugin-face observation of the bypass.
+// - every executed face of both passes renders one DEBUG line carrying the port, the face, the plugin, its result and the dispatched identity
 // - the line reports the result the face answered: a refusal, a risk grade, a dropped presentation
 // - the two dispatch passes render one line per executed face, carrying the request and the agent they were dispatched for
-// - the phase face writes nothing at INFO, so the bounded stream stays with turn boundaries and model requests
+// - the face lines write nothing at INFO, so the bounded stream stays with turn boundaries and model requests
 // - a logger that fails does not refuse a pass or drop a presentation
 // 契约: docs/wiki/plugin/plugin-architecture.md#overview
-func TestPhaseObservation(t *testing.T) {
+func TestFaceObservation(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("both passes render one line per executed face", func(t *testing.T) {
-		logger := &phaseLog{}
-		watchPhaseLog(t, logger)
+		logger := &faceLog{}
+		watchFaceLog(t, logger)
 		var order []string
 		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
 		risk := invariantRisk{invariantPlugin: invariantPlugin{name: "grader", port: Port{Reads: MaterialCall, Produces: ProductRuling}}, grade: RiskHigh}
@@ -943,7 +943,7 @@ func TestPhaseObservation(t *testing.T) {
 		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "done"}
 		pipeline, err := NewFlow([]Instance{transform, risk, observer, presenter})
 		if err != nil {
-			t.Fatalf("register one element per phase: %v", err)
+			t.Fatalf("register one element per port: %v", err)
 		}
 
 		if _, err := pipeline.Before(ctx, invariantCall("call-1", "echo", `{"x":1}`)); err != nil {
@@ -951,29 +951,29 @@ func TestPhaseObservation(t *testing.T) {
 		}
 		pipeline.After(ctx, "fact-1")
 
-		if !logger.mentions("debug", "phase=produce", "face=transform", "plugin=corrector", "port=call->call", "result=ok", "call=call-1") {
+		if !logger.mentions("debug", "plugin face", "face=transform", "plugin=corrector", "port=call->call", "result=ok", "call=call-1") {
 			t.Fatalf("debug lines = %v, want the transform face line of call-1", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "phase=produce", "face=risk", "plugin=grader", "port=call->ruling", "result=high", "call=call-1") {
+		if !logger.mentions("debug", "plugin face", "face=risk", "plugin=grader", "port=call->ruling", "result=high", "call=call-1") {
 			t.Fatalf("debug lines = %v, want the risk face line carrying its grade", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "phase=consume", "face=observe", "plugin=watcher", "port=fact->observation", "result=ok", "fact=fact-1") {
+		if !logger.mentions("debug", "plugin face", "face=observe", "plugin=watcher", "port=fact->observation", "result=ok", "fact=fact-1") {
 			t.Fatalf("debug lines = %v, want the observation face line of fact-1", logger.at("debug"))
 		}
-		if !logger.mentions("debug", "phase=consume", "face=present", "plugin=renderer", "port=fact->view", "result=rendered", "fact=fact-1") {
+		if !logger.mentions("debug", "plugin face", "face=present", "plugin=renderer", "port=fact->view", "result=rendered", "fact=fact-1") {
 			t.Fatalf("debug lines = %v, want the presentation face line of fact-1", logger.at("debug"))
 		}
 		if lines := logger.at("debug"); len(lines) != 4 {
 			t.Fatalf("debug lines = %v, want one line per executed face", lines)
 		}
 		if lines := logger.at("info"); len(lines) != 0 {
-			t.Fatalf("info lines = %v, want the phase face kept at DEBUG", lines)
+			t.Fatalf("info lines = %v, want the face lines kept at DEBUG", lines)
 		}
 	})
 
 	t.Run("every presenter renders its own line for the one fact", func(t *testing.T) {
-		logger := &phaseLog{}
-		watchPhaseLog(t, logger)
+		logger := &faceLog{}
+		watchFaceLog(t, logger)
 		var order []string
 		first := invariantPresenter{invariantPlugin: invariantPlugin{name: "first", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "one"}
 		second := invariantPresenter{invariantPlugin: invariantPlugin{name: "second", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "two"}
@@ -983,8 +983,8 @@ func TestPhaseObservation(t *testing.T) {
 		}
 		pipeline.After(ctx, "fact-1")
 
-		if !logger.mentions("debug", "phase=consume", "face=present", "plugin=first", "port=fact->view", "fact=fact-1") ||
-			!logger.mentions("debug", "phase=consume", "face=present", "plugin=second", "port=fact->view", "fact=fact-1") {
+		if !logger.mentions("debug", "plugin face", "face=present", "plugin=first", "port=fact->view", "fact=fact-1") ||
+			!logger.mentions("debug", "plugin face", "face=present", "plugin=second", "port=fact->view", "fact=fact-1") {
 			t.Fatalf("debug lines = %v, want one presentation line per presenter", logger.at("debug"))
 		}
 		if lines := logger.at("debug"); len(lines) != 2 {
@@ -993,15 +993,15 @@ func TestPhaseObservation(t *testing.T) {
 	})
 
 	t.Run("both dispatch passes render one line per executed face", func(t *testing.T) {
-		logger := &phaseLog{}
-		watchPhaseLog(t, logger)
+		logger := &faceLog{}
+		watchFaceLog(t, logger)
 		var order []string
 		var seen []event.EventID
 		trigger := invariantTrigger{invariantPlugin: invariantPlugin{name: "curator", port: Port{Reads: MaterialFact, Produces: ProductCompression}}, order: &order, seen: &seen}
 		inject := invariantInject{invariantPlugin: invariantPlugin{name: "environment", port: Port{Reads: MaterialRequest, Produces: ProductEnvironment}}, blocks: []string{"clock=noon"}}
 		pipeline, err := NewFlow([]Instance{trigger, inject})
 		if err != nil {
-			t.Fatalf("register one element per dispatch phase: %v", err)
+			t.Fatalf("register one element per dispatch port: %v", err)
 		}
 
 		request := invariantRequest()
@@ -1013,10 +1013,10 @@ func TestPhaseObservation(t *testing.T) {
 			t.Fatalf("run the environment-inject pass = (%q, %v), want the block of the registered face", blocks, err)
 		}
 
-		if !logger.mentions("debug", "phase=consume", "face=trigger", "plugin=curator", "port=fact->compression", "result=ok", "request="+string(request.ID)) {
+		if !logger.mentions("debug", "plugin face", "face=trigger", "plugin=curator", "port=fact->compression", "result=ok", "request="+string(request.ID)) {
 			t.Fatalf("debug lines = %v, want the compress-trigger face line of %s", logger.at("debug"), request.ID)
 		}
-		if !logger.mentions("debug", "phase=produce", "face=inject", "plugin=environment", "port=request->environment", "result=ok", "agent=agent-a") {
+		if !logger.mentions("debug", "plugin face", "face=inject", "plugin=environment", "port=request->environment", "result=ok", "agent=agent-a") {
 			t.Fatalf("debug lines = %v, want the environment-inject face line of agent-a", logger.at("debug"))
 		}
 		if lines := logger.at("debug"); len(lines) != 2 {
@@ -1028,12 +1028,12 @@ func TestPhaseObservation(t *testing.T) {
 	})
 
 	t.Run("a refused face and a dropped presentation keep their own result", func(t *testing.T) {
-		logger := &phaseLog{}
-		watchPhaseLog(t, logger)
+		logger := &faceLog{}
+		watchFaceLog(t, logger)
 		var order []string
 		refusing := &invariantTransform{
 			invariantPlugin: invariantPlugin{name: "refusing", port: Port{Reads: MaterialCall, Produces: ProductCall}},
-			run:             func(*trpcmodel.ToolCall) error { return errPhaseRefused },
+			run:             func(*trpcmodel.ToolCall) error { return errRefused },
 		}
 		dropping := invariantPresenter{invariantPlugin: invariantPlugin{name: "dropping", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, dropped: true}
 		pipeline, err := NewFlow([]Instance{refusing, dropping})
@@ -1041,7 +1041,7 @@ func TestPhaseObservation(t *testing.T) {
 			t.Fatalf("register the refusing transform: %v", err)
 		}
 
-		if _, err := pipeline.Before(ctx, invariantCall("call-2", "echo", `{}`)); !errors.Is(err, errPhaseRefused) {
+		if _, err := pipeline.Before(ctx, invariantCall("call-2", "echo", `{}`)); !errors.Is(err, errRefused) {
 			t.Fatalf("before pass error = %v, want the refusal of the transform reported", err)
 		}
 		pipeline.After(ctx, "fact-2")
@@ -1055,13 +1055,13 @@ func TestPhaseObservation(t *testing.T) {
 	})
 
 	t.Run("a logger that fails does not refuse a pass", func(t *testing.T) {
-		watchPhaseLog(t, &phaseLog{panicsLeft: 2})
+		watchFaceLog(t, &faceLog{panicsLeft: 2})
 		var order []string
 		transform := &invariantTransform{invariantPlugin: invariantPlugin{name: "corrector", port: Port{Reads: MaterialCall, Produces: ProductCall}}}
 		presenter := invariantPresenter{invariantPlugin: invariantPlugin{name: "renderer", port: Port{Reads: MaterialFact, Produces: ProductView}}, order: &order, text: "done"}
 		pipeline, err := NewFlow([]Instance{transform, presenter})
 		if err != nil {
-			t.Fatalf("register the phase elements: %v", err)
+			t.Fatalf("register the pipeline elements: %v", err)
 		}
 
 		pass, err := pipeline.Before(ctx, invariantCall("call-3", "echo", `{}`))
@@ -1075,5 +1075,5 @@ func TestPhaseObservation(t *testing.T) {
 	})
 }
 
-// errPhaseRefused is the refusal one transform answers in these checks.
-var errPhaseRefused = errors.New("the transform refused the call")
+// errRefused is the refusal one transform answers in these checks.
+var errRefused = errors.New("the transform refused the call")

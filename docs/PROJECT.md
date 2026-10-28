@@ -51,7 +51,7 @@ flowchart LR
 | 合同 | `golden/runtime/event_integrity_scenarios.json`：29 个父测试 / 143 个锚，八族事件语义冻结 |
 | 每 MR | short 十轮（十份独立 run-id 凭据）+ 症状四锚（受理静默 / 完成恰一条 / 失败告知 / exec 中间态静默） |
 | 长程 | 六组合矩阵：7200 输入 / 720 重启，verdict 全 match |
-| 变异 | 11 个修复被"故意放回"逐一杀死（`scripts/check_event_integrity_mutations.py`） |
+| 变异 | 11 个修复被"故意放回"逐一杀死（`scripts/gates/check_event_integrity_mutations.py`） |
 | 门禁 | `scripts/lint.sh` + 三模块 build/vet/test + 合同检查器 + workflow 自测 |
 
 ## 边界（主动声明）

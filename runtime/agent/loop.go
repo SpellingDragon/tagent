@@ -14,7 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
-	"github.com/SpellingDragon/tagent/evolution/governance"
+	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -36,12 +36,15 @@ type FactResolver func(id event.EventID) (model.Message, bool)
 // the whole event as the ledger of the run keeps it and reports the identity
 // that fact committed under, minting one for an event that arrives without an
 // identity. The identity it answers is the one the After pass reads back, so an
-// observation never reconstructs the fact it observes.
+// observation never reconstructs the fact it observes. A commit that did not
+// land reports no identity beside the named failure, so no caller ever answers
+// a commitment over a fact the ledger refused.
 //
-// The redline list (2 rules):
+// The redline list (3 rules):
 // MUST store the whole event as it stands, minting an identity only for an event that carries none.
 // MUST report the identity that fact committed under, so the observation reads that very fact back.
-type FactCommit func(evt event.Event) event.EventID
+// MUST report a refused commit beside no identity, so the caller decides what a fact that never landed means.
+type FactCommit func(evt event.Event) (event.EventID, error)
 
 // FactPipelines assembles the ordered plugin pipeline of one agent, so the
 // After pass of a fact the loop commits outside a dispatch — the ready input of
@@ -155,9 +158,10 @@ type Recorder interface {
 // MUST NOT let a capture failure reach the model decision, and MUST NOT make admission wait on a writer.
 type Capture interface {
 	// Snapshot fixes the view one decision's request runs on before the request
-	// starts: the model name, the prompt version and the tools visible to it,
-	// beside the request as it stands. The request is observed, never edited.
-	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, req model.Request) error
+	// starts: the model name, the prompt version, the tools visible to it and the
+	// skills visible to it, beside the request as it stands. The request is
+	// observed, never edited.
+	Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error
 	// Record admits one observed attempt beside the response that produced it:
 	// the outcome arrives reduced, and the record side shares that terminal
 	// rather than deriving a second one.
@@ -220,7 +224,6 @@ type Loop struct {
 	notices   NoticeFeed
 	present   PresentationSink
 	boundary  RequestFace
-	snapshot  RequestSnapshotFace
 	watch     func(taskID event.TaskID, stopped func() bool) error
 	final     FinalRoundPolicy
 	finals    map[event.AgentID]FinalRoundPolicy
@@ -299,12 +302,16 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		if round.final {
 			turn.FinalRound = round.reason
 			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
-			l.commitOutput(ctx, inv, decision, outcome)
+			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
+				return l.failCommit(turn, commitErr)
+			}
 			return turn, nil
 		}
 		if len(receipts) == 0 && len(observations) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
-			l.commitOutput(ctx, inv, decision, outcome)
+			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
+				return l.failCommit(turn, commitErr)
+			}
 			return turn, nil
 		}
 		transcript = append(transcript, assistantOf(outcome))
@@ -312,6 +319,15 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		transcript = append(transcript, observations...)
 		rounds++
 	}
+}
+
+// failCommit reports one drive whose output fact did not commit: the turn ends
+// beside the failed terminal and the named cause of the refusal, so a caller
+// never reads a completed turn over a fact that never landed.
+func (l *Loop) failCommit(turn Turn, cause error) (Turn, error) {
+	turn.Terminal = model.KindFailed
+	turn.Failure = strings.TrimSpace(cause.Error())
+	return turn, fmt.Errorf("tagent: the output fact of the drive did not commit: %w", cause)
 }
 
 // consumerDebug renders one line of the consumer face at DEBUG: the drive's start
@@ -329,6 +345,23 @@ func consumerDebug(format string, args ...any) {
 	}
 	defer func() { _ = recover() }()
 	trpclog.Default.Debugf(format, args...)
+}
+
+// consumerWarn renders one line of the consumer face at WARN beside a fact the
+// commit face refused: a notice fact and a delivery fact answer no caller, so
+// the refused commit is reported here rather than swallowed, and the bypass
+// discipline of the consumer face applies to this line too.
+//
+// The redline list (3 rules):
+// MUST stay a bypass: a failing logger is a missing line, never a failed drive.
+// MUST carry the named cause beside the identity of the fact family it belongs to.
+// MUST NOT render transcript, message or tool-output content.
+func consumerWarn(format string, args ...any) {
+	if trpclog.Default == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	trpclog.Default.Warnf(format, args...)
 }
 
 // Backflow admits one notification of a call into the range of the invocation
@@ -369,7 +402,9 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 func (l *Loop) commitProgressFact(invocationID event.InvocationID, notice task.Notice) {
 	in := l.intakeFor(invocationID)
 	if addr := in.rangeAddress(); addr.IsComplete() {
-		l.commitNotice(invocationID, addr, notice)
+		if _, err := l.commitNotice(invocationID, addr, notice); err != nil {
+			consumerWarn("tagent: the notice fact of task %s did not commit: %v", notice.TaskID, err)
+		}
 	}
 }
 
@@ -382,7 +417,7 @@ func (l *Loop) commitProgressFact(invocationID event.InvocationID, notice task.N
 // and never input a decision speaks from. The notification's own four-tuple
 // stays its identity: the fact reference it carries names the work it reports
 // and never replaces that identity.
-func (l *Loop) commitNotice(invocationID event.InvocationID, addr event.Address, notice task.Notice) event.EventID {
+func (l *Loop) commitNotice(invocationID event.InvocationID, addr event.Address, notice task.Notice) (event.EventID, error) {
 	return l.commitFactKey(context.Background(), addr.AgentID, event.Event{
 		Key:       NoticeFactKey(invocationID, notice),
 		Type:      event.TypeFeedback,
@@ -443,10 +478,37 @@ func (l *Loop) observeReady(ctx context.Context, inv Invocation) {
 // turn-end fact of the range and runs its After pass: the message the drive
 // commits to the transcript of its session beside the decision, invocation and
 // address it belongs to, so the turn end is one committed fact of the run and
-// not a line derived from the outcome afterwards.
-func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) {
-	l.commitFact(ctx, inv.Address.AgentID, event.Event{
+// not a line derived from the outcome afterwards. A commit the ledger refuses
+// is reported to the caller of the drive beside a failed terminal, so a turn
+// never answers completed over a fact that never landed.
+func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) error {
+	return l.commitFact(ctx, inv.Address.AgentID, event.Event{
 		Type:         event.TypeAgentOutput,
+		Timestamp:    time.Now(),
+		Message:      assistantOf(outcome),
+		Owner:        inv.Address,
+		Source:       inv.Address,
+		Target:       inv.Address,
+		InvocationID: inv.InvocationID,
+		InstanceID:   inv.Instance,
+		DecisionID:   decision.DecisionID,
+		EpisodeID:    episodeOfReady(inv.Ready),
+	})
+}
+
+// commitCalls commits the assistant message one decision issued its tool calls
+// as the call fact of the range, before the calls it names are admitted: the
+// message the model produced beside every call identity, function name and the
+// arguments as the model issued them, landed as its own fact of the run. The
+// call fact is what the projection restores the pairing a later request replays
+// from — beside the result facts the calls settle into, the chain keeps both
+// sides of every call-result pair and a restart recovers the pairing from the
+// facts alone. A commit the ledger refuses ends the decision beside the named
+// error before any call it names is admitted, so a call never executes over a
+// fact that never landed.
+func (l *Loop) commitCalls(ctx context.Context, inv Invocation, decision Decision, outcome model.Outcome) error {
+	return l.commitFact(ctx, inv.Address.AgentID, event.Event{
+		Type:         event.TypeThinkingPlan,
 		Timestamp:    time.Now(),
 		Message:      assistantOf(outcome),
 		Owner:        inv.Address,
@@ -463,12 +525,14 @@ func (l *Loop) commitOutput(ctx context.Context, inv Invocation, decision Decisi
 // range it settles into, beside the task it belongs to and the address the
 // notification was accepted at, and runs the After pass of that fact. A
 // notification that arrived before the range recorded its own address commits
-// no delivery fact: the fact of a delivery names the range it lands in.
+// no delivery fact: the fact of a delivery names the range it lands in. A
+// commit the ledger refuses answers no caller, so it is reported at WARN and
+// the delivery itself still settles into its range.
 func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationID, addr event.Address, notice task.Notice) {
 	if addr.AgentID == "" || addr.SessionID == "" {
 		return
 	}
-	l.commitFact(ctx, addr.AgentID, event.Event{
+	if err := l.commitFact(ctx, addr.AgentID, event.Event{
 		Type:         event.TypeTaskSettled,
 		Timestamp:    time.Now(),
 		TaskID:       notice.TaskID,
@@ -477,7 +541,9 @@ func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationI
 		Target:       addr,
 		InvocationID: invocationID,
 		InstanceID:   l.instance,
-	})
+	}); err != nil {
+		consumerWarn("tagent: the delivery fact of task %s did not commit: %v", notice.TaskID, err)
+	}
 }
 
 // commitFact commits one fact of the run through the attached commit face and
@@ -485,28 +551,35 @@ func (l *Loop) commitSettled(ctx context.Context, invocationID event.InvocationI
 // loop beside no commit face commits nothing and observes nothing; a commit
 // face beside no pipeline face still commits the fact but leaves its
 // observation unnetted, so the missing face is a named gap beside a fact that
-// stays committed as it stands.
-func (l *Loop) commitFact(ctx context.Context, agentID event.AgentID, evt event.Event) {
-	l.commitFactKey(ctx, agentID, evt)
+// stays committed as it stands. A refused commit is reported to the caller, so
+// the loop never carries on as if a fact that never landed had landed.
+func (l *Loop) commitFact(ctx context.Context, agentID event.AgentID, evt event.Event) error {
+	_, err := l.commitFactKey(ctx, agentID, evt)
+	return err
 }
 
 // commitFactKey commits one fact of the run through the attached commit face and
 // runs the After pass of that fact, and reports the identity the fact committed
-// under. An empty identity reports a loop that committed nothing: a loop beside
-// no commit face commits nothing and observes nothing, while a commit face
-// beside no pipeline face still commits the fact but leaves its observation
-// unnetted, so the missing face is a named gap beside a fact that stays
-// committed as it stands.
-func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID {
+// under. An empty identity beside no error reports a loop that committed
+// nothing: a loop beside no commit face commits nothing and observes nothing,
+// while a commit face beside no pipeline face still commits the fact but leaves
+// its observation unnetted, so the missing face is a named gap beside a fact
+// that stays committed as it stands. A refused commit reports no identity
+// beside the named failure and runs no After pass, because no committed fact
+// stands there to observe.
+func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt event.Event) (event.EventID, error) {
 	l.mu.Lock()
 	commit, pipelines := l.commit, l.pipelines
 	l.mu.Unlock()
 	if commit == nil {
-		return ""
+		return "", nil
 	}
-	key := commit(evt)
+	key, err := commit(evt)
+	if err != nil {
+		return "", err
+	}
 	if key == "" {
-		return ""
+		return "", nil
 	}
 	if pipelines == nil {
 		l.publish(view.Presentation{Fact: key, Gaps: []view.ObservationGap{{
@@ -514,10 +587,10 @@ func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt eve
 			Fact:   key,
 			Err:    ErrFactPipelineUnwired,
 		}}})
-		return key
+		return key, nil
 	}
 	l.afterPass(ctx, agentID, key)
-	return key
+	return key, nil
 }
 
 // CommitFactFor commits one fact on behalf of the named agent and runs the
@@ -526,8 +599,9 @@ func (l *Loop) commitFactKey(ctx context.Context, agentID event.AgentID, evt eve
 // producer outside a dispatch — the configuration source judging a model
 // replacement — lands its fact in the one ledger and is observed through the
 // faces of that agent's published generation exactly as the loop's own facts
-// are. An empty identity reports a loop beside no commit face.
-func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) event.EventID {
+// are. An empty identity beside no error reports a loop beside no commit face,
+// and a refused commit reports the failure beside no identity.
+func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) (event.EventID, error) {
 	return l.commitFactKey(ctx, agentID, evt)
 }
 
@@ -632,51 +706,6 @@ func (l *Loop) SetRequestFace(face RequestFace) {
 	l.boundary = face
 }
 
-// RequestSnapshotFace fixes the safe request snapshot of one decision's
-// request at the formal request boundary: the face is handed the request as it
-// stands before the model entry is called — the full message set the model
-// will see and the tools visible to it — beside the model view material the
-// request runs on and the borrowed binding its visible skill set is read from.
-// The face keeps a projected copy of the request and never edits the request
-// itself, and a face error never reaches the model decision: capture is
-// observation, not execution, and the refused fix is counted as an explicit
-// recording loss beside its decision identity. The face crosses built-in,
-// event, model and state types only, so the capture side attaches through it
-// with no package edge into the execution core.
-//
-// The redline list (3 rules):
-// MUST keep a projected copy of the request and say whether the fix was kept.
-// MUST NOT edit the request it was handed, and MUST NOT hold it past the fix.
-// MUST NOT let a refused fix reach the model decision: it is a counted recording loss.
-type RequestSnapshotFace func(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools []string, binding state.AgentBinding, req model.Request) error
-
-// SetRequestSnapshotFace attaches the safe request snapshot face this loop
-// fixes each decision's request boundary snapshot through before that request
-// starts. A nil face fixes nothing. The setter is separate from the constructor
-// so the declared construction shape of the loop stays as it is.
-func (l *Loop) SetRequestSnapshotFace(face RequestSnapshotFace) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.snapshot = face
-}
-
-// fixRequestSnapshot fixes the safe request snapshot of one decision's request
-// through the attached face before that request starts, or fixes nothing while
-// no face is attached. A fix the face refused is counted as an explicit
-// recording loss beside its decision identity and never carried into the model
-// decision.
-func (l *Loop) fixRequestSnapshot(ctx context.Context, decisionID event.DecisionID, view modelView, binding state.AgentBinding, req model.Request) {
-	l.mu.Lock()
-	face := l.snapshot
-	l.mu.Unlock()
-	if face == nil {
-		return
-	}
-	if err := face(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, binding, req); err != nil {
-		l.noteRecordingLoss("snapshot", string(decisionID), err)
-	}
-}
-
 // fixCapture fixes the request view of one decision through the attached
 // capture before that request starts, or fixes nothing while no capture is
 // attached. A fix the capture refused is counted as an explicit recording loss
@@ -688,7 +717,7 @@ func (l *Loop) fixCapture(ctx context.Context, decisionID event.DecisionID, view
 	if capture == nil {
 		return
 	}
-	if err := capture.Snapshot(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, req); err != nil {
+	if err := capture.Snapshot(ctx, decisionID, view.modelName, view.promptVersion, view.visibleTools, view.visibleSkills, req); err != nil {
 		l.noteRecordingLoss("capture-snapshot", string(decisionID), err)
 	}
 }
@@ -805,7 +834,7 @@ func (l *Loop) requestBoundary(ctx context.Context, inv Invocation, binding stat
 // execution.
 type RecordingLoss struct {
 	// Kind names the record kind the failed write belonged to: "episode",
-	// "decision", "attempt" or "snapshot".
+	// "decision" or "attempt".
 	Kind string
 	// ID is the identity of the record the failed write belonged to.
 	ID string
@@ -878,7 +907,7 @@ func (l *Loop) publish(presentation view.Presentation) {
 // a background task and holds no slot.
 // - One decision boundary is one observable model attempt: a retry hidden below this boundary never mints a second attempt identity.
 // - The model view is fixed before the request starts and is never rebuilt from the options of a finished call.
-// - The safe request snapshot is fixed before the model entry is called and observes the request without editing it; a refused fix is counted as a recording loss.
+// - The safe request snapshot is fixed through the attached capture before the model entry is called and observes the request without editing it; a refused fix is counted as a recording loss.
 // - The model entry error is presented with failure polarity through the same reduction: a synthesized failure response is reduced like any stream, so the terminal judgement stays in the model package alone.
 // - The model decision reached its terminal: the session slot is free again while the admitted tools run as background tasks.
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
@@ -923,6 +952,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if boundary.PromptVersion != "" {
 		view.promptVersion = boundary.PromptVersion
 	}
+	view.visibleSkills = boundary.VisibleSkills
 	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript)+1)
 	messages = append(messages, boundary.Messages...)
 	messages = append(messages, transcript...)
@@ -930,7 +960,6 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
 	}
 	req := model.Request{Messages: messages, Tools: tools}
-	l.fixRequestSnapshot(ctx, decisionID, view, handle.Binding, req)
 	l.fixCapture(ctx, decisionID, view, req)
 
 	production := &inFlightProducer{}
@@ -961,6 +990,10 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		if round.final {
 			receipts = refuseClosingCalls(callsOf(outcome))
 		} else {
+			if commitErr := l.commitCalls(ctx, inv, decision, outcome); commitErr != nil {
+				_ = handle.Release(ctx)
+				return decision, outcome, nil, nil, nil, commitErr
+			}
 			receipts, observations, facts, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
 			if err != nil {
 				_ = handle.Release(ctx)
@@ -1451,20 +1484,24 @@ func (l *Loop) recordDecisionAttempt(ctx context.Context, inv Invocation, decisi
 
 // modelView is the model view material one request actually runs on, carried
 // across the recording face in the built-in shapes that face crosses: the model
-// and prompt version of the borrowed generation and the names of the tools
-// visible to the request. A member that ran unversioned is named unversioned
-// rather than assumed current: the record side pins each visible member by the
-// material it is handed and invents no version of its own.
+// and prompt version of the borrowed generation, the names of the tools visible
+// to the request and the names of the skills visible to it. A member that ran
+// unversioned is named unversioned rather than assumed current: the record side
+// pins each visible member by the material it is handed and invents no version
+// of its own.
 type modelView struct {
 	modelName     string
 	promptVersion string
 	visibleTools  []string
+	visibleSkills []string
 }
 
 // modelViewOf fixes the model view one request actually runs on before the
 // request starts: the model and prompt version of the borrowed generation and
-// the tools visible to the request. The view is never rebuilt from the options
-// of a finished call.
+// the tools visible to the request. The skills visible to it are read off the
+// request boundary view beside this, because the boundary assembly is the one
+// home of the rule naming which skills a request makes visible. The view is
+// never rebuilt from the options of a finished call.
 func modelViewOf(binding state.AgentBinding) modelView {
 	view := modelView{
 		modelName:     binding.Model.Info().Name,
@@ -1544,7 +1581,10 @@ func observationOf(msg model.Message, callID, tool string) model.Message {
 // history of a session from and writes one ended drive's transcript back to:
 // the invocations of one session share the history the drives that already
 // ended on it committed, while each drive aggregates only its own ready input
-// beside that history and never batches with a neighbour.
+// beside that history and never batches with a neighbour. A session whose
+// transcript a mapped sequence carries needs no second face here: that
+// sequence is the one history of the session, so an implementation may answer
+// none of its own beside it.
 //
 // The redline list (3 rules):
 // MUST report the history the named session accumulated, as a copy the caller owns.

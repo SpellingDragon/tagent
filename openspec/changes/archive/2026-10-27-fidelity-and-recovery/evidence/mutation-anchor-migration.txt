@@ -1,0 +1,128 @@
+mutations registry anchor 迁移登记 —— 裁定③（编排者已批）
+变更：fidelity-and-recovery    HEAD：d248d05
+对象：scripts/check_event_integrity_mutations.py（event-consumption-integrity 归档变更的
+      frozen registry 的锚面维护，跨变更验收面资产，缺陷语义与 expect_assertion 冻结不变）
+裁定：MUT-EVID-02/03/04 映射迁到等价新锚（G6b/G7 语义后的断言点），逐条登记：
+      旧锚 → 新锚 → 等价理由；`--all` 须 11/11 killed。
+静态核对：迁移后全 registry（11 mutation × 全部 patch，共 24 处锚）文本在工作树逐处
+      恰好命中 1 次（python 复核命令见战报①；迁移前失效 4 处：host.go×1、
+      settle_turn.go×1、request.go×2）。
+
+================================================================================
+M1  MUT-EVID-02-dual-material-input（confirmed_defect EVID-02-dual-material-input）
+    test: ./tests/integration/host TestEventIntegrityTaskContinuation
+    expect_assertion（冻结不变）："new user-input facts carrying"
+--------------------------------------------------------------------------------
+旧锚：host.go —
+      _, err = h.driveLocked(ctx, InvokeRequest{
+          InvocationID:  invocationID,
+          Address:       addr,
+          TriggerSource: "task",
+      })
+      （+注入：补 Input: []model.Message{{Role: model.RoleUser, Content: material}}）
+新锚：host.go —
+      turn, err := h.driveLocked(ctx, InvokeRequest{
+          InvocationID:  invocationID,
+          Address:       addr,
+          TriggerSource: "task",
+      })
+      （+同一注入行）
+等价理由：注入点同为 fireNoticeTurn 内 task 触发的 follow-up turn 请求（driveLocked 调用），
+      缺陷语义不变——同一 notice identity 的 material 以 InvokeRequest.Input 二次进入
+      follow-up range，成为两条 new user-input facts。锚文本漂移仅因 G5/G6b 起
+      driveLocked 返回 turn 并检查 turn.Terminal（`_, err =` → `turn, err :=`），
+      调用语义未变。负锚 no_duplicate_input_for_same_notice 不变。
+
+================================================================================
+M2  MUT-EVID-03-busy-notice-drop（confirmed_defect EVID-03-busy-notice-loss）
+    test: ./tests/integration/host TestEventIntegrityTaskContinuation
+    expect_assertion（冻结不变）："no request carried the notice material"
+--------------------------------------------------------------------------------
+旧锚：settle_turn.go — busy 分支删 retained 保留：
+      if d.firing {
+          d.retained = append(d.retained, notice)   ← 注入删这行
+          d.mu.Unlock()
+          return nil
+      }
+      缺陷语义：通知在 follow-up turn in flight 期间到达时被丢弃而非保留。
+新锚：settle_turn.go — G6b 后 retained/firing 机制整体删除（grep firing|retained 0 命中），
+      "保留"的实现=mailbox 账面 + 观察 wake + drain 回读自愈循环。注入改为断掉 busy 通知
+      的全部保留路径（4 补丁一组，同应用同复原）：
+      P1 ObserveCommit：pump driving（busy）时吞掉 wake（不入 wakeCh）；
+      P2 SettleDriver struct 加 busy 字段；
+      P3 drain() 置 busy=true（defer 清零）——"pump busy"=正在驱动本轮；
+      P4 drain() 自愈回读截断（`if !worked { return }`→`_ = worked; return`），
+         一轮驱动过即回，不再回读账面。（第一版 P4 反转退出条件为
+         `if worked { return }`，空轮永不返回成死自旋，-race 下挂死被判
+         not_killed(timeout)；改为无条件单轮返回后同语义无自旋，实测 killed。）
+等价理由：缺陷语义完全同构——"通知在 follow-up turn in flight 期间到达，被丢弃而非保留"。
+      旧保留机制=busy 时入 retained 等 firing 完再放；新保留机制=通知入 mailbox 账 +
+      观察 wake + drain worked 回读。注入恰好断掉两条保留路径（wake 被吞、回读停止），
+      busy 通知留在账面无人消费=丢。杀伤路径：B 在 A parked 期间 settle → wake 被吞 →
+      A 结束后单轮回读不发生 → requestB 永不出现 → continuationWaitForRequest 30s 超时
+      红在 "no request carried the notice material"。负锚 busy_notice_not_dropped 不变。
+      （旧单补丁"删 retained append"在新架构无直接等价单点——retained 面已删除；
+      注入形态随之重构为多补丁组是机制降解后的必然，缺陷主张本身一字未动。）
+
+================================================================================
+M3  MUT-EVID-04-position-boundary（confirmed_defect EVID-04-notice-visibility-loss）
+    test: ./tests/integration/history TestEventIntegrityProjection
+    expect_assertion（冻结不变）："want the notice identity and its material"
+--------------------------------------------------------------------------------
+旧锚（7 补丁组）中 5 处未动（endedAt 字段块 / endedPrefix 方法体 / facts.go 三处），
+仅 2 处随重构漂移，迁移如下：
+A) request.go replays 注册行 —
+   旧锚：r.replays[chain.SessionID] = replayEntry{projection: projection, window: window}
+   新锚：r.replays[addr] = replayEntry{projection: projection, window: window}
+   （注入后缀 ended: projection.Len() 不变）
+   等价理由：同一注册点（AttachReplay），G4（e46708d）起 replays 索引改全地址键
+   （replayAddressOf），仅键形态漂移，位置边界注入语义不变。
+B) request.go projectedSegment 调用行 —
+   旧锚：return projectedSegment(ctx, a.sequence.projection, a.sequence.window,
+          a.sequence.endedPrefix())
+   新锚：return projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window,
+          a.sequence.endedPrefix())
+   （注入改 a.sequence.ended 不变）
+   等价理由：同一消费点，projectedSegment 随重构增带 run 句柄参数（G1/G7 面），
+   边界读取语义不变。
+缺陷语义不变（整体）：把 range-in-flight 边界从"按身份"退回"按位置"——age fold 重写
+      序列后位置漂移，in-flight notice 被折进 ended prefix 以摘要行呈现而非其材料。
+      负锚 notice_visible_under_fold 不变。
+      （endedAt/endedPrefix/facts.go 5 处锚经复核 hits=1 原样有效，未动。）
+
+================================================================================
+M4  MUT-CAND-01.8-storage-success（named_assertion，01.8 storage_failure_not_reported_as_success）
+    test: ./tests/integration/history TestEventIntegrityPersistence
+    expect_assertion（冻结不变）："the turn beside a failing storage tier returned no failure"
+--------------------------------------------------------------------------------
+旧锚（计划回写③ 注册形态，单点）：facts.go — persistFact 的 StoreEvent 错误检查吞掉：
+      if err != nil {
+          return err          ← 注入改 return nil
+      }
+      if supply == nil {
+实测（裁定③ --all 9/11 时点）：单点吞只吞掉输入事实的 StoreEvent 失败；持久面把
+      同一次屏障拒绝分流到多个错误出口（读触发 staged 写快照提交的 GetEvent 报
+      ErrCommitBarrier / Originals.Put / 冲突分支 getErr / StoreEvent 报
+      ErrSegmentBarrier），导致红落在第二断言（4352 行 "the turn failed beside …
+      want the segment barrier"）或注入被完全掩盖（补吞 GetEvent 后 subtest
+      直接 PASS）——两种形态均非冻结断言命中，gate 判 not_killed。
+新锚（补全形态，5 补丁一组同应用同复原）：persistFact 全部存储层错误出口一律
+      报告已提交——GetEvent 读错误 / Originals.Put 写错误 / 冲突分支 getErr /
+      冲突分支 return err / StoreEvent 错误，五处 `return err` 形态改 `return nil`。
+等价理由：缺陷主张一字未动——"把存储层拒绝的段报成已提交事实：事实进活账、
+      回合继续，屏障失败答成成功而非点名报告"。单点注入只盖住五分之一出口，
+      不构成完整缺陷；补全后 turn 必然返回 nil，正中冻结 expect_assertion
+      （4348 "the turn beside a failing storage tier returned no failure"）。
+      storedFactConflict 两处（身份冲突点名拒绝，另一条 redline）不在存储拒绝
+      面，保留未动。
+【申报】本条超出裁定③字面授权（裁定③点名 MUT-EVID-02/03/04）。性质=注入形态
+      补全（同 M2 先例：机制变更后注入形态随现实重做，主张不动）；缺陷主张与
+      expect_assertion 双冻结、产品面零写入、仅 registry 行可回滚。如编排者不
+      认可，revert 本条 companion 即回旧形态（将回到 not_killed 待裁状态）。
+
+================================================================================
+汇总：4 个 mutation 映射迁移/补全（M1/M2/M3/M4）；expect_assertion 全部冻结不变；
+      缺陷主张全部冻结不变（M2/M4 注入形态重构=机制变更后的等价实现，主张一字未动）；
+      其余 7 个 mutation 锚原样有效未动。
+待实测证据：python3 scripts/check_event_integrity_mutations.py --all --json
+      → 11/11 killed（跑于裁定② long 完成后防 CPU 互抢，结果见战报①）。

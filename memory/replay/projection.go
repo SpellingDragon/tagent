@@ -25,7 +25,7 @@ import (
 )
 
 // ProjectionEntry is one ordered item of a projection: the canonical identity of
-// a committed fact, its type and summary, the content presented for it, and its
+// a committed fact, its type and summary, the original text it carries, and its
 // time, in the same shape a recall card entry uses.
 type ProjectionEntry struct {
 	// Key is the canonical identity of the fact, in its hex form.
@@ -34,44 +34,13 @@ type ProjectionEntry struct {
 	Type string
 	// Summary is the stored summary of the fact, which is not the full text.
 	Summary string
-	// Content is what the model view carries for this entry: the full original
-	// when the recorded decision is full text, and otherwise the bounded preview
-	// or ticket that decision recorded.
+	// Content is the original text of the fact: immutable input, never a view.
+	// An assembly shapes the copy a request carries and leaves this text as the
+	// fact stated it, so the same entry presents differently under different
+	// budgets.
 	Content string
 	// Time is the time the fact was recorded.
 	Time time.Time
-}
-
-// PresentationMode names how one projection entry is presented to the model.
-type PresentationMode int
-
-const (
-	// PresentationUnrecorded is the zero value: no decision was recorded for the
-	// entry, so it is never presented as if one had been.
-	PresentationUnrecorded PresentationMode = iota
-	// PresentationFull presents the full original text of the entry.
-	PresentationFull
-	// PresentationSummary presents the stored summary in place of the original.
-	PresentationSummary
-	// PresentationTicket presents a bounded preview together with the ticket
-	// that reaches the original by segment.
-	PresentationTicket
-)
-
-// PresentationDecision is the recorded choice of how one projection entry was
-// presented to the model, and the basis a replay reproduces.
-//
-// The recorded decision is what a replay follows, so a recorded preview is never
-// promoted to the full original and the original is never reconstructed from the
-// decision.
-type PresentationDecision struct {
-	// Key identifies the entry the decision was recorded for.
-	Key event.EventID
-	// Mode is the presentation chosen for the entry.
-	Mode PresentationMode
-	// Preview is the bounded text shown when Mode is not PresentationFull, and
-	// is empty for a full-text decision.
-	Preview string
 }
 
 // ChainKey is the causal chain identity one fact chain is isolated under: the

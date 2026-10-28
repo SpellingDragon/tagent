@@ -1,0 +1,11 @@
+=== RUN   TestExecFinalOutputSurvivesTheExit
+=== RUN   TestExecFinalOutputSurvivesTheExit/the_exit_saves_the_final_output
+    final_output_test.go:184: 最终输出捕获次数 = 0, want >= 1: the exit released the resource without saving its final output
+=== RUN   TestExecFinalOutputSurvivesTheExit/the_release_answer_carries_the_final_output
+    final_output_test.go:212: exec_release answer = "released probe/final-release after confirmed stop: exit=7", want the final output carrying omega beside the release
+--- FAIL: TestExecFinalOutputSurvivesTheExit (0.08s)
+    --- FAIL: TestExecFinalOutputSurvivesTheExit/the_exit_saves_the_final_output (0.08s)
+    --- FAIL: TestExecFinalOutputSurvivesTheExit/the_release_answer_carries_the_final_output (0.00s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/tool/exec	0.251s
+FAIL

@@ -337,7 +337,7 @@ recall 一族工具对模型呈现的 `Declaration` 里**没有任何向量或�
 
 | 原版 | 当期状态 |
 |---|---|
-| 召回 `recall`/`recall_*`/`memory_turn`、知识 `skill_*`/`web_search`、任务 `*_task`、`spec`、`memoryx`、PlanAgent、govx | 包已不在 `tool/`；召回与知识能力归 `memory/{query,search}` 与 `runtime/agent`，任务与批准归 `runtime/task`，治理归 `evolution/governance`；判据保留在本篇与 [docs/api/](../../api/index.md) |
+| 召回 `recall`/`recall_*`/`memory_turn`、知识 `skill_*`/`web_search`、任务 `*_task`、`spec`、`memoryx`、PlanAgent、govx | 包已不在 `tool/`；召回与知识能力归 `memory/{query,search}` 与 `runtime/agent`，任务与批准归 `runtime/task`，治理归 `features/evolution/governance`；判据保留在本篇与 [docs/api/](../../api/index.md) |
 | `AgentToolWrapper` + `event_keys` + `RuntimeState["external_context"]` 上下文传递 | 由 `tool/subagent` 的 `Assembly` + handoff envelope 承接；"只序列化 EventKey/EventType/EventSummary、按需让远端自查原文"的取舍保留 |
 | `EventKeys` 为 `[evt_...]` 前缀、hex 契约、`toInt64Key` 以 hex 优先 | 归 `event` 的编号与时间线前缀契约（见[事件契约](../event/event-architecture.md#timeline-prefix)）；EventKey 为 Snowflake int64（PartitionID/Timestamp/Sequence），字符串面统一 16 进制；`PartitionID = FNV-1a(AgentName) & 0x3FF`，**Memory 不感知 agent**，只按分区隔离 |
 | `ActionTool` 直接持 executor/monitor，经 `TaskSpawner` spawn | 由 `tool/exec` 的 `Manager`（资源/租约/清扫）+ `runtime/task`（settle-or-detach）承接；`action: tmux not available (install: brew install tmux)` 与"同步降级直跑已移除"的历史结论保留 |

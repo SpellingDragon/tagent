@@ -3,7 +3,7 @@
 tagent 组合根的**真实宿主示例**：常驻微信机器人，把 `tagent.Assemble` 产出的 `*tagent.Run` 接上消息链路——
 入站去重、媒体与长文本落盘、按显式会址投递、审批通道与投递回执全部跑在真消息上。
 
-> 部署（裸机 systemd / 容器）见 [deploy/README.md](deploy/README.md)；历史设计记录见 [../../docs/wiki/](../../docs/wiki/)（该目录 25 篇为 historical-verbatim，描述的是已移除的实现；当期契约以 [../../openspec/specs/](../../openspec/specs/) 与 `scripts/gen_godoc.sh` 生成的 `docs/api/` 为准）。
+> 部署（裸机 systemd / 容器）见 [deploy/README.md](deploy/README.md)；历史设计记录见 [../../docs/wiki/](../../docs/wiki/)（该目录 25 篇为 historical-verbatim，描述的是已移除的实现；当期契约以 [../../openspec/specs/](../../openspec/specs/) 与 `scripts/gates/gen_godoc.sh` 生成的 `docs/api/` 为准）。
 
 ---
 

@@ -36,10 +36,10 @@
 | D2 资产写审批规则 | 权限域分离（D3）落地验证 | 删除 `exec.cognitive-asset-write` 规则 + `asset_write.go`；相关测试降级为「规则不存在」断言；更新本页 |
 | D4 走私提示 | failure-polarity-passthrough 上线 + 观察期（两周）走私形态未再现 | 删除 `smuggle_hint.go` 检测器与 Call 注入 + 更新本页 |
 
-约定：账本随交付登记；条件触发时进入拆除队列（新变更或并入相邻变更），**不允许条件已满足而脚手架滞留**。认知资产清单的**单一真源** = `evolution.DefaultProtectedPaths`（`evolution/evolve.go`）。三处消费方同源引用，禁止复制路径字面量：①evolution 登记边界（`cfg.ProtectedPaths` 缺省取此值）；②漂移审计文件集（`asset_drift.go` 经 `DefaultAssetPatterns()` 转发）；③资产写审批路径匹配（`agent/governance/asset_write.go` 经 `cognitiveAssetPrefixes()` 派生）。依赖方向核验：evolution 仅 import event/memory；governance 与 evolution 互不引用；`governance → evolution`、根包 `tagent → {evolution, agent}` 均无环。
+约定：账本随交付登记；条件触发时进入拆除队列（新变更或并入相邻变更），**不允许条件已满足而脚手架滞留**。认知资产清单的**单一真源** = `evolution.DefaultProtectedPaths`（`features/evolution/evolve.go`）。三处消费方同源引用，禁止复制路径字面量：①evolution 登记边界（`cfg.ProtectedPaths` 缺省取此值）；②漂移审计文件集（`asset_drift.go` 经 `DefaultAssetPatterns()` 转发）；③资产写审批路径匹配（`agent/governance/asset_write.go` 经 `cognitiveAssetPrefixes()` 派生）。依赖方向核验：evolution 仅 import event/memory；governance 与 evolution 互不引用；`governance → evolution`、根包 `tagent → {evolution, agent}` 均无环。
 
 ## 六、默认态与零配置
 
 漂移审计、走私引导**默认开启**（纯附加行为：事件+日志、提示行，无拦截）；资产写审批规则随 `DefaultRules` 默认存在，仅在 governance enabled 时被评估，governance 关闭的部署零行为变化。三者 MUST NOT 引入新的必填配置项（清单同源声明，间隔/路径均为常量）。
 
-相关代码：`asset_drift.go`/`asset_drift_test.go`、`event/types.go`+`event/registry.go`（`TypeCognitiveAssetChanged` 登记）、`agent/task_record_sink.go`（`RecordCognitiveAssetChange`）、`agent/governance/asset_write.go`+`classifier.go`、`tool/action/smuggle_hint.go`+`action_tool.go`、`evolution/evolve.go`。
+相关代码：`asset_drift.go`/`asset_drift_test.go`、`event/types.go`+`event/registry.go`（`TypeCognitiveAssetChanged` 登记）、`agent/task_record_sink.go`（`RecordCognitiveAssetChange`）、`agent/governance/asset_write.go`+`classifier.go`、`tool/action/smuggle_hint.go`+`action_tool.go`、`features/evolution/evolve.go`。

@@ -20,7 +20,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/rl"
+	"github.com/SpellingDragon/tagent/features/rl"
 )
 
 // hostCaptureID is the identity the boot capture seals its manifest under.
@@ -106,6 +106,17 @@ func (c *hostRunCapture) Scope(view rl.ModelViewRef, decisionID event.DecisionID
 		return hostScopedCapture{}
 	}
 	return hostScopedCapture{inner: c.trajectory.Scope(view, decisionID)}
+}
+
+// Snapshots reports the safe request snapshots the run-wide trajectory fixed, in
+// fix order, each beside the decision whose request it was fixed for. The read
+// goes to the trajectory that holds them, so the run's snapshot read face and
+// the capture's own account are one account rather than two.
+func (c *hostRunCapture) Snapshots() []rl.DecisionSnapshot {
+	if c == nil || c.trajectory == nil {
+		return nil
+	}
+	return c.trajectory.Snapshots()
 }
 
 // hostScopedCapture keeps one scoped capture of the run-wide trajectory beside

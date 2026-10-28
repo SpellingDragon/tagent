@@ -14,7 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/telemetry"
+	"github.com/SpellingDragon/tagent/features/telemetry"
 )
 
 // TestEnvironmentBlockGenerationIsObserved checks the rewrite-frequency face of the environment block through the formal entry.
