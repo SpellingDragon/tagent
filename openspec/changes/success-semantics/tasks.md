@@ -1,4 +1,4 @@
-# 任务（grill 第一轮增补修订版）
+# 任务（grill 第一轮增补修订版；mermaid 图示首轮主链，叶 7-11 见下节）
 
 ```mermaid
 graph LR
@@ -15,8 +15,8 @@ graph LR
 - [x] 2. checked 全 4 点+at-least-once 边界（P2+#5#6#7#9）：recordDeliveryState 4 调用点失败具名上抛；noteDeliveryRefusal 同；Approve 发送前不销账、回执落盘销账、回执失败具名错误；spec 降级声明（无 tier=进程内）—— 验证：TestDeliveryStateCommitFailure（取消 ctx→Refuse 返错、内存态不变）+ TestApproveDeliveryReceiptFailure（回执失败→具名错误、义务不销）+ 既有 delivery_recovery/delivery_review 锚
 - [x] 3. 无 message 键拒旧（P2+#10#11）：DecodeEventBody 顶层无 message 键→ErrEventBody（原始键存在性）；新测试字节样例 `{"key":…,"content":…,"summary":…}` —— 验证：TestDecodeEventBodyRefusesKeyContentSummaryShape + 既有 TestDecodeEventBodyLegacyRefused 不动
 - [x] 4. final 归属与残余窗口明示（D6/D7）：spec 写明用户 turn 微窗口残余+理由、final 跨重启不承诺+ErrFinalOutputUnrecorded 归属 —— 验证：openspec validate --strict 通过
-- [ ] 5. grill 二轮至无新有效问题（用户指令）—— 验证：终轮 grill 报告无新有效问题
-- [ ] 6. F：全套门禁+push+远端 CI 绿+PR+merge（CI 不过不 merge）
+- [x] 5. （并入 12/13）grill 循环与收尾门在五项并入后由任务 12/13 承担，此行与 6 一并折叠
+- [x] 6. （并入 13）收尾门见任务 13，PR+merge 只发生一次
 
 ## 叶 7-11（责任范围收缩五项并入，grill 一轮判据修订版）
 

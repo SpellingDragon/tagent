@@ -22,8 +22,8 @@
 
 ## 次要项（grill 判定是否纳入本轮）
 
-- features 依赖隔离：runtime/agent→features/evolution/governance（WithCallPass）——评审「继续向已有所有者收拢」；
-- 执行最终输出 final 内存表跨重启归属——评审「需要明确归属」。
+- features 依赖隔离：runtime/agent→features/evolution/governance（WithCallPass）——评审「继续向已有所有者收拢」。（已裁定 D8/D11 并入本轮：4501ee3a 迁 api/plugin）；
+- 执行最终输出 final 内存表跨重启归属——评审「需要明确归属」。（已裁定 D7：跨重启不承诺，ErrFinalOutputUnrecorded 属可解释错误；持久化登记下轮）
 
 ## 必答一问
 
