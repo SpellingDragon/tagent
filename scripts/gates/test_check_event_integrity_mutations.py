@@ -137,7 +137,7 @@ class MutationGateTest(unittest.TestCase):
         evid = [record for record in payload["mutations"]
                 if record["id"] == "MUT-EVID-04-position-boundary"]
         self.assertEqual(len(evid), 1, [r["id"] for r in payload["mutations"]])
-        self.assertEqual(sorted(set(evid[0]["targets"])), ["facts.go", "request.go"])
+        self.assertEqual(sorted(set(evid[0]["targets"])), ["assembly/facts.go", "assembly/request.go"])
 
     def test_every_confirmed_defect_has_mutation(self):
         self.assertGreaterEqual(len(self.confirmed), 2)
@@ -235,11 +235,12 @@ class MutationGateTest(unittest.TestCase):
             gate.MUTATIONS[0],
             id="MUT-STALE",
             replacement=gate.Replacement(
-                file="host.go", old="an anchor the file no longer carries\n", new="x\n"),
+                file="assembly/host.go", old="an anchor the file no longer carries\n", new="x\n"),
         )
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp)
-            (tree / "host.go").write_text("package tagent\n", encoding="utf-8")
+            (tree / "assembly").mkdir()
+            (tree / "assembly" / "host.go").write_text("package assembly\n", encoding="utf-8")
             with self.assertRaises(gate.GateError):
                 gate.apply_patch(tree, stale)
 
@@ -247,7 +248,7 @@ class MutationGateTest(unittest.TestCase):
             gate.MUTATIONS[0],
             id="MUT-STALE-REGISTRY",
             replacement=gate.Replacement(
-                file="host.go", old="an anchor the file no longer carries\n", new="x\n"),
+                file="assembly/host.go", old="an anchor the file no longer carries\n", new="x\n"),
         )
         problems = gate.validate_registry(self.root, [broken])
         self.assertTrue(any("stale mutation" in problem for problem in problems), problems)
@@ -341,11 +342,12 @@ class MutationGateTest(unittest.TestCase):
                     if item.id == "MUT-EVID-04-position-boundary"][0]
         self.assertEqual(len(mutation.patch_set()), 7)
         files = {replacement.file for replacement in mutation.patch_set()}
-        self.assertEqual(files, {"request.go", "facts.go"})
+        self.assertEqual(files, {"assembly/request.go", "assembly/facts.go"})
 
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp)
             for name in files:
+                (tree / name).parent.mkdir(parents=True, exist_ok=True)
                 source = self.root / name
                 (tree / name).write_text(source.read_text(encoding="utf-8"),
                                          encoding="utf-8")
@@ -353,10 +355,10 @@ class MutationGateTest(unittest.TestCase):
             mutated = {name: (tree / name).read_text(encoding="utf-8")
                        for name in files}
             self.assertEqual(sorted(pristine), sorted(files))
-            self.assertIn("\tended           int\n", mutated["request.go"])
-            self.assertNotIn("endedPrefix", mutated["request.go"])
-            self.assertIn("held.ended = position", mutated["facts.go"])
-            self.assertIn("\tboundary := held.ended\n", mutated["facts.go"])
+            self.assertIn("\tended           int\n", mutated["assembly/request.go"])
+            self.assertNotIn("endedPrefix", mutated["assembly/request.go"])
+            self.assertIn("held.ended = position", mutated["assembly/facts.go"])
+            self.assertIn("\tboundary := held.ended\n", mutated["assembly/facts.go"])
             gate.restore_patch(tree, pristine)
             for name in files:
                 self.assertEqual((tree / name).read_text(encoding="utf-8"),
