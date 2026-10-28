@@ -27,6 +27,7 @@
 | 记忆存储 | [memory/memory-architecture.md](memory/memory-architecture.md) | FullEvent/EventReference、分层存储（L0-L3）、因果链、墓碑、记忆策展 |
 | 事件契约 | [event/event-architecture.md](event/event-architecture.md) | 事件类型系统、元数据契约、时间线前缀（读写单点） |
 | 插件 | [plugin/plugin-architecture.md](plugin/plugin-architecture.md) | 两相位六端口的材料流：TransformCall / RiskAssessor+Governor / EnvironmentInject / PostCommitObserver / FinalPresenter / CompressTrigger |
+| 十分钟机制导览 | [mechanism-tour.md](mechanism-tour.md) | 一条链、三个挂点、六端口三类时机、消息/异步/冥想全链、四不变量 |
 | 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层+跨重启连续）、召回体系、任务工具族、EventKeys 传递 |
 | tmux 动作会话存活判定 | [tool/tmux-action.md](tool/tmux-action.md) |
 | 持久投递与依赖退化 | [reliability/durable-delivery.md](reliability/durable-delivery.md) | 信封三段状态、依赖退化阶梯、谱系投递白名单的两层语义与进程内跨 agent 投递缝 |
