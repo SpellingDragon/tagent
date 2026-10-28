@@ -1076,12 +1076,17 @@ func smokeEndedWithTool(messages []smokeModelMessage) bool {
 
 // smokePairedResult 报告请求的最后一条消息是不是给定调用的工具结果：按角色与
 // 调用 id 取键，因为受理回执是裸 "ok"，正文里没有可识别的字样。
+// smokePairedResult reports whether the call was answered by its tool result
+// anywhere in the request: a settled observation may ride the same request as
+// the receipt that answered the call, so the pairing is found by presence and
+// never by the position of the last message.
 func smokePairedResult(messages []smokeModelMessage, callID string) bool {
-	if len(messages) == 0 {
-		return false
+	for _, msg := range messages {
+		if msg.Role == string(tagentmodel.RoleTool) && msg.ToolCallID == callID {
+			return true
+		}
 	}
-	last := messages[len(messages)-1]
-	return last.Role == string(tagentmodel.RoleTool) && last.ToolCallID == callID
+	return false
 }
 
 // smokeFrame 报告用户消息是不是循环折成的工具结果帧。

@@ -228,7 +228,7 @@ jobs:
     # setup, tmux install and the artifact upload. The 03.10 extrapolation
     # (2.39min) and the earlier 109-110s-per-shard claim were both wrong by
     # 5-8x; 4/6 shards exceeded the old 600s bound.
-    timeout-minutes: 25
+    timeout-minutes: 45
     strategy:
       # A red shard must not cancel the other five: every combination keeps
       # its own evidence.
@@ -258,7 +258,7 @@ jobs:
         env:
           SEED: ${{ matrix.seed }}
           WINDOW: ${{ matrix.window }}
-        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 1200 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 2400 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
       - name: Upload event-long shard evidence
         if: always()
         uses: actions/upload-artifact@v4

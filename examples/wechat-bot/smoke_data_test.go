@@ -172,8 +172,8 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 				}
 			}
 		}
-		if !strings.HasPrefix(receipt, "{"+callID+" ") || !strings.Contains(receipt, " true ") {
-			t.Fatalf("call_subagent receipt = %q, want the minimal admission receipt {%s <task> true <kind>}", receipt, callID)
+		if receipt != "ok" {
+			t.Fatalf("call_subagent receipt = %q, want the minimal ok admission confirmation", receipt)
 		}
 		if strings.Contains(receipt, "[call_subagent_denied]") {
 			t.Fatalf("call_subagent receipt = %q, want the admission, not a named refusal", receipt)

@@ -584,7 +584,6 @@ func (inv *Inventory) readTasks(ctx context.Context, g *gathering) {
 		})
 		g.owed = append(g.owed, reading.Outbox...)
 	}
-	sort.Slice(g.tasks, func(i, j int) bool { return g.tasks[i].TaskID < g.tasks[j].TaskID })
 }
 
 // readInvocations projects the invocation dimension from the sites whose

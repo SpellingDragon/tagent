@@ -77,3 +77,4 @@ data/
 !examples/wechat-bot/scripts/ima-note-upload.sh
 
 __pycache__/
+examples/wechat-bot/skills/interview/agent-interview-helper/

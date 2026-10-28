@@ -2,6 +2,8 @@ package taskexample
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -51,8 +53,9 @@ func (t *taskTable) Register(ctx context.Context, spec task.Spec) (task.Admissio
 			return task.AdmissionReceipt{CallID: spec.CallID, TaskID: taskID, Accepted: true, Kind: task.AdmissionDedup}, nil
 		}
 	}
-	t.seq++
-	taskID := event.TaskID(fmt.Sprintf("task-%d", t.seq))
+	var buf [16]byte
+	rand.Read(buf[:])
+	taskID := event.TaskID("task-" + hex.EncodeToString(buf[:]))
 	if t.specs == nil {
 		t.specs = map[event.TaskID]task.Spec{}
 		t.statuses = map[event.TaskID]task.Status{}

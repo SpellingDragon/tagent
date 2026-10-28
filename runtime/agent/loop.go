@@ -1530,6 +1530,8 @@ func answerText(cause error, answer any) string {
 		return ""
 	case string:
 		return out
+	case task.AdmissionReceipt:
+		return out.Text()
 	default:
 		return fmt.Sprintf("%v", out)
 	}
@@ -1553,7 +1555,7 @@ func refusalText(cause error) string {
 // and the notification promise are exactly the fragments a model restates as
 // an extra acknowledgement, so the confirmation is cut to this constant and
 // the task keeps its own record of what it was admitted as.
-const admissionReceiptText = "ok"
+const admissionReceiptText = task.AdmissionReceiptText
 
 // admissionText reports the receipt text of one admitted call as that minimal
 // confirmation. The answer still pairs with the call under the tool role and
@@ -1561,8 +1563,8 @@ const admissionReceiptText = "ok"
 // arrives later. The wording a model must act on stays outside this function:
 // the approval hold keeps its "parked awaiting approval" and a refusal keeps
 // its named reason.
-func admissionText(task.AdmissionReceipt) string {
-	return admissionReceiptText
+func admissionText(receipt task.AdmissionReceipt) string {
+	return receipt.Text()
 }
 
 // observationOf turns one settled result into the observation its call enters

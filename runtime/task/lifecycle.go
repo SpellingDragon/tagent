@@ -2,8 +2,9 @@ package task
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
-	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -106,7 +107,6 @@ type MemoryRegistry struct {
 	admission *MemoryAdmission
 	seq       *NoticeSequencer
 	limit     int
-	last      int64
 	tasks     map[event.TaskID]*memoryTask
 	policy    Policy
 }
@@ -155,9 +155,8 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 	if r.limit > 0 && r.activeCountLocked() >= r.limit {
 		return AdmissionReceipt{CallID: spec.CallID, Accepted: false, Kind: AdmissionRejected}, ErrConcurrencyLimit
 	}
-	r.last++
 	admitted := time.Now()
-	taskID := event.TaskID(fmt.Sprintf("task-%d", r.last))
+	taskID := mintTaskID()
 	entry := &memoryTask{
 		spec:       spec,
 		status:     StatusAccepted,
@@ -411,4 +410,16 @@ func leavesApprovalWait(to Status) bool {
 // cancelled task record that fact once and are not moved again.
 func isTerminal(status Status) bool {
 	return status == StatusSettled || status == StatusFailed || status == StatusCancelled
+}
+
+// mintTaskID mints one task identity: a random hex slug, never a sequence
+// number. A task identity is never enumerable — an admission receipt carries
+// no task id to the model, and the environment block names the open work, so a
+// predictable identifier would only serve enumeration across a shared surface.
+func mintTaskID() event.TaskID {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		panic("task: no randomness for a task identity: " + err.Error())
+	}
+	return event.TaskID("task-" + hex.EncodeToString(buf[:]))
 }

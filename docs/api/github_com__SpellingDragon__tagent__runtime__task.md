@@ -35,6 +35,12 @@ const (
     policy names: the name an agent declaration selects through its task policy,
     and the threshold sets those names resolve to.
 
+const AdmissionReceiptText = "ok"
+    AdmissionReceiptText is the whole model-visible content of one admission
+    receipt: the minimal confirmation that the call was admitted. The task id,
+    the state word and the settlement promise never travel to the model — an
+    admission is the system's own confirmation, never speaking material.
+
 VARIABLES
 
 var DefaultPolicy = Policy{
@@ -234,6 +240,23 @@ type AdmissionReceipt struct {
     it admits one call. Admission is not a result, so the receipt reports
     only that the call was admitted; the task's outcome arrives later as an
     independent notification.
+
+func (r AdmissionReceipt) MarshalJSON() ([]byte, error)
+    MarshalJSON renders the receipt as its minimal model-visible text, so a
+    framework that serializes tool results as JSON carries the confirmation and
+    never the task identity.
+
+func (r AdmissionReceipt) String() string
+    String renders the receipt as its minimal model-visible text.
+
+func (AdmissionReceipt) Text() string
+    Text reports the model-visible receipt: the minimal confirmation, never the
+    task identity or any internal state. The answer still pairs with its call
+    under the tool role and the call id. The receipt renders through String
+    and MarshalJSON to the same minimal text, so every path that materializes
+    a receipt for a model — the loop's typed dispatch and a tool framework's
+    own serialization alike — carries the confirmation and never the internal
+    identity.
 
 type ApprovalAnswer struct {
 	// ApprovalID is the approval identity of the hold the response resolves.
@@ -902,9 +925,9 @@ func (n Notice) FactKey() string
     TaskID+Round+Kind+Seq the notice's own identity stays at, synthesised into
     the one canonical spelling "%s:%d:%s:%d". The event reference the notice
     points at never replaces that identity, so a retried delivery answers the
-    same key. The runtime mints task identities as "task-<n>" and every kind is
-    one of the closed NoticeKind words, so the colon join stays injective over
-    the notices this package produces.
+    same key. The runtime mints task identities as "task-<random hex>" and
+    every kind is one of the closed NoticeKind words, so the colon join stays
+    injective over the notices this package produces.
 
 func (n Notice) FactType() string
     FactType returns the notification category as the fact type: the category is

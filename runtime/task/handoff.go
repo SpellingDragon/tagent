@@ -188,7 +188,13 @@ func (m *MemoryManager) RecoveryMaterial(ctx context.Context, instance event.Ins
 	for id := range owed {
 		ids = append(ids, id)
 	}
-	sort.Slice(ids, func(i, j int) bool { return taskSerial(ids[i]) < taskSerial(ids[j]) })
+	sort.Slice(ids, func(i, j int) bool {
+		a, b := m.registry.tasks[ids[i]], m.registry.tasks[ids[j]]
+		if !a.admittedAt.Equal(b.admittedAt) {
+			return a.admittedAt.Before(b.admittedAt)
+		}
+		return ids[i] < ids[j]
+	})
 	var chain []TaskRecord
 	for _, id := range ids {
 		entry := m.registry.tasks[id]

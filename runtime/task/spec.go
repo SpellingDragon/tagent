@@ -109,10 +109,39 @@ const (
 	AdmissionRejected
 )
 
-// AdmissionReceipt is the single receipt a registration wrapper returns when it
-// admits one call. Admission is not a result, so the receipt reports only that
-// the call was admitted; the task's outcome arrives later as an independent
-// notification.
+// AdmissionReceiptText is the whole model-visible content of one admission
+// receipt: the minimal confirmation that the call was admitted. The task id,
+// the state word and the settlement promise never travel to the model — an
+// admission is the system's own confirmation, never speaking material.
+const AdmissionReceiptText = "ok"
+
+// Text reports the model-visible receipt: the minimal confirmation, never the
+// task identity or any internal state. The answer still pairs with its call
+// under the tool role and the call id. The receipt renders through String and
+// MarshalJSON to the same minimal text, so every path that materializes a
+// receipt for a model — the loop's typed dispatch and a tool framework's own
+// serialization alike — carries the confirmation and never the internal
+// identity.
+func (AdmissionReceipt) Text() string {
+	return AdmissionReceiptText
+}
+
+// String renders the receipt as its minimal model-visible text.
+func (r AdmissionReceipt) String() string {
+	return r.Text()
+}
+
+// MarshalJSON renders the receipt as its minimal model-visible text, so a
+// framework that serializes tool results as JSON carries the confirmation and
+// never the task identity.
+func (r AdmissionReceipt) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + AdmissionReceiptText + `"`), nil
+}
+
+// AdmissionReceipt is the single receipt a registration wrapper returns when
+// it admits one call. Admission is not a result, so the receipt reports only
+// that the call was admitted; the task's outcome arrives later as an
+// independent notification.
 type AdmissionReceipt struct {
 	// CallID is the native provider call identifier the receipt pairs with.
 	CallID string

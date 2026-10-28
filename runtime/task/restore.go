@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -220,9 +218,6 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 		if record.Spec.DedupKey != "" {
 			r.admission.AdmitKey(record.Spec.DedupKey, record.Spec.CallID, taskID)
 		}
-		if serial := taskSerial(taskID); serial > r.last {
-			r.last = serial
-		}
 	} else if prior, ok := entry.mutations[fact.MutationID]; ok {
 		if prior.Status != fact.Status || !slices.Equal(prior.Outbox, fact.Outbox) {
 			return false, ErrMutationConflict
@@ -252,19 +247,4 @@ func (r *MemoryRegistry) foldLocked(record TaskRecord) (bool, error) {
 		entry.closeExecutionObligation("")
 	}
 	return recovered, nil
-}
-
-// taskSerial reports the serial number a task identity carries, so a restored
-// chain advances the registry's task numbering past every identity it rebuilt.
-func taskSerial(taskID event.TaskID) int64 {
-	const prefix = "task-"
-	identity := string(taskID)
-	if !strings.HasPrefix(identity, prefix) {
-		return 0
-	}
-	serial, err := strconv.ParseInt(identity[len(prefix):], 10, 64)
-	if err != nil {
-		return 0
-	}
-	return serial
 }
