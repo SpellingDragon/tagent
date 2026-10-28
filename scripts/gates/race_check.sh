@@ -40,7 +40,9 @@ RACE_WAIVER_SIGNATURES=(
 	'trpc-agent-go.*invocation'
 	'trpc-agent-go/session.*inmemory'
 	'trpc-agent-go.*session/session\.go'
-	# U5 — trpc-mcp-go v0.0.10 streamable client transport.
+	# U5 — trpc-mcp-go streamable client transport setSessionID/send race.
+	# v0.0.18 tried and rolled back 2026-10-28: same race plus a functional
+	# regression (connection refused in mcp_face); stays on v0.0.10 until fixed.
 	'trpc-mcp-go.*streamableHTTPClientTransport'
 	'trpc-mcp-go.*streamable_client\.go'
 )

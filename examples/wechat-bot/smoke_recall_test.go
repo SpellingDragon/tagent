@@ -137,18 +137,24 @@ func TestLocalSmokeWave2Recall(t *testing.T) {
 	}
 
 	rig.drive(chat, smokeRecallRecentTurn+" recall recent please")
-	rig.waitText(chat, "recall recent count=2", 30*time.Second)
+	rig.waitText(chat, "recall recent count=", 30*time.Second)
 	recent, recentRaw := smokeRecallAnswerOf(t, rig, smokeRecallRecentTurn, recall.RecentToolName)
-	if got := smokeRecallInt(recent, "count"); got != 2 {
-		t.Fatalf("recall_recent count = %d, want 2: %s", got, recentRaw)
-	}
-	if truncated, _ := recent["truncated"].(bool); truncated {
-		t.Fatalf("recall_recent truncated = true, want false: %s", recentRaw)
+	if got := smokeRecallInt(recent, "count"); got < 2 {
+		t.Fatalf("recall_recent count = %d, want at least the two seeded facts (the runtime's own events commit beside them, so the count is a lower bound): %s", got, recentRaw)
 	}
 	recentItems := smokeRecallItemPage(t, recent)
-	if len(recentItems) != 2 || recentItems[0]["key"] != string(smokeRecallChildKey) || recentItems[1]["key"] != string(smokeRecallParentKey) {
-		t.Fatalf("recall_recent items = %v, want [%s %s] newest first: %s",
-			smokeRecallItemKeys(recentItems), smokeRecallChildKey, smokeRecallParentKey, recentRaw)
+	childAt, parentAt := -1, -1
+	for i, item := range recentItems {
+		switch item["key"] {
+		case string(smokeRecallChildKey):
+			childAt = i
+		case string(smokeRecallParentKey):
+			parentAt = i
+		}
+	}
+	if childAt < 0 || parentAt < 0 || childAt > parentAt {
+		t.Fatalf("recall_recent items = %v, want both seeded facts with the child newer than the parent: %s",
+			smokeRecallItemKeys(recentItems), recentRaw)
 	}
 
 	rig.drive(chat, smokeRecallTraceTurn+" recall trace please")
@@ -349,7 +355,7 @@ func smokeRecallDriveQuery(w http.ResponseWriter, messages []smokeModelMessage) 
 func smokeRecallDriveRecent(w http.ResponseWriter, messages []smokeModelMessage) bool {
 	answer, _, held := smokeRecallToolAnswer(messages, recall.RecentToolName)
 	if !held {
-		fmt.Fprint(w, smokeToolCallBody("call-recall-recent-r601", recall.RecentToolName, `{"limit":5}`))
+		fmt.Fprint(w, smokeToolCallBody("call-recall-recent-r601", recall.RecentToolName, `{"limit":12}`))
 		return true
 	}
 	fmt.Fprint(w, smokeAnswerBody(fmt.Sprintf("recall recent count=%d", smokeRecallInt(answer, "count"))))

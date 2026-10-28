@@ -15,6 +15,19 @@ The face stays inside this package's own vocabulary: the root assembly supplies
 an OwnerResolver instead of the package importing the task or agent owners,
 so the dependency edge of the golden architecture holds.
 
+The command face of the tmux executor: how one declaration is rendered as
+the shell line a pane runs, and how the exit record kept beside a session is
+prepared, read and cleared.
+
+The executor face of the tmux mechanism: the TmuxExecutor type, the tmux client
+call, the first-frame observation, and the four Executor methods. The session
+reads live in tmux_session.go, and the command line beside the exit record in
+tmux_command.go.
+
+The session face of the tmux executor: the session name one resource key names,
+and the reads of the tmux session list that Start, Probe and Stop base their
+verdicts on.
+
 CONSTANTS
 
 const DefaultLeaseTTL = 30 * time.Minute

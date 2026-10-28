@@ -36,13 +36,14 @@ UP_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-agent-go@v1.10.0/sess
 TAG_FRAME='  github.com/SpellingDragon/tagent/agent.(*ContextManager).persistBusEvent(...)'
 TAG_PATH='      /repo/agent/context_manager.go:802 +0x9c'
 OTHER_UP='  trpc.group/trpc-go/trpc-agent-go@v1.9.0/model/stream.go:40 (...)' # upstream, NOT in waiver list
-# U5 — trpc-mcp-go v0.0.10 streamable client transport. The transport symbol
+# U5 — trpc-mcp-go v0.0.10 streamable client transport (v0.0.18 tried and
+# rolled back: same race + functional regression; waiver stays).
 # never carries its file name, so the symbol line and the path line each need
 # their own signature (a single-path signature left the symbol line unmatched).
-MCP_FRAME='  trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).setSessionID()'
-MCP_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-mcp-go@v0.0.10/streamable_client.go:467 +0x414'
 MCP_SERVER_FRAME='  trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPServer).handlePost(...)'  # server side, NOT waived
 MCP_SERVER_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-mcp-go@v0.0.10/streamable_server.go:207 +0x1c'
+MCP_FRAME='  trpc.group/trpc-go/trpc-mcp-go.(*streamableHTTPClientTransport).setSessionID()'
+MCP_PATH='      /Users/x/go/pkg/mod/trpc.group/trpc-go/trpc-mcp-go@v0.0.10/streamable_client.go:607 +0x414'
 
 # 1. Clean pass.
 run_case "clean pass" 0 "ok  \tgithub.com/SpellingDragon/tagent/event\t0.4s" 0 "OK"
@@ -95,7 +96,6 @@ mcp_mixed="$(race_out "$MCP_FRAME" "$MCP_PATH")
 run_case "waived trpc-mcp-go race + plain failure" 1 "$mcp_mixed" 1 "plain (non-race) failure"
 
 # 13. trpc-mcp-go frame OUTSIDE the transport/file waiver (server side) → red.
-# Proves the signature waives the streamable client transport, not the module.
 run_case "trpc-mcp-go server frame still unregistered" 1 "$(race_out "$MCP_SERVER_FRAME" "$MCP_SERVER_PATH")" 1 "NOT covered by the registered waiver"
 
 # 14. REAL end-to-end: legal package passes.
