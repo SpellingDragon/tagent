@@ -524,6 +524,28 @@ func integritySeal(t *testing.T, root string) rl.CaptureManifest {
 	return manifest
 }
 
+// integrityAttemptsQuiet reads the capture records once they hold at least
+// the wanted count and stop growing: the capture admission lands each record
+// with its own disk write, and on a slow runner the last record of a turn can
+// still be in flight when the close has returned, so the count the caller
+// asserts on names a settled file.
+func integrityAttemptsQuiet(t *testing.T, root string, want int) []rl.AttemptRecord {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	var last []rl.AttemptRecord
+	for {
+		current := integrityAttempts(t, root)
+		if len(current) >= want && (last != nil && len(last) == len(current)) {
+			return current
+		}
+		last = current
+		if time.Now().After(deadline) {
+			t.Fatalf("attempt records = %d after 30s, want %d settled on disk", len(current), want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // integrityAttempts reads every stored attempt line of the boot capture.
 func integrityAttempts(t *testing.T, root string) []rl.AttemptRecord {
 	t.Helper()
@@ -775,7 +797,7 @@ func runIntegrityRequestsAndAttempts(t *testing.T) {
 	}
 
 	integrityClose(t, ctx, host)
-	attempts := integrityAttempts(t, root)
+	attempts := integrityAttemptsQuiet(t, root, 4)
 	if len(attempts) != 4 {
 		t.Fatalf("attempt records = %d, want one per real model request", len(attempts))
 	}
@@ -891,7 +913,7 @@ func runIntegrityFailedAttempt(t *testing.T) {
 	})
 
 	integrityClose(t, ctx, host)
-	attempts := integrityAttempts(t, root)
+	attempts := integrityAttemptsQuiet(t, root, 5)
 	if len(attempts) != 5 {
 		t.Fatalf("attempt records = %d, want the five real model requests", len(attempts))
 	}
@@ -1197,7 +1219,7 @@ func runIntegrityExportCorrelationIsNotReward(t *testing.T) {
 	}
 
 	integrityClose(t, ctx, host)
-	attempts := integrityAttempts(t, root)
+	attempts := integrityAttemptsQuiet(t, root, 2)
 	if len(attempts) != 2 {
 		t.Fatalf("attempt records = %d, want the two attempts the samples correlate with", len(attempts))
 	}
@@ -1302,7 +1324,7 @@ func runIntegrityFormalCaptureThenOfflineExport(t *testing.T) {
 	}
 
 	integrityClose(t, ctx, host)
-	attempts := integrityAttempts(t, root)
+	attempts := integrityAttemptsQuiet(t, root, 2)
 	if len(attempts) != 2 {
 		t.Fatalf("attempt records = %d, want the two exported attempts", len(attempts))
 	}
