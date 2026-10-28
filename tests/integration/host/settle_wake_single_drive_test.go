@@ -267,7 +267,9 @@ func (a *settleDriveTally) counts() (entryCalls, followUps int) {
 // that process after the follow-up turn landed its terminal fact and while its
 // answer is held in the sender, and boots the same root again: the restarted
 // process reads the landed attempt beside its receipt, so the notification
-// starts exactly one follow-up turn and no second answer is delivered.
+// starts exactly one follow-up turn, and the answer the kill left owed is
+// delivered once by the restart instead of being lost with the sender that never
+// confirmed it.
 func runSingleDriveAcrossKill(t *testing.T) {
 	wakeEnv(t)
 
@@ -314,8 +316,8 @@ func runSingleDriveAcrossKill(t *testing.T) {
 	if entryAfter != entryCalls {
 		t.Fatalf("entry turns after the restart = %d, want the %d the landed attempt closes", entryAfter, entryCalls)
 	}
-	if bodies := sender.bodies(); len(bodies) != 0 {
-		t.Fatalf("the restarted process delivered %q, want nothing: the answer was already written", bodies)
+	if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != settleDriveFollowUpBody {
+		t.Fatalf("the restarted process delivered %q, want the one owed copy of %q the kill left behind", bodies, settleDriveFollowUpBody)
 	}
 	facts := restored.Run().SessionFacts(event.Address{AgentID: "user", SessionID: settleDriveSession})
 	if got := settleDriveNoticeFacts(facts); got != 1 {

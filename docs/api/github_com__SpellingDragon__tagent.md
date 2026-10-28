@@ -549,6 +549,12 @@ func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     recorded beside the review table, so the approval resolves the body across a
     restart as well.
 
+    The receipt of the approval lands only after the send it confirms returned:
+    a receipt the tier refuses leaves the obligation owed and answers the landed
+    delivery by name, so the caller learns the body reached the channel and the
+    account did not — a restart delivers the body once more, which is the one
+    extra copy an unconfirmed receipt tolerates.
+
 func (h *Host) Close(ctx context.Context) error
     Close stops the endpoints and the reflection driver, drains the run and
     closes the MCP servers. A repeated close reports the first result and runs
@@ -574,6 +580,10 @@ func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     consumed, and an audit feedback fact without a model payload records the
     refusal at the target address. The refusal consumes the durable record as
     well, so no later boot owes the body again.
+
+    Both commits are checked before the refusal publishes: a record or an audit
+    fact the tier refused answers the caller by name and leaves the body in the
+    review table, so a refusal no account accepted is never read as a decision.
 
 func (h *Host) Reload(ctx context.Context) (hostReloadReport, error)
     Reload reads the configuration source again, publishes the declaration

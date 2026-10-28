@@ -87,6 +87,9 @@ type settleAttempts interface {
 // delivered. A fire face that reads no barrier still settles its seat through the
 // pump's own fallback beside the returned turn.
 type settleBarrier struct {
+	// addr is the session address the follow-up turn drives, so the account it
+	// closes names the session whose bodies the turn generated.
+	addr event.Address
 	// notice is the notification the driven turn answers, in its own four-part
 	// identity: task, round, kind and sequence.
 	notice task.Notice
@@ -113,6 +116,14 @@ func settleBarrierFrom(ctx context.Context) (settleBarrier, bool) {
 	barrier, ok := ctx.Value(settleBarrierKey{}).(settleBarrier)
 	return barrier, ok
 }
+
+// settleHandoff is the face one landed attempt is closed through: it registers
+// the delivery obligation of every body the landed turn generated, beside the
+// session address and the notification the turn answered. The mailbox entry is
+// consumed only behind a successful hand-off, so a stop between the landed
+// terminal and the send leaves a body an account carries instead of a receipt
+// that forbids every replay.
+type settleHandoff func(ctx context.Context, addr event.Address, notice task.Notice) error
 
 // ErrSettleDriverUnwired reports an observation on a driver whose fact lookup,
 // mailbox account or follow-up face was never wired: a gap by name instead of
@@ -174,6 +185,11 @@ type SettleDriver struct {
 	// fire drives the one follow-up turn the settle asks for.
 	fire func(ctx context.Context, addr event.Address, fact event.Event) error
 
+	// handoff registers the delivery obligations of a landed turn before its
+	// mailbox entry is consumed; a driver wired beside none closes the entry
+	// without one, exactly as a run keeping no durable delivery account does.
+	handoff settleHandoff
+
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 
@@ -231,6 +247,30 @@ func (d *SettleDriver) Port() plugin.Port {
 // work it woke is owed on the mailbox account, so a failed observation leaves the
 // follow-up turn owed and the account hands it to the next decision.
 func (d *SettleDriver) DrivesObligation() {}
+
+// setHandoff wires the delivery account one landed attempt is closed through:
+// the bodies the landed turn generated are registered there before the mailbox
+// entry is consumed. The face is read by the pump, so the write takes the
+// driver's own lock.
+func (d *SettleDriver) setHandoff(handoff settleHandoff) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.handoff = handoff
+	d.mu.Unlock()
+}
+
+// handoffOf reports the hand-off face this driver was wired beside and whether
+// one is wired at all.
+func (d *SettleDriver) handoffOf() (settleHandoff, bool) {
+	if d == nil {
+		return nil, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.handoff, d.handoff != nil
+}
 
 // ObserveCommit reads the fact one commit wrote and wakes the pump when the
 // fact is one the settle trigger table fires on. The observation itself starts
@@ -357,7 +397,10 @@ func (d *SettleDriver) drain() {
 // it. A seat whose recorded attempt already landed a completed terminal is closed
 // with its receipt and no turn is driven for it: the receipt the stopped process
 // never wrote is written here, so one notification starts one turn however many
-// processes over the same account read it. A stop ends the turn in flight and
+// processes over the same account read it. That receipt is written only behind the
+// hand-off, which registers the delivery obligation of the bodies the landed turn
+// generated: an obligation the account refuses keeps the entry owed for the next
+// wake instead of closing it beside a body nothing carries. A stop ends the turn in flight and
 // leaves the entry unconsumed, so the work survives the stop instead of dying with
 // it; beside a turn that completed, the consumption receipt is written without
 // the pump's cancellation and closes the entry even as the driver stops.
@@ -382,6 +425,13 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 			d.releaseSeat(wake, seat)
 			return
 		case held && landed.Terminal == settleCompletedTerminal:
+			if handoff, wired := d.handoffOf(); wired {
+				if err := handoff(context.WithoutCancel(ctx), seat.Address, seat.Notice); err != nil {
+					assemblyWarn("tagent: the landed settle of %s kept its entry owed: %v", seat.Notice.FactKey(), err)
+					d.releaseSeat(wake, seat)
+					return
+				}
+			}
 			if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 				assemblyWarn("tagent: the settle consumption of %s beside its landed attempt reported: %v", seat.Notice.FactKey(), err)
 			}
@@ -400,6 +450,7 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 	defer stop()
 
 	barrier := settleBarrier{
+		addr:   seat.Address,
 		notice: seat.Notice,
 		settle: func(bctx context.Context, terminal model.Kind) error {
 			if attempts == nil {
