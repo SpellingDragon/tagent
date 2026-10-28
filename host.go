@@ -1222,6 +1222,12 @@ const hostDeliverySent = "sent"
 // the receipt of an obligation given up beside its audit fact.
 const hostDeliveryRefused = "refused"
 
+// hostDeliveryHeadless names the record state of a body retired without a send
+// because it was generated at an address that is not the entry: the host drives
+// every other address headless, so its answer belongs to the caller that drove it
+// and never to a message channel.
+const hostDeliveryHeadless = "headless"
+
 // hostDeliveryRecord is the durable form of one delivery obligation: the
 // identity, content, lineage and target of the body beside the state the
 // obligation stands in and the moment it was taken.
@@ -1374,31 +1380,48 @@ func (h *Host) recordDeliveryState(ctx context.Context, held *heldDelivery, stat
 
 // recordDeliveryOwed registers the delivery obligation of every generated body
 // the account does not hold yet, in one batch behind one write barrier, and
-// reports the bodies it registered: the hand-off a restart reads back and sends.
-// A body whose record already exists is left as it stands, so one generation
-// registers one obligation however often the hand-off runs and whatever state
-// that obligation reached since. A run beside no storage tier registers nothing:
-// its deliveries are process-local.
+// reports every body whose obligation still stands owed when it returns: the
+// bodies it just registered beside the ones an earlier registration left owed
+// because no send ever discharged them. The hand-off sends that whole set, so an
+// obligation stranded between its record and its send is redriven by the process
+// that meets it again instead of waiting for a restart. A body whose record
+// already carries a later state — held, retry, sent or refused — is left as it
+// stands, so one generation registers one obligation however often the hand-off
+// runs and a discharged body is never delivered a second time here. The write
+// barrier is taken only by a batch that staged a record: a set made entirely of
+// records an earlier call already committed carries nothing new to sync.
+//
+// Only a body generated at the entry address takes an obligation at all: every
+// other address is driven headless, which means its answer is read by the caller
+// that drove it and never pushed to a message channel. That is the same reader
+// the live delivery applies, so the record and the send agree on which addresses
+// own a delivery. A run beside no storage tier registers nothing: its deliveries
+// are process-local.
 func (h *Host) recordDeliveryOwed(ctx context.Context, addr event.Address, lineage string, bodies []freshBody) ([]freshBody, error) {
 	log := h.deliveryDurable()
-	if log == nil || len(bodies) == 0 {
+	if log == nil || len(bodies) == 0 || addr.AgentID != h.entry {
 		return nil, nil
 	}
-	registered := make([]freshBody, 0, len(bodies))
+	owed := make([]freshBody, 0, len(bodies))
+	staged := false
 	for _, body := range bodies {
 		id, ok := freshObligationOf(body)
 		if !ok {
 			continue
 		}
 		key := hostDeliveryPrefix + id
-		_, recorded, err := log.Get(ctx, key)
+		payload, held, err := log.Get(ctx, key)
 		if err != nil {
 			return nil, fmt.Errorf("tagent: read the delivery obligation %s: %w", id, err)
 		}
-		if recorded {
+		if held {
+			if owedDeliveryRecord(payload) {
+				owed = append(owed, body)
+			}
 			continue
 		}
-		payload, err := json.Marshal(hostDeliveryRecord{
+		staged = true
+		payload, err = json.Marshal(hostDeliveryRecord{
 			ID:      id,
 			Content: body.content,
 			Lineage: lineage,
@@ -1412,37 +1435,64 @@ func (h *Host) recordDeliveryOwed(ctx context.Context, addr event.Address, linea
 		if err := log.Put(ctx, key, payload); err != nil {
 			return nil, fmt.Errorf("tagent: the delivery obligation %s was refused: %w", id, err)
 		}
-		registered = append(registered, body)
+		owed = append(owed, body)
 	}
-	if len(registered) == 0 {
+	if staged {
+		if err := log.Sync(ctx); err != nil {
+			return nil, fmt.Errorf("tagent: the delivery obligations of %s left no write barrier: %w", addr.SessionID, err)
+		}
+	}
+	if len(owed) == 0 {
 		return nil, nil
 	}
-	if err := log.Sync(ctx); err != nil {
-		return nil, fmt.Errorf("tagent: the delivery obligations of %s left no write barrier: %w", addr.SessionID, err)
+	return owed, nil
+}
+
+// owedDeliveryRecord reports whether the durable record of one delivery
+// obligation still stands owed: a body the account registered and no send has
+// discharged. Bytes the record cannot be read out of stand for no obligation
+// here, because this call only decides whether to send again; the boot that
+// meets the same bytes refuses to start beside them by name instead of guessing
+// a disposition the record does not state.
+func owedDeliveryRecord(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
 	}
-	return registered, nil
+	var record hostDeliveryRecord
+	if err := json.Unmarshal(payload, &record); err != nil {
+		return false
+	}
+	return record.Status == hostDeliveryOwed
 }
 
 // handoffSettledBodies registers the delivery obligation of the bodies a landed
-// follow-up turn generated and sends them through the review ruling the live path
-// applies. The settle driver calls it before it consumes the mailbox entry that
-// turn answered: the receipt forbids every replay of the notification, so the
-// bodies of a turn whose process stopped between its terminal fact and its send
-// are carried by the account instead of by a turn that never runs again. Only a
-// body the account did not hold before this call is sent, so an obligation a
-// restart already delivered — or parked for a decision — is never delivered a
-// second time by the hand-off. An obligation the account refuses is reported to
-// the driver, which keeps the entry owed instead of closing it.
+// follow-up turn generated and sends every obligation that still stands owed
+// through the review ruling the live path applies. The settle driver calls it
+// before it consumes the mailbox entry that turn answered: the receipt forbids
+// every replay of the notification, so the bodies of a turn whose process stopped
+// between its terminal fact and its send are carried by the account instead of by
+// a turn that never runs again.
+//
+// The send face is the whole owed set, not only the bodies this call registered:
+// an obligation an earlier registration left owed — a batch whose later record
+// the account refused, a sibling process that stopped after its record — is
+// redriven here instead of being stranded in this process until the next boot,
+// and an obligation a restart already delivered, parked or discarded carries a
+// later state and is left alone. A redrive that lands beside the boot's own send
+// of the same body is the one extra copy an unconfirmed receipt tolerates; both
+// write the same receipt, and the record it leaves is what stops a third. An
+// obligation the account refuses is reported to the driver, which keeps the entry
+// owed instead of closing it.
 func (h *Host) handoffSettledBodies(ctx context.Context, addr event.Address, notice task.Notice) error {
 	if h == nil || h.run == nil {
 		return nil
 	}
 	bodies := generatedBodiesOf(h.run.SessionFacts(addr), noticeInvocation(notice))
-	registered, err := h.recordDeliveryOwed(ctx, addr, deliveryLineageOf("task"), bodies)
+	owed, err := h.recordDeliveryOwed(ctx, addr, deliveryLineageOf("task"), bodies)
 	if err != nil {
 		return err
 	}
-	for _, body := range registered {
+	for _, body := range owed {
 		obligation, _ := freshObligationOf(body)
 		delivery := plugin.Delivery{Content: body.content, Lineage: deliveryLineageOf("task"), Target: addr}
 		if _, cause := h.deliverObligation(ctx, obligation, h.sender, delivery); cause != "" {
@@ -1509,9 +1559,11 @@ func (h *Host) holdDelivery(ctx context.Context, obligation string, delivery plu
 // behind the identities continues past the restored ones. A body the account
 // holds as owed — generated and never sent — is sent here through the review
 // ruling the live path applies, so a restart delivers what a stop left behind
-// instead of dropping it. A record that names no identity, or a body that does
-// not unmarshal, refuses the boot by name: the host never starts beside an
-// obligation it cannot honor.
+// instead of dropping it; an owed body whose target is not the entry address is
+// retired without a send instead, because a headless address's answer belongs to
+// the caller that drove it and never to a message channel. A record that names no
+// identity, or a body that does not unmarshal, refuses the boot by name: the host
+// never starts beside an obligation it cannot honor.
 func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 	log := h.deliveryDurable()
 	if log == nil {
@@ -1540,6 +1592,10 @@ func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 		}
 		switch record.Status {
 		case hostDeliveryOwed:
+			if record.Target.AgentID != h.entry {
+				h.retireHeadlessDelivery(ctx, record)
+				continue
+			}
 			unattended = append(unattended, record)
 			continue
 		case hostDeliveryHeld, hostDeliveryRetry:
@@ -1568,6 +1624,26 @@ func (h *Host) restorePendingDeliveries(ctx context.Context) error {
 		assemblyInfo("tagent: the owed delivery of %s was delivered beside the restart", record.ID)
 	}
 	return nil
+}
+
+// retireHeadlessDelivery gives up the owed record of a body generated at an
+// address that is not the entry: the host answers a headless address for the
+// caller that drove it and never pushes its body to a message channel, so an
+// obligation another generation registered there is closed under its own state
+// instead of being delivered beside the restart. The record keeps the body, so a
+// reader sees what was given up and why. A record the tier refuses is warned and
+// left owed: nothing is sent here, and the next boot retires it again.
+func (h *Host) retireHeadlessDelivery(ctx context.Context, record hostDeliveryRecord) {
+	held := &heldDelivery{
+		id:       record.ID,
+		delivery: plugin.Delivery{Content: record.Content, Lineage: record.Lineage, Target: record.Target},
+		heldAt:   record.HeldAt,
+	}
+	if err := h.recordDeliveryState(ctx, held, hostDeliveryHeadless); err != nil {
+		assemblyWarn("tagent: the owed delivery of %s at the headless address %s was not retired: %v", record.ID, record.Target.AgentID, err)
+		return
+	}
+	assemblyInfo("tagent: the owed delivery of %s at the headless address %s was retired without a send", record.ID, record.Target.AgentID)
 }
 
 // deliveryHeldSeq reports the order number inside one delivery identity, and
@@ -1615,7 +1691,9 @@ func (h *Host) deliverOne(ctx context.Context, sender MessageSender, delivery pl
 // An obligation the sender accepted is recorded as sent behind its write
 // barrier: a receipt the tier refused leaves the obligation owed, so a restart
 // delivers the body once more rather than reading an unconfirmed send as
-// discharged.
+// discharged. That unconfirmed receipt is named in the second result beside the
+// landed outcome, so a caller learns the body reached the channel and the account
+// did not — the same note a hold carries when its own record did not land.
 func (h *Host) deliverObligation(ctx context.Context, obligation string, sender MessageSender, delivery plugin.Delivery) (deliveryOutcome, string) {
 	if sender == nil {
 		return deliveryRefused, "the host carries no outbound message sender"
@@ -1646,9 +1724,22 @@ func (h *Host) deliverObligation(ctx context.Context, obligation string, sender 
 		held := &heldDelivery{id: obligation, delivery: delivery, heldAt: time.Now()}
 		if err := h.recordDeliveryState(ctx, held, hostDeliverySent); err != nil {
 			assemblyWarn("tagent: the delivery of %s landed but its receipt did not: %v", obligation, err)
+			return deliverySent, sentRecordNote(err)
 		}
 	}
 	return deliverySent, ""
+}
+
+// sentRecordNote renders the receipt note one landed send adds when its record
+// did not reach the account: the body was accepted by the channel and the
+// obligation still stands owed, so a restart delivers it once more. The note is
+// the counterpart of holdRecordNote, so a caller reads an unconfirmed receipt the
+// same way it reads an unrecorded hold.
+func sentRecordNote(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "the delivery landed but its receipt did not: " + err.Error()
 }
 
 // holdRecordNote renders the receipt note one hold adds when its record did not

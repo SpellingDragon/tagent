@@ -11,6 +11,45 @@
 - **WHEN** Sender 未确认时进程被强杀并重启
 - **THEN** 已生成结果 SHALL 被恢复发送，待交付账本销账
 
+#### Scenario: 发送已落地而回执未落按至少一次容忍
+
+- **WHEN** Sender 已接受正文而 sent 回执未落
+- **THEN** 该义务 SHALL 保持未销，重启 SHALL 恰好重投一次，该重复投递 SHALL 被容忍为至少一次语义的一部分；回执落地 SHALL 是阻止再次投递的唯一凭据
+
+理由 SHALL 与声明同处记载：发送与「发送已落」的持久回执是两个崩溃点，任何实现都只能在两者之间选一个顺序；先发送后回执必然留下「已送达但未销账」的窗口，把该窗口读成漏送会迫使实现选择先回执后发送，从而在相反窗口里真漏送。本契约因此把该窗口的重复投递定为可接受代价，而不是违约。
+
+### Requirement: 交付义务只登记入口地址的正文
+
+交付义务 SHALL 只为入口 agent（entry）地址生成的正文登记。其余地址 SHALL 按 headless 语义驱动：其正文由驱动它的调用方读取，SHALL NOT 进入消息渠道。登记面（settle 终态）、交接面（handoff）与恢复面（boot restore）SHALL 读同一地址门禁，与实时投递面的入口判定同源。
+
+已登记的非入口地址正文义务（上一版或兄弟进程所留）SHALL 在恢复时被跳过投递，并以具名状态 `headless` 销账；该记录 SHALL 保留正文与目标，供读者审计，SHALL NOT 因此被投递。
+
+#### Scenario: 非入口地址的正文不登记也不投递
+
+- **WHEN** 非入口 agent 地址上的 follow-up turn 完成并生成正文
+- **THEN** SHALL NOT 登记交付义务，重启后消息渠道 SHALL 收不到该正文
+
+#### Scenario: 遗留的非入口义务恢复时具名销账
+
+- **WHEN** 恢复读到 target 为非入口地址的 owed 记录
+- **THEN** SHALL NOT 投递该正文，该记录状态 SHALL 转为 `headless`
+
+### Requirement: 未销义务在进程内补投
+
+「已登记而未发送」的交付义务（批量登记中途失败、兄弟进程登记后崩溃、通道暂不可用）SHALL NOT 滞留到下次重启：交接面 SHALL 在每次落地时对本次生成的正文与记录仍处 owed 状态的正文一并补投，SHALL NOT 只发送本次新登记的正文。
+
+补投 SHALL 以记录状态为准：状态已为 `held`/`retry`/`sent`/`refused`/`headless` 的正文 SHALL NOT 被交接面重投。补投与 boot restore 的并发 SHALL 由 sent 回执的幂等交付与上条的至少一次容忍界住。
+
+#### Scenario: 已登记未发送的义务由下次交接补投
+
+- **WHEN** 某正文的义务已登记为 owed 而发送未发生，同一进程内下一次交接读到该记录
+- **THEN** 该正文 SHALL 被补投一次，其记录 SHALL 转为 `sent`
+
+#### Scenario: 已销账的义务不被补投
+
+- **WHEN** 交接读到的记录状态不是 owed
+- **THEN** 该正文 SHALL NOT 被重投
+
 ### Requirement: 状态提交 checked
 
 交付状态的持久化失败 SHALL 以具名错误返回且不发布内存态变化。
