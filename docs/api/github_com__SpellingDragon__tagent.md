@@ -18,6 +18,12 @@ keeps the loop's per-turn seal from closing the run-wide sink: a turn ends
 without ending the account, and Close seals the real capture once, after the run
 drained.
 
+The delivery ledger of the host: the assistant bodies one drive generates become
+durable delivery obligations before any body leaves, a held body waits for the
+approval face, and a restart resumes every obligation the ledger still names.
+The body, the hold and the refusal each stand as one record under one identity,
+so a delivery settled twice is settled once.
+
 The diagnostic visibility face of the host: the unified runtime reading beside
 the reflection, training and observation faces, each opened by the switch the
 host was started with. Every section reads the owner that already holds the fact
@@ -28,6 +34,18 @@ of the live scene.
 A face whose switch is off, or whose subsystem the assembly carries no wiring
 for, names that state in its reason instead of answering a zero reading that
 would pass for an idle subsystem.
+
+The host document dialect one Boot call decodes and the assembly it spells:
+the declared agents, their prompts, tools and providers, and the model each
+agent samples through. The document is the host's own reading of the shared
+declaration shape, so a section the core shares is read here exactly as the
+declaration reads it, and only the application section stays opaque.
+
+The loopback endpoints of the host: the liveness probe a supervisor polls, the
+task endpoint an inbound channel posts to, and the reload endpoint a supervisor
+posts to after it rewrites the configuration source. Every endpoint authorizes
+before it reads a body, and a face that is switched off names that state in its
+reason instead of answering a request it never accepted.
 
 The model sampling of one declared agent: the temperature, thinking switch
 and reasoning effort a host document declares flow onto every request of that
@@ -50,6 +68,12 @@ the event-driven replacement path the run already owns.
 The document is the host's own dialect, so a reload reads it with the same
 strict decoder Boot reads it with; a document the decoder refuses changes
 nothing at all.
+
+The host-owned tools and ports: the outbound send tool the model calls,
+the scheduled reflection plan and the port that commits its body to a session,
+and the request shape an inbound channel posts to the task endpoint. Each one is
+a face the host contributes to the assembly, so the host builds it here rather
+than leaving the wiring to every deployment.
 
 The minimal public assembly entry of the runtime: one Run assembles the shared
 faces once, publishes the candidate bindings of one declaration through the

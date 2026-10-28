@@ -81,7 +81,8 @@ NUMERIC_RULES = (RULE_IFACE, RULE_STRUCT, RULE_CTX)
 #
 # 键一律是**当前树路径**：包迁移（query/→memory/query/、agent/→runtime/agent/、
 # state/→runtime/state/、task/→runtime/task/、event/→api/event/、config/→api/config/、
-# governance/→evolution/governance/、host_bridge.go→cli/host_face.go、diagnostics.go→host_face.go）只做键正名，
+# governance/→evolution/governance/、host_bridge.go→cli/host_face.go、diagnostics.go→host_face.go、
+# host_face.go→host_diagnostics.go、host.go 投递段→host_delivery.go）只做键正名，
 # observed 不动——路径对齐不是豁免扩张。已清零的条目按棘轮生命周期删除，不得回填。
 BASELINE = (
     ("iface-methods", "features/rl/capture.go:Capture", 3),
@@ -155,7 +156,7 @@ BASELINE = (
     ("struct-fields", "features/rl/replacement.go:ReplacementRecord", 6),
     # 08.4 新产数据面（诊断读出报告＝数据保真面非配置选择面，S2 类别豁免；
     # 引入叶 08.4——七段读出是报告语义本体，同 Explanation 先例）
-    ("struct-fields", "host_face.go:DiagnosticReport", 7),
+    ("struct-fields", "host_diagnostics.go:DiagnosticReport", 7),
     ("struct-fields", "features/rl/record.go:AttemptRecord", 12),
     ("struct-fields", "features/rl/record.go:DecisionRecord", 7),
     ("struct-fields", "features/rl/record.go:EpisodeRecord", 9),
@@ -176,7 +177,7 @@ BASELINE = (
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
     ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
-    ("ctx-bare", "host.go:*", 1),    # deliveryLineageFrom：回合血统经类型化 accessor 落到 send 投递
+    ("ctx-bare", "host_delivery.go:*", 1),    # deliveryLineageFrom：回合血统经类型化 accessor 落到 send 投递
     ("ctx-bare", "settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间
     # S4 contract-surface 已出清（叶 00.24）：全部导出接口的 canonical 范例与 Godoc
     # 红线均已落地，本表不再登记 S4 债务。以下一条为再次登记：ResultDelegation 是
