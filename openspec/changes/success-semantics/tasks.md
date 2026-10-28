@@ -24,6 +24,6 @@ graph LR
 - [x] 8. B 训练外移：Capture 全保（Snapshot 调用时固定）；Recorder Episode/Decision 删、Attempt 并入 Capture.Record；WithCallPass/CallPassFrom 迁 api/plugin、runtime/agent 去 features/evolution import —— 验证：黑名单 grep（Recorder 组织+features/* import 于 runtime 核心）零命中+白名单（event 身份）不受扰+`go test ./runtime/agent ./features/... -count=1`
 - [x] 9. C 端口压平：删九词汇常量、assemble 具名派发、EXTENSIONS.md:11/:28+skeleton_assert+误声明用例同步 —— 验证：全仓 grep `MaterialCall|MaterialRequest|MaterialFact|Product(Call|Ruling|Observation|View|Compression|Environment)` =0+六端口派发测试绿
 - [ ] 10. D 热更新三档：字段映射表；tools/plugins 二档具名拒绝；storage/ReadRoot/Exec 二档 compatibleWith 具名拒绝；PublishUnchanged 锚 —— 验证：reload 三档测试（新代可变/越档具名拒绝/同指纹 PublishUnchanged）
-- [ ] 11. E 越界检查+验收：清点表入库（runtime/task grep tmux|subagent|远程）；新工具验收测试（execution rig+NativeAgent.Tools，适配器只给执行/取消/恢复证据跑通受理→结算→投递，宿主零补偿）—— 验证：验收测试绿+清点零越界
+- [x] 11. E 越界检查+验收：清点表入库（runtime/task grep tmux|subagent|远程）；新工具验收测试（execution rig+NativeAgent.Tools，适配器只给执行/取消/恢复证据跑通受理→结算→投递，宿主零补偿）—— 验证：验收测试绿+清点零越界
 - [ ] 12. F2 grill 循环至无新有效问题（含叶 7-11 实施后二/三轮复核：A-1/A-2 裁决落表、B 幸存面与 D11 一致、C 判据裁定、D 字段映射）—— 验证：终轮 grill 报告无新有效问题
 - [ ] 13. F3 收尾：全套门禁+push+远端 CI 绿+PR+merge（CI 不过不 merge）
