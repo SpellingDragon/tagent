@@ -435,6 +435,7 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 			if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 				assemblyWarn("tagent: the settle consumption of %s beside its landed attempt reported: %v", seat.Notice.FactKey(), err)
 			}
+			assemblyDebug("tagent: settle entry closed beside its landed attempt notice=%s", seat.Notice.FactKey())
 			return
 		}
 		if err := attempts.RecordAttempt(ctx, seat.Notice, state.SettleAttempt{}); err != nil {
@@ -453,6 +454,7 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 		addr:   seat.Address,
 		notice: seat.Notice,
 		settle: func(bctx context.Context, terminal model.Kind) error {
+			assemblyDebug("tagent: settle turn landed notice=%s terminal=%s", seat.Notice.FactKey(), terminal)
 			if attempts == nil {
 				return nil
 			}
@@ -470,6 +472,7 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 	if err := wake.Consume(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 		assemblyWarn("tagent: the settle consumption of %s beside the finished turn reported: %v", seat.Notice.FactKey(), err)
 	}
+	assemblyDebug("tagent: settle entry consumed notice=%s", seat.Notice.FactKey())
 }
 
 // releaseSeat hands one entry this drive claimed back to the pending pool, so

@@ -586,7 +586,9 @@ func (l *Loop) afterPass(ctx context.Context, agentID event.AgentID, key event.E
 		}}})
 		return
 	}
-	l.publish(pipeline.After(ctx, key))
+	presentation := pipeline.After(ctx, key)
+	l.publish(presentation)
+	consumerDebug("tagent: consumer after-pass agent=%s fact=%s gaps=%d", agentID, key, len(presentation.Gaps))
 }
 
 // SetCapture attaches the trajectory capture face this loop fixes each
@@ -990,6 +992,7 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 	for _, call := range calls {
 		pass, beforeErr := pipeline.Before(ctx, call)
 		if beforeErr != nil {
+			consumerDebug("tagent: consumer tool refused invocation=%s call=%s tool=%s by=plugin-pass", inv.InvocationID, call.ID, call.Function.Name)
 			receipts = append(receipts, paired(call.ID, call.Function.Name, "tagent: the plugin pass refused the call: "+beforeErr.Error()))
 			continue
 		}
@@ -997,6 +1000,7 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 		name := final.Function.Name
 		native, ok := tools[name]
 		if !ok {
+			consumerDebug("tagent: consumer tool refused invocation=%s call=%s tool=%s by=unknown-tool", inv.InvocationID, call.ID, name)
 			receipts = append(receipts, paired(call.ID, name, "tagent: no tool named "+name))
 			continue
 		}
@@ -1014,9 +1018,11 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 		switch out := answer.(type) {
 		case task.AdmissionReceipt:
 			if !out.Accepted {
+				consumerDebug("tagent: consumer tool refused invocation=%s call=%s tool=%s by=admission", inv.InvocationID, call.ID, name)
 				receipts = append(receipts, paired(call.ID, name, refusalText(callErr)))
 				continue
 			}
+			consumerDebug("tagent: consumer tool admitted invocation=%s call=%s tool=%s task=%s", inv.InvocationID, call.ID, name, out.TaskID)
 			receipts = append(receipts, paired(call.ID, name, admissionText(out)))
 			running = append(running, admittedCall{callID: call.ID, tool: name, taskID: out.TaskID})
 		case task.HoldReceipt:
