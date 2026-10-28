@@ -307,3 +307,12 @@ D5 锚测试任一红 SHALL 视为对应不变量违例，阻断收口。
 - **WHEN** 远端 CI 任一 job 红
 - **THEN** F6 SHALL NOT 勾选
 
+### Requirement: 静默红清零
+
+清理 SHALL 使 smoke 全套（tmux 真实执行）与 race（无 U5 豁免）、结构门全部转绿。
+
+#### Scenario: 全套 smoke 绿
+
+- **WHEN** `go -C examples/wechat-bot test -tags smoke . -count=1`
+- **THEN** SHALL exit 0
+
