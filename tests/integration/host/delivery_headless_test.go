@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
@@ -94,14 +94,14 @@ func runHeadlessSettleTakesNoObligation(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", headlessAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	addr := event.Address{AgentID: "knowledge", SessionID: headlessSettleSession}
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
 		Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 	}); err != nil {
@@ -125,7 +125,7 @@ func runHeadlessSettleTakesNoObligation(t *testing.T) {
 		t.Fatalf("close the host: %v", err)
 	}
 	rebooted := &deliveryRecorder{}
-	second, err := tagent.Boot(configPath, tagent.WithSender(rebooted))
+	second, err := assembly.Boot(configPath, assembly.WithSender(rebooted))
 	if err != nil {
 		t.Fatalf("boot the host over the same storage: %v", err)
 	}
@@ -161,7 +161,7 @@ func runHeadlessOwedRetiredOnBoot(t *testing.T) {
 		Status:  owedState,
 	})
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host over the planted record: %v", err)
 	}

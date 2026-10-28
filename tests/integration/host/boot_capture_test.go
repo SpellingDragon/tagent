@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 )
 
@@ -29,14 +29,14 @@ func TestBootMountsCapture(t *testing.T) {
 	provider := newScriptedProvider(t)
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-	host, err := tagent.Boot(configPath, tagent.WithSender(recordingSender{}))
+	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	for _, content := range []string{"hello", "hello again"} {
-		turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 			Address: event.Address{AgentID: "user", SessionID: "session-capture"},
 			Input:   []model.Message{{Role: model.RoleUser, Content: content}},
 		})

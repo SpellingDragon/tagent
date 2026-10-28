@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -375,19 +375,19 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 			t.Fatalf("AssembleBudget: %v", err)
 		}
 		provider := &replayModel{name: "model-a"}
-		run, err := tagent.Assemble(ctx, &config.Declaration{
+		run, err := assembly.Assemble(ctx, &config.Declaration{
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
-		}, map[event.AgentID]tagent.NativeAgent{
+		}, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(replayPolicy{}))
+		}, assembly.WithGovernance(replayPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID, SessionID: session.SessionID}, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
+		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID, SessionID: session.SessionID}, assembly.FoldWindow{MaxTokens: 100}, proj); err != nil {
 			t.Fatalf("AttachReplay: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-replay-1",
 			Address:      event.Address{AgentID: "agent-a", SessionID: session.SessionID},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "请求带投影。"}},
@@ -419,7 +419,7 @@ func TestProjectionReplayAndBudget(t *testing.T) {
 		if !sawInput || !sawPlan || !sawTool {
 			t.Fatalf("role mapping = input:%v plan:%v tool:%v, want the frozen types mapped onto user/assistant/tool", sawInput, sawPlan, sawTool)
 		}
-		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID}, tagent.FoldWindow{MaxTokens: 100}, proj); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
+		if err := run.AttachReplay(agent.RequestChain{PartitionID: session.PartitionID}, assembly.FoldWindow{MaxTokens: 100}, proj); !errors.Is(err, agent.ErrRequestChainSessionRequired) {
 			t.Fatalf("sessionless registration error = %v, want ErrRequestChainSessionRequired", err)
 		}
 	})

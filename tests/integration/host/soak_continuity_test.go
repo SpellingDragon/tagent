@@ -24,10 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -439,7 +439,7 @@ func soakHotChild(t *testing.T, root, out string) {
 	tool := &entryTool{name: "echo", output: "out-soak"}
 	declA := soakDeclaration("model-a")
 	agentsA := soakAgents(providerA, tool)
-	run, err := tagent.Assemble(ctx, declA, agentsA, tagent.WithGovernance(passPolicy{}), soakStorage(root))
+	run, err := assembly.Assemble(ctx, declA, agentsA, assembly.WithGovernance(passPolicy{}), soakStorage(root))
 	if err != nil {
 		t.Fatalf("assemble the resident: %v", err)
 	}
@@ -528,11 +528,11 @@ func soakAnswer(req *model.Request) *model.Response {
 
 // assembleSoakRuntime assembles one runtime over real durable storage at the
 // root the work order names.
-func assembleSoakRuntime(t *testing.T, ctx context.Context, root string) (*tagent.Run, *entryModel, *entryTool) {
+func assembleSoakRuntime(t *testing.T, ctx context.Context, root string) (*assembly.Run, *entryModel, *entryTool) {
 	t.Helper()
 	provider := &entryModel{name: "model-a", answer: soakAnswer}
 	tool := &entryTool{name: "echo", output: "out-soak"}
-	run, err := tagent.Assemble(ctx, soakDeclaration("model-a"), soakAgents(provider, tool), tagent.WithGovernance(passPolicy{}), soakStorage(root))
+	run, err := assembly.Assemble(ctx, soakDeclaration("model-a"), soakAgents(provider, tool), assembly.WithGovernance(passPolicy{}), soakStorage(root))
 	if err != nil {
 		t.Fatalf("assemble the runtime over %s: %v", root, err)
 	}
@@ -540,8 +540,8 @@ func assembleSoakRuntime(t *testing.T, ctx context.Context, root string) (*tagen
 }
 
 // soakStorage names the durable tier one soak runtime persists under.
-func soakStorage(root string) tagent.Option {
-	return tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
+func soakStorage(root string) assembly.Option {
+	return assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root})
 }
 
 // soakDeclaration is the one-agent declaration the soak runtime is assembled
@@ -554,8 +554,8 @@ func soakDeclaration(name string) *config.Declaration {
 }
 
 // soakAgents is the native agent set one soak declaration resolves against.
-func soakAgents(provider *entryModel, tool *entryTool) map[event.AgentID]tagent.NativeAgent {
-	return map[event.AgentID]tagent.NativeAgent{
+func soakAgents(provider *entryModel, tool *entryTool) map[event.AgentID]assembly.NativeAgent {
+	return map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 	}
 }
@@ -567,9 +567,9 @@ func soakSession(round int) event.Address {
 
 // soakDriveInvocation drives one invocation through the formal runtime entry and
 // holds the turn to the completed shape the soak counts on.
-func soakDriveInvocation(t *testing.T, ctx context.Context, run *tagent.Run, invocation string, addr event.Address) {
+func soakDriveInvocation(t *testing.T, ctx context.Context, run *assembly.Run, invocation string, addr event.Address) {
 	t.Helper()
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: event.InvocationID(invocation),
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -587,7 +587,7 @@ func soakDriveInvocation(t *testing.T, ctx context.Context, run *tagent.Run, inv
 
 // soakTaskIDs reads the task dimension of every session the caller names and
 // reports the task identities in one order.
-func soakTaskIDs(t *testing.T, ctx context.Context, run *tagent.Run, sessions []event.Address) []string {
+func soakTaskIDs(t *testing.T, ctx context.Context, run *assembly.Run, sessions []event.Address) []string {
 	t.Helper()
 	if len(sessions) == 0 {
 		return nil

@@ -1,13 +1,13 @@
-// Package rootexample shows how a host satisfies the SettleWake port.
+// Package assemblyexample shows how a host satisfies the SettleWake port.
 //
 // 契约: docs/wiki/agent/agent-architecture.md#settle-driver
-package rootexample
+package assemblyexample
 
 import (
 	"context"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/state"
 )
 
@@ -39,7 +39,7 @@ func (w *demoWake) Consume(_ context.Context, _ event.Address, _ event.InstanceI
 // entry back, so the work stays owed instead of dying with the turn.
 func ExampleSettleWake() {
 	addr := event.Address{AgentID: "agent-a", SessionID: "chat-a"}
-	var account tagent.SettleWake = &demoWake{}
+	var account assembly.SettleWake = &demoWake{}
 	_ = account.Unconsumed()
 	_ = account.Claim(context.Background(), addr, "instance-1", 1)
 	_ = account.Consume(context.Background(), addr, "instance-1", 1)

@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
@@ -112,7 +112,7 @@ func runHistoryRestoresWithoutBudget(t *testing.T) {
 	}
 	closeIntegrityHost(t, ctx, host)
 
-	rebooted, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	rebooted, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("re-boot the history-restore host over the same storage root: %v", err)
 	}
@@ -184,7 +184,7 @@ func runPresentationUnlimitedAtZero(t *testing.T) {
 	}
 	closeIntegrityHost(t, ctx, host)
 
-	rebooted, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	rebooted, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("re-boot the unbounded host over the same storage root: %v", err)
 	}

@@ -5,7 +5,7 @@
 // the request shape an inbound channel posts to the task endpoint. Each one is a
 // face the host contributes to the assembly, so the host builds it here rather
 // than leaving the wiring to every deployment.
-package tagent
+package assembly
 
 import (
 	"context"

@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -52,15 +52,15 @@ func TestFactFidelity(t *testing.T) {
 
 // factFidelityAssemble assembles one runtime over the durable root beside the
 // scripted model, exactly as a deployment assembles its run.
-func factFidelityAssemble(t *testing.T, root string, provider *entryModel) *tagent.Run {
+func factFidelityAssemble(t *testing.T, root string, provider *entryModel) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(context.Background(),
+	run, err := assembly.Assemble(context.Background(),
 		&config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: provider.name}}},
-		map[event.AgentID]tagent.NativeAgent{
+		map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&entryTool{name: "echo", output: "out-fidelity"}}},
 		},
-		tagent.WithGovernance(passPolicy{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+		assembly.WithGovernance(passPolicy{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
 	if err != nil {
 		t.Fatalf("assemble the fact fidelity runtime over %s: %v", root, err)
 	}
@@ -69,7 +69,7 @@ func factFidelityAssemble(t *testing.T, root string, provider *entryModel) *tage
 
 // factFidelityClose closes the runtime beside its storage, so the next
 // assembly reads the durable root rather than a live ledger.
-func factFidelityClose(t *testing.T, run *tagent.Run) {
+func factFidelityClose(t *testing.T, run *assembly.Run) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -439,7 +439,7 @@ func factFidelityCommitFailureFailsTurn(t *testing.T) {
 	run := factFidelityAssemble(t, root, provider)
 	defer factFidelityClose(t, run)
 
-	warmup, err := run.Invoke(ctx, tagent.InvokeRequest{
+	warmup, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-fidelity-warmup",
 		Address:      factFidelityAddress,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "the warmup turn lands"}},
@@ -451,7 +451,7 @@ func factFidelityCommitFailureFailsTurn(t *testing.T) {
 		t.Fatalf("the warmup turn reached %s, want the completed terminal of the normal path", warmup.Terminal)
 	}
 
-	refused, err := run.Invoke(ctx, tagent.InvokeRequest{
+	refused, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-fidelity-refused",
 		Address:      factFidelityAddress,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "the turn whose output cannot land"}},
@@ -478,7 +478,7 @@ func factFidelityCommitFailureFailsTurn(t *testing.T) {
 	if held != nil {
 		held()
 	}
-	retry, err := run.Invoke(ctx, tagent.InvokeRequest{
+	retry, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-fidelity-retry",
 		Address:      factFidelityAddress,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "the retry lands"}},
@@ -493,7 +493,7 @@ func factFidelityCommitFailureFailsTurn(t *testing.T) {
 
 // factFidelityCountKey reports how many records of the session chain carry the
 // identity, so one identity is observed as exactly one record.
-func factFidelityCountKey(run *tagent.Run, key event.EventID) int {
+func factFidelityCountKey(run *assembly.Run, key event.EventID) int {
 	held := 0
 	for _, fact := range run.SessionFacts(factFidelityAddress) {
 		if fact.Key == key {

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/tool/knowledge"
 
@@ -144,7 +144,7 @@ func skillBodySurface(t *testing.T, ctx context.Context, root string, agent even
 	}
 	surface, err := knowledge.New(ctx, knowledge.Options{
 		Skills: repository,
-		Sink:   tagent.NewSkillLoadSink(agent),
+		Sink:   assembly.NewSkillLoadSink(agent),
 	})
 	if err != nil {
 		t.Fatalf("assemble the knowledge surface: %v", err)
@@ -157,7 +157,7 @@ func skillBodySurface(t *testing.T, ctx context.Context, root string, agent even
 // observe the request the real request assembly fixed.
 func skillBodyTurn(t *testing.T, ctx context.Context, surface []trpctool.CallableTool, provider *ntModel, agent event.AgentID) agent.Turn {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, &config.Declaration{
+	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry: string(agent),
 		Agents: []config.AgentSpec{{
 			ID:     string(agent),
@@ -165,13 +165,13 @@ func skillBodyTurn(t *testing.T, ctx context.Context, surface []trpctool.Callabl
 			Tools:  []config.ToolRef{{Name: knowledge.SkillLoadToolName}},
 			Params: map[string]float64{},
 		}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		agent: {Model: provider, Tools: surface},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: skillBodyInvocation,
 		Address:      event.Address{AgentID: agent, SessionID: skillBodySession},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "load a skill"}},

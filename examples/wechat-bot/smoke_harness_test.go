@@ -31,10 +31,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -1167,7 +1167,7 @@ type smokeRig struct {
 	channel  *fakeChannel
 	gateway  *approvalGateway
 	app      *wechatApp
-	host     *tagent.Host
+	host     *assembly.Host
 	lastChat string
 
 	closed   bool
@@ -1215,15 +1215,15 @@ func bootSmokeRigWithPort(t *testing.T, cfg *smokeConfig, provider *smokeProvide
 	if port == nil {
 		port = channel
 	}
-	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
+	options := append(app.options(), assembly.WithApprovals(gateway.Manager()))
 	if cfg.DeliveryRuler != nil {
-		options = append(options, tagent.WithDeliveryRuler(cfg.DeliveryRuler))
+		options = append(options, assembly.WithDeliveryRuler(cfg.DeliveryRuler))
 	}
-	host, err := tagent.Boot(cfg.ConfigPath, options...)
+	host, err := assembly.Boot(cfg.ConfigPath, options...)
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
-	app.host.invoke = func(ctx context.Context, req tagent.InvokeRequest) (bool, error) {
+	app.host.invoke = func(ctx context.Context, req assembly.InvokeRequest) (bool, error) {
 		turn, err := host.Invoke(ctx, req)
 		if err != nil {
 			return false, err
@@ -1273,15 +1273,15 @@ func (r *smokeRig) reboot() {
 	if err != nil {
 		r.t.Fatalf("assemble the wechat application on reboot: %v", err)
 	}
-	options := append(app.options(), tagent.WithApprovals(gateway.Manager()))
+	options := append(app.options(), assembly.WithApprovals(gateway.Manager()))
 	if r.cfg.DeliveryRuler != nil {
-		options = append(options, tagent.WithDeliveryRuler(r.cfg.DeliveryRuler))
+		options = append(options, assembly.WithDeliveryRuler(r.cfg.DeliveryRuler))
 	}
-	host, err := tagent.Boot(r.cfg.ConfigPath, options...)
+	host, err := assembly.Boot(r.cfg.ConfigPath, options...)
 	if err != nil {
 		r.t.Fatalf("boot the host on reboot: %v", err)
 	}
-	app.host.invoke = func(ctx context.Context, req tagent.InvokeRequest) (bool, error) {
+	app.host.invoke = func(ctx context.Context, req assembly.InvokeRequest) (bool, error) {
 		turn, err := host.Invoke(ctx, req)
 		if err != nil {
 			return false, err
@@ -1342,7 +1342,7 @@ func (r *smokeReviewRuler) sawContent(prefix string) bool {
 
 // waitHeldDelivery 等到该会话挂起一条正文以 want 开头的投递，把它交回；超时即
 // 失败并列出当前挂起表。
-func (r *smokeRig) waitHeldDelivery(chat, want string, timeout time.Duration) tagent.HeldDelivery {
+func (r *smokeRig) waitHeldDelivery(chat, want string, timeout time.Duration) assembly.HeldDelivery {
 	r.t.Helper()
 	deadline := time.Now().Add(timeout)
 	target := r.addressOf(chat)
@@ -1360,7 +1360,7 @@ func (r *smokeRig) waitHeldDelivery(chat, want string, timeout time.Duration) ta
 }
 
 // approveDelivery 批准一条挂起投递，并要求它在超时内到达渠道。
-func (r *smokeRig) approveDelivery(ctx context.Context, held tagent.HeldDelivery) {
+func (r *smokeRig) approveDelivery(ctx context.Context, held assembly.HeldDelivery) {
 	r.t.Helper()
 	if err := r.host.ApproveDelivery(ctx, held.ID); err != nil {
 		r.t.Fatalf("approve the held delivery %s: %v", held.ID, err)
@@ -1897,7 +1897,7 @@ func syntheticEntries(entries []replay.ProjectionEntry) []replay.ProjectionEntry
 }
 
 // TestEventIntegrityHostAdapters drives one inbound channel message through the formal assembly and one entryless declaration:
-// - formal_channel_turn runs loadWechatConfig -> newWechatApp -> tagent.Boot -> bindChannel -> registerHandlers
+// - formal_channel_turn runs loadWechatConfig -> newWechatApp -> assembly.Boot -> bindChannel -> registerHandlers
 // - it checks the reply, the target session and the request identity
 // - missing_entry_fails_closed checks an empty declared identity is refused by name, drives no model and binds no default address
 func TestEventIntegrityHostAdapters(t *testing.T) {

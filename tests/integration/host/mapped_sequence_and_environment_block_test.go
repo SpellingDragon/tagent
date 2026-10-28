@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -22,9 +22,9 @@ import (
 
 // invokeTurn drives one invocation of the named session through the formal
 // entry and fails the test when the turn is refused.
-func invokeTurn(t *testing.T, run *tagent.Run, id string, addr event.Address, input string) {
+func invokeTurn(t *testing.T, run *assembly.Run, id string, addr event.Address, input string) {
 	t.Helper()
-	if _, err := run.Invoke(context.Background(), tagent.InvokeRequest{
+	if _, err := run.Invoke(context.Background(), assembly.InvokeRequest{
 		InvocationID: event.InvocationID(id),
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: input}},
@@ -55,9 +55,9 @@ func TestProjectionCarriesTheCommittedSequence(t *testing.T) {
 			MaxTokens: 100,
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -105,9 +105,9 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -179,9 +179,9 @@ func TestEnvironmentBlockClosesTheRequestAssembly(t *testing.T) {
 			EnvironmentBlock: true,
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -265,9 +265,9 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{spec},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{echo}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -363,16 +363,16 @@ func TestEnvironmentBlockNamesTheOpenObligations(t *testing.T) {
 			{ID: "agent-b", Model: "model-b", EnvironmentBlock: true},
 		},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: blocked, Tools: []trpctool.CallableTool{blocking}},
 		"agent-b": {Model: observer},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := run.Invoke(ctx, tagent.InvokeRequest{
+		_, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-blocking",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-blocking"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "先挂起一个调用"}},

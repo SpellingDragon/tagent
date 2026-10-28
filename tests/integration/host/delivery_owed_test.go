@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
 
@@ -92,13 +92,13 @@ func owedKillResident(t *testing.T, mode string) {
 		t.Fatalf("unknown owed-delivery work order %q", mode)
 	}
 	account := filepath.Join(os.Getenv(owedKillOutEnv), owedKillAccountName)
-	host, err := tagent.Boot(os.Getenv(owedKillConfigEnv), tagent.WithSender(&owedKillSender{account: account}))
+	host, err := assembly.Boot(os.Getenv(owedKillConfigEnv), assembly.WithSender(&owedKillSender{account: account}))
 	if err != nil {
 		t.Fatalf("boot the resident host: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: event.Address{AgentID: "user", SessionID: settleDriveSession},
 		Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 	}); err != nil {

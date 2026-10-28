@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // TestUserTurnDeliversThroughProjectionSession pins the delivery of a user turn whose declaration registers a replay projection:
@@ -34,7 +34,7 @@ func TestUserTurnDeliversThroughProjectionSession(t *testing.T) {
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-a",
 		"    max_tokens: 32000\n"))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestUserTurnDeliversOnlyThisInvocation(t *testing.T) {
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-a",
 		"    max_tokens: 32000\n"))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -130,13 +130,13 @@ func TestHeadlessAddressDeliversNothing(t *testing.T) {
 		"  user: {}\n"+
 			"  knowledge: {}\n"))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: event.Address{AgentID: "knowledge", SessionID: "session-headless-delivery"},
 		Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 	})

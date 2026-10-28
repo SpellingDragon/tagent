@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -39,7 +39,7 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 		proj := replay.NewReplayProjection()
 		proj.Append(ctx, replay.ProjectionEntry{Key: "p-0001", Type: event.TypeExternalInput, Summary: "in", Content: "投影原文一", Time: base})
 		proj.Append(ctx, replay.ProjectionEntry{Key: "p-0002", Type: event.TypeAgentOutput, Summary: "out", Content: "投影原文二", Time: base.Add(time.Minute)})
-		var run *tagent.Run
+		var run *assembly.Run
 		seen := 0
 		provider := &learnModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 			snaps := run.RequestSnapshots()
@@ -65,15 +65,15 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 				},
 			}},
 		}
-		assembled, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		assembled, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-		}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(formalCapture(t)))
+		}, assembly.WithGovernance(formalPolicy{}), assembly.WithCapture(formalCapture(t)))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
 		run = assembled
 		chain := agent.RequestChain{PartitionID: 3, SessionID: event.SessionID("session-snapshot")}
-		if err := run.AttachReplay(chain, tagent.FoldWindow{MaxTokens: 100}, proj); err != nil {
+		if err := run.AttachReplay(chain, assembly.FoldWindow{MaxTokens: 100}, proj); err != nil {
 			t.Fatalf("AttachReplay: %v", err)
 		}
 		firstTurn := invokeSnapshot(t, ctx, run, "inv-snapshot-1", chain.SessionID, "first")
@@ -152,9 +152,9 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-		}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(formalCapture(t)))
+		}, assembly.WithGovernance(formalPolicy{}), assembly.WithCapture(formalCapture(t)))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -192,7 +192,7 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 	t.Run("the snapshot belongs to its decision request and never to a tool result", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		var run *tagent.Run
+		var run *assembly.Run
 		round := 0
 		provider := &learnModel{name: "model-a", answer: func(*model.Request) *model.Response {
 			round++
@@ -209,9 +209,9 @@ func TestFormalRequestSnapshotHasNoSecrets(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 		}
-		assembled, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		assembled, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-		}, tagent.WithGovernance(formalPolicy{}), tagent.WithCapture(formalCapture(t)))
+		}, assembly.WithGovernance(formalPolicy{}), assembly.WithCapture(formalCapture(t)))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -264,15 +264,15 @@ func formalCapture(t *testing.T) *rl.TrajectoryCapture {
 }
 
 // invokeSnapshot drives one invocation of the formal entry carrying the named input beside the episode boundary it names.
-func invokeSnapshot(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, input string) agent.Turn {
+func invokeSnapshot(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, input string) agent.Turn {
 	t.Helper()
 	return invokeSnapshotWith(t, ctx, run, invocation, session, []model.Message{{Role: model.RoleUser, Content: input}})
 }
 
 // invokeSnapshotWith drives one invocation of the formal entry carrying the given native input beside the episode boundary it names.
-func invokeSnapshotWith(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, input []model.Message) agent.Turn {
+func invokeSnapshotWith(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, input []model.Message) agent.Turn {
 	t.Helper()
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      "ep-snapshot",
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},

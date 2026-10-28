@@ -2,7 +2,7 @@
 // 会话路由、唯一出站通路、审批裁决与审批席位、两条启动通知，以及 registerHandlers 的
 // 真实挂点链路（审批→去重→分类→typing→Drive→清理）。
 //
-// 装配（声明→agents→models→工具面→storage→meditation→注入面）已由 tagent.Boot 承担，
+// 装配（声明→agents→models→工具面→storage→meditation→注入面）已由 assembly.Boot 承担，
 // 其核心测试在根包；这里只驱动应用侧运行时，模型回答以脚本替身给出。
 //
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#module-layout
@@ -23,10 +23,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
@@ -225,7 +225,7 @@ type routingRig struct {
 
 	mu       sync.Mutex
 	answers  []string
-	requests []tagent.InvokeRequest
+	requests []assembly.InvokeRequest
 }
 
 func newRoutingRig(t *testing.T) *routingRig {
@@ -256,7 +256,7 @@ func newRoutingRig(t *testing.T) *routingRig {
 		sender: sender,
 		seen:   NewSeenStore(t.TempDir(), discardLogger()),
 	}
-	rig.host.invoke = func(ctx context.Context, req tagent.InvokeRequest) (bool, error) {
+	rig.host.invoke = func(ctx context.Context, req assembly.InvokeRequest) (bool, error) {
 		rig.mu.Lock()
 		rig.requests = append(rig.requests, req)
 		answer := ""
@@ -284,10 +284,10 @@ func (r *routingRig) callCount() int {
 	return len(r.requests)
 }
 
-func (r *routingRig) recorded() []tagent.InvokeRequest {
+func (r *routingRig) recorded() []assembly.InvokeRequest {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]tagent.InvokeRequest(nil), r.requests...)
+	return append([]assembly.InvokeRequest(nil), r.requests...)
 }
 
 func discardLogger() *slog.Logger {
@@ -313,7 +313,7 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func requestCarries(req tagent.InvokeRequest, body string) bool {
+func requestCarries(req assembly.InvokeRequest, body string) bool {
 	for _, msg := range req.Input {
 		if strings.Contains(msg.Content, body) {
 			return true

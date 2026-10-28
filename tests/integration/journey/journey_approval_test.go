@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
@@ -50,7 +50,7 @@ func TestJourneyApprovalHoldThenRun(t *testing.T) {
 	provider.scriptAnswers(journeyEntryModel, finalBody)
 	host := bootJourney(t, provider,
 		journeySpec{EntryTools: []string{"send"}, MaxTokens: 4096},
-		tagent.WithApprover(approve),
+		assembly.WithApprover(approve),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

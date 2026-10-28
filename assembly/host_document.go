@@ -5,7 +5,7 @@
 // samples through. The document is the host's own reading of the shared declaration
 // shape, so a section the core shares is read here exactly as the declaration reads
 // it, and only the application section stays opaque.
-package tagent
+package assembly
 
 import (
 	"context"

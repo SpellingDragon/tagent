@@ -1,4 +1,4 @@
-package tagent // import "github.com/SpellingDragon/tagent"
+package assembly // import "github.com/SpellingDragon/tagent/assembly"
 
 Boot is the turnkey entry of the composition root: it reads one host document,
 resolves the declaration it carries, and returns the Host the application

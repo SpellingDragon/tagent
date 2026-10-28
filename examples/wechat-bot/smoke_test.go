@@ -27,10 +27,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/replay"
@@ -1649,7 +1649,7 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 		t.Fatalf("the fold product opened %d no-novelty pass(es), want none", got-noNovelty)
 	}
 
-	threshold := tagent.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
+	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
 	plan := replay.AgeFoldPlan{KeepRecent: 2, VolumeThreshold: threshold}
 	rebuilt := smokeIntegrityRebuildProjection(t, rig, chat)
 	first, err := rebuilt.FoldByAge(context.Background(), plan)
@@ -1849,7 +1849,7 @@ func smokeIntegrityFoldConsumer(t *testing.T) {
 	if !carried {
 		t.Fatalf("session %s registered no projection", chat)
 	}
-	threshold := tagent.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
+	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
 	if volume := len(replay.RenderProjection(entries)); volume > threshold {
 		t.Fatalf("the projection grew to %d bytes after the follow-up, want <= the %d-byte window", volume, threshold)
 	}
@@ -2567,7 +2567,7 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 		t.Fatalf("the request after the fold read no history summary carrying %q\nprojection:\n%s\nrequests carrying a history summary:\n%s",
 			wantRendered, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
-	threshold := tagent.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
+	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
 	if volume := len(replay.RenderProjection(entries)); volume > threshold {
 		t.Fatalf("the folded projection is %d bytes, want <= the %d-byte window\nprojection:\n%s",
 			volume, threshold, smokeEntryDigest(entries))

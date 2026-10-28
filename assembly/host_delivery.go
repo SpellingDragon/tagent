@@ -5,7 +5,7 @@
 // approval face, and a restart resumes every obligation the ledger still names. The
 // body, the hold and the refusal each stand as one record under one identity, so a
 // delivery settled twice is settled once.
-package tagent
+package assembly
 
 import (
 	"context"

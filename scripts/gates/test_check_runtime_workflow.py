@@ -168,16 +168,18 @@ class WorkflowTest(unittest.TestCase):
     def test_product_scope_matches_golden_architecture(self):
         # PRODUCT_PACKAGES must cover exactly the first-party product packages
         # registered in golden/runtime/architecture.json (its scope excludes
-        # scripts/tests/prototype/examples/docs/resources). The root package is
-        # `*.go` because `gofmt -l .` would recurse the whole root module. A new
-        # golden top-level package must land here and in the workflow together.
+        # scripts/tests/prototype/examples/docs/resources). Every registered package
+        # is spelled by its own directory, the composition root included; a bare `.`
+        # would recurse the whole root module, so the root names its directory too.
+        # A new golden top-level package must land here and in the workflow together.
         scope = self.workflow["jobs"]["contracts"]["env"]["PRODUCT_PACKAGES"].split()
-        self.assertIn("*.go", scope, "the root package must be covered by *.go")
         golden = json.loads(GOLDEN_ARCHITECTURE.read_text(encoding="utf-8"))
+        root = golden["root_package"]
+        self.assertIn(root, scope, "the composition root must be covered by its directory")
         expected = set()
         for package in golden["packages"]:
             pattern = package["pattern"]
-            expected.add("*.go" if pattern == "." else pattern.split("/")[0])
+            expected.add(pattern if pattern == root else pattern.split("/")[0])
         self.assertEqual(set(scope), expected,
                          "PRODUCT_PACKAGES must equal the golden product packages")
 

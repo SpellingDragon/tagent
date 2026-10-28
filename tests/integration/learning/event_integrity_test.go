@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
@@ -466,7 +466,7 @@ func integrityDocument(root, endpoint string, worker bool) string {
 
 // integrityBoot boots one host over a fresh storage root and returns its run,
 // the recording outbound face and the root the capture lands under.
-func integrityBoot(t *testing.T, endpoint string, worker bool) (*tagent.Host, *integritySender, string) {
+func integrityBoot(t *testing.T, endpoint string, worker bool) (*assembly.Host, *integritySender, string) {
 	t.Helper()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
@@ -474,7 +474,7 @@ func integrityBoot(t *testing.T, endpoint string, worker bool) (*tagent.Host, *i
 		t.Fatalf("write the host document: %v", err)
 	}
 	sender := newIntegritySender()
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -487,9 +487,9 @@ func integrityBoot(t *testing.T, endpoint string, worker bool) (*tagent.Host, *i
 }
 
 // integrityInvoke drives one turn through the formal host entry.
-func integrityInvoke(t *testing.T, ctx context.Context, host *tagent.Host, addr event.Address, invocation event.InvocationID, episode event.EpisodeID, input string) agent.Turn {
+func integrityInvoke(t *testing.T, ctx context.Context, host *assembly.Host, addr event.Address, invocation event.InvocationID, episode event.EpisodeID, input string) agent.Turn {
 	t.Helper()
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      episode,
 		Address:      addr,
@@ -503,7 +503,7 @@ func integrityInvoke(t *testing.T, ctx context.Context, host *tagent.Host, addr 
 
 // integrityClose closes the host and fails the check when the drain reports an
 // error.
-func integrityClose(t *testing.T, ctx context.Context, host *tagent.Host) {
+func integrityClose(t *testing.T, ctx context.Context, host *assembly.Host) {
 	t.Helper()
 	if err := host.Close(ctx); err != nil {
 		t.Fatalf("close the host: %v", err)
@@ -1101,11 +1101,11 @@ func runIntegrityNoRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	_, err := host.Invoke(ctx, tagent.InvokeRequest{
+	_, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: event.Address{AgentID: "user"},
 		Input:   []model.Message{{Role: model.RoleUser, Content: "never sent"}},
 	})
-	if !errors.Is(err, tagent.ErrHostAddressMissing) {
+	if !errors.Is(err, assembly.ErrHostAddressMissing) {
 		t.Fatalf("incomplete address error = %v, want ErrHostAddressMissing", err)
 	}
 	if requests := provider.recordedRequests(); len(requests) != 0 {

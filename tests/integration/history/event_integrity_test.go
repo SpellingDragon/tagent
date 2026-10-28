@@ -32,11 +32,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
@@ -766,7 +766,7 @@ func seedConsumptionProcess(t *testing.T, root, out string) {
 
 	run := assembleConsumptionRun(t, ctx, root)
 	report.Recovery = consumptionRecoveryViews(run.Recovery())
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-seed",
 		Address:      consumptionSeedAddress,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -794,7 +794,7 @@ func recoverConsumptionProcess(t *testing.T, root, out string) {
 	run := recoverConsumptionRun(t, ctx, root)
 	report := consumptionChildReport{Mode: consumptionModeRecover, PID: os.Getpid()}
 	if os.Getenv(consumptionChildCfgEnv) != "" {
-		report.Notes = append(report.Notes, "the restart opened through tagent.Boot")
+		report.Notes = append(report.Notes, "the restart opened through assembly.Boot")
 	}
 	report.Recovery = consumptionRecoveryViews(run.Recovery())
 	addresses := []event.Address{consumptionSeedAddress, consumptionClaimAddress}
@@ -819,7 +819,7 @@ func seedHandoverProcess(t *testing.T, root, out string) {
 	report.Recovery = consumptionRecoveryViews(run.Recovery())
 	done := make(chan error, 1)
 	go func() {
-		_, err := run.Invoke(ctx, tagent.InvokeRequest{
+		_, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-handover",
 			Address:      consumptionSeedAddress,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hand over"}},
@@ -865,7 +865,7 @@ func waitHandoverReached(t *testing.T, reached <-chan struct{}, done <-chan erro
 // point the anchor needs — the point a process exit must still recover from —
 // and the probe declares the post-commit observation port like any other face.
 type handoverProbe struct {
-	run     *tagent.Run
+	run     *assembly.Run
 	reached chan struct{}
 	once    sync.Once
 }
@@ -902,9 +902,9 @@ func (p *handoverProbe) ObserveCommit(ctx context.Context, id event.EventID) err
 // assembleHandoverRun assembles the runtime the handover anchor drives over the
 // durable root named: the same assembly entry the host boots, the native tool
 // the turn calls, and the probe that holds the delivery inside the handover.
-func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *handoverProbe) *tagent.Run {
+func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *handoverProbe) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {
 			Model: &chainModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 				if len(req.Messages) == 1 {
@@ -914,8 +914,8 @@ func assembleHandoverRun(t *testing.T, ctx context.Context, root string, probe *
 			}},
 			Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-handover"}},
 		},
-	}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
-		tagent.WithPlugins(func(assembled *tagent.Run) ([]plugin.Instance, error) {
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
+		assembly.WithPlugins(func(assembled *assembly.Run) ([]plugin.Instance, error) {
 			probe.run = assembled
 			return []plugin.Instance{probe}, nil
 		}))
@@ -964,13 +964,13 @@ func consumptionSeedClaimedTask(t *testing.T, ctx context.Context, root string) 
 // recoverConsumptionRun opens the restart through the formal Boot entry when
 // the child was handed a host document, and through the very assembly entry
 // Boot calls otherwise: both fold the durable chains of the same root.
-func recoverConsumptionRun(t *testing.T, ctx context.Context, root string) *tagent.Run {
+func recoverConsumptionRun(t *testing.T, ctx context.Context, root string) *assembly.Run {
 	t.Helper()
 	configPath := os.Getenv(consumptionChildCfgEnv)
 	if configPath == "" {
 		return assembleConsumptionRun(t, ctx, root)
 	}
-	host, err := tagent.Boot(configPath)
+	host, err := assembly.Boot(configPath)
 	if err != nil {
 		t.Fatalf("boot the restarted host: %v", err)
 	}
@@ -986,9 +986,9 @@ func consumptionHostDocument(root string) string {
 // assembleConsumptionRun assembles the runtime the restart anchors drive over
 // the durable root named: the same assembly entry the host boots, beside the
 // native tool the seed's turn calls.
-func assembleConsumptionRun(t *testing.T, ctx context.Context, root string) *tagent.Run {
+func assembleConsumptionRun(t *testing.T, ctx context.Context, root string) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {
 			Model: &chainModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 				if len(req.Messages) == 1 {
@@ -998,7 +998,7 @@ func assembleConsumptionRun(t *testing.T, ctx context.Context, root string) *tag
 			}},
 			Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}},
 		},
-	}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}))
 	if err != nil {
 		t.Fatalf("assemble the consumption runtime: %v", err)
 	}
@@ -1331,7 +1331,7 @@ func restoreDescribe(messages []persistenceMessage) string {
 }
 
 // consumptionTaskViews reads the task dimension of one assembly.
-func consumptionTaskViews(t *testing.T, ctx context.Context, run *tagent.Run, addresses []event.Address) []consumptionTaskView {
+func consumptionTaskViews(t *testing.T, ctx context.Context, run *assembly.Run, addresses []event.Address) []consumptionTaskView {
 	t.Helper()
 	snapshot, err := run.Query(ctx, query.ListFilter{
 		Scope: query.AuthorizationScope{Agents: []event.AgentID{"agent-a"}, Sessions: addresses},
@@ -1348,7 +1348,7 @@ func consumptionTaskViews(t *testing.T, ctx context.Context, run *tagent.Run, ad
 }
 
 // consumptionNoticeViews reads the notification dimension of one assembly.
-func consumptionNoticeViews(t *testing.T, ctx context.Context, run *tagent.Run, addresses []event.Address) []consumptionNoticeView {
+func consumptionNoticeViews(t *testing.T, ctx context.Context, run *assembly.Run, addresses []event.Address) []consumptionNoticeView {
 	t.Helper()
 	snapshot, err := run.Query(ctx, query.ListFilter{
 		Scope: query.AuthorizationScope{Agents: []event.AgentID{"agent-a"}, Sessions: addresses},
@@ -1641,14 +1641,14 @@ func projectionKey(turn int, position string) event.EventID {
 
 // newProjectionRun assembles one runtime whose agent declares the given model
 // window over the given provider, and reports the address its turns run at.
-func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*tagent.Run, event.Address) {
+func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*assembly.Run, event.Address) {
 	t.Helper()
-	run, err := tagent.Assemble(context.Background(), &config.Declaration{
+	run, err := assembly.Assemble(context.Background(), &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: maxTokens}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -1656,7 +1656,7 @@ func newProjectionRun(t *testing.T, maxTokens int, provider model.Model) (*tagen
 }
 
 // commitProjectionTurn commits the four legs of one closed turn under the run.
-func commitProjectionTurn(t *testing.T, ctx context.Context, run *tagent.Run, addr event.Address, turn int) {
+func commitProjectionTurn(t *testing.T, ctx context.Context, run *assembly.Run, addr event.Address, turn int) {
 	t.Helper()
 	for position, leg := range projectionTurnLegs(turn) {
 		if _, err := run.CommitToSession(ctx, addr, event.Event{
@@ -1672,7 +1672,7 @@ func commitProjectionTurn(t *testing.T, ctx context.Context, run *tagent.Run, ad
 }
 
 // commitProjectionLeg commits one leg of a turn under the run.
-func commitProjectionLeg(t *testing.T, ctx context.Context, run *tagent.Run, addr event.Address, turn int, position, typ, summary string, content string) {
+func commitProjectionLeg(t *testing.T, ctx context.Context, run *assembly.Run, addr event.Address, turn int, position, typ, summary string, content string) {
 	t.Helper()
 	if _, err := run.CommitToSession(ctx, addr, event.Event{
 		Key:       projectionKey(turn, position),
@@ -1687,7 +1687,7 @@ func commitProjectionLeg(t *testing.T, ctx context.Context, run *tagent.Run, add
 
 // projectionEntriesOf reports the projection entries of one session in their
 // canonical order, refusing a session that registered no projection.
-func projectionEntriesOf(t *testing.T, run *tagent.Run, session event.SessionID) []replay.ProjectionEntry {
+func projectionEntriesOf(t *testing.T, run *assembly.Run, session event.SessionID) []replay.ProjectionEntry {
 	t.Helper()
 	entries, held := run.ReplayEntries(session)
 	if !held {
@@ -1707,7 +1707,7 @@ func projectionKeysOf(entries []replay.ProjectionEntry) []string {
 
 // projectionProductsOf reports the synthetic product keys of one session's
 // projection in projection order.
-func projectionProductsOf(t *testing.T, run *tagent.Run, session event.SessionID) []event.EventID {
+func projectionProductsOf(t *testing.T, run *assembly.Run, session event.SessionID) []event.EventID {
 	t.Helper()
 	keys := make([]event.EventID, 0, 4)
 	for _, entry := range projectionEntriesOf(t, run, session) {
@@ -1720,7 +1720,7 @@ func projectionProductsOf(t *testing.T, run *tagent.Run, session event.SessionID
 
 // projectionFactCountOf reports how many facts of one frozen type the session
 // chain holds.
-func projectionFactCountOf(run *tagent.Run, session event.SessionID, factType string) int {
+func projectionFactCountOf(run *assembly.Run, session event.SessionID, factType string) int {
 	count := 0
 	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
 		if evt.Type == factType {
@@ -1735,7 +1735,7 @@ func projectionFactCountOf(run *tagent.Run, session event.SessionID, factType st
 // message and maps onto no projection entry, so the rebuild reads back exactly
 // the material the commits mapped. It reports the rebuilt projection, the
 // rebuild report and how many mapped facts the chain carried.
-func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *tagent.Run, session event.SessionID) (*replay.ReplayProjection, replay.RebuildReport, int) {
+func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *assembly.Run, session event.SessionID) (*replay.ReplayProjection, replay.RebuildReport, int) {
 	t.Helper()
 	chainKey := replay.ChainKey{PartitionID: 1, SessionID: session}
 	chain := replay.NewMemoryEventChain()
@@ -1770,7 +1770,7 @@ func rebuildProjectionFromRun(t *testing.T, ctx context.Context, run *tagent.Run
 func projectionWindowPlan(maxTokens int) replay.AgeFoldPlan {
 	return replay.AgeFoldPlan{
 		KeepRecent:      config.DefaultKeepRecentTasks,
-		VolumeThreshold: (tagent.FoldWindow{MaxTokens: maxTokens}).VolumeThresholdBytes(),
+		VolumeThreshold: (assembly.FoldWindow{MaxTokens: maxTokens}).VolumeThresholdBytes(),
 	}
 }
 
@@ -2070,7 +2070,7 @@ func projectionConsumedRawKeysOf(committed []string, entries []replay.Projection
 // projectionCommitFactsOf reports the mapped facts of one session chain in
 // commit order, in the shape a cold start replays the WAL under: a compress
 // request carries no message and maps onto no projection entry.
-func projectionCommitFactsOf(t *testing.T, run *tagent.Run, session event.SessionID) []replay.ChainFact {
+func projectionCommitFactsOf(t *testing.T, run *assembly.Run, session event.SessionID) []replay.ChainFact {
 	t.Helper()
 	facts := make([]replay.ChainFact, 0, 16)
 	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
@@ -2092,7 +2092,7 @@ func projectionCommitFactsOf(t *testing.T, run *tagent.Run, session event.Sessio
 // projectionCompressFactsOf reports the identities of the compress requests one
 // session chain holds: the judgments the fold filed, quoted by their
 // content-addressed identity.
-func projectionCompressFactsOf(run *tagent.Run, session event.SessionID) map[event.EventID]bool {
+func projectionCompressFactsOf(run *assembly.Run, session event.SessionID) map[event.EventID]bool {
 	keys := map[event.EventID]bool{}
 	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
 		if evt.Type == event.CompressRequestType {
@@ -2227,10 +2227,10 @@ func runRestartRestoresFoldForm(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a", MaxTokens: projectionWindowTokens}},
 	}
-	agents := map[event.AgentID]tagent.NativeAgent{
+	agents := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: &replayModel{name: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, declaration, agents, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(storage))
+	run, err := assembly.Assemble(ctx, declaration, agents, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {
 		t.Fatalf("assemble the durable runtime: %v", err)
 	}
@@ -2251,7 +2251,7 @@ func runRestartRestoresFoldForm(t *testing.T) {
 		t.Fatal("the online fold filed no compress request, so the restart proves no judgment")
 	}
 
-	restarted, err := tagent.Assemble(ctx, declaration, agents, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(storage))
+	restarted, err := assembly.Assemble(ctx, declaration, agents, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(storage))
 	if err != nil {
 		t.Fatalf("restart over the same storage: %v", err)
 	}
@@ -2351,7 +2351,7 @@ func runActualRequestAssembly(t *testing.T) {
 	}
 	t.Logf("actual_request_assembly: before=%v", projectionKeysOf(before))
 
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-projection",
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "projection request"}},
@@ -2456,7 +2456,7 @@ func projectionEntryOfKey(entries []replay.ProjectionEntry, key event.EventID) (
 
 // projectionProductsEntries reports the product entries of one session's
 // projection in projection order.
-func projectionProductsEntries(t *testing.T, run *tagent.Run, session event.SessionID) []replay.ProjectionEntry {
+func projectionProductsEntries(t *testing.T, run *assembly.Run, session event.SessionID) []replay.ProjectionEntry {
 	t.Helper()
 	return projectionProductsEntriesOf(t, projectionEntriesOf(t, run, session))
 }
@@ -2882,7 +2882,7 @@ func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	if err := os.WriteFile(configPath, []byte(restartHostDocument(root, provider.endpoint())), 0o644); err != nil {
 		t.Fatalf("write the restart host document: %v", err)
 	}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the restarted host: %v", err)
 	}
@@ -2891,7 +2891,7 @@ func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	report.Recovery = consumptionRecoveryViews(run.Recovery())
 	report.Tasks = consumptionTaskViews(t, ctx, run, addresses)
 	report.Notices = consumptionNoticeViews(t, ctx, run, addresses)
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-restart-recover",
 		Address:      restartSeedAddress,
 		Input:        []model.Message{{Role: model.RoleUser, Content: restartRecoverInput}},
@@ -3455,9 +3455,9 @@ func restartSoleNotice(report restartChildReport) (consumptionNoticeView, bool) 
 // the 03.11 long run declares: a small model window, the 0.3 share of that
 // window and one recent task kept whole, so every new segment start folds the
 // segment before it inside the check.
-func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (*tagent.Run, event.Address) {
+func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (*assembly.Run, event.Address) {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, &config.Declaration{
+	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry: "agent-a",
 		Agents: []config.AgentSpec{{
 			ID:                "agent-a",
@@ -3466,9 +3466,9 @@ func newFoldWindowRun(t *testing.T, ctx context.Context, provider model.Model) (
 			CompressThreshold: 0.3,
 			KeepRecentTasks:   1,
 		}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -3524,7 +3524,7 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands and the check would not read the rewrite", before, len(after))
 	}
 
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID:  invocation,
 		Address:       addr,
 		TriggerSource: "task",
@@ -3955,7 +3955,7 @@ type persistenceRig struct {
 	provider   *persistenceChat
 	embeddings *persistenceEmbeddings
 	sender     *persistenceSender
-	host       *tagent.Host
+	host       *assembly.Host
 }
 
 // newPersistenceRig boots one host over a fresh durable root.
@@ -3990,7 +3990,7 @@ func (r *persistenceRig) boot() {
 	if err := os.WriteFile(configPath, []byte(document), 0o644); err != nil {
 		r.t.Fatalf("write the persistence host document: %v", err)
 	}
-	host, err := tagent.Boot(configPath, tagent.WithSender(r.sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(r.sender))
 	if err != nil {
 		r.t.Fatalf("boot the persistence host: %v", err)
 	}
@@ -3999,7 +3999,7 @@ func (r *persistenceRig) boot() {
 
 // invoke drives one user turn of the one address through the formal entry.
 func (r *persistenceRig) invoke(ctx context.Context, invocation string, input string) (agent.Turn, error) {
-	return r.host.Invoke(ctx, tagent.InvokeRequest{
+	return r.host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: event.InvocationID(invocation),
 		Address:      persistenceAddress,
 		Input:        []model.Message{{Role: model.RoleUser, Content: input}},
@@ -4123,7 +4123,7 @@ func persistenceLastAnswer(t *testing.T, provider *persistenceChat, tool string)
 
 // persistenceFactByContent reports the committed fact whose content is exactly
 // the text.
-func persistenceFactByContent(t *testing.T, run *tagent.Run, content string) event.Event {
+func persistenceFactByContent(t *testing.T, run *assembly.Run, content string) event.Event {
 	t.Helper()
 	for _, fact := range run.SessionFacts(persistenceAddress) {
 		if fact.Message.Content == content {
@@ -4135,7 +4135,7 @@ func persistenceFactByContent(t *testing.T, run *tagent.Run, content string) eve
 }
 
 // persistenceFactOf reports the one committed fact the match selects.
-func persistenceFactOf(t *testing.T, run *tagent.Run, what string, match func(event.Event) bool) event.Event {
+func persistenceFactOf(t *testing.T, run *assembly.Run, what string, match func(event.Event) bool) event.Event {
 	t.Helper()
 	var matched []event.Event
 	for _, fact := range run.SessionFacts(persistenceAddress) {
@@ -4939,7 +4939,7 @@ func newRestoreRig(t *testing.T, root string) *persistenceRig {
 }
 
 // restoreInvocationViews reads the invocation dimension of one restarted run.
-func restoreInvocationViews(t *testing.T, ctx context.Context, run *tagent.Run, addr event.Address) []restoreInvocationView {
+func restoreInvocationViews(t *testing.T, ctx context.Context, run *assembly.Run, addr event.Address) []restoreInvocationView {
 	t.Helper()
 	snapshot, err := run.Query(ctx, query.ListFilter{
 		Scope: query.AuthorizationScope{Agents: []event.AgentID{addr.AgentID}, Sessions: []event.Address{addr}},
@@ -4960,7 +4960,7 @@ func restoreInvocationViews(t *testing.T, ctx context.Context, run *tagent.Run, 
 }
 
 // restoreTaskViews reads the task dimension of one restarted run.
-func restoreTaskViews(t *testing.T, ctx context.Context, run *tagent.Run, addr event.Address) []restoreTaskView {
+func restoreTaskViews(t *testing.T, ctx context.Context, run *assembly.Run, addr event.Address) []restoreTaskView {
 	t.Helper()
 	snapshot, err := run.Query(ctx, query.ListFilter{
 		Scope: query.AuthorizationScope{Agents: []event.AgentID{addr.AgentID}, Sessions: []event.Address{addr}},

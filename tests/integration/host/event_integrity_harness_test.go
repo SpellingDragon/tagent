@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 )
 
@@ -315,8 +315,8 @@ func awaitIntegrityDrive(t *testing.T, driven <-chan integrityOutcome, what stri
 }
 
 // driveIntegrityTurn drives one turn at the given address over the host.
-func driveIntegrityTurn(ctx context.Context, host *tagent.Host, addr event.Address, input string) (agent.Turn, error) {
-	return host.Invoke(ctx, tagent.InvokeRequest{
+func driveIntegrityTurn(ctx context.Context, host *assembly.Host, addr event.Address, input string) (agent.Turn, error) {
+	return host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
 		Input:   []model.Message{{Role: model.RoleUser, Content: input}},
 	})
@@ -325,14 +325,14 @@ func driveIntegrityTurn(ctx context.Context, host *tagent.Host, addr event.Addre
 // bootIntegrityHost boots the scripted entry document the integrity checks
 // drive: the entry agent beside the declared send tool, resolved at the
 // scripted provider.
-func bootIntegrityHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *tagent.Host {
+func bootIntegrityHost(t *testing.T, provider *scriptedProvider, sender recordingSender) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-entry",
 		"    tools:\n"+
 			"      - { kind: tool, id: send }\n"))
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the integrity host: %v", err)
 	}
@@ -341,12 +341,12 @@ func bootIntegrityHost(t *testing.T, provider *scriptedProvider, sender recordin
 
 // bootIntegrityHostWithAgents boots one host document whose agent sections are
 // given verbatim, so a check declares the identities its script names.
-func bootIntegrityHostWithAgents(t *testing.T, provider *scriptedProvider, sender recordingSender, sections string) *tagent.Host {
+func bootIntegrityHostWithAgents(t *testing.T, provider *scriptedProvider, sender recordingSender, sections string) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", sections))
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the integrity host: %v", err)
 	}
@@ -355,7 +355,7 @@ func bootIntegrityHostWithAgents(t *testing.T, provider *scriptedProvider, sende
 
 // keepIntegrityHost releases every park and stops the host when the check ends,
 // so a failed check leaves neither a parked provider nor a listening face.
-func keepIntegrityHost(t *testing.T, script *integrityScript, host *tagent.Host) {
+func keepIntegrityHost(t *testing.T, script *integrityScript, host *assembly.Host) {
 	t.Helper()
 	t.Cleanup(func() {
 		script.releaseAll()
@@ -370,7 +370,7 @@ func keepIntegrityHost(t *testing.T, script *integrityScript, host *tagent.Host)
 // closeIntegrityHost drains the run the host drives and requires the formal
 // obligations to converge before the host closes: the confirmable drain point
 // of a check, never a sleep beside a still-open obligation.
-func closeIntegrityHost(t *testing.T, ctx context.Context, host *tagent.Host) {
+func closeIntegrityHost(t *testing.T, ctx context.Context, host *assembly.Host) {
 	t.Helper()
 	report, err := host.Run().Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(20 * time.Second)})
 	if err != nil {

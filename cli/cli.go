@@ -25,9 +25,9 @@ import (
 	"syscall"
 	"time"
 
-	tagent "github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -62,17 +62,17 @@ var ErrRequestNotAuthenticated = errors.New("tagent: the request subject is not 
 // request subject of every HTTP request authenticates at one gate ahead of the
 // route resolution, so no endpoint opens a bypass around it.
 type CLI struct {
-	run         *tagent.Run
+	run         *assembly.Run
 	scope       query.AuthorizationScope
 	credential  string
 	feedback    http.Handler
-	diagnostics tagent.DiagnosticSwitches
+	diagnostics assembly.DiagnosticSwitches
 }
 
 // NewCLI returns the thin command shell over one assembled run, reading under
 // the authorization scope the caller already holds and carrying the options
 // the host configures it with.
-func NewCLI(run *tagent.Run, scope query.AuthorizationScope, opts ...CLIOption) *CLI {
+func NewCLI(run *assembly.Run, scope query.AuthorizationScope, opts ...CLIOption) *CLI {
 	c := &CLI{run: run, scope: scope}
 	for _, opt := range opts {
 		opt(c)
@@ -119,7 +119,7 @@ func (c *CLI) invoke(ctx context.Context, args []string, stdout, stderr io.Write
 		fmt.Fprintln(stderr, "usage: tagent invoke -agent A -session S -invocation I -text T")
 		return 2
 	}
-	turn, err := c.run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := c.run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: event.InvocationID(*invocation),
 		Address:      event.Address{AgentID: event.AgentID(*agentID), SessionID: event.SessionID(*session)},
 		Input:        []model.Message{{Role: model.RoleUser, Content: *text}},
@@ -165,7 +165,7 @@ func (c *CLI) start(ctx context.Context, args []string, stdout, stderr io.Writer
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	switches, err := tagent.DiagnosticSwitchesFromEnv()
+	switches, err := assembly.DiagnosticSwitchesFromEnv()
 	if err != nil {
 		fmt.Fprintln(stderr, "tagent: start:", err)
 		return 2

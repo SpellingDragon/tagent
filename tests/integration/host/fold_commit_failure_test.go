@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 )
@@ -38,7 +38,7 @@ func TestFoldCommitFailureSurfaces(t *testing.T) {
 // commitRefusalRun assembles one run over a freshly opened localfile tier, so
 // every commit below passes the storage path a served process commits through
 // and no refusal is a memory-only shortcut.
-func commitRefusalRun(t *testing.T) *tagent.Run {
+func commitRefusalRun(t *testing.T) *assembly.Run {
 	t.Helper()
 	decl := &config.Declaration{
 		Entry:  "agent-a",
@@ -47,10 +47,10 @@ func commitRefusalRun(t *testing.T) *tagent.Run {
 	native := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
 		return entryFinalTurn("the commit-refusal run drives no decision of its own")
 	}}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: native},
-	}, tagent.WithGovernance(passPolicy{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
+	}, assembly.WithGovernance(passPolicy{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}))
 	if err != nil {
 		t.Fatalf("assemble the commit-refusal run: %v", err)
 	}
@@ -79,8 +79,8 @@ func runRefusedCommitLandsInNoLedger(t *testing.T) {
 	if !strings.Contains(err.Error(), "carries no event time") {
 		t.Fatalf("the refused commit answered %v, want the cause the storage path refused it under", err)
 	}
-	if _, readErr := run.CommittedEvent(ctx, key); !errors.Is(readErr, tagent.ErrCommittedFactMissing) {
-		t.Fatalf("the refused fact reads back as %v, want %v: a refused commit may never be answered as a commitment", readErr, tagent.ErrCommittedFactMissing)
+	if _, readErr := run.CommittedEvent(ctx, key); !errors.Is(readErr, assembly.ErrCommittedFactMissing) {
+		t.Fatalf("the refused fact reads back as %v, want %v: a refused commit may never be answered as a commitment", readErr, assembly.ErrCommittedFactMissing)
 	}
 	if held := run.SessionFacts(addr); len(held) != 0 {
 		t.Fatalf("the session holds %d fact(s) beside a refused commit: %+v", len(held), held)

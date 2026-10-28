@@ -25,7 +25,7 @@
 
 合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 hex 键，去重域只决定票据能否并存，不改写身份。
 
-**触发源戳的归属**：`event.MetaKeyTriggerSource` 写入的戳名由产出它的机制包持有；宿主经 `InvokeRequest.TriggerSource` 自带的戳由 `run.go` 原样写入。戳只标记来源、不构成身份，因此不在上表新增族。
+**触发源戳的归属**：`event.MetaKeyTriggerSource` 写入的戳名由产出它的机制包持有；宿主经 `InvokeRequest.TriggerSource` 自带的戳由 `assembly/run.go` 原样写入。戳只标记来源、不构成身份，因此不在上表新增族。
 
 | 戳 | 常量 | 归属包 |
 |---|---|---|

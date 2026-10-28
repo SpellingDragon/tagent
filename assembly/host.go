@@ -6,7 +6,7 @@
 // reflection and the two loopback endpoints; the application fills the
 // outbound message face, the approval face and the reflection delivery face
 // through the options, and reads nothing else out of the document.
-package tagent
+package assembly
 
 import (
 	"context"

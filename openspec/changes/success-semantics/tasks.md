@@ -30,5 +30,5 @@ graph LR
 
 - [x] 14. host 簇文件重组（D15）：四域纯移动（host_delivery/host_document/host_tools/host_face←尾部）+host_diagnostics 更名；零语义变更 —— 验证：`go build ./...`+`go test . ./tests/integration/host -count=1`+`git diff` 仅移动（内容零 diff 或仅文件头/import）+lint 绿
 
-- [ ] 15. 根包整体迁移 assembly/（D16）：23 文件 git mv+包名 assembly+仓内 import/限定符重写+门禁随迁 —— 验证：`go build ./...`+全量 `go test ./... -short`+lint 绿+根目录零 .go
+- [x] 15. 根包整体迁移 assembly/（D16）：23 文件 git mv+包名 assembly+仓内 import/限定符重写+门禁随迁 —— 验证：`go build ./...`+全量 `go test ./... -short`+lint 绿+根目录零 .go
 - [x] 16. 终轮 grill 4 项（P2×2 契约级+P3×2）：spec MCP 档位措辞修正（mcp_servers 实为一档热面）；config-hot-reload 域 MODIFIED delta（tools/plugins→RESTART 拒、mcp_servers→FP 代际）；三表位置引用加快照注（叶 14 重组前）；proposal 补范围并入登记（D9-D16）—— 验证：`openspec validate success-semantics --strict` + `openspec validate --all --strict` + 文档 grep 复核。（原行「+config-migration.md 两行」按派发裁定移出本叶：docs/ 归 assembly 迁移兄弟单，迁移后路径引用随该单再定）

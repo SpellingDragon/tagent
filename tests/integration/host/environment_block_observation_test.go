@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/telemetry"
 )
 
@@ -42,19 +42,19 @@ func TestEnvironmentBlockGenerationIsObserved(t *testing.T) {
 			{ID: "agent-b", Model: "model-a"},
 		},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
 		"agent-b": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}), tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+	}, assembly.WithGovernance(passPolicy{}), assembly.WithTelemetry(telemetry.NewLogObserver(logger)))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 
-	before := tagent.EnvironmentBlockGenerations()
+	before := assembly.EnvironmentBlockGenerations()
 	invokeTurn(t, run, "inv-block-1", event.Address{AgentID: "agent-a", SessionID: "session-block"}, "带上环境块")
 	invokeTurn(t, run, "inv-block-2", event.Address{AgentID: "agent-a", SessionID: "session-block"}, "再带一次")
 	invokeTurn(t, run, "inv-no-block", event.Address{AgentID: "agent-b", SessionID: "session-no-block"}, "不带环境块")
-	if got := tagent.EnvironmentBlockGenerations() - before; got != 2 {
+	if got := assembly.EnvironmentBlockGenerations() - before; got != 2 {
 		t.Fatalf("environment block generations = %d, want one per declaring request and none for the undeclared agent", got)
 	}
 

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 )
 
@@ -33,7 +33,7 @@ func TestJourneyBootForwardsGovernance(t *testing.T) {
 		provider.scriptAnswers(journeyEntryModel, refusal)
 		host := bootJourney(t, provider,
 			journeySpec{EntryTools: []string{"send"}, MaxTokens: 4096},
-			tagent.WithPolicy(governance.Open(
+			assembly.WithPolicy(governance.Open(
 				governance.WithStrict(),
 				governance.WithRules(governance.RiskRule{
 					ID:     "journey-refuse-send",
@@ -67,7 +67,7 @@ func TestJourneyBootForwardsGovernance(t *testing.T) {
 		provider.scriptAnswers(journeyEntryModel, refusal)
 		host := bootJourney(t, provider,
 			journeySpec{EntryTools: []string{"send"}, MaxTokens: 4096},
-			tagent.WithEnforcement(governance.EnforcementStrict),
+			assembly.WithEnforcement(governance.EnforcementStrict),
 		)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()

@@ -10,7 +10,7 @@
 // keeps the loop's per-turn seal from closing the run-wide sink: a turn ends
 // without ending the account, and Close seals the real capture once, after the
 // run drained.
-package tagent
+package assembly
 
 import (
 	"context"

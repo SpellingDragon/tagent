@@ -1,10 +1,10 @@
-package rootexample // import "github.com/SpellingDragon/tagent/examples/contract/root"
+package assemblyexample // import "github.com/SpellingDragon/tagent/examples/contract/assembly"
 
-Package rootexample shows how a host satisfies the MessageSender port.
+Package assemblyexample shows how a host satisfies the MessageSender port.
 
-Package rootexample shows how a host satisfies the SessionFolds port.
+Package assemblyexample shows how a host satisfies the SessionFolds port.
 
-Package rootexample shows how a host satisfies the SettleWake port.
+Package assemblyexample shows how a host satisfies the SettleWake port.
 
 FUNCTIONS
 

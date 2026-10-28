@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 
@@ -37,12 +37,12 @@ func TestLongExecutionRenewsLease(t *testing.T) {
 		}
 		return convFinalTurn("the long execution settled")
 	}}
-	run, err := tagent.Assemble(ctx, &config.Declaration{
+	run, err := assembly.Assemble(ctx, &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
-	}, map[event.AgentID]tagent.NativeAgent{
+	}, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tagentexec.NewRunTool(manager)}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestLongExecutionRenewsLease(t *testing.T) {
 	}
 	driven := make(chan drive, 1)
 	go func() {
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-long-run",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-long-run"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "download the archive"}},

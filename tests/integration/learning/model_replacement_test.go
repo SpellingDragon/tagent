@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -171,7 +171,7 @@ func TestModelReplacementLifecycle(t *testing.T) {
 
 		done := make(chan error, 1)
 		go func() {
-			_, err := run.Invoke(ctx, tagent.InvokeRequest{
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-inflight",
 				Episode:      "ep-inflight",
 				Address:      event.Address{AgentID: "agent-a", SessionID: "session-inflight"},
@@ -353,11 +353,11 @@ func replacementDecl(modelRef string) *config.Declaration {
 
 // replacementRun assembles one runtime over the model handle and declaration
 // reference the caller names, with the record pipeline it writes through.
-func replacementRun(t *testing.T, ctx context.Context, handle model.Model, modelRef string, records rl.Recorder) *tagent.Run {
+func replacementRun(t *testing.T, ctx context.Context, handle model.Model, modelRef string, records rl.Recorder) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, replacementDecl(modelRef), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, replacementDecl(modelRef), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: handle},
-	}, tagent.WithGovernance(formalPolicy{}), tagent.WithRecorder(records))
+	}, assembly.WithGovernance(formalPolicy{}), assembly.WithRecorder(records))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -365,9 +365,9 @@ func replacementRun(t *testing.T, ctx context.Context, handle model.Model, model
 }
 
 // replacementInvoke drives one invocation through the formal runtime entry.
-func replacementInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID) agent.Turn {
+func replacementInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID) agent.Turn {
 	t.Helper()
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      episode,
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},
@@ -384,10 +384,10 @@ func replacementInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invoc
 // being installed and the runtime publishes it as the generation a request that
 // begins afterwards borrows. Every call is counted, so a rebuild that publishes
 // nothing is observable.
-func replacementPublisher(ctx context.Context, run *tagent.Run, calls *int) func(rl.ModelIdentity, model.Model) error {
+func replacementPublisher(ctx context.Context, run *assembly.Run, calls *int) func(rl.ModelIdentity, model.Model) error {
 	return func(identity rl.ModelIdentity, next model.Model) error {
 		*calls++
-		outcome, err := run.Publish(ctx, replacementDecl(identity.Name()), map[event.AgentID]tagent.NativeAgent{
+		outcome, err := run.Publish(ctx, replacementDecl(identity.Name()), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: next},
 		})
 		if err != nil {

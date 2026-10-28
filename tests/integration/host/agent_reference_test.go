@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -69,10 +69,10 @@ func TestAgentReferenceDelegatesToTheDeclaredTarget(t *testing.T) {
 				{ID: "knowledge", Model: "model-knowledge", Tools: []config.ToolRef{{Name: "skill_search"}}},
 			},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"caller":    {Model: caller, Tools: []trpctool.CallableTool{&entryTool{name: "send", output: "sent"}}},
 			"knowledge": {Model: knowledge, Tools: []trpctool.CallableTool{skillTool}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -156,10 +156,10 @@ func TestAgentReferenceDelegatesToTheDeclaredTarget(t *testing.T) {
 				{ID: "knowledge", Model: "model-knowledge"},
 			},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"caller":    {Model: caller},
 			"knowledge": {Model: &entryModel{name: "model-knowledge", answer: func(*model.Request) *model.Response { return entryFinalTurn("") }}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
@@ -200,9 +200,9 @@ func TestAgentReferenceRefusesAnUndeclaredTarget(t *testing.T) {
 			Tools: []config.ToolRef{{Name: "ghost", Params: map[string]string{subagent.ParamAgent: "ghost"}}},
 		}},
 	}
-	_, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	_, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"caller": {Model: &entryModel{name: "model-caller", answer: func(*model.Request) *model.Response { return entryFinalTurn("") }}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err == nil {
 		t.Fatal("the assembly admitted an agent reference to an agent the declaration does not declare")
 	}

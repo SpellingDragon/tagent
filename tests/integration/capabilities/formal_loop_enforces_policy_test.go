@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -67,18 +67,18 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			checkPair(t, req.Messages[5], "call-danger-2", "danger_tool", "rule: no-danger")
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model:   provider,
 				Tools:   []trpctool.CallableTool{probe},
 				Plugins: []plugin.Instance{&policyGrader{high: map[string]bool{"danger_tool": true}}},
 			},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(governor))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithPolicy(governor))
 		if err != nil {
 			t.Fatalf("assemble the policy runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-policy"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-policy",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -132,7 +132,7 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 			checkObservation(t, req.Messages[5], "call-echo", "echo_tool", "probe-out:echo_tool")
 			return ntFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {
 				Model: provider,
 				Tools: []trpctool.CallableTool{probe},
@@ -141,12 +141,12 @@ func TestFormalLoopEnforcesPolicy(t *testing.T) {
 					&policyPresenter{name: "final-presenter"},
 				},
 			},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the presentation runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-presentation"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-presentation",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},

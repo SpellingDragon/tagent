@@ -2,7 +2,7 @@
   "schema_version": 1,
   "change": "runtime-rebuild",
   "module_path": "github.com/SpellingDragon/tagent",
-  "root_package": ".",
+  "root_package": "assembly",
   "description": "runtime-rebuild 的结构覆盖政策（人工制定，不从当前残件的 imports 自动学习）。只登记计划允许的一方差包与允许的包间边；未登记的包、未允许的边一律失败并等人工批准，不用通配豁免。",
   "scope": {
     "exclude_dir_names": [
@@ -24,10 +24,10 @@
   },
   "packages": [
     {
-      "pattern": ".",
+      "pattern": "assembly",
       "role": "composition",
       "required": true,
-      "reason": "公共入口放 module 根 package tagent：根只做整理与组合，不再建 tagent/ 同名第二层门面（plan §3 包与文件组织）。根 allow 列表是登记表：列全每个已登记包供未登记包检出，不是依赖边；宿主壳 cli 位于组合根之上，其指向 . 的回边不算环（真环仍在其余包之间检出，判据见 scripts/gates/check_runtime_architecture.py 的 find_cycle）。"
+      "reason": "公共入口是包 assembly，住在目录 assembly/（组合根：宿主装配与会话运行面），目录名即包名；module 根只留 README、go.mod 与子目录，不再承载 Go 源，也不建与模块同名的第二层门面（D16）。根 allow 列表是登记表：列全每个已登记包供未登记包检出，不是依赖边；宿主壳 cli 位于组合根之上，其指向 assembly 的回边不算环（真环仍在其余包之间检出，判据见 scripts/gates/check_runtime_architecture.py 的 find_cycle）。"
     },
     {
       "pattern": "cli",
@@ -225,7 +225,7 @@
   ],
   "edges": [
     {
-      "from": ".",
+      "from": "assembly",
       "allow": [
         "api/config",
         "api/document",
@@ -266,7 +266,7 @@
     {
       "from": "cli",
       "allow": [
-        ".",
+        "assembly",
         "api/event",
         "api/model",
         "memory/query",
@@ -314,7 +314,7 @@
         "api/model",
         "features/rl",
         "features/evolution",
-        "."
+        "assembly"
       ],
       "reason": "呈现词汇是纯叶子：只引 event 的事实身份（EventID），不引用任何其他一方包；呈现不写、不读存储、不驱动执行（fact-loop-convergence D3）。"
     },
@@ -552,7 +552,7 @@
         "features/rl",
         "features/evolution",
         "features/evolution/governance",
-        "."
+        "assembly"
       ],
       "reason": "观测实现域：SDKObserver/Recorder/CommitObserver 只读已提交事件与 plugin.Observer/AuditSink 词汇，不拥有状态、不依赖任何领域实现（package-zero-debt 终审反转）。"
     },
@@ -571,7 +571,7 @@
         "features/rl",
         "features/evolution",
         "features/telemetry",
-        "."
+        "assembly"
       ],
       "reason": "治理实现域：Policy/BudgetManager/GoalRegistry/DenialLedger 实现 plugin.Governor，审批交由 task/approval 的窄口，不拥有状态、不依赖执行器（package-zero-debt 终审反转）。"
     },
@@ -589,7 +589,7 @@
         "features/evolution",
         "features/evolution/governance",
         "features/telemetry",
-        "."
+        "assembly"
       ],
       "reason": "审批是任务生命周期的子包：只引 plugin 的 RiskLevel/Decision 裁决词汇，不反向依赖治理或执行器（package-zero-debt 终审反转）。"
     },
@@ -605,7 +605,7 @@
         "runtime/agent",
         "runtime/state",
         "features/evolution",
-        "."
+        "assembly"
       ],
       "reason": "采集与导出消费者：可从 model/memory 取真实产出与原文，但禁止依赖 agent、根组合根（plan 明确禁止 rl→agent/root）。; LeaseObserver implements plugin.Instance to consume model.replacement facts through the pipeline - the same PostCommitObserver pattern as the meditation driver and the age fold"
     },
@@ -858,7 +858,7 @@
       },
       {
         "id": "consume.sink",
-        "pkg": ".",
+        "pkg": "assembly",
         "receivers": [
           "Run"
         ],
@@ -868,7 +868,7 @@
       },
       {
         "id": "consume.book-notice",
-        "pkg": ".",
+        "pkg": "assembly",
         "receivers": [
           "Run"
         ],
@@ -878,7 +878,7 @@
       },
       {
         "id": "host.deliver",
-        "pkg": ".",
+        "pkg": "assembly",
         "receivers": [
           "Run"
         ],
@@ -957,7 +957,7 @@
       {
         "id": "facts",
         "packages": [
-          "."
+          "assembly"
         ],
         "files": [
           "facts.go"
@@ -983,7 +983,7 @@
       {
         "id": "host",
         "packages": [
-          "."
+          "assembly"
         ],
         "files": [
           "age_fold.go",
@@ -1021,7 +1021,7 @@
       {
         "id": "assembly-commit",
         "packages": [
-          "."
+          "assembly"
         ],
         "files": [
           "commit.go"

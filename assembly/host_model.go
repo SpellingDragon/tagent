@@ -10,7 +10,7 @@
 // The wrapper fills a value only while the request itself names none: an
 // undeclared parameter is never written as a zero, and a sampling a request
 // already carries is never overridden.
-package tagent
+package assembly
 
 import (
 	"context"

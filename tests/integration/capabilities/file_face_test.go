@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	tagentfile "github.com/SpellingDragon/tagent/tool/file"
 )
 
@@ -74,13 +74,13 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 			return ntFinalTurn("the declared file tools answered")
 		}}
 
-		run, err := tagent.Assemble(ctx, fileFaceDeclaration(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, fileFaceDeclaration(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-file": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-file-face",
 			Address:      event.Address{AgentID: "agent-file", SessionID: "session-file-face"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "edit the notes"}},
@@ -127,13 +127,13 @@ func TestFileFaceServesTheDeclaredTools(t *testing.T) {
 			return ntFinalTurn("the outside paths were refused")
 		}}
 
-		run, err := tagent.Assemble(ctx, fileFaceDeclaration(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, fileFaceDeclaration(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-file": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-file-face-refusal",
 			Address:      event.Address{AgentID: "agent-file", SessionID: "session-file-face-refusal"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "read the file above the root"}},

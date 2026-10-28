@@ -14,7 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/SpellingDragon/tagent"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/telemetry"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 	ftrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
@@ -140,7 +140,7 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 
 	t.Run("the admitted call writes its per-fact line", func(t *testing.T) {
 		logger := &observationLogger{}
-		run, tool := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+		run, tool := visibilityRun(t, ctx, assembly.WithTelemetry(telemetry.NewLogObserver(logger)))
 		visibilityInvoke(t, ctx, run, "inv-log", "session-log")
 		if tool.calls() != 1 {
 			t.Fatalf("tool executions = %d, want the admitted call executed exactly once", tool.calls())
@@ -157,7 +157,7 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 
 	t.Run("the turn boundaries are observed at INFO", func(t *testing.T) {
 		logger := &observationLogger{}
-		run, _ := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+		run, _ := visibilityRun(t, ctx, assembly.WithTelemetry(telemetry.NewLogObserver(logger)))
 		visibilityInvoke(t, ctx, run, "inv-log-boundary", "session-log-boundary")
 		if !logger.mentions("info", "turn start", "agent=agent-a", "invocation=inv-log-boundary") {
 			t.Fatalf("info lines = %v, want the turn-start boundary of the invocation", logger.at("info"))
@@ -172,7 +172,7 @@ func TestLogObservationThroughTheFormalEntry(t *testing.T) {
 
 	t.Run("a failing logger does not block the turn", func(t *testing.T) {
 		logger := &observationLogger{panicsLeft: 1}
-		run, _ := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+		run, _ := visibilityRun(t, ctx, assembly.WithTelemetry(telemetry.NewLogObserver(logger)))
 		visibilityInvoke(t, ctx, run, "inv-log-fail", "session-log-fail")
 		if !logger.mentions("debug", "recovered a failing logger") {
 			t.Fatalf("debug lines = %v, want the recovered line in place of the refused one", logger.at("debug"))
@@ -265,7 +265,7 @@ func TestFourFacesObservationThroughTheFormalEntry(t *testing.T) {
 
 	logger, tracer := &observationLogger{}, &observedTracer{}
 	watchObservationFaces(t, logger, tracer)
-	run, _ := visibilityRun(t, ctx, tagent.WithTelemetry(telemetry.NewLogObserver(logger)))
+	run, _ := visibilityRun(t, ctx, assembly.WithTelemetry(telemetry.NewLogObserver(logger)))
 	visibilityInvoke(t, ctx, run, "inv-faces", "session-faces")
 
 	if !logger.mentions("debug", "tool call", "tool=echo", "call=call-1") {

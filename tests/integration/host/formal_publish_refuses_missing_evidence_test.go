@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
@@ -88,10 +88,10 @@ func TestFormalPublishRefusesMissingEvidence(t *testing.T) {
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	agentsA := map[event.AgentID]tagent.NativeAgent{
+	agentsA := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 	}
-	run, err := tagent.Assemble(ctx, declA, agentsA, tagent.WithGovernance(policy))
+	run, err := assembly.Assemble(ctx, declA, agentsA, assembly.WithGovernance(policy))
 	if err != nil {
 		t.Fatalf("assemble the formal run: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestFormalPublishRefusesMissingEvidence(t *testing.T) {
 			{ID: "agent-b", Model: "model-b"},
 		},
 	}
-	agentsB := map[event.AgentID]tagent.NativeAgent{
+	agentsB := map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
 		"agent-b": {Model: providerB},
 	}

@@ -322,8 +322,14 @@ def load_policy(report, golden_path):
             policy.get("schema_version")))
     if not isinstance(policy.get("module_path"), str) or not policy["module_path"].strip():
         report.error("architecture module_path must be a non-empty string")
-    if policy.get("root_package") != ".":
-        report.error("root_package must be '.' (module root, no nested tagent facade)")
+    # The composition root is data, not a fixed spelling: the policy names the package
+    # that assembles and publishes (it sat at the module root until the assembly/ move),
+    # and the gate reads that name instead of assuming one. Everything below that talks
+    # about "the root" resolves it from here.
+    root = policy.get("root_package")
+    if not isinstance(root, str) or not root.strip():
+        report.error("architecture root_package must name the composition root package")
+        root = ""
     packages = policy.get("packages")
     edges = policy.get("edges")
     if not isinstance(packages, list) or not packages:
@@ -366,8 +372,19 @@ def load_policy(report, golden_path):
         if not isinstance(external.get("reason"), str) or not external["reason"].strip():
             report.error("external policy needs a written reason")
     known = set(registry)
-    if "." not in registry:
-        report.error("architecture must register the module root as composition package '.'")
+    if root:
+        legal, why = pattern_is_legal(root)
+        if not legal or "*" in root or ANCHORED_RE.match(root):
+            report.error("architecture root_package {!r} must be one exact package path".format(root))
+            root = ""
+        elif root not in registry:
+            report.error("architecture must register the composition root package {!r}".format(root))
+            root = ""
+        elif registry[root].get("role") != "composition":
+            report.error("architecture root_package {!r} must carry role 'composition'".format(root))
+            root = ""
+    if not root:
+        report.error("architecture has no usable composition root package")
     adjacency = {}
     seen_edges = set()
     for index, entry in enumerate(edges):
@@ -400,13 +417,14 @@ def load_policy(report, golden_path):
     for pattern in sorted(known):
         if pattern not in seen_edges:
             report.error("policy has no edge entry for package {!r}".format(pattern))
-    cycle = find_cycle(adjacency)
+    cycle = find_cycle(adjacency, root or ".")
     if cycle:
         report.error("architecture package cycle: {}".format(" -> ".join(cycle)))
-    root_allow = set(adjacency.get(".", []))
-    for pattern in sorted(known - {"."}):
-        if pattern not in root_allow:
-            report.error("composition root does not list package {!r}".format(pattern))
+    if root:
+        root_allow = set(adjacency.get(root, []))
+        for pattern in sorted(known - {root}):
+            if pattern not in root_allow:
+                report.error("composition root does not list package {!r}".format(pattern))
     report.count("policy_edges", len(seen_edges))
     errors_before = len(report.errors)
     validate_event_ownership(report, policy, registry)

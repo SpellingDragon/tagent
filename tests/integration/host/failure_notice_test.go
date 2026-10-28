@@ -20,9 +20,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 const (
@@ -127,11 +127,11 @@ func (p *failureProvider) endpoint() string { return p.server.URL + "/v1" }
 
 // bootFailureHost boots the entry document the failure-notice checks drive: the
 // bare entry agent resolved at the given endpoint over a temp storage root.
-func bootFailureHost(t *testing.T, provider *failureProvider, sender tagent.MessageSender) *tagent.Host {
+func bootFailureHost(t *testing.T, provider *failureProvider, sender assembly.MessageSender) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the failure-notice host: %v", err)
 	}
@@ -145,7 +145,7 @@ func bootFailureHost(t *testing.T, provider *failureProvider, sender tagent.Mess
 
 // failureFactsOf reports the payload-free failure facts of one session, in
 // commit order.
-func failureFactsOf(host *tagent.Host, addr event.Address) []event.Event {
+func failureFactsOf(host *assembly.Host, addr event.Address) []event.Event {
 	var matched []event.Event
 	for _, fact := range host.Run().SessionFacts(addr) {
 		if fact.Type != event.TypeFeedback {
@@ -161,7 +161,7 @@ func failureFactsOf(host *tagent.Host, addr event.Address) []event.Event {
 
 // failureFactOf reports the one failure fact of the session, failing beside the
 // count when none or several were committed.
-func failureFactOf(t *testing.T, host *tagent.Host, addr event.Address) event.Event {
+func failureFactOf(t *testing.T, host *assembly.Host, addr event.Address) event.Event {
 	t.Helper()
 	facts := failureFactsOf(host, addr)
 	if len(facts) != 1 {
@@ -403,11 +403,11 @@ func TestFailureNotice(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 			Address: event.Address{AgentID: "user"},
 			Input:   []model.Message{{Role: model.RoleUser, Content: "an input the host refuses for its address"}},
 		})
-		if !errors.Is(err, tagent.ErrHostAddressMissing) {
+		if !errors.Is(err, assembly.ErrHostAddressMissing) {
 			t.Fatalf("invoke error = %v, want the named host address error", err)
 		}
 		if turn.Terminal == model.KindFailed || turn.Failure != "" {

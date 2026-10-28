@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	orgconfig "github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -91,11 +91,11 @@ func TestPresetToolsAssemble(t *testing.T) {
 		return presetFinalTurn("preset tools settled")
 	}}
 
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-preset": {Model: provider},
 	},
-		tagent.WithGovernance(presetGovernance{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: storeRoot}),
+		assembly.WithGovernance(presetGovernance{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: storeRoot}),
 	)
 	if err != nil {
 		t.Fatalf("assemble the preset declaration: %v", err)
@@ -106,7 +106,7 @@ func TestPresetToolsAssemble(t *testing.T) {
 		}
 	})
 
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-preset-tools",
 		Address:      event.Address{AgentID: "agent-preset", SessionID: "session-preset-tools"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "what do the presets answer"}},

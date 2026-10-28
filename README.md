@@ -2,6 +2,8 @@
 
 事件驱动的 agent 运行时：一切状态皆链上事实，一切行为皆事件响应。Go 单仓（`github.com/SpellingDragon/tagent`）；宿主示例（微信 bot 与 CLI host）位于独立 module。
 
+组合根是 `assembly/`：宿主装配与会话运行面（`assembly.Boot`/`assembly.Assemble` 的家）；其余顶层产品包与包边见 [docs/wiki/README.md](docs/wiki/README.md)。
+
 ## 30 秒看懂
 
 - **问题**：长会话 Agent 上下文膨胀、崩溃失忆、外部副作用重复。
@@ -26,7 +28,7 @@
 
 ```mermaid
 flowchart TB
-    UI["宿主渠道<br/>(微信 / CLI / HTTP)"] -->|"用户消息"| BOOT["tagent.Boot<br/>配置一条路装配"]
+    UI["宿主渠道<br/>(微信 / CLI / HTTP)"] -->|"用户消息"| BOOT["assembly.Boot<br/>配置一条路装配"]
     BOOT --> CHAIN[("会话链<br/>不可变事实")]
 
     subgraph PIPE["pipeline.After —— 事实提交分派"]
@@ -91,7 +93,7 @@ flowchart LR
 
 | 能力 | 机制 | 配置面 |
 |---|---|---|
-| **turnkey 装配** | `tagent.Boot(config)`——providers/工具面/存储/冥想/注入面一条路 | 宿主只填 Sender/Approver 端口 |
+| **turnkey 装配** | `assembly.Boot(config)`——providers/工具面/存储/冥想/注入面一条路 | 宿主只填 Sender/Approver 端口 |
 | **模型热换** | `/reload` → replacement 事实 → lease（重建→发布→安装，失败不装） | 改 yaml 不重启 |
 | **上下文压缩** | 三龄段折叠（AgeFoldPlugin）＋预算降级两道防线 | `max_tokens`＋`compress_threshold`(0.8)＋`keep_recent_tasks`(2)，缺省全默认 |
 | **冥想反思** | 事件驱动计时＋水位门＋防循环闭表（自产戳不触发） | `meditation:` 段，deliver_to 白名单 |

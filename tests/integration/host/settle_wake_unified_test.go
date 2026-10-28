@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // TestSettleWakeUnified pins the one-work-account semantics of the settle driver over the formal host assembly.
@@ -102,7 +102,7 @@ func runWakeDuplicateFire(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", wakeAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -113,7 +113,7 @@ func runWakeDuplicateFire(t *testing.T) {
 	invokeCtx, invokeCancel := context.WithCancel(ctx)
 	invoked := make(chan error, 1)
 	go func() {
-		_, err := host.Invoke(invokeCtx, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtx, assembly.InvokeRequest{
 			Address: addr,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 		})
@@ -219,7 +219,7 @@ func runWakeRestartResume(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", wakeAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -230,7 +230,7 @@ func runWakeRestartResume(t *testing.T) {
 	invokeCtx, invokeCancel := context.WithCancel(ctx)
 	invoked := make(chan error, 1)
 	go func() {
-		_, err := host.Invoke(invokeCtx, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtx, assembly.InvokeRequest{
 			Address: addr,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 		})
@@ -257,7 +257,7 @@ func runWakeRestartResume(t *testing.T) {
 	}
 	releaseHold()
 
-	restored, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	restored, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the restored host: %v", err)
 	}
@@ -341,7 +341,7 @@ func runWakeStopRetains(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", wakeAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -353,7 +353,7 @@ func runWakeStopRetains(t *testing.T) {
 	doneA := make(chan error, 1)
 	invokeCtxA, invokeCancelA := context.WithCancel(ctx)
 	go func() {
-		_, err := host.Invoke(invokeCtxA, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtxA, assembly.InvokeRequest{
 			Address: addrA,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the first total"}},
 		})
@@ -371,7 +371,7 @@ func runWakeStopRetains(t *testing.T) {
 	doneB := make(chan error, 1)
 	invokeCtxB, invokeCancelB := context.WithCancel(ctx)
 	go func() {
-		_, err := host.Invoke(invokeCtxB, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtxB, assembly.InvokeRequest{
 			Address: addrB,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the second total"}},
 		})
@@ -407,7 +407,7 @@ func runWakeStopRetains(t *testing.T) {
 	}
 	releaseHold()
 
-	restored, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	restored, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the restored host: %v", err)
 	}
@@ -466,7 +466,7 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", wakeAgentSections))
 	sender := &deliveryRecorder{}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -477,7 +477,7 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	invokeCtx, invokeCancel := context.WithCancel(ctx)
 	invoked := make(chan error, 1)
 	go func() {
-		_, err := host.Invoke(invokeCtx, tagent.InvokeRequest{
+		_, err := host.Invoke(invokeCtx, assembly.InvokeRequest{
 			Address: addr,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
 		})
@@ -504,7 +504,7 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	mu.Unlock()
 	bodies := len(sender.bodies())
 
-	restored, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	restored, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the restored host: %v", err)
 	}

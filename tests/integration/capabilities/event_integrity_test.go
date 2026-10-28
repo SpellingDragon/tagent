@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -511,14 +511,14 @@ func TestEventIntegrityApproval(t *testing.T) {
 				return ntFinalTurn("settled")
 			}
 		}}
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{probe}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithPolicy(recorder))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithPolicy(recorder))
 		if err != nil {
 			t.Fatalf("assemble the approval runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-approval"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-approval",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},

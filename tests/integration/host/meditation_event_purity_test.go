@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 
@@ -167,7 +167,7 @@ func (noSessions) ActiveSessions(event.AgentID) []event.Address { return nil }
 // two agents, the late-bound cross-session sink the summary tool writes
 // through, and the channel the fired passes report on.
 type meditationRig struct {
-	run       *tagent.Run
+	run       *assembly.Run
 	userModel *entryModel
 	medModel  *entryModel
 	userAddr  event.Address
@@ -195,14 +195,14 @@ func newMeditationRig(t *testing.T, interval time.Duration, medAnswer func(*mode
 			{ID: "meditator", Model: "model-meditator"},
 		},
 	}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"user-agent": {Model: userModel},
 		"meditator":  {Model: medModel, Tools: []trpctool.CallableTool{summary}},
 	},
-		tagent.WithGovernance(passPolicy{}),
-		tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
-		tagent.WithReflectionAnchors(filepath.Join(root, "anchors.json")),
-		tagent.WithPlugins(func(assembled *tagent.Run) ([]plugin.Instance, error) {
+		assembly.WithGovernance(passPolicy{}),
+		assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: root}),
+		assembly.WithReflectionAnchors(filepath.Join(root, "anchors.json")),
+		assembly.WithPlugins(func(assembled *assembly.Run) ([]plugin.Instance, error) {
 			reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
 				Loop: meditation.ReflectionLoop{Agent: "meditator", Session: "meditator-loop"},
 				Face: meditation.ReflectionFace{
@@ -258,11 +258,11 @@ func (r *meditationRig) awaitFire(t *testing.T) meditation.TickOutcome {
 // built before the run exists and forwards through the run bound after the
 // assembly, exactly as the host's port does.
 type meditationSink struct {
-	run *tagent.Run
+	run *assembly.Run
 }
 
 // Bind attaches the assembled run.
-func (s *meditationSink) Bind(run *tagent.Run) { s.run = run }
+func (s *meditationSink) Bind(run *assembly.Run) { s.run = run }
 
 // CommitToSession commits one delivered event into the chain of its address.
 func (s *meditationSink) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
@@ -302,9 +302,9 @@ func lastMessage(req model.Request) model.Message {
 
 // invokeUserTurn drives one invocation whose input facts carry the user stamp:
 // the stamp the freshness policy reads as an interaction someone awaits.
-func invokeUserTurn(t *testing.T, run *tagent.Run, id string, addr event.Address, input string) {
+func invokeUserTurn(t *testing.T, run *assembly.Run, id string, addr event.Address, input string) {
 	t.Helper()
-	if _, err := run.Invoke(context.Background(), tagent.InvokeRequest{
+	if _, err := run.Invoke(context.Background(), assembly.InvokeRequest{
 		InvocationID:  event.InvocationID(id),
 		Address:       addr,
 		TriggerSource: "user",

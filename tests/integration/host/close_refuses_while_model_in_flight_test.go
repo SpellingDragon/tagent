@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
@@ -32,7 +32,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-model-flight"}
 		driving := make(chan error, 1)
 		go func() {
-			_, err := run.Invoke(ctx, tagent.InvokeRequest{
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-model-flight",
 				Address:      addr,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -74,7 +74,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-cancel"}
 		driving := make(chan error, 1)
 		go func() {
-			_, err := run.Invoke(ctx, tagent.InvokeRequest{
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-cancel",
 				Address:      addr,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -120,7 +120,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-real-stop"}
 		driving := make(chan error, 1)
 		go func() {
-			_, err := run.Invoke(ctx, tagent.InvokeRequest{
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-real-stop",
 				Address:      addr,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -165,7 +165,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-refuse"}
 		driving := make(chan error, 1)
 		go func() {
-			_, err := run.Invoke(ctx, tagent.InvokeRequest{
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-first",
 				Address:      addr,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -184,7 +184,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		}()
 		refused := false
 		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-			if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+			if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 				InvocationID: "inv-late",
 				Address:      addr,
 				Input:        []model.Message{{Role: model.RoleUser, Content: "late"}},
@@ -208,7 +208,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		if err := <-driving; err != nil {
 			t.Fatalf("invoke beside the released tool: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-after",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "after"}},
@@ -226,7 +226,7 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 
 // newModelFlightRun assembles one runtime whose model parks its stream until
 // the test releases it, beside one echo tool the parked model never reaches.
-func newModelFlightRun(t *testing.T, ctx context.Context) (*tagent.Run, *blockingModel, *entryTool) {
+func newModelFlightRun(t *testing.T, ctx context.Context) (*assembly.Run, *blockingModel, *entryTool) {
 	t.Helper()
 	provider := newBlockingModel("model-a", func(req *model.Request) *model.Response {
 		return entryFinalTurn("settled")
@@ -236,9 +236,9 @@ func newModelFlightRun(t *testing.T, ctx context.Context) (*tagent.Run, *blockin
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -247,7 +247,7 @@ func newModelFlightRun(t *testing.T, ctx context.Context) (*tagent.Run, *blockin
 
 // newSlowToolRun assembles one runtime whose first decision reaches one slow
 // tool and whose second decision ends the turn, over the scripted native model.
-func newSlowToolRun(t *testing.T, ctx context.Context) (*tagent.Run, *entryModel, *slowTool) {
+func newSlowToolRun(t *testing.T, ctx context.Context) (*assembly.Run, *entryModel, *slowTool) {
 	t.Helper()
 	provider := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		if last := req.Messages[len(req.Messages)-1]; last.Content == "hello" {
@@ -260,9 +260,9 @@ func newSlowToolRun(t *testing.T, ctx context.Context) (*tagent.Run, *entryModel
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -271,7 +271,7 @@ func newSlowToolRun(t *testing.T, ctx context.Context) (*tagent.Run, *entryModel
 
 // runTasks lists the task identities the assembled run holds for the named
 // address through its diagnostic reading.
-func runTasks(t *testing.T, run *tagent.Run, ctx context.Context, addr event.Address) []event.TaskID {
+func runTasks(t *testing.T, run *assembly.Run, ctx context.Context, addr event.Address) []event.TaskID {
 	t.Helper()
 	snapshot, err := run.Query(ctx, query.ListFilter{
 		Scope: query.AuthorizationScope{Agents: []event.AgentID{addr.AgentID}, Sessions: []event.Address{addr}},

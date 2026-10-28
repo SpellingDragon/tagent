@@ -10,7 +10,7 @@
 // The document is the host's own dialect, so a reload reads it with the same
 // strict decoder Boot reads it with; a document the decoder refuses changes
 // nothing at all.
-package tagent
+package assembly
 
 import (
 	"context"

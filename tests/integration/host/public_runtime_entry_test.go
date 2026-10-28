@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/cli"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -40,7 +40,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		defer cancel()
 		run, provider, tool := newEntryRun(t, ctx)
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-start"}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-start",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -67,7 +67,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		defer cancel()
 		run, _, _ := newEntryRun(t, ctx)
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-query"}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-query",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -136,7 +136,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		defer cancel()
 		run, _, _ := newEntryRun(t, ctx)
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-close"}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-close",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -150,7 +150,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		if len(report.Unsettled) != 0 {
 			t.Fatalf("unsettled obligations = %+v, want every accepted obligation settled", report.Unsettled)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-after-close",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "late"}},
@@ -171,7 +171,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 		defer cancel()
 		run, provider, _ := newEntryRun(t, ctx)
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-cli"}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-cli-sdk",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -282,7 +282,7 @@ func TestPublicRuntimeEntry(t *testing.T) {
 // newEntryRun assembles one runtime through the sole assembly entry: a
 // scripted native model beside one native echo tool, driven over a declaration
 // naming the single agent.
-func newEntryRun(t *testing.T, ctx context.Context) (*tagent.Run, *entryModel, *entryTool) {
+func newEntryRun(t *testing.T, ctx context.Context) (*assembly.Run, *entryModel, *entryTool) {
 	t.Helper()
 	provider := &entryModel{name: "model-a", answer: func(req *model.Request) *model.Response {
 		if last := req.Messages[len(req.Messages)-1]; last.Content == "hello" || last.Content == "hello again" {
@@ -295,9 +295,9 @@ func newEntryRun(t *testing.T, ctx context.Context) (*tagent.Run, *entryModel, *
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -59,16 +59,16 @@ func (failingRecorder) RecordAttempt(context.Context, rl.AttemptRecord) error {
 // formalRun assembles one runtime through the sole assembly entry beside the
 // record pipeline it names: a scripted native model over one native echo tool,
 // driven over a declaration naming the single agent.
-func formalRun(t *testing.T, ctx context.Context, records rl.Recorder, answer func(req *model.Request) *model.Response) *tagent.Run {
+func formalRun(t *testing.T, ctx context.Context, records rl.Recorder, answer func(req *model.Request) *model.Response) *assembly.Run {
 	t.Helper()
 	provider := &learnModel{name: "model-a", answer: answer}
 	decl := &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&learnTool{name: "echo-a", output: "out-a"}}},
-	}, tagent.WithGovernance(formalPolicy{}), tagent.WithRecorder(records))
+	}, assembly.WithGovernance(formalPolicy{}), assembly.WithRecorder(records))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -77,9 +77,9 @@ func formalRun(t *testing.T, ctx context.Context, records rl.Recorder, answer fu
 
 // formalInvoke drives one invocation through the formal runtime entry beside
 // the episode boundary it names.
-func formalInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID) agent.Turn {
+func formalInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID) agent.Turn {
 	t.Helper()
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      episode,
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},

@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // heldReviewBody is the assistant body the review checks see the provider
@@ -50,7 +50,7 @@ func TestDeliveryReviewHold(t *testing.T) {
 		defer closeDeliveryReviewHost(t, host, ctx)
 
 		addr := event.Address{AgentID: "user", SessionID: "session-delivery-review-approve"}
-		turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 			Address:       addr,
 			TriggerSource: "user",
 			Input:         []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -93,7 +93,7 @@ func TestDeliveryReviewHold(t *testing.T) {
 		if again := ruler.seenDeliveries(); len(again) != 1 {
 			t.Fatalf("reviewed deliveries after approval = %+v, want the ruling the hold already carries", again)
 		}
-		if err := host.ApproveDelivery(ctx, held[0].ID); !errors.Is(err, tagent.ErrDeliveryNotFound) {
+		if err := host.ApproveDelivery(ctx, held[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
 			t.Fatalf("the repeated approval = %v, want ErrDeliveryNotFound", err)
 		}
 		if bodies := sender.bodies(); len(bodies) != 1 {
@@ -112,7 +112,7 @@ func TestDeliveryReviewHold(t *testing.T) {
 		defer closeDeliveryReviewHost(t, host, ctx)
 
 		addr := event.Address{AgentID: "user", SessionID: "session-delivery-review-refuse"}
-		if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 			Address: addr,
 			Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 		}); err != nil {
@@ -148,7 +148,7 @@ func TestDeliveryReviewHold(t *testing.T) {
 		if got := fact.Meta[event.MetaPrefix+"content_bytes"]; got != strconv.Itoa(len(heldReviewBody)) {
 			t.Fatalf("refusal content bytes = %q, want %d", got, len(heldReviewBody))
 		}
-		if err := host.RefuseDelivery(ctx, held[0].ID); !errors.Is(err, tagent.ErrDeliveryNotFound) {
+		if err := host.RefuseDelivery(ctx, held[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
 			t.Fatalf("the repeated refusal = %v, want ErrDeliveryNotFound", err)
 		}
 	})
@@ -176,7 +176,7 @@ func TestDeliveryReviewSend(t *testing.T) {
 		defer closeDeliveryReviewHost(t, host, ctx)
 
 		addr := event.Address{AgentID: "user", SessionID: "session-delivery-review-send-allow"}
-		turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 			Address:       addr,
 			TriggerSource: "user",
 			Input:         []model.Message{{Role: model.RoleUser, Content: "send it"}},
@@ -223,7 +223,7 @@ func TestDeliveryReviewSend(t *testing.T) {
 		defer closeDeliveryReviewHost(t, host, ctx)
 
 		addr := event.Address{AgentID: "user", SessionID: "session-delivery-review-send-hold"}
-		if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 			Address:       addr,
 			TriggerSource: "user",
 			Input:         []model.Message{{Role: model.RoleUser, Content: "send it"}},
@@ -280,7 +280,7 @@ func TestDeliveryReviewDefaultAllow(t *testing.T) {
 	defer closeDeliveryReviewHost(t, host, ctx)
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-review-default-allow"}
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address:       addr,
 		TriggerSource: "user",
 		Input:         []model.Message{{Role: model.RoleUser, Content: "send it"}},
@@ -310,7 +310,7 @@ func TestDeliveryReviewFailureNotice(t *testing.T) {
 	defer closeDeliveryReviewHost(t, host, ctx)
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-review-failure"}
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address:       addr,
 		TriggerSource: "user",
 		Input:         []model.Message{{Role: model.RoleUser, Content: "the provider refuses this turn"}},
@@ -370,7 +370,7 @@ func scriptedSawContent(provider *scriptedProvider, prefix string) bool {
 
 // bootDeliveryReviewSendHost boots the entry document that declares the send
 // tool beside the review face and the controlled sender the send checks drive.
-func bootDeliveryReviewSendHost(t *testing.T, provider *scriptedProvider, sender tagent.MessageSender, ruler plugin.DeliveryRuler) *tagent.Host {
+func bootDeliveryReviewSendHost(t *testing.T, provider *scriptedProvider, sender assembly.MessageSender, ruler plugin.DeliveryRuler) *assembly.Host {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
@@ -380,7 +380,7 @@ func bootDeliveryReviewSendHost(t *testing.T, provider *scriptedProvider, sender
 		"      - { kind: tool, id: send }\n"
 	configPath := filepath.Join(root, "tagent.yaml")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgent(root, provider.endpoint(), "model-entry", agentBlock))
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender), tagent.WithDeliveryRuler(ruler))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender), assembly.WithDeliveryRuler(ruler))
 	if err != nil {
 		t.Fatalf("boot the send review host: %v", err)
 	}
@@ -413,7 +413,7 @@ func (r *scriptedDeliveryRuler) seenDeliveries() []plugin.Delivery {
 
 // bootDeliveryReviewHost boots the bare entry document with the review face and
 // the controlled sender the delivery review checks drive.
-func bootDeliveryReviewHost(t *testing.T, provider *scriptedProvider, sender tagent.MessageSender, ruler plugin.DeliveryRuler) *tagent.Host {
+func bootDeliveryReviewHost(t *testing.T, provider *scriptedProvider, sender assembly.MessageSender, ruler plugin.DeliveryRuler) *assembly.Host {
 	t.Helper()
 	return bootDeliveryReviewEndpointHost(t, provider.endpoint(), sender, ruler)
 }
@@ -421,14 +421,14 @@ func bootDeliveryReviewHost(t *testing.T, provider *scriptedProvider, sender tag
 // bootDeliveryReviewEndpointHost boots the bare entry document against one
 // endpoint, so a check can drive a failing provider through the same review
 // face as a succeeding one.
-func bootDeliveryReviewEndpointHost(t *testing.T, endpoint string, sender tagent.MessageSender, ruler plugin.DeliveryRuler) *tagent.Host {
+func bootDeliveryReviewEndpointHost(t *testing.T, endpoint string, sender assembly.MessageSender, ruler plugin.DeliveryRuler) *assembly.Host {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, endpoint, "model-entry")
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender), tagent.WithDeliveryRuler(ruler))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender), assembly.WithDeliveryRuler(ruler))
 	if err != nil {
 		t.Fatalf("boot the delivery review host: %v", err)
 	}
@@ -437,7 +437,7 @@ func bootDeliveryReviewEndpointHost(t *testing.T, endpoint string, sender tagent
 
 // closeDeliveryReviewHost closes the host beside the check and reports a
 // refused close without hiding the check's own failure.
-func closeDeliveryReviewHost(t *testing.T, host *tagent.Host, ctx context.Context) {
+func closeDeliveryReviewHost(t *testing.T, host *assembly.Host, ctx context.Context) {
 	t.Helper()
 	if err := host.Close(ctx); err != nil {
 		t.Errorf("close the delivery review host: %v", err)
@@ -446,7 +446,7 @@ func closeDeliveryReviewHost(t *testing.T, host *tagent.Host, ctx context.Contex
 
 // deliveryRefusalFact reports the refusal feedback fact recorded at one
 // address, failing beside the committed facts when the audit fact is absent.
-func deliveryRefusalFact(t *testing.T, host *tagent.Host, addr event.Address) event.Event {
+func deliveryRefusalFact(t *testing.T, host *assembly.Host, addr event.Address) event.Event {
 	t.Helper()
 	for _, fact := range host.Run().SessionFacts(addr) {
 		if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyEventSummary] == "delivery refused" {

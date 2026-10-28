@@ -149,7 +149,7 @@ fi
 # 产品包注释测量模式（CI 的 format-and-contract job）：棘轮之外的零容忍面。
 # 与 CI 同述：命中数必须可解析且为 0；解析不到数字按 unparsed 拒收，不静默放行。
 echo "lint: comment policy (product packages, zero findings)"
-product_policy_out="$(go run ./scripts/comment_policy -no-baseline *.go api runtime memory features tool internal cli 2>&1)"
+product_policy_out="$(go run ./scripts/comment_policy -no-baseline assembly api runtime memory features tool internal cli 2>&1)"
 printf '%s\n' "$product_policy_out"
 product_policy_count="$(printf '%s\n' "$product_policy_out" | sed -n 's/^comment_policy: \([0-9][0-9]*\) finding(s).*/\1/p')"
 if [ "$product_policy_count" != "0" ]; then

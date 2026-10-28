@@ -18,11 +18,11 @@ var runtimeArtifactExts = []string{".lock", ".journal", ".tmp", ".spill", ".prof
 
 // registeredTopDirs is the deliberate set of directories allowed at the repo
 // root. Adding an entry here is how a new top-level directory gets registered;
-// the README layout section is its human-facing counterpart. Dot-directories
-// and loose root files are outside this rule: the former are tool and runtime
-// space, the latter are the composition-root package's own sources.
+// the README layout section is its human-facing counterpart. Dot-directories are
+// outside this rule (tool and runtime space); loose root files are too, but the
+// module root holds no Go source: the composition root is the assembly/ package.
 var registeredTopDirs = map[string]bool{
-	".github": true, "api": true, "cli": true, "docs": true,
+	".github": true, "api": true, "assembly": true, "cli": true, "docs": true,
 	"examples": true, "features": true, "golden": true, "internal": true,
 	"memory": true, "openspec": true, "resources": true,
 	"runtime": true, "scripts": true, "tests": true, "tool": true,

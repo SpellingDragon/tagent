@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // TestReloadPublishesTheHotFieldsAsOneGeneration moves the model and the declared prompt file between two turns:
@@ -34,7 +34,7 @@ func TestReloadPublishesTheHotFieldsAsOneGeneration(t *testing.T) {
 	writeReloadPrompt(t, root, "second.md", publishedPromptMarker)
 	configPath := filepath.Join(root, "tagent.yaml")
 	writeHostDocumentFile(t, configPath, reloadTierDocument(root, provider.endpoint(), "model-a", root, reloadPromptBlock("first.md")))
-	host, err := tagent.Boot(configPath, tagent.WithSender(newRecordingSender()))
+	host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestReloadRefusesTheFieldsOnlyBootReads(t *testing.T) {
 			root := t.TempDir()
 			configPath := filepath.Join(root, "tagent.yaml")
 			writeHostDocumentFile(t, configPath, reloadTierDocument(root, provider.endpoint(), "model-a", "", ""))
-			host, err := tagent.Boot(configPath, tagent.WithSender(newRecordingSender()))
+			host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
 			if err != nil {
 				t.Fatalf("boot the host: %v", err)
 			}
@@ -154,10 +154,10 @@ func TestReloadRefusesTheFieldsOnlyBootReads(t *testing.T) {
 			writeHostDocumentFile(t, configPath, tc.change(root, provider.endpoint()))
 
 			_, err = host.Reload(ctx)
-			if !errors.Is(err, tagent.ErrHostReloadRestartRequired) {
+			if !errors.Is(err, assembly.ErrHostReloadRestartRequired) {
 				t.Fatalf("reload error = %v, want the restart refusal", err)
 			}
-			if !errors.Is(err, tagent.ErrHostReloadStructural) {
+			if !errors.Is(err, assembly.ErrHostReloadStructural) {
 				t.Fatalf("reload error = %v, want the refusal answered inside the structural family", err)
 			}
 			if !strings.Contains(err.Error(), "requires a restart") {
@@ -205,7 +205,7 @@ func TestReloadCarriesNoGenerationForAnUnchangedDocument(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
 	writeHostDocumentFile(t, configPath, reloadTierDocument(root, provider.endpoint(), "model-a", "", ""))
-	host, err := tagent.Boot(configPath, tagent.WithSender(newRecordingSender()))
+	host, err := assembly.Boot(configPath, assembly.WithSender(newRecordingSender()))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
 	}

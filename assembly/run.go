@@ -12,7 +12,7 @@
 // assembly would, the tool calls are admitted through the task registration
 // wrapper, and the terminal of every decision is reduced by the model package's
 // single reduction entry.
-package tagent
+package assembly
 
 import (
 	"context"

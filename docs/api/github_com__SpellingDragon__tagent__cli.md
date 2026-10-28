@@ -86,7 +86,7 @@ type CLI struct {
     The request subject of every HTTP request authenticates at one gate ahead of
     the route resolution, so no endpoint opens a bypass around it.
 
-func NewCLI(run *tagent.Run, scope query.AuthorizationScope, opts ...CLIOption) *CLI
+func NewCLI(run *assembly.Run, scope query.AuthorizationScope, opts ...CLIOption) *CLI
     NewCLI returns the thin command shell over one assembled run, reading under
     the authorization scope the caller already holds and carrying the options
     the host configures it with.
@@ -111,7 +111,7 @@ type CLIOption func(*CLI)
 
     CLIOption configures the host shell at construction.
 
-func WithDiagnostics(switches tagent.DiagnosticSwitches) CLIOption
+func WithDiagnostics(switches assembly.DiagnosticSwitches) CLIOption
     WithDiagnostics configures the diagnostic switches the host serves its
     optional faces with: the unified runtime map keeps its own route, and
     each switch opens the reflection, training or observation face beside it.

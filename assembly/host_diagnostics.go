@@ -10,7 +10,7 @@
 // A face whose switch is off, or whose subsystem the assembly carries no wiring
 // for, names that state in its reason instead of answering a zero reading that
 // would pass for an idle subsystem.
-package tagent
+package assembly
 
 import (
 	"context"

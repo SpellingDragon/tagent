@@ -16,4 +16,4 @@
 // serializable scene is its facts beside its configuration, never a snapshot of
 // the conversation body, so a later process recovers the body by replaying the
 // durable fact chain instead of restoring a body snapshot kept beside the facts.
-package tagent
+package assembly

@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/cli"
 	"github.com/SpellingDragon/tagent/memory/query"
 )
@@ -72,11 +72,11 @@ func diagRefusal(t *testing.T, got diagResponse, wantText string) {
 // newDiagService starts one host HTTP service over a fresh assembled run and
 // reports its base URL beside the run, under the credential the caller names:
 // an empty credential configures no request authentication at all.
-func newDiagService(t *testing.T, ctx context.Context, credential string) (*tagent.Run, string, func()) {
+func newDiagService(t *testing.T, ctx context.Context, credential string) (*assembly.Run, string, func()) {
 	t.Helper()
 	run, _, _ := newEntryRun(t, ctx)
 	addr := event.Address{AgentID: "agent-a", SessionID: "session-diag"}
-	if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-diag",
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},

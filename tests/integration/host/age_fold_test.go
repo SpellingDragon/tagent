@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
@@ -25,8 +25,8 @@ func ageFoldInput(turn int) string {
 // ageFoldWindow reports the window a test declaration of maxTokens names under
 // the declaration defaults, so the fold the plugin runs and the fold a test
 // re-runs are judged under the same threshold.
-func ageFoldWindow(maxTokens int) tagent.FoldWindow {
-	return tagent.FoldWindow{
+func ageFoldWindow(maxTokens int) assembly.FoldWindow {
+	return assembly.FoldWindow{
 		MaxTokens:         maxTokens,
 		CompressThreshold: config.DefaultCompressThreshold,
 		KeepRecentTasks:   config.DefaultKeepRecentTasks,
@@ -35,7 +35,7 @@ func ageFoldWindow(maxTokens int) tagent.FoldWindow {
 
 // ageFoldProducts reports the synthetic product entries one session's projection
 // carries, sorted by key, beside how many entries it carries at all.
-func ageFoldProducts(t *testing.T, run *tagent.Run, session event.SessionID) ([]event.EventID, int) {
+func ageFoldProducts(t *testing.T, run *assembly.Run, session event.SessionID) ([]event.EventID, int) {
 	t.Helper()
 	entries, held := run.ReplayEntries(session)
 	if !held {
@@ -52,7 +52,7 @@ func ageFoldProducts(t *testing.T, run *tagent.Run, session event.SessionID) ([]
 }
 
 // ageFoldFacts reports how many facts of one frozen type the session chain holds.
-func ageFoldFacts(run *tagent.Run, session event.SessionID, factType string) int {
+func ageFoldFacts(run *assembly.Run, session event.SessionID, factType string) int {
 	count := 0
 	for _, evt := range run.SessionFacts(event.Address{SessionID: session}) {
 		if evt.Type == factType {
@@ -82,9 +82,9 @@ func TestAgeFoldFiresFromCommits(t *testing.T) {
 			MaxTokens: 100,
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -128,9 +128,9 @@ func TestUnderThresholdUntouched(t *testing.T) {
 			MaxTokens: 1 << 16,
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -177,9 +177,9 @@ func TestRebuildRefoldsIdempotent(t *testing.T) {
 			MaxTokens: maxTokens,
 		}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(passPolicy{}))
+	}, assembly.WithGovernance(passPolicy{}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}

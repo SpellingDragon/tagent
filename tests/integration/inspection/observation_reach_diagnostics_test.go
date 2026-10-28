@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/telemetry"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -157,15 +157,15 @@ const obsToolOutput = "out-a"
 // newObservedRun assembles one runtime through the sole assembly entry beside
 // the telemetry observer under test, over a declaration naming the single
 // agent and the scripted model and echo tool.
-func newObservedRun(t *testing.T, ctx context.Context, observer plugin.Observer) *tagent.Run {
+func newObservedRun(t *testing.T, ctx context.Context, observer plugin.Observer) *assembly.Run {
 	t.Helper()
 	decl := &config.Declaration{
 		Entry:  "agent-a",
 		Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}},
 	}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: &obsModel{name: "model-a"}, Tools: []trpctool.CallableTool{&obsTool{name: "echo"}}},
-	}, tagent.WithGovernance(obsPassPolicy{}), tagent.WithTelemetry(observer))
+	}, assembly.WithGovernance(obsPassPolicy{}), assembly.WithTelemetry(observer))
 	if err != nil {
 		t.Fatalf("assemble the observed runtime: %v", err)
 	}
@@ -183,9 +183,9 @@ func obsKindCounts(snapshot query.Snapshot) map[query.ObjectKind]int {
 }
 
 // obsInvoke drives one tool-calling turn through the assembled run.
-func obsInvoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation, session string) tagent.InvokeRequest {
+func obsInvoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation, session string) assembly.InvokeRequest {
 	t.Helper()
-	req := tagent.InvokeRequest{
+	req := assembly.InvokeRequest{
 		InvocationID: event.InvocationID(invocation),
 		Address:      event.Address{AgentID: "agent-a", SessionID: event.SessionID(session)},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -422,7 +422,7 @@ func TestObservationReachDiagnostics(t *testing.T) {
 
 // runPresentationOf reports the After presentation of the named committed
 // fact, or nil when the run holds none for it.
-func runPresentationOf(run *tagent.Run, id event.EventID) *view.Presentation {
+func runPresentationOf(run *assembly.Run, id event.EventID) *view.Presentation {
 	for _, pres := range run.Presentations() {
 		if pres.Fact == id {
 			got := pres

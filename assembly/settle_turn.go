@@ -13,7 +13,7 @@
 //   - The fired turn commits no settle fact with a lineage, so it can never fire itself again.
 //   - The mailbox is the one account that answers whether work waits: a notification waits there until a turn claims it, drives it and consumes it on that same account, so one notification starts one turn however often it is observed.
 //   - The attempt record is the second fence a restart reads: a turn that already landed its terminal is closed with its consumption receipt instead of driven again, so a stop between the terminal fact and the receipt replays no second turn.
-package tagent
+package assembly
 
 import (
 	"context"

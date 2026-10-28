@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -41,14 +41,14 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 	}}
 	decl := &config.Declaration{Entry: "agent-a", Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-a"}}}
 	governance := &scenarioGovernance{answers: scenarioPassingChecks("eval", "benchmark", "apply-gate")}
-	run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider, Tools: []trpctool.CallableTool{gated}},
-	}, tagent.WithGovernance(governance))
+	}, assembly.WithGovernance(governance))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
 	address := event.Address{AgentID: "agent-a", SessionID: "session-shared"}
-	firstTurn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	firstTurn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-a",
 		Address:      address,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "turn-a"}},
@@ -56,7 +56,7 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("invoke the first invocation: %v", err)
 	}
-	secondTurn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	secondTurn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-b",
 		Address:      address,
 		Input:        []model.Message{{Role: model.RoleUser, Content: "turn-b"}},
@@ -81,7 +81,7 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	doneC := make(chan error, 1)
 	go func() {
-		_, err := run.Invoke(cancelCtx, tagent.InvokeRequest{
+		_, err := run.Invoke(cancelCtx, assembly.InvokeRequest{
 			InvocationID: "inv-c",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-cancel"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "turn-c"}},
@@ -96,7 +96,7 @@ func TestScenario02DualInvocationIsolation(t *testing.T) {
 	case <-time.After(scenarioTimeout):
 		t.Fatal("timed out waiting for the cancelled invocation")
 	}
-	neighbour, neighbourErr := run.Invoke(ctx, tagent.InvokeRequest{
+	neighbour, neighbourErr := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-d",
 		Address:      event.Address{AgentID: "agent-a", SessionID: "session-cancel"},
 		Input:        []model.Message{{Role: model.RoleUser, Content: "turn-d"}},

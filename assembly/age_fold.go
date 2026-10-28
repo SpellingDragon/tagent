@@ -1,5 +1,5 @@
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
-package tagent
+package assembly
 
 import (
 	"context"

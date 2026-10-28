@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	memoryembedder "github.com/SpellingDragon/tagent/memory/embedder"
 	"github.com/SpellingDragon/tagent/memory/ledger"
@@ -159,7 +159,7 @@ func seedEvalCorpus(t *testing.T, root string) *ledger.Tier {
 // beside no storage when the root is empty — with the given embedder binding,
 // or with no embedding at all when it names nothing. The recall face of the
 // returned run is the production wiring under test; the run drives no model.
-func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *tagent.Run {
+func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *assembly.Run {
 	t.Helper()
 	ctx := context.Background()
 	declRoot := t.TempDir()
@@ -169,14 +169,14 @@ func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *tag
 		t.Error("the recall face must drive no model")
 		return &model.Response{}
 	}}
-	opts := []tagent.Option{tagent.WithGovernance(passPolicy{})}
+	opts := []assembly.Option{assembly.WithGovernance(passPolicy{})}
 	if storeRoot != "" {
-		opts = append(opts, tagent.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: storeRoot}))
+		opts = append(opts, assembly.WithStorage(ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: storeRoot}))
 	}
 	if embedder != nil {
-		opts = append(opts, tagent.WithEmbedder(embedder))
+		opts = append(opts, assembly.WithEmbedder(embedder))
 	}
-	run, err := tagent.Assemble(ctx, declarationOf(declRoot), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, declarationOf(declRoot), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
 	}, opts...)
 	if err != nil {
@@ -192,8 +192,8 @@ func evalAssemble(t *testing.T, storeRoot string, embedder memory.Embedder) *tag
 
 // evalRecallPort binds the recall port of one assembled run, so the test drives
 // the same recall face the production tools read through.
-func evalRecallPort(run *tagent.Run) *tagent.RecallPort {
-	port := tagent.NewRecallPort(nil, nil)
+func evalRecallPort(run *assembly.Run) *assembly.RecallPort {
+	port := assembly.NewRecallPort(nil, nil)
 	port.Bind(run)
 	return port
 }
@@ -201,7 +201,7 @@ func evalRecallPort(run *tagent.Run) *tagent.RecallPort {
 // awaitEvalRecall waits until the production recall of q answers every wanted
 // key, failing on a bounded wait so a vector generation that never becomes
 // ready fails the case instead of hanging the run.
-func awaitEvalRecall(t *testing.T, run *tagent.Run, q search.Query, want []event.EventID) search.Result {
+func awaitEvalRecall(t *testing.T, run *assembly.Run, q search.Query, want []event.EventID) search.Result {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(realAwaitLimit)
@@ -277,7 +277,7 @@ func countRecovered(want, got []event.EventID) int {
 // mints it over the stored corpus alone — two hits under a page of one, cursor
 // guaranteed — so the mint never depends on how many hits an embedding
 // endpoint happens to produce.
-func mintEvalCursor(t *testing.T, run *tagent.Run, partitions []string) search.Cursor {
+func mintEvalCursor(t *testing.T, run *assembly.Run, partitions []string) search.Cursor {
 	t.Helper()
 	paged, err := evalRecallPort(run).Search(context.Background(), search.Query{Text: evalFilterText, Strategy: search.StrategyKeywordOnly, Partitions: partitions, Limit: 1})
 	if err != nil {
@@ -295,7 +295,7 @@ func mintEvalCursor(t *testing.T, run *tagent.Run, partitions []string) search.C
 // that baseline, and the verdict the row keeps. A row planned to fail is
 // recorded under its named failure with no fabricated hit, never silently
 // dropped from the report.
-func runEvalRow(t *testing.T, run *tagent.Run, spec evalRowSpec, partitions []string) evalRow {
+func runEvalRow(t *testing.T, run *assembly.Run, spec evalRowSpec, partitions []string) evalRow {
 	t.Helper()
 	ctx := context.Background()
 	row := evalRow{
@@ -472,7 +472,7 @@ func TestRecallEvaluation(t *testing.T) {
 
 	t.Run("负锚: 无存储具名拒绝与无 embedding 零行为变化", func(t *testing.T) {
 		bare := evalAssemble(t, "", nil)
-		if _, err := evalRecallPort(bare).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}}); !errors.Is(err, tagent.ErrRetrievalUnwired) {
+		if _, err := evalRecallPort(bare).Search(ctx, search.Query{Text: realRecallText, Strategy: search.StrategyHybrid, Partitions: []string{realAlphaPartition}}); !errors.Is(err, assembly.ErrRetrievalUnwired) {
 			t.Fatalf("recall beside no storage = %v, want the named refusal ErrRetrievalUnwired", err)
 		}
 

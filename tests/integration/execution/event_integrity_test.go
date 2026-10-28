@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	orgstate "github.com/SpellingDragon/tagent/runtime/state"
@@ -1051,14 +1051,14 @@ func eventIntegrityHostDocument(root, endpoint string) string {
 }
 
 // eventIntegrityBoot boots the formal host the checks drive.
-func eventIntegrityBoot(t *testing.T, provider *eventIntegrityProvider, sender *eventIntegritySender) *tagent.Host {
+func eventIntegrityBoot(t *testing.T, provider *eventIntegrityProvider, sender *eventIntegritySender) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
 	if err := os.WriteFile(configPath, []byte(eventIntegrityHostDocument(root, provider.endpoint())), 0o644); err != nil {
 		t.Fatalf("write the host document: %v", err)
 	}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the formal host: %v", err)
 	}
@@ -1067,7 +1067,7 @@ func eventIntegrityBoot(t *testing.T, provider *eventIntegrityProvider, sender *
 
 // eventIntegrityKeepHost stops the host when the check ends, so a failed check
 // leaves no listening face behind.
-func eventIntegrityKeepHost(t *testing.T, host *tagent.Host) {
+func eventIntegrityKeepHost(t *testing.T, host *assembly.Host) {
 	t.Helper()
 	t.Cleanup(func() {
 		closeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1080,7 +1080,7 @@ func eventIntegrityKeepHost(t *testing.T, host *tagent.Host) {
 
 // eventIntegrityClose drains the run the host drives and requires the formal
 // obligations to converge before the host closes.
-func eventIntegrityClose(t *testing.T, ctx context.Context, host *tagent.Host) {
+func eventIntegrityClose(t *testing.T, ctx context.Context, host *assembly.Host) {
 	t.Helper()
 	report, err := host.Run().Close(ctx, agent.CloseRequest{Deadline: time.Now().Add(20 * time.Second)})
 	if err != nil {
@@ -1095,8 +1095,8 @@ func eventIntegrityClose(t *testing.T, ctx context.Context, host *tagent.Host) {
 }
 
 // eventIntegrityInvoke drives one invocation of the formal host.
-func eventIntegrityInvoke(ctx context.Context, host *tagent.Host, addr event.Address, invocationID event.InvocationID, input string) (agent.Turn, error) {
-	return host.Invoke(ctx, tagent.InvokeRequest{
+func eventIntegrityInvoke(ctx context.Context, host *assembly.Host, addr event.Address, invocationID event.InvocationID, input string) (agent.Turn, error) {
+	return host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocationID,
 		Address:      addr,
 		Input:        []model.Message{{Role: model.RoleUser, Content: input}},
@@ -1205,7 +1205,7 @@ func eventIntegrityFactsSummary(facts []event.Event) string {
 
 // eventIntegrityNotices reads the notification projection of one session over
 // the formal read face.
-func eventIntegrityNotices(t *testing.T, run *tagent.Run, addr event.Address) []query.Detail {
+func eventIntegrityNotices(t *testing.T, run *assembly.Run, addr event.Address) []query.Detail {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -2000,7 +2000,7 @@ func runEventIntegrityExecFinalOutputSurvives(t *testing.T) {
 // beside an empty execution ledger and releases the same key. It returns the
 // text the second host's release call answered with beside the first host and
 // the key that host still holds.
-func eventIntegrityExecRestart(t *testing.T) (string, *tagent.Host, tagentexec.ResourceKey) {
+func eventIntegrityExecRestart(t *testing.T) (string, *assembly.Host, tagentexec.ResourceKey) {
 	t.Helper()
 	const (
 		heldInput     = "start the run one host holds"
@@ -2091,14 +2091,14 @@ func eventIntegrityExecDocument(root, endpoint, modelName, monitor string) strin
 
 // eventIntegrityBootExec boots one formal host whose entry agent declares the
 // exec face under the given model identity and monitor rhythm.
-func eventIntegrityBootExec(t *testing.T, provider *eventIntegrityProvider, sender *eventIntegritySender, modelName, monitor string) *tagent.Host {
+func eventIntegrityBootExec(t *testing.T, provider *eventIntegrityProvider, sender *eventIntegritySender, modelName, monitor string) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
 	if err := os.WriteFile(configPath, []byte(eventIntegrityExecDocument(root, provider.endpoint(), modelName, monitor)), 0o644); err != nil {
 		t.Fatalf("write the exec host document: %v", err)
 	}
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the exec host: %v", err)
 	}
@@ -2107,7 +2107,7 @@ func eventIntegrityBootExec(t *testing.T, provider *eventIntegrityProvider, send
 
 // eventIntegrityAwaitExecRenewed waits until the ledger reports the resource
 // held beside at least the named number of renewals.
-func eventIntegrityAwaitExecRenewed(t *testing.T, host *tagent.Host, key tagentexec.ResourceKey, want int) tagentexec.Explanation {
+func eventIntegrityAwaitExecRenewed(t *testing.T, host *assembly.Host, key tagentexec.ResourceKey, want int) tagentexec.Explanation {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	var explanation tagentexec.Explanation
@@ -2147,7 +2147,7 @@ func eventIntegrityExecStateFacts(facts []event.Event) []event.Event {
 
 // eventIntegrityAwaitExecStateFact waits until the session records the one
 // audit fact of the named observed phase.
-func eventIntegrityAwaitExecStateFact(t *testing.T, host *tagent.Host, addr event.Address, phase tagentexec.StatePhase) event.Event {
+func eventIntegrityAwaitExecStateFact(t *testing.T, host *assembly.Host, addr event.Address, phase tagentexec.StatePhase) event.Event {
 	t.Helper()
 	summary := "exec-state: " + string(phase)
 	deadline := time.Now().Add(20 * time.Second)

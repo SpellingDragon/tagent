@@ -11,10 +11,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -116,8 +116,8 @@ func benchDeclaration() *config.Declaration {
 }
 
 // benchAgents is the native agent set the declaration resolves against.
-func benchAgents() map[event.AgentID]tagent.NativeAgent {
-	return map[event.AgentID]tagent.NativeAgent{
+func benchAgents() map[event.AgentID]assembly.NativeAgent {
+	return map[event.AgentID]assembly.NativeAgent{
 		benchAgent: {
 			Model: &scriptedModel{name: "model-a"},
 			Tools: []trpctool.CallableTool{&echoTool{name: "echo", output: "out-a"}},
@@ -126,10 +126,10 @@ func benchAgents() map[event.AgentID]tagent.NativeAgent {
 }
 
 // assemble builds one formal assembly over the benchmark declaration.
-func assemble(b *testing.B, opts ...tagent.Option) *tagent.Run {
+func assemble(b *testing.B, opts ...assembly.Option) *assembly.Run {
 	b.Helper()
-	opts = append([]tagent.Option{tagent.WithGovernance(passGovernance{})}, opts...)
-	run, err := tagent.Assemble(context.Background(), benchDeclaration(), benchAgents(), opts...)
+	opts = append([]assembly.Option{assembly.WithGovernance(passGovernance{})}, opts...)
+	run, err := assembly.Assemble(context.Background(), benchDeclaration(), benchAgents(), opts...)
 	if err != nil {
 		b.Fatalf("assemble the benchmark runtime: %v", err)
 	}
@@ -137,9 +137,9 @@ func assemble(b *testing.B, opts ...tagent.Option) *tagent.Run {
 }
 
 // drive runs one invocation turn on the named session and checks its terminal.
-func drive(b *testing.B, run *tagent.Run, sequence int, session event.SessionID) {
+func drive(b *testing.B, run *assembly.Run, sequence int, session event.SessionID) {
 	b.Helper()
-	turn, err := run.Invoke(context.Background(), tagent.InvokeRequest{
+	turn, err := run.Invoke(context.Background(), assembly.InvokeRequest{
 		InvocationID: event.InvocationID(fmt.Sprintf("inv-%d", sequence)),
 		Address:      event.Address{AgentID: benchAgent, SessionID: session},
 		Input:        []model.Message{{Role: model.RoleUser, Content: benchInput}},

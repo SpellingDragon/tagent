@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -181,7 +181,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
-		driver := tagent.NewSettleDriver(wakeAccountLookup(t), func() tagent.SettleWake { return store }, fire.fire)
+		driver := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, fire.fire)
 		defer driver.Stop()
 
 		for i := 0; i < 3; i++ {
@@ -212,7 +212,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
-		driver := tagent.NewSettleDriver(wakeAccountLookup(t), func() tagent.SettleWake { return store }, fire.fire)
+		driver := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, fire.fire)
 
 		driver.Wake()
 		wakeWaitFor(t, "the first follow-up attempt", func() bool { return fire.count() == 1 })
@@ -225,7 +225,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		restored := wakeAccountLog(t, root)
 		resumed := state.NewMemoryStore(state.NewAuthority(), restored)
 		resumedFire := newWakeFire(nil)
-		next := tagent.NewSettleDriver(wakeAccountLookup(t), func() tagent.SettleWake { return resumed }, resumedFire.fire)
+		next := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return resumed }, resumedFire.fire)
 		defer next.Stop()
 		next.Wake()
 		wakeWaitFor(t, "the resumed follow-up", func() bool { return resumedFire.count() == 1 })
@@ -246,7 +246,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
-		driver := tagent.NewSettleDriver(wakeAccountLookup(t), func() tagent.SettleWake { return store }, fire.fire)
+		driver := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, fire.fire)
 		defer driver.Stop()
 
 		driver.Wake()
@@ -268,7 +268,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		}
 
 		replay := newWakeFire(nil)
-		guard := tagent.NewSettleDriver(wakeAccountLookup(t), func() tagent.SettleWake { return store }, replay.fire)
+		guard := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, replay.fire)
 		defer guard.Stop()
 		guard.Wake()
 		time.Sleep(500 * time.Millisecond)

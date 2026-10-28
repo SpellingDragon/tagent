@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
@@ -58,13 +58,13 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 			}
 			return chainFinalTurn("settled")
 		}}
-		run, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("assemble the durable runtime: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-chain",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -84,11 +84,11 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 			t.Fatalf("admitted task ref = %+v, want the task beside its instance identity", admitted)
 		}
 
-		restarted, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		restarted, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 				return chainFinalTurn("settled")
 			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("restart the durable runtime: %v", err)
 		}
@@ -140,11 +140,11 @@ func TestRestoreRefusesChainWithoutSpec(t *testing.T) {
 			t.Fatalf("commit the fixture fact = %v, %v, want committed", result, err)
 		}
 
-		run, err := tagent.Assemble(ctx, chainDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, chainDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: &chainModel{name: "model-a", answer: func(*model.Request) *model.Response {
 				return chainFinalTurn("settled")
 			}}, Tools: []trpctool.CallableTool{&chainTool{name: "probe", output: "out-a"}}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("assemble beside the damaged chain: %v", err)
 		}

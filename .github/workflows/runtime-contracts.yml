@@ -15,8 +15,9 @@
 # comment_policy -no-baseline、codetools tracked-hygiene，加 openspec strict。
 # 产品包口径 = golden/runtime/architecture.json 登记的第一方包（其 scope 明确排除
 # scripts/tests/examples/docs/resources）；PRODUCT_PACKAGES 的顶层目录集由
-# scripts/gates/test_check_runtime_workflow.py 对 golden 钉住，防漂移。根包用 *.go 是因为
-# `gofmt -l .`/`comment_policy .` 会递归整个根 module（含 scripts/tests）。
+# scripts/gates/test_check_runtime_workflow.py 对 golden 钉住，防漂移。组合根是目录
+# assembly/（目录名即包名），与其他产品包一样按目录点名：`gofmt -l .`/`comment_policy .`
+# 会递归整个根 module（含 scripts/tests），所以逐目录列举而不是给根目录通配。
 #
 # 多 module 现状：examples/wechat-bot 与 examples/cli-host 都是独立 module（无 go.work，
 # 根 module 的 ./... 到不了它们），各自可编译并通过自身测试——以 `git archive HEAD`
@@ -64,9 +65,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # First-party product packages per golden/runtime/architecture.json (its
-      # scope excludes scripts/tests/examples/docs/resources). The root
-      # package is *.go: a bare `.` would recurse the whole root module.
-      PRODUCT_PACKAGES: "*.go api runtime memory features tool internal cli"
+      # scope excludes scripts/tests/examples/docs/resources). The composition
+      # root is the directory assembly/; a bare `.` would recurse the root module.
+      PRODUCT_PACKAGES: "assembly api runtime memory features tool internal cli"
     steps:
       # Full history: doc-refs citation-level anchors resolve at their introducing commits.
       - uses: actions/checkout@v4

@@ -1,4 +1,4 @@
-package tagent
+package assembly
 
 import (
 	"context"

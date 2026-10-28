@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 )
 
@@ -58,13 +58,13 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 			}
 		}}
 
-		run, err := tagent.Assemble(ctx, execFaceDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, execFaceDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-exec": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithExecManager(manager))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithExecManager(manager))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-exec-face",
 			Address:      event.Address{AgentID: "agent-exec", SessionID: "session-exec-face"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "run the probe"}},
@@ -106,13 +106,13 @@ func TestExecFaceRunsTheDeclaredRhythm(t *testing.T) {
 			return ntFinalTurn("the unwired execution face refused both calls")
 		}}
 
-		run, err := tagent.Assemble(ctx, execFaceDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, execFaceDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-exec": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-exec-face-unwired",
 			Address:      event.Address{AgentID: "agent-exec", SessionID: "session-exec-face-unwired"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "run the probe"}},

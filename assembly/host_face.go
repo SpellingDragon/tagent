@@ -5,7 +5,7 @@
 // posts to after it rewrites the configuration source. Every endpoint authorizes
 // before it reads a body, and a face that is switched off names that state in its
 // reason instead of answering a request it never accepted.
-package tagent
+package assembly
 
 import (
 	"context"

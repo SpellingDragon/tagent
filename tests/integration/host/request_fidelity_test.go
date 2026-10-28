@@ -20,9 +20,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 )
 
@@ -150,11 +150,11 @@ func fidelityEntrySections(window string) string {
 // bootFidelityHost boots the fidelity entry document over the given root and
 // answers its configuration path, so a scenario re-boots the same document over
 // the same storage root after a close.
-func bootFidelityHost(t *testing.T, provider *scriptedProvider, sender recordingSender, root, window string) (*tagent.Host, string) {
+func bootFidelityHost(t *testing.T, provider *scriptedProvider, sender recordingSender, root, window string) (*assembly.Host, string) {
 	t.Helper()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", fidelityEntrySections(window)))
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("boot the fidelity host: %v", err)
 	}
@@ -389,7 +389,7 @@ func runFidelityRequestAfterColdBoot(t *testing.T) {
 	}
 	closeIntegrityHost(t, ctx, host)
 
-	rebooted, err := tagent.Boot(configPath, tagent.WithSender(sender))
+	rebooted, err := assembly.Boot(configPath, assembly.WithSender(sender))
 	if err != nil {
 		t.Fatalf("re-boot the fidelity host over the same storage root: %v", err)
 	}

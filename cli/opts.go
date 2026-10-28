@@ -3,7 +3,7 @@ package cli
 import (
 	"net/http"
 
-	tagent "github.com/SpellingDragon/tagent"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -30,6 +30,6 @@ func WithFeedbackEndpoint(endpoint http.Handler) CLIOption {
 // optional faces with: the unified runtime map keeps its own route, and each
 // switch opens the reflection, training or observation face beside it. The
 // start command reads the same switches from the process environment.
-func WithDiagnostics(switches tagent.DiagnosticSwitches) CLIOption {
+func WithDiagnostics(switches assembly.DiagnosticSwitches) CLIOption {
 	return func(c *CLI) { c.diagnostics = switches }
 }

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 
@@ -92,13 +92,13 @@ func TestNativeToolsAndSkillState(t *testing.T) {
 			return ntFinalTurn("settled")
 		}}
 
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{fnTool}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-native-tools",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-native-tools"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -171,13 +171,13 @@ func TestNativeToolsAndSkillState(t *testing.T) {
 			return ntFinalTurn("settled")
 		}}
 
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-skill-state",
 			Address:      event.Address{AgentID: "agent-a", SessionID: "session-skill-state"},
 			Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -237,14 +237,14 @@ func TestNativeToolsAndSkillState(t *testing.T) {
 			}
 		}}
 
-		run, err := tagent.Assemble(ctx, declarationOf(root), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, declarationOf(root), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime: %v", err)
 		}
 		address := event.Address{AgentID: "agent-a", SessionID: "session-file-change"}
-		first, err := run.Invoke(ctx, tagent.InvokeRequest{
+		first, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-file-change-1",
 			Address:      address,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "invoke one"}},
@@ -266,7 +266,7 @@ func TestNativeToolsAndSkillState(t *testing.T) {
 			t.Fatalf("skill file = (%q, %v), want the rewrite landed on disk inside the request", onDisk, err)
 		}
 
-		second, err := run.Invoke(ctx, tagent.InvokeRequest{
+		second, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-file-change-2",
 			Address:      address,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "invoke two"}},

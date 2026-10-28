@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 
@@ -161,7 +161,7 @@ func scenarioFixedFiles(t *testing.T) (promptBody, skillBody string, files []con
 // projection, whose static head carries the fixed files and whose requests close
 // with the dynamic environment block, so the request the model is driven with is
 // the assembled boundary the scenario observes.
-func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*tagent.Run, *scenarioModel, string, string) {
+func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*assembly.Run, *scenarioModel, string, string) {
 	t.Helper()
 	promptBody, skillBody, files := scenarioFixedFiles(t)
 	provider := &scenarioModel{name: "model-a", answer: func(*model.Request) *model.Response {
@@ -177,13 +177,13 @@ func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*tag
 			Files:            files,
 		}},
 	}
-	run, err := tagent.Assemble(context.Background(), decl, map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(context.Background(), decl, map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: provider},
-	}, tagent.WithGovernance(&scenarioGovernance{answers: scenarioPassingChecks("eval", "benchmark", "apply-gate")}))
+	}, assembly.WithGovernance(&scenarioGovernance{answers: scenarioPassingChecks("eval", "benchmark", "apply-gate")}))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
-	if err := run.AttachReplay(agent.RequestChain{PartitionID: scenarioChainKey.PartitionID, SessionID: scenarioChainKey.SessionID}, tagent.FoldWindow{MaxTokens: 1 << 16}, projection); err != nil {
+	if err := run.AttachReplay(agent.RequestChain{PartitionID: scenarioChainKey.PartitionID, SessionID: scenarioChainKey.SessionID}, assembly.FoldWindow{MaxTokens: 1 << 16}, projection); err != nil {
 		t.Fatalf("attach the replayed projection: %v", err)
 	}
 	return run, provider, promptBody, skillBody
@@ -191,9 +191,9 @@ func scenarioContextRun(t *testing.T, projection *replay.ReplayProjection) (*tag
 
 // scenarioInvokeOnce drives one invocation of the scenario session and reports
 // the messages of the single request the model was driven with.
-func scenarioInvokeOnce(t *testing.T, run *tagent.Run, provider *scenarioModel, invocation, input string) []model.Message {
+func scenarioInvokeOnce(t *testing.T, run *assembly.Run, provider *scenarioModel, invocation, input string) []model.Message {
 	t.Helper()
-	if _, err := run.Invoke(context.Background(), tagent.InvokeRequest{
+	if _, err := run.Invoke(context.Background(), assembly.InvokeRequest{
 		InvocationID: event.InvocationID(invocation),
 		Address:      event.Address{AgentID: "agent-a", SessionID: scenarioChainKey.SessionID},
 		Input:        []model.Message{{Role: model.RoleUser, Content: input}},

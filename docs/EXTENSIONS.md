@@ -66,7 +66,7 @@
 1. **`Invocation.Ready []event.Event`** 是一次责任范围**独占**的输入。`Loop.Drive` 把它拼在会话历史之后交给 `aggregateReady`：事件的 `Message` 原样保留（多工具 assistant 消息与逐调用配对的工具消息不被拆开），只有自身没带角色的消息才用 `agent.RoleOf` 按类型补。
 2. **消费即一次决策**。模型产出的工具调用经受理路径变成**受理回执**与**结算观察**，两者在下一次决策前进入 transcript；当一次决策既没有回执也没有观察时，这一趟以终态收束并提交 transcript。
 3. **`Loop.Backflow(invocationID, notice)` 只驱动发起了该调用的那次 invocation 的下一次决策**，不驱动别的。它只接受 `settled` / `failed` / `cancelled` 三种终态：非终态通知没有可配对的结果，在这里被忽略，而不是被当作空结果。
-4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`facts.go`）。loop 自己不选传输、不猜目标。
+4. **投递面由宿主给**：`task.WithEnvelopeDeliverer` 把 envelope 交给宿主，`Run` 的 sink 把工作通知记进邮箱（`assembly/facts.go`）。loop 自己不选传输、不猜目标。
 
 **自定义事件类型就是运行期消息**：`Ready` 里没有类型白名单，一个不在上表里的类型（例如宿主自己的 `meditation_tick`）照样被消费成它自己的那条消息、照样能调用模型与工具、照样经 `Backflow` 回填。唯一不许的是"消费了但什么都没产出还静默返回"：空结果必须以具名错误拒绝投递，而不是投一条空消息——对照用例 `tests/integration/execution/custom_event_loop_test.go` 用 `errCustomEventNoResult` 固定这条语义，S12 用同一消费链固定通知定向（`tests/integration/acceptance/scenario_s12_test.go`）。
 
@@ -185,18 +185,18 @@ agents:
 
 拒绝都点名：`preset: the declared tool carries no wiring`（声明了 `recall` 或 `call_subagent` 却没有对应面）、`knowledge: the reference names no local source`、`knowledge: a remote endpoint is not wired`、`knowledge: the reference names no known tool`、`preset: the parameter value cannot be read`。契约在 `tool/subagent/presets.go`，装配面核对见 `tests/integration/config/preset_tools_test.go`。
 
-**当前边界（写在这里以免扩展者猜）**：pipeline 元素由宿主经 `tagent.NativeAgent.Plugins` 贡献，声明里的 `plugins:` 名单是声明侧的次序意图，`tagent.Assemble` 不把它解析成元素。所以"声明序"要生效，宿主按同一名单贡献元素；S11 正是这么驱动的（`tests/integration/acceptance/scenario_s11_test.go`）。运行手册与门禁清单见 `docs/OPERATION.md`。
+**当前边界（写在这里以免扩展者猜）**：pipeline 元素由宿主经 `assembly.NativeAgent.Plugins` 贡献，声明里的 `plugins:` 名单是声明侧的次序意图，`assembly.Assemble` 不把它解析成元素。所以"声明序"要生效，宿主按同一名单贡献元素；S11 正是这么驱动的（`tests/integration/acceptance/scenario_s11_test.go`）。运行手册与门禁清单见 `docs/OPERATION.md`。
 
 ---
 
 <a id="reduction-map"></a>
 ## 七、化归判据对照表：18 面三问归位
 
-新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：module 根加 17 个一级产品面（`tool` 的 exec/file/knowledge/mcp/recall/spec/subagent 适配器算一族，`memory` 的存储档与检索子包算子包，`api` 的词汇包按面单列）。
+新增能力先过 `docs/FACT-VOCABULARY.md` 的三问（**是不是事实 / 谁消费 / 什么时态**），每一面只归到一个轴：**事实**（产出即锁定的族）、**消费**（只读或投递别人的事实）、**时态**（存续/在途/回放/产物）、**执行器**（跑一次执行）、**边界**（端口与组合）。口径：组合根加 17 个一级产品面（`tool` 的 exec/file/knowledge/mcp/recall/spec/subagent 适配器算一族，`memory` 的存储档与检索子包算子包，`api` 的词汇包按面单列）。
 
 | # | 面（包） | ① 是不是事实 | ② 谁消费它 | ③ 什么时态 | 归位轴 |
 |---|---|---|---|---|---|
-| 1 | `tagent`（module 根） | 否：只装配与发布 | 宿主导入入口；`Assemble` 读声明 | 无（组合） | 边界 |
+| 1 | `assembly`（组合根，住在 `assembly/`） | 否：只装配与发布 | 宿主导入入口；`Assemble` 读声明 | 无（组合） | 边界 |
 | 2 | `runtime/agent` | 否：消费 ready 与回填，产物经 `rl.Recorder` 提交 | 回合驱动自己消费；宿主读回执与终态 | 在途（决策） | 执行器 |
 | 3 | `api/config` | 是：声明族（规范指纹身份） | 组合根与热重载候选；`runtime/state` 读绑定 | 存续 | 事实 |
 | 4 | `api/event` | 是：核心事件族（`Key` 身份） | 全部消费面的输入词汇 | 事实本体 | 事实 |

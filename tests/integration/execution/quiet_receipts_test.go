@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -34,14 +34,14 @@ func TestQuietReceipts(t *testing.T) {
 			Entry:  "agent-a",
 			Agents: []config.AgentSpec{{ID: "agent-a", Model: "model-quiet"}},
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the quiet runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-quiet"}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-quiet-1",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "please delegate"}},
@@ -98,14 +98,14 @@ func TestQuietReceipts(t *testing.T) {
 		approve := func(context.Context, string, []byte) (task.Ruling, error) {
 			return task.Ruling{Kind: task.RulingHold, Reason: "waiting for approval"}, nil
 		}
-		run, err := tagent.Assemble(ctx, decl, map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{tool}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithApprover(approve))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithApprover(approve))
 		if err != nil {
 			t.Fatalf("assemble the held runtime: %v", err)
 		}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-held"}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-quiet-2",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "please delegate"}},

@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/query"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -38,14 +38,14 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		adapter := &minimalAdapter{name: "probe", output: "adapter-out"}
 		provider := adapterProvider()
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-adapter"}
-		run, err := tagent.Assemble(ctx, adapterDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, adapterDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{adapter}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime beside the new adapter: %v", err)
 		}
 
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-adapter",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "use the new tool"}},
@@ -101,13 +101,13 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		cfg := ledger.StorageConfig{Type: ledger.StorageLocalFile, Root: t.TempDir()}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-adapter-restart"}
 		adapter := &minimalAdapter{name: "probe", output: "adapter-out"}
-		run, err := tagent.Assemble(ctx, adapterDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, adapterDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: adapterProvider(), Tools: []trpctool.CallableTool{adapter}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("assemble the durable runtime beside the new adapter: %v", err)
 		}
-		if _, err := run.Invoke(ctx, tagent.InvokeRequest{
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-adapter",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "use the new tool"}},
@@ -119,9 +119,9 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		}
 
 		restarted := &minimalAdapter{name: "probe", output: "adapter-out"}
-		second, err := tagent.Assemble(ctx, adapterDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		second, err := assembly.Assemble(ctx, adapterDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: adapterProvider(), Tools: []trpctool.CallableTool{restarted}},
-		}, tagent.WithGovernance(passPolicy{}), tagent.WithStorage(cfg))
+		}, assembly.WithGovernance(passPolicy{}), assembly.WithStorage(cfg))
 		if err != nil {
 			t.Fatalf("restart the durable runtime: %v", err)
 		}
@@ -153,13 +153,13 @@ func TestNewToolAdapterNeedsNoHostCompensation(t *testing.T) {
 		adapter := &minimalAdapter{name: "probe", err: errors.New("the adapter could not reach its target")}
 		addr := event.Address{AgentID: "agent-a", SessionID: "session-adapter-failure"}
 		provider := adapterProvider()
-		run, err := tagent.Assemble(ctx, adapterDeclaration(), map[event.AgentID]tagent.NativeAgent{
+		run, err := assembly.Assemble(ctx, adapterDeclaration(), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: provider, Tools: []trpctool.CallableTool{adapter}},
-		}, tagent.WithGovernance(passPolicy{}))
+		}, assembly.WithGovernance(passPolicy{}))
 		if err != nil {
 			t.Fatalf("assemble the runtime beside the failing adapter: %v", err)
 		}
-		turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+		turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 			InvocationID: "inv-adapter",
 			Address:      addr,
 			Input:        []model.Message{{Role: model.RoleUser, Content: "use the new tool"}},
@@ -569,7 +569,7 @@ func adapterCallContext(callID string) context.Context {
 }
 
 // listObjects reads one dimension of the live scene through the formal read face.
-func listObjects(t *testing.T, ctx context.Context, run *tagent.Run, addr event.Address, kind query.ObjectKind) []query.Detail {
+func listObjects(t *testing.T, ctx context.Context, run *assembly.Run, addr event.Address, kind query.ObjectKind) []query.Detail {
 	t.Helper()
 	scope := query.AuthorizationScope{Agents: []event.AgentID{addr.AgentID}, Sessions: []event.Address{addr}}
 	snapshot, err := run.Query(ctx, query.ListFilter{Scope: scope, Kinds: []query.ObjectKind{kind}})

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // recoveryHeldBody is the assistant body the review holds before the restart.
@@ -52,7 +52,7 @@ func testDeliveryRecoveryHeld(t *testing.T) {
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-recovery-held"}
 	host := bootDeliveryRecoveryHost(t, configPath, sender, ruler)
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address:       addr,
 		TriggerSource: "user",
 		Input:         []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -97,7 +97,7 @@ func testDeliveryRecoveryHeld(t *testing.T) {
 	if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != recoveryHeldBody {
 		t.Fatalf("delivered bodies after approval = %q, want the restored body exactly once", bodies)
 	}
-	if err := host.ApproveDelivery(ctx, restored[0].ID); !errors.Is(err, tagent.ErrDeliveryNotFound) {
+	if err := host.ApproveDelivery(ctx, restored[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
 		t.Fatalf("the repeated approval = %v, want ErrDeliveryNotFound", err)
 	}
 	if bodies := sender.bodies(); len(bodies) != 1 {
@@ -118,7 +118,7 @@ func testDeliveryRecoveryRetry(t *testing.T) {
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-recovery-retry"}
 	host := bootDeliveryRecoveryHost(t, configPath, sender, nil)
-	turn, err := host.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address:       addr,
 		TriggerSource: "user",
 		Input:         []model.Message{{Role: model.RoleUser, Content: "hello"}},
@@ -153,7 +153,7 @@ func testDeliveryRecoveryRetry(t *testing.T) {
 	if bodies := sender.bodies(); len(bodies) != 1 || bodies[0] != recoveryRetryBody {
 		t.Fatalf("delivered bodies after the redelivery = %q, want the owed body exactly once", bodies)
 	}
-	if err := host.ApproveDelivery(ctx, restored[0].ID); !errors.Is(err, tagent.ErrDeliveryNotFound) {
+	if err := host.ApproveDelivery(ctx, restored[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
 		t.Fatalf("the repeated approval = %v, want ErrDeliveryNotFound", err)
 	}
 	if bodies := sender.bodies(); len(bodies) != 1 {
@@ -175,7 +175,7 @@ func testDeliveryRecoveryRefused(t *testing.T) {
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-recovery-refused"}
 	host := bootDeliveryRecoveryHost(t, configPath, sender, ruler)
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
 		Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 	}); err != nil {
@@ -208,10 +208,10 @@ func testDeliveryRecoveryRefused(t *testing.T) {
 	if left := host.HeldDeliveries(); len(left) != 0 {
 		t.Fatalf("owed deliveries beside the further restart = %+v, want the refusal consumed", left)
 	}
-	if err := host.RefuseDelivery(ctx, restored[0].ID); !errors.Is(err, tagent.ErrDeliveryNotFound) {
+	if err := host.RefuseDelivery(ctx, restored[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
 		t.Fatalf("the repeated refusal = %v, want ErrDeliveryNotFound", err)
 	}
-	if err := host.ApproveDelivery(ctx, restored[0].ID); !errors.Is(err, tagent.ErrDeliveryNotFound) {
+	if err := host.ApproveDelivery(ctx, restored[0].ID); !errors.Is(err, assembly.ErrDeliveryNotFound) {
 		t.Fatalf("the approval beside a refusal = %v, want ErrDeliveryNotFound", err)
 	}
 	if bodies := sender.bodies(); len(bodies) != 0 {
@@ -221,12 +221,12 @@ func testDeliveryRecoveryRefused(t *testing.T) {
 
 // bootDeliveryRecoveryHost boots the entry document named by the configuration
 // path beside the controlled sender and review face the recovery checks drive.
-func bootDeliveryRecoveryHost(t *testing.T, configPath string, sender tagent.MessageSender, ruler plugin.DeliveryRuler) *tagent.Host {
+func bootDeliveryRecoveryHost(t *testing.T, configPath string, sender assembly.MessageSender, ruler plugin.DeliveryRuler) *assembly.Host {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
-	host, err := tagent.Boot(configPath, tagent.WithSender(sender), tagent.WithDeliveryRuler(ruler))
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender), assembly.WithDeliveryRuler(ruler))
 	if err != nil {
 		t.Fatalf("boot the delivery recovery host: %v", err)
 	}

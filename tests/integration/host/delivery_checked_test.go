@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/assembly"
 )
 
 // TestDeliveryStateCommitFailure pins the refusal of one held body beside a state commit the tier refused.
@@ -33,7 +33,7 @@ func TestDeliveryStateCommitFailure(t *testing.T) {
 	defer closeDeliveryReviewHost(t, host, ctx)
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-state-commit"}
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
 		Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 	}); err != nil {
@@ -88,7 +88,7 @@ func TestApproveDeliveryReceiptFailure(t *testing.T) {
 	defer closeDeliveryReviewHost(t, host, ctx)
 
 	addr := event.Address{AgentID: "user", SessionID: "session-delivery-receipt"}
-	if _, err := host.Invoke(ctx, tagent.InvokeRequest{
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		Address: addr,
 		Input:   []model.Message{{Role: model.RoleUser, Content: "hello"}},
 	}); err != nil {
@@ -125,7 +125,7 @@ func TestApproveDeliveryReceiptFailure(t *testing.T) {
 
 // deliveryRefusalFactOf reports the refusal audit fact recorded at one address,
 // and nil beside an address that holds none.
-func deliveryRefusalFactOf(host *tagent.Host, addr event.Address) *event.Event {
+func deliveryRefusalFactOf(host *assembly.Host, addr event.Address) *event.Event {
 	for _, fact := range host.Run().SessionFacts(addr) {
 		if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyEventSummary] == "delivery refused" {
 			held := fact

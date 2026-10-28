@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SpellingDragon/tagent"
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/features/rl"
 	"github.com/SpellingDragon/tagent/runtime/state"
 )
@@ -211,11 +211,11 @@ func scenario10Decl(modelRef string) *config.Declaration {
 // scenario10Run assembles one runtime over the model handle and declaration
 // reference the caller names, writing its records through the capture sink the
 // scenario seals.
-func scenario10Run(t *testing.T, ctx context.Context, handle model.Model, modelRef string, records rl.Recorder) *tagent.Run {
+func scenario10Run(t *testing.T, ctx context.Context, handle model.Model, modelRef string, records rl.Recorder) *assembly.Run {
 	t.Helper()
-	run, err := tagent.Assemble(ctx, scenario10Decl(modelRef), map[event.AgentID]tagent.NativeAgent{
+	run, err := assembly.Assemble(ctx, scenario10Decl(modelRef), map[event.AgentID]assembly.NativeAgent{
 		"agent-a": {Model: handle},
-	}, tagent.WithGovernance(formalPolicy{}), tagent.WithRecorder(records))
+	}, assembly.WithGovernance(formalPolicy{}), assembly.WithRecorder(records))
 	if err != nil {
 		t.Fatalf("assemble the runtime: %v", err)
 	}
@@ -224,9 +224,9 @@ func scenario10Run(t *testing.T, ctx context.Context, handle model.Model, modelR
 
 // scenario10Invoke drives one invocation through the formal runtime entry and
 // requires the completed terminal of the version in effect.
-func scenario10Invoke(t *testing.T, ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID, input string) {
+func scenario10Invoke(t *testing.T, ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID, input string) {
 	t.Helper()
-	turn, err := run.Invoke(ctx, tagent.InvokeRequest{
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      episode,
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},
@@ -243,8 +243,8 @@ func scenario10Invoke(t *testing.T, ctx context.Context, run *tagent.Run, invoca
 // scenario10InvokeErr drives one invocation from a goroutine and reports the
 // error it ended with, so a request held in flight is observed without
 // blocking the check.
-func scenario10InvokeErr(ctx context.Context, run *tagent.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID, input string) error {
-	_, err := run.Invoke(ctx, tagent.InvokeRequest{
+func scenario10InvokeErr(ctx context.Context, run *assembly.Run, invocation event.InvocationID, session event.SessionID, episode event.EpisodeID, input string) error {
+	_, err := run.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: invocation,
 		Episode:      episode,
 		Address:      event.Address{AgentID: "agent-a", SessionID: session},
@@ -272,10 +272,10 @@ func scenario10WaitFor(t *testing.T, what string, condition func() bool) {
 // being installed and the runtime publishes it as the generation a request that
 // begins afterwards borrows. Every call is counted, so a rebuild that publishes
 // nothing is observable.
-func scenario10Publisher(ctx context.Context, run *tagent.Run, calls *int) func(rl.ModelIdentity, model.Model) error {
+func scenario10Publisher(ctx context.Context, run *assembly.Run, calls *int) func(rl.ModelIdentity, model.Model) error {
 	return func(identity rl.ModelIdentity, next model.Model) error {
 		*calls++
-		outcome, err := run.Publish(ctx, scenario10Decl(identity.Name()), map[event.AgentID]tagent.NativeAgent{
+		outcome, err := run.Publish(ctx, scenario10Decl(identity.Name()), map[event.AgentID]assembly.NativeAgent{
 			"agent-a": {Model: next},
 		})
 		if err != nil {
