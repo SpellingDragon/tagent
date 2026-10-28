@@ -16,7 +16,7 @@
 | T5 | `memoryTask.mutations` | `runtime/task/lifecycle.go:95` | 即权威折 | 是（`repeatOf` 幂等） | 保留 | 链的内存折 |
 | T6 | `memoryTask.obligations` | `runtime/task/lifecycle.go:96` | 能：outbox 事实 − 已销账 + answered/blocked 覆写 | 是（Flush/Close 面） | 保留为派生索引 | `host.go:1572` 同族先例：账在持久层，表在内存 |
 | T7 | `memoryTask.blocked` | `runtime/task/lifecycle.go:97-104` | **不能**：拒收原因无事实载体（durable 账只存义务状态，不存目标的话） | **是**：blocked 义务按名上报，不读作「仍在路上」 | **保留写权**，依据写入代码注释 | D9 裁决；补权威写＝新增持久面，超出本案（`manager.go:211` `recordBlocked` 注释） |
-| T8 | `memoryTask.exitReason` | `runtime/task/lifecycle.go:105-110` | **不能**：cancelled 事实不带 executor 的话 | 否：纯报告（`shutdown.go:351` 只读上报） | 保留（报告字段，登记）；补持久化归下轮 | 与 D7 final 同族：跨重启不承诺，重启读空而非推断 |
+| T8 | `memoryTask.exitReason` | `runtime/task/lifecycle.go:105-110` | **不能**：cancelled 事实不带 executor 的话 | 否：纯报告（`manager.go:70`（Obligations face 投影）+ `lifecycle.go:105-110` 字段注释| 保留（报告字段，登记）；补持久化归下轮 | 与 D7 final 同族：跨重启不承诺，重启读空而非推断 |
 | T9 | `memoryTask.cancelRequested` | `runtime/task/lifecycle.go:111-116` | **不能**：请求未落任何事实 | **是**：无请求的确认停止被具名拒绝（`cancel.go:79` `ErrCancelNotRequested`） | 保留写权，依据写入代码注释 | 同上；重启读作未请求，不从状态反推 |
 | T10 | `memoryTask.stops` | `runtime/task/lifecycle.go:117` | 不能：执行面报告 | 否：报告面 | 保留 | 同上 |
 | T11 | `memoryTask.handoff` / `handoffRecord` | `runtime/task/lifecycle.go:118-119` | 能：`handoff:` 前缀 mutation | 是（未来通知路由） | 保留（派生） | `restore.go:233-235` fold 已 `applyHandoff` |
