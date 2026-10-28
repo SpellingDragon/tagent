@@ -114,10 +114,8 @@ Package assembly is the composition root of the runtime: the single point
 where a pure organization declaration becomes a live runtime, and the only
 dependency-injection site of the process. Assemble is the sole assembly entry
 and the Run it returns is the face the host drives; no second assembly entry
-sits beside it.
-
-The package was the module-root package tagent until D16 moved it whole into
-assembly/.
+sits beside it. The package was the module-root package tagent until D16 moved
+it whole into assembly/.
 
 The root establishes the shared faces before any candidate binding is prepared
 and assembles the execution face on top of them, and it keeps no second

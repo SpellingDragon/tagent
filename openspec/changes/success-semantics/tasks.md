@@ -25,7 +25,7 @@ graph LR
 - [x] 9. C 端口压平：删九词汇常量、assemble 具名派发、EXTENSIONS.md:11/:28+skeleton_assert+误声明用例同步 —— 验证：全仓 grep `MaterialCall|MaterialRequest|MaterialFact|Product(Call|Ruling|Observation|View|Compression|Environment)` =0+六端口派发测试绿
 - [x] 10. D 热更新三档：字段映射表；tools/plugins 二档具名拒绝；storage/ReadRoot/Exec 二档 compatibleWith 具名拒绝；PublishUnchanged 锚 —— 验证：reload 三档测试（新代可变/越档具名拒绝/同指纹 PublishUnchanged）
 - [x] 11. E 越界检查+验收：清点表入库（runtime/task grep tmux|subagent|远程）；新工具验收测试（execution rig+NativeAgent.Tools，适配器只给执行/取消/恢复证据跑通受理→结算→投递，宿主零补偿）—— 验证：验收测试绿+清点零越界
-- [ ] 12. F2 grill 循环至无新有效问题（含叶 7-11 实施后二/三轮复核：A-1/A-2 裁决落表、B 幸存面与 D11 一致、C 判据裁定、D 字段映射）—— 验证：终轮 grill 报告无新有效问题
+- [x] 12. F2 grill 循环至无新有效问题（含叶 7-11 实施后二/三轮复核：A-1/A-2 裁决落表、B 幸存面与 D11 一致、C 判据裁定、D 字段映射）—— 验证：终轮 grill 报告无新有效问题
 - [ ] 13. F3 收尾：全套门禁+push+远端 CI 绿+PR+merge（CI 不过不 merge）
 
 - [x] 14. host 簇文件重组（D15）：四域纯移动（host_delivery/host_document/host_tools/host_face←尾部）+host_diagnostics 更名；零语义变更 —— 验证：`go build ./...`+`go test . ./tests/integration/host -count=1`+`git diff` 仅移动（内容零 diff 或仅文件头/import）+lint 绿
