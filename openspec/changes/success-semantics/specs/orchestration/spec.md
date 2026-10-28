@@ -45,7 +45,7 @@
 #### Scenario: 已登记未发送的义务由下次交接补投
 
 - **WHEN** 某正文的义务已登记为 owed 而发送未发生，同一进程内该通知的下一次交接读到该记录
-- **THEN** 该正文 SHALL 被补投一次，其记录 SHALL 转为 `sent`
+- **THEN** 该正文 SHALL 被补投一次，其记录 SHALL 转为 `sent`（通道接受且 sent 回执落地时；裁决挂起转 `held`、通道拒收转 `retry`、回执未落按至少一次容忍）
 
 #### Scenario: 已销账的义务不被补投
 
@@ -83,7 +83,7 @@
 - 「消费回执已落但发送未发生」：通知的消费回执落地之后、正文发送之前进程停止，该通知不再被唤醒，义务记录仍为 owed，由重启的恢复面（boot restore）补投。
 - 「用户轮登记后发送前」：用户 turn 的交付义务登记之后、发送之前进程停止，同一进程内没有会读到该义务的交接面，同样由重启的恢复面补投。
 
-两者 SHALL 被读作已登记义务的恢复，措辞与 `settleTerminal` 的注释一致：回执与发送之间的停顿由重启投递的 owed 正文作答（"a stop between the two is answered by the owed body a restart delivers"）。
+两者 SHALL 被读作已登记义务的恢复，措辞与 `settleTerminal` 的注释一致：登记与回执之间的停顿由重启投递的 owed 正文作答（"a stop between the two is answered by the owed body a restart delivers"）。
 
 #### Scenario: 回执已落而发送未发生的义务由重启补投
 
@@ -98,7 +98,7 @@
 #### Scenario: 强杀后已登记义务恰一次投递
 
 - **WHEN** Sender 未确认时进程被强杀并重启
-- **THEN** 强杀前投递 SHALL 为 0 条，重启后该结果 SHALL 恰投递 1 条（该次重投的 sent 回执落地时；回执未落按至少一次容忍），持久账 `tagent/task/v1/delivery:` 前缀下的 owed 条目 SHALL 归零，该结果的生成义务 SHALL 恰被消费一次
+- **THEN** 强杀前投递 SHALL 为 0 条，重启后该结果 SHALL 恰投递 1 条（该次重投的 sent 回执落地时；回执未落按至少一次容忍），持久账 `tagent/task/v1/delivery:` 前缀下的 owed 条目 SHALL 归零（该次重投的 sent 回执落地时），该结果的生成义务 SHALL 恰被消费一次
 
 #### Scenario: 微窗口内被杀不作恢复承诺
 
