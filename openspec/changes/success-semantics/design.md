@@ -17,3 +17,13 @@ D11 训练外移幸存面（N3 裁定：tool/ 属装配面，import 白名单化
 D12 端口压平裁定（grill C-1）：组合推导判据=「材料集合级统一路由或组合合法性计算」——按证据（phases.go:197-253 六对 switch 等价具名端口常量、material.go:82-96 闭表查（叶9 前为 :86-108 三查）、无集合路由/代数）裁**无**→删九词汇常量，assemble 改具名端口常量派发；EXTENSIONS.md:11/:28 两锚改写、skeleton_assert.go:104-113 常量钉、误声明用例（policy_test.go:458-464）同步；六端口闭集不合并。
 D13 热更新三档字段映射（grill D-1）：字段级映射表（hostDocument+hostAgent 全字段每行一档）；**tools/plugins 声明裁二档具名拒绝**（现静默换入 doc 且永不复用是最差态——host_reload.go:140-147 全量复用 Boot natives）；档三测试锚=PublishUnchanged（publish.go:300-305 同指纹不开新代）；storage.root/type、ReadRoot/Exec 等二档字段由 compatibleWith 具名拒绝（现静默放行 host_reload.go:199-220）。
 D14 验收设施（grill E-1）：复用 tests/integration/execution rig（delegation_completion_test.go:514-527+close_drains_obligations 全套）+ NativeAgent.Tools 注册面（run.go:64-73）；清点表=runtime/task 全目录 grep（tmux|subagent|远程）产出入库清单。
+
+# host 簇文件重组裁定（D15，2026-10-28 用户指令「分包或职责优化」）
+
+D15 不分包、文件级职责重组：host 簇是组合根（Host 横跨驱动/交付/装配/生命周期），分包要求导出化大量内部类型（heldDelivery/hostDeliveryRecord/settleBarrier），制造导出面膨胀——不分包（先例：能力从属才移包）。实测域块（host.go 3215 行）：交付域 host.go:1141-1935（~800 行，本案 D1-D6 全部改动面）、文档装配域 2036-2634（~600 行）、宿主工具与端口域 2635-2994（send 工具+meditation+injection ~360 行）、HTTP face 2995-3215（~220 行）。重组（同包纯移动零语义变更）：
+- host_delivery.go ← 交付域全族（deliverFresh→freshObligationOf）；
+- host_document.go ← hostDocument 装配域；
+- host_tools.go ← send 工具+meditation+injection；
+- host_face.go ← host.go 尾部真 HTTP face（现 host_face.go 实为诊断面，更名 host_diagnostics.go——名实相符）；
+- host.go 剩 Boot/options/驱动/settle/生命周期/地址锁（~1100 行）。
+门禁随迁：comment_policy 文件头、package-layout 镜像、gen_godoc 重生成；host_test.go 仍镜像 host.go。
