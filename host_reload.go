@@ -17,12 +17,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/features/rl"
+	"github.com/SpellingDragon/tagent/runtime/state"
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -33,14 +36,52 @@ import (
 // organization is restarted with it.
 var ErrHostReloadStructural = errors.New("tagent: the reload changes the declared agent set")
 
+// ErrHostReloadRestartRequired reports a reload that moves a field whose only
+// consumer Boot built: the storage tier, the request timeout, the observation
+// face, the governance rules, and per agent the tool, skill, read, file,
+// execution, memory and meditation sections. No path in a running host rebuilds
+// those consumers, so the reload refuses the change by name rather than
+// answering success for a value nothing reads; a host that needs it is restarted
+// with the document.
+var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
+
+// errHostReloadRestartRequired is the named refusal of a restart-only change.
+type errHostReloadRestartRequired struct{}
+
+// Error names the restart the refused change needs.
+func (errHostReloadRestartRequired) Error() string {
+	return "tagent: the reload requires a restart"
+}
+
+// Unwrap attaches the refusal to the structural family: a restart-only change is
+// one face Boot wired whose replacement has no path, so every face that maps the
+// structural refusal answers this one the same way.
+func (errHostReloadRestartRequired) Unwrap() error { return ErrHostReloadStructural }
+
 // hostReloadReport is the answer of one reload: the publication result beside
 // the model changes the reload judged.
 type hostReloadReport struct {
 	// Reloaded states that the document was read and published.
 	Reloaded bool `json:"reloaded"`
+	// Publication states what the one publication entry did with the candidate:
+	// the generation in effect after the attempt and whether the attempt
+	// published a new one. A reload carrying the content already in effect
+	// enters no generation, so the receipt answers that instead of leaving a
+	// reader to infer it from an empty model change list.
+	Publication hostReloadPublication `json:"publication"`
 	// ModelChanges lists the model reference moves the reload judged, one per
 	// agent whose lease moved.
 	ModelChanges []hostReloadModelChange `json:"model_changes"`
+}
+
+// hostReloadPublication is the publication receipt of one reload: the generation
+// in effect once the attempt ended, and whether that attempt published it.
+type hostReloadPublication struct {
+	Generation uint64 `json:"generation"`
+	// Published states whether the attempt entered service as a new generation;
+	// false means the candidate carried the content already in effect, so
+	// nothing was rebuilt and the generation stayed where it was.
+	Published bool `json:"published"`
 }
 
 // hostReloadModelChange is one model reference move judged by a reload: the
@@ -147,8 +188,13 @@ func (h *Host) Reload(ctx context.Context) (hostReloadReport, error) {
 		next[id] = held
 	}
 	changes := h.modelChanges(decl, doc)
-	if _, err := h.run.Publish(ctx, decl, next); err != nil {
+	outcome, err := h.run.Publish(ctx, decl, next)
+	if err != nil {
 		return report, err
+	}
+	report.Publication = hostReloadPublication{
+		Generation: outcome.Publication.Generation,
+		Published:  outcome.Result != state.PublishUnchanged,
 	}
 	h.models.set(doc)
 	h.mu.Lock()
@@ -194,8 +240,10 @@ func (h *Host) modelChanges(decl *config.Declaration, doc *hostDocument) []hostR
 	return changes
 }
 
-// compatibleWith refuses a document that changes the entry agent or the
-// declared agent set: the run wires those faces once at Boot.
+// compatibleWith refuses a document that changes the entry agent, the declared
+// agent set or a field only Boot reads. It runs before the natives the host
+// contributed are reused and before the document in effect is swapped, so a
+// refused reload leaves both exactly as they were.
 func (d *hostDocument) compatibleWith(next *hostDocument) error {
 	if next == nil {
 		return fmt.Errorf("%w: the reload carries no document", ErrHostReloadStructural)
@@ -216,7 +264,63 @@ func (d *hostDocument) compatibleWith(next *hostDocument) error {
 			return fmt.Errorf("%w: agent %q is removed", ErrHostReloadStructural, id)
 		}
 	}
+	if changed := d.restartRequiredChanges(next); len(changed) > 0 {
+		return fmt.Errorf("%w: %s changed", ErrHostReloadRestartRequired, strings.Join(changed, ", "))
+	}
 	return nil
+}
+
+// restartRequiredChanges lists the fields the next document moves while the only
+// consumer of each was built at Boot: the storage tier, the request timeout, the
+// observation face, the governance rules and, per agent, the tool declarations,
+// the skill roots, the read root, the file surface, the execution face, the
+// memory section and the meditation section. Boot constructs those consumers
+// once beside the natives it contributes, and a reload hands the natives back as
+// they were, so a reload that took a moved value would answer success for a
+// change no consumer takes.
+//
+// Every path is the YAML key an operator searches the configuration source for,
+// and the order is fixed here and then by agent id, so the same edit always
+// answers the same names.
+func (d *hostDocument) restartRequiredChanges(next *hostDocument) []string {
+	changed := make([]string, 0, 4)
+	compare := func(path string, before, after any) {
+		if !reflect.DeepEqual(before, after) {
+			changed = append(changed, path)
+		}
+	}
+	compare("storage.type", d.Storage.Type, next.Storage.Type)
+	compare("storage.root", d.Storage.Root, next.Storage.Root)
+	compare("request_timeout_seconds", d.TimeoutSeconds, next.TimeoutSeconds)
+	compare("governance", d.Governance, next.Governance)
+	compare("telemetry", d.Telemetry, next.Telemetry)
+	for _, id := range d.declaredAgentIDs(next) {
+		before, after := d.Agents[id], next.Agents[id]
+		compare("agents."+id+".tools", before.Tools, after.Tools)
+		compare("agents."+id+".skill_dirs", before.SkillDirs, after.SkillDirs)
+		compare("agents."+id+".read_root", before.ReadRoot, after.ReadRoot)
+		compare("agents."+id+".file", before.File, after.File)
+		compare("agents."+id+".exec", before.Exec, after.Exec)
+		compare("agents."+id+".memory", before.Memory, after.Memory)
+		compare("agents."+id+".meditation", before.Meditation, after.Meditation)
+	}
+	return changed
+}
+
+// declaredAgentIDs lists every agent id the two documents declare, in name
+// order: the compared fields belong to agents both documents name.
+func (d *hostDocument) declaredAgentIDs(next *hostDocument) []string {
+	ids := make([]string, 0, len(d.Agents))
+	for id := range d.Agents {
+		ids = append(ids, id)
+	}
+	for id := range next.Agents {
+		if _, held := d.Agents[id]; !held {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // heldModelVersion reports the model version one agent's lease holds, and the

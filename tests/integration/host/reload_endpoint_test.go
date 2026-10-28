@@ -18,9 +18,16 @@ import (
 )
 
 // reloadAnswer is the endpoint's answer as the supervisor reads it back: the
-// publication result beside the model changes the reload judged.
+// publication result beside the model changes the reload judged. The receipt
+// names the generation in effect after the attempt and whether that attempt
+// published it, so a carried document is answered as one instead of leaving a
+// reader to infer it from an empty change list.
 type reloadAnswer struct {
-	Reloaded     bool `json:"reloaded"`
+	Reloaded    bool `json:"reloaded"`
+	Publication struct {
+		Generation uint64 `json:"generation"`
+		Published  bool   `json:"published"`
+	} `json:"publication"`
 	ModelChanges []struct {
 		Agent string `json:"agent"`
 		From  string `json:"from"`

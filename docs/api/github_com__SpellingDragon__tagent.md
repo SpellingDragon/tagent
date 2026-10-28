@@ -189,6 +189,15 @@ var ErrHostNoActiveSession = errors.New("tagent: no user session has been admitt
     the endpoint carries no session identity of its own, so it drives the one
     session the host admitted last.
 
+var ErrHostReloadRestartRequired error = errHostReloadRestartRequired{}
+    ErrHostReloadRestartRequired reports a reload that moves a field whose only
+    consumer Boot built: the storage tier, the request timeout, the observation
+    face, the governance rules, and per agent the tool, skill, read, file,
+    execution, memory and meditation sections. No path in a running host
+    rebuilds those consumers, so the reload refuses the change by name rather
+    than answering success for a value nothing reads; a host that needs it is
+    restarted with the document.
+
 var ErrHostReloadStructural = errors.New("tagent: the reload changes the declared agent set")
     ErrHostReloadStructural reports a reload that changes the entry agent or the
     declared agent set. Boot wires the model leases, the reflection plan and the
@@ -250,9 +259,51 @@ var ErrUnknownHostTool = errors.New("tagent: the declared tool is not contribute
 
 FUNCTIONS
 
+func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error)
+    Assemble builds the minimal public assembly of the runtime and publishes the
+    first binding generation of the declaration before it returns: the shared
+    faces are established in order, the tools of every agent are registered
+    through the task wrapper, and the candidate passes the sole publication
+    entry under the governance the assembly is configured with. A formal
+    assembly carries no stand-in governance and is refused by name beside none.
+    With a storage tier configured, the task facts persist through that tier
+    and the chains it already holds are folded back into the registry before the
+    assembly returns. A construction or publication failure frees only what that
+    candidate acquired and returns the failure as the cause.
+
+    The loop borrows through the sole publication entry, so every borrow carries
+    the retirement drain of the generation it took. The redline list (4 rules):
+    MUST establish the shared faces in order and publish the first binding
+    generation before it returns. MUST free only what the failed candidate
+    acquired. MUST NOT carry a stand-in governance in a formal assembly.
+    MUST NOT return a half-assembled run beside a publication failure.
+
+func Boot(configPath string, opts ...HostOption) (*Host, error)
+    Boot reads one host document and returns the assembled host: the declaration
+    is resolved from the document, the models, tool instances, storage tier,
+    embedder and reflection plan are built for it, the run is assembled through
+    Assemble, and the reflection driver and the loopback endpoints start beside
+    it. Every failure before the assembly returns the named refusal and leaves
+    nothing running.
+
+func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
+    DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
+    was started with. The variable carries a comma-separated list of subsystem
+    names; an empty variable opens no optional face, and a name outside the
+    three subsystems is refused with ErrDiagnosticSwitchUnknown.
+
 func EnvironmentBlockGenerations() int64
     EnvironmentBlockGenerations reports how many environment blocks the request
     boundary has rendered in this process so far.
+
+func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error)
+    MemoryPlanOf merges every agent's memory declaration into the one plan the
+    assembly opens, beside the storage section the document states at its top
+    level. Every declaring agent must name the same tier and the same engine:
+    a shared store read under two different engines would answer one query two
+    ways. An engine beside no tier is refused by name, because an embedding with
+    nowhere to persist its vectors is no engine at all. A document that declares
+    neither reports a nil plan, which wires no storage face and no embedder.
 
 func NewSkillLoadSink(agent event.AgentID) knowledge.LoadSink
     NewSkillLoadSink mounts a fresh loaded-skill ledger on one agent and answers
@@ -433,12 +484,6 @@ type DiagnosticSwitches struct {
     and stays readable while every switch below is off. Each switch below opens
     one optional face over the subsystem the assembly actually wired.
 
-func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
-    DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
-    was started with. The variable carries a comma-separated list of subsystem
-    names; an empty variable opens no optional face, and a name outside the
-    three subsystems is refused with ErrDiagnosticSwitchUnknown.
-
 type DiagnosticTelemetry struct {
 	// Face is the switch and wiring reading of this subsystem.
 	Face DiagnosticFace
@@ -532,14 +577,6 @@ type Host struct {
     a supervisor and an inbound channel reach. The host holds no application
     concept of its own: every channel identity, approval ruling and delivery
     target arrives through the options and the invocation address.
-
-func Boot(configPath string, opts ...HostOption) (*Host, error)
-    Boot reads one host document and returns the assembled host: the declaration
-    is resolved from the document, the models, tool instances, storage tier,
-    embedder and reflection plan are built for it, the run is assembled through
-    Assemble, and the reflection driver and the loopback endpoints start beside
-    it. Every failure before the assembly returns the named refusal and leaves
-    nothing running.
 
 func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     ApproveDelivery re-delivers one held body exactly once: the body is sent to
@@ -645,15 +682,6 @@ type MemoryPlan struct {
     recall vocabulary generates embeddings under. The plan is resolved once
     at assembly and caches the binding it built, so the storage face and the
     retrieval face of one run run over the one embedder.
-
-func MemoryPlanOf(decl *config.Declaration, storageType, storageRoot string) (*MemoryPlan, error)
-    MemoryPlanOf merges every agent's memory declaration into the one plan the
-    assembly opens, beside the storage section the document states at its top
-    level. Every declaring agent must name the same tier and the same engine:
-    a shared store read under two different engines would answer one query two
-    ways. An engine beside no tier is refused by name, because an embedding with
-    nowhere to persist its vectors is no engine at all. A document that declares
-    neither reports a nil plan, which wires no storage face and no embedder.
 
 func (p *MemoryPlan) Embedder() (memory.Embedder, error)
     Embedder reports the embedding binding the plan generates its vectors under:
@@ -927,25 +955,6 @@ type Run struct {
     the owner that already holds the fact. MUST NOT keep a second live copy of
     the scene inside the run. MUST NOT admit new input past the gate the close
     already closed.
-
-func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error)
-    Assemble builds the minimal public assembly of the runtime and publishes the
-    first binding generation of the declaration before it returns: the shared
-    faces are established in order, the tools of every agent are registered
-    through the task wrapper, and the candidate passes the sole publication
-    entry under the governance the assembly is configured with. A formal
-    assembly carries no stand-in governance and is refused by name beside none.
-    With a storage tier configured, the task facts persist through that tier
-    and the chains it already holds are folded back into the registry before the
-    assembly returns. A construction or publication failure frees only what that
-    candidate acquired and returns the failure as the cause.
-
-    The loop borrows through the sole publication entry, so every borrow carries
-    the retirement drain of the generation it took. The redline list (4 rules):
-    MUST establish the shared faces in order and publish the first binding
-    generation before it returns. MUST free only what the failed candidate
-    acquired. MUST NOT carry a stand-in governance in a formal assembly.
-    MUST NOT return a half-assembled run beside a publication failure.
 
 func (r *Run) ActiveSessions(agentID event.AgentID) []event.Address
     ActiveSessions reports the complete addresses this run has established,
