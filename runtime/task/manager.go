@@ -204,7 +204,10 @@ func deliveryContext(ctx context.Context, spec Spec) context.Context {
 }
 
 // recordBlocked records the reason beside one notification whose delivery could not
-// proceed.
+// proceed. The record is memory the restore does not rebuild: the account keeps
+// the state of an obligation, never the words a target answered with, so a
+// restarted task re-learns a refusal by flushing again rather than by reading a
+// reason out of its chain.
 func (t *memoryTask) recordBlocked(notice Notice, err error) {
 	reason := refusalReason
 	if err != nil {

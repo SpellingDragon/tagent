@@ -117,7 +117,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if before.Target != oldTarget || before.TargetInstance != sourceInstance {
 		t.Fatalf("envelope = %+v, want the started notification frozen beside %v / %s", before, oldTarget, sourceInstance)
 	}
-	if result, err := registry.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress:"+string(taskID)+":1"), []task.Envelope{before}); result != task.CommitCommitted || err != nil {
+	if result, err := registry.Advance(ctx, taskID, task.StatusRunning, task.MutationID("progress:"+string(taskID)+":1"), []task.Envelope{before}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("advance progress = (%v, %v), want the notification committed beside its frozen routing", result, err)
 	}
 	if err := manager.Handoff(ctx, taskID, task.HandoffTarget{Target: newTarget, TargetInstance: targetInstance}); err != nil {
@@ -198,7 +198,7 @@ func TestHandoffRoutingSurvivesRestart(t *testing.T) {
 	if after.Source != before.Source {
 		t.Fatalf("source = %+v, want the frozen source %+v kept beside the new target", after.Source, before.Source)
 	}
-	if result, err := registry2.Advance(ctx, taskID, task.StatusProgress, task.MutationID("progress:"+string(taskID)+":2"), []task.Envelope{after}); result != task.CommitCommitted || err != nil {
+	if result, err := registry2.Advance(ctx, taskID, task.StatusRunning, task.MutationID("progress:"+string(taskID)+":2"), []task.Envelope{after}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("advance progress = (%v, %v), want the future notification committed beside its frozen routing", result, err)
 	}
 

@@ -246,7 +246,7 @@ func TestCloseDrainsObligations(t *testing.T) {
 		if !reflect.DeepEqual(report.Unsettled, want) {
 			t.Fatalf("unsettled = %+v, want the named reason of every obligation that stayed open", report.Unsettled)
 		}
-		if _, status, err := rig.tasks.Lookup(ctx, t1); err != nil || status != task.StatusProgress {
+		if _, status, err := rig.tasks.Lookup(ctx, t1); err != nil || status != task.StatusRunning {
 			t.Fatalf("task state after the cancellation request = (%v, %v), want the work standing where the request found it", status, err)
 		}
 	})
@@ -446,7 +446,7 @@ func (r *closeRig) advance(t *testing.T, ctx context.Context, taskID event.TaskI
 		t.Fatalf("look up the delegated task: %v", err)
 	}
 	notice := delegationNotice(taskID, task.NoticeProgress, seq)
-	result, err := r.tasks.Advance(ctx, taskID, task.StatusProgress,
+	result, err := r.tasks.Advance(ctx, taskID, task.StatusRunning,
 		task.MutationID(fmt.Sprintf("progress:%s:%d", taskID, seq)),
 		[]task.Envelope{{
 			Notice:         notice,

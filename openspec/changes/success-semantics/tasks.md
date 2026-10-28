@@ -20,7 +20,7 @@ graph LR
 
 ## 叶 7-11（责任范围收缩五项并入，grill 一轮判据修订版）
 
-- [ ] 7. A 去写权三分+枚举表：StatusProgress 删写权改派生读（running∧链含 progress 通知∧非终态；commit Status 重放语义写明）；Count 登记/Open 现算/Blocked 保留写权写依据；独立写权状态全枚举表（pendingDeliveries/answered/exitReason/Occupancy/delegate 投影逐行裁决）—— 验证：反事实判据测试+`go test ./runtime/task ./runtime/agent ./memory/... ./tests/integration/... -count=1`（StatusProgress 断言测试改写）
+- [x] 7. A 去写权三分+枚举表：StatusProgress 删写权改派生读（running∧链含 progress 通知∧非终态；commit Status 重放语义写明）；Count 登记/Open 现算/Blocked 保留写权写依据；独立写权状态全枚举表（pendingDeliveries/answered/exitReason/Occupancy/delegate 投影逐行裁决）—— 验证：反事实判据测试+`go test ./runtime/task ./runtime/agent ./memory/... ./tests/integration/... -count=1`（StatusProgress 断言测试改写）
 - [ ] 8. B 训练外移：Capture 全保（Snapshot 调用时固定）；Recorder Episode/Decision 删、Attempt 并入 Capture.Record；WithCallPass/CallPassFrom 迁 api/plugin、runtime/agent 去 features/evolution import —— 验证：黑名单 grep（Recorder 组织+features/* import 于 runtime 核心）零命中+白名单（event 身份）不受扰+`go test ./runtime/agent ./features/... -count=1`
 - [ ] 9. C 端口压平：删九词汇常量、assemble 具名派发、EXTENSIONS.md:11/:28+skeleton_assert+误声明用例同步 —— 验证：全仓 grep `MaterialCall|MaterialRequest|MaterialFact|Product(Call|Ruling|Observation|View|Compression|Environment)` =0+六端口派发测试绿
 - [ ] 10. D 热更新三档：字段映射表；tools/plugins 二档具名拒绝；storage/ReadRoot/Exec 二档 compatibleWith 具名拒绝；PublishUnchanged 锚 —— 验证：reload 三档测试（新代可变/越档具名拒绝/同指纹 PublishUnchanged）

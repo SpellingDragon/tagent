@@ -109,7 +109,7 @@ func TestTaskLifecycle(t *testing.T) {
 		}
 		progress := task.Notice{TaskID: taskA, Round: 1, Kind: task.NoticeProgress, Seq: 0, Event: "evt-progress-a"}
 		progressEnvelope := task.Envelope{Notice: progress, Target: specA.Target, Source: specA.Source, TargetInstance: specA.InstanceID}
-		if result, err := registry.Advance(ctx, taskA, task.StatusProgress, "progress-a", []task.Envelope{progressEnvelope}); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskA, task.StatusRunning, "progress-a", []task.Envelope{progressEnvelope}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want task-a reporting progress", result, err)
 		}
 		if open, err := manager.Obligations(ctx, taskA); err != nil || open.Count != 2 {
@@ -246,7 +246,7 @@ func TestTaskLifecycle(t *testing.T) {
 		second := task.Notice{TaskID: taskC, Round: 1, Kind: task.NoticeProgress, Seq: 1, Event: "evt-progress-c-1"}
 		firstEnvelope := task.Envelope{Notice: first, Target: specC.Target, Source: specC.Source, TargetInstance: specC.InstanceID}
 		secondEnvelope := task.Envelope{Notice: second, Target: specC.Target, Source: specC.Source, TargetInstance: specC.InstanceID}
-		if result, err := registry.Advance(ctx, taskC, task.StatusProgress, "progress-c", []task.Envelope{firstEnvelope, secondEnvelope}); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskC, task.StatusRunning, "progress-c", []task.Envelope{firstEnvelope, secondEnvelope}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want task-c reporting progress", result, err)
 		}
 		if err := manager.Flush(ctx, taskC); err != nil {

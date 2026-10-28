@@ -114,7 +114,6 @@ const (
 	_ = StatusUnknown
 	_ = StatusAccepted
 	_ = StatusRunning
-	_ = StatusProgress
 	_ = StatusSettled
 	_ = StatusFailed
 	_ = StatusCancelled
@@ -162,6 +161,11 @@ var (
 	_ func(context.Context, event.TaskID, HandoffTarget) error                   = (*MemoryManager)(nil).Handoff
 	_ func(context.Context, event.TaskID) error                                  = (*MemoryManager)(nil).Flush
 )
+
+// The progress read keeps its documented shape: it is a derived read of the
+// committed chain, pinned beside the status machine rather than as one of its
+// values, so a reader asks the chain instead of a status the machine keeps.
+var _ func(*MemoryRegistry, context.Context, event.TaskID) (bool, error) = (*MemoryRegistry).ProgressReported
 
 // The durable restore face keeps its documented shapes: the self-contained
 // restore link beside its codec, the owner-binding port and the named

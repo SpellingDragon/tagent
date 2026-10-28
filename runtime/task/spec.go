@@ -61,6 +61,11 @@ type Serialization string
 // Status is the state a task moves through from admission to settlement. The
 // zero value is StatusUnknown, so a task whose status was never set is read as
 // unknown rather than as accepted.
+//
+// Every value here is a state a transition commits. In-flight progress is not
+// one of them: a progress report is a Notification the chain carries, and
+// ProgressReported derives that answer from the chain, so a reader asks for it
+// instead of reading a status the machine would have to keep in step.
 type Status int
 
 const (
@@ -72,9 +77,21 @@ const (
 	StatusAccepted
 	// StatusRunning is a task whose execution is under way.
 	StatusRunning
-	// StatusProgress reports in-flight progress of a running task. It is not a
-	// terminal status.
-	StatusProgress
+	// statusProgressRetired is the ordinal the progress status held while it was
+	// still storable. A progress report travels as a NoticeProgress beside the
+	// fact that carries it, so a status value for it repeated information the
+	// committed chain already holds and moved no task anywhere the chain could
+	// not read back; its write authority is gone with it. Every transition that
+	// used to name it moves the task to StatusRunning instead, and no transition
+	// writes this ordinal.
+	//
+	// The ordinal stays reserved rather than closed, because a status is stored
+	// as its ordinal: closing the gap would shift every later status by one, so
+	// a chain written before this removal would replay its settled fact as a
+	// failed one. replayedStatus reads the reserved ordinal back as
+	// StatusRunning, and the progress read of that task still answers progress
+	// from the notification the chain carries.
+	statusProgressRetired
 	// StatusSettled is a task whose terminal outcome has been committed.
 	StatusSettled
 	// StatusFailed is a task whose execution ended in failure.

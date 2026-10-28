@@ -75,7 +75,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 		if err != nil {
 			t.Fatalf("issue notice: %v", err)
 		}
-		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, mutation, []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskID, task.StatusRunning, mutation, []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want the notification committed beside its frozen routing", result, err)
 		}
 		return envelope
@@ -200,7 +200,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 			}
 		}
 
-		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, "progress-claims-1", []task.Envelope{before}); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskID, task.StatusRunning, "progress-claims-1", []task.Envelope{before}); result != task.CommitCommitted || err != nil {
 			t.Fatalf("repeated mutation = (%v, %v), want the fact already stored", result, err)
 		}
 		repeated := 0
@@ -261,7 +261,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 		if err != nil {
 			t.Fatalf("restore: %v", err)
 		}
-		if len(report.Tasks) != 1 || report.Tasks[0].TaskID != taskID || !report.Tasks[0].Recovered || report.Tasks[0].Status != task.StatusProgress {
+		if len(report.Tasks) != 1 || report.Tasks[0].TaskID != taskID || !report.Tasks[0].Recovered || report.Tasks[0].Status != task.StatusRunning {
 			t.Fatalf("restore report = %+v, want the task rebuilt from the chain", report)
 		}
 		if !errors.Is(report.Tasks[0].Refused, task.ErrTargetRemoved) {
@@ -369,7 +369,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 			}
 			notices = append(notices, envelope)
 		}
-		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, "progress-seq", notices); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskID, task.StatusRunning, "progress-seq", notices); result != task.CommitCommitted || err != nil {
 			t.Fatalf("advance = (%v, %v), want the three progress notifications committed", result, err)
 		}
 		if err := manager.Flush(ctx, taskID); err != nil {
@@ -402,7 +402,7 @@ func TestHandoffFutureNotifications(t *testing.T) {
 		if owed != 3 {
 			t.Fatalf("stored %d notifications, want one fact per identity and none for the repeated transport", owed)
 		}
-		if result, err := registry.Advance(ctx, taskID, task.StatusProgress, "progress-seq", notices); result != task.CommitCommitted || err != nil {
+		if result, err := registry.Advance(ctx, taskID, task.StatusRunning, "progress-seq", notices); result != task.CommitCommitted || err != nil {
 			t.Fatalf("repeated mutation = (%v, %v), want the fact already stored", result, err)
 		}
 		if facts := len(carrier.Facts(taskID)); facts != 3 {

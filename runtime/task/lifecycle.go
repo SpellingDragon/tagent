@@ -61,7 +61,16 @@ func WithConcurrencyLimit(limit int) RegistryOption {
 type obligationEntry struct {
 	obligation Obligation
 	envelope   Envelope
-	answered   bool
+	// answered reports whether the target already refused this notification.
+	// The flag keeps its write authority because the answer it records has no
+	// fact carrier: the durable account stores the state of an obligation and
+	// never the words the target answered with, so no chain reads the refusal
+	// back. It also changes what the flush may do — a notification already
+	// answered is not offered again as though nothing had been said — so it is a
+	// decision input rather than a report. Recording the refusal in the account
+	// would be a new persistent surface, which the responsibility range of this
+	// change does not carry.
+	answered bool
 }
 
 // specDeclarer is the optional admission-material face a commit carrier may
@@ -79,14 +88,31 @@ type specDeclarer interface {
 // revision it holds, the mutations recorded against it, and the obligations a manager
 // still holds for it.
 type memoryTask struct {
-	spec            Spec
-	status          Status
-	revision        int64
-	round           int64
-	mutations       map[MutationID]CommitRecord
-	obligations     []obligationEntry
-	blocked         []BlockedObligation
-	exitReason      string
+	spec        Spec
+	status      Status
+	revision    int64
+	round       int64
+	mutations   map[MutationID]CommitRecord
+	obligations []obligationEntry
+	// blocked keeps the reason beside each notification whose delivery could not
+	// proceed. It keeps its write authority for the same reason obligationEntry
+	// keeps answered: a refusal's own words have no fact carrier, so the chain
+	// cannot compute them back, and the record changes what a reader may conclude
+	// about the task — an obligation reported as blocked is not reported as still
+	// on its way. Writing the reason into the account is a new persistent surface
+	// and stays outside this change.
+	blocked []BlockedObligation
+	// exitReason is the reason an obligation ended without settlement, reported
+	// beside the obligations. It is a report field, not a gate: nothing reads it
+	// to decide what the task may do next, and the chain carries the cancelled
+	// fact without the executor's words, so a restart reports an empty reason
+	// rather than an inferred one.
+	exitReason string
+	// cancelRequested remembers that a caller asked for this task's cancellation.
+	// It keeps its write authority: it gates whether a confirmed stop may record
+	// the cancelled fact (a stop with no request open is refused by name), and no
+	// committed fact carries the request, so a restart reads it as unrequested
+	// rather than inferring a request from a status.
 	cancelRequested bool
 	stops           []StopEvidence
 	handoff         *HandoffTarget
@@ -273,7 +299,7 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
 		return AdmissionReceipt{TaskID: taskID, Accepted: true, Kind: AdmissionFresh}, nil
 	}
 	switch entry.status {
-	case StatusRunning, StatusProgress:
+	case StatusRunning:
 		return AdmissionReceipt{TaskID: taskID, Accepted: false, Kind: AdmissionRejected}, ErrRoundInFlight
 	case StatusCancelled:
 		return AdmissionReceipt{TaskID: taskID, Accepted: false, Kind: AdmissionRejected}, ErrResumeCancelled
@@ -395,14 +421,14 @@ func (r *MemoryRegistry) envelopeOf(taskID event.TaskID, notice Notice) (Envelop
 // status it holds: a call parked at admission beside an execution under way. The
 // wait is execution-phase information, so no terminal task enters it.
 func entersApprovalWait(from Status) bool {
-	return from == StatusAccepted || from == StatusRunning || from == StatusProgress
+	return from == StatusAccepted || from == StatusRunning
 }
 
 // leavesApprovalWait reports whether a task may leave the approval wait for the
 // status it moves to: the execution continues under way, or a terminal fact
 // lands on the wait. A wait never re-opens an admission.
 func leavesApprovalWait(to Status) bool {
-	return to == StatusRunning || to == StatusProgress ||
+	return to == StatusRunning ||
 		to == StatusSettled || to == StatusFailed || to == StatusCancelled
 }
 

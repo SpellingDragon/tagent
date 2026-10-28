@@ -9,6 +9,17 @@ exactly as it stands.
 
 红线: 逻辑状态=纯观测：只标记，不改状态机、不自动处置（不 kill 不中断）——处置走 Governor 策略面。
 
+This file holds the progress read of a task. Progress is a fact a running task
+reports, not a state it is moved to: the report travels as a NoticeProgress in
+the outbox of the fact that carries it, so the committed chain already answers
+whether progress was reported. ProgressReported derives that answer from the
+chain, which is what makes it the same answer for a registry that watched the
+task and for one that rebuilt it from the chain — a stored status could not
+make that promise, because the write had to be kept in step with the fact and a
+rebuild could only see one of the two.
+
+红线: 派生读只读已提交事实：不写 status、revision、mutation 或 obligation，反复读与只读一次同效。
+
 Package task is the runtime's task admission and settlement layer. It declares
 the declaration a tool, sub-agent or result-delivery call is admitted under,
 the status a task moves through, and the ports through which a transition is
@@ -843,6 +854,17 @@ func (r *MemoryRegistry) Lookup(ctx context.Context, taskID event.TaskID) (Spec,
     Lookup returns the declaration and status of the task with the given
     identity.
 
+func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.TaskID) (bool, error)
+    ProgressReported reports whether the task stands in the running phase with
+    progress reported beside it: the task holds no terminal fact, its status is
+    StatusRunning, and a fact on its chain carries a NoticeProgress.
+
+    The read covers the whole committed chain and never only the current round.
+    The round a task is at is not readable from the chain alone — folding a
+    chain advances the round past the notices it carries — so a round-scoped
+    read would answer differently for a live task and for the task restored from
+    its own chain. The chain-wide read is the one both faces agree on.
+
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error)
     Register admits one task declaration and returns its admission receipt.
     A repeated admission of the same dedup key reports the task of the
@@ -1249,6 +1271,11 @@ type Status int
     The zero value is StatusUnknown, so a task whose status was never set is
     read as unknown rather than as accepted.
 
+    Every value here is a state a transition commits. In-flight progress is
+    not one of them: a progress report is a Notification the chain carries,
+    and ProgressReported derives that answer from the chain, so a reader asks
+    for it instead of reading a status the machine would have to keep in step.
+
 const (
 	// StatusUnknown is the zero value: the task's status is not determinable. It
 	// is surfaced rather than downgraded to a settled outcome.
@@ -1258,9 +1285,7 @@ const (
 	StatusAccepted
 	// StatusRunning is a task whose execution is under way.
 	StatusRunning
-	// StatusProgress reports in-flight progress of a running task. It is not a
-	// terminal status.
-	StatusProgress
+
 	// StatusSettled is a task whose terminal outcome has been committed.
 	StatusSettled
 	// StatusFailed is a task whose execution ended in failure.

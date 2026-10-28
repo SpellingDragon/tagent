@@ -135,7 +135,7 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if err != nil {
 			t.Fatalf("issue the notification after the handoff: %v", err)
 		}
-		if _, err := registry.Advance(ctx, taskID, StatusProgress, "progress", []Envelope{after}); err != nil {
+		if _, err := registry.Advance(ctx, taskID, StatusRunning, "progress", []Envelope{after}); err != nil {
 			t.Fatalf("commit the notification after the handoff: %v", err)
 		}
 		chain, err := manager.RecoveryMaterial(ctx, "instance-b")
@@ -153,8 +153,11 @@ func TestHandoffRestoreInvariants(t *testing.T) {
 		if len(report.Tasks) != 1 || !report.Tasks[0].Recovered {
 			t.Fatalf("restore report = %+v, want the one task rebuilt from the chain", report)
 		}
-		if got := report.Tasks[0].Status; got != StatusProgress {
-			t.Fatalf("restored status = %v, want the status the chain ends at", got)
+		if got := report.Tasks[0].Status; got != StatusRunning {
+			t.Fatalf("restored status = %v, want the running phase the chain ends at", got)
+		}
+		if reported, err := restored.ProgressReported(ctx, taskID); err != nil || !reported {
+			t.Fatalf("progress reported by the restored task = (%v, %v), want the progress the chain carries", reported, err)
 		}
 		restoredManager := NewMemoryManager(restored, nil)
 		record, err := restoredManager.HandoffOf(ctx, taskID)

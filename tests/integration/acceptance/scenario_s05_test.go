@@ -87,7 +87,7 @@ func scenarioIssueProgress(t *testing.T, face *scenarioTaskFace, taskID event.Ta
 	if err != nil {
 		t.Fatalf("issue the notification of %s: %v", taskID, err)
 	}
-	if result, err := face.Advance(ctx, taskID, task.StatusProgress, mutation, []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
+	if result, err := face.Advance(ctx, taskID, task.StatusRunning, mutation, []task.Envelope{envelope}); result != task.CommitCommitted || err != nil {
 		t.Fatalf("commit the notification of %s = (%v, %v), want the notification committed beside its frozen routing", taskID, result, err)
 	}
 	return envelope
