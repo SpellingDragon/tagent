@@ -774,6 +774,7 @@ func seedConsumptionProcess(t *testing.T, root, out string) {
 		t.Fatalf("invoke the seeded runtime: %v", err)
 	}
 	addresses := []event.Address{consumptionSeedAddress, consumptionClaimAddress}
+	waitSeedNoticeConsumed(t, ctx, run, addresses)
 	report.Tasks = consumptionTaskViews(t, ctx, run, addresses)
 	report.Notices = consumptionNoticeViews(t, ctx, run, addresses)
 	report.Notes = append(report.Notes, "the seed waits for the parent's kill and never closes")
@@ -1528,6 +1529,35 @@ func consumptionChildCommand(mode, root, out string) *exec.Cmd {
 		consumptionChildOutEnv+"="+out,
 	)
 	return cmd
+}
+
+// waitSeedNoticeConsumed waits until the settle drive has landed the
+// consumption receipt of the invocation's settled notification: the drive
+// runs beside the invocation and its disk writes make the receipt a matter
+// of time, so the report the parent interrupts on names an arrived fact and
+// the mailbox phases beside it stop moving under the report's feet.
+func waitSeedNoticeConsumed(t *testing.T, ctx context.Context, run *assembly.Run, addresses []event.Address) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	last := consumptionNoticeViews(t, ctx, run, addresses)
+	for {
+		time.Sleep(20 * time.Millisecond)
+		current := consumptionNoticeViews(t, ctx, run, addresses)
+		still := fmt.Sprint(last) == fmt.Sprint(current)
+		consumed := false
+		for _, view := range current {
+			if view.Phase == string(query.NoticePhaseConsumed) {
+				consumed = true
+			}
+		}
+		if still && consumed {
+			return
+		}
+		last = current
+		if time.Now().After(deadline) {
+			t.Fatalf("the notifications read %+v, want the settle drive's consumption receipt landed and the phases quiet", current)
+		}
+	}
 }
 
 // waitConsumptionReport waits for the child's atomic report.
