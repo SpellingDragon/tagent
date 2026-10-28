@@ -20,7 +20,7 @@ func (passingCompress) Name() string { return "passing-compress" }
 
 // Port reports the fact->compression port the element serves.
 func (passingCompress) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+	return plugin.PortFactCompression
 }
 
 // TriggerCompress answers the request it was handed without an error, so the pass carries
@@ -42,7 +42,7 @@ func (refusingCompress) Name() string { return "refusing-compress" }
 
 // Port reports the fact->compression port the element serves.
 func (refusingCompress) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductCompression}
+	return plugin.PortFactCompression
 }
 
 // TriggerCompress answers the refusal it was built with, which refuses the whole pass.

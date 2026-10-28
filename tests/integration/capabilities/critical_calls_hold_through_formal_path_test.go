@@ -400,7 +400,7 @@ func (g *criticalGrader) Name() string { return "critical-grader" }
 
 // Port returns the single port the test instance serves.
 func (g *criticalGrader) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk grades one tool call from the table the grader carries.

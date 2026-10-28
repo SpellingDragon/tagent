@@ -39,7 +39,7 @@ func TestPluginPhaseOrdering(t *testing.T) {
 		}}
 		log := &phaseLog{}
 		var sawTransformName, sawTransformArgs, sawRiskName, sawRiskArgs string
-		renamer := &phaseFace{name: "renamer", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}, log: log,
+		renamer := &phaseFace{name: "renamer", port: plugin.PortCallTransform, log: log,
 			transform: func(call *model.ToolCall) error {
 				sawTransformName = call.Function.Name
 				sawTransformArgs = string(call.Function.Arguments)
@@ -47,7 +47,7 @@ func TestPluginPhaseOrdering(t *testing.T) {
 				call.Function.Arguments = []byte(`{"x":2}`)
 				return nil
 			}}
-		grader := &phaseFace{name: "grader", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}, log: log,
+		grader := &phaseFace{name: "grader", port: plugin.PortCallRuling, log: log,
 			risk: func(call *model.ToolCall) plugin.RiskLevel {
 				sawRiskName = call.Function.Name
 				sawRiskArgs = string(call.Function.Arguments)
@@ -125,8 +125,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			return convFinalTurn("settled")
 		}}
 		log := &phaseLog{}
-		observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log}
-		presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
+		observer := &phaseFace{name: "observer", port: plugin.PortFactObservation, log: log}
+		presenter := &phaseFace{name: "presenter", port: plugin.PortFactView, log: log}
 		cooked := &phaseTool{name: "echo-final", output: "never", log: log}
 		deny := task.Approver(func(ctx context.Context, tool string, jsonArgs []byte) (task.Ruling, error) {
 			return task.Ruling{Kind: task.RulingDeny, Reason: "risk rule"}, nil
@@ -186,13 +186,13 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			var rig *phaseRig
 			var observed event.EventID
 			var observedCommitted bool
-			observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log,
+			observer := &phaseFace{name: "observer", port: plugin.PortFactObservation, log: log,
 				observe: func(fact event.EventID) error {
 					observed = fact
 					_, observedCommitted = rig.facts.resolve(fact)
 					return nil
 				}}
-			presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
+			presenter := &phaseFace{name: "presenter", port: plugin.PortFactView, log: log}
 			cooked := &phaseTool{name: "echo-final", output: "final-out", log: log}
 			rig = newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, nil, log)
 
@@ -220,8 +220,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 				return convFinalTurn("settled")
 			}}
 			log := &phaseLog{}
-			observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log}
-			presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
+			observer := &phaseFace{name: "observer", port: plugin.PortFactObservation, log: log}
+			presenter := &phaseFace{name: "presenter", port: plugin.PortFactView, log: log}
 			cooked := &phaseTool{name: "echo-final", output: "never", log: log}
 			deny := task.Approver(func(ctx context.Context, tool string, jsonArgs []byte) (task.Ruling, error) {
 				return task.Ruling{Kind: task.RulingDeny, Reason: "risk rule"}, nil
@@ -245,8 +245,8 @@ func TestPluginPhaseOrdering(t *testing.T) {
 				return convFinalTurn("settled")
 			}}
 			log := &phaseLog{}
-			observer := &phaseFace{name: "observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log}
-			presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log}
+			observer := &phaseFace{name: "observer", port: plugin.PortFactObservation, log: log}
+			presenter := &phaseFace{name: "presenter", port: plugin.PortFactView, log: log}
 			cooked := &phaseTool{name: "echo-final", output: "final-out", log: log}
 			rig := newPhaseRig(t, provider, []*phaseTool{cooked}, []plugin.Instance{observer, presenter}, nil, log)
 			rig.failRecord(errors.New("the recorder is down"))
@@ -277,11 +277,11 @@ func TestPluginPhaseOrdering(t *testing.T) {
 			return convFinalTurn("settled")
 		}}
 		log := &phaseLog{}
-		bad := &phaseFace{name: "bad-observer", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, log: log,
+		bad := &phaseFace{name: "bad-observer", port: plugin.PortFactObservation, log: log,
 			observe: func(event.EventID) error {
 				return errors.New("the observer is down")
 			}}
-		presenter := &phaseFace{name: "presenter", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, log: log,
+		presenter := &phaseFace{name: "presenter", port: plugin.PortFactView, log: log,
 			present: func(fact event.EventID) (string, bool) {
 				return "view:" + string(fact), false
 			}}

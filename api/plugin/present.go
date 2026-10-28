@@ -29,7 +29,7 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
 	for _, face := range p.observers {
 		started := time.Now()
 		err := face.impl.ObserveCommit(ctx, fact)
-		observeFace(Port{Reads: MaterialFact, Produces: ProductObservation}, faceObserve, face.name, faceResult(err), "fact="+string(fact), started)
+		observeFace(PortFactObservation, faceObserve, face.name, faceResult(err), "fact="+string(fact), started)
 		if err != nil {
 			out.Gaps = append(out.Gaps, face.gap(fact, err))
 		}
@@ -37,7 +37,7 @@ func (p Pipeline) After(ctx context.Context, fact event.EventID) view.Presentati
 	for _, face := range p.presenters {
 		started := time.Now()
 		text, dropped := face.impl.Present(ctx, fact)
-		observeFace(Port{Reads: MaterialFact, Produces: ProductView}, facePresent, face.name, facePresentation(dropped), "fact="+string(fact), started)
+		observeFace(PortFactView, facePresent, face.name, facePresentation(dropped), "fact="+string(fact), started)
 		out.Views = append(out.Views, view.RenderedView{Plugin: face.name, Text: text, Dropped: dropped})
 	}
 	return out

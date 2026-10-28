@@ -15,7 +15,7 @@ func (environmentBlocks) Name() string { return "environment-blocks" }
 
 // Port reports the request->environment port the element serves.
 func (environmentBlocks) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialRequest, Produces: plugin.ProductEnvironment}
+	return plugin.PortRequestEnvironment
 }
 
 // InjectEnvironment renders the environment material of one assembly: the clock and the
@@ -34,7 +34,7 @@ func (silentEnvironment) Name() string { return "silent-environment" }
 
 // Port reports the request->environment port the element serves.
 func (silentEnvironment) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialRequest, Produces: plugin.ProductEnvironment}
+	return plugin.PortRequestEnvironment
 }
 
 // InjectEnvironment answers no block and no error for the assembly it holds nothing for.

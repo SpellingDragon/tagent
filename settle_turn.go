@@ -240,7 +240,7 @@ func (d *SettleDriver) Name() string { return "settle-driver" }
 // Port reports the consumption this driver serves: one committed fact in, one
 // observation out. The observation is the follow-up turn the fact may fire.
 func (d *SettleDriver) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // DrivesObligation marks this face's duty: the observation wakes the pump, and the

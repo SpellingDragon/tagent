@@ -95,7 +95,7 @@ func (p *Policy) Name() string { return "governance-policy" }
 // it. The grade the ruling consumes is the risk face's product, so this face
 // declares the call->ruling port without rendering a second grade.
 func (p *Policy) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // PolicyOption configures the governance gate at construction.

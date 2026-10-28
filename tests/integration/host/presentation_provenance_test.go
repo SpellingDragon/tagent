@@ -25,7 +25,7 @@ func (p *provenancePresenter) Name() string { return p.name }
 
 // Port reports the fact->view port the presenter serves.
 func (p *provenancePresenter) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present records the source fact and answers the view this presenter writes.

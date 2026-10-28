@@ -17,7 +17,7 @@ func (argumentSize) Name() string { return "argument-size" }
 
 // Port reports the call->ruling port the element serves.
 func (argumentSize) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk grades one call before its side effect and answers one declared grade.

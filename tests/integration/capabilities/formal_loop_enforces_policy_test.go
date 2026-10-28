@@ -233,7 +233,7 @@ func (g *policyGrader) Name() string { return "policy-grader" }
 
 // Port returns the single port the test instance serves.
 func (g *policyGrader) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk grades one tool call from the name it carries.
@@ -280,7 +280,7 @@ func (o *policyObserver) Name() string { return o.name }
 
 // Port returns the single port the test instance serves.
 func (o *policyObserver) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit fails the observation beside the plugin name and the fact.
@@ -299,7 +299,7 @@ func (p *policyPresenter) Name() string { return p.name }
 
 // Port returns the single port the test instance serves.
 func (p *policyPresenter) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present renders the presentation text of one committed fact.

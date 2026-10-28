@@ -773,7 +773,7 @@ func (g *govGrader) Name() string { return g.name }
 
 // Port reports the call->ruling port the risk face serves.
 func (g *govGrader) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // AssessRisk grades one tool call before its side effect runs.

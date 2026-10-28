@@ -73,7 +73,7 @@ func (o *LeaseObserver) Name() string { return "model-lease" }
 // observation out. The observation is the replacement the fact applies to the
 // lease.
 func (o *LeaseObserver) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit reads the fact one commit wrote and applies a model replacement

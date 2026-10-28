@@ -343,14 +343,14 @@ type Instance interface {
 	// Name returns the stable name of this instance.
 	Name() string
 
-	// Port reports the material this instance reads and the product it answers.
+	// Port reports the port this instance serves.
 	Port() Port
 }
     Instance is one instance of the material flow. The drive that runs one
     decision, the tick that runs one reflection and the assembler that builds
     one request are built-in instances; a plugin is an instance the composition
     root mounts. What an instance is differs only in who mounts it: the flow
-    dispatches every instance by the material its port reads.
+    dispatches every instance by the port it declares.
 
     The redline list (3 rules): MUST declare the one port it serves and
     implement that port's narrow interface. MUST NOT declare a port it does
@@ -371,23 +371,6 @@ const (
 	// LayerMetric is the metric layer: the counter the SDK adds for one
 	// committed fact.
 	LayerMetric Layer = "metric"
-)
-type Material string
-
-    Material names one kind of material the flow moves between its faces:
-    the call a tool is about to run, the request an assembly builds, and the
-    fact a commit wrote. A face reads exactly one material and never rewrites it
-    in place.
-
-const (
-	// MaterialCall is the call material: one tool call before its side effect.
-	MaterialCall Material = "call"
-
-	// MaterialRequest is the request material: one request assembly.
-	MaterialRequest Material = "request"
-
-	// MaterialFact is the fact material: one committed fact.
-	MaterialFact Material = "fact"
 )
 type ObservationSink interface {
 	// Observe reports one committed fact to the observation side. The fact is
@@ -558,25 +541,45 @@ func (p Pipeline) TriggerCompress(ctx context.Context, request event.CompressReq
     request as compressed. A pipeline carrying no compression face answers nil,
     so a consumer wired without one refuses nothing of the request it read.
 
-type Port struct {
-	// Reads is the material this instance reads.
-	Reads Material
+type Port string
 
-	// Produces is the product this instance answers.
-	Produces Product
-}
-    Port is the declaration of one flow instance: the material it reads and the
-    product it answers. The pair is the whole routing of the flow — the narrow
-    interface the instance is held to and the pass that dispatches it are both
-    readings of it.
+    Port names one declared port of the material flow. Exactly six exist,
+    each spelling the routing it stands for — the material the face reads
+    beside the product it answers — and a face serves one of them by name.
+    Nothing routes by a material or a product read on its own, because no pass
+    ever walks the materials as a set: a port constant is the whole declaration.
 
-    The redline list (2 rules): MUST declare exactly one read material and one
-    product; an element serving two ports is two instances. MUST implement the
+    The redline list (2 rules): MUST serve one of the six declared ports; a name
+    outside the set is refused rather than matched to a port. MUST implement the
     narrow interface of the declared port.
 
+const (
+	// PortCallTransform is the port a call transform serves: it reads the call a
+	// tool is about to run and answers the corrected call of the same identity.
+	PortCallTransform Port = "call->call"
+
+	// PortCallRuling is the port the pre-execution ruling serves: it reads the
+	// call and answers the ruling over it, the risk grade beside the decision.
+	PortCallRuling Port = "call->ruling"
+
+	// PortRequestEnvironment is the port environment injection serves: it reads
+	// one request assembly and answers the environment blocks of it.
+	PortRequestEnvironment Port = "request->environment"
+
+	// PortFactObservation is the port a post-commit observer serves: it reads one
+	// committed fact and answers a read-only observation that never rewrites it.
+	PortFactObservation Port = "fact->observation"
+
+	// PortFactView is the port a final presenter serves: it reads one committed
+	// fact and answers the views rendered from it.
+	PortFactView Port = "fact->view"
+
+	// PortFactCompression is the port a compress trigger serves: it reads one
+	// committed fact and answers the compression a filed request asks for.
+	PortFactCompression Port = "fact->compression"
+)
 func (p Port) String() string
-    String spells one port as the material it reads beside the product it
-    answers.
+    String spells one port as the routing it stands for.
 
 type PostCommitObserver interface {
 	ObserveCommit(ctx context.Context, id event.EventID) error
@@ -594,37 +597,6 @@ type PostCommitObserver interface {
     MUST carry the driver duty when a failed observation leaves work owed,
     and keep that obligation in a durable account of its own.
 
-type Product string
-    Product names what one face answers out of the material it reads:
-    the corrected call, the ruling over a call, the observation of a fact, the
-    view of a fact, the compression a filed request asks for and the environment
-    blocks of a request.
-
-const (
-	// ProductCall is the corrected call: the same identity, a corrected name and
-	// corrected arguments.
-	ProductCall Product = "call"
-
-	// ProductRuling is the ruling over one call: the grade of the call beside the
-	// one pre-execution decision.
-	ProductRuling Product = "ruling"
-
-	// ProductObservation is the observation of one fact: a read-only reading that
-	// never rewrites the fact.
-	ProductObservation Product = "observation"
-
-	// ProductView is the presentation of one fact: one view per presenter, traced
-	// to the fact it was rendered from.
-	ProductView Product = "view"
-
-	// ProductCompression is the compression one filed request asks for: the chain
-	// the request drives, never the curation itself.
-	ProductCompression Product = "compression"
-
-	// ProductEnvironment is the environment material one request assembly carries:
-	// one block per product, each block traced to the request.
-	ProductEnvironment Product = "environment"
-)
 type RiskAssessor interface {
 	AssessRisk(ctx context.Context, call *trpcmodel.ToolCall) RiskLevel
 }

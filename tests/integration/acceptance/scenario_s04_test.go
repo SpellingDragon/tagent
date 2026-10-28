@@ -28,7 +28,7 @@ func (p *scenarioTransform) Name() string { return "scenario-transform" }
 
 // Port reports the call->call port.
 func (p *scenarioTransform) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformCall rewrites one call's arguments to the final body.
@@ -61,7 +61,7 @@ func (p *scenarioPolicy) Name() string { return "scenario-policy" }
 
 // Port reports the call->ruling port the ruling belongs to.
 func (p *scenarioPolicy) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductRuling}
+	return plugin.PortCallRuling
 }
 
 // Judge renders the one ruling of a call.
@@ -120,7 +120,7 @@ func (p *scenarioPresenter) Name() string { return "scenario-presenter" }
 
 // Port reports the fact->view port.
 func (p *scenarioPresenter) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}
+	return plugin.PortFactView
 }
 
 // Present renders the presentation text of one fact identity.

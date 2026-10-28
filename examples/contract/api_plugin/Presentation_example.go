@@ -17,7 +17,7 @@ func (brokenAudit) Name() string { return "broken-audit" }
 
 // Port reports the fact->observation port the element serves.
 func (brokenAudit) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit fails on every committed fact, so the After pass records a gap.

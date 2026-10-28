@@ -103,7 +103,7 @@ func (p *AgeFoldPlugin) Name() string { return AgeFoldPluginName }
 // Port reports the consumption the plugin serves: one committed fact in, one
 // observation out. The observation is the fold the fact may trigger.
 func (p *AgeFoldPlugin) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit folds the projection of the session the committed fact belongs

@@ -121,7 +121,7 @@ func (p observePlugin) Name() string { return "observation" }
 
 // Port reports the fact->observation port this instance serves.
 func (p observePlugin) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit delegates one committed fact to the wired observer.

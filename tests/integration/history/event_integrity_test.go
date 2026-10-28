@@ -875,7 +875,7 @@ func (p *handoverProbe) Name() string { return "handover-probe" }
 
 // Port returns the single port the probe serves.
 func (p *handoverProbe) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}
+	return plugin.PortFactObservation
 }
 
 // ObserveCommit holds the settled delivery of a tool call at the handover

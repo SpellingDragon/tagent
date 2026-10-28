@@ -17,7 +17,7 @@ func (registrationOnly) Name() string { return "registration-only" }
 
 // Port reports the call->call port the element declares.
 func (registrationOnly) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformFace is the canonical instance: one name, the one port it serves and the one
@@ -29,7 +29,7 @@ func (TransformFace) Name() string { return "transform-face" }
 
 // Port reports the call->call port the element serves.
 func (TransformFace) Port() plugin.Port {
-	return plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}
+	return plugin.PortCallTransform
 }
 
 // TransformCall corrects one call before its side effect; the corrected call is the one

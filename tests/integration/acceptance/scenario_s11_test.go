@@ -107,8 +107,8 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 
 	declared := decl.Agents[0].Plugins
 	declaredAfter := scenarioDeclaredPortOrder(declared, recorder.plugins(),
-		plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation},
-		plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView})
+		plugin.PortFactObservation,
+		plugin.PortFactView)
 	settleDeadline := time.Now().Add(5 * time.Second)
 	for len(recorder.afterGroups()) < len(parentRequests)+1 && time.Now().Before(settleDeadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -118,7 +118,7 @@ func TestScenario11ConfigDrivenSubagentAndPipeline(t *testing.T) {
 	observations["parent_pipeline_after_order"] = afterGroups
 	observations["parent_pipeline_matches_declaration"] =
 		scenarioSameOrder(recorder.beforeOrder(), scenarioDeclaredOrder(declared, recorder.plugins(),
-			plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall})) &&
+			plugin.PortCallTransform)) &&
 			scenarioEveryGroupIs(afterGroups, declaredAfter)
 	observations["parent_instruction_from_declared_file"] =
 		scenarioAnyMessage(parentRequests[0].Messages, scenarioParentInstruction)
@@ -228,10 +228,10 @@ func (r *scenarioPhaseRecorder) declaredElements(t *testing.T, names []string) [
 // face the declaration names.
 func (r *scenarioPhaseRecorder) plugins() []plugin.Instance {
 	return []plugin.Instance{
-		&scenarioPhasePlugin{name: "transform-a", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}, recorder: r},
-		&scenarioPhasePlugin{name: "transform-b", port: plugin.Port{Reads: plugin.MaterialCall, Produces: plugin.ProductCall}, recorder: r},
-		&scenarioPhasePlugin{name: "observe-a", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductObservation}, recorder: r},
-		&scenarioPhasePlugin{name: "presenter-b", port: plugin.Port{Reads: plugin.MaterialFact, Produces: plugin.ProductView}, recorder: r},
+		&scenarioPhasePlugin{name: "transform-a", port: plugin.PortCallTransform, recorder: r},
+		&scenarioPhasePlugin{name: "transform-b", port: plugin.PortCallTransform, recorder: r},
+		&scenarioPhasePlugin{name: "observe-a", port: plugin.PortFactObservation, recorder: r},
+		&scenarioPhasePlugin{name: "presenter-b", port: plugin.PortFactView, recorder: r},
 	}
 }
 
