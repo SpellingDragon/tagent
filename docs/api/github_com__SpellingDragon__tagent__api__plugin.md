@@ -43,6 +43,15 @@ var ErrObservationObligationRetained = errors.New("plugin: the observation faile
     this error and never as a delivered observation. The cause is wrapped beside
     it, so a reader learns from one error what failed and what stayed owed.
 
+FUNCTIONS
+
+func WithCallPass(ctx context.Context, pass CallPass) context.Context
+    WithCallPass carries the one Before pass of a tool call on the context of
+    that call, so the admission ruling of the composition root rules over the
+    very pass the dispatch produced. The dispatch is its production writer. The
+    pass is the seam's only value: what triggered the call travels inside it,
+    and no second context key is ever introduced.
+
 TYPES
 
 type Attempt struct {
@@ -120,6 +129,14 @@ type CallPass struct {
     the risk grade advises the pre-execution ruling without ever running a
     second risk face; the trigger source is stated by the dispatching layer that
     knows what started the call, so a ruling has no hidden input of its own.
+
+func CallPassFrom(ctx context.Context) (CallPass, bool)
+    CallPassFrom reports the Before pass the context carries and whether one
+    is set. It is this seam's single typed accessor: a call site reads the pass
+    through it and never through a bare context value, and the composition
+    root's admission ruling is its production reader. A call driven beside no
+    pass reads not-ok, and that caller decides the default — the admission
+    ruling refuses such a call closed rather than ruling at a guess.
 
 type CompressTrigger interface {
 	// TriggerCompress starts the compression one filed compress request drives. A

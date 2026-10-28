@@ -177,17 +177,18 @@ var (
 	}
 )
 
-// The adapter of the execution loop's narrow recording face keeps its declared
+// The adapter of the execution loop's surviving narrow face keeps its declared
 // shape: the constructor over this package's record pipeline and the three
-// face entries it satisfies, each crossing built-in, event and model types only.
+// capture-face entries it satisfies, each crossing built-in, event and model
+// types only.
 var (
 	_ func(Recorder) RecorderAdapter = NewRecorderAdapter
 
-	_ func(RecorderAdapter, context.Context, event.EpisodeID, event.SessionID, time.Time) error = RecorderAdapter.RecordEpisode
+	_ func(RecorderAdapter, context.Context, event.DecisionID, string, string, []string, []string, model.Request) error = RecorderAdapter.Snapshot
 
-	_ func(RecorderAdapter, context.Context, event.DecisionID, event.InvocationID, event.EpisodeID, []event.EventID, string, string, []string, time.Time) error = RecorderAdapter.RecordDecision
+	_ func(RecorderAdapter, context.Context, event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) error = RecorderAdapter.Record
 
-	_ func(RecorderAdapter, context.Context, event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) error = RecorderAdapter.RecordAttempt
+	_ func(RecorderAdapter, context.Context) error = RecorderAdapter.Seal
 )
 
 // The schema versions and record kinds are compile-time constants, so the

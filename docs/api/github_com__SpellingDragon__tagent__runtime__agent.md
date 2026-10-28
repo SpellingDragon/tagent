@@ -197,13 +197,17 @@ type Capture interface {
 	Seal(ctx context.Context) error
 }
     Capture is the narrow trajectory capture face this loop fixes and records
-    through beside the training record production face: the request view is
-    fixed before the request starts, every observed attempt is admitted under
-    the capture's own bound, and the turn seals what it held when it ends.
-    The observations cross as the loop observed them — the decision identity,
-    the request view material, the reduced outcome — and never as a record of
-    another package's shape, so the capture side attaches through this face with
-    no package edge into the execution core.
+    through: the request view is fixed before the request starts, every observed
+    attempt is admitted under the capture's own bound, and the turn seals what
+    it held when it ends. The observations cross as the loop observed them
+    — the decision identity, the request view material, the reduced outcome
+    — and never as a record of another package's shape, so the capture side
+    attaches through this face with no package edge into the execution core.
+    The attempt admission is the loop's only record-producing point: the episode
+    identity travels on the ready input, the decision's model view material is
+    what Snapshot fixed before the request started, and the stored input events
+    are the chain the ledger keeps, so no second record kind is minted here to
+    repeat what the run holds.
 
     The redline list (4 rules): MUST fix the request view before the request
     starts and never rebuild it from the options of a finished call. MUST admit
@@ -696,9 +700,8 @@ func (l *Loop) SetAgentFinalRounds(policies map[event.AgentID]FinalRoundPolicy)
 
 func (l *Loop) SetCapture(capture Capture)
     SetCapture attaches the trajectory capture face this loop fixes each
-    decision's request view through, admits each observed attempt beside and
-    seals the turn through. A nil face captures nothing. The production points
-    call the face exactly as the recording face is called: a refused fix, record
+    decision's request view through, admits each observed attempt through and
+    seals the turn through. A nil face captures nothing. A refused fix, record
     or seal is a counted recording loss and never reaches the model decision,
     and the setter is separate from the constructor so the declared construction
     shape of the loop stays as it is.
@@ -746,14 +749,6 @@ func (l *Loop) SetPresentations(sink PresentationSink)
     drops the presentation only, never the fact it was rendered from. The setter
     is separate from the constructor so the declared construction shape of the
     loop stays as it is.
-
-func (l *Loop) SetRecorder(recorder Recorder)
-    SetRecorder attaches the training record production face this loop writes
-    its episode, decision and attempt records through. The production points of
-    this loop write one record per real decision and per observable attempt;
-    a nil recorder keeps the loop recording nothing. The setter is separate from
-    the constructor so the declared construction shape of the loop stays as it
-    is.
 
 func (l *Loop) SetRequestFace(face RequestFace)
     SetRequestFace attaches the request-boundary face this loop assembles each
@@ -840,42 +835,6 @@ type Reconciler interface {
     holds, so a close never reports a drain beside an unlanded terminal. MUST
     NOT hold a terminal past the obligations it waits on, and MUST NOT report
     one before them.
-
-type Recorder interface {
-	// RecordEpisode writes the episode record of one business process at the
-	// point that process actually starts: the application's own episode
-	// boundary the ready input names, the session the invocation runs in and
-	// the time the record was written.
-	RecordEpisode(ctx context.Context, episodeID event.EpisodeID, sessionID event.SessionID, at time.Time) error
-	// RecordDecision writes the decision record of one model decision at the
-	// point that decision produced its terminal: the identities it belongs to,
-	// the stored input events it reduced and the model view material its
-	// request actually ran on, each visible tool named exactly as it ran.
-	RecordDecision(ctx context.Context, decisionID event.DecisionID, invocationID event.InvocationID, episodeID event.EpisodeID, inputs []event.EventID, modelName, promptVersion string, visibleTools []string, at time.Time) error
-	// RecordAttempt writes the attempt record of one observable model attempt at
-	// the point that attempt produced its response: the outcome exactly as the
-	// single model reduction derived it, so the record side shares that terminal
-	// and derives none of its own.
-	RecordAttempt(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
-}
-    Recorder is the narrow training-record production face this loop writes
-    its episode, decision and attempt records through. The methods receive
-    the observations scattered exactly as the production point observed them
-    — the record identities, the stored input events, the model view material
-    and the reduced outcome — and never a record of another package's shape:
-    the signatures cross built-in, event and model types only, so the record
-    production side attaches through this face with no package edge into the
-    execution core, the same stitching the projected request assembly uses.
-
-    The production points of this loop write one record per real decision and
-    per observable attempt; a nil recorder keeps the loop recording nothing, and
-    a recorder error never reaches the model decision: recording is observation,
-    not execution. The redline list (4 rules): MUST write at the observation
-    point, carrying the identities and the values as that point observed them.
-    MUST report every record it could not write as a counted loss beside the
-    record identity. MUST NOT derive a record of its own: the outcome arrives
-    reduced, never re-judged here. MUST NOT let a write failure reach the model
-    decision: recording is observation, not execution.
 
 type RecordingLoss struct {
 	// Kind names the record kind the failed write belonged to: "episode",

@@ -336,9 +336,6 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
-	if cfg.recorder != nil {
-		r.loop.SetRecorder(rl.NewRecorderAdapter(cfg.recorder))
-	}
 	inventory := query.NewInventory(runReading{run: r})
 	r.projection = query.NewProjection(inventory, projectionWindow)
 	r.mcpServers = mcpgw.NewServerRegistry()
@@ -827,11 +824,15 @@ func WithEmbedder(embedder memory.Embedder) Option {
 	return func(c *assemblyConfig) { c.embedder = embedder }
 }
 
-// WithRecorder attaches the training record production face this assembly
-// writes its episode, decision and attempt records through: the production
-// points of the formal root record exactly what they observed, and a write the
-// recorder refuses is counted in the explicit recording-loss account of the
-// run instead of being dropped silently.
+// WithRecorder attaches the training record pipeline this assembly derives its
+// attempt records through: the run admits a decision's request view and an
+// attempt's reduced outcome once, and the pipeline writes one attempt record per
+// admission exactly as the attempt observed it, so a recorded outcome is never
+// re-derived beside the model's own. The episode boundary and the stored input of
+// a decision are not observed at this admission: a pipeline that needs those
+// derives them from the capture's evidence beside the chain the run keeps. A
+// write the recorder refuses is counted in the explicit recording-loss account of
+// the run instead of being dropped silently.
 func WithRecorder(recorder rl.Recorder) Option {
 	return func(c *assemblyConfig) { c.recorder = recorder }
 }
@@ -1732,24 +1733,70 @@ func (r *Run) publishLease(agentID event.AgentID) func(rl.ModelIdentity, model.M
 	}
 }
 
-// mountCapture attaches the trajectory capture to the loop: the run's capture
-// is scoped to one request view per decision and adapted onto the loop's narrow
-// capture face. A capture beside no scope is refused by name before the first
-// publication.
+// mountCapture attaches the trajectory capture and the training recorder to the
+// loop's one evidence face: the run admits a decision's request view and an
+// attempt's reduced outcome once, and hands that admission to every attached
+// face, so the trajectory and the record pipeline never stand as two production
+// points of one attempt. A capture beside no scope is refused by name before the
+// first publication.
 func (r *Run) mountCapture() error {
-	if r.capture == nil {
+	faces := make([]agent.Capture, 0, 2)
+	if r.capture != nil {
+		scope, ok := r.capture.(rl.CaptureScope)
+		if !ok {
+			return fmt.Errorf("%w: %T", ErrCaptureUnscoped, r.capture)
+		}
+		adapter, err := rl.NewCaptureAdapter(scope)
+		if err != nil {
+			return err
+		}
+		faces = append(faces, adapter)
+		r.captureScope = scope
+	}
+	if r.recorder != nil {
+		faces = append(faces, rl.NewRecorderAdapter(r.recorder))
+	}
+	if len(faces) == 0 {
 		return nil
 	}
-	scope, ok := r.capture.(rl.CaptureScope)
-	if !ok {
-		return fmt.Errorf("%w: %T", ErrCaptureUnscoped, r.capture)
+	r.loop.SetCapture(captureFaces(faces))
+	return nil
+}
+
+// captureFaces hands one loop admission to every attached face in order: each
+// face reads the same view material of a decision and the same reduced outcome
+// of an attempt, and the first face that refuses it reports the refusal, so an
+// admission is never counted as taken by a face it never reached.
+type captureFaces []agent.Capture
+
+// Snapshot fixes the view of one decision's request on every attached face.
+func (f captureFaces) Snapshot(ctx context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, visibleSkills []string, req model.Request) error {
+	for _, face := range f {
+		if err := face.Snapshot(ctx, decisionID, modelName, promptVersion, visibleTools, visibleSkills, req); err != nil {
+			return err
+		}
 	}
-	adapter, err := rl.NewCaptureAdapter(scope)
-	if err != nil {
-		return err
+	return nil
+}
+
+// Record admits one observed attempt on every attached face.
+func (f captureFaces) Record(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error {
+	for _, face := range f {
+		if err := face.Record(ctx, attemptID, decisionID, episodeID, outcome); err != nil {
+			return err
+		}
 	}
-	r.loop.SetCapture(adapter)
-	r.captureScope = scope
+	return nil
+}
+
+// Seal closes every attached face: a seal refused by one face is reported rather
+// than read as a completed capture of the turn.
+func (f captureFaces) Seal(ctx context.Context) error {
+	for _, face := range f {
+		if err := face.Seal(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

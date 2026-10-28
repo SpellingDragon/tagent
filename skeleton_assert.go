@@ -93,11 +93,11 @@ var (
 	_ agent.DelegationTasks = closeFace{}
 )
 
-// The training record production face of the execution loop is satisfied by the
-// record pipeline's adapter across the package boundary: the composition root
-// is where both sides meet, so the zero-edge stitching of the face is proven
+// The training record pipeline's adapter satisfies the loop's surviving evidence
+// face across the package boundary: the composition root is where both sides
+// meet, so the stitching of one admission onto one record pipeline is proven
 // here and nowhere else.
-var _ agent.Recorder = rl.RecorderAdapter{}
+var _ agent.Capture = rl.RecorderAdapter{}
 
 // The session transcript face of the execution loop is satisfied by the run's
 // own session history ledger across the package boundary: the composition root

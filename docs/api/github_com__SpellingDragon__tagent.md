@@ -811,11 +811,15 @@ func WithPolicy(policy plugin.Governor) Option
     with its named paired result, and a held call parks in the approval wait.
 
 func WithRecorder(recorder rl.Recorder) Option
-    WithRecorder attaches the training record production face this assembly
-    writes its episode, decision and attempt records through: the production
-    points of the formal root record exactly what they observed, and a write the
-    recorder refuses is counted in the explicit recording-loss account of the
-    run instead of being dropped silently.
+    WithRecorder attaches the training record pipeline this assembly derives
+    its attempt records through: the run admits a decision's request view and an
+    attempt's reduced outcome once, and the pipeline writes one attempt record
+    per admission exactly as the attempt observed it, so a recorded outcome
+    is never re-derived beside the model's own. The episode boundary and the
+    stored input of a decision are not observed at this admission: a pipeline
+    that needs those derives them from the capture's evidence beside the chain
+    the run keeps. A write the recorder refuses is counted in the explicit
+    recording-loss account of the run instead of being dropped silently.
 
 func WithReflectionAnchors(path string) Option
     WithReflectionAnchors points the reflection face of this assembly at the

@@ -19,7 +19,7 @@ import (
 )
 
 // TestConsumersShareTheProtocol drives both in-process consumers over one fact each and checks the protocol they share: read, consume, produce.
-// - the turn-driven consumer reads the one ready fact and commits the decision and attempt records it produces as facts of the same chain
+// - the turn-driven consumer reads the one ready fact and commits the attempt record its evidence face admitted
 // - the time-driven consumer reads the observed fact and fires one reflection input fact beside it
 // - both cite the identity they read on what they produce, and neither rewrites the fact it read
 // 契约: docs/EXTENSIONS.md#consumer-protocol
@@ -33,7 +33,7 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 		sourceKey := rig.ledger.record(source, rig.partition)
 		before := rig.ledger.snapshot()
 		records := &consumerRecords{ledger: rig.ledger, partition: rig.partition}
-		rig.input.loop.SetRecorder(rl.NewRecorderAdapter(records))
+		rig.input.loop.SetCapture(rl.NewRecorderAdapter(records))
 
 		turn, err := rig.input.loop.Drive(ctx, agent.Invocation{
 			InvocationID: event.InvocationID("invocation-turn"),
@@ -54,23 +54,19 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 		}
 
 		decisions, attempts := records.produced()
-		if len(decisions) != 1 || len(attempts) != 1 {
-			t.Fatalf("records = (%d decisions, %d attempts), want one record per production point", len(decisions), len(attempts))
+		if len(decisions) != 0 || len(attempts) != 1 {
+			t.Fatalf("records = (%d decisions, %d attempts), want the one attempt admission the loop keeps", len(decisions), len(attempts))
 		}
-		if len(decisions[0].InputEvents) != 1 || decisions[0].InputEvents[0] != sourceKey {
-			t.Fatalf("decision inputs = %v, want the identity it read (%s)", decisions[0].InputEvents, sourceKey)
+		if attempts[0].DecisionID != turn.Decisions[0].DecisionID || attempts[0].Terminal != model.KindCompleted {
+			t.Fatalf("attempt = (%s, %v), want it to belong to decision %s with the reduced terminal", attempts[0].DecisionID, attempts[0].Terminal, turn.Decisions[0].DecisionID)
 		}
-		if attempts[0].DecisionID != decisions[0].ID || attempts[0].Terminal != model.KindCompleted {
-			t.Fatalf("attempt = (%s, %v), want it to belong to decision %s with the reduced terminal", attempts[0].DecisionID, attempts[0].Terminal, decisions[0].ID)
-		}
-		assertFactProduced(t, rig.ledger, before, sourceKey, event.EventID(decisions[0].ID))
 		assertFactProduced(t, rig.ledger, before, sourceKey, event.EventID(attempts[0].ID))
-		decisionFact, err := rig.ledger.CommittedFact(ctx, event.EventID(decisions[0].ID))
+		attemptFact, err := rig.ledger.CommittedFact(ctx, event.EventID(attempts[0].ID))
 		if err != nil {
-			t.Fatalf("read the decision fact: %v", err)
+			t.Fatalf("read the attempt fact: %v", err)
 		}
-		if !strings.Contains(decisionFact.Message.Content, string(sourceKey)) {
-			t.Fatalf("decision fact = %q, want it citing the identity it read (%s)", decisionFact.Message.Content, sourceKey)
+		if !strings.Contains(attemptFact.Message.Content, string(attempts[0].DecisionID)) {
+			t.Fatalf("attempt fact = %q, want it citing the decision it was admitted under (%s)", attemptFact.Message.Content, attempts[0].DecisionID)
 		}
 	})
 
@@ -170,7 +166,7 @@ func (c *consumerRecords) RecordAttempt(_ context.Context, record rl.AttemptReco
 	c.attempts = append(c.attempts, record)
 	c.mu.Unlock()
 
-	body := fmt.Sprintf("attempt %s terminal %d", record.ID, record.Terminal)
+	body := fmt.Sprintf("attempt %s of decision %s terminal %d", record.ID, record.DecisionID, record.Terminal)
 	c.ledger.record(recordFact(event.EventID(record.ID), "training_attempt", record.Timestamp, body), c.partition)
 	return nil
 }

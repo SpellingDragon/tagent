@@ -588,7 +588,7 @@ func (r *govRig) call(callID, tool, args string) (any, error) {
 		r.t.Fatalf("run the one Before pass of call %s: %v", callID, err)
 	}
 	pass.TriggerSource = "model"
-	out, callErr := r.wrapper.Call(task.WithCallFrame(governance.WithCallPass(ctx, pass), govFrame(callID)), pass.Final.Function.Arguments)
+	out, callErr := r.wrapper.Call(task.WithCallFrame(plugin.WithCallPass(ctx, pass), govFrame(callID)), pass.Final.Function.Arguments)
 	if got := r.judgeCount() - before; got != 1 {
 		r.t.Errorf("pre-execution rulings for call %s = %d, want exactly one", callID, got)
 	}
@@ -601,7 +601,7 @@ func (r *govRig) call(callID, tool, args string) (any, error) {
 // first — a refused call is terminal and carries its denial — while a held call
 // is a wait and never a denial.
 func (r *govRig) ruling(ctx context.Context, tool string, jsonArgs []byte) (task.Ruling, error) {
-	pass, ok := governance.CallPassFrom(ctx)
+	pass, ok := plugin.CallPassFrom(ctx)
 	if !ok {
 		return task.Ruling{}, errors.New("governance rig: the call carries no Before pass to rule over")
 	}

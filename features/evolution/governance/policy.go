@@ -61,29 +61,6 @@ type RiskRule struct {
 	Reason string
 }
 
-// callPassKey is the context key one Before pass is carried under.
-type callPassKey struct{}
-
-// WithCallPass carries the one Before pass of a tool call on the context of that
-// call, so the admission ruling of the composition root rules over the very pass
-// the dispatch produced. The dispatch is its production writer. The pass is the
-// seam's only value: what triggered the call travels inside it, and no second
-// context key is ever introduced.
-func WithCallPass(ctx context.Context, pass plugin.CallPass) context.Context {
-	return context.WithValue(ctx, callPassKey{}, pass)
-}
-
-// CallPassFrom reports the Before pass the context carries and whether one is
-// set. It is this seam's single typed accessor: a call site reads the pass
-// through it and never through a bare context value, and the composition root's
-// admission ruling is its production reader. A call driven beside no pass reads
-// not-ok, and that caller decides the default — the admission ruling refuses
-// such a call closed rather than ruling at a guess.
-func CallPassFrom(ctx context.Context) (plugin.CallPass, bool) {
-	pass, ok := ctx.Value(callPassKey{}).(plugin.CallPass)
-	return pass, ok
-}
-
 // Policy is the pre-execution enforcement policy of the governance gate: the
 // warn/strict grade, the violation rules, the declared risk table, and the goal,
 // budget and approval gates beside the ledger every ruling leaves its governance

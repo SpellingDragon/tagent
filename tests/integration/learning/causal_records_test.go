@@ -23,12 +23,13 @@ import (
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestCausalTrainingRecords drives the runtime's real production points — the event loop and the task wrapper:
-// - the production points write one episode, one decision per decision boundary and one attempt per observable attempt
+// TestCausalTrainingRecords drives the runtime's one evidence face — the event loop's capture admission — and the record pipeline attached to it:
+// - the loop admits one attempt per observable attempt, so every decision's outcome is replayable, the last one and the intermediate ones alike
+// - the request view material of every decision is fixed at admission: the model, the prompt version and the tools the request saw
+// - the causal chain one decision reduced is the request the loop handed the model, read from the turn itself
 // - a failed attempt keeps its error text beside the shared terminal
 // - every record line carries its schema version and never the v2 capture shape
 // - a record round-trips through its versioned line without losing fields
-// - the minimal real production fields are kept: the native response, usage, error text, input events, model view and timestamps
 // - two concurrent drives keep their attempts independent under the race
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-recorder
 func TestCausalTrainingRecords(t *testing.T) {
@@ -48,73 +49,43 @@ func TestCausalTrainingRecords(t *testing.T) {
 			t.Fatalf("turn = (%v, %d decisions), want one completed terminal beside two decisions", turn.Terminal, len(turn.Decisions))
 		}
 		records := h.records.snapshot()
-		if len(records.episodes) != 1 {
-			t.Fatalf("episode records = %d, want exactly one at the production point", len(records.episodes))
-		}
-		episode := records.episodes[0]
-		if episode.Schema != rl.SchemaCurrent {
-			t.Fatalf("episode schema = %q, want %q", episode.Schema, rl.SchemaCurrent)
-		}
-		if episode.ID != "ep-learn-1" {
-			t.Fatalf("episode id = %q, want the application's own episode boundary", episode.ID)
-		}
-		if len(episode.Sessions) != 1 || episode.Sessions[0] != "session-learn-1" {
-			t.Fatalf("episode sessions = %v, want the session the drive ran on", episode.Sessions)
-		}
-		if episode.Lineage != rl.LineageUnknown || episode.ParentID != "" || episode.RootID != "" {
-			t.Fatalf("episode lineage = (%v, parent %q, root %q), want an explicit unknown lineage with no guessed parent", episode.Lineage, episode.ParentID, episode.RootID)
-		}
-		if episode.Timestamp.IsZero() {
-			t.Fatalf("episode timestamp = %v, want the time the record was written", episode.Timestamp)
-		}
-
-		if len(records.decisions) != 2 {
-			t.Fatalf("decision records = %d, want one per real decision boundary", len(records.decisions))
-		}
-		for i, decision := range records.decisions {
-			if decision.Schema != rl.SchemaCurrent {
-				t.Fatalf("decision %d schema = %q, want %q", i, decision.Schema, rl.SchemaCurrent)
-			}
-			if decision.ID != turn.Decisions[i].DecisionID {
-				t.Fatalf("decision %d id = %q, want the real decision identity %q", i, decision.ID, turn.Decisions[i].DecisionID)
-			}
-			if decision.InvocationID != "inv-learn-1" || decision.EpisodeID != "ep-learn-1" {
-				t.Fatalf("decision %d scope = (%q, %q), want the invocation and episode it belongs to", i, decision.InvocationID, decision.EpisodeID)
-			}
-			if decision.Timestamp.IsZero() {
-				t.Fatalf("decision %d timestamp = %v, want the time the record was written", i, decision.Timestamp)
-			}
-			view := decision.ModelView
-			if view.Model != "model-a" {
-				t.Fatalf("decision %d model view model = %q, want the model the request ran on", i, view.Model)
-			}
-			if view.PromptVersion != "prompt-v1" {
-				t.Fatalf("decision %d prompt version = %q, want the version the request ran with", i, view.PromptVersion)
-			}
-			if len(view.VisibleTools) != 1 || view.VisibleTools[0].Name != "echo-a" {
-				t.Fatalf("decision %d visible tools = %v, want the tools the request actually saw", i, view.VisibleTools)
-			}
-			if view.VisibleTools[0].Version != "" {
-				t.Fatalf("decision %d tool version = %q, want an unversioned member recorded as unversioned", i, view.VisibleTools[0].Version)
-			}
-		}
-		if len(records.decisions[0].InputEvents) != 1 || records.decisions[0].InputEvents[0] != "ev-input-1" {
-			t.Fatalf("first decision input events = %v, want the stored ready input it reduced", records.decisions[0].InputEvents)
-		}
-		if len(records.decisions[1].InputEvents) < 2 || records.decisions[1].InputEvents[0] != "ev-input-1" ||
-			records.decisions[1].InputEvents[1] != "fact-call-1" {
-			t.Fatalf("second decision input events = %v, want the ready input beside the settled fact fact-call-1", records.decisions[1].InputEvents)
-		}
-
 		if len(records.attempts) != 2 {
 			t.Fatalf("attempt records = %d, want one per observable model attempt", len(records.attempts))
 		}
 		for i, attempt := range records.attempts {
+			if attempt.EpisodeID != "ep-learn-1" {
+				t.Fatalf("attempt %d episode = %q, want the episode boundary the ready input named", i, attempt.EpisodeID)
+			}
+		}
+
+		views := h.evidence.views()
+		if len(views) != 2 {
+			t.Fatalf("fixed request views = %d, want one per decision boundary", len(views))
+		}
+		for i, view := range views {
+			if view.decisionID != turn.Decisions[i].DecisionID {
+				t.Fatalf("view %d decision = %q, want the real decision identity %q", i, view.decisionID, turn.Decisions[i].DecisionID)
+			}
+			if view.model != "model-a" {
+				t.Fatalf("view %d model = %q, want the model the request ran on", i, view.model)
+			}
+			if view.promptVersion != "prompt-v1" {
+				t.Fatalf("view %d prompt version = %q, want the version the request ran with", i, view.promptVersion)
+			}
+			if len(view.tools) != 1 || view.tools[0] != "echo-a" {
+				t.Fatalf("view %d visible tools = %v, want the tools the request actually saw", i, view.tools)
+			}
+		}
+		if second := turn.Decisions[1].Request.Messages; !carriesToolOutput(second, "out-a") {
+			t.Fatalf("second decision request = %+v, want the settled tool observation of the first round", second)
+		}
+
+		for i, attempt := range records.attempts {
 			if attempt.Schema != rl.SchemaCurrent {
 				t.Fatalf("attempt %d schema = %q, want %q", i, attempt.Schema, rl.SchemaCurrent)
 			}
-			if attempt.ID == "" || attempt.DecisionID != records.decisions[i].ID {
-				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, records.decisions[i].ID)
+			if attempt.ID == "" || attempt.DecisionID != turn.Decisions[i].DecisionID {
+				t.Fatalf("attempt %d identity = (%q, %q), want one attempt bound to decision %q", i, attempt.ID, attempt.DecisionID, turn.Decisions[i].DecisionID)
 			}
 			if attempt.EpisodeID != "ep-learn-1" {
 				t.Fatalf("attempt %d episode = %q, want the episode it belongs to", i, attempt.EpisodeID)
@@ -161,8 +132,8 @@ func TestCausalTrainingRecords(t *testing.T) {
 			t.Fatalf("turn terminal = %v, want the failed terminal the reduction derived", turn.Terminal)
 		}
 		records := h.records.snapshot()
-		if len(records.attempts) != 1 || len(records.decisions) != 1 {
-			t.Fatalf("records = (%d decisions, %d attempts), want one of each at the production points", len(records.decisions), len(records.attempts))
+		if len(records.attempts) != 1 {
+			t.Fatalf("attempt records = %d, want one per observable attempt of the failed decision", len(records.attempts))
 		}
 		attempt := records.attempts[0]
 		if attempt.Terminal != model.KindFailed || attempt.Terminal != turn.Decisions[0].Terminal {
@@ -180,16 +151,30 @@ func TestCausalTrainingRecords(t *testing.T) {
 			return learnFinalTurn("done")
 		}}
 		h := newHarness(t, provider, nil, "inv-learn-1")
-		h.drive(ctx, "ep-learn-version", "run")
+		turn := h.drive(ctx, "ep-learn-version", "run")
 		records := h.records.snapshot()
-		if len(records.episodes) != 1 || len(records.decisions) != 1 || len(records.attempts) != 1 {
-			t.Fatalf("records = (%d, %d, %d), want one of each kind", len(records.episodes), len(records.decisions), len(records.attempts))
+		if len(records.attempts) != 1 {
+			t.Fatalf("attempt records = %d, want the one attempt the drive admitted", len(records.attempts))
+		}
+		episode := rl.EpisodeRecord{
+			Schema:    rl.SchemaCurrent,
+			ID:        "ep-learn-version",
+			Sessions:  []event.SessionID{h.session},
+			Lineage:   rl.LineageUnknown,
+			Timestamp: time.Unix(1700000000, 0).UTC(),
+		}
+		decision := rl.DecisionRecord{
+			Schema:       rl.SchemaCurrent,
+			ID:           turn.Decisions[0].DecisionID,
+			InvocationID: h.invocationID,
+			EpisodeID:    "ep-learn-version",
+			Timestamp:    time.Unix(1700000000, 0).UTC(),
 		}
 
 		lines := make([][]byte, 0, 3)
 		for _, line := range []rl.Line{
-			rl.NewEpisodeLine(records.episodes[0]),
-			rl.NewDecisionLine(records.decisions[0]),
+			rl.NewEpisodeLine(episode),
+			rl.NewDecisionLine(decision),
 			rl.NewAttemptLine(records.attempts[0]),
 		} {
 			data, err := rl.MarshalLine(line)
@@ -327,16 +312,13 @@ func TestCausalTrainingRecords(t *testing.T) {
 
 		all := collectorState{}
 		for _, h := range []*harness{first, second} {
-			state := h.records.snapshot()
-			all.episodes = append(all.episodes, state.episodes...)
-			all.decisions = append(all.decisions, state.decisions...)
-			all.attempts = append(all.attempts, state.attempts...)
+			all.attempts = append(all.attempts, h.records.snapshot().attempts...)
 		}
-		if len(all.episodes) != 2 || len(all.decisions) != 2 || len(all.attempts) != 2 {
-			t.Fatalf("records = (%d episodes, %d decisions, %d attempts), want one set per drive", len(all.episodes), len(all.decisions), len(all.attempts))
+		if len(all.attempts) != 2 {
+			t.Fatalf("attempt records = %d, want one per drive", len(all.attempts))
 		}
-		if all.episodes[0].ID == all.episodes[1].ID {
-			t.Fatalf("episode ids = (%q, %q), want each drive to keep its own episode", all.episodes[0].ID, all.episodes[1].ID)
+		if all.attempts[0].EpisodeID == all.attempts[1].EpisodeID {
+			t.Fatalf("attempt episodes = (%q, %q), want each drive to keep its own episode boundary", all.attempts[0].EpisodeID, all.attempts[1].EpisodeID)
 		}
 		seen := map[event.AttemptID]bool{}
 		for _, attempt := range all.attempts {
@@ -346,6 +328,19 @@ func TestCausalTrainingRecords(t *testing.T) {
 			seen[attempt.ID] = true
 		}
 	})
+}
+
+// carriesToolOutput reports whether one request transcript carries the settled
+// observation of a tool call in the lane that observation was delivered through,
+// so the causal chain one decision reduced is read from the request the loop
+// actually handed the model rather than from a stored list of identities.
+func carriesToolOutput(messages []model.Message, output string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, output) {
+			return true
+		}
+	}
+	return false
 }
 
 // collectorState is the snapshot of everything the record collector received.
@@ -428,6 +423,7 @@ func (f *factTable) resolve(id event.EventID) (model.Message, bool) {
 type harness struct {
 	loop         *agent.Loop
 	records      *collector
+	evidence     *evidenceCapture
 	facts        *factTable
 	session      event.SessionID
 	invocationID event.InvocationID
@@ -485,8 +481,58 @@ func newHarness(t *testing.T, provider *learnModel, tools []*learnTool, invocati
 		t.Fatalf("hold the state plan: %v", err)
 	}
 	h.loop = agent.NewLoop(bindings, state.NewOccupancy(), "instance-learn", h.facts.resolve)
-	h.loop.SetRecorder(rl.NewRecorderAdapter(h.records))
+	h.evidence = &evidenceCapture{records: h.records}
+	h.loop.SetCapture(h.evidence)
 	return h
+}
+
+// evidenceView is the request view material the runtime fixed for one decision.
+type evidenceView struct {
+	decisionID    event.DecisionID
+	model         string
+	promptVersion string
+	tools         []string
+}
+
+// evidenceCapture is the loop's one evidence face in the test: it keeps the view
+// each decision's request was fixed on and writes the attempt record of every
+// admitted attempt through the record collector, exactly as the run's own
+// adapter does. Nothing is derived here: the attempt record is built through the
+// single observation face AttemptOf from the outcome the reduction produced.
+type evidenceCapture struct {
+	records *collector
+
+	mu     sync.Mutex
+	fixed  []evidenceView
+	sealed int
+}
+
+// Snapshot keeps the view material one decision's request was fixed on.
+func (c *evidenceCapture) Snapshot(_ context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, _ []string, _ model.Request) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fixed = append(c.fixed, evidenceView{decisionID: decisionID, model: modelName, promptVersion: promptVersion, tools: append([]string(nil), visibleTools...)})
+	return nil
+}
+
+// Record writes the attempt record of one admitted attempt.
+func (c *evidenceCapture) Record(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error {
+	return c.records.RecordAttempt(ctx, rl.AttemptOf(attemptID, decisionID, episodeID, outcome))
+}
+
+// Seal counts one closed turn.
+func (c *evidenceCapture) Seal(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sealed++
+	return nil
+}
+
+// views reports the request views fixed so far, in decision order.
+func (c *evidenceCapture) views() []evidenceView {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]evidenceView(nil), c.fixed...)
 }
 
 // drive runs one invocation of the harness to its terminal over the named

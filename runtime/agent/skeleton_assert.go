@@ -143,13 +143,6 @@ var (
 
 	_ func(*Loop, event.InvocationID, task.Notice) = (*Loop).Backflow
 
-	// The training record production face is attached through the setter, so the
-	// declared construction shape above stays exactly as it is. The face crosses
-	// built-in, event and model types only and receives its observations
-	// scattered, so the record production side attaches with no package edge
-	// into this package.
-	_ func(*Loop, Recorder) = (*Loop).SetRecorder
-
 	// The session transcript face is attached through its own setter, so the
 	// declared construction shape above stays exactly as it is: the face crosses
 	// the address and the native messages only, and the loop shares one
@@ -194,15 +187,7 @@ var (
 
 	_ func(HistoryFace, event.Address, []model.Message) = HistoryFace.CommitHistory
 
-	_ Recorder = (Recorder)(nil)
-
-	_ func(Recorder, context.Context, event.EpisodeID, event.SessionID, time.Time) error = Recorder.RecordEpisode
-
-	_ func(Recorder, context.Context, event.DecisionID, event.InvocationID, event.EpisodeID, []event.EventID, string, string, []string, time.Time) error = Recorder.RecordDecision
-
-	_ func(Recorder, context.Context, event.AttemptID, event.DecisionID, event.EpisodeID, model.Outcome) error = Recorder.RecordAttempt
-
-	// The model view material the decision record is written from keeps its
+	// The model view material the request snapshot is fixed from keeps its
 	// documented fields.
 	_ = modelView{modelName: "", promptVersion: "", visibleTools: []string{}, visibleSkills: []string{}}
 

@@ -154,6 +154,12 @@ var (
 		TriggerSource: "",
 	}
 
+	// The pass of one call travels on the context beside the call itself, so a
+	// tool that never sees the pipeline still reads the verdict it ran under.
+	_ func(context.Context, CallPass) context.Context = WithCallPass
+
+	_ func(context.Context) (CallPass, bool) = CallPassFrom
+
 	_ = AuditRecord{
 		Fact:     "",
 		Attempts: []Attempt{{Layer: LayerTrace, Skipped: false}},

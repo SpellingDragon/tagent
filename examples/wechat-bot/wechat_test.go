@@ -27,7 +27,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
-	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
@@ -823,7 +822,7 @@ func TestApprovalRuling(t *testing.T) {
 		Risk:          plugin.RiskCritical,
 		TriggerSource: "user",
 	}
-	callCtx := governance.WithCallPass(ctx, pass)
+	callCtx := plugin.WithCallPass(ctx, pass)
 
 	held, err := ruling(callCtx, "exec", args)
 	if err != nil || held.Kind != task.RulingHold {
@@ -848,7 +847,7 @@ func TestApprovalRuling(t *testing.T) {
 	if _, _, err := gateway.Resolve("boss", "reject "+shortDigest(approval.ArgsDigest(deniedArgs))); err != nil {
 		t.Fatalf("reject the second call: %v", err)
 	}
-	denied, err := ruling(governance.WithCallPass(ctx, deniedPass), "exec", deniedArgs)
+	denied, err := ruling(plugin.WithCallPass(ctx, deniedPass), "exec", deniedArgs)
 	if err != nil || denied.Kind != task.RulingDeny {
 		t.Fatalf("denied ruling = (%+v,%v), want deny", denied, err)
 	}

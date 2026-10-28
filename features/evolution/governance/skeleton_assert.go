@@ -1,8 +1,6 @@
 package governance
 
 import (
-	"context"
-
 	trpcmodel "trpc.group/trpc-go/trpc-agent-go/model"
 
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -28,10 +26,6 @@ var (
 	_ func(*Policy) bool = (*Policy).Active
 
 	_ func(*Policy) Enforcement = (*Policy).Mode
-
-	_ func(context.Context, plugin.CallPass) context.Context = WithCallPass
-
-	_ func(context.Context) (plugin.CallPass, bool) = CallPassFrom
 )
 
 // The 04.5 declarations keep the zero-selection gate: Open with every option

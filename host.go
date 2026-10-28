@@ -2728,7 +2728,7 @@ func (t *hostSendTool) held(reason string) string {
 // the trigger-source stamp of the running turn otherwise, and the send tool's
 // own line when the call runs beside neither.
 func hostSendLineageOf(ctx context.Context) string {
-	if pass, ok := governance.CallPassFrom(ctx); ok {
+	if pass, ok := plugin.CallPassFrom(ctx); ok {
 		if source := strings.TrimSpace(pass.TriggerSource); source != "" {
 			return source
 		}

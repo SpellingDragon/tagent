@@ -721,7 +721,7 @@ func (p *toolProducer) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 // execution.
 func policyRuling(governor plugin.Governor) task.Approver {
 	return func(ctx context.Context, _ string, _ []byte) (task.Ruling, error) {
-		pass, ok := governance.CallPassFrom(ctx)
+		pass, ok := plugin.CallPassFrom(ctx)
 		if !ok {
 			return task.Ruling{}, errors.New("tagent: the call carries no Before pass to rule over")
 		}

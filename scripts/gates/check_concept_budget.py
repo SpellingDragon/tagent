@@ -96,10 +96,8 @@ BASELINE = (
     ("struct-fields", "memory/replay/age_segments.go:AgeFoldReport", 7),
     ("struct-fields", "runtime/task/registry.go:Obligations", 6),
     ("struct-fields", "tool/subagent/target.go:TargetOptions", 8),
-    # S1 iface-methods — 10 项（observed=实测接口方法数）
+    # S1 iface-methods — 8 项（observed=实测接口方法数）
     ("iface-methods", "runtime/agent/delegate.go:DelegationTasks", 4),
-    ("iface-methods", "runtime/agent/loop.go:Recorder", 3),
-    ("iface-methods", "features/rl/produce.go:Recorder", 3),
     ("iface-methods", "runtime/state/durable.go:FactLog", 4),
     ("iface-methods", "runtime/state/store.go:Store", 4),
     ("iface-methods", "runtime/task/registry.go:Manager", 4),
@@ -176,7 +174,7 @@ BASELINE = (
     # 本体，收窄字段等于拆数据面，消费方须把同一观察二次归并。
     ("struct-fields", "tool/exec/state.go:StateEvent", 8),
     # S3 ctx-bare — accessor 落点具名登记（调用点裸读=0；实现体单次 ctx.Value=合法）
-    ("ctx-bare", "features/evolution/governance/policy.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
+    ("ctx-bare", "api/plugin/phases.go:*", 1),   # CallPassFrom：派发→受理 pass 传输（锁定工具端口无第二通道）
     ("ctx-bare", "runtime/task/wrapper.go:*", 1),    # CallFrameFrom：per-call 身份经端口唯一通道
     ("ctx-bare", "host.go:*", 1),    # deliveryLineageFrom：回合血统经类型化 accessor 落到 send 投递
     ("ctx-bare", "settle_turn.go:*", 1),    # settleBarrierFrom：回合终态屏障经类型化 accessor 落到驱动与投递之间

@@ -14,7 +14,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/api/view"
-	"github.com/SpellingDragon/tagent/features/evolution/governance"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -106,50 +105,17 @@ const factPipelineName = "fact-pipeline"
 // dropped observation.
 var ErrFactPipelineUnwired = errors.New("agent: no fact pipeline is attached to observe through")
 
-// Recorder is the narrow training-record production face this loop writes its
-// episode, decision and attempt records through. The methods receive the
-// observations scattered exactly as the production point observed them — the
-// record identities, the stored input events, the model view material and the
-// reduced outcome — and never a record of another package's shape: the
-// signatures cross built-in, event and model types only, so the record
-// production side attaches through this face with no package edge into the
-// execution core, the same stitching the projected request assembly uses.
-//
-// The production points of this loop write one record per real decision and per
-// observable attempt; a nil recorder keeps the loop recording nothing, and a
-// recorder error never reaches the model decision: recording is observation,
-// not execution.
-// The redline list (4 rules):
-// MUST write at the observation point, carrying the identities and the values as that point observed them.
-// MUST report every record it could not write as a counted loss beside the record identity.
-// MUST NOT derive a record of its own: the outcome arrives reduced, never re-judged here.
-// MUST NOT let a write failure reach the model decision: recording is observation, not execution.
-type Recorder interface {
-	// RecordEpisode writes the episode record of one business process at the
-	// point that process actually starts: the application's own episode
-	// boundary the ready input names, the session the invocation runs in and
-	// the time the record was written.
-	RecordEpisode(ctx context.Context, episodeID event.EpisodeID, sessionID event.SessionID, at time.Time) error
-	// RecordDecision writes the decision record of one model decision at the
-	// point that decision produced its terminal: the identities it belongs to,
-	// the stored input events it reduced and the model view material its
-	// request actually ran on, each visible tool named exactly as it ran.
-	RecordDecision(ctx context.Context, decisionID event.DecisionID, invocationID event.InvocationID, episodeID event.EpisodeID, inputs []event.EventID, modelName, promptVersion string, visibleTools []string, at time.Time) error
-	// RecordAttempt writes the attempt record of one observable model attempt at
-	// the point that attempt produced its response: the outcome exactly as the
-	// single model reduction derived it, so the record side shares that terminal
-	// and derives none of its own.
-	RecordAttempt(ctx context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error
-}
-
 // Capture is the narrow trajectory capture face this loop fixes and records
-// through beside the training record production face: the request view is
-// fixed before the request starts, every observed attempt is admitted under the
-// capture's own bound, and the turn seals what it held when it ends. The
-// observations cross as the loop observed them — the decision identity, the
-// request view material, the reduced outcome — and never as a record of another
-// package's shape, so the capture side attaches through this face with no
-// package edge into the execution core.
+// through: the request view is fixed before the request starts, every observed
+// attempt is admitted under the capture's own bound, and the turn seals what it
+// held when it ends. The observations cross as the loop observed them — the
+// decision identity, the request view material, the reduced outcome — and never
+// as a record of another package's shape, so the capture side attaches through
+// this face with no package edge into the execution core. The attempt admission
+// is the loop's only record-producing point: the episode identity travels on the
+// ready input, the decision's model view material is what Snapshot fixed before
+// the request started, and the stored input events are the chain the ledger
+// keeps, so no second record kind is minted here to repeat what the run holds.
 //
 // The redline list (4 rules):
 // MUST fix the request view before the request starts and never rebuild it from the options of a finished call.
@@ -217,7 +183,6 @@ type Loop struct {
 	seq       uint64
 	intakes   map[event.InvocationID]*intake
 	history   HistoryFace
-	recorder  Recorder
 	capture   Capture
 	commit    FactCommit
 	pipelines FactPipelines
@@ -278,15 +243,13 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		return turn, err
 	}
 	transcript := append(append([]model.Message(nil), history...), ready...)
-	l.recordEpisode(ctx, inv)
-	inputs := readyEventIDs(inv.Ready)
 	policy := l.finalRoundFor(inv.Address.AgentID)
 	started := time.Now()
 	rounds := 0
 	for {
 		transcript = append(transcript, l.terminalNotes(inv)...)
 		round := closingRound(policy, rounds, time.Since(started))
-		decision, outcome, receipts, observations, facts, decideErr := l.decide(ctx, inv, transcript, inputs, round)
+		decision, outcome, receipts, observations, decideErr := l.decide(ctx, inv, transcript, round)
 		if decideErr != nil {
 			return turn, decideErr
 		}
@@ -298,7 +261,6 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 				turn.Failure = strings.TrimSpace(cause.Error())
 			}
 		}
-		inputs = append(inputs, facts...)
 		if round.final {
 			turn.FinalRound = round.reason
 			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
@@ -627,21 +589,9 @@ func (l *Loop) afterPass(ctx context.Context, agentID event.AgentID, key event.E
 	l.publish(pipeline.After(ctx, key))
 }
 
-// SetRecorder attaches the training record production face this loop writes its
-// episode, decision and attempt records through. The production points of this
-// loop write one record per real decision and per observable attempt; a nil
-// recorder keeps the loop recording nothing. The setter is separate from the
-// constructor so the declared construction shape of the loop stays as it is.
-func (l *Loop) SetRecorder(recorder Recorder) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.recorder = recorder
-}
-
 // SetCapture attaches the trajectory capture face this loop fixes each
-// decision's request view through, admits each observed attempt beside and
-// seals the turn through. A nil face captures nothing. The production points
-// call the face exactly as the recording face is called: a refused fix, record
+// decision's request view through, admits each observed attempt through and
+// seals the turn through. A nil face captures nothing. A refused fix, record
 // or seal is a counted recording loss and never reaches the model decision, and
 // the setter is separate from the constructor so the declared construction
 // shape of the loop stays as it is.
@@ -736,6 +686,17 @@ func (l *Loop) recordCaptureAttempt(ctx context.Context, attemptID event.Attempt
 	if err := capture.Record(ctx, attemptID, decisionID, episodeID, outcome); err != nil {
 		l.noteRecordingLoss("capture-attempt", string(attemptID), err)
 	}
+}
+
+// recordAttempt admits one observed attempt of a decision through the attached
+// capture beside the response that produced it. It is the decision's one
+// record-producing point: the episode identity is read from the ready input's
+// own application boundary and never guessed, the response is the native one the
+// attempt observed and the terminal is the one the reduction derived. A refused
+// admission is counted as a recording loss and never carried into the model
+// decision.
+func (l *Loop) recordAttempt(ctx context.Context, inv Invocation, decisionID event.DecisionID, attemptID event.AttemptID, outcome model.Outcome) {
+	l.recordCaptureAttempt(ctx, attemptID, decisionID, episodeOfReady(inv.Ready), outcome)
 }
 
 // sealCapture seals the capture of the turn the drive served, or seals nothing
@@ -860,13 +821,6 @@ func (l *Loop) RecordingLosses() []RecordingLoss {
 	return append([]RecordingLoss(nil), l.losses...)
 }
 
-// currentRecorder reports the attached recorder, or nil while none is attached.
-func (l *Loop) currentRecorder() Recorder {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.recorder
-}
-
 // PresentationSink consumes the After pass presentation of one committed fact:
 // the views its presenters rendered beside the visible gaps its failed
 // observers left. The sink is the read-out face the presentation is handed to —
@@ -913,7 +867,7 @@ func (l *Loop) publish(presentation view.Presentation) {
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
 // - The model production of one decision is watched beside its invocation identity and confirms its stop when the reduction really ended.
 // - The closing round marks its request on the boundary, carries the closing instruction after the transcript, runs under the short closing timeout and admits none of the calls it issues.
-func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, inputs []event.EventID, round decisionRound) (Decision, model.Outcome, []model.Message, []model.Message, []event.EventID, error) {
+func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound) (Decision, model.Outcome, []model.Message, []model.Message, error) {
 	if round.final {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, round.timeout)
@@ -922,12 +876,12 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	decisionID := l.nextDecisionID(inv)
 	attemptID := event.AttemptID(fmt.Sprintf("attempt-%s", decisionID))
 	if err := l.occupy(ctx, inv, decisionID); err != nil {
-		return Decision{}, model.Outcome{}, nil, nil, nil, err
+		return Decision{}, model.Outcome{}, nil, nil, err
 	}
 	handle, err := l.borrow.Borrow(ctx, inv.Address.AgentID)
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
-		return Decision{}, model.Outcome{}, nil, nil, nil, err
+		return Decision{}, model.Outcome{}, nil, nil, err
 	}
 
 	tools := make(map[string]trpctool.Tool, len(handle.Binding.Tools))
@@ -947,7 +901,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
 		_ = handle.Release(ctx)
-		return Decision{}, model.Outcome{}, nil, nil, nil, err
+		return Decision{}, model.Outcome{}, nil, nil, err
 	}
 	if boundary.PromptVersion != "" {
 		view.promptVersion = boundary.PromptVersion
@@ -970,7 +924,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	}
 	outcome := model.ReduceChannel(ctx, stream, nil)
 	production.stop()
-	l.recordDecisionAttempt(ctx, inv, decisionID, attemptID, inputs, view, outcome)
+	l.recordAttempt(ctx, inv, decisionID, attemptID, outcome)
 	consumerDebug("tagent: consumer decision invocation=%s decision=%s terminal=%s calls=%d closing=%t",
 		inv.InvocationID, decisionID, outcome.Kind, len(callsOf(outcome)), round.final)
 
@@ -985,24 +939,23 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 
 	var receipts []model.Message
 	var observations []model.Message
-	var facts []event.EventID
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
 		if round.final {
 			receipts = refuseClosingCalls(callsOf(outcome))
 		} else {
 			if commitErr := l.commitCalls(ctx, inv, decision, outcome); commitErr != nil {
 				_ = handle.Release(ctx)
-				return decision, outcome, nil, nil, nil, commitErr
+				return decision, outcome, nil, nil, commitErr
 			}
-			receipts, observations, facts, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
+			receipts, observations, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
 			if err != nil {
 				_ = handle.Release(ctx)
-				return decision, outcome, nil, nil, nil, err
+				return decision, outcome, nil, nil, err
 			}
 		}
 	}
 	_ = handle.Release(ctx)
-	return decision, outcome, receipts, observations, facts, nil
+	return decision, outcome, receipts, observations, nil
 }
 
 // dispatch admits every tool call of one decision through the task wrapper of
@@ -1021,10 +974,10 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 // - Every call of this decision is already admitted and answered with its receipt before the first wait for a settled result begins.
 // - The settled result fact is the stored event the next decision of this range reduces; a call that recorded no fact contributes none.
 // - The After pass reads only a fact whose canonical commit already happened: a failed observation is a visible gap in the returned presentation and never rolls the committed fact back, and a dropped presentation drops the presentation only. The presentation is the read-out the inspection face consumes; the loop keeps the committed fact itself.
-func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool) ([]model.Message, []model.Message, []event.EventID, error) {
+func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool) ([]model.Message, []model.Message, error) {
 	pipeline, err := plugin.NewFlow(decision.Binding.Plugins)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	in := l.intakeFor(inv.InvocationID)
 	receipts := make([]model.Message, 0, len(calls))
@@ -1057,7 +1010,7 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 			Address:   inv.Address,
 			Execution: executionSerialization,
 		}
-		answer, callErr := native.Call(task.WithCallFrame(governance.WithCallPass(ctx, pass), frame), final.Function.Arguments)
+		answer, callErr := native.Call(task.WithCallFrame(plugin.WithCallPass(ctx, pass), frame), final.Function.Arguments)
 		switch out := answer.(type) {
 		case task.AdmissionReceipt:
 			if !out.Accepted {
@@ -1073,23 +1026,21 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 		}
 	}
 	observations := make([]model.Message, 0, len(running))
-	var facts []event.EventID
 	for _, adm := range running {
 		arrival, ok := in.await(ctx, adm.taskID)
 		if !ok {
 			if err := ctx.Err(); err != nil {
-				return nil, nil, nil, err
+				return nil, nil, err
 			}
 			observations = append(observations, observationOf(model.Message{Content: "tagent: the tool result did not arrive before the wait ended"}, adm.callID, adm.tool))
 			continue
 		}
 		observations = append(observations, observationOf(arrival.msg, adm.callID, adm.tool))
 		if arrival.fact != "" {
-			facts = append(facts, arrival.fact)
 			l.publish(pipeline.After(ctx, arrival.fact))
 		}
 	}
-	return receipts, observations, facts, nil
+	return receipts, observations, nil
 }
 
 // occupy takes the session decision slot for the named decision, waiting for
@@ -1427,63 +1378,8 @@ func episodeOfReady(ready []event.Event) event.EpisodeID {
 	return ""
 }
 
-// readyEventIDs reports the stored event identities the ready input of one
-// invocation carries, in the order the session admitted it.
-func readyEventIDs(ready []event.Event) []event.EventID {
-	ids := make([]event.EventID, 0, len(ready))
-	for _, ev := range ready {
-		if ev.Key != "" {
-			ids = append(ids, ev.Key)
-		}
-	}
-	return ids
-}
-
-// recordEpisode writes the episode record of one invocation's business process
-// at the point that process actually starts. The episode identity is read from
-// the ready input's own application boundary and never guessed, and no episode
-// record is written for an input that names no episode at all.
-// - Recording is observation, not execution: a recorder error is never carried into the model decision and never blocks it; the write it stopped is counted as an explicit recording loss instead of being dropped silently.
-func (l *Loop) recordEpisode(ctx context.Context, inv Invocation) {
-	recorder := l.currentRecorder()
-	if recorder == nil {
-		return
-	}
-	episodeID := episodeOfReady(inv.Ready)
-	if episodeID == "" {
-		return
-	}
-	if err := recorder.RecordEpisode(ctx, episodeID, inv.Address.SessionID, time.Now()); err != nil {
-		l.noteRecordingLoss("episode", string(episodeID), err)
-	}
-}
-
-// recordDecisionAttempt writes the decision record and the attempt record at
-// the point the decision actually produced them: one decision boundary beside
-// one observable model attempt, the stored input events the decision reduced,
-// the native response the attempt observed and the single terminal the model
-// reduction derived. A retry hidden below the decision boundary writes no
-// second attempt here, and no terminal is re-derived at this production point.
-// - The attempt record is assembled on the record side from the outcome exactly as the reduction produced it: the terminal it records is the one the model reduction derived.
-// - A write the recorder refused is counted as an explicit recording loss beside its record identity and never dropped silently.
-func (l *Loop) recordDecisionAttempt(ctx context.Context, inv Invocation, decisionID event.DecisionID, attemptID event.AttemptID, inputs []event.EventID, view modelView, outcome model.Outcome) {
-	episodeID := episodeOfReady(inv.Ready)
-	l.recordCaptureAttempt(ctx, attemptID, decisionID, episodeID, outcome)
-	recorder := l.currentRecorder()
-	if recorder == nil {
-		return
-	}
-	now := time.Now()
-	if err := recorder.RecordDecision(ctx, decisionID, inv.InvocationID, episodeID, inputs, view.modelName, view.promptVersion, view.visibleTools, now); err != nil {
-		l.noteRecordingLoss("decision", string(decisionID), err)
-	}
-	if err := recorder.RecordAttempt(ctx, attemptID, decisionID, episodeID, outcome); err != nil {
-		l.noteRecordingLoss("attempt", string(attemptID), err)
-	}
-}
-
 // modelView is the model view material one request actually runs on, carried
-// across the recording face in the built-in shapes that face crosses: the model
+// across the capture face in the built-in shapes that face crosses: the model
 // and prompt version of the borrowed generation, the names of the tools visible
 // to the request and the names of the skills visible to it. A member that ran
 // unversioned is named unversioned rather than assumed current: the record side

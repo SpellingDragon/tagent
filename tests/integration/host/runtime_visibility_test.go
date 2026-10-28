@@ -227,7 +227,7 @@ func TestRuntimeVisibility(t *testing.T) {
 			t.Fatal("recording losses = none, want the attempt writes the recorder refused counted in the account")
 		}
 		for _, loss := range opened.Training.Losses {
-			if loss.Kind != "attempt" || loss.Reason == "" {
+			if loss.Kind != "capture-attempt" || loss.Reason == "" {
 				t.Fatalf("recording loss = %+v, want the refused attempt write beside its named reason", loss)
 			}
 		}

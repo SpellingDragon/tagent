@@ -84,8 +84,8 @@ func TestLoopTurnInvariants(t *testing.T) {
 	t.Run("a model entry error reaches the same single reduction every stream does", func(t *testing.T) {
 		behaviour := newInvariantLoopModel("", errors.New("agent: the model entry refused the request"))
 		loop, _, _ := invariantLoop(t, behaviour)
-		recorder := &invariantLoopRecorder{}
-		loop.SetRecorder(recorder)
+		capture := &invariantLoopCapture{}
+		loop.SetCapture(capture)
 		turn, err := loop.Drive(ctx, Invocation{
 			InvocationID: "invocation-1",
 			Address:      invariantLoopAddress,
@@ -105,11 +105,64 @@ func TestLoopTurnInvariants(t *testing.T) {
 		if len(turn.Decisions) != 1 {
 			t.Fatalf("decisions beside a refused model entry = %d, want the one attempt", len(turn.Decisions))
 		}
-		if got := recorder.counts(); got != (invariantLoopCounts{episodes: 1, decisions: 1, attempts: 1}) {
-			t.Fatalf("records beside a refused model entry = %+v, want one of each production point", got)
+		admitted := capture.admissions()
+		if len(admitted) != 1 || len(capture.views()) != 1 {
+			t.Fatalf("admissions beside a refused model entry = (%d attempts, %d views), want one of each", len(admitted), len(capture.views()))
 		}
-		if got := recorder.outcome(); got != model.KindFailed {
-			t.Fatalf("recorded attempt outcome = %v, want the reduced terminal itself", got)
+		if got := admitted[0].outcome.Kind; got != model.KindFailed {
+			t.Fatalf("admitted attempt outcome = %v, want the reduced terminal itself", got)
+		}
+		if admitted[0].episodeID != "episode-1" || admitted[0].decisionID != turn.Decisions[0].DecisionID {
+			t.Fatalf("admitted attempt = (%s, %s), want the episode the ready input named beside the decision it belongs to", admitted[0].episodeID, admitted[0].decisionID)
+		}
+	})
+
+	t.Run("an intermediate decision's outcome stays replayable through the capture", func(t *testing.T) {
+		script := newClosingRoundScript(
+			closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-1", "echo-a")}},
+			closingRoundStep{answer: "delivered"},
+		)
+		loop, history, _ := closingRoundLoop(t, script)
+		capture := &invariantLoopCapture{}
+		loop.SetCapture(capture)
+		turn, err := loop.Drive(ctx, Invocation{
+			InvocationID: "invocation-1",
+			Address:      closingRoundAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:       "event-1",
+				EpisodeID: "episode-1",
+				Message:   model.Message{Role: model.RoleUser, Content: "start"},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("drive over a tool round and its answer = %v, want both decisions run", err)
+		}
+		if len(turn.Decisions) != 2 || turn.Terminal != model.KindCompleted {
+			t.Fatalf("turn = (%v, %d decisions), want the tool round beside the answering one", turn.Terminal, len(turn.Decisions))
+		}
+		admitted := capture.admissions()
+		if len(admitted) != 2 {
+			t.Fatalf("admitted attempts = %d, want one per decision of the drive", len(admitted))
+		}
+		for i, admission := range admitted {
+			if admission.decisionID != turn.Decisions[i].DecisionID {
+				t.Fatalf("admitted attempt %d names decision %q, want %q", i, admission.decisionID, turn.Decisions[i].DecisionID)
+			}
+			if admission.episodeID != "episode-1" {
+				t.Fatalf("admitted attempt %d names episode %q, want the ready input's own", i, admission.episodeID)
+			}
+		}
+		intermediate := admitted[0].outcome
+		if intermediate.Body == nil || !intermediate.Body.IsToolCallResponse() {
+			t.Fatalf("admitted intermediate outcome = %+v, want the tool call the reduction kept", intermediate)
+		}
+		last := admitted[1].outcome
+		if last.Kind != model.KindCompleted || last.Body == nil || last.Body.IsToolCallResponse() {
+			t.Fatalf("admitted last outcome = %+v, want the answer the reduction kept", last)
+		}
+		if committed := history.SessionHistory(closingRoundAddress); !invariantCarries(committed, "delivered") {
+			t.Fatalf("committed transcript = %+v, want the last decision's answer kept as the drive's word", committed)
 		}
 	})
 
@@ -348,60 +401,68 @@ func (w *invariantLoopWatch) list() []func() bool {
 	return append([]func() bool(nil), w.stops...)
 }
 
-// invariantLoopCounts is the number of records one recorder was asked to write.
-type invariantLoopCounts struct {
-	episodes  int
-	decisions int
-	attempts  int
+// invariantLoopView is the request view material one decision was admitted with.
+type invariantLoopView struct {
+	decisionID    event.DecisionID
+	modelName     string
+	promptVersion string
+	visibleTools  []string
 }
 
-// invariantLoopRecorder counts the records written through it and keeps the last attempt outcome.
-type invariantLoopRecorder struct {
+// invariantLoopAdmission is one attempt the loop admitted through its evidence face.
+type invariantLoopAdmission struct {
+	attemptID  event.AttemptID
+	decisionID event.DecisionID
+	episodeID  event.EpisodeID
+	outcome    model.Outcome
+}
+
+// invariantLoopCapture is the loop's evidence face in a test: it keeps the view
+// material each decision was fixed with and the outcome each admission carried,
+// so one attempt of one decision is readable after the drive ended.
+type invariantLoopCapture struct {
 	mu       sync.Mutex
-	counted  invariantLoopCounts
-	outcomes []model.Outcome
+	fixed    []invariantLoopView
+	recorded []invariantLoopAdmission
+	sealed   int
 }
 
-// RecordEpisode counts one episode record.
-func (r *invariantLoopRecorder) RecordEpisode(context.Context, event.EpisodeID, event.SessionID, time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.counted.episodes++
+// Snapshot keeps the view material one decision's request was fixed on.
+func (c *invariantLoopCapture) Snapshot(_ context.Context, decisionID event.DecisionID, modelName, promptVersion string, visibleTools, _ []string, _ model.Request) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fixed = append(c.fixed, invariantLoopView{decisionID: decisionID, modelName: modelName, promptVersion: promptVersion, visibleTools: append([]string(nil), visibleTools...)})
 	return nil
 }
 
-// RecordDecision counts one decision record.
-func (r *invariantLoopRecorder) RecordDecision(context.Context, event.DecisionID, event.InvocationID, event.EpisodeID, []event.EventID, string, string, []string, time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.counted.decisions++
+// Record admits one observed attempt beside the outcome the reduction produced.
+func (c *invariantLoopCapture) Record(_ context.Context, attemptID event.AttemptID, decisionID event.DecisionID, episodeID event.EpisodeID, outcome model.Outcome) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recorded = append(c.recorded, invariantLoopAdmission{attemptID: attemptID, decisionID: decisionID, episodeID: episodeID, outcome: outcome})
 	return nil
 }
 
-// RecordAttempt counts one attempt record beside the outcome it was handed.
-func (r *invariantLoopRecorder) RecordAttempt(_ context.Context, _ event.AttemptID, _ event.DecisionID, _ event.EpisodeID, outcome model.Outcome) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.counted.attempts++
-	r.outcomes = append(r.outcomes, outcome)
+// Seal counts one closed turn.
+func (c *invariantLoopCapture) Seal(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sealed++
 	return nil
 }
 
-// counts reports the records written so far.
-func (r *invariantLoopRecorder) counts() invariantLoopCounts {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.counted
+// views reports the request views fixed so far.
+func (c *invariantLoopCapture) views() []invariantLoopView {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]invariantLoopView(nil), c.fixed...)
 }
 
-// outcome reports the kind of the last attempt outcome handed to the recorder.
-func (r *invariantLoopRecorder) outcome() model.Kind {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.outcomes) == 0 {
-		return model.KindUnknown
-	}
-	return r.outcomes[len(r.outcomes)-1].Kind
+// admissions reports the attempts admitted so far.
+func (c *invariantLoopCapture) admissions() []invariantLoopAdmission {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]invariantLoopAdmission(nil), c.recorded...)
 }
 
 // invariantLoop returns one loop over one held generation and one empty occupancy ledger.

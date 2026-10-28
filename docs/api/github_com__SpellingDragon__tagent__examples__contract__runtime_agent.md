@@ -43,8 +43,3 @@ func ExampleReconciler()
     ExampleReconciler books one admitted call, lands its terminal and reports
     that no booking stays open once the landing ran.
 
-func ExampleRecorder()
-    ExampleRecorder drives one decision's recording: the episode the range
-    starts, the decision it reduced and the attempt beside it. A write failure
-    stays an observation and never reaches the model decision.
-
