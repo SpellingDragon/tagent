@@ -26,7 +26,7 @@
 | T15 | `Obligations.Count` | `runtime/task/manager.go:67` | 能：**当场现算** `len(entry.obligations)` | 否 | **登记已成立，无代码改动** | D9 判据；此前已现算 |
 | T16 | `Obligations.Open` | `runtime/task/manager.go:72` | 能：**当场现算**，逐条取自 obligations | 否 | **登记已成立，无代码改动** | 同上 |
 | T17 | `MemoryCommit.owed/revisions/facts/mutations` | `runtime/task/commit.go:161-164` | 能：`facts` 是权威，其余为索引 | 是（提交/幂等） | 保留（持久层自身索引） | 与 T6 同族 |
-| T18 | `NoticeSequencer.next` | `runtime/task/handoff.go:226` | 能：`Observe` 重放链上每条通知 | 是（通知身份唯一） | 保留派生索引 | `restore.go:241` 已逐条 `Observe` |
+| T18 | `NoticeSequencer.next` | `runtime/task/handoff.go:226` | 能：`Observe` 重放链上每条通知 | 是（通知身份唯一） | 保留派生索引 | `restore.go:248` 已逐条 `Observe` |
 | T19 | `MemoryAdmission.tasks`（dedup 表） | `runtime/task/admission.go:40` | 能：fold 时按 admission 材质重登记 | 是（dedup 裁决） | 保留派生索引 | `restore.go:225-227` 已重登记 |
 
 ## 二、兄弟簇（只读登记，本叶不改）
