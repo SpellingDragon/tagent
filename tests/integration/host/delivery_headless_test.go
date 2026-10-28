@@ -6,6 +6,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/ledger"
+
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // headlessSettleBody, headlessWorkerBody and headlessEntryBody are the three
@@ -203,4 +206,123 @@ func writeDeliveryRecord(t *testing.T, root string, record owedDeliveryRecord) {
 	if err := facts.Sync(context.Background()); err != nil {
 		t.Fatalf("commit the delivery record %s: %v", record.ID, err)
 	}
+}
+
+// settleCaptureLogf records every Debugf line the settle drive renders.
+type settleCaptureLogf struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *settleCaptureLogf) Debug(args ...any) {}
+func (c *settleCaptureLogf) Debugf(format string, args ...any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, fmt.Sprintf(format, args...))
+}
+func (c *settleCaptureLogf) Info(args ...any)      {}
+func (c *settleCaptureLogf) Infof(string, ...any)  {}
+func (c *settleCaptureLogf) Warn(args ...any)      {}
+func (c *settleCaptureLogf) Warnf(string, ...any)  {}
+func (c *settleCaptureLogf) Error(args ...any)     {}
+func (c *settleCaptureLogf) Errorf(string, ...any) {}
+func (c *settleCaptureLogf) Fatal(args ...any)     {}
+func (c *settleCaptureLogf) Fatalf(string, ...any) {}
+
+func (c *settleCaptureLogf) join() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.lines, "\n")
+}
+
+// runSettleDriveLeavesADebugTrail drives the same delegated settle chain the headless checks ride and pins the settle face's debug trail.
+//   - the landed follow-up terminal and the consumed entry each name their notification on one DEBUG line
+//   - the tool admission rides the same stream
+//   - the lines name identities and outcomes only — never the settled body
+func runSettleDriveLeavesADebugTrail(t *testing.T) {
+	wakeEnv(t)
+	provider := newScriptedProvider(t)
+	settled := make(chan struct{})
+	var settleOnce sync.Once
+	var mu sync.Mutex
+	knowledgeCalls := 0
+	provider.answer = func(index int) string {
+		switch provider.servedModels()[index] {
+		case "model-worker":
+			return scriptedAnswerOf(headlessWorkerBody)
+		case "model-knowledge":
+			mu.Lock()
+			defer mu.Unlock()
+			knowledgeCalls++
+			if knowledgeCalls == 1 {
+				return wakeDelegate("call-worker", "compute the total")
+			}
+			settleOnce.Do(func() { close(settled) })
+			return scriptedAnswerOf(headlessSettleBody)
+		default:
+			return scriptedAnswerOf(headlessEntryBody)
+		}
+	}
+	capture := &settleCaptureLogf{}
+	original := trpclog.Default
+	trpclog.Default = capture
+	t.Cleanup(func() { trpclog.Default = original })
+
+	root := t.TempDir()
+	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
+	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", headlessAgentSections))
+	host, err := assembly.Boot(configPath, assembly.WithSender(&deliveryRecorder{}))
+	if err != nil {
+		t.Fatalf("boot the host: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	addr := event.Address{AgentID: "knowledge", SessionID: headlessSettleSession}
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
+		Address: addr,
+		Input:   []model.Message{{Role: model.RoleUser, Content: "delegate the total to the worker"}},
+	}); err != nil {
+		t.Fatalf("drive the delegating turn at the headless address: %v", err)
+	}
+	select {
+	case <-settled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the headless address never drove a follow-up turn")
+	}
+	waitForSettle(t, "the headless follow-up turn to land its answer", func() bool {
+		for _, fact := range host.Run().SessionFacts(addr) {
+			if fact.Message.Role == model.RoleAssistant && strings.TrimSpace(fact.Message.Content) == headlessSettleBody {
+				return true
+			}
+		}
+		return false
+	})
+	waitForSettle(t, "the settle drive to leave its trail", func() bool {
+		trail := capture.join()
+		return strings.Contains(trail, "tagent: settle turn landed notice=") &&
+			strings.Contains(trail, "tagent: settle entry consumed notice=")
+	})
+	if err := host.Close(ctx); err != nil {
+		t.Fatalf("close the host: %v", err)
+	}
+
+	trail := capture.join()
+	for _, want := range []string{
+		"tagent: consumer tool admitted",
+		"tagent: settle turn landed notice=",
+		"terminal=completed",
+		"tagent: settle entry consumed notice=",
+	} {
+		if !strings.Contains(trail, want) {
+			t.Fatalf("the settle trail lacks %q;\ntrail:\n%s", want, trail)
+		}
+	}
+	if strings.Contains(trail, headlessSettleBody) {
+		t.Fatalf("the settle trail carries the settled body, want identities and outcomes only")
+	}
+}
+
+// TestSettleDriveLeavesADebugTrail pins the settle drive's debug trail beside the headless delivery checks that ride the same chain.
+func TestSettleDriveLeavesADebugTrail(t *testing.T) {
+	t.Run("the follow-up turn and its consumption each leave one line", runSettleDriveLeavesADebugTrail)
 }
