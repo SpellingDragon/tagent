@@ -88,12 +88,12 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 			t.Fatalf("message 1 = (%q, %q), want the mapped answer in full", got[1].Role, got[1].Content)
 		}
 		block, at := environmentBlockMessage(t, got)
-		if at != 2 {
-			t.Fatalf("environment block stands at message %d, want it closing the boundary assembly", at)
+		if at != len(got)-1 {
+			t.Fatalf("environment block stands at message %d, want it closing the request", at)
 		}
 		requireEnvironmentFields(t, block)
-		if got[3].Role != model.RoleUser || got[3].Content != "第二轮输入" {
-			t.Fatalf("message 3 = (%q, %q), want the invocation input behind the block", got[3].Role, got[3].Content)
+		if got[2].Role != model.RoleUser || got[2].Content != "第二轮输入" {
+			t.Fatalf("message 2 = (%q, %q), want the invocation input ahead of the block", got[2].Role, got[2].Content)
 		}
 	})
 

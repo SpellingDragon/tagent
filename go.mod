@@ -70,18 +70,22 @@ require (
 // DEPENDENCY DEBT (pinned module — the retirement condition is part of the pin).
 //
 // What is pinned: trpc.group/trpc-go/trpc-agent-go now resolves to the fork tag
-// github.com/SpellingDragon/trpc-agent-go@v1.11.2-tagent.1 = upstream v1.11.2
+// github.com/SpellingDragon/trpc-agent-go@v1.11.2-tagent.2 = upstream v1.11.2
 // plus the 4 stream-close-contract commits (close event streams only after the
-// producer is done). The tag is published, so nothing here depends on an
-// out-of-tree local checkout: a fresh clone builds from the module proxy, and
-// `go mod verify` fails if the pinned content is not what the checksums record.
+// producer is done) and the ordered-tools commit (Request.ToolOrder names the
+// order tool definitions are emitted in, so a caller keeps stable tools ahead
+// of the tools it loaded later and the provider-side prefix cache stays valid
+// for the larger stable part of the request). The tag is published, so nothing
+// here depends on an out-of-tree local checkout: a fresh clone builds from the
+// module proxy, and `go mod verify` fails if the pinned content is not what the
+// checksums record.
 //
 // Why it is pinned: those 4 commits reach no official tag yet. Upstream PR
 // trpc-group/trpc-agent-go#2637 carries the same change.
 //
 // RETIREMENT CONDITION — all four, in this order:
 //   1. trpc-group/trpc-agent-go#2637 is merged AND an official tag carries those
-//      4 commits (check: `go list -m -versions trpc.group/trpc-go/trpc-agent-go`
+//      5 commits (check: `go list -m -versions trpc.group/trpc-go/trpc-agent-go`
 //      lists a tag whose notes contain the producer-done/stream-close fix).
 //   2. That official tag contains the same commit set as the pinned fork tag
 //      (no behavior delta to re-review): compare the two logs, not the strings.
@@ -105,4 +109,4 @@ require (
 //
 // Historical note (R1, design D6): the pin replaced a local `replace` to an
 // out-of-tree checkout, which made the build depend on one machine's disk layout.
-replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1
+replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.2

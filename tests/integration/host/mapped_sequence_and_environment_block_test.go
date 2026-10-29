@@ -156,6 +156,54 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 	}
 }
 
+// TestFixedPromptFilesMergeIntoOneSystemMessage checks the declared prompt files enter the request as one system message.
+//
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
+func TestFixedPromptFilesMergeIntoOneSystemMessage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	writePromptAt(t, filepath.Join(root, "prompts", "a.md"), "prompt body a\n")
+	writePromptAt(t, filepath.Join(root, "prompts", "b.md"), "prompt body b\n")
+	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
+		return entryFinalTurn("settled")
+	}}
+	decl := &config.Declaration{
+		Entry: "agent-a",
+		Agents: []config.AgentSpec{{
+			ID:    "agent-a",
+			Model: "model-a",
+			Files: []config.FileRef{
+				{Path: filepath.Join(root, "prompts", "a.md"), Kind: config.FileKindPrompt},
+				{Path: filepath.Join(root, "prompts", "b.md"), Kind: config.FileKindPrompt},
+			},
+		}},
+	}
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
+		"agent-a": {Model: provider},
+	}, assembly.WithGovernance(passPolicy{}))
+	if err != nil {
+		t.Fatalf("assemble the runtime: %v", err)
+	}
+	invokeTurn(t, run, "inv-merge-1", event.Address{AgentID: "agent-a", SessionID: "session-merge"}, "看看前缀")
+
+	requests := provider.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("recorded requests = %d, want exactly one formal request", len(requests))
+	}
+	got := requests[0].Messages
+	if len(got) != 2 {
+		t.Fatalf("request carries %d messages, want the merged prompt and the input: %v", len(got), got)
+	}
+	if got[0].Role != model.RoleSystem ||
+		!strings.Contains(got[0].Content, "prompt body a") || !strings.Contains(got[0].Content, "prompt body b") {
+		t.Fatalf("message 0 = (%q, %q), want one system message carrying both prompt files", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != model.RoleUser || got[1].Content != "看看前缀" {
+		t.Fatalf("message 1 = (%q, %q), want the invocation input", got[1].Role, got[1].Content)
+	}
+}
+
 // TestEnvironmentBlockClosesTheRequestAssembly checks where the declared environment block stands.
 //   - the block is the last part of the boundary assembly, after the mapped sequence
 //   - the invocation's own input still closes the request behind it
@@ -195,19 +243,19 @@ func TestEnvironmentBlockClosesTheRequestAssembly(t *testing.T) {
 	}
 	got := requests[1].Messages
 	if len(got) != 4 {
-		t.Fatalf("second request carries %d messages, want the two mapped facts, the block and the input: %v", len(got), got)
+		t.Fatalf("second request carries %d messages, want the two mapped facts, the input and the trailing block: %v", len(got), got)
 	}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		if strings.Contains(got[i].Content, "## Environment") {
-			t.Fatalf("message %d carries the environment block, want it after the mapped sequence", i)
+			t.Fatalf("message %d carries the environment block, want it behind the mapped sequence and the input", i)
 		}
 	}
-	block := got[2]
-	if block.Role != model.RoleSystem || !strings.HasPrefix(block.Content, "## Environment\n") {
-		t.Fatalf("message 2 = (%q, %q), want the environment block closing the assembly", block.Role, block.Content)
+	if got[2].Role != model.RoleUser || got[2].Content != "第二轮输入" {
+		t.Fatalf("message 2 = (%q, %q), want the invocation input ahead of the block", got[2].Role, got[2].Content)
 	}
-	if got[3].Role != model.RoleUser || got[3].Content != "第二轮输入" {
-		t.Fatalf("message 3 = (%q, %q), want the invocation input behind the block", got[3].Role, got[3].Content)
+	block := got[3]
+	if block.Role != model.RoleSystem || !strings.HasPrefix(block.Content, "## Environment\n") {
+		t.Fatalf("message 3 = (%q, %q), want the environment block closing the request", block.Role, block.Content)
 	}
 	for _, want := range []string{
 		"- agent: agent-a",
@@ -281,12 +329,12 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("request carries %d messages, want the prompt, the skill body, the block and the input: %v", len(got), got)
 	}
-	block := got[len(got)-2]
+	block := got[len(got)-1]
 	if block.Role != model.RoleSystem || !strings.HasPrefix(block.Content, "## Environment\n") {
-		t.Fatalf("message %d = (%q, %q), want the environment block closing the assembly", len(got)-2, block.Role, block.Content)
+		t.Fatalf("message %d = (%q, %q), want the environment block closing the request", len(got)-1, block.Role, block.Content)
 	}
-	if last := got[len(got)-1]; last.Role != model.RoleUser || last.Content != "看看环境" {
-		t.Fatalf("message %d = (%q, %q), want the range input behind the block", len(got)-1, last.Role, last.Content)
+	if last := got[len(got)-2]; last.Role != model.RoleUser || last.Content != "看看环境" {
+		t.Fatalf("message %d = (%q, %q), want the range input ahead of the block", len(got)-2, last.Role, last.Content)
 	}
 	if !strings.Contains(got[0].Content, "system prompt") || !strings.Contains(got[1].Content, "greet body v1") {
 		t.Fatalf("request prefix = %v, want the fixed prompt and skill bodies in front of the block", got[:2])
@@ -395,10 +443,13 @@ func TestEnvironmentBlockNamesTheOpenObligations(t *testing.T) {
 		t.Fatalf("recorded requests = %d, want exactly one request of the observing range", len(requests))
 	}
 	got := requests[0].Messages
-	if len(got) != 2 || !strings.HasPrefix(got[0].Content, "## Environment\n") {
-		t.Fatalf("request = %v, want the environment block leading the boundary", got)
+	if len(got) != 2 || !strings.HasPrefix(got[1].Content, "## Environment\n") {
+		t.Fatalf("request = %v, want the environment block closing the request", got)
 	}
-	block := got[0].Content
+	if got[0].Role != model.RoleUser {
+		t.Fatalf("message 0 = (%q, %q), want the range input ahead of the block", got[0].Role, got[0].Content)
+	}
+	block := got[1].Content
 	if !strings.Contains(block, "- tasks: 1 open") {
 		t.Fatalf("environment block = %q, want the one open obligation counted", block)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -458,4 +459,46 @@ func (h *BindingHandle) Release(ctx context.Context) error {
 		return nil
 	}
 	return h.release(ctx)
+}
+
+// ToolFace reports the native tools one binding's request carries beside the
+// order their definitions are emitted in: the tools published with the binding
+// in name order first, then the tools registered on its resources after the
+// binding was published, in registration order. Both the request's tool map and
+// the environment block's tool list read this one face, so a model never reads
+// a tool name it cannot call. Keeping the later-registered tools behind the
+// published ones also keeps the provider-side prefix cache valid for the larger
+// stable part of the request.
+func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string) {
+	tools := make(map[string]trpctool.Tool, len(binding.Tools))
+	stable := make([]string, 0, len(binding.Tools))
+	for _, t := range binding.Tools {
+		if t == nil || t.Declaration() == nil {
+			continue
+		}
+		name := t.Declaration().Name
+		if _, held := tools[name]; held {
+			continue
+		}
+		tools[name] = t
+		stable = append(stable, name)
+	}
+	sort.Strings(stable)
+	order := append([]string(nil), stable...)
+	resources, ok := binding.Set.(*ToolResources)
+	if !ok {
+		return tools, order
+	}
+	for _, t := range resources.Tools(context.Background()) {
+		if t == nil || t.Declaration() == nil {
+			continue
+		}
+		name := t.Declaration().Name
+		if _, held := tools[name]; held {
+			continue
+		}
+		tools[name] = t
+		order = append(order, name)
+	}
+	return tools, order
 }

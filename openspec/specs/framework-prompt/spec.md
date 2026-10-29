@@ -23,7 +23,7 @@ ContextManager SHALL prepend a framework runtime description before the user-con
 
 ### Requirement: 环境块作为动态能力清单追加在请求末尾
 
-环境块 SHALL 由既有 `request->environment` 端口在请求边界现算（含 agent/model/tools/skills/mcp/prompt_version 与开放任务行），SHALL 作为请求 system 素材的收尾段承载（`Role=system` 消息，段名 `## Environment`，与 system prompt 自身的 Markdown 段同形）；模型家族的特殊 token 环绕 SHALL 由各 adapter 按惯例完成，框架 MUST NOT 自造标记、MUST NOT 以 user 消息冒充环境信息。工具面 SHALL 走原生 `Request.Tools` 字段（工具定义不进任何消息正文）。环境块开关关闭时 SHALL 不产生该段（行为=基线）。
+环境块 SHALL 由既有 `request->environment` 端口在请求边界现算（含 agent/model/tools/skills/mcp/prompt_version 与开放任务行），SHALL 与运行时加载的技能正文合并为一条动态 system 段（`## Environment` 收尾），并作为请求**最后一条消息**追加（transcript 与收尾指令之后）：稳定内容（声明的 prompt 与声明的技能正文，各合并为一条 system 消息）在前，逐轮可变的内容收尾，服务端前缀缓存只截断末尾最小一段。模型家族的特殊 token 环绕 SHALL 由各 adapter 按惯例完成，框架 MUST NOT 自造标记、MUST NOT 以 user 消息冒充环境信息；adapter 的缓存重排（把 system 消息统一抽到最前）SHALL 关闭，否则末条动态段被抽走、前缀排序失效。工具面 SHALL 走原生 `Request.Tools` 字段（工具定义不进任何消息正文），其定义顺序 SHALL 经 `ToolOrder` 表达：随绑定发布的工具在前（名序），运行期后加载的工具在后（注册序）。环境块开关关闭时该段只含后加载技能正文或为空（行为=基线）。
 
 #### Scenario: 末尾追加
 

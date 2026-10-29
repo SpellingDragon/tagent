@@ -26,7 +26,7 @@
 
 <a id="e2e-turn-sequence"></a>
 ## 六、一次完整回合的端到端时序
-宿主端点收请求（`assembly/host_face.go`：**先鉴权后读体**，未认证即 `ErrHostUnauthenticated`）→ 装配 `Invocation{InvocationID,Address,Instance,Ready}` → `Loop.Drive`：ready 逐条成事实 → 每轮决策前 `Occupy` 会话决策席（同址已有在途即 `ErrSlotHeld`，不并行不插队）→ `RequestFace` 装配请求（固定布局：system 单条恒首位、压缩摘要作 user 级注记、assistant 恒等于模型真实产出；环境块（`## Environment` 段，`Role=system`）落在 system 素材末段、transcript 之前，家族特殊 token 由各 adapter 按惯例渲染，框架不自造标记）→ `Decide` → tool 调用经适配器执行、结果作为事实提交 → 决策与通知提交 → 终结即 `Vacate` 席位 → 通知由 `assembly/host_delivery.go` 按冻结路由投递，未接受的保留义务。`Backflow` 是回合进行中读终结结算的那条缝：`progress` 落成事实，`settled`/`failed`/`cancelled` 才进入终结处理。
+宿主端点收请求（`assembly/host_face.go`：**先鉴权后读体**，未认证即 `ErrHostUnauthenticated`）→ 装配 `Invocation{InvocationID,Address,Instance,Ready}` → `Loop.Drive`：ready 逐条成事实 → 每轮决策前 `Occupy` 会话决策席（同址已有在途即 `ErrSlotHeld`，不并行不插队）→ `RequestFace` 装配请求（固定布局：system 单条恒首位、压缩摘要作 user 级注记、assistant 恒等于模型真实产出；环境块与运行时加载的技能正文合并为动态 system 段（`## Environment` 收尾），作为请求最后一条消息（transcript 与收尾指令之后）追加：稳定前缀（声明 prompt、声明技能正文各一条 system）在前，可变内容收尾，家族特殊 token 由各 adapter 按惯例渲染，框架不自造标记）→ `Decide` → tool 调用经适配器执行、结果作为事实提交 → 决策与通知提交 → 终结即 `Vacate` 席位 → 通知由 `assembly/host_delivery.go` 按冻结路由投递，未接受的保留义务。`Backflow` 是回合进行中读终结结算的那条缝：`progress` 落成事实，`settled`/`failed`/`cancelled` 才进入终结处理。
 
 <a id="trace-anchor"></a>
 ## 七、trace 锚点：span 与轨迹两条投影必须互链，且不得造假

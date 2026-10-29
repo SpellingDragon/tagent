@@ -442,7 +442,7 @@
           "skill"
         ],
         "folded_summary_leads_projection": true,
-        "environment_block_before_transcript": true,
+        "environment_block_before_transcript": false,
         "part_count_closed": 5
       }
     },

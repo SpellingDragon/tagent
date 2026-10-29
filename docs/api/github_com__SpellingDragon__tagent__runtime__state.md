@@ -340,6 +340,16 @@ func Route(change Change) (Channel, error)
     because refusing it is the correct behavior. A change the matrix registers
     nowhere is refused by name as well and takes no path at all.
 
+func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string)
+    ToolFace reports the native tools one binding's request carries beside the
+    order their definitions are emitted in: the tools published with the binding
+    in name order first, then the tools registered on its resources after the
+    binding was published, in registration order. Both the request's tool map
+    and the environment block's tool list read this one face, so a model never
+    reads a tool name it cannot call. Keeping the later-registered tools behind
+    the published ones also keeps the provider-side prefix cache valid for the
+    larger stable part of the request.
+
 TYPES
 
 type AcceptSeq uint64
