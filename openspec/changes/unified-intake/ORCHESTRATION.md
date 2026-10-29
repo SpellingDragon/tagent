@@ -24,7 +24,7 @@
 ### 2.2 授权（每单白名单）
 
 - D1：仅新测试文件+（如需）tests 内 fixture。禁碰生产代码。
-- D2：`runtime/agent/loop.go`（每决策增量+退出判据）、`assembly/facts.go`（界标不变量校准）、测试文件。ReadyFeed 面签名冻结（见 design D1），实现方式自定；不得改 decision inputs 落链语义。
+- D2：`runtime/agent/loop.go`（每决策增量+退出判据）、`assembly/facts.go`（界标不变量校准）、测试文件。聚合复用既有 `observeReady`/`aggregateReady`/`SessionFacts`；不得改 decision inputs 落链语义。
 - D3：`assembly/host.go`（Invoke/gate 段：在途记录+KindUnknown 受理）、`assembly/host_face.go`（inject 段：KindUnknown 判已受理）、`examples/wechat-bot/wechat.go`（Drive 段：同判读+mutex 降级）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
 - D4/D6：仅规格文件+wiki 锚页（锚 slug 保全）。
 - D5：`features/evolution/meditation/{driver,judgment}.go`、`assembly/run.go`（仅 Occupancy 注入段；与 D2 分段授权）、新测试。闸零值=现行为。
