@@ -7,18 +7,19 @@
 | 01 | decision-boundary | `event-boundary`（ADDED） | 在途 turn 的每个 decision 边界重新聚合链上就绪事件（含用户/外部输入）；host Invoke 受理语义与 gate 降级 | `persistent-event-loop` 现条款（:94/:105/:123 保留不动） |
 | 02 | meditation-activity | `meditation-activity`（MODIFIED `meditation-idle-gating`） | 节奏门加用户事件新鲜度闸与决策席在途闸；自管回合不重置 | `event-metadata-contract` 的 trigger_source 读径（相同，不新建） |
 
-## D1 决策边界就绪增量（域 A 核心）
+## D1 决策边界就绪增量（域 A 核心；grill P0-1/P1-3/P2-14 修订）
 
-- `Loop` 新增窄读面 `ReadyFeed`（消费方定义：`func(ctx, after EventID) []event.Event`——按会话读 `after` 之后的新事实），装配时注入；nil=现行为（兼容）。
-- `Drive` 循环每轮 `decide` **之前**：`observeReady` 从「仅在开头跑一次」改为「每 decision 边界对增量再跑一次」——增量=链上自本 invocation 上次消费位以来的新事件（含用户消息、通知、注入）；新事件按下标成事实并入 transcript。
-- **决策因果可重放**：每个 decision 的输入=其时刻链上事实集（decision 事实落链自带 inputs 引用），重放边界不变——不破坏既有可重放性。
+- `Loop` 新增窄读面 `ReadyFeed`（消费方定义）：`func(ctx context.Context, addr event.Address, after event.EventID) []event.Event`——按会话读 `after` 之后的**可入 ready 事实**；装配注入；nil=现行为（兼容）。
+- **可入判据=复用 `admitsRange`**（assembly/facts.go:242：`TypeExternalInput` + task 章的 notice），并显式排除本 range 已消费键。**红色约束：progress notice（TypeFeedback）绝不进入任何 decision 输入**（既有红线 loop.go:221）；drive 自己落的 thinking_plan/agent_output 不入 ready（同判据自然排除）。
+- `Drive` 每轮 `decide` **之前**做增量：拉 `admitsRange` 增量→并入 transcript（按下标成事实位点）；`observeReady` 的 After 趟对**增量**重跑且按 EventKey 去重（同事实不重复观察）。
+- **不变量：在途消费不移动 projection 界标 `endedAt`**——`admitsRange` 对「range 在途且 InvocationID 不同」的事实 SHALL 只记入 ready 水位、不移动已结束材料界标（否则 prefix 与 transcript 双份携带；见 P0-1）。可重放边界由 `replayEntry.endedAt` 承担（`Event` 无 inputs 字段，Decision 只活在内存——P2-14 修正原论证）。
 - 首个 decision 语义不变（ready=Invocation.Ready 聚合同样适用）。
 
-## D2 host Invoke 受理语义（域 A）
+## D2 host Invoke 受理语义（域 A；grill P0-2/P1-4/P1-10 修订）
 
-- 用户/外部输入到达：**先落链成事实**（evt 事实，`landing` 序号），返回受理回执（`ok` 最小回执语义沿用）。
-- 该 session 无在途 turn → 起 turn（gate 获取成功才起）；有在途 turn → **只落事实即返回**，由在途 turn 下一 decision 边界消费。
-- 无在途 but gate 被占的微窗口：落事实后挂到 gate 等待起 turn（与现状排队等价，但消息已先入链，语义=「已受理」）。
+- **顺序不变量：落链先于 gate**——`Run.LandInput(ctx, addr, msgs) ([]event.Event, error)`（从 Run.Invoke 抽出；`assembly/invoke.go` 进 D3 白名单）在 `lockAddressContext` **之前**执行；受理事实以在途 range 的 `InvocationID` 落链（或同 range 水位归属），保证投影界标不移动（D1 不变量）。重复落链幂等：同内容同 session 未消费水位内的重复提交 SHALL 归并（不重复入 transcript）。
+- **受理返回值确定化**：在途受理返回 `Turn{InvocationID: 受理 id, Terminal: model.KindUnknown}` 并携带新哨兵 `agent.ErrAcceptedInFlight`（调用方可辨）；**仅对用户入口生效**——follow-up 路径（fireNoticeTurn/driveSeat）仍经 gate 阻塞拿完整 Turn，`ErrNoticeTurnIncomplete` 语义一字不变。D2 旧分支③（挂 gate 等起 turn）删除：无在途但 gate 被占的微窗口=以「在途」同径受理（消费方是 gate 持有者的收尾 re-check）。
+- **末决策兜底（P0-2）**：`Drive` 在返回前做一次增量 re-check：存在未消费的 ready 增量（admitsRange 事实且水位未过）→ 续跑一轮；同时 gate 释放后 `Host` 二次裁定——仍存在未消费外部输入则接续起 turn。规格写「至多一次消费由 ready 水位归属保证」。
 
 ## D3 gate 降级为 turn 发起权门（域 A）
 
@@ -30,8 +31,9 @@
 
 ## D5 冥想活跃闸（域 B）
 
-- 判据数据源与 novelty 门同源（事实链 `trigger_source`）：driver 记录 per-session `lastUserEventAt`（`source==user` 的事实时间）；fire 前判：`now - lastUserEventAt < min_gap` → **不 fire**（冷却自最后用户事件重置）；自管谱系（task_settled/回执/摘要注入）不更新 `lastUserEventAt`（家务回合不阻塞条款保留）。
-- 决策席在途：driver fire 前读该 session 决策席占用（装配注入窄读面 `SlotQuery`），占用→不 fire（**推迟非放弃**——水位不动、pending 机制沿用；下个 tick 重评）。
+- 判据数据源与 novelty 门同源但**归一化**（P1-9）：「用户事件」= `TypeExternalInput` 且（`trigger_source == "user"` **或** owner 为宿主用户地址）——CLI/`/task` 未盖章输入仍算活跃（Invoke 入口补默认盖章 best-effort，但判据不依赖它）；driver 记录 per-observation-namespace `lastUserEventAt`；fire 前判：`now - lastUserEventAt < min_gap` → **不 fire**；自管谱系不更新（家务不阻塞保留）。
+- 决策席在途（P1-5 主体钉死）：判据=「观察面内最新用户事件所属 session 的决策席被占用」——多 session 聚合规则=**任一被测 session 占用即抑制，全空闲才 fire**；装配注入窄读面 `SlotQuery`（只读）。
+- 抑制语义（P1-6 修正）：抑制=**deferred 记账+水位不动+保留观察面覆盖**；重评触发=下一次 host-facing 提交或冥想自身提交（ObserveCommit 入口），**无新提交则不重评**（既无 ticker 的诚实上界；B1 锚覆盖该上界）。
 - 与 `meditation-idle-gating` 现条款关系：MODIFIED 节奏门 Requirement——保留「时间门槛禁令」原文（反时间阈值），新增「用户事件新鲜度」与「决策席在途」两侧判据（结构性判据，非时间门槛）；其余条款（novelty/让位/水位执行语义）一字不动。
 
 ## D6 被否方案
@@ -56,4 +58,4 @@
 
 ## D9 回退
 
-每域改动独立可回退：A2/A3 以 `ReadyFeed` nil=现行为为回退开关（无配置面，代码级并存）；B2 以活跃闸参数零值=现行为。回退后与基线零 diff（F1 契约目录断言+回退复跑症状锚必红）。
+每域改动独立可回退：A2/A3 以 `ReadyFeed` nil=现行为为回退开关（无配置面，代码级并存）；B2 以活跃闸参数零值=现行为。时钟 seam（P1-8）：`NewDriver` 增加 `now func() time.Time` 参数（装配点 assembly/host.go:401 扩入 D5 白名单）；B1 时钟=`Reflection.Tick(ctx, now)` 直注入，禁真实 sleep。回退后与基线零 diff（F1 逐条命令见 tasks）。
