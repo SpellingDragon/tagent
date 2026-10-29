@@ -7,37 +7,39 @@
 | 01 | decision-boundary | `persistent-event-loop`（ADDED） | 在途 turn 的每个 decision 边界重新聚合链上就绪事件（含用户/外部输入）；host Invoke 受理语义与 gate 降级 | `persistent-event-loop` 现条款（:94/:105/:123 保留不动） |
 | 02 | meditation-activity | `meditation-idle-gating`（MODIFIED） | 节奏门加用户事件新鲜度闸与决策席在途闸；自管回合不重置 | `event-metadata-contract` 的 trigger_source 读径（相同，不新建） |
 
-## D1 决策边界就绪增量（域 A 核心；grill P0-1/P1-3/P2-14 修订）
+## D1 决策边界消费＝既有 ready 面的时序参数化（零新概念）
 
-- `Loop` 新增窄读面 `ReadyFeed`（消费方定义）：`func(ctx context.Context, addr event.Address, after event.EventID) []event.Event`——按会话读 `after` 之后的**可入 ready 事实**；装配注入；nil=现行为（兼容）。
-- **可入判据=复用 `admitsRange`**（assembly/facts.go:242：`TypeExternalInput` + task 章的 notice），并显式排除本 range 已消费键。**红色约束：progress notice（TypeFeedback）绝不进入任何 decision 输入**（既有红线 loop.go:221）；drive 自己落的 thinking_plan/agent_output 不入 ready（同判据自然排除）。
-- `Drive` 每轮 `decide` **之前**做增量：拉 `admitsRange` 增量→并入 transcript（按下标成事实位点）；`observeReady` 的 After 趟对**增量**重跑且按 EventKey 去重（同事实不重复观察）。
-- **不变量：在途消费不移动 projection 界标 `endedAt`**——`admitsRange` 对「range 在途且 InvocationID 不同」的事实 SHALL 只记入 ready 水位、不移动已结束材料界标（否则 prefix 与 transcript 双份携带；见 P0-1）。可重放边界由 `replayEntry.endedAt` 承担（`Event` 无 inputs 字段，Decision 只活在内存——P2-14 修正原论证）。
-- 首个 decision 语义不变（ready=Invocation.Ready 聚合同样适用）。
-- **消费水位具名面（P1-4）**：`lastConsumedReady event.EventID`——由 `Loop.intake` 持有；初值=首轮 `Invocation.Ready` 末键；推进点=每次增量并入 transcript 之后；驱动以错误结束**不推进**；`ReadyFeed(after)` 只负责范围，排除已消费由该游标负责。**账本分层**：受理账本复用既有 mailbox（`AdmitInbound`/claim/consume）；`lastConsumedReady` 只是**呈现**账本（决定 transcript 并入），不与 mailbox seq 竞争。
-- **在途位具名面**：`replayEntry` 增加 `rangeInFlight bool`（Drive 起赋值、返回前清除）；`admitsRange` 的「在途不移动 endedAt」判据读它。
+**不新增任何面/类型/哨兵。全部复用：** `Invocation.Ready`（注释本就自称「aggregated for the next decision」）、`observeReady`/`aggregateReady`（既有）、`SessionFacts`（既有读面）、`intake` 的 transcript 累积（既有）、`projection.endedAt` 界标（既有）。
 
-## D2 host Invoke 受理语义（域 A；grill P0-2/P1-4/P1-10 修订）
+- **落链归属**：在途到达的外部输入复用既有 `Run.Invoke` 落链路径，事实的 `InvocationID` 记为**在途 range 的 invocation**（Host 在既有地址门内记录在途 inv——地址门既有对象的字段扩展，非新概念）。同 invocation 的事实不触发 `admitsRange` 的「新 range 首条输入」界标前移——**界标不动的保证来自既有判据本身，无需新增在途位**。
+- **消费**：`Drive` 每轮 `decide` 前重跑既有 `observeReady`+`aggregateReady`，输入=既有 `SessionFacts(addr)` 中 `InvocationID==本 range` 且 `admitsRange` 放行的事实；**去重=transcript 已含集合**（既有 transcript 本身就是累积面），不设水位游标。
+- **退出判据扩展（唯一改动点）**：既有退出条件 `len(receipts)==0 && len(observations)==0` 增加一项——`aggregateReady` 增量非空则继续。**位置在既有 commit-transcript/commit-output 之前**（与 grill P2-2 修正一致：并入退出判定，不在 return 前另插 re-check）。
+- 红线条目照旧：progress notice 不进任何 decision 输入（既有红线，不因本变更松动）。
 
-- **顺序不变量：落链先于 gate**——`Run.LandInput(ctx, addr, msgs) ([]event.Event, error)`（从 Run.Invoke 抽出；`assembly/invoke.go` 进 D3 白名单）在 `lockAddressContext` **之前**执行；受理事实以在途 range 的 `InvocationID` 落链（或同 range 水位归属），保证投影界标不移动（D1 不变量）。重复落链幂等：同内容同 session 未消费水位内的重复提交 SHALL 归并（不重复入 transcript）。
-- **受理返回值确定化**：在途受理返回 `Turn{InvocationID: 受理 id, Terminal: model.KindUnknown}` 并携带新哨兵 `agent.ErrAcceptedInFlight`（调用方可辨）；**仅对用户入口生效**——follow-up 路径（fireNoticeTurn/driveSeat）仍经 gate 阻塞拿完整 Turn，`ErrNoticeTurnIncomplete` 语义一字不变。D2 旧分支③（挂 gate 等起 turn）删除：无在途但 gate 被占的微窗口=以「在途」同径受理（消费方是 gate 持有者的收尾 re-check）。
-- **末决策兜底（P0-2）与驱动归属（P1-1）**：`Drive` 返回前做增量 re-check（未消费增量→续跑）；驱动归属用 **handoff latch**（每地址 `gateSeat{mu, held, closing, nextDrive}`，与 gate 同锁）替代二次裁定的 check-then-act：受理方落链后持锁——held/closing→`nextDrive=true`（由持有者承接）；否则 `held=true` 自驱。持有方收回后持锁——`nextDrive`→承接续驱；否则关闭。**保证分工：至少一次消费由 latch，至多一次由 `lastConsumedReady` 水位**。
-- **Host 唯一组合缝**：`Run.InvokeLanded(ctx, req, ready []event.Event)`——LandInput 已落链后的驱动入口；Host SHALL NOT 再调 `Run.Invoke`（防二次落链+另起驱动）。
+## D2 host Invoke 受理语义（零新概念版）
 
-## D3 gate 降级为 turn 发起权门（域 A）
+- **在途受理**：`Host.Invoke` 在既有地址门内发现已有在途 turn 时——复用既有 `Run.Invoke` 落链该输入（归属在途 inv），返回 **既有形态** `Turn{Terminal: model.KindUnknown}` 且 `err=nil`。**不新增哨兵**：调用方已有的「无错误但 terminal 未知=未产出」判读即是受理语义；既有 `KindUnknown` 注释本就表达「状态不可判定」。
+- **无在途**：保持现状——拿门、起 turn、阻塞返回完整 Turn。
+- **末决策窗口**：由 D1 的退出判据扩展自然覆盖（消息在末决策期间落链→退出判定看到增量→继续而非退出）；门释放前若判据新增了增量（微窗口），持有方重跑一次同一判据——**同一判据重跑，不是新机制**。
+- **Host 组合缝**：`Run.Invoke` 保持唯一入口（落链+驱动一体，既有形态）；Host 的门内逻辑调整只决定「是否把返回的 Turn 交还调用方」，**不抽新函数、不改 Run 公共面**。
+- follow-up 路径（fireNoticeTurn/driveSeat）**一字不动**。
 
-`addressGate` 语义从「消息门」改为「**turn 发起权门**」：同 session 仍至多一个在途 turn（决策席串行不变）；gate 不再阻塞消息入链，只仲裁「谁起 turn」。`ErrSlotHeld`（决策席）与 `ErrShutdownRefused` 语义不变。
+## D3 gate 语义（域 A，零新概念）
+
+`addressGate` 既有的「同 session 单槽」语义**不改**；变化只在持有者行为：在途期间到达的输入**落链后即返受理**（D2），不再由调用方在门外排队。`state.Occupancy`/`ErrSlotHeld`/`ErrShutdownRefused` 一字不动。**新增的只有门内一个既有对象的字段**（记录在途 InvocationID，供 D1 落链归属），非新概念。
 
 ## D4 外部输入规格条款（域 A delta）
 
 `persistent-event-loop` ADDED Requirement「在途 turn 的外部输入在 decision 边界消费」：外部输入（`source==user`/渠道）SHALL 先成事实；在途 turn SHALL 在下一 decision 边界聚合并消费，SHALL NOT 排队至 turn 结束另起 turn，SHALL NOT 被执行中的 decision 打断消费。Scenario 两条（在途消费/无在途起 turn）。**不改** :94/:105/:123 的 task_settled 条款（两者同构，条款并列）。
 
-## D5 冥想活跃闸（域 B）
+## D5 冥想活跃闸＝既有 novelty 判据的时间参数化（零新概念）
 
-- 判据数据源与 novelty 门同源但**归一化**（P1-9）：「用户事件」= `TypeExternalInput` 且 (`hostFacingStamp(trigger_source)` **或** `trigger_source=="" && owner==宿主用户地址`的兼容项)——与 judgment.go 的 host-facing 词表 `{user,task,reincarnation,system_alert}` 同源、`hostFacingStamp` 直接复用；**`trigger_source==meditation` 恒不计入活跃**（冥想自身注入显式排除，不再依赖 session 不同这一巧合）；driver 记录 per-observation-namespace `lastUserEventAt`；fire 前判：`now - lastUserEventAt < min_gap` → **不 fire**；自管谱系不更新（家务不阻塞保留）。
-- 决策席在途（P1-5 主体钉死）：判据=「观察面内最新用户事件所属 session 的决策席被占用」——多 session 聚合规则=**任一被测 session 占用即抑制，全空闲才 fire**；装配注入窄读面 **`SlotQuery func(addr event.Address) bool`**（语义=该地址 addressGate 被持有=**turn 门**，与 D3 的 gate 同面；`state.Occupancy` 的 instance 维度显式不参与本读面；原因：D3 后 turn 粒度串行由 gate 承担，decision 席是另一层）。多 session 聚合规则随 delta 场景同步（任一被测 session 占用即抑制）。
-- 抑制语义（P1-6/P0-1 修正）：抑制=**gateDeferred 计数+水位不动+保留观察面覆盖**（新增独立计数器，不混入既有 pending）；**重评由一次性 rearm timer 承担**（复用既有 rearm 语义，非周期 ticker）：闸未开时 retained=true 且重评点=冷却到期时刻（`now + min_gap - lastUserEventAt`），到期即评一次；**禁止**在抑制期创建 pending（pending 既有语义=已注入待 outcome，闸在注入之前，两类不得混用）。
-- 与 `meditation-idle-gating` 现条款关系：MODIFIED 节奏门 Requirement——保留「时间门槛禁令」原文（反时间阈值），新增「用户事件新鲜度」与「决策席在途」两侧判据（结构性判据，非时间门槛）；其余条款（novelty/让位/水位执行语义）一字不动。
+**不新增读面/计时器/计数器。全部复用：** 既有 novelty 门的扫描结果（`ScannedFact{Timestamp, SelfManaged, Attribution}` 已有「非自管新鲜事实」的全部判据）、既有 `retained`/`rearm` 语义、既有 verdict 通道。
+
+- **判据①（用户事件新鲜度）**：novelty 门已在扫描「Timestamp > lastMeditation 且非自管」的事实——**把「存在即 novel」的时间参数化**：该批事实中最近一条的 Timestamp 距 now 不足 `min_gap` → 本 tick 不 fire（冷却自最后非自管事实重置）。自管谱系在 `SelfManaged` 上已被既有判据排除（「家务回合不阻塞」条款的既有实现即此）。
+- **判据②（turn 在途）**：装配注入**既有 `*state.Occupancy`**（Loop 已持有、Host 已构造——同一既有对象注入），fire 前查「观察面事实所属地址的决策席占用」→ 占用不 fire。**不造 SlotQuery 面**：直接持有既有对象。
+- **抑制语义**：沿用既有 `retained`（语义本就是「保留到下次评估」）——抑制=retained 置位+水位不动；重评由**既有 rearm/interval 节拍**承担（间隔=`interval` 既有默认，**不新增 gateUntil 等待源**）。既无 ticker 的诚实上界保留在 gaps。
+- **不造任何新读面/新计时器/新计数器/新同步入口**；测试沿用既有测试设施的注入方式（既有 fake 时间设施或既有构造的可选参数）。
 
 ## D6 被否方案
 
@@ -61,4 +63,4 @@
 
 ## D9 回退
 
-每域改动独立可回退：A2/A3 以 `ReadyFeed` nil=现行为为回退开关（无配置面，代码级并存）；B2 以活跃闸参数零值=现行为。时钟 seam（P1-5）：新增 **`Driver.PassAt(ctx, now) TickOutcome`** 同步直调入口（经过闸门全路径，锚与宿主观察面共用）；B1 锚用它，禁真实 sleep、禁绕过闸门直调 Reflection。回退后与基线零 diff（F1 逐条命令见 tasks）。
+每域改动独立可回退：A2/A3 以 `ReadyFeed` nil=现行为为回退开关（无配置面，代码级并存）；B2 以活跃闸参数零值=现行为（构造零值=既有全部语义）。**无新时钟 seam**：重评沿用既有 rearm/interval 节拍；测试沿用既有 `NewDriver` 构造与既有测试设施（禁真实 sleep）。回退后与基线零 diff（F1 逐条命令见 tasks）。

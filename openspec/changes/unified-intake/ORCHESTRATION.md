@@ -24,17 +24,17 @@
 ### 2.2 授权（每单白名单）
 
 - D1：仅新测试文件+（如需）tests 内 fixture。禁碰生产代码。
-- D2：`runtime/agent/loop.go`、`runtime/agent/invocation.go`、`assembly/run.go`（ReadyFeed 注入段）、`assembly/facts.go`（admitsRange 界标不变量）、测试文件。ReadyFeed 面签名冻结（见 design D1），实现方式自定；不得改 decision inputs 落链语义。
-- D3：`assembly/host.go`（Invoke/gate/handoff latch 段）、`assembly/invoke.go`（LandInput/InvokeLanded）、`assembly/host_face.go`（inject 段：ErrAcceptedInFlight 不算失败）、`examples/wechat-bot/wechat.go`（Drive 段：同哨兵+mutex 降级）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
+- D2：`runtime/agent/loop.go`（每决策增量+退出判据）、`assembly/facts.go`（界标不变量校准）、测试文件。ReadyFeed 面签名冻结（见 design D1），实现方式自定；不得改 decision inputs 落链语义。
+- D3：`assembly/host.go`（Invoke/gate 段：在途记录+KindUnknown 受理）、`assembly/host_face.go`（inject 段：KindUnknown 判已受理）、`examples/wechat-bot/wechat.go`（Drive 段：同判读+mutex 降级）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
 - D4/D6：仅规格文件+wiki 锚页（锚 slug 保全）。
-- D5：`features/evolution/meditation/{driver,judgment}.go`、`assembly/host.go`（仅 NewDriver 调用点 :401，Clock+SlotQuery 注入）、`assembly/run.go`（仅 SlotQuery 注入段；与 D2 分段授权，D2 只写 ReadyFeed 段）、新测试。闸零值=现行为。
+- D5：`features/evolution/meditation/{driver,judgment}.go`、`assembly/run.go`（仅 Occupancy 注入段；与 D2 分段授权）、新测试。闸零值=现行为。
 - 预授权：单内 lint 自清（comment_policy 命令随令）；必须上报：任何需要动白名单外文件的连带（例如 loop 增加导出符号影响 api 面）。
-- 共享面：`assembly/run.go` 按段授权（D2=ReadyFeed 段；D5=SlotQuery 段，串行不相交）；`assembly/host.go` 按段（D3=Invoke/gate；D5=NewDriver 调用点）。
+- 共享面：`assembly/run.go` 按段授权（D2=聚合段；D5=Occupancy 注入段，串行不相交）；`assembly/host.go` 全归 D3。
 
 ### 2.3 凭据（五查落点）
 
 - 每单必贴：目标测试 `-run` 逐字输出（正锚）、负锚测试输出、消费者锚（公共入口：Host.Invoke/Assemble/NewDriver 真构造）、`bash scripts/lint.sh` 尾行、`git diff --stat` 白名单核对。
-- 必亲验数字：A1 红锚在基线上红（贴 FAIL 原文）；D2 后 `go test ./tests/integration/{history,execution,learning} -count=1` 全绿（ReadyFeed 增量对既有消费场景的扰动=本变更真未知数，回归面随 D2）；D3 后 `tests/integration/host` 全包 ok；`openspec validate --strict` exit 0；doc-budget 零差额。
+- 必亲验数字：A1 红锚在基线上红（贴 FAIL 原文）；D2 后 `go test ./tests/integration/{history,execution,learning} -count=1` 全绿（增量聚合对既有消费场景的扰动=本变更真未知数，回归面随 D2）；D3 后 `tests/integration/host` 全包 ok；`openspec validate --strict` exit 0；doc-budget 零差额。
 - 每单单独提交；提交信息 `feat(intake):/feat(meditation):/test(anchor):` 前缀。
 
 ### 2.4 释放（锁与等待表）

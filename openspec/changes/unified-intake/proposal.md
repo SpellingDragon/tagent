@@ -14,8 +14,8 @@
 
 ## What Changes
 
-- **(A) 单门事件流**：用户/外部输入到达即落链成事实；turn 在途时消息**不排队等 turn**，由在途 turn 的**下一 decision 边界**重新聚合链上就绪事件消费（ready 增量读面 + host Invoke 受理语义 + gate 降级为 turn 发起权门）。
-- **(B) 冥想活跃闸**：节奏门在 `min_gap` 基础上加两侧判据——①同 session 最近用户事件新鲜度（`source==user` 且晚于 last fire）→ 冷却自最后用户事件重置；②该 session 决策席在途 → 不 fire。自管谱系回合（结算摘要/回执注入）不重置冷却（沿用「家务回合不阻塞」）。
+- **(A) 单门事件流（零新概念）**：用户/外部输入到达即落链成事实（复用既有 `Run.Invoke` 路径）；turn 在途时消息**不排队等 turn**，由在途 turn 的**下一 decision 边界**用既有 `aggregateReady` 重新聚合消费（`Invocation.Ready`/`observeReady`/`SessionFacts`/`transcript`/`endedAt` 全部既有；唯一改动=退出判据扩一项）。
+- **(B) 冥想活跃闸（零新概念）**：节奏门叠两层既有判据——①novelty 扫描结果的时间参数化（最近非自管新鲜事实距 now 不足 `min_gap`→不 fire）；②既有 `*state.Occupancy` 决策席占用→不 fire；抑制沿用既有 `retained`/`rearm` 节拍，推迟非放弃。
 - **(C) 规格 delta**：`persistent-event-loop` ADDED「在途 turn 的外部输入在 decision 边界消费」；`meditation-idle-gating` MODIFIED 节奏门条款加活跃闸（保留时间门槛禁令的其余部分）。
 
 ## 被否方案（D6 详）

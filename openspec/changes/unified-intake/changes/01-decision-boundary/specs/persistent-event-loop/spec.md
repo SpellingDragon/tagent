@@ -4,7 +4,7 @@
 
 ### Requirement: 在途 turn 的外部输入在 decision 边界消费
 
-外部输入（`TypeExternalInput` 且 `hostFacingStamp(trigger_source)` 或空章+宿主地址）到达 SHALL 先提交为事实；**同一 session 有在途 turn 时**返回受理回执（`ErrAcceptedInFlight` 语义），无在途时起新 turn 并返回其 Turn；该输入 SHALL 在该 turn 的下一 decision 边界被聚合进输入并消费，SHALL NOT 排队至 turn 结束另起 turn；执行中的 decision SHALL NOT 被打断。自管谱系通知（task_settled 等）的既有排队条款不受本要求影响。
+外部输入（`TypeExternalInput`；另含既有 `admitsRange` 口径的 `TypeFeedback`&task 通知）到达 SHALL 先提交为事实；**同一 session 有在途 turn 时** SHALL 以既有 `Turn{Terminal: KindUnknown}` 且无错误返回受理，无在途时起新 turn 并返回其 Turn（本要求约束 `Host.Invoke` 受理面；`Run.Invoke` 直调面与注入面并发由既有决策席串行）；该输入 SHALL 在该 turn 的下一 decision 边界经既有 `aggregateReady` 聚合进输入并消费，SHALL NOT 排队至 turn 结束另起 turn；执行中的 decision SHALL NOT 被打断。自管谱系通知（task_settled 等）的既有排队条款不受本要求影响。
 
 #### Scenario: 在途消息被下一决策消费
 

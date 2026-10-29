@@ -4,7 +4,7 @@
 
 ### Requirement: 冥想触发采用双闸门判定
 
-冥想触发 SHALL 采用双门判定：novelty 门（观察面内存在 `Timestamp > lastMeditation` 且非自管谱系的事件）与节奏门（`now - lastMeditation >= min_gap`，两次**执行**之间的下限；`lastMeditation` 为零时直通）。节奏门 SHALL 再叠两侧结构性活跃判据：①同 session 存在晚于 `lastMeditation` 的用户事件（`TypeExternalInput` 且 `hostFacingStamp(trigger_source)` 或空章+宿主地址；`trigger_source==meditation` 恒不计入）且距其不足 `min_gap` → 不 fire（冷却自最后用户事件重置）；②该 session 决策席被在途 turn 占用 → 不 fire（推迟非放弃，水位不动、pending 沿用）。自管谱系回合（结算摘要/回执注入）SHALL NOT 重置冷却。让路 SHALL 由注入时刻的批次合并规则承担（见「混合批次中丢弃冥想事件」），MUST NOT 以任意回合的时间门槛预先判定忙闲。
+冥想触发 SHALL 采用双门判定：novelty 门（观察面内存在 `Timestamp > lastMeditation` 且非自管谱系的事件）与节奏门（`now - lastMeditation >= min_gap`，两次**执行**之间的下限；`lastMeditation` 为零时直通）。节奏门 SHALL 再叠两侧结构性活跃判据：①novelty 扫描中最近一条非自管新鲜事实距 now 不足 `min_gap` → 不 fire（冷却自最后用户事件重置）；②观察面事实所属地址的既有决策席被在途 turn 占用 → 不 fire（推迟非放弃：水位不动、`pending` MUST 保持为空）。自管谱系回合（结算摘要/回执注入）SHALL NOT 重置冷却。让路 SHALL 由注入时刻的批次合并规则承担（见「混合批次中丢弃冥想事件」），MUST NOT 以任意回合的时间门槛预先判定忙闲。
 
 #### Scenario: 节奏门按执行间隔判定
 
