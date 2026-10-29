@@ -52,8 +52,9 @@ const scenarioHistorySummaryPrefix = "history summary: "
 const scenarioSegmentFoldPrefix = "folded segment process: "
 
 // scenarioEnvironmentPrefix is the content prefix the dynamic environment block
-// is rendered with.
-const scenarioEnvironmentPrefix = "<environment>\n"
+// is rendered with: the named section the system channel carries, the same way
+// the fixed prompt carries its own material.
+const scenarioEnvironmentPrefix = "## Environment\n"
 
 // scenarioRecoveryPrefix is the content prefix the replay path's recovery marker
 // is rendered with: the marker names how much of the chain the budget replayed,

@@ -23,7 +23,7 @@ ContextManager SHALL prepend a framework runtime description before the user-con
 
 ### Requirement: 环境块作为动态能力清单追加在请求末尾
 
-环境块 SHALL 由既有 `request->environment` 端口在请求边界现算（含 agent/model/tools/skills/mcp/prompt_version 与开放任务行），SHALL 以 `<environment>…</environment>` 特殊标记环绕，SHALL 作为请求 `Messages` 的最后一条追加（`Role=user`，transcript 之后）；system prompt 文件本体 SHALL 保持前缀装配。环境块开关关闭时 SHALL 不追加末尾消息（行为=基线）。
+环境块 SHALL 由既有 `request->environment` 端口在请求边界现算（含 agent/model/tools/skills/mcp/prompt_version 与开放任务行），SHALL 作为请求 system 素材的收尾段承载（`Role=system` 消息，段名 `## Environment`，与 system prompt 自身的 Markdown 段同形）；模型家族的特殊 token 环绕 SHALL 由各 adapter 按惯例完成，框架 MUST NOT 自造标记、MUST NOT 以 user 消息冒充环境信息。工具面 SHALL 走原生 `Request.Tools` 字段（工具定义不进任何消息正文）。环境块开关关闭时 SHALL 不产生该段（行为=基线）。
 
 #### Scenario: 末尾追加
 

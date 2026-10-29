@@ -475,15 +475,23 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	if a.registered {
 		a.assembler.segment(a.projectedMainContext)
 	}
+	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
+		a.assembler.segment(a.environmentBlock)
+	}
 	messages, err := a.assembler.assemble(ctx)
 	if err != nil {
 		return agent.BoundaryView{}, err
 	}
-	view := agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}
-	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
-		view.Environment = a.run.environmentBlock(ctx, a.boundary, a.promptVersion)
-	}
-	return view, nil
+	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}, nil
+}
+
+// environmentBlock contributes the closing system section of the request: the
+// faces the request carries beside the open asynchronous work at this boundary,
+// rendered as the named Markdown section the fixed prompt's own material uses.
+// The material travels the system channel, so each family adapter turns it into
+// its own system framing instead of the request posing as conversation.
+func (a *requestAssembly) environmentBlock(ctx context.Context) ([]model.Message, error) {
+	return []model.Message{{Role: model.RoleSystem, Content: a.run.environmentBlock(ctx, a.boundary, a.promptVersion)}}, nil
 }
 
 // fixedFiles reads the declared prompt and skill bodies afresh at this boundary
@@ -892,18 +900,20 @@ func environmentBlockDebug(format string, args ...any) {
 // behind its transcript, for an agent that declares it: the agent the request
 // runs as, the tool, skill and MCP faces available to it, the content version
 // its prompt files fixed and the asynchronous work it holds open at this
-// boundary. The block is carried under the declared markers and the loop
-// appends it as its own user message after everything else, because everything
-// in it changes with the run while the material ahead of it — the fixed prompt,
-// the skill bodies and the transcript — does not, so the changing part never
-// moves the stable prefix it follows.
+// boundary. The block is the closing section of the request's system material,
+// rendered as a named Markdown section the way the fixed prompt renders its own:
+// the system channel is what the family adapters turn into their own system
+// framing, so the block never poses as conversation. Everything in it changes
+// with the run while the material ahead of it — the fixed prompt and the skill
+// bodies — does not, so the changing part never moves the stable prefix it
+// follows, and no marker of our own is invented beside the adapter's framing.
 func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary, promptVersion string) string {
 	spec := r.agentSpecOf(boundary.Agent)
 	open, omitted := r.openTaskLines(ctx)
 	environmentBlockGenerations.Add(1)
 	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s tasks=%d omitted=%d", boundary.Agent, len(open)+omitted, omitted)
 	var b strings.Builder
-	b.WriteString("<environment>\n")
+	b.WriteString("## Environment\n")
 	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)
 	if modelName := modelNameOf(boundary.Binding); modelName != "" {
 		fmt.Fprintf(&b, "- model: %s\n", modelName)
@@ -922,8 +932,7 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	if omitted > 0 {
 		fmt.Fprintf(&b, "  - (+%d more)\n", omitted)
 	}
-	b.WriteString("</environment>")
-	return b.String()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // openTaskLines reports the obligations this run owes as the environment block

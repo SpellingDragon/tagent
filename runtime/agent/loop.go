@@ -1036,9 +1036,6 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if round.final {
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
 	}
-	if boundary.Environment != "" {
-		messages = append(messages, model.Message{Role: model.RoleUser, Content: boundary.Environment})
-	}
 	req := model.Request{Messages: messages, Tools: tools}
 	l.fixCapture(ctx, decisionID, view, req)
 
