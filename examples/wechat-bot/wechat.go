@@ -245,6 +245,16 @@ func (h *hostRuntime) Admit(key string) error {
 // the turn's output through the sender port. A failed turn is answered by the
 // host's own failure notice: this layer holds no cause and writes no second
 // wording, so the user reads one raw error instead of a canned sentence.
+//
+// The per-session lock covers the intake alone: the notices a session still has
+// to read and the text of this delivery are taken into one request under it, so
+// two deliveries of one chat never read the inbox for each other. The turn itself
+// runs outside the lock, because the host's own address gate orders the drives
+// and takes a message that arrives while one runs onto the chain of that turn: a
+// channel lock around the whole turn would park the second message behind the
+// first one again, which is the queue this runtime does not keep. A delivery the
+// host accepted beside a running turn answers no decision and no error, and that
+// silence is the accepted message: it is never read here as a failed turn.
 func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Address, error) {
 	addr, err := h.router.AddressFor(in.ChatID)
 	if err != nil {
@@ -253,13 +263,7 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 	if err := h.router.Bind(addr, in.ChatID); err != nil {
 		return event.Address{}, err
 	}
-	unlock := h.lockAddress(addr)
-	defer unlock()
-
-	input := h.inbox.Drain(addr)
-	if text := strings.TrimSpace(in.Text); text != "" {
-		input = append(input, tagentmodel.Message{Role: tagentmodel.RoleUser, Content: text})
-	}
+	input := h.intake(addr, in)
 	if len(input) == 0 {
 		return addr, nil
 	}
@@ -281,7 +285,24 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 	return addr, nil
 }
 
-// lockAddress serializes the drives of one session.
+// intake takes the material one delivery admits: the notices the session still
+// has to read beside the text of this delivery, read and composed under the
+// intake lock of the session so two deliveries of one chat never read the inbox
+// for each other. The turn is not held under that lock: the host orders the
+// drives of the session and takes a message that arrives beside a running turn
+// onto that turn's chain.
+func (h *hostRuntime) intake(addr event.Address, in inboundMessage) []tagentmodel.Message {
+	unlock := h.lockAddress(addr)
+	defer unlock()
+	input := h.inbox.Drain(addr)
+	if text := strings.TrimSpace(in.Text); text != "" {
+		input = append(input, tagentmodel.Message{Role: tagentmodel.RoleUser, Content: text})
+	}
+	return input
+}
+
+// lockAddress serializes the intake of one session: the take of the notices it
+// still has to read beside the text of the delivery that is being admitted.
 func (h *hostRuntime) lockAddress(addr event.Address) func() {
 	value, _ := h.gates.LoadOrStore(addr, &sync.Mutex{})
 	mu := value.(*sync.Mutex)

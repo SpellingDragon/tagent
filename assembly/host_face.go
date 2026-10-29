@@ -152,7 +152,10 @@ func (f *hostFace) reload(w http.ResponseWriter, r *http.Request) {
 
 // inject admits one injection and answers before its turn runs: the body's user
 // content is driven at the user session the host admitted last, in the host
-// context so a shutdown still reaches the turn.
+// context so a shutdown still reaches the turn. A turn of that session that is
+// already running takes the content onto its own chain, and the admission
+// answers no decision and no error: that receipt is the accepted message, never a
+// failed injection, so the handler records it and raises no warning.
 func (f *hostFace) inject(w http.ResponseWriter, r *http.Request) {
 	if err := f.authorize(r); err != nil {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="tagent"`)
@@ -187,12 +190,18 @@ func (f *hostFace) inject(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusAccepted)
 	go func() {
-		if _, err := f.host.Invoke(f.ctx, InvokeRequest{
+		turn, err := f.host.Invoke(f.ctx, InvokeRequest{
 			Address:       addr,
 			TriggerSource: injection.TriggerSource,
 			Input:         []model.Message{{Role: model.RoleUser, Content: text}},
-		}); err != nil {
+		})
+		if err != nil {
 			assemblyWarn("tagent: the injected task failed (session=%s): %v", addr.SessionID, err)
+			return
+		}
+		if turn.Terminal == model.KindUnknown {
+			assemblyInfo("tagent: the injected task is on the chain of the range in flight (session=%s invocation=%s)",
+				addr.SessionID, turn.InvocationID)
 		}
 	}()
 }

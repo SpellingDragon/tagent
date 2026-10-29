@@ -182,6 +182,56 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 	})
 }
 
+// TestInflightUserMessageIsAcceptedNotQueued checks that a message arriving beside a running turn is accepted onto that turn's chain, not queued behind the gate.
+//
+// - positive: the call answers while the turn in flight is still parked, with no decision and no error
+// - positive: the fact commits under the identity of the range in flight, which is the input that range reads at its next decision
+// - negative: the in-flight turn reads the message once and drives no turn of its own for it, so nothing is queued beside the gate
+// - consumer: Host.Invoke over a host booted from a real document, read back from the requests served and the run's own chain
+//
+// 契约: docs/wiki/agent/event-flow.md
+func TestInflightUserMessageIsAcceptedNotQueued(t *testing.T) {
+	scene := intakeDrive(t, intakeSecondBody)
+
+	accepted := scene.accepted[0]
+	if accepted.waited {
+		t.Fatalf("the invocation of the in-flight message answered nothing within %s: a message beside a running turn is accepted, not queued behind the gate that turn holds", intakeAcceptWindow)
+	}
+	if accepted.err != nil {
+		t.Fatalf("invoke beside the in-flight turn = %v, want the message accepted beside no error", accepted.err)
+	}
+	if accepted.turn.Terminal != model.KindUnknown || len(accepted.turn.Decisions) != 0 {
+		t.Fatalf("accepted turn = (%v, %d decisions), want the receipt of an admission: no decision reached and no error",
+			accepted.turn.Terminal, len(accepted.turn.Decisions))
+	}
+	if accepted.turn.InvocationID != intakeFirstInvocation {
+		t.Fatalf("the accepted receipt names the range %q, want the range in flight %q: the message is input of the turn already running",
+			accepted.turn.InvocationID, intakeFirstInvocation)
+	}
+
+	landed := intakeFactsCarrying(scene.facts, intakeSecondBody)
+	if len(landed) != 1 {
+		t.Fatalf("facts carrying the in-flight message = %d, want the one fact the acceptance commits: a queued message is committed later, and only once it drives its own turn", len(landed))
+	}
+	if landed[0].InvocationID != intakeFirstInvocation {
+		t.Fatalf("the landed fact belongs to the range %q, want the range in flight %q: an input admitted beside a running turn is that range's material",
+			landed[0].InvocationID, intakeFirstInvocation)
+	}
+
+	at, ok := intakeDecisionAfterCall(scene.requests)
+	if !ok {
+		t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
+	}
+	if copies := intakeUserCopies(scene.requests[at], intakeSecondBody); copies != 1 {
+		t.Fatalf("copies of the accepted message in the next decision of the turn in flight = %d, want exactly 1 (%s)",
+			copies, intakeDescribe(scene.requests))
+	}
+	if len(scene.requests) != 2 {
+		t.Fatalf("model requests = %d (%s), want the two decisions of the one turn in flight: an accepted message queues no turn of its own behind the gate",
+			len(scene.requests), intakeDescribe(scene.requests))
+	}
+}
+
 // TestTheChainIsReadAgainAtTheDecisionBoundary checks that a message landing in the chain of a turn in flight reaches that turn's next decision.
 //
 // - positive: the message committed under the range in flight stands in the decision that reads the parked call's result, exactly once

@@ -637,6 +637,13 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
     user address of the entry agent delivers the fresh assistant output through
     the message sender; every other address is driven headless.
 
+    A user message that arrives while a drive of that address is already running
+    is admitted into the chain of that running range instead of parking outside
+    the gate: the message reaches the next decision boundary of the turn in
+    flight, and the call answers the admission itself — no decision reached and
+    no error. Every other arrival, and a user arrival beside a gate no drive
+    holds, takes the gate and drives a turn of its own, exactly as before.
+
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
     consumed, and an audit feedback fact without a model payload records the

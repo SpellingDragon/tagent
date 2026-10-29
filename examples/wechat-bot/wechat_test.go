@@ -301,6 +301,9 @@ func textMessage(from, text string) *wechat.Message {
 	}}}
 }
 
+// wechatDeliveryWindow bounds how long one channel delivery may wait before the lock is read as spanning the turn.
+const wechatDeliveryWindow = 5 * time.Second
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -1245,6 +1248,77 @@ func TestRegisteredHandlersDriveTheChannel(t *testing.T) {
 	}
 	if got := rig.callCount(); got != 2 {
 		t.Fatalf("an approval ruling drove %d model turns, want none", got-2)
+	}
+}
+
+// TestASecondWechatMessageIsNotHeldByTheChannelLock 钉住同一会话的第二条消息不被渠道锁挡在门外。
+//
+//   - the second delivery of one chat reaches the host while the first turn is still running
+//   - that delivery answers no error and no failed turn, which the channel never reads as a failure
+//   - the chain read is pinned where the real host runs: TestInflightUserMessageIsAcceptedNotQueued, since this rig fakes the host
+func TestASecondWechatMessageIsNotHeldByTheChannelLock(t *testing.T) {
+	rig := newRoutingRig(t)
+	ctx := context.Background()
+
+	var mu sync.Mutex
+	var calls []assembly.InvokeRequest
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rig.host.invoke = func(ctx context.Context, req assembly.InvokeRequest) (bool, error) {
+		mu.Lock()
+		calls = append(calls, req)
+		index := len(calls)
+		mu.Unlock()
+		if index == 1 {
+			close(entered)
+			<-release
+		}
+		return false, nil
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-a", Text: "第一句"})
+		firstDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(wechatDeliveryWindow):
+		t.Fatal("the first delivery never reached the host")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := rig.host.Drive(ctx, inboundMessage{ChatID: "chat-a", Text: "第二句"})
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("the second delivery beside the running turn = %v, want the accepted receipt beside no error", err)
+		}
+	case <-time.After(wechatDeliveryWindow):
+		t.Fatal("the second delivery of one chat waited for the first turn to end: the channel lock still spans the whole turn")
+	}
+
+	close(release)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("the first delivery = %v, want the turn it drove answered beside no error", err)
+		}
+	case <-time.After(wechatDeliveryWindow):
+		t.Fatal("the first delivery never ended after its turn was released")
+	}
+
+	mu.Lock()
+	recorded := append([]assembly.InvokeRequest(nil), calls...)
+	mu.Unlock()
+	if len(recorded) != 2 {
+		t.Fatalf("invocations = %d, want the two deliveries of one chat", len(recorded))
+	}
+	if !requestCarries(recorded[0], "第一句") || !requestCarries(recorded[1], "第二句") {
+		t.Fatalf("requests = %+v, want each delivery admitted with its own text", recorded)
 	}
 }
 

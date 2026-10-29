@@ -624,6 +624,13 @@ func (h *Host) stopTelemetry(ctx context.Context) error {
 // Invoke drives one invocation through the assembled run. An invocation at the
 // user address of the entry agent delivers the fresh assistant output through
 // the message sender; every other address is driven headless.
+//
+// A user message that arrives while a drive of that address is already running
+// is admitted into the chain of that running range instead of parking outside
+// the gate: the message reaches the next decision boundary of the turn in
+// flight, and the call answers the admission itself — no decision reached and no
+// error. Every other arrival, and a user arrival beside a gate no drive holds,
+// takes the gate and drives a turn of its own, exactly as before.
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	if h == nil || h.run == nil {
 		return agent.Turn{}, ErrHostClosed
@@ -646,12 +653,43 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	if req.InvocationID == "" {
 		req.InvocationID = h.nextInvocation(req.Address)
 	}
+	if user {
+		if turn, accepted, err := h.acceptInflight(ctx, req); accepted {
+			return turn, err
+		}
+	}
 	unlock, err := h.lockAddressContext(ctx, req.Address)
 	if err != nil {
 		return agent.Turn{}, err
 	}
 	defer unlock()
 	return h.driveLocked(ctx, req)
+}
+
+// acceptInflight lands the messages of one user request in the chain of the
+// range a drive is running at that address, and answers the admission itself.
+// The facts commit under the identity of the running range, so that drive reads
+// them at its own next decision boundary instead of a second turn opening after
+// it; the After pass of each fact stays with that boundary read, which observes
+// one fact of its range once. The answer carries no decision and no error: what
+// the call reports is that the message is on the chain the turn in flight reads.
+//
+// A gate no drive holds names no range, and the call is not admitted here: the
+// caller takes the gate and drives its turn as it always did.
+func (h *Host) acceptInflight(ctx context.Context, req InvokeRequest) (agent.Turn, bool, error) {
+	inflight, running := h.gateOf(req.Address).running()
+	if !running {
+		return agent.Turn{}, false, nil
+	}
+	now := time.Now()
+	for _, msg := range req.Input {
+		evt := h.run.inputEventOf(req, msg, inflight, now)
+		if _, err := h.run.commitOnly(ctx, req.Address, evt); err != nil {
+			return agent.Turn{}, true, fmt.Errorf("tagent: the input of %s was not committed into the chain of the range in flight %s: %w",
+				req.InvocationID, inflight, err)
+		}
+	}
+	return agent.Turn{InvocationID: inflight, Terminal: model.KindUnknown}, true, nil
 }
 
 // driveLocked drives one invocation whose session gate the caller already
@@ -676,6 +714,9 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 	user := req.Address.AgentID == h.entry
 	sender := h.sender
 	h.mu.Unlock()
+	gate := h.gateOf(req.Address)
+	gate.hold(req.InvocationID)
+	defer gate.release()
 	var baseline int
 	if user {
 		h.rememberUserAddress(req.Address)
@@ -1070,8 +1111,46 @@ func (h *Host) injectAddress(label string) event.Address {
 
 // addressGate is the one-slot gate that serializes the drives of one session:
 // the token is held by the drive in flight, and a waiter parks on the channel
-// instead of a mutex, so a cancelled follow-up leaves the wait.
-type addressGate struct{ token chan struct{} }
+// instead of a mutex, so a cancelled follow-up leaves the wait. Beside the token
+// the gate names the range the holder drives, which is the identity an input
+// admitted while the drive runs commits under.
+type addressGate struct {
+	token chan struct{}
+	// mu guards inflight, the range the holder of the token drives; it reads
+	// empty beside a gate no drive holds.
+	mu       sync.Mutex
+	inflight event.InvocationID
+}
+
+// gateOf reports the one-slot gate of one session address.
+func (h *Host) gateOf(addr event.Address) *addressGate {
+	value, _ := h.gates.LoadOrStore(addr, &addressGate{token: make(chan struct{}, 1)})
+	return value.(*addressGate)
+}
+
+// hold names the range the drive of the token is about to run, so an input that
+// arrives beside it commits into that range's chain.
+func (g *addressGate) hold(invocation event.InvocationID) {
+	g.mu.Lock()
+	g.inflight = invocation
+	g.mu.Unlock()
+}
+
+// release forgets the range the drive of the token ran. It runs before the token
+// is handed back, so a gate that reads free names no range.
+func (g *addressGate) release() {
+	g.mu.Lock()
+	g.inflight = ""
+	g.mu.Unlock()
+}
+
+// running reports the range the holder of the token drives, and false beside a
+// gate whose holder named none.
+func (g *addressGate) running() (event.InvocationID, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.inflight, g.inflight != ""
+}
 
 // lockAddress serializes the drives of one session.
 func (h *Host) lockAddress(addr event.Address) func() {
@@ -1086,8 +1165,7 @@ func (h *Host) lockAddress(addr event.Address) func() {
 // when the caller's context ends: the stop of the settle driver cancels the
 // follow-up waiting here, so a close never hangs on a gate a user turn holds.
 func (h *Host) lockAddressContext(ctx context.Context, addr event.Address) (func(), error) {
-	value, _ := h.gates.LoadOrStore(addr, &addressGate{token: make(chan struct{}, 1)})
-	gate := value.(*addressGate)
+	gate := h.gateOf(addr)
 	select {
 	case gate.token <- struct{}{}:
 		return func() { <-gate.token }, nil

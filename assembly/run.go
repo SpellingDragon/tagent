@@ -1019,6 +1019,26 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 // stamped is kept as the caller wrote it, and only an unstated stamp reads as
 // the target address of the commit.
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
+	key, err := r.commitOnly(ctx, addr, evt)
+	if err != nil {
+		return key, err
+	}
+	pipeline, err := r.factPipeline(addr.AgentID)
+	if err != nil {
+		return key, err
+	}
+	r.takePresentation(pipeline.After(ctx, key))
+	return key, nil
+}
+
+// commitOnly lands one event in the fact chain of an explicit address and stops
+// at the commit: the address block is backfilled exactly as the cross-session
+// write face backfills it, and no observation runs here. A caller that lands a
+// message beside a range already in flight uses this segment so the fact is not
+// observed twice: the After pass of that fact belongs to the boundary read the
+// running drive performs at its own next decision, which observes each fact of
+// its range once.
+func (r *Run) commitOnly(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
 	if err := r.establish(ctx, addr); err != nil {
 		return "", err
 	}
@@ -1045,11 +1065,6 @@ func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event
 	if err != nil {
 		return "", fmt.Errorf("tagent: commit the cross-session event: %w", err)
 	}
-	pipeline, err := r.factPipeline(addr.AgentID)
-	if err != nil {
-		return key, err
-	}
-	r.takePresentation(pipeline.After(ctx, key))
 	return key, nil
 }
 
