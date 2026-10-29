@@ -288,7 +288,10 @@ func (r *Reflection) LastDeferredAt() time.Time {
 //
 // A tick whose gate cannot be established reports TickClosed with the fact it
 // could not establish and injects nothing; a tick that injected reports the input
-// and settles the outcome the loop side handed back.
+// and settles the outcome the loop side handed back. The former watermark floor
+// is absorbed by the freshness judgment: the scan reads only facts newer than the
+// watermark and Recent is the newest of them, so a fresh fact inside the window
+// already implies the watermark floor — one judgment, not two.
 func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome {
 	if err := ctx.Err(); err != nil {
 		return TickOutcome{Decision: TickDecision{Disposition: TickClosed, Reason: "the tick context ended", Cause: err}}
@@ -327,16 +330,6 @@ func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome {
 			Decision: TickDecision{
 				Disposition: TickRhythm,
 				Reason:      fmt.Sprintf("the rhythm floor %s since the host-facing fact recorded at %s has not elapsed", r.cfg.Cadence.MinGap, recent.Content.Timestamp.UTC().Format(time.RFC3339Nano)),
-			},
-			Scan:   scan,
-			Digest: digest,
-		}
-	}
-	if !watermark.Moment.IsZero() && now.Sub(watermark.Moment) < r.cfg.Cadence.MinGap {
-		return TickOutcome{
-			Decision: TickDecision{
-				Disposition: TickRhythm,
-				Reason:      fmt.Sprintf("the rhythm floor %s after the consumed reflection at %s has not elapsed", r.cfg.Cadence.MinGap, watermark.Moment.UTC().Format(time.RFC3339Nano)),
 			},
 			Scan:   scan,
 			Digest: digest,

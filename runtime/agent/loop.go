@@ -273,13 +273,11 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		landed = next
 		if round.final {
 			turn.FinalRound = round.reason
-			if len(landed) == 0 {
-				l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
-				if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
-					return l.failCommit(turn, commitErr)
-				}
-				return turn, nil
+			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
+			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
+				return l.failCommit(turn, commitErr)
 			}
+			return turn, nil
 		} else if len(receipts) == 0 && len(observations) == 0 && len(landed) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
 			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
@@ -485,12 +483,13 @@ func (l *Loop) markConsumed(invocationID event.InvocationID, events []event.Even
 // - The marker is recorded before the drive reads anything, so the head input of the drive itself stands behind it and is never re-read.
 // - A chain that held no fact at the start names no head, and the read of that drive starts at the head of the chain as it stands.
 func (l *Loop) markRangeHead(inv Invocation) {
-	facts := l.sessionFacts(inv.Address)
 	in := l.intakeFor(inv.InvocationID)
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	in.head = ""
-	if len(facts) > 0 {
+	if n := len(inv.Ready); n > 0 {
+		in.head = inv.Ready[n-1].Key
+	} else if facts := l.sessionFacts(inv.Address); len(facts) > 0 {
 		in.head = facts[len(facts)-1].Key
 	}
 }

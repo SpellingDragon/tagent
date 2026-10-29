@@ -413,6 +413,7 @@ func rangeHeadDrive(t *testing.T, held []event.Event, land func(history *invaria
 	for _, evt := range held {
 		history.land(evt)
 	}
+	history.land(invariantLandedFact("event-probe", "invocation-1", "the message that opens this turn"))
 	ledger := &invariantAfterLedger{}
 	loop.SetFactPipelines(ledger.pipeline)
 	loop.SetPresentations(ledger.present)

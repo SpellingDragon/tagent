@@ -133,7 +133,7 @@ FAIL	github.com/SpellingDragon/tagent/tests/integration/evolution	0.403s
 
 ## 残余（如实登记，逐条带定位）
 
-1. **末窗口竞态重复副本（02 域之外，01 域已知）**：`[drive 最后一次 boundary 读 → run.Invoke 返回]` 窗口内到达的消息，可能在新 turn 的请求中出现两份。悬空已消除（`cdd2b1a1` 收口），彻底解法需跨 host/loop 的「不再读链」信号，超出本变更授权。
+1. **末窗口竞态（02 域之外，01 域已知；grilling 评审修正）**：`[drive 最后一次 boundary 读 → gate.release()]` 窗口内到达的消息有两个子例——①`release` 落在受理复核之前：消息以 inflight 身份落链、受理返回，但该 range 已不再读它（`endedAt` 不前进，也不入下一 turn 的历史），用户得不到回答直到再次发言；②`release` 落在复核之前但落链早于复核、复核在 `release` 之后：回到 gate 自驱，消息在新 turn 请求中出现两份。`cdd2b1a1` 的负锚只覆盖 `release` **之后**的到达。彻底解法需跨 host/loop 的「不再读链」信号，超出本变更授权；子例①为当前最坏已知行为，登记待下轮。
 2. **boot 文档方言无 environment_block 字段**：`assembly/host_document.go` 的 host 文档方言里没有开关/字段可以关掉或改写环境块——03 域把它固定为「请求边界的动态能力清单，追加在上下文末尾」，宿主文档无法按 host 关闭。要在方言层可配置，属新的 document 契约，留给下一轮。
 3. **`Reflection.MinGap` 为计划外新增访问器**：`features/evolution/meditation/reflection.go:252`，唯一调用点 `driver.go:247`（重评排期取窗口剩余）。B2 任务行只授权「必要时既有构造加可选参数」，导出访问器是新符号；因只在包内消费、未进 public api 面，本次不返工，登记为偏差。
 4. **负载抖动（观察，未定因）**：见「门禁观察」——两例等待型集成测试在机器饱和时各失败一次，空闲时连续三次全绿、单独复跑稳定通过。已按观察记录，未证明基线同负载下同样抖动（本轮未做该对照）。
