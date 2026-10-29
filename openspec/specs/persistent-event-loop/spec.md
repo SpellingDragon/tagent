@@ -521,3 +521,22 @@ progress 通知 SHALL 只作为其 range 的事实落链（通知身份与稳定
 #### Scenario: 投递前审核是投递的必要条件
 - **WHEN** 宿主把一条正文（回合正文、失败告知或跨代理 send 的正文）投递到目标会话
 - **THEN** 该投递 SHALL 在到达渠道前把投递语义（正文、血统、目标）交审核插件裁决：allow/record SHALL 恰好投递一次；hold MUST NOT 投递、SHALL 挂起并在批准后原样补投恰好一次且 MUST NOT 被报告为投递；拒绝 MUST NOT 投递并 SHALL 留下无载荷审计事实（投递身份、血统、目标与字节数可查）；未配置审核时 SHALL 照常投递（默认 allow）
+
+### Requirement: 在途 turn 的外部输入在 decision 边界消费
+
+外部输入（`TypeExternalInput`；另含既有 `admitsRange` 口径的 `TypeFeedback`&task 通知）到达 SHALL 先提交为事实；**同一 session 有在途 turn 时** SHALL 以既有 `Turn{Terminal: KindUnknown}` 且无错误返回受理，无在途时起新 turn 并返回其 Turn（本要求约束 `Host.Invoke` 受理面；`Run.Invoke` 直调面与注入面并发由既有决策席串行）；该输入 SHALL 在该 turn 的下一 decision 边界经既有 `aggregateReady` 聚合进输入并消费，SHALL NOT 排队至 turn 结束另起 turn；执行中的 decision SHALL NOT 被打断。自管谱系通知（task_settled 等）的既有排队条款不受本要求影响。
+
+#### Scenario: 在途消息被下一决策消费
+
+- **WHEN** 慢工具轮 turn 进行中同 session 到达用户消息
+- **THEN** 该消息 SHALL 提交为事实，且同 turn 下一 decision 的输入 SHALL 含该消息
+
+#### Scenario: 无在途时起 turn
+
+- **WHEN** 无在途 turn 时到达用户消息
+- **THEN** SHALL 落链并起新 turn 消费
+
+#### Scenario: 忙碌不丢
+
+- **WHEN** 在途 turn 的 decision 进行中到达外部输入
+- **THEN** 输入 SHALL 保留于链上待下一决策，MUST NOT 丢弃或覆盖
