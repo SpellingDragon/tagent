@@ -560,6 +560,12 @@ type HistoryFace interface {
 	// CommitHistory appends the transcript one ended drive accumulated to the
 	// history of the named session.
 	CommitHistory(addr event.Address, msgs []model.Message)
+	// SessionFacts reports the facts the named session committed, in commit
+	// order: the chain a drive reads the input that landed in its own range
+	// from at a decision boundary rather than at the start of the drive alone.
+	// The signature is the one the run's own chain read carries, so the drive
+	// reads the very ledger it commits through instead of a lane beside it.
+	SessionFacts(addr event.Address) []event.Event
 }
     HistoryFace is the session transcript face the loop reads the accumulated
     history of a session from and writes one ended drive's transcript back to:
@@ -568,12 +574,14 @@ type HistoryFace interface {
     input beside that history and never batches with a neighbour. A session
     whose transcript a mapped sequence carries needs no second face here:
     that sequence is the one history of the session, so an implementation may
-    answer none of its own beside it.
+    answer none of its own beside it — and the facts of that chain are what the
+    drive reads its range's input again from at every decision boundary.
 
-    The redline list (3 rules): MUST report the history the named session
-    accumulated, as a copy the caller owns. MUST NOT batch the ready input of
-    one invocation into another invocation's range. MUST NOT rewrite or drop the
-    history a committed drive left behind.
+    The redline list (4 rules): MUST report the history the named session
+    accumulated, as a copy the caller owns. MUST report the facts of the named
+    session in commit order, as a copy the caller owns. MUST NOT batch the ready
+    input of one invocation into another invocation's range. MUST NOT rewrite or
+    drop the history a committed drive left behind.
 
 type Invocation struct {
 	// InvocationID identifies the responsibility range.
@@ -662,11 +670,15 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     The ready input of the range is never mixed with the input of another
     invocation. - The episode record is written where the business process
     actually starts: at the first drive of the invocation's own ready input.
-    - The settled result facts one decision paired are the stored input the next
-    decision reduces. - The transcript of this drive is committed beside the
-    terminal answer of its last decision, so the next invocation of this session
-    reads the range's history as it actually ended. - The whole drive is watched
-    as one in-flight production beside its invocation identity — the queueing
+    - The settled result facts one decision paired are the stored input the
+    next decision reduces. - The drive reads its range's chain again at every
+    decision boundary: input that landed in the range while a decision ran
+    enters the next decision of that same range, and a decision that opened
+    no obligation still ends the round while that input stands unread.
+    - The transcript of this drive is committed beside the terminal answer
+    of its last decision, so the next invocation of this session reads the
+    range's history as it actually ended. - The whole drive is watched as
+    one in-flight production beside its invocation identity — the queueing
     waits included — and confirms its stop only when the drive really ended.
     - A progress notification of the range's own call commits as a fact of its
     chain and enters no round head: the report is audit and projection material,

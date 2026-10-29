@@ -12,6 +12,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/api/view"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -255,6 +257,203 @@ func TestLoopTurnInvariants(t *testing.T) {
 	})
 }
 
+// TestTheBoundaryReadsTheChainAgain pins the boundary read of one drive: the input that landed in a range while its decision was running.
+// - a fact of the driven range that landed in flight reaches the next decision exactly once
+// - a fact of another invocation of the same session enters no decision of this drive
+// - the head input of the drive is not read back as a second copy of itself
+// - the identity a fact committed under is what de-duplicates it, never the text it carries
+// - the After pass of a fact runs once, however many boundaries read it
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestTheBoundaryReadsTheChainAgain(t *testing.T) {
+	t.Run("a fact that landed in flight reaches the next decision once", func(t *testing.T) {
+		behaviour, ledger, out := boundaryDrive(t, func(history *invariantLoopHistory) {
+			history.land(invariantLandedFact("fact-landed", "invocation-1", "the message that arrived in flight"))
+		})
+		if out.err != nil {
+			t.Fatalf("drive beside input that landed in flight = %v, want the second decision to run", out.err)
+		}
+		if len(out.turn.Decisions) != 2 {
+			t.Fatalf("decisions = %d (%s), want the decision in flight beside the one that reads the landed input",
+				len(out.turn.Decisions), invariantRequests(behaviour.requestMessages()))
+		}
+		sent := behaviour.requestMessages()
+		if got := invariantCopies(sent[len(sent)-1], "the message that arrived in flight"); got != 1 {
+			t.Fatalf("copies of the landed input in the next decision = %d, want exactly 1 (%s)",
+				got, invariantRequests(sent))
+		}
+		if got := ledger.count("fact-landed"); got != 1 {
+			t.Fatalf("After passes of the landed fact = %d, want the fact observed once", got)
+		}
+	})
+
+	t.Run("a fact of another invocation enters no decision of this drive", func(t *testing.T) {
+		behaviour, ledger, out := boundaryDrive(t, func(history *invariantLoopHistory) {
+			history.land(invariantLandedFact("fact-neighbour", "invocation-2", "the message of another range"))
+		})
+		if out.err != nil {
+			t.Fatalf("drive beside a fact of another range = %v, want its own terminal", out.err)
+		}
+		if len(out.turn.Decisions) != 1 {
+			t.Fatalf("decisions = %d, want the one decision: a neighbouring range's input opens no round here",
+				len(out.turn.Decisions))
+		}
+		for _, sent := range behaviour.requestMessages() {
+			if got := invariantCopies(sent, "the message of another range"); got != 0 {
+				t.Fatalf("copies of a neighbouring range's input = %d, want 0 (%s)", got, invariantRequests(behaviour.requestMessages()))
+			}
+		}
+		if got := ledger.count("fact-neighbour"); got != 0 {
+			t.Fatalf("After passes of a neighbouring range's fact = %d, want this drive to observe none of it", got)
+		}
+	})
+
+	t.Run("the head input of the drive is not read back as a second copy", func(t *testing.T) {
+		behaviour, ledger, out := boundaryDrive(t, func(history *invariantLoopHistory) {
+			history.land(invariantLandedFact("event-1", "invocation-1", "the message that opens the turn"))
+		})
+		if out.err != nil {
+			t.Fatalf("drive whose head input stands in the chain = %v, want its own terminal", out.err)
+		}
+		if len(out.turn.Decisions) != 1 {
+			t.Fatalf("decisions = %d, want the one decision: the head input is already in the transcript",
+				len(out.turn.Decisions))
+		}
+		if got := invariantCopies(behaviour.requestMessages()[0], "the message that opens the turn"); got != 1 {
+			t.Fatalf("copies of the head input = %d, want 1 (%s)", got, invariantRequests(behaviour.requestMessages()))
+		}
+		if got := ledger.count("event-1"); got != 1 {
+			t.Fatalf("After passes of the head input = %d, want the fact observed once", got)
+		}
+	})
+
+	t.Run("the identity de-duplicates, never the text", func(t *testing.T) {
+		behaviour, _, out := boundaryDrive(t, func(history *invariantLoopHistory) {
+			history.land(invariantLandedFact("fact-first", "invocation-1", "the same text sent twice"))
+			history.land(invariantLandedFact("fact-second", "invocation-1", "the same text sent twice"))
+			history.land(invariantLandedFact("fact-second", "invocation-1", "the same text sent twice"))
+		})
+		if out.err != nil {
+			t.Fatalf("drive beside two facts carrying one text = %v, want both read", out.err)
+		}
+		sent := behaviour.requestMessages()
+		if len(sent) != 2 {
+			t.Fatalf("requests = %d, want the decision in flight beside the one that reads the landed facts", len(sent))
+		}
+		if got := invariantCopies(sent[1], "the same text sent twice"); got != 2 {
+			t.Fatalf("copies of one text landed as two facts = %d, want 2: the identity de-duplicates and the text does not (%s)",
+				got, invariantRequests(sent))
+		}
+	})
+}
+
+// boundaryDrive drives one invocation whose single decision is held at the model gate,
+// lands the facts the caller names while that decision runs, and answers the drive.
+func boundaryDrive(t *testing.T, land func(history *invariantLoopHistory)) (*invariantLoopModel, *invariantAfterLedger, invariantLoopResult) {
+	t.Helper()
+	behaviour := &invariantLoopModel{gate: make(chan struct{}), answer: "answer-a"}
+	loop, _, _ := invariantLoop(t, behaviour)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	ledger := &invariantAfterLedger{}
+	loop.SetFactPipelines(ledger.pipeline)
+	loop.SetPresentations(ledger.present)
+	done := make(chan invariantLoopResult, 1)
+	go func() {
+		turn, err := loop.Drive(context.Background(), Invocation{
+			InvocationID: "invocation-1",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-1",
+				Message: model.Message{Role: model.RoleUser, Content: "the message that opens the turn"},
+			}},
+		})
+		done <- invariantLoopResult{turn: turn, err: err}
+	}()
+	invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
+	land(history)
+	close(behaviour.gate)
+	select {
+	case out := <-done:
+		return behaviour, ledger, out
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drive did not end after the decision was let through")
+		return nil, nil, invariantLoopResult{}
+	}
+}
+
+// invariantLandedFact is one fact as a producer outside the drive lands it in the chain
+// of its session: the identity it committed under beside the input it reads as.
+func invariantLandedFact(key event.EventID, invocation event.InvocationID, content string) event.Event {
+	return event.Event{
+		Key:          key,
+		Type:         event.TypeExternalInput,
+		Timestamp:    time.Now(),
+		Message:      model.Message{Role: model.RoleUser, Content: content},
+		Owner:        invariantLoopAddress,
+		Source:       invariantLoopAddress,
+		Target:       invariantLoopAddress,
+		InvocationID: invocation,
+	}
+}
+
+// invariantAfterLedger records the fact every After pass of the loop was presented for.
+type invariantAfterLedger struct {
+	mu    sync.Mutex
+	facts []event.EventID
+}
+
+// pipeline answers the empty pipeline: the pass runs and presents the fact it read.
+func (l *invariantAfterLedger) pipeline(event.AgentID) (plugin.Pipeline, error) {
+	return plugin.Pipeline{}, nil
+}
+
+// present records the fact one After pass was presented for.
+func (l *invariantAfterLedger) present(presentation view.Presentation) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.facts = append(l.facts, presentation.Fact)
+}
+
+// count reports how many After passes the named fact was presented for.
+func (l *invariantAfterLedger) count(key event.EventID) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	seen := 0
+	for _, fact := range l.facts {
+		if fact == key {
+			seen++
+		}
+	}
+	return seen
+}
+
+// invariantCopies counts the messages of one request that carry the named material.
+func invariantCopies(msgs []model.Message, content string) int {
+	seen := 0
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, content) {
+			seen++
+		}
+	}
+	return seen
+}
+
+// invariantRequests renders the requests one drive sent, so a failure states what the
+// model really saw.
+func invariantRequests(requests [][]model.Message) string {
+	described := make([]string, 0, len(requests))
+	for at, msgs := range requests {
+		roles := make([]string, 0, len(msgs))
+		for _, msg := range msgs {
+			roles = append(roles, string(msg.Role)+":"+msg.Content)
+		}
+		described = append(described, fmt.Sprintf("#%d %v", at, roles))
+	}
+	return strings.Join(described, " | ")
+}
+
 // invariantLoopResult is one finished drive as the goroutine hands it back.
 type invariantLoopResult struct {
 	turn Turn
@@ -355,15 +554,19 @@ func (c *invariantLoopChains) recorded() []event.SessionID {
 	return append([]event.SessionID(nil), c.chains...)
 }
 
-// invariantLoopHistory keeps one transcript per session address.
+// invariantLoopHistory keeps one transcript and one fact chain per session address.
 type invariantLoopHistory struct {
 	mu        sync.Mutex
 	bySession map[event.SessionID][]model.Message
+	facts     map[event.SessionID][]event.Event
 }
 
 // newInvariantLoopHistory returns an empty session transcript face.
 func newInvariantLoopHistory() *invariantLoopHistory {
-	return &invariantLoopHistory{bySession: map[event.SessionID][]model.Message{}}
+	return &invariantLoopHistory{
+		bySession: map[event.SessionID][]model.Message{},
+		facts:     map[event.SessionID][]event.Event{},
+	}
 }
 
 // SessionHistory reports the transcript accumulated for one session.
@@ -378,6 +581,21 @@ func (h *invariantLoopHistory) CommitHistory(addr event.Address, msgs []model.Me
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.bySession[addr.SessionID] = append(h.bySession[addr.SessionID], msgs...)
+}
+
+// SessionFacts reports the fact chain accumulated for one session, as a copy.
+func (h *invariantLoopHistory) SessionFacts(addr event.Address) []event.Event {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]event.Event(nil), h.facts[addr.SessionID]...)
+}
+
+// land commits one fact into the chain of its session, the way a producer outside the
+// drive lands material a decision boundary has to read again.
+func (h *invariantLoopHistory) land(evt event.Event) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.facts[evt.Owner.SessionID] = append(h.facts[evt.Owner.SessionID], evt)
 }
 
 // invariantLoopWatch records the in-flight productions a drive registers.

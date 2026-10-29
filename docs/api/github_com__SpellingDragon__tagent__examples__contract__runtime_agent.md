@@ -34,7 +34,9 @@ func ExampleHandoffEnvelope()
 
 func ExampleHistoryFace()
     ExampleHistoryFace commits the transcript of one ended drive and reads it
-    back beside the input the next drive aggregates.
+    back beside the input the next drive aggregates, and it reads the fact chain
+    of the session back as the input a decision boundary of a drive in flight
+    reads again.
 
 func ExampleNoticeFeed()
     ExampleNoticeFeed demonstrates the incremental notice read from the chain.

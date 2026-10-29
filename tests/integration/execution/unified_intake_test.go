@@ -39,6 +39,9 @@ const (
 	intakeSecondBody       = "intake: the message that arrives in flight"
 	intakeRepeatBody       = "intake: the same text sent twice"
 	intakeFinalBody        = "intake: the slow call finished"
+	// intakeInFlightBody is the message that lands in the chain of the turn in flight,
+	// committed through the run's own write face while the slow call is parked.
+	intakeInFlightBody = "intake: the message that lands in the chain in flight"
 )
 
 // intakeAcceptWindow bounds how long an in-flight invocation may take to answer (the
@@ -177,6 +180,114 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 				"and the content does not (%s)", copies, intakeDescribe(scene.requests))
 		}
 	})
+}
+
+// TestTheChainIsReadAgainAtTheDecisionBoundary checks that a message landing in the chain of a turn in flight reaches that turn's next decision.
+//
+// - positive: the message committed under the range in flight stands in the decision that reads the parked call's result, exactly once
+// - negative: no second copy stands there, so the projection lane and the boundary read are one read of one chain and never two
+// - consumer: the message commits through the run's own cross-session write face, over a host booted from a real document
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestTheChainIsReadAgainAtTheDecisionBoundary(t *testing.T) {
+	scene := intakeLandingDrive(t, intakeInFlightBody)
+	at, ok := intakeDecisionAfterCall(scene.requests)
+	if !ok {
+		t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
+	}
+	if scene.err != nil || scene.turn.Terminal != model.KindCompleted {
+		t.Fatalf("turn in flight = (%v, %v), want it to end by its own terminal beside the message that landed in it",
+			scene.turn.Terminal, scene.err)
+	}
+	if copies := intakeUserCopies(scene.requests[at], intakeInFlightBody); copies != 1 {
+		t.Fatalf("copies of the message that landed in flight in the next decision = %d, want exactly 1: "+
+			"the boundary reads the chain that already carries it, so a second copy means two lanes hold one input (%s)",
+			copies, intakeDescribe(scene.requests))
+	}
+	if landed := intakeFactsCarrying(scene.facts, intakeInFlightBody); len(landed) != 1 {
+		t.Fatalf("facts carrying the message that landed in flight = %d, want the one fact the message was committed as", len(landed))
+	}
+}
+
+// TestTheChainKeepsTheSameTextTwice checks that two in-flight messages carrying one text reach the next decision as two inputs.
+// - positive: both messages stand in the decision that reads the parked call's result, two copies of one text
+// - negative: the boundary de-duplicates by the identity a fact committed under, never by the content it reads as
+// - consumer: both messages commit through the run's own cross-session write face, over a host booted from a real document
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestTheChainKeepsTheSameTextTwice(t *testing.T) {
+	scene := intakeLandingDrive(t, intakeRepeatBody, intakeRepeatBody)
+	at, ok := intakeDecisionAfterCall(scene.requests)
+	if !ok {
+		t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
+	}
+	if scene.err != nil || scene.turn.Terminal != model.KindCompleted {
+		t.Fatalf("turn in flight = (%v, %v), want it to end by its own terminal beside the messages that landed in it",
+			scene.turn.Terminal, scene.err)
+	}
+	if copies := intakeUserCopies(scene.requests[at], intakeRepeatBody); copies != 2 {
+		t.Fatalf("copies of one text landed as two facts = %d, want 2: the committed identity de-duplicates and the content does not (%s)",
+			copies, intakeDescribe(scene.requests))
+	}
+}
+
+// intakeLandingScene is one run of the boundary anchor: the turn that was in flight and
+// the material read back from the model endpoint and the run itself.
+type intakeLandingScene struct {
+	turn     agent.Turn
+	err      error
+	requests []intakeRequest
+	facts    []event.Event
+}
+
+// intakeLandingDrive opens a turn whose first decision issues the slow call, commits each
+// in-flight message into the chain under that turn's own invocation while the call is
+// parked, releases the call, and reads back what the model and the run recorded. The
+// commit is the run's own write face, so the material is in the very chain the drive
+// commits to and no lane beside it.
+//
+// The invocation of the commit is the range in flight, which is the identity the host
+// records beside an input admitted while a turn runs (see the host's acceptance face).
+func intakeLandingDrive(t *testing.T, landed ...string) *intakeLandingScene {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	provider := newIntakeProvider(t)
+	sender := newIntakeSender()
+	host := intakeBoot(t, provider, sender)
+	addr := event.Address{AgentID: intakeEntryAgent, SessionID: intakeSession}
+
+	firstDone := make(chan intakeLandingScene, 1)
+	go func() {
+		turn, err := host.Invoke(ctx, assembly.InvokeRequest{
+			InvocationID: intakeFirstInvocation,
+			Address:      addr,
+			Input:        []model.Message{{Role: model.RoleUser, Content: intakeFirstBody}},
+		})
+		firstDone <- intakeLandingScene{turn: turn, err: err}
+	}()
+	sender.awaitParked(t)
+	for _, body := range landed {
+		if _, err := host.Run().CommitToSession(ctx, addr, event.Event{
+			Type:         event.TypeExternalInput,
+			Message:      model.Message{Role: model.RoleUser, Content: body},
+			InvocationID: intakeFirstInvocation,
+		}); err != nil {
+			t.Fatalf("commit the message %q into the chain of the turn in flight: %v", body, err)
+		}
+	}
+	sender.release()
+
+	scene := &intakeLandingScene{}
+	select {
+	case settled := <-firstDone:
+		scene.turn, scene.err = settled.turn, settled.err
+	case <-time.After(intakeSettleWindow):
+		t.Fatalf("the turn in flight never ended after its call was released")
+	}
+	scene.requests = provider.requests()
+	scene.facts = host.Run().SessionFacts(addr)
+	return scene
 }
 
 // intakeScene is one run of the anchor: the invocation that opens the turn, the

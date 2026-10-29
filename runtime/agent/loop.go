@@ -216,6 +216,7 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // ready input of the range is never mixed with the input of another invocation.
 // - The episode record is written where the business process actually starts: at the first drive of the invocation's own ready input.
 // - The settled result facts one decision paired are the stored input the next decision reduces.
+// - The drive reads its range's chain again at every decision boundary: input that landed in the range while a decision ran enters the next decision of that same range, and a decision that opened no obligation still ends the round while that input stands unread.
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
 // - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
 // - A progress notification of the range's own call commits as a fact of its chain and enters no round head: the report is audit and projection material, never input a decision speaks from.
@@ -237,6 +238,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	defer production.stop()
 	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
 	l.observeReady(ctx, inv)
+	l.markConsumed(inv.InvocationID, inv.Ready)
 	history := l.sessionHistory(inv.Address)
 	ready, err := aggregateReady(inv.Ready)
 	if err != nil {
@@ -246,7 +248,9 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	policy := l.finalRoundFor(inv.Address.AgentID)
 	started := time.Now()
 	rounds := 0
+	var landed []model.Message
 	for {
+		transcript = append(transcript, landed...)
 		transcript = append(transcript, l.terminalNotes(inv)...)
 		round := closingRound(policy, rounds, time.Since(started))
 		decision, outcome, receipts, observations, decideErr := l.decide(ctx, inv, transcript, round)
@@ -261,15 +265,21 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 				turn.Failure = strings.TrimSpace(cause.Error())
 			}
 		}
+		next, readErr := l.boundaryInput(ctx, inv)
+		if readErr != nil {
+			return turn, readErr
+		}
+		landed = next
 		if round.final {
 			turn.FinalRound = round.reason
-			l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
-			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
-				return l.failCommit(turn, commitErr)
+			if len(landed) == 0 {
+				l.commitTranscript(inv.Address, append(transcript[len(history):], append([]model.Message{assistantOf(outcome)}, receipts...)...))
+				if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
+					return l.failCommit(turn, commitErr)
+				}
+				return turn, nil
 			}
-			return turn, nil
-		}
-		if len(receipts) == 0 && len(observations) == 0 {
+		} else if len(receipts) == 0 && len(observations) == 0 && len(landed) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
 			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
 				return l.failCommit(turn, commitErr)
@@ -426,14 +436,95 @@ func noticeKeyPrefix(invocationID string) string {
 // ready event carries the identity it committed under at the entry of its
 // range, so the turn-start boundary of this drive is observed as the fact the
 // run already holds. A ready event that carries no identity names no committed
-// fact and is not observed; the drive itself reads the event either way.
+// fact and is not observed; the drive itself reads the event either way. The
+// pass is idempotent per range: a fact one boundary already observed is not
+// observed again by a later boundary of the same range.
 func (l *Loop) observeReady(ctx context.Context, inv Invocation) {
 	for _, ev := range inv.Ready {
-		if ev.Key == "" {
+		l.observeFact(ctx, inv, ev)
+	}
+}
+
+// observeFact runs the After pass of one fact of one range, once: the identity
+// the fact committed under is remembered by the range, so the fact a boundary
+// meets again — the head input of the drive, or the input that landed in flight
+// and is read at every boundary from then on — is observed exactly once.
+func (l *Loop) observeFact(ctx context.Context, inv Invocation, evt event.Event) {
+	if evt.Key == "" {
+		return
+	}
+	in := l.intakeFor(inv.InvocationID)
+	in.mu.Lock()
+	observed := in.observed[evt.Key]
+	in.observed[evt.Key] = true
+	in.mu.Unlock()
+	if observed {
+		return
+	}
+	l.afterPass(ctx, inv.Address.AgentID, evt.Key)
+}
+
+// markConsumed records the keys of one batch of input as material its range has
+// taken into the transcript, so the boundary read reports each fact once: the
+// identity a fact committed under is the de-duplication, never the content the
+// fact reads as.
+func (l *Loop) markConsumed(invocationID event.InvocationID, events []event.Event) {
+	in := l.intakeFor(invocationID)
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for _, evt := range events {
+		if evt.Key != "" {
+			in.read[evt.Key] = true
+		}
+	}
+}
+
+// boundaryInput reads the range's own facts again at one decision boundary and answers the messages of the facts the range has not taken yet, in commit order: the input that landed in this range while the decision that just ended was running enters the next decision of that same range.
+// - Only the facts of this range are read: a fact of another invocation of the session is that range's input and never this one's.
+// - Only the facts that start a range are read: the reasoning, the calls, the output and the notices belong to the range in flight and are carried by the transcript.
+// - The identity a fact committed under is what de-duplicates it, so the same text sent twice is two facts and stands in the request twice.
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func (l *Loop) boundaryInput(ctx context.Context, inv Invocation) ([]model.Message, error) {
+	facts := l.sessionFacts(inv.Address)
+	if len(facts) == 0 {
+		return nil, nil
+	}
+	fresh := make([]event.Event, 0, len(facts))
+	in := l.intakeFor(inv.InvocationID)
+	in.mu.Lock()
+	for _, evt := range facts {
+		if evt.InvocationID != inv.InvocationID || evt.Key == "" || !startsRange(evt) {
 			continue
 		}
-		l.afterPass(ctx, inv.Address.AgentID, ev.Key)
+		if in.read[evt.Key] {
+			continue
+		}
+		in.read[evt.Key] = true
+		fresh = append(fresh, evt)
 	}
+	in.mu.Unlock()
+	for _, evt := range fresh {
+		l.observeFact(ctx, inv, evt)
+	}
+	return aggregateReady(fresh)
+}
+
+// startsRange reports whether one committed fact starts the range it belongs to:
+// the input an invocation aggregates, and the notification an unattended
+// follow-up turn commits as the material its drive reads at the head. Every
+// other fact — the reasoning, the calls and the output of a round, and the
+// notice a running call admits — belongs to the range already in flight and
+// never opens one. It is the criterion the session chain moves its
+// ended-material boundary by (assembly admitsRange), so a fact of the range in
+// flight never moves that boundary either; the loop keeps its own copy because
+// the boundary read crosses the transcript face alone, and both copies name the
+// same judgement.
+func startsRange(evt event.Event) bool {
+	if evt.Type == event.TypeExternalInput {
+		return true
+	}
+	return evt.Type == event.TypeFeedback && evt.Meta[event.MetaKeyTriggerSource] == "task"
 }
 
 // commitOutput commits the assistant output one ended drive answers with as the
@@ -1092,8 +1183,8 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 
 // intake is one invocation's backflow intake: the address its range runs at,
 // the cache of the settled tool messages that arrived before their wait began,
-// the waits of the calls still running, and the notice facts the range has
-// already read.
+// the waits of the calls still running, the facts the range has already taken
+// into its transcript and the facts it has already observed.
 //
 // The intake holds no notification lane of its own: a notification is a fact of
 // the session chain, committed before it is admitted here, and a drive reads the
@@ -1102,12 +1193,15 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 // result is committed as the delivery fact of its range before it lands here,
 // and the wait of its call pairs it through this cache. A notification of one
 // invocation never reaches the intake of another.
+// - The read set names the facts standing in this range's transcript: the head input of its drive, the notices it read, and the input a decision boundary reported.
+// - The observed set names the facts whose After pass this loop already ran, so neither set is exported and a boundary that meets the same fact again doubles nothing.
 type intake struct {
-	mu      sync.Mutex
-	address event.Address
-	waiters map[event.TaskID][]chan delivered
-	settled map[event.TaskID][]delivered
-	read    map[event.EventID]bool
+	mu       sync.Mutex
+	address  event.Address
+	waiters  map[event.TaskID][]chan delivered
+	settled  map[event.TaskID][]delivered
+	read     map[event.EventID]bool
+	observed map[event.EventID]bool
 }
 
 // setAddress records the address the range of this intake runs at, so the
@@ -1137,9 +1231,10 @@ type delivered struct {
 // newIntake returns an empty backflow intake.
 func newIntake() *intake {
 	return &intake{
-		waiters: map[event.TaskID][]chan delivered{},
-		settled: map[event.TaskID][]delivered{},
-		read:    map[event.EventID]bool{},
+		waiters:  map[event.TaskID][]chan delivered{},
+		settled:  map[event.TaskID][]delivered{},
+		read:     map[event.EventID]bool{},
+		observed: map[event.EventID]bool{},
 	}
 }
 
@@ -1488,10 +1583,12 @@ func observationOf(msg model.Message, callID, tool string) model.Message {
 // beside that history and never batches with a neighbour. A session whose
 // transcript a mapped sequence carries needs no second face here: that
 // sequence is the one history of the session, so an implementation may answer
-// none of its own beside it.
+// none of its own beside it — and the facts of that chain are what the drive
+// reads its range's input again from at every decision boundary.
 //
-// The redline list (3 rules):
+// The redline list (4 rules):
 // MUST report the history the named session accumulated, as a copy the caller owns.
+// MUST report the facts of the named session in commit order, as a copy the caller owns.
 // MUST NOT batch the ready input of one invocation into another invocation's range.
 // MUST NOT rewrite or drop the history a committed drive left behind.
 type HistoryFace interface {
@@ -1501,6 +1598,12 @@ type HistoryFace interface {
 	// CommitHistory appends the transcript one ended drive accumulated to the
 	// history of the named session.
 	CommitHistory(addr event.Address, msgs []model.Message)
+	// SessionFacts reports the facts the named session committed, in commit
+	// order: the chain a drive reads the input that landed in its own range
+	// from at a decision boundary rather than at the start of the drive alone.
+	// The signature is the one the run's own chain read carries, so the drive
+	// reads the very ledger it commits through instead of a lane beside it.
+	SessionFacts(addr event.Address) []event.Event
 }
 
 // SetHistory attaches the session transcript face this loop reads the shared
@@ -1524,6 +1627,19 @@ func (l *Loop) sessionHistory(addr event.Address) []model.Message {
 		return nil
 	}
 	return append([]model.Message(nil), face.SessionHistory(addr)...)
+}
+
+// sessionFacts reports the facts the named session committed, as the chain read
+// answers them: a loop beside no history face reads no chain and keeps every
+// drive at the input it was handed.
+func (l *Loop) sessionFacts(addr event.Address) []event.Event {
+	l.mu.Lock()
+	face := l.history
+	l.mu.Unlock()
+	if face == nil {
+		return nil
+	}
+	return face.SessionFacts(addr)
 }
 
 // commitTranscript appends the transcript one ended drive accumulated to the
