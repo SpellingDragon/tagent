@@ -2637,7 +2637,7 @@ func reflectionDeliveryHostDocument(root, endpoint, deliverTo string) string {
 	b.WriteString("    meditation:\n")
 	b.WriteString("      enabled: true\n")
 	b.WriteString("      interval: 1h\n")
-	b.WriteString("      min_gap: 0s\n")
+	b.WriteString("      min_gap: 50ms\n")
 	b.WriteString("      prompt_file: meditation.md\n")
 	b.WriteString("      observed_namespaces: [user]\n")
 	b.WriteString("      deliver_to: " + deliverTo + "\n")
@@ -3051,15 +3051,16 @@ func runReplayIdentity(t *testing.T) {
 // reflection model explicitly calls it, and the target session's next real
 // request carries the delivered body.
 //
-// The meditation document runs with its activity window closed: a real clock
-// cannot advance a two-hour window inside a check, and the delivery it drives
-// is the subject here, not the rhythm. The observed round's own commit is also
-// the activity evidence the pass waits on, so a pass that reaches the driver
-// while that round still holds its decision seat yields the turn. The second
-// host-facing commit below lands after the round returned, which makes the
-// re-evaluation reachable over a free seat; a round that already fired leaves
-// that commit inside the interval floor, so the anchor still reads exactly one
-// delivery.
+// The meditation document runs a fifty-millisecond activity window, so the
+// document exercises a positive floor end to end: the fact each host-facing
+// commit files is inside its own window, the held pass keeps its episode open
+// through the standing re-arm, and the re-evaluation fires once that window is
+// past. The observed round's own commit is also the activity evidence the pass
+// waits on, so a pass that reaches the driver while that round still holds its
+// decision seat yields the turn. The second host-facing commit below lands after
+// the round returned, which makes the re-evaluation reachable over a free seat;
+// a round that already fired leaves that commit inside the interval floor, so
+// the anchor still reads exactly one delivery.
 func runBootDeliverToTargetRequest(t *testing.T) {
 	const (
 		input  = "the user round the reflection observes"

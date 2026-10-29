@@ -242,7 +242,10 @@ type Driver struct {
 
     There is no ticker: a reflection is the answer to a new event, so a process
     with nothing new never fires one. The interval is a floor between two fires,
-    never a clock that fires on its own.
+    never a clock that fires on its own. A pass the rhythm floor holds back
+    keeps its episode open through the standing re-arm and evaluates again once
+    the window opens, so a floor above zero still fires instead of waiting for a
+    commit the held session may never send.
 
 func NewDriver(reflection *Reflection, interval, minGap time.Duration,
 	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
@@ -450,6 +453,11 @@ func (r *Reflection) FreshSince(ctx context.Context, since time.Time) (bool, err
 
 func (r *Reflection) LastDeferredAt() time.Time
     LastDeferredAt reports the moment of the most recent deferral.
+
+func (r *Reflection) MinGap() time.Duration
+    MinGap reports the floor between two consumed reflections this loop holds:
+    the window a pass is judged against, and the one an event-driven face holds
+    a suppressed pass open for.
 
 func (r *Reflection) NoteOutcome(ctx context.Context, receipt ReflectionReceipt) error
     NoteOutcome settles what became of the reflection input awaiting one.

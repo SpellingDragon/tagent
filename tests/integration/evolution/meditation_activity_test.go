@@ -181,6 +181,88 @@ func TestMeditationYieldsBesideAnActiveSession(t *testing.T) {
 	})
 }
 
+// TestTheGateReevaluatesAfterTheWindow drives the held episode of the rhythm gate through the production driver.
+// - the fact the commit itself filed is inside the min gap, so the first pass yields and injects nothing
+// - the same episode re-evaluates on its standing wait without a second commit, and fires once the window is past
+// - the held episode reported the rhythm once, so the wait is the window's remainder and never a spin
+// - the fired pass reads the very material the held pass read, so the observation was postponed, never dropped
+//
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestTheGateReevaluatesAfterTheWindow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cfg := reflectionConfig()
+	cfg.Cadence.Interval = 0
+	cfg.Cadence.MinGap = 80 * time.Millisecond
+	rig := newReflectionRig(t, cfg, t.TempDir())
+	owner := activitySession()
+	driver := meditation.NewDriver(rig.reflection, cfg.Cadence.Interval, cfg.Cadence.MinGap, nil, "")
+	outcomes := make(chan meditation.TickOutcome, 64)
+	driver.SetObserver(func(outcome meditation.TickOutcome) { outcomes <- outcome })
+	t.Cleanup(driver.Stop)
+
+	key := rig.ledger.record(ownedFact("window-commit", "the host material the commit itself filed", time.Now(), owner), rig.partition)
+	if err := driver.ObserveCommit(ctx, key); err != nil {
+		t.Fatalf("observe the commit: %v", err)
+	}
+
+	held := activityOutcome(t, outcomes, "held pass")
+	if held.Decision.Disposition != meditation.TickRhythm {
+		t.Fatalf("the pass beside the committing fact = (%q, %s), want the activity window holding it back", held.Decision.Disposition, held.Decision.Reason)
+	}
+	if held.Scan == nil || held.Scan.Verdict.Recent == nil || held.Scan.Verdict.Recent.Identity.Key != key {
+		t.Fatalf("held face = %+v, want the committing fact as the newest host-facing fact", held.Scan)
+	}
+	if got := rig.input.injectedCount(); got != 0 {
+		t.Fatalf("injected inputs = %d, want none while the window holds the pass back", got)
+	}
+	if _, pending := rig.reflection.Pending(); pending {
+		t.Fatal("the held pass left a reflection input pending, want the gate open for the re-evaluation")
+	}
+	if got := rig.watermark(t); !got.IsZero() {
+		t.Fatalf("watermark after the held pass = %s, want it unmoved", got)
+	}
+
+	heldPasses := 0
+	var fired meditation.TickOutcome
+	for fired.Decision.Disposition != meditation.TickFired {
+		outcome := activityOutcome(t, outcomes, "re-evaluated pass")
+		if outcome.Decision.Disposition == meditation.TickRhythm {
+			heldPasses++
+			continue
+		}
+		fired = outcome
+	}
+	if heldPasses != 0 {
+		t.Fatalf("held passes after the first = %d, want the window waited out once: the standing wait is the window's remainder, not a re-pass every moment", heldPasses)
+	}
+	if fired.Injection == nil {
+		t.Fatalf("the re-evaluated pass = (%q, %s), want the postponed reflection firing once the window is past", fired.Decision.Disposition, fired.Decision.Reason)
+	}
+	if fired.Scan == nil || fired.Scan.Verdict.Recent == nil || fired.Scan.Verdict.Recent.Identity.Key != key {
+		t.Fatalf("fired face = %+v, want the very material the held pass read", fired.Scan)
+	}
+	if got := rig.input.injectedCount(); got != 1 {
+		t.Fatalf("injected inputs = %d, want exactly the one postponed reflection", got)
+	}
+	if got := rig.watermark(t); got.IsZero() {
+		t.Fatal("watermark after the fired pass is unset, want the consumed reflection advancing it")
+	}
+}
+
+// activityOutcome waits for one pass reading of the driver under check.
+func activityOutcome(t *testing.T, outcomes <-chan meditation.TickOutcome, what string) meditation.TickOutcome {
+	t.Helper()
+	select {
+	case outcome := <-outcomes:
+		return outcome
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the driver reported no %s", what)
+		return meditation.TickOutcome{}
+	}
+}
+
 // activitySession is the address whose traffic the activity gate reads: the
 // session every host-facing fact of these sub-cases belongs to.
 func activitySession() event.Address {

@@ -18,7 +18,10 @@ import (
 //
 // There is no ticker: a reflection is the answer to a new event, so a process
 // with nothing new never fires one. The interval is a floor between two fires,
-// never a clock that fires on its own.
+// never a clock that fires on its own. A pass the rhythm floor holds back keeps
+// its episode open through the standing re-arm and evaluates again once the
+// window opens, so a floor above zero still fires instead of waiting for a
+// commit the held session may never send.
 type Driver struct {
 	reflection *Reflection
 	interval   time.Duration
@@ -40,6 +43,10 @@ type Driver struct {
 
 	mu        sync.Mutex
 	lastFired time.Time
+	// holdUntil is the moment the rhythm floor that held the latest pass back
+	// opens the window: the standing re-arm measures its wait against it, so a
+	// held episode re-evaluates when the floor elapses instead of spinning.
+	holdUntil time.Time
 	// owner is the address the latest host-facing commit names: the session whose
 	// decision seat the next pass waits on.
 	owner    event.Address
@@ -197,15 +204,18 @@ func (d *Driver) fire(ctx context.Context) {
 // pass runs one reflection pass and reports the reading to the host observer. A
 // pass the observed session holds a decision seat for waits for the next
 // host-facing commit: the watermark stays where it stands and no reflection input
-// is pending.
+// is pending. A pass the rhythm floor holds back keeps the episode open until the
+// window opens, so the same observation is evaluated again without a new commit.
 func (d *Driver) pass(ctx context.Context) {
 	if held, reason := d.seatHeld(); held {
 		d.notify(TickOutcome{Decision: TickDecision{Disposition: TickRhythm, Reason: reason}})
 		return
 	}
-	if d.minGap > 0 {
+	floor := d.rhythmFloor()
+	if floor > 0 {
 		if watermark, err := d.reflection.Watermark(ctx); err == nil {
-			if !watermark.Moment.IsZero() && time.Since(watermark.Moment) < d.minGap {
+			if !watermark.Moment.IsZero() && time.Since(watermark.Moment) < floor {
+				d.hold(watermark.Moment.Add(floor))
 				d.notify(TickOutcome{Decision: TickDecision{
 					Disposition: TickRhythm,
 					Reason:      "the min gap since the last consumed reflection has not elapsed",
@@ -221,7 +231,46 @@ func (d *Driver) pass(ctx context.Context) {
 		d.lastFired = time.Now()
 		d.mu.Unlock()
 	}
+	if outcome.Decision.Disposition == TickRhythm {
+		d.hold(d.rhythmWindow(outcome, floor))
+	}
 	d.notify(outcome)
+}
+
+// rhythmFloor is the floor this pass waits out: the wider of the driver's own
+// interval-side floor and the reflection's cadence floor, which name the same
+// declared value in production and are never narrower than the window that held
+// the pass back.
+func (d *Driver) rhythmFloor() time.Duration {
+	floor := d.minGap
+	if d.reflection != nil {
+		if cadence := d.reflection.MinGap(); cadence > floor {
+			floor = cadence
+		}
+	}
+	return floor
+}
+
+// rhythmWindow names the moment the rhythm floor that held a pass back opens the
+// window again: the moment the newest host-facing fact leaves the floor, or one
+// floor from now when the pass carried no such fact.
+func (d *Driver) rhythmWindow(outcome TickOutcome, floor time.Duration) time.Time {
+	if scan := outcome.Scan; scan != nil && scan.Verdict.Recent != nil {
+		if at := scan.Verdict.Recent.Content.Timestamp; !at.IsZero() {
+			return at.Add(floor)
+		}
+	}
+	return time.Now().Add(floor)
+}
+
+// hold keeps the firing episode open until the moment the window opens again: the
+// observation that settled the pass is postponed, never dropped, and the standing
+// re-arm schedules the re-evaluation the window allows.
+func (d *Driver) hold(until time.Time) {
+	d.mu.Lock()
+	d.retained = true
+	d.holdUntil = until
+	d.mu.Unlock()
 }
 
 // seatHeld reports whether the session the latest host-facing commit names holds a
@@ -243,7 +292,11 @@ func (d *Driver) seatHeld() (bool, string) {
 
 // rearm settles one pass: it releases the firing state when no observation was
 // retained during the pass, and otherwise keeps the episode open and reports how
-// long the rhythm floor still holds the retained evaluation back.
+// long the rhythm floor still holds the retained evaluation back. A first
+// suppression has no fire to measure the interval from, and a held pass has
+// nothing left of it: both wait for the window the floor closes, never shorter
+// than the single millisecond that still lets the clock advance and never
+// longer than the interval floor when one is declared.
 func (d *Driver) rearm() (time.Duration, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -252,12 +305,20 @@ func (d *Driver) rearm() (time.Duration, bool) {
 		return 0, false
 	}
 	d.retained = false
+	now := time.Now()
+	wait := time.Duration(0)
 	if d.interval > 0 && !d.lastFired.IsZero() {
-		if wait := d.interval - time.Since(d.lastFired); wait > 0 {
-			return wait, true
+		wait = d.interval - now.Sub(d.lastFired)
+	}
+	if wait <= 0 {
+		if wait = d.holdUntil.Sub(now); wait < time.Millisecond {
+			wait = time.Millisecond
+		}
+		if d.interval > 0 && wait > d.interval {
+			wait = d.interval
 		}
 	}
-	return 0, true
+	return wait, true
 }
 
 // live reports whether the driver still accepts commits.

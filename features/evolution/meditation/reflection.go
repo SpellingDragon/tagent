@@ -246,6 +246,13 @@ func (r *Reflection) Watermark(ctx context.Context) (Watermark, error) {
 	return r.watermark(ctx)
 }
 
+// MinGap reports the floor between two consumed reflections this loop holds: the
+// window a pass is judged against, and the one an event-driven face holds a
+// suppressed pass open for.
+func (r *Reflection) MinGap() time.Duration {
+	return r.cfg.Cadence.MinGap
+}
+
 // Pending reports the identity of the reflection input awaiting its outcome, if
 // one is pending.
 func (r *Reflection) Pending() (event.EventID, bool) {
