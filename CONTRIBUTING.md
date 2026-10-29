@@ -118,7 +118,7 @@ bash scripts/gates/check-openspec.sh
 ## 七、文档要求
 
 - **[`docs/api/`](docs/api/index.md) 是生成面**：真源是源码注释，作者是 `scripts/gates/gen_godoc.sh`，手改必被 `gen_godoc --check` 判红。
-- **[`docs/wiki/`](docs/wiki/README.md) 是历史快照（historical-verbatim）**：真源是各篇自己的快照提交，断言对已移除的实现成立；**不许"对齐今天"式改写**。引用由 `doc-refs` 按引入该引用的提交锚定保护。
+- **[`docs/wiki/`](docs/wiki/README.md) 分两类**：被代码 `// 契约:` 引用的 16 篇是**活契约页**（随代码重写式修订，锚 slug 不可改）；其余各篇是历史快照（historical-verbatim），真源是各自的快照提交，不许"对齐今天"式改写，引用由 `doc-refs` 按快照锚定保护。
 - **长期事实文档**（`docs/*.md`、根级 `README.md` / `CONTRIBUTING.md`）：真源是今天的树，引用的路径必须存在。`doc-refs` 的扫描面是 `docs/wiki` 与 `docs/*.md`；根级 markdown 不在扫描面内，但同一纪律适用——写下的路径先 `ls` 到。
 - **未提交的 `docs/wiki` 编辑会取消该篇的历史锚定**，使其引用集体报 dangling。文档批次先落盘再跑门禁；需要当场判单篇时用 `go run ./scripts/codetools doc-refs docs/wiki/README.md`。机制说明见 [`docs/OPERATION.md`](docs/OPERATION.md) §五·3(a)。
 - **`openspec/specs/` 是已接受需求的真源**；过程记录放 `openspec/changes/`（归档后只读）。脚本与 CI 不得把读者指向过程工件（`proc-refs` 门）。
