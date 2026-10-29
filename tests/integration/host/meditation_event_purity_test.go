@@ -215,7 +215,7 @@ func newMeditationRig(t *testing.T, interval time.Duration, medAnswer func(*mode
 			if err != nil {
 				return nil, err
 			}
-			driver := meditation.NewDriver(reflection, interval, 0)
+			driver := meditation.NewDriver(reflection, interval, 0, nil, "")
 			driver.SetObserver(func(outcome meditation.TickOutcome) {
 				if outcome.Decision.Disposition != meditation.TickFired {
 					return

@@ -187,6 +187,11 @@ var (
 
 	_ func(HistoryFace, event.Address, []model.Message) = HistoryFace.CommitHistory
 
+	// The chain read of the same face is the third method: the drive reads the
+	// facts of its range at every decision boundary, and the signature is the one
+	// the run's own chain read carries.
+	_ func(HistoryFace, event.Address) []event.Event = HistoryFace.SessionFacts
+
 	// The model view material the request snapshot is fixed from keeps its
 	// documented fields.
 	_ = modelView{modelName: "", promptVersion: "", visibleTools: []string{}, visibleSkills: []string{}}

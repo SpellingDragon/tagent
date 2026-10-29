@@ -216,6 +216,10 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 // notice fact is a mapped fact like any other, so a notification enters the
 // chain's projection as it commits and the range reads it back as a projection
 // increment instead of from a lane of its own.
+// - The boundary never moves for a fact of the range it already stands at: input that
+// lands under the invocation of the range in flight is that drive's own material, so
+// the drive reads it again at its next decision boundary instead of the boundary
+// presenting it as ended material (runtime/agent Loop boundaryInput).
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -238,7 +242,10 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 // running call admits — belongs to the range already in flight and never moves
 // the boundary. The notice fact is recognised by the trigger source its
 // committing path stamps, so a progress notice of the same type under the same
-// range is never mistaken for the start of another one.
+// range is never mistaken for the start of another one. The drive's own
+// boundary read keeps the same criterion (runtime/agent startsRange), so a fact
+// that starts a range here and a fact a drive reads again there are one
+// judgement.
 func admitsRange(evt event.Event) bool {
 	if evt.Type == event.TypeExternalInput {
 		return true

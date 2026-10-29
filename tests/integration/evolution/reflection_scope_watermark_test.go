@@ -31,6 +31,7 @@ import (
 // - injection only writes the explicit input: consumption advances the watermark to the injection moment, a yield leaves it in place
 // - the digest renders deterministically and bounded out of the one pass the tick read, spending no model call
 // - the fired input is a source=meditation external input consumed by the agent's own loop session and observable on the fact chain
+// - every anchor here ticks outside the min gap of the fact it reads, so the activity gate leaves the scope and watermark faces their subject
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 func TestReflectionScopeAndWatermark(t *testing.T) {
 	t.Run("an observation face outside the read scope is refused by name", func(t *testing.T) {
@@ -78,11 +79,13 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		rig := newReflectionRig(t, reflectionConfig(), t.TempDir())
+		cfg := reflectionConfig()
+		rig := newReflectionRig(t, cfg, t.TempDir())
 		rig.ledger.record(externalFact("pool-note", "a note from the read scope", time.Unix(0, 0).Add(2*time.Minute)), memory.PartitionIDFromName("agent-pool"))
-		own := rig.ledger.record(externalFact("own-note", "a note on the agent's own partition", time.Unix(0, 0).Add(3*time.Minute)), rig.partition)
+		ownAt := time.Unix(0, 0).Add(3 * time.Minute)
+		own := rig.ledger.record(externalFact("own-note", "a note on the agent's own partition", ownAt), rig.partition)
 
-		outcome := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute))
+		outcome := rig.reflection.Tick(ctx, ownAt.Add(cfg.Cadence.MinGap+time.Minute))
 		if outcome.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("tick disposition = %q (%s), want the own-partition fact to fire the reflection", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}
@@ -111,8 +114,10 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		defer cancel()
 
 		dir := t.TempDir()
-		rig := newReflectionRig(t, reflectionConfig(), dir)
-		rig.ledger.record(externalFact("fresh-note", "a note newer than the watermark", time.Unix(0, 0).Add(2*time.Minute)), rig.partition)
+		cfg := reflectionConfig()
+		rig := newReflectionRig(t, cfg, dir)
+		noteAt := time.Unix(0, 0).Add(2 * time.Minute)
+		rig.ledger.record(externalFact("fresh-note", "a note newer than the watermark", noteAt), rig.partition)
 		record := filepath.Join(dir, "anchors.json")
 		if err := os.WriteFile(record, []byte(`{"last_meditation":"yesterday"}`), 0o644); err != nil {
 			t.Fatalf("write the damaged anchor record: %v", err)
@@ -135,7 +140,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if err := os.WriteFile(record, []byte(`{}`), 0o644); err != nil {
 			t.Fatalf("repair the anchor record: %v", err)
 		}
-		if repaired := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); repaired.Decision.Disposition != meditation.TickFired {
+		if repaired := rig.reflection.Tick(ctx, noteAt.Add(cfg.Cadence.MinGap+time.Minute)); repaired.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("repaired tick = %q (%s), want the same face firing once the watermark is readable", repaired.Decision.Disposition, repaired.Decision.Reason)
 		}
 
@@ -160,7 +165,8 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		}
 
 		broken := newReflectionRig(t, reflectionConfig(), t.TempDir())
-		broken.ledger.record(externalFact("chain-note", "a note behind an unreachable chain", time.Unix(0, 0).Add(2*time.Minute)), broken.partition)
+		brokenAt := time.Unix(0, 0).Add(2 * time.Minute)
+		broken.ledger.record(externalFact("chain-note", "a note behind an unreachable chain", brokenAt), broken.partition)
 		broken.ledger.fail(errors.New("the fact chain is unreachable"))
 		if _, err := broken.reflection.FreshSince(ctx, time.Unix(0, 0)); err == nil {
 			t.Fatal("a failed read must be reported as an error, never as nothing fresh")
@@ -172,7 +178,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 			t.Fatalf("injected inputs = %d, want no fallback criterion firing past an unreadable face", got)
 		}
 		broken.ledger.fail(nil)
-		if got := broken.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute)); got.Decision.Disposition != meditation.TickFired {
+		if got := broken.reflection.Tick(ctx, brokenAt.Add(cfg.Cadence.MinGap+time.Minute)); got.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("readable tick = %q (%s), want the same face firing once the chain answers", got.Decision.Disposition, got.Decision.Reason)
 		}
 	})
@@ -185,7 +191,7 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		cfg := reflectionConfig()
 		rig := newReflectionRig(t, cfg, dir)
 		rig.ledger.record(externalFact("first-note", "the fact the first reflection covers", time.Unix(0, 0).Add(2*time.Minute)), rig.partition)
-		injected := time.Unix(0, 0).Add(3 * time.Minute)
+		injected := time.Unix(0, 0).Add(2 * time.Minute).Add(cfg.Cadence.MinGap + time.Minute)
 		rig.input.arm(meditation.ReflectionInFlight)
 
 		fired := rig.reflection.Tick(ctx, injected)
@@ -264,12 +270,14 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		rig := newReflectionRig(t, reflectionConfig(), t.TempDir())
+		cfg := reflectionConfig()
+		rig := newReflectionRig(t, cfg, t.TempDir())
 		covered := time.Unix(0, 0).Add(2 * time.Minute)
 		key := rig.ledger.record(externalFact("covered-note", "the fact a yielded reflection covered", covered), rig.partition)
 		rig.input.arm(meditation.ReflectionDeferred)
 
-		first := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute))
+		tickAt := covered.Add(cfg.Cadence.MinGap + time.Minute)
+		first := rig.reflection.Tick(ctx, tickAt)
 		if first.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("tick = (%q, %s), want the reflection firing on the covered fact", first.Decision.Disposition, first.Decision.Reason)
 		}
@@ -282,11 +290,11 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		if got := rig.reflection.DeferredCount(); got != 1 {
 			t.Fatalf("deferral count = %d, want the yield tallied", got)
 		}
-		if got := rig.reflection.LastDeferredAt(); !got.Equal(time.Unix(0, 0).Add(3 * time.Minute)) {
+		if got := rig.reflection.LastDeferredAt(); !got.Equal(tickAt) {
 			t.Fatalf("last deferral = %s, want the moment the yield was reported", got)
 		}
 
-		second := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute))
+		second := rig.reflection.Tick(ctx, tickAt.Add(time.Minute))
 		if second.Decision.Disposition != meditation.TickFired {
 			t.Fatalf("next tick = (%q, %s), want the same face re-evaluated and firing", second.Decision.Disposition, second.Decision.Reason)
 		}
@@ -388,7 +396,8 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 		sourceKey := rig.ledger.record(source, rig.partition)
 		before := rig.ledger.snapshot()
 
-		outcome := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute))
+		injected := time.Unix(0, 0).Add(2 * time.Minute).Add(cfg.Cadence.MinGap + time.Minute)
+		outcome := rig.reflection.Tick(ctx, injected)
 		if outcome.Decision.Disposition != meditation.TickFired || outcome.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want one injected reflection input", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}
@@ -445,14 +454,14 @@ func TestReflectionScopeAndWatermark(t *testing.T) {
 			t.Fatal("the reflection must not rewrite a fact it read")
 		}
 
-		next := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(4*time.Minute))
+		next := rig.reflection.Tick(ctx, injected.Add(time.Minute))
 		if next.Decision.Disposition != meditation.TickNoNovelty {
 			t.Fatalf("next tick = %q (%s), want the reflection input never re-arming the judgment that produced it", next.Decision.Disposition, next.Decision.Reason)
 		}
 		if got := rig.input.injectedCount(); got != 1 {
 			t.Fatalf("injected inputs = %d, want no second input beside the self-managed one", got)
 		}
-		if got := rig.watermark(t); !got.Equal(time.Unix(0, 0).Add(3 * time.Minute)) {
+		if got := rig.watermark(t); !got.Equal(injected) {
 			t.Fatalf("watermark = %s, want the injection moment the consumed turn advanced it to", got)
 		}
 	})

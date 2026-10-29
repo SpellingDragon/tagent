@@ -29,6 +29,7 @@ import (
 //   - an observation that arrives while a pass is in flight is retained for the next evaluation and never dropped as busy
 //   - the reflection's own product never re-enters the judgment that produced it
 //   - the formal assembly drives a real reflection turn, and the material is not recorded as consumed before that turn completes
+//   - the anchors that must fire tick outside the min gap of the material they read, so the activity side of the rhythm floor leaves the fired pass its subject
 //
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 func TestEventIntegrityMeditationSchedule(t *testing.T) {
@@ -42,7 +43,8 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 		firstKey := rig.ledger.record(externalFact("cadence-first", "the material the deferred pass covered", firstAt), rig.partition)
 
 		rig.input.arm(meditation.ReflectionDeferred)
-		deferred := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(3*time.Minute))
+		deferredAt := firstAt.Add(cfg.Cadence.MinGap + time.Minute)
+		deferred := rig.reflection.Tick(ctx, deferredAt)
 		if deferred.Decision.Disposition != meditation.TickFired || deferred.Injection == nil {
 			t.Fatalf("deferred tick = (%q, %s), want the material firing the reflection", deferred.Decision.Disposition, deferred.Decision.Reason)
 		}
@@ -54,7 +56,7 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 		}
 
 		rig.input.arm(meditation.ReflectionConsumed)
-		consumedAt := time.Unix(0, 0).Add(4 * time.Minute)
+		consumedAt := deferredAt.Add(time.Minute)
 		consumed := rig.reflection.Tick(ctx, consumedAt)
 		if consumed.Decision.Disposition != meditation.TickFired || consumed.Injection == nil {
 			t.Fatalf("re-evaluated tick = (%q, %s), want the same face firing once it is read again", consumed.Decision.Disposition, consumed.Decision.Reason)
@@ -79,7 +81,7 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 			t.Fatalf("injected inputs = %d, want none beside the two passes before the rhythm floor elapses", got)
 		}
 
-		cadenceAt := consumedAt.Add(time.Hour)
+		cadenceAt := laterAt.Add(cfg.Cadence.MinGap + time.Minute)
 		fired := rig.reflection.Tick(ctx, cadenceAt)
 		if fired.Decision.Disposition != meditation.TickFired || fired.Injection == nil {
 			t.Fatalf("cadence tick = (%q, %s), want the fresh material firing once the floor elapses", fired.Decision.Disposition, fired.Decision.Reason)
@@ -105,7 +107,7 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 		firstKey := rig.ledger.record(externalFact("cold-first", "the material a start with no watermark reads", firstAt), rig.partition)
 
 		rig.input.arm(meditation.ReflectionConsumed)
-		firstTick := time.Unix(0, 0).Add(3 * time.Minute)
+		firstTick := firstAt.Add(cfg.Cadence.MinGap + time.Minute)
 		first := rig.reflection.Tick(ctx, firstTick)
 		if first.Decision.Disposition != meditation.TickFired || first.Injection == nil {
 			t.Fatalf("cold tick = (%q, %s), want the first tick passing through the rhythm floor", first.Decision.Disposition, first.Decision.Reason)
@@ -120,9 +122,9 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 			t.Fatalf("injected inputs = %d, want exactly the one cold pass", got)
 		}
 
-		laterAt := time.Unix(0, 0).Add(10 * time.Minute)
+		laterAt := firstTick.Add(time.Minute)
 		laterKey := rig.ledger.record(externalFact("cold-later", "the material the locked rhythm holds", laterAt), rig.partition)
-		locked := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(11*time.Minute))
+		locked := rig.reflection.Tick(ctx, laterAt.Add(time.Minute))
 		if locked.Decision.Disposition != meditation.TickRhythm {
 			t.Fatalf("locked tick = (%q, %s), want the cold pass locking the rhythm behind itself", locked.Decision.Disposition, locked.Decision.Reason)
 		}
@@ -213,7 +215,7 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 		if err != nil {
 			t.Fatalf("assemble the reflection over the held input: %v", err)
 		}
-		driver := meditation.NewDriver(reflection, 0, 0)
+		driver := meditation.NewDriver(reflection, 0, 0, nil, "")
 		t.Cleanup(driver.Stop)
 
 		firstKey := rig.ledger.record(externalFact("busy-first", "the material the in-flight pass reads", time.Now().Add(-time.Minute)), rig.partition)
@@ -282,10 +284,12 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		rig := newReflectionRig(t, reflectionConfig(), t.TempDir())
-		rig.ledger.record(externalFact("reentry-source", "the host material the reflection reads", time.Unix(0, 0).Add(2*time.Minute)), rig.partition)
+		cfg := reflectionConfig()
+		rig := newReflectionRig(t, cfg, t.TempDir())
+		sourceAt := time.Unix(0, 0).Add(2 * time.Minute)
+		rig.ledger.record(externalFact("reentry-source", "the host material the reflection reads", sourceAt), rig.partition)
 		rig.input.arm(meditation.ReflectionConsumed)
-		consumedAt := time.Unix(0, 0).Add(3 * time.Minute)
+		consumedAt := sourceAt.Add(cfg.Cadence.MinGap + time.Minute)
 		fired := rig.reflection.Tick(ctx, consumedAt)
 		if fired.Decision.Disposition != meditation.TickFired || fired.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want the host material firing the reflection", fired.Decision.Disposition, fired.Decision.Reason)
@@ -307,7 +311,7 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 		}
 
 		outcomes := make(chan meditation.TickOutcome, 4)
-		driver := meditation.NewDriver(rig.reflection, 0, 0)
+		driver := meditation.NewDriver(rig.reflection, 0, 0, nil, "")
 		driver.SetObserver(func(outcome meditation.TickOutcome) { outcomes <- outcome })
 		t.Cleanup(driver.Stop)
 		if err := driver.ObserveCommit(ctx, fired.Injection.Key); err != nil {
@@ -325,8 +329,8 @@ func TestEventIntegrityMeditationSchedule(t *testing.T) {
 			t.Fatalf("watermark after the own product = %s, want it unmoved at %s", got, consumedAt)
 		}
 
-		ownLater := rig.ledger.record(lineageFact("reentry-later", "a later self-managed product", meditation.LineageReflection, time.Unix(0, 0).Add(4*time.Minute)), rig.partition)
-		settled := rig.reflection.Tick(ctx, time.Unix(0, 0).Add(5*time.Minute))
+		ownLater := rig.ledger.record(lineageFact("reentry-later", "a later self-managed product", meditation.LineageReflection, consumedAt.Add(time.Minute)), rig.partition)
+		settled := rig.reflection.Tick(ctx, consumedAt.Add(2*time.Minute))
 		if settled.Decision.Disposition != meditation.TickNoNovelty {
 			t.Fatalf("tick = (%q, %s), want the self-managed traffic holding no novelty", settled.Decision.Disposition, settled.Decision.Reason)
 		}
@@ -553,7 +557,7 @@ func newFormalMeditationRig(t *testing.T, medAnswer func(*model.Request) *model.
 			if err != nil {
 				return nil, err
 			}
-			driver := meditation.NewDriver(reflection, 0, 0)
+			driver := meditation.NewDriver(reflection, 0, 0, nil, "")
 			driver.SetObserver(func(outcome meditation.TickOutcome) {
 				if outcome.Decision.Disposition != meditation.TickFired {
 					return

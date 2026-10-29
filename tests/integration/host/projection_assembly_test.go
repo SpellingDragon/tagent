@@ -1,7 +1,7 @@
 // The projection-assembly checks of the host: the one assembler the request
 // boundary builds its prefix through serves the three uses — the main context,
-// the environment segment and the delegated refs — under the same budget
-// assembly, and an agent that declares no environment block grows no segment.
+// the environment block and the delegated refs — under the same budget
+// assembly, and an agent that declares no environment block grows no message.
 package host
 
 import (
@@ -25,6 +25,14 @@ import (
 // per token, while the ticket of the same text fits it.
 const assemblyBudget = 120
 
+// environmentBlockOpen and environmentBlockClose are the markers the dynamic
+// environment block is rendered under, so a request states its block by the
+// markers alone.
+const (
+	environmentBlockOpen  = "<environment>"
+	environmentBlockClose = "</environment>"
+)
+
 // assemblyFullText is the material the three uses carry: past the budget, so
 // every use degrades it the same way instead of presenting it in full.
 var assemblyFullText = strings.Repeat("a", 500)
@@ -35,7 +43,7 @@ var assemblyPreview = strings.Repeat("a", 128) + "…"
 
 // TestProjectionAssemblyServesTheThreeUses checks the one assembler behind the three uses.
 //   - the main context degrades to a ticket under the registration budget
-//   - the environment segment stays whole beside a budget that skips the projection
+//   - the environment block stays whole beside a budget that skips the projection
 //   - the delegated refs degrade to the ticket of the same preview under the same budget
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
@@ -69,7 +77,7 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 		}
 		got := requests[1].Messages
 		if len(got) != 4 {
-			t.Fatalf("second request carries %d messages, want the two mapped facts, the block and the input: %v", len(got), got)
+			t.Fatalf("second request carries %d messages, want the two mapped facts, the input and the block: %v", len(got), got)
 		}
 		main := got[0]
 		if main.Role != model.RoleUser {
@@ -88,16 +96,16 @@ func TestProjectionAssemblyServesTheThreeUses(t *testing.T) {
 			t.Fatalf("message 1 = (%q, %q), want the mapped answer in full", got[1].Role, got[1].Content)
 		}
 		block, at := environmentBlockMessage(t, got)
-		if at != 2 {
-			t.Fatalf("environment block stands at message %d, want it closing the boundary assembly", at)
+		if at != 3 {
+			t.Fatalf("environment block stands at message %d, want it trailing the request", at)
 		}
 		requireEnvironmentFields(t, block)
-		if got[3].Role != model.RoleUser || got[3].Content != "第二轮输入" {
-			t.Fatalf("message 3 = (%q, %q), want the invocation input behind the block", got[3].Role, got[3].Content)
+		if got[2].Role != model.RoleUser || got[2].Content != "第二轮输入" {
+			t.Fatalf("message 2 = (%q, %q), want the invocation input ahead of the block", got[2].Role, got[2].Content)
 		}
 	})
 
-	t.Run("the environment segment stays whole beside a budget that skips the projection", func(t *testing.T) {
+	t.Run("the environment block stays whole beside a budget that skips the projection", func(t *testing.T) {
 		tight := assembleWithBudget(t, "session-assembly-tight", 20)
 		roomy := assembleWithBudget(t, "session-assembly-roomy", 1200)
 
@@ -203,7 +211,7 @@ func TestUndeclaredEnvironmentBlockKeepsTheAssemblyUnchanged(t *testing.T) {
 		t.Fatalf("second request carries %d messages, want the two mapped facts and the input alone: %v", len(got), got)
 	}
 	for _, message := range got {
-		if strings.Contains(message.Content, "## Environment") {
+		if strings.Contains(message.Content, environmentBlockOpen) {
 			t.Fatalf("request carries an environment block the agent never declared: %v", got)
 		}
 	}
@@ -241,17 +249,19 @@ func assembleWithBudget(t *testing.T, session string, budget int) []model.Messag
 	return requests[1].Messages
 }
 
-// environmentBlockMessage reports the environment block a request carries and
-// the message index it stands at.
+// environmentBlockMessage reports the environment block a request closes with
+// and the message index it stands at: the block trails the request under its
+// declared markers, so it is the last message and carries the block alone.
 func environmentBlockMessage(t *testing.T, messages []model.Message) (string, int) {
 	t.Helper()
-	for i, message := range messages {
-		if strings.HasPrefix(message.Content, "## Environment\n") {
-			return message.Content, i
-		}
+	if len(messages) == 0 {
+		t.Fatalf("request carries no message, want the environment block trailing it")
 	}
-	t.Fatalf("request carries no environment block: %v", messages)
-	return "", -1
+	last := messages[len(messages)-1]
+	if !strings.HasPrefix(last.Content, environmentBlockOpen+"\n") || !strings.HasSuffix(last.Content, environmentBlockClose) {
+		t.Fatalf("last message = (%q, %q), want the marked environment block trailing the request: %v", last.Role, last.Content, messages)
+	}
+	return last.Content, len(messages) - 1
 }
 
 // environmentBlockOf reports the environment block of one request.

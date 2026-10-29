@@ -242,25 +242,34 @@ type Driver struct {
 
     There is no ticker: a reflection is the answer to a new event, so a process
     with nothing new never fires one. The interval is a floor between two fires,
-    never a clock that fires on its own.
+    never a clock that fires on its own. A pass the rhythm floor holds back
+    keeps its episode open through the standing re-arm and evaluates again once
+    the window opens, so a floor above zero still fires instead of waiting for a
+    commit the held session may never send.
 
-func NewDriver(reflection *Reflection, interval, minGap time.Duration) *Driver
+func NewDriver(reflection *Reflection, interval, minGap time.Duration,
+	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
+	instance event.InstanceID) *Driver
     NewDriver assembles the event-driven reflection face over one reflection
-    loop, the floor between two fires and the floor between two consumed
-    reflections.
+    loop, the floor between two fires, the floor between two consumed
+    reflections, the read of the observed session's execution seat and the
+    instance that seat is held in.
 
     The interval is measured from the last fire; the first fire is never
     held back, so the first event of a process is answered at once,
     and a non-positive interval disables that floor. The min gap stays the
     reflection's own rhythm floor, read from the execution watermark, so a fired
-    but not yet consumed reflection is never re-fired early.
+    but not yet consumed reflection is never re-fired early. A nil seat read or
+    an empty instance leaves the pass its rhythm alone.
 
 func (d *Driver) Name() string
     Name reports the stable name of this plugin instance.
 
 func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error
     ObserveCommit reads the fact one commit wrote and advances the driver's
-    timer state when that fact names an interaction someone awaits.
+    timer state when that fact names an interaction someone awaits, recording
+    the session that material belongs to beside it: the pass reflects on that
+    session's seat.
 
     The pass itself runs detached from the committing turn: a reflection spends
     a model call, and a user turn never waits for it. A failed read is reported
@@ -445,6 +454,11 @@ func (r *Reflection) FreshSince(ctx context.Context, since time.Time) (bool, err
 func (r *Reflection) LastDeferredAt() time.Time
     LastDeferredAt reports the moment of the most recent deferral.
 
+func (r *Reflection) MinGap() time.Duration
+    MinGap reports the floor between two consumed reflections this loop holds:
+    the window a pass is judged against, and the one an event-driven face holds
+    a suppressed pass open for.
+
 func (r *Reflection) NoteOutcome(ctx context.Context, receipt ReflectionReceipt) error
     NoteOutcome settles what became of the reflection input awaiting one.
 
@@ -467,13 +481,21 @@ func (r *Reflection) Scope() ReflectionScope
 
 func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome
     Tick runs one reflection tick at now: it establishes the execution
-    watermark, reads the observed face once, renders the digest from that same
-    pass, applies the pending guard, the freshness judgment and the rhythm
-    floor, and injects one explicit input event when all three open.
+    watermark, reads the observed face once, renders the digest from that
+    same pass, applies the pending guard, the freshness judgment and the
+    rhythm floor, and injects one explicit input event when all three open.
+    The rhythm floor is read on both sides of one execution — the interval
+    since the last consumed reflection, and the age of the newest host-facing
+    fact — and a floor that holds the tick back reports the fact holding it,
+    leaving the watermark and the pending input untouched.
 
-    A tick whose gate cannot be established reports TickClosed with the fact it
-    could not establish and injects nothing; a tick that injected reports the
-    input and settles the outcome the loop side handed back.
+    A tick whose gate cannot be established reports TickClosed with the fact
+    it could not establish and injects nothing; a tick that injected reports
+    the input and settles the outcome the loop side handed back. The former
+    watermark floor is absorbed by the freshness judgment: the scan reads only
+    facts newer than the watermark and Recent is the newest of them, so a fresh
+    fact inside the window already implies the watermark floor — one judgment,
+    not two.
 
 func (r *Reflection) Watermark(ctx context.Context) (Watermark, error)
     Watermark reports the execution watermark the gate holds, refusing by name

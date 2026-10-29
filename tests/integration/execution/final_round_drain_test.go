@@ -303,6 +303,10 @@ func (h *finalRoundHistory) CommitHistory(addr event.Address, msgs []model.Messa
 	h.bySession[addr.SessionID] = append(h.bySession[addr.SessionID], msgs...)
 }
 
+// SessionFacts reports no fact of the session: this rig keeps the transcript alone and
+// commits no chain beside it, so a decision boundary of a drive reads no input again.
+func (h *finalRoundHistory) SessionFacts(event.Address) []event.Event { return nil }
+
 // finalRoundAnswer reports the content of the message one transcript carries in
 // answer of the named call.
 func finalRoundAnswer(msgs []model.Message, callID string) string {

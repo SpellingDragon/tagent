@@ -379,22 +379,21 @@ func foldWindowOf(spec config.AgentSpec) FoldWindow {
 // first — the prompt and skill bodies the binding names, in structural order
 // — then the skill bodies already loaded on the binding's tool resources
 // beside them (skill-name order, once each, and never a body the fixed files
-// already carry), then the replayed projection of the session chain, and
-// finally the dynamic environment material of the request when the agent
-// declares it: the environment segment is one product of the assembly, rendered
-// by the assembler itself, and it enters the prefix as its own system message.
-// Every segment of the prefix is a product of that one assembler, and the
-// projected main context is assembled under the same budget assembly the
-// delegated refs render under, so the request side never grows a second
-// assembly channel beside it. The content version the boundary fixed is
-// reported back as the version the request runs on.
+// already carry), then the replayed projection of the session chain. Every
+// segment of the prefix is a product of that one assembler, and the projected
+// main context is assembled under the same budget assembly the delegated refs
+// render under, so the request side never grows a second assembly channel
+// beside it. The content version the boundary fixed is reported back as the
+// version the request runs on, and an agent declaring the environment block
+// receives the block itself: the request face renders it here and the loop
+// appends it behind the transcript, so the block never enters the prefix.
 //
 // The order is the cache ordering the environment block exists for: what stays
 // the same between two requests of one session — the fixed prompt and skill
 // bodies, the transcript ahead of it — sits at the top as the stable prefix,
-// while what changes with the run sits at the bottom of the assembly, so a
-// change of the available tool face or of the open task state never moves the
-// prefix before it.
+// while what changes with the run trails the request, so a change of the
+// available tool face or of the open task state never moves the prefix it
+// follows.
 func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundary) (agent.BoundaryView, error) {
 	if boundary.Chain.SessionID == "" {
 		return agent.BoundaryView{}, agent.ErrRequestChainSessionRequired
@@ -420,12 +419,9 @@ type requestSegment func(ctx context.Context) ([]model.Message, error)
 
 // projectionAssembler is the one assembler the request boundary builds the
 // prefix of a request through: every segment of the prefix is a product of this
-// assembler — the fixed file contents, the loaded skill bodies, the projected
-// main context and the environment segment — laid out in the order the segments
-// are declared. No segment grows a dispatch channel of its own beside the
-// assembly, and the environment segment in particular is the assembler's own
-// producing product of the request material, never a phase pass routed around
-// it.
+// assembler — the fixed file contents, the loaded skill bodies and the projected
+// main context — laid out in the order the segments are declared. No segment
+// grows a dispatch channel of its own beside the assembly.
 type projectionAssembler struct {
 	segments []requestSegment
 }
@@ -466,7 +462,11 @@ type requestAssembly struct {
 }
 
 // assemble declares the segments of the layout in the fixed order, runs them
-// through the one assembler and answers the boundary view they produce.
+// through the one assembler and answers the boundary view they produce. An
+// agent declaring the environment block receives the block beside the prefix:
+// the block is rendered here, after every segment settled the content version
+// it names, and the loop appends it behind the transcript instead of the
+// prefix carrying it.
 func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, error) {
 	if a.fixer != nil {
 		a.assembler.segment(a.fixedFiles)
@@ -475,14 +475,15 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	if a.registered {
 		a.assembler.segment(a.projectedMainContext)
 	}
-	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
-		a.assembler.segment(a.environmentSegment)
-	}
 	messages, err := a.assembler.assemble(ctx)
 	if err != nil {
 		return agent.BoundaryView{}, err
 	}
-	return agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}, nil
+	view := agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}
+	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
+		view.Environment = a.run.environmentBlock(ctx, a.boundary, a.promptVersion)
+	}
+	return view, nil
 }
 
 // fixedFiles reads the declared prompt and skill bodies afresh at this boundary
@@ -655,13 +656,6 @@ func skillLoadsOf(agent event.AgentID) []knowledge.LoadedSkill {
 // the chain fixed, bounded to the entries that already ended.
 func (a *requestAssembly) projectedMainContext(ctx context.Context) ([]model.Message, error) {
 	return projectedSegment(ctx, a.run, a.sequence.projection, a.sequence.window, a.sequence.endedPrefix())
-}
-
-// environmentSegment contributes the dynamic environment material of the
-// request when the agent declares it: the block the assembler renders at this
-// boundary, as its own system message at the bottom of the prefix.
-func (a *requestAssembly) environmentSegment(ctx context.Context) ([]model.Message, error) {
-	return []model.Message{{Role: model.RoleSystem, Content: a.run.environmentBlock(ctx, a.boundary)}}, nil
 }
 
 // projectedSegment renders projected material under the window assembly: the
@@ -895,20 +889,21 @@ func environmentBlockDebug(format string, args ...any) {
 }
 
 // environmentBlock renders the dynamic environment material one request carries
-// at the bottom of the boundary assembly, for an agent that declares it: the
-// agent the request runs as, the tool, skill and MCP faces available to it, and
-// the asynchronous work it holds open at this boundary. The block is one system
-// message on its own and the assembly appends it as it stands, because everything
-// in it changes with the run while the material above it — the fixed prompt, the
-// skill bodies and the transcript ahead of the assembly — does not, so the
-// changing part never moves the stable prefix it follows.
-func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary) string {
+// behind its transcript, for an agent that declares it: the agent the request
+// runs as, the tool, skill and MCP faces available to it, the content version
+// its prompt files fixed and the asynchronous work it holds open at this
+// boundary. The block is carried under the declared markers and the loop
+// appends it as its own user message after everything else, because everything
+// in it changes with the run while the material ahead of it — the fixed prompt,
+// the skill bodies and the transcript — does not, so the changing part never
+// moves the stable prefix it follows.
+func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary, promptVersion string) string {
 	spec := r.agentSpecOf(boundary.Agent)
 	open, omitted := r.openTaskLines(ctx)
 	environmentBlockGenerations.Add(1)
 	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s tasks=%d omitted=%d", boundary.Agent, len(open)+omitted, omitted)
 	var b strings.Builder
-	b.WriteString("## Environment\n")
+	b.WriteString("<environment>\n")
 	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)
 	if modelName := modelNameOf(boundary.Binding); modelName != "" {
 		fmt.Fprintf(&b, "- model: %s\n", modelName)
@@ -916,6 +911,7 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding)))
 	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(visibleSkillsOf(boundary.Binding)))
 	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(endpointsOf(spec.Tools)))
+	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
 	fmt.Fprintf(&b, "- tasks: %d open\n", len(open)+omitted)
 	if len(open) == 0 {
 		b.WriteString("  - (none)\n")
@@ -926,7 +922,8 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	if omitted > 0 {
 		fmt.Fprintf(&b, "  - (+%d more)\n", omitted)
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	b.WriteString("</environment>")
+	return b.String()
 }
 
 // openTaskLines reports the obligations this run owes as the environment block
@@ -1014,4 +1011,14 @@ func listOrNone(items []string) string {
 		return "(none)"
 	}
 	return strings.Join(items, ", ")
+}
+
+// versionOrNone renders the content version the request boundary fixed as the
+// environment block names it, and a named empty version rather than a blank
+// field, so a request that fixed no content version still says so.
+func versionOrNone(version string) string {
+	if version == "" {
+		return "(none)"
+	}
+	return version
 }

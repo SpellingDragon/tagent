@@ -42,20 +42,7 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 	ready := make([]event.Event, 0, len(req.Input))
 	now := time.Now()
 	for _, msg := range req.Input {
-		evt := event.Event{
-			Type:         typeOf(msg),
-			Timestamp:    now,
-			Message:      msg,
-			Owner:        req.Address,
-			Source:       req.Address,
-			Target:       req.Address,
-			InvocationID: req.InvocationID,
-			InstanceID:   r.instance,
-			EpisodeID:    req.Episode,
-		}
-		if req.TriggerSource != "" {
-			evt.Meta = map[string]string{event.MetaKeyTriggerSource: req.TriggerSource}
-		}
+		evt := r.inputEventOf(req, msg, req.InvocationID, now)
 		key, err := r.commitFactChecked(ctx, evt)
 		if err != nil {
 			return agent.Turn{}, fmt.Errorf("tagent: commit the input fact: %w", err)
@@ -169,4 +156,28 @@ func typeOf(msg model.Message) string {
 	default:
 		return event.TypeExternalInput
 	}
+}
+
+// inputEventOf renders one native input message as the entry fact of a range:
+// the frozen type of the message beside the address, identity and instance the
+// range stamps on it, and the trigger-source stamp of the material when the
+// caller names one. The identity is the range the message is input of, so a
+// message admitted beside a range already running commits under that range and
+// is read at that drive's next decision boundary.
+func (r *Run) inputEventOf(req InvokeRequest, msg model.Message, invocationID event.InvocationID, now time.Time) event.Event {
+	evt := event.Event{
+		Type:         typeOf(msg),
+		Timestamp:    now,
+		Message:      msg,
+		Owner:        req.Address,
+		Source:       req.Address,
+		Target:       req.Address,
+		InvocationID: invocationID,
+		InstanceID:   r.instance,
+		EpisodeID:    req.Episode,
+	}
+	if req.TriggerSource != "" {
+		evt.Meta = map[string]string{event.MetaKeyTriggerSource: req.TriggerSource}
+	}
+	return evt
 }

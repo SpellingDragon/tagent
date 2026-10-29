@@ -2637,7 +2637,7 @@ func reflectionDeliveryHostDocument(root, endpoint, deliverTo string) string {
 	b.WriteString("    meditation:\n")
 	b.WriteString("      enabled: true\n")
 	b.WriteString("      interval: 1h\n")
-	b.WriteString("      min_gap: 2h\n")
+	b.WriteString("      min_gap: 50ms\n")
 	b.WriteString("      prompt_file: meditation.md\n")
 	b.WriteString("      observed_namespaces: [user]\n")
 	b.WriteString("      deliver_to: " + deliverTo + "\n")
@@ -3050,6 +3050,17 @@ func runReplayIdentity(t *testing.T) {
 // assembly: Boot grants deliver_summary to the meditation session only, the
 // reflection model explicitly calls it, and the target session's next real
 // request carries the delivered body.
+//
+// The meditation document runs a fifty-millisecond activity window, so the
+// document exercises a positive floor end to end: the fact each host-facing
+// commit files is inside its own window, the held pass keeps its episode open
+// through the standing re-arm, and the re-evaluation fires once that window is
+// past. The observed round's own commit is also the activity evidence the pass
+// waits on, so a pass that reaches the driver while that round still holds its
+// decision seat yields the turn. The second host-facing commit below lands after
+// the round returned, which makes the re-evaluation reachable over a free seat;
+// a round that already fired leaves that commit inside the interval floor, so
+// the anchor still reads exactly one delivery.
 func runBootDeliverToTargetRequest(t *testing.T) {
 	const (
 		input  = "the user round the reflection observes"
@@ -3086,6 +3097,13 @@ func runBootDeliverToTargetRequest(t *testing.T) {
 	}
 	if turn.Terminal != model.KindCompleted {
 		t.Fatalf("the observed round terminal = %v, want it completed", turn.Terminal)
+	}
+	if _, err := host.Run().CommitToSession(ctx, reflectionDeliveryAddr, event.Event{
+		Type:    event.TypeExternalInput,
+		Meta:    map[string]string{event.MetaKeyTriggerSource: "user"},
+		Message: model.Message{Role: model.RoleUser, Content: "the user round that follows the observed one"},
+	}); err != nil {
+		t.Fatalf("commit the host-facing round the reflection re-evaluates: %v", err)
 	}
 	script.await(t, deliverStep)
 	script.await(t, settledStep)

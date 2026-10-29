@@ -166,6 +166,12 @@ type Agent interface {
 type BoundaryView struct {
 	// Messages are the prefix messages of the request, in fixed layout order.
 	Messages []model.Message
+	// Environment is the dynamic environment block the request closes with,
+	// rendered under its declared markers: the faces the request carries beside
+	// the open asynchronous work at this boundary. The loop appends it as the
+	// last message of the request, behind the transcript. An empty block appends
+	// nothing, so an agent declaring none keeps the request at its transcript.
+	Environment string
 	// PromptVersion is the content version the request boundary fixed.
 	PromptVersion string
 	// VisibleSkills lists the skill names the boundary material makes visible to
@@ -176,10 +182,11 @@ type BoundaryView struct {
 }
     BoundaryView is what the request boundary settled on: the prefix messages
     the request carries in front of the transcript, in the fixed layout the
-    request face assembles, the content version the request runs on, and the
-    skill names that material makes visible. An empty PromptVersion keeps the
-    version the binding already carries: a binding that names no files fixes no
-    content version of its own.
+    request face assembles, the dynamic environment block the request closes
+    with, the content version the request runs on, and the skill names that
+    material makes visible. An empty PromptVersion keeps the version the binding
+    already carries: a binding that names no files fixes no content version of
+    its own.
 
 type Capture interface {
 	// Snapshot fixes the view one decision's request runs on before the request
@@ -560,6 +567,12 @@ type HistoryFace interface {
 	// CommitHistory appends the transcript one ended drive accumulated to the
 	// history of the named session.
 	CommitHistory(addr event.Address, msgs []model.Message)
+	// SessionFacts reports the facts the named session committed, in commit
+	// order: the chain a drive reads the input that landed in its own range
+	// from at a decision boundary rather than at the start of the drive alone.
+	// The signature is the one the run's own chain read carries, so the drive
+	// reads the very ledger it commits through instead of a lane beside it.
+	SessionFacts(addr event.Address) []event.Event
 }
     HistoryFace is the session transcript face the loop reads the accumulated
     history of a session from and writes one ended drive's transcript back to:
@@ -568,12 +581,14 @@ type HistoryFace interface {
     input beside that history and never batches with a neighbour. A session
     whose transcript a mapped sequence carries needs no second face here:
     that sequence is the one history of the session, so an implementation may
-    answer none of its own beside it.
+    answer none of its own beside it — and the facts of that chain are what the
+    drive reads its range's input again from at every decision boundary.
 
-    The redline list (3 rules): MUST report the history the named session
-    accumulated, as a copy the caller owns. MUST NOT batch the ready input of
-    one invocation into another invocation's range. MUST NOT rewrite or drop the
-    history a committed drive left behind.
+    The redline list (4 rules): MUST report the history the named session
+    accumulated, as a copy the caller owns. MUST report the facts of the named
+    session in commit order, as a copy the caller owns. MUST NOT batch the ready
+    input of one invocation into another invocation's range. MUST NOT rewrite or
+    drop the history a committed drive left behind.
 
 type Invocation struct {
 	// InvocationID identifies the responsibility range.
@@ -662,23 +677,29 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     The ready input of the range is never mixed with the input of another
     invocation. - The episode record is written where the business process
     actually starts: at the first drive of the invocation's own ready input.
-    - The settled result facts one decision paired are the stored input the next
-    decision reduces. - The transcript of this drive is committed beside the
-    terminal answer of its last decision, so the next invocation of this session
-    reads the range's history as it actually ended. - The whole drive is watched
-    as one in-flight production beside its invocation identity — the queueing
-    waits included — and confirms its stop only when the drive really ended.
-    - A progress notification of the range's own call commits as a fact of its
-    chain and enters no round head: the report is audit and projection material,
-    never input a decision speaks from. - A terminal notification of the
-    range's own call enters the round head as input material: a settle, a
-    failure or a cancellation is what an unattended follow-up turn speaks from,
-    and the progress reports beside it are skipped by their own category.
-    - A drive whose budget is spent runs one closing round and ends there:
-    the closing round delivers what the range already produced, its transcript
-    is committed the same way, and the obligation it opens is none. - The drive
-    is observed as one consumer run: its start and its end are DEBUG lines
-    carrying identities, counts and the terminal, never transcript content.
+    - The settled result facts one decision paired are the stored input the
+    next decision reduces. - The drive reads its range's chain again at every
+    decision boundary: input that landed in the range while a decision ran
+    enters the next decision of that same range, and a decision that opened no
+    obligation still ends the round while that input stands unread. The read
+    starts behind the head the chain held when the drive began, so the material
+    an earlier range already took is never this range's input. - The transcript
+    of this drive is committed beside the terminal answer of its last decision,
+    so the next invocation of this session reads the range's history as it
+    actually ended. - The whole drive is watched as one in-flight production
+    beside its invocation identity — the queueing waits included — and confirms
+    its stop only when the drive really ended. - A progress notification of the
+    range's own call commits as a fact of its chain and enters no round head:
+    the report is audit and projection material, never input a decision speaks
+    from. - A terminal notification of the range's own call enters the round
+    head as input material: a settle, a failure or a cancellation is what an
+    unattended follow-up turn speaks from, and the progress reports beside it
+    are skipped by their own category. - A drive whose budget is spent runs
+    one closing round and ends there: the closing round delivers what the
+    range already produced, its transcript is committed the same way, and the
+    obligation it opens is none. - The drive is observed as one consumer run:
+    its start and its end are DEBUG lines carrying identities, counts and the
+    terminal, never transcript content.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could
@@ -889,16 +910,19 @@ type RequestFace func(ctx context.Context, boundary RequestBoundary) (BoundaryVi
     binding's tool resources beside them (skill-name order, once each), then
     the replayed projection of the session chain (each presented entry under the
     frozen event-type→role table), then the transcript the drive accumulates
-    behind the prefix. The boundary material enters the actual GenerateContent
-    request at the loop, and no projection entry shape is mirrored into this
-    package: the face crosses built-in, event, model and state types only,
-    so the composition root attaches it with no package edge into the projection
-    layer, the same stitching the recording face uses. A chain that names no
-    session is refused by name through ErrRequestChainSessionRequired; a nil
-    face keeps the request at its transcript alone. The redline list (3 rules):
-    MUST assemble the prefix in the fixed layout from contents read fresh at
-    this boundary. MUST refuse a chain that names no session by name. MUST NOT
-    cross any package edge into the projection layer.
+    behind the prefix. An agent declaring the environment block receives
+    the block itself, and the loop appends it as the last message behind the
+    transcript, so the dynamic material trails the request instead of entering
+    the prefix. The boundary material enters the actual GenerateContent request
+    at the loop, and no projection entry shape is mirrored into this package:
+    the face crosses built-in, event, model and state types only, so the
+    composition root attaches it with no package edge into the projection layer,
+    the same stitching the recording face uses. A chain that names no session is
+    refused by name through ErrRequestChainSessionRequired; a nil face keeps the
+    request at its transcript alone. The redline list (3 rules): MUST assemble
+    the prefix in the fixed layout from contents read fresh at this boundary.
+    MUST refuse a chain that names no session by name. MUST NOT cross any
+    package edge into the projection layer.
 
 type Shutdown struct {
 	// Has unexported fields.

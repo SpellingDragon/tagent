@@ -45,13 +45,20 @@ type RequestBoundary struct {
 
 // BoundaryView is what the request boundary settled on: the prefix messages
 // the request carries in front of the transcript, in the fixed layout the
-// request face assembles, the content version the request runs on, and the
-// skill names that material makes visible. An empty PromptVersion keeps the
-// version the binding already carries: a binding that names no files fixes no
-// content version of its own.
+// request face assembles, the dynamic environment block the request closes
+// with, the content version the request runs on, and the skill names that
+// material makes visible. An empty PromptVersion keeps the version the binding
+// already carries: a binding that names no files fixes no content version of
+// its own.
 type BoundaryView struct {
 	// Messages are the prefix messages of the request, in fixed layout order.
 	Messages []model.Message
+	// Environment is the dynamic environment block the request closes with,
+	// rendered under its declared markers: the faces the request carries beside
+	// the open asynchronous work at this boundary. The loop appends it as the
+	// last message of the request, behind the transcript. An empty block appends
+	// nothing, so an agent declaring none keeps the request at its transcript.
+	Environment string
 	// PromptVersion is the content version the request boundary fixed.
 	PromptVersion string
 	// VisibleSkills lists the skill names the boundary material makes visible to
@@ -70,7 +77,10 @@ type BoundaryView struct {
 // binding's tool resources beside them (skill-name order, once each), then
 // the replayed projection of the session chain (each presented entry under
 // the frozen event-type→role table), then the transcript the drive
-// accumulates behind the prefix. The boundary material enters the actual
+// accumulates behind the prefix. An agent declaring the environment block
+// receives the block itself, and the loop appends it as the last message
+// behind the transcript, so the dynamic material trails the request instead
+// of entering the prefix. The boundary material enters the actual
 // GenerateContent request at the loop, and no projection entry shape is
 // mirrored into this package: the face crosses built-in, event, model and
 // state types only, so the composition root attaches it with no package edge

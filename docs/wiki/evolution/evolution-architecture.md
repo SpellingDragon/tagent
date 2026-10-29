@@ -21,7 +21,7 @@
 - **台账是内存态**：从已记录事件重建，从不持久化。重启后对重启前激活的版本失去锚点，评估如实落到 `insufficient`（点名缺激活证据），**绝不退化成健康**。
 - **消费记录不被重贴标签**：`Correlate` 只新增 `version → sha`，与已记录映射冲突即 `ErrCorrelationConflict`，旧映射为准。
 - **反馈按两条件精确 join**：`Consumed == version` 且 `Stamp ∈ {version, registration}`（`joinFeedback`），其余进入具名排除清单。不做时间窗猜测，也不把整库反馈算进这一版。
-- **窗口的消费侧就是反思水位门**：`Watermark` 只被**真正被消费**的反思轮推进到注入时刻；仅注入不推进、被延后的轮次不得推进、读不到即关闸（`ErrAnchorStoreUnusable`／`ErrAnchorUnreadable`），**绝不回落到新默认值开闸**。`hostFacingStamps` 是闭表——`user`／`task`／`reincarnation`／`system_alert` 才算"有人在等"，其余血统（含 agent 自己的反思轮）不开新鲜度门，防"自省引发的自省"成环。
+- **窗口的消费侧就是反思水位门**：`Watermark` 只被**真正被消费**的反思轮推进到注入时刻；仅注入不推进、被延后的轮次不得推进、读不到即关闸（`ErrAnchorStoreUnusable`／`ErrAnchorUnreadable`），**绝不回落到新默认值开闸**。`hostFacingStamps` 是闭表——`user`／`task`／`reincarnation`／`system_alert` 才算"有人在等"，其余血统（含 agent 自己的反思轮）不开新鲜度门，防"自省引发的自省"成环。节奏门另叠活跃闸：最近一条非自管新鲜事实（含触发本次评估的提交）距 now 不足 `min_gap`，或该事实所属地址的决策席在途，则让路——水位不动、`pending` 保持空；抑制保持本次 episode，窗口过后由既有重评节拍再评。
 
 <a id="verdict-states"></a>
 ## 三、结论四态与发布闸四态：两套词汇不互用
