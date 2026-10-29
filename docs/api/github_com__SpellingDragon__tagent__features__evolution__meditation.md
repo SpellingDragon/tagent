@@ -244,23 +244,29 @@ type Driver struct {
     with nothing new never fires one. The interval is a floor between two fires,
     never a clock that fires on its own.
 
-func NewDriver(reflection *Reflection, interval, minGap time.Duration) *Driver
+func NewDriver(reflection *Reflection, interval, minGap time.Duration,
+	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
+	instance event.InstanceID) *Driver
     NewDriver assembles the event-driven reflection face over one reflection
-    loop, the floor between two fires and the floor between two consumed
-    reflections.
+    loop, the floor between two fires, the floor between two consumed
+    reflections, the read of the observed session's execution seat and the
+    instance that seat is held in.
 
     The interval is measured from the last fire; the first fire is never
     held back, so the first event of a process is answered at once,
     and a non-positive interval disables that floor. The min gap stays the
     reflection's own rhythm floor, read from the execution watermark, so a fired
-    but not yet consumed reflection is never re-fired early.
+    but not yet consumed reflection is never re-fired early. A nil seat read or
+    an empty instance leaves the pass its rhythm alone.
 
 func (d *Driver) Name() string
     Name reports the stable name of this plugin instance.
 
 func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error
     ObserveCommit reads the fact one commit wrote and advances the driver's
-    timer state when that fact names an interaction someone awaits.
+    timer state when that fact names an interaction someone awaits, recording
+    the session that material belongs to beside it: the pass reflects on that
+    session's seat.
 
     The pass itself runs detached from the committing turn: a reflection spends
     a model call, and a user turn never waits for it. A failed read is reported
@@ -467,9 +473,13 @@ func (r *Reflection) Scope() ReflectionScope
 
 func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome
     Tick runs one reflection tick at now: it establishes the execution
-    watermark, reads the observed face once, renders the digest from that same
-    pass, applies the pending guard, the freshness judgment and the rhythm
-    floor, and injects one explicit input event when all three open.
+    watermark, reads the observed face once, renders the digest from that
+    same pass, applies the pending guard, the freshness judgment and the
+    rhythm floor, and injects one explicit input event when all three open.
+    The rhythm floor is read on both sides of one execution — the interval
+    since the last consumed reflection, and the age of the newest host-facing
+    fact — and a floor that holds the tick back reports the fact holding it,
+    leaving the watermark and the pending input untouched.
 
     A tick whose gate cannot be established reports TickClosed with the fact it
     could not establish and injects nothing; a tick that injected reports the

@@ -2,6 +2,7 @@ package meditation
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -23,6 +24,13 @@ type Driver struct {
 	interval   time.Duration
 	minGap     time.Duration
 
+	// slot reads the execution seat of one observed address: it is the runtime's
+	// own occupancy read, handed over as that object's own method, so the driver
+	// reports the seat the executor holds rather than a copy of it.
+	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool)
+	// instance is the runtime instance the observed session sits in.
+	instance event.InstanceID
+
 	// lookup reads the fact one commit identity names: the commit notice carries
 	// an identity, and the fact itself is read back through the observed chain.
 	lookup func(ctx context.Context, id event.EventID) (event.Event, error)
@@ -32,10 +40,13 @@ type Driver struct {
 
 	mu        sync.Mutex
 	lastFired time.Time
-	firing    bool
-	retained  bool
-	stopped   bool
-	wg        sync.WaitGroup
+	// owner is the address the latest host-facing commit names: the session whose
+	// decision seat the next pass waits on.
+	owner    event.Address
+	firing   bool
+	retained bool
+	stopped  bool
+	wg       sync.WaitGroup
 
 	observer func(TickOutcome)
 }
@@ -47,18 +58,25 @@ var (
 )
 
 // NewDriver assembles the event-driven reflection face over one reflection loop,
-// the floor between two fires and the floor between two consumed reflections.
+// the floor between two fires, the floor between two consumed reflections, the
+// read of the observed session's execution seat and the instance that seat is
+// held in.
 //
 // The interval is measured from the last fire; the first fire is never held
 // back, so the first event of a process is answered at once, and a non-positive
 // interval disables that floor. The
 // min gap stays the reflection's own rhythm floor, read from the execution
 // watermark, so a fired but not yet consumed reflection is never re-fired early.
-func NewDriver(reflection *Reflection, interval, minGap time.Duration) *Driver {
+// A nil seat read or an empty instance leaves the pass its rhythm alone.
+func NewDriver(reflection *Reflection, interval, minGap time.Duration,
+	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
+	instance event.InstanceID) *Driver {
 	d := &Driver{
 		reflection: reflection,
 		interval:   interval,
 		minGap:     minGap,
+		slot:       slot,
+		instance:   instance,
 	}
 	d.stopCtx, d.stopCancel = context.WithCancel(context.Background())
 	if reflection != nil {
@@ -85,7 +103,8 @@ func (d *Driver) SetObserver(observer func(TickOutcome)) {
 }
 
 // ObserveCommit reads the fact one commit wrote and advances the driver's timer
-// state when that fact names an interaction someone awaits.
+// state when that fact names an interaction someone awaits, recording the session
+// that material belongs to beside it: the pass reflects on that session's seat.
 //
 // The pass itself runs detached from the committing turn: a reflection spends a
 // model call, and a user turn never waits for it. A failed read is reported and
@@ -108,6 +127,7 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error {
 
 	now := time.Now()
 	d.mu.Lock()
+	d.owner = fact.Owner
 	if d.stopped {
 		d.mu.Unlock()
 		return nil
@@ -174,8 +194,15 @@ func (d *Driver) fire(ctx context.Context) {
 	}
 }
 
-// pass runs one reflection pass and reports the reading to the host observer.
+// pass runs one reflection pass and reports the reading to the host observer. A
+// pass the observed session holds a decision seat for waits for the next
+// host-facing commit: the watermark stays where it stands and no reflection input
+// is pending.
 func (d *Driver) pass(ctx context.Context) {
+	if held, reason := d.seatHeld(); held {
+		d.notify(TickOutcome{Decision: TickDecision{Disposition: TickRhythm, Reason: reason}})
+		return
+	}
 	if d.minGap > 0 {
 		if watermark, err := d.reflection.Watermark(ctx); err == nil {
 			if !watermark.Moment.IsZero() && time.Since(watermark.Moment) < d.minGap {
@@ -195,6 +222,23 @@ func (d *Driver) pass(ctx context.Context) {
 		d.mu.Unlock()
 	}
 	d.notify(outcome)
+}
+
+// seatHeld reports whether the session the latest host-facing commit names holds a
+// decision seat, beside the reading that names the occupant. A driver assembled
+// without a seat read or in no instance has no seat to wait on.
+func (d *Driver) seatHeld() (bool, string) {
+	d.mu.Lock()
+	slot, instance, owner := d.slot, d.instance, d.owner
+	d.mu.Unlock()
+	if slot == nil || instance == "" || owner.IsZero() {
+		return false, ""
+	}
+	invocation, decision, held := slot(owner, instance)
+	if !held {
+		return false, ""
+	}
+	return true, fmt.Sprintf("the decision seat of %s/%s is held by the decision %s of %s", owner.AgentID, owner.SessionID, decision, invocation)
 }
 
 // rearm settles one pass: it releases the firing state when no observation was

@@ -68,7 +68,7 @@ func TestMeditationYieldsBesideAnActiveSession(t *testing.T) {
 		if err := seats.Occupy(owner, instance, "invocation-held", "decision-held"); err != nil {
 			t.Fatalf("hold the decision seat: %v", err)
 		}
-		driver := meditation.NewDriver(rig.reflection, 0, 0)
+		driver := meditation.NewDriver(rig.reflection, 0, 0, seats.Slot, instance)
 		outcomes := make(chan meditation.TickOutcome, 4)
 		driver.SetObserver(func(outcome meditation.TickOutcome) { outcomes <- outcome })
 		t.Cleanup(driver.Stop)
@@ -171,7 +171,7 @@ func TestMeditationYieldsBesideAnActiveSession(t *testing.T) {
 
 		nextAt := time.Unix(0, 0).Add(10 * time.Minute)
 		nextKey := rig.ledger.record(ownedFact("activity-next", "the next host-facing commit of that session", nextAt, owner), rig.partition)
-		fired := rig.reflection.Tick(ctx, nextAt)
+		fired := rig.reflection.Tick(ctx, nextAt.Add(cfg.Cadence.MinGap+time.Minute))
 		if fired.Decision.Disposition != meditation.TickFired || fired.Injection == nil {
 			t.Fatalf("tick on the next host-facing commit = (%q, %s), want the postponed reflection firing", fired.Decision.Disposition, fired.Decision.Reason)
 		}

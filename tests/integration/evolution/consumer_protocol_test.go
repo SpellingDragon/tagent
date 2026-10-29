@@ -22,6 +22,7 @@ import (
 // - the turn-driven consumer reads the one ready fact and commits the attempt record its evidence face admitted
 // - the time-driven consumer reads the observed fact and fires one reflection input fact beside it
 // - both cite the identity they read on what they produce, and neither rewrites the fact it read
+// - the time-driven anchor ticks outside the min gap of the fact it read, so the activity gate leaves the consume-produce protocol its subject
 // 契约: docs/EXTENSIONS.md#consumer-protocol
 func TestConsumersShareTheProtocol(t *testing.T) {
 	t.Run("the turn-driven consumer reads one fact and produces new facts beside it", func(t *testing.T) {
@@ -74,13 +75,14 @@ func TestConsumersShareTheProtocol(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		rig := newReflectionRig(t, reflectionConfig(), t.TempDir())
+		cfg := reflectionConfig()
+		rig := newReflectionRig(t, cfg, t.TempDir())
 		observed := time.Unix(0, 0).Add(2 * time.Minute)
 		source := externalFact("tick-source", "the fact the tick reflects on", observed)
 		sourceKey := rig.ledger.record(source, rig.partition)
 		before := rig.ledger.snapshot()
 
-		outcome := rig.reflection.Tick(ctx, observed.Add(time.Minute))
+		outcome := rig.reflection.Tick(ctx, observed.Add(cfg.Cadence.MinGap+time.Minute))
 		if outcome.Decision.Disposition != meditation.TickFired || outcome.Injection == nil {
 			t.Fatalf("tick = (%q, %s), want the read fact firing one judgement fact", outcome.Decision.Disposition, outcome.Decision.Reason)
 		}

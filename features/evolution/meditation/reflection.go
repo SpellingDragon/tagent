@@ -274,7 +274,10 @@ func (r *Reflection) LastDeferredAt() time.Time {
 // Tick runs one reflection tick at now: it establishes the execution watermark,
 // reads the observed face once, renders the digest from that same pass, applies
 // the pending guard, the freshness judgment and the rhythm floor, and injects one
-// explicit input event when all three open.
+// explicit input event when all three open. The rhythm floor is read on both sides
+// of one execution — the interval since the last consumed reflection, and the age
+// of the newest host-facing fact — and a floor that holds the tick back reports the
+// fact holding it, leaving the watermark and the pending input untouched.
 //
 // A tick whose gate cannot be established reports TickClosed with the fact it
 // could not establish and injects nothing; a tick that injected reports the input
@@ -307,6 +310,16 @@ func (r *Reflection) Tick(ctx context.Context, now time.Time) TickOutcome {
 			Decision: TickDecision{
 				Disposition: TickNoNovelty,
 				Reason:      "no fact newer than the watermark reads as new material under the freshness policy",
+			},
+			Scan:   scan,
+			Digest: digest,
+		}
+	}
+	if recent := scan.Verdict.Recent; recent != nil && r.cfg.Cadence.MinGap > 0 && now.Sub(recent.Content.Timestamp) < r.cfg.Cadence.MinGap {
+		return TickOutcome{
+			Decision: TickDecision{
+				Disposition: TickRhythm,
+				Reason:      fmt.Sprintf("the rhythm floor %s since the host-facing fact recorded at %s has not elapsed", r.cfg.Cadence.MinGap, recent.Content.Timestamp.UTC().Format(time.RFC3339Nano)),
 			},
 			Scan:   scan,
 			Digest: digest,

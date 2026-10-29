@@ -398,7 +398,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 			if err != nil {
 				return nil, err
 			}
-			driver = meditation.NewDriver(reflection, meditationPlan.interval, meditationPlan.minGap)
+			driver = meditation.NewDriver(reflection, meditationPlan.interval, meditationPlan.minGap, run.occupancy.Slot, run.instance)
 			driver.SetObserver(func(outcome meditation.TickOutcome) {
 				assemblyInfo("tagent: meditation driver of %s: %s (%s)", meditationPlan.agent, outcome.Decision.Disposition, outcome.Decision.Reason)
 			})

@@ -156,7 +156,7 @@ var (
 // The event-driven face keeps its declared shapes: one commit identity in, the
 // reflection pass it may fire out, beside the stop that ends the driver.
 var (
-	_ func(*Reflection, time.Duration, time.Duration) *Driver = NewDriver
+	_ func(*Reflection, time.Duration, time.Duration, func(event.Address, event.InstanceID) (event.InvocationID, event.DecisionID, bool), event.InstanceID) *Driver = NewDriver
 
 	_ func(*Driver) string                                = (*Driver).Name
 	_ func(*Driver) plugin.Port                           = (*Driver).Port
