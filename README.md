@@ -175,7 +175,7 @@ go test -tags smoke -bench Benchmark -benchtime 30x -run '^$' ./...
 
 ## 版本与依赖
 
-- **v0.3.0**，pre-release 姿态（无迁移承诺），见 `CHANGELOG.md`。
+- **v0.3.0及以前**是pre-release 姿态（无迁移承诺），见 `CHANGELOG.md`。
 - 配置装载是**严格解码**：未知键拒绝启动（`unknown field`）。
 - `trpc-agent-go` 指向 fork（`replace`，回正条件见 `go.mod` 的 `TODO(upstream)`）。
 
