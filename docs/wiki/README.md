@@ -1,75 +1,28 @@
-# tagent Wiki 索引
+# docs/wiki：活契约页 + 历史档案
 
-## 当前架构速览
+本目录分两类，定位不同、维护规则不同：
 
-**当期架构**＝`golden/runtime/architecture.json` 登记的第一方产品包 ＋ 组合根。顶层产品目录为 `assembly`（组合根）、`api`、`runtime`、`memory`、`evolution`、`telemetry`、`rl`、`tool`、`internal`（基准面 `internal/bench`）、`cli`；这一集合与 CI 的 `PRODUCT_PACKAGES` 逐项对准（由 `scripts/gates/test_check_runtime_workflow.py` 对 golden 钉住，防漂移）。`go list ./...` 同时列出 tests/examples/scripts 等非产品包，不计入；交付侧的 10 个二级领域 `00-foundation`…`09-acceptance` 是责任与验收单位，不构成包边界。
+## 活契约页（16 篇，随代码走）
 
-**本文档树的定位**：本目录 24 篇为历史设计记录（historical-verbatim），逐断言校对的是已移除的生产实现；下方"历史设计声明"说明这一定位。**当期现实的权威入口如下**：
+代码注释以 `// 契约: docs/wiki/…#锚` 引用这些章节，锚由 `comment_policy`/`doc-refs` 门禁钉住——**它们是现行契约，不是历史文档**。2026-10 起按当前代码做了重写式修订（原文与判据保全、承载点正名为现行实现）：
 
-- **当期 API 与包面**：[docs/api/](../api/index.md)——由 `scripts/gates/gen_godoc.sh` 从码面注释生成（索引自报包总数 68：根 module 67 个包 + `examples/wechat-bot` 独立 module 1 个），与源码同步由 `scripts/lint.sh` 的 docs/api freshness 步判定，是唯一不漂移的 API 参考。
-- **码面分层**（`golden/runtime/architecture.json` 钉定包边；职责自下而上）：**词汇与协议** `event`（纯叶子）· `model`（锁定 tRPC 原生模型协议）→ **声明与状态** `config`（纯组织声明）· `state`（生效绑定、session/mailbox、消费位置的唯一持有者）→ **执行与义务** `agent`（事件调度与单次决策）· `task`（转移与通知义务）· `plugin`（两相位六端口的窄口扩展点）→ **事实与投影** `memory`（原文与可重建投影）→ **适配** `tool/exec` · `tool/file` · `tool/knowledge` · `tool/mcp` · `tool/recall` · `tool/spec` · `tool/subagent` → **观察与派生** `telemetry`（观测旁路）· `memory/query`（只读投影）· `rl`（训练数据）· `evolution`（自演进）→ **组合根** `assembly/`（唯一装配与发布点）→ **宿主** `examples/wechat-bot`（独立 module）。
-- **实施台账（架构事实）**：[openspec/changes/archive/2026-10-18-runtime-rebuild/](../../openspec/changes/archive/2026-10-18-runtime-rebuild/)——123 叶实施记录/波次台账/问题脉络分析/DoD 终验；当期包边、领域边界与验收口径以该台账与 `golden/runtime/` 为准。
-- **历史文档索引**：下方"历史设计声明"一节；各篇引用按其快照提交锚定（doc-refs 历史锚定口径）。
+| 域 | 篇 |
+|---|---|
+| agent（5） | [agent-architecture](agent/agent-architecture.md) · [event-flow](agent/event-flow.md) · [execution-generations](agent/execution-generations.md) · [governance-enforcement](agent/governance-enforcement.md) · [task-lifecycle](agent/task-lifecycle.md) |
+| 存储（3） | [memory-architecture](memory/memory-architecture.md) · [event-architecture](event/event-architecture.md) · [durable-delivery](reliability/durable-delivery.md) |
+| 平台/插件（3） | [platform-subsystems](platform/platform-subsystems.md) · [org-hot-reload](platform/org-hot-reload.md) · [plugin-architecture](plugin/plugin-architecture.md) |
+| 数据/工具/示例（5） | [rl-architecture](rl/rl-architecture.md) · [tool-architecture](tool/tool-architecture.md) · [tmux-action](tool/tmux-action.md) · [evolution-architecture](evolution/evolution-architecture.md) · [wechat-bot-runtime](examples/wechat-bot-runtime.md) |
 
+维护规则：文档随代码走——代码变了页要跟（重写式修订，非打补丁）；锚标题（slug）不可改（代码引用钉住）；已知缺口在篇末「gaps」节如实登记。
 
-## 历史设计声明
+## 历史档案（其余各篇，historical-verbatim）
 
-本目录 24 篇为历史设计快照：逐断言校对的是**已移除的生产实现**，描述的是彼时的目标形态，而非当前代码事实。各篇机制内容保留为历史事实，不随当期码面重写；当期架构以实现码面为准（见上节"当前架构速览"），后续重构另行立项。
+快照性质：断言对**当时的实现**成立，真源是各自的快照提交；不许「对齐今天」式改写，引用由 `doc-refs` 按快照锚定保护。要了解某机制「当年为什么这样设计」，来这里；要了解「现在是什么」，去活契约页。
 
-模块级架构文档，与代码同仓演进。**每篇经过逐断言代码校对**（断言与结构体/签名/常量逐一对照），并以「已知缺口与演进方向」章主动声明尚未闭合的环。
+## 新读者入口（按序）
 
-## 文档地图
-
-| 模块 | 文档 | 一句话 |
-|------|------|--------|
-| agent 引擎 | [agent/agent-architecture.md](agent/agent-architecture.md) | 事件驱动引擎：EventBus / runEventLoop / ContextManager / 冥想（单机制：缺省自察＝自体维护，显式列他人＝旁路冥想）/ 子 Agent 封装 |
-| 事件流 | [agent/event-flow.md](agent/event-flow.md) | 一条消息从注入到回复的完整旅程 |
-| 记忆存储 | [memory/memory-architecture.md](memory/memory-architecture.md) | FullEvent/EventReference、分层存储（L0-L3）、因果链、墓碑、记忆策展 |
-| 事件契约 | [event/event-architecture.md](event/event-architecture.md) | 事件类型系统、元数据契约、时间线前缀（读写单点） |
-| 插件 | [plugin/plugin-architecture.md](plugin/plugin-architecture.md) | 两相位六端口的材料流：TransformCall / RiskAssessor+Governor / EnvironmentInject / PostCommitObserver / FinalPresenter / CompressTrigger |
-| 十分钟机制导览 | [mechanism-tour.md](mechanism-tour.md) | 一条链、三个挂点、六端口三类时机、消息/异步/冥想全链、四不变量 |
-| 工具 | [tool/tool-architecture.md](tool/tool-architecture.md) | ActionTool（tmux+任务层+跨重启连续）、召回体系、任务工具族、EventKeys 传递 |
-| tmux 动作会话存活判定 | [tool/tmux-action.md](tool/tmux-action.md) |
-| 持久投递与依赖退化 | [reliability/durable-delivery.md](reliability/durable-delivery.md) | 信封三段状态、依赖退化阶梯、谱系投递白名单的两层语义与进程内跨 agent 投递缝 |
-| wechat-bot 运行面 | [examples/wechat-bot-runtime.md](examples/wechat-bot-runtime.md) | 入站去重与文件收发窄接口、投递目标回退、大文件真链路验收 |
-| 上下文压缩与自身遥测 | [agent/compression-and-telemetry.md](agent/compression-and-telemetry.md) |
-| 治理分级处置与批准通道 | [agent/governance-enforcement.md](agent/governance-enforcement.md) |
-| 任务层生命周期与回收 | [agent/task-lifecycle.md](agent/task-lifecycle.md) |
-| 执行器代际与生命周期收敛 | [agent/execution-generations.md](agent/execution-generations.md) |
-| 自我改进 | [evolution/evolution-architecture.md](evolution/evolution-architecture.md) | refine 通道、git 原语安全闸、后验评估窗口与双回滚触发 |
-| RL 侧接口 | [rl/rl-architecture.md](rl/rl-architecture.md) | 端点allowlist 与逐跳重定向（SSRF）防线、配置面与升级收紧 |
-| 评估套件 | [platform/evaluation-suites.md](platform/evaluation-suites.md) | 票据零幻觉召回、畸形票据显式拒绝、工具面白名单、handoff 契约存在性 |
-| Prompt | [prompt/prompt-architecture.md](prompt/prompt-architecture.md) | Loader / bootstrap / 内嵌回退 / 热重载 Source |
-| 平台子系统 | [platform/platform-subsystems.md](platform/platform-subsystems.md) | 治理闸 · 自进化(git 原生) · 常驻可靠性 · 配置热重载(候选事务/执行代) · 统一可观测 · 记忆引擎(解耦缝) · MCP 闭环（默认关闭项全部 opt-in） |
-| 转世通报（换装后首轮自我告知） | [platform/reincarnation-notice.md](platform/reincarnation-notice.md) |
-| 组织级热重载（换代、应用记录与无锁读面） | [platform/org-hot-reload.md](platform/org-hot-reload.md) |
-| 运行时资源所有权（租约、代际与封路） | [platform/resource-ownership.md](platform/resource-ownership.md) |
-| agent 行为矩阵 | [platform/agent-behavior-matrix.md](platform/agent-behavior-matrix.md) | 启用上述子系统后，agent 在治理/自进化/可靠性/语义召回/可观测/部署各复杂场景下的**实际反应**（逐条溯源到代码） |
-
-## 撰写约定（新增或修订时遵循）
-
-> 注释与文档的分工、以及代码内 `// 契约:` 索引的写法，以 `openspec/specs/code-documentation` 与
-> `openspec/specs/architecture-guardrails` 为准；本目录只承载长期事实，不记录迭代过程。
-
-
-**标准章节骨架**（各篇按此顺序组织，机制章节数量自定）：
-
-1. `## 一、模块定位` — 一句话定位 + 核心职责 + 设计原则
-2. `## 二、文件清单` — 文件→职责表（**不列行数**，必然腐化）
-3. `## 三、组件关系总览图` — mermaid
-4. 中间章节 — 核心数据结构 → 各机制详解 → 与其他模块的关系 → 关键设计决策（"为什么"集中在此）
-5. `## 已知缺口与演进方向`（末章，必备）— 以工程事实陈述缺口：**现状与防线 + 候选方向**，不粉饰、不承诺排期
-
-**行文纪律**：
-
-- 图优先 **mermaid**（graph/sequenceDiagram）；比特位域等 mermaid 无对应图型的场景用代码块 + 配套表格
-- 代码块引用只标**文件名**，不标行号（行号必然腐化）
-- 可验证断言（结构体字段/函数签名/常量值/默认值）修订时须与代码对照；历史机制被替代时**删除死代码留存**，最多保留一行历史注记
-- 内部术语首次出现处给白话解释；面向首次读者的表述规范见 README 修订原则（特性先行、少黑话）
-
-## 与其他文档的关系
-
-- **README**：面向首次读者——它能为我做什么（不含内部论证）
-- **wiki（本目录）**：面向使用者与外部分析——机制怎么工作、边界在哪、缺口是什么
-- **openspec/specs/**：面向实现者——行为契约的规格化表述（SHALL 级）
-- **tests/README**：契约守护矩阵——模型↔框架文本接缝的真实 LLM 测试清单
+1. [docs/GLOSSARY.md](../GLOSSARY.md) —— 术语一行一对照
+2. [docs/demos/storage-concept-map.html](../demos/storage-concept-map.html) —— 存储概念地图（12 概念按受众分层 + 一图数据流 + 每概念一句反事实）
+3. [docs/demos/storage-time-travel.html](../demos/storage-time-travel.html) —— 回放装载 / 时光回退 / session fork 交互演示
+4. [mechanism-tour.md](mechanism-tour.md) —— 十分钟机制导览
+5. 按域下钻上方活契约页
