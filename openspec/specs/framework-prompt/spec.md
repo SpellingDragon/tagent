@@ -25,6 +25,8 @@ ContextManager SHALL prepend a framework runtime description before the user-con
 
 环境块 SHALL 由既有 `request->environment` 端口在请求边界现算（含 agent/model/tools/skills/mcp/prompt_version 与开放任务行），SHALL 与运行时加载的技能正文合并为一条动态 system 段（`## Environment` 收尾），并作为请求**最后一条消息**追加（transcript 与收尾指令之后）：稳定内容（声明的 prompt 与声明的技能正文，各合并为一条 system 消息）在前，逐轮可变的内容收尾，服务端前缀缓存只截断末尾最小一段。模型家族的特殊 token 环绕 SHALL 由各 adapter 按惯例完成，框架 MUST NOT 自造标记、MUST NOT 以 user 消息冒充环境信息；adapter 的缓存重排（把 system 消息统一抽到最前）SHALL 关闭，否则末条动态段被抽走、前缀排序失效。工具面 SHALL 走原生 `Request.Tools` 字段（工具定义不进任何消息正文），其定义顺序 SHALL 经 `ToolOrder` 表达：随绑定发布的工具在前（名序），运行期后加载的工具在后（注册序）。环境块开关关闭时该段只含后加载技能正文或为空（行为=基线）。
 
+可见面 SHALL 以配置为上限：声明的 prompt 文件、技能文件与工具引用构成配置全集，agent 每请求可见的部分 SHALL 是它的子集，默认 SHALL 为全集（零行为基线）。可见面 SHALL 可在运行期热变更（`ToolResources.SetVisible` 经 `Run.NarrowFace`），MUST NOT 重发布绑定，变更 SHALL 在下一请求边界生效；插件是后续的干预者，接缝即该入口。请求的 `Request.Tools`、`ToolOrder`、环境块的 tools/mcp/skills 三行、技能正文（固定段与动态段）与 capture 视图 SHALL 同源读取该可见面——模型 MUST NOT 看到本身调不到的名字，也 MUST NOT 读到一个清单未列出的正文。
+
 #### Scenario: 末尾追加
 
 - **WHEN** 环境块开关打开且请求装配完成

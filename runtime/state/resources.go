@@ -41,6 +41,21 @@ const (
 	ToolKindFunction ToolKind = "function"
 )
 
+// VisibleSelection narrows the face one agent may see from the next request
+// boundary on: the lists name the subset of the configured tools, MCP
+// references and skills, and a nil list keeps the full configured face for that
+// class. The zero selection is the full face, which is the default a
+// declaration that narrows nothing carries.
+type VisibleSelection struct {
+	// Tools names the visible tool subset; nil keeps every configured tool.
+	Tools []string
+	// MCP names the visible MCP reference subset by reference name; nil keeps
+	// every configured reference.
+	MCP []string
+	// Skills names the visible skill subset; nil keeps every visible skill.
+	Skills []string
+}
+
 // ToolResource is the registration record of one native tool: the name the
 // model sees beside the family it belongs to and the source it was read from.
 type ToolResource struct {
@@ -89,6 +104,7 @@ type ToolResources struct {
 	loads   map[string]SkillLoad
 	views   map[string]SkillLoad
 	order   []string
+	visible VisibleSelection
 	closed  bool
 }
 
@@ -236,6 +252,34 @@ func (r *ToolResources) SkillLoads() []SkillLoad {
 		loads = append(loads, r.loads[name])
 	}
 	return loads
+}
+
+// SetVisible narrows the face these resources expose from the next request
+// boundary on, or opens it again when the selection carries no list: the
+// binding is never republished, so a tool that becomes visible in one boundary
+// is visible to the request the next boundary assembles. The host and the
+// plugins that guard one agent call this; the request's tools, the environment
+// block and the capture view all read the narrowed face.
+func (r *ToolResources) SetVisible(selection VisibleSelection) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.visible = VisibleSelection{
+		Tools:  append([]string(nil), selection.Tools...),
+		MCP:    append([]string(nil), selection.MCP...),
+		Skills: append([]string(nil), selection.Skills...),
+	}
+}
+
+// Visible reports the face these resources narrow to the request boundary: the
+// zero selection keeps the full configured face.
+func (r *ToolResources) Visible() VisibleSelection {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return VisibleSelection{
+		Tools:  append([]string(nil), r.visible.Tools...),
+		MCP:    append([]string(nil), r.visible.MCP...),
+		Skills: append([]string(nil), r.visible.Skills...),
+	}
 }
 
 // Tools reports the registered native tools of these resources in

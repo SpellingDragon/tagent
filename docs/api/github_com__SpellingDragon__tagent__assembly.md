@@ -1133,6 +1133,13 @@ func (r *Run) LeasePublications() []rl.ModelIdentity
     this run's default publication entry, in installation order, as a copy the
     caller owns.
 
+func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection state.VisibleSelection) error
+    NarrowFace narrows the face one agent may see from the next request boundary
+    on, or opens it again when the selection carries no list: the binding is not
+    republished, so the change reaches the very next request. The host and the
+    plugins that guard one agent call this; the request's tools, the environment
+    block and the capture view all read the narrowed face.
+
 func (r *Run) NoteModelChange(agentID event.AgentID, from, to, source string) (event.EventID, error)
     NoteModelChange files the judgment that one agent's model reference moves
     from one version to another and commits it as a model replacement fact

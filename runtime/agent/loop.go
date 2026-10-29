@@ -1534,12 +1534,8 @@ func modelViewOf(binding state.AgentBinding) modelView {
 		modelName:     binding.Model.Info().Name,
 		promptVersion: binding.PromptSource.Version,
 	}
-	for _, tool := range binding.Tools {
-		if tool == nil || tool.Declaration() == nil {
-			continue
-		}
-		view.visibleTools = append(view.visibleTools, tool.Declaration().Name)
-	}
+	_, order := state.ToolFace(binding)
+	view.visibleTools = append(view.visibleTools, order...)
 	return view
 }
 

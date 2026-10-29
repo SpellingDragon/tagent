@@ -1841,6 +1841,14 @@ func (r *ToolResources) Register(kind ToolKind, source string, tools ...trpctool
 func (r *ToolResources) Resources() []ToolResource
     Resources reports the registration records in registration order.
 
+func (r *ToolResources) SetVisible(selection VisibleSelection)
+    SetVisible narrows the face these resources expose from the next request
+    boundary on, or opens it again when the selection carries no list: the
+    binding is never republished, so a tool that becomes visible in one boundary
+    is visible to the request the next boundary assembles. The host and the
+    plugins that guard one agent call this; the request's tools, the environment
+    block and the capture view all read the narrowed face.
+
 func (r *ToolResources) SkillLoad(name string) (SkillLoad, bool)
     SkillLoad reports the load state one skill left in the state owner and
     whether any load of it was recorded.
@@ -1851,6 +1859,25 @@ func (r *ToolResources) SkillLoads() []SkillLoad
 func (r *ToolResources) Tools(context.Context) []trpctool.Tool
     Tools reports the registered native tools of these resources in registration
     order.
+
+func (r *ToolResources) Visible() VisibleSelection
+    Visible reports the face these resources narrow to the request boundary:
+    the zero selection keeps the full configured face.
+
+type VisibleSelection struct {
+	// Tools names the visible tool subset; nil keeps every configured tool.
+	Tools []string
+	// MCP names the visible MCP reference subset by reference name; nil keeps
+	// every configured reference.
+	MCP []string
+	// Skills names the visible skill subset; nil keeps every visible skill.
+	Skills []string
+}
+    VisibleSelection narrows the face one agent may see from the next
+    request boundary on: the lists name the subset of the configured tools,
+    MCP references and skills, and a nil list keeps the full configured face
+    for that class. The zero selection is the full face, which is the default a
+    declaration that narrows nothing carries.
 
 type WorkSeat struct {
 	// Address is the explicit address of the site the entry sits at.

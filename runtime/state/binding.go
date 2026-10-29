@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -470,6 +471,15 @@ func (h *BindingHandle) Release(ctx context.Context) error {
 // published ones also keeps the provider-side prefix cache valid for the larger
 // stable part of the request.
 func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string) {
+	var visible []string
+	var narrowed bool
+	if resources, ok := binding.Set.(*ToolResources); ok {
+		selection := resources.Visible()
+		if selection.Tools != nil {
+			visible = selection.Tools
+			narrowed = true
+		}
+	}
 	tools := make(map[string]trpctool.Tool, len(binding.Tools))
 	stable := make([]string, 0, len(binding.Tools))
 	for _, t := range binding.Tools {
@@ -477,6 +487,9 @@ func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string) {
 			continue
 		}
 		name := t.Declaration().Name
+		if narrowed && !slices.Contains(visible, name) {
+			continue
+		}
 		if _, held := tools[name]; held {
 			continue
 		}
@@ -494,6 +507,9 @@ func ToolFace(binding AgentBinding) (map[string]trpctool.Tool, []string) {
 			continue
 		}
 		name := t.Declaration().Name
+		if narrowed && !slices.Contains(visible, name) {
+			continue
+		}
 		if _, held := tools[name]; held {
 			continue
 		}

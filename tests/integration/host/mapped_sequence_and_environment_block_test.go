@@ -339,6 +339,26 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 	if !strings.Contains(got[0].Content, "system prompt") || !strings.Contains(got[1].Content, "greet body v1") {
 		t.Fatalf("request prefix = %v, want the fixed prompt and skill bodies in front of the block", got[:2])
 	}
+	listed := map[string]bool{}
+	for _, line := range strings.Split(block.Content, "\n") {
+		if !strings.HasPrefix(line, "- tools: ") {
+			continue
+		}
+		for _, name := range strings.Split(strings.TrimPrefix(line, "- tools: "), ", ") {
+			if name = strings.TrimSpace(name); name != "" && name != "(none)" {
+				listed[name] = true
+			}
+		}
+	}
+	if len(listed) != len(requests[0].Tools) {
+		t.Fatalf("environment list names %d tools (%v), want the %d the request carries: one face for both",
+			len(listed), listed, len(requests[0].Tools))
+	}
+	for name := range requests[0].Tools {
+		if !listed[name] {
+			t.Fatalf("environment list omits %q while the request carries it: the model would miss a callable tool", name)
+		}
+	}
 	for _, want := range []string{
 		"- skills: greet",
 		"- mcp: docs@http://mcp.local",

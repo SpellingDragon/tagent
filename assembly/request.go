@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -486,7 +487,7 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	return agent.BoundaryView{
 		Messages:      messages,
 		PromptVersion: a.promptVersion,
-		VisibleSkills: visibleSkillsOf(a.boundary.Binding),
+		VisibleSkills: a.narrowSkillNames(mergeSkillNames(visibleSkillsOf(a.boundary.Binding), a.loadedSkillNames())),
 		DynamicSystem: a.dynamicSystem(ctx),
 	}, nil
 }
@@ -530,9 +531,14 @@ func (a *requestAssembly) fixedSystem(ctx context.Context) ([]model.Message, err
 		return nil, err
 	}
 	var prompts, skillBodies []string
+	visibleSkills := a.visibleSkillSet()
 	for _, fixed := range snapshot.Files {
 		if fixed.Ref.Kind == config.FileKindSkill {
-			a.fixedSkills[skillNameOf(fixed.Ref.Path)] = true
+			name := skillNameOf(fixed.Ref.Path)
+			a.fixedSkills[name] = true
+			if visibleSkills != nil && !visibleSkills[name] {
+				continue
+			}
 			skillBodies = append(skillBodies, fixed.Content)
 			continue
 		}
@@ -568,8 +574,12 @@ func (a *requestAssembly) publishSkillBodies(context.Context) {
 			declared[skillNameOf(ref.Path)] = true
 		}
 	}
+	visibleSkills := a.visibleSkillSet()
 	hold := func(name, body string) {
 		if name == "" || body == "" || declared[name] || a.fixedSkills[name] {
+			return
+		}
+		if visibleSkills != nil && !visibleSkills[name] {
 			return
 		}
 		if _, held := bodies[name]; held {
@@ -592,6 +602,106 @@ func (a *requestAssembly) publishSkillBodies(context.Context) {
 			hold(load.Name, load.Body)
 		}
 	}
+}
+
+// visibleSkillSet reports the skills the visible face keeps as a set, or nil
+// when the selection names no subset: the fixed skill bodies and the dynamic
+// section read the same face, so the prefix never carries a body the visible
+// list omits.
+func (a *requestAssembly) visibleSkillSet() map[string]bool {
+	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
+	if !ok {
+		return nil
+	}
+	visible := resources.Visible().Skills
+	if visible == nil {
+		return nil
+	}
+	set := make(map[string]bool, len(visible))
+	for _, name := range visible {
+		set[name] = true
+	}
+	return set
+}
+
+// narrowedSkillsOf reports the declared skills the visible face keeps: a nil
+// selection keeps every declaration, and a named subset keeps the
+// intersection. The environment block and the request's visible skills read
+// one face.
+func narrowedSkillsOf(binding state.AgentBinding) []string {
+	names := visibleSkillsOf(binding)
+	resources, ok := binding.Set.(*state.ToolResources)
+	if !ok {
+		return names
+	}
+	visible := resources.Visible().Skills
+	if visible == nil {
+		return names
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if slices.Contains(visible, name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// narrowSkillNames reports the skill names the visible face keeps: a nil
+// selection keeps every name, and a named subset keeps the intersection.
+func (a *requestAssembly) narrowSkillNames(names []string) []string {
+	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
+	if !ok {
+		return names
+	}
+	visible := resources.Visible().Skills
+	if visible == nil {
+		return names
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if slices.Contains(visible, name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// visibleMCPOf reports the MCP references the visible face keeps, by reference
+// name: a nil selection keeps every configured reference.
+func visibleMCPOf(spec config.AgentSpec, binding state.AgentBinding) []string {
+	refs := spec.Tools
+	if resources, ok := binding.Set.(*state.ToolResources); ok {
+		if visible := resources.Visible().MCP; visible != nil {
+			kept := make([]config.ToolRef, 0, len(refs))
+			for _, ref := range refs {
+				if slices.Contains(visible, ref.Name) {
+					kept = append(kept, ref)
+				}
+			}
+			refs = kept
+		}
+	}
+	return endpointsOf(refs)
+}
+
+// mergeSkillNames reports the union of two skill-name lists, each name once,
+// in name order: the visible face the request carries and the dynamic section
+// name the same set.
+func mergeSkillNames(declared, loaded []string) []string {
+	seen := make(map[string]bool, len(declared)+len(loaded))
+	names := make([]string, 0, len(declared)+len(loaded))
+	for _, list := range [][]string{declared, loaded} {
+		for _, name := range list {
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // loadedSkillNames reports the published skill bodies in skill-name order.
@@ -960,8 +1070,8 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 		fmt.Fprintf(&b, "- model: %s\n", modelName)
 	}
 	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding)))
-	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(visibleSkillsOf(boundary.Binding)))
-	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(endpointsOf(spec.Tools)))
+	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(narrowedSkillsOf(boundary.Binding)))
+	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(visibleMCPOf(spec, boundary.Binding)))
 	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
 	fmt.Fprintf(&b, "- tasks: %d open\n", len(open)+omitted)
 	if len(open) == 0 {
