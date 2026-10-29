@@ -26,7 +26,7 @@
 
 <a id="e2e-turn-sequence"></a>
 ## 六、一次完整回合的端到端时序
-宿主端点收请求（`assembly/host_face.go`：**先鉴权后读体**，未认证即 `ErrHostUnauthenticated`）→ 装配 `Invocation{InvocationID,Address,Instance,Ready}` → `Loop.Drive`：ready 逐条成事实 → 每轮决策前 `Occupy` 会话决策席（同址已有在途即 `ErrSlotHeld`，不并行不插队）→ `RequestFace` 装配请求（固定布局：system 单条恒首位、压缩摘要作 user 级注记、assistant 恒等于模型真实产出；环境块与运行时加载的技能正文合并为动态 system 段（`## Environment` 收尾），作为请求最后一条消息（transcript 与收尾指令之后）追加：稳定前缀（声明 prompt、声明技能正文各一条 system）在前，可变内容收尾，家族特殊 token 由各 adapter 按惯例渲染，框架不自造标记）→ `Decide` → tool 调用经适配器执行、结果作为事实提交 → 决策与通知提交 → 终结即 `Vacate` 席位 → 通知由 `assembly/host_delivery.go` 按冻结路由投递，未接受的保留义务。`Backflow` 是回合进行中读终结结算的那条缝：`progress` 落成事实，`settled`/`failed`/`cancelled` 才进入终结处理。
+宿主端点收请求（`assembly/host_face.go`：**先鉴权后读体**，未认证即 `ErrHostUnauthenticated`）→ 装配 `Invocation{InvocationID,Address,Instance,Ready}` → `Loop.Drive`：ready 逐条成事实 → 每轮决策前 `Occupy` 会话决策席（同址已有在途即 `ErrSlotHeld`，不并行不插队）→ `RequestFace` 装配请求（布局三段：**稳定前缀**=声明 prompt 一条 system、声明技能正文一条 system、压缩摘要作 user 级注记、assistant 恒等于模型真实产出；**transcript**；**动态段**=运行时加载的技能正文加 `## Environment` 块，一条 system，是请求最后一条消息，收尾指令在前）。稳定内容前置、可变内容收尾，为的是服务端前缀缓存只截断末尾一段；工具定义走 `Request.Tools`，其顺序由 `ToolOrder` 表达（发布代工具在前名序，运行期后加载工具在后注册序），adapter 的缓存重排关闭，家族特殊 token 由 adapter 按惯例渲染→ `Decide` → tool 调用经适配器执行、结果作为事实提交 → 决策与通知提交 → 终结即 `Vacate` 席位 → 通知由 `assembly/host_delivery.go` 按冻结路由投递，未接受的保留义务。`Backflow` 是回合进行中读终结结算的那条缝：`progress` 落成事实，`settled`/`failed`/`cancelled` 才进入终结处理。
 
 <a id="trace-anchor"></a>
 ## 七、trace 锚点：span 与轨迹两条投影必须互链，且不得造假
@@ -38,7 +38,7 @@
 
 <a id="watchdog-final-round"></a>
 ## 九、看门狗收尾轮：预算到期的下一次决策就是收尾轮
-`FinalRoundPolicy{MaxRounds,Budget,Prompt,Timeout}` 装在 `Loop.SetFinalRound` 上，四条红线：两个预算都为 0 时 drive 恒无界；预算只在**回合边界**读，绝不切断已在途的决策；**至多跑一轮**收尾轮，它返回即结束 drive；收尾轮发出的工具调用**一律不受理**——每个调用以配对回执如实拒绝（`finalRoundRefusal`），因为"交付"不该开新义务。收尾轮有三处标记：请求边界 `RequestBoundary.FinalRound`、请求尾部携带收尾指令、按自己的短超时（缺省 30s）运行；`Turn.FinalRound` 报出原因是 `rounds` 还是 `budget`（自终则空）。收尾之后照旧走 `Shutdown.Close` 的真实终结判定——上限生效与优雅收尾两全。
+`FinalRoundPolicy{MaxRounds,Budget,Prompt,Timeout}` 装在 `Loop.SetFinalRound` 上，四条红线：两个预算都为 0 时 drive 恒无界；预算只在**回合边界**读，绝不切断已在途的决策；**至多跑一轮**收尾轮，它返回即结束 drive；收尾轮发出的工具调用**一律不受理**——每个调用以配对回执如实拒绝（`finalRoundRefusal`），因为"交付"不该开新义务。收尾轮有三处标记：请求边界 `RequestBoundary.FinalRound`、尾部携带收尾指令（动态段在其后，仍是最后一条）、按自己的短超时（缺省 30s）运行；收尾轮读链得到的在途输入不进本回合，留作下一回合的历史；`Turn.FinalRound` 报出原因是 `rounds` 还是 `budget`（自终则空）。收尾之后照旧走 `Shutdown.Close` 的真实终结判定——上限生效与优雅收尾两全。
 
 ## 已知缺口与演进方向
 | 缺口 | 现状与防线 | 候选方向 |
