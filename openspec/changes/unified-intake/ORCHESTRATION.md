@@ -27,9 +27,9 @@
 - D2：`runtime/agent/loop.go`（每决策增量+退出判据）、`runtime/agent/skeleton_assert.go`（HistoryFace 三方法钉）、`assembly/facts.go`（界标不变量校准）、`examples/contract/runtime_agent/HistoryFace_example.go`（第 3 方法实现）、`tests/integration/execution/final_round_drain_test.go`（接口实现补方法）、同包测试。聚合复用既有 `observeReady`/`aggregateReady`/`SessionFacts`；不得改 decision inputs 落链语义。
 - D3：`assembly/host.go`（Invoke/gate 段：在途记录+KindUnknown 受理，**除 meditation Driver 构造段 401-407**）、`assembly/host_face.go`（inject 段：KindUnknown 判已受理）、`assembly/run.go`（CommitToSession 内部落链段拆出；公面签名不变）、`examples/wechat-bot/wechat.go`（Drive 段：同判读+mutex 降级）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
 - D4/D6：仅规格文件+wiki 锚页（锚 slug 保全）。
-- D5：`features/evolution/meditation/{driver,judgment,reflection}.go`（reflection.go 仅 Tick 内判据①段）、`assembly/host.go`（仅 meditation `NewDriver` 构造段 401-407，**按段与 D3 串行**）、4 个既有测试调用点（meditation_event_purity_test.go、evolution/event_integrity_test.go ×3）、新测试。闸零值=现行为。
+- D5：`features/evolution/meditation/{driver,judgment,reflection}.go`（reflection.go 仅 Tick 内判据①段）、`assembly/host.go`（仅 meditation `NewDriver` 构造段 401-405，**按段与 D3 串行**）、4 个既有测试调用点（meditation_event_purity_test.go、evolution/event_integrity_test.go ×3）、新测试。闸零值=现行为。
 - 预授权：单内 lint 自清（comment_policy 命令随令）；D4/D6 附带 `scripts/gates/doc_budget.json` 具名记账权（W6：wiki 锚页净增行按既有「先拒后具名落锁」惯例）；必须上报：任何需要动白名单外文件的连带（例如 loop 增加导出符号影响 api 面）。
-- 共享面：`assembly/run.go` 按段授权（D2=聚合段；D3=CommitToSession 落链段；串行不相交）；`assembly/host.go` 除 meditation Driver 构造段（D5）外归 D3。
+- 共享面：`assembly/run.go` 全段归 D3（CommitToSession 落链段拆出）；D2 不需改 `run.go`（`*Run.SessionFacts` 既有同签名）；`assembly/host.go` 除 meditation Driver 构造段 401-405（D5）外归 D3。
 
 ### 2.3 凭据（五查落点）
 

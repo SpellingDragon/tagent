@@ -38,7 +38,7 @@
 
 - **判据①（用户事件新鲜度）**：novelty 门已在扫描「Timestamp > lastMeditation 且非自管」的事实——**把「存在即 novel」的时间参数化**：该批事实中最近一条的 Timestamp 距 now 不足 `min_gap` → 本 tick 不 fire（冷却自最后非自管事实重置）。**限定（W2 如实）**：判据只看已盖章谱系（`hostFacingStamp` 既有词表）；未盖章输入既有判据本就归自管，不纳入——与既有实现一致，不新增归一化。
 - **判据②（决策在途，落地形态）**：构建时注入既有 `*state.Occupancy` 与 `event.InstanceID`（既有 `NewDriver` 构造加两参，非新类型）；fire 前取 `ScanVerdict.Recent.Identity.Key` → 既有 `Reflection.CommittedFact` 读回事实 → 其 `Owner` 地址查既有 `Slot(Owner, instance)` → 占用不 fire。**收窄说明**：Occupancy 只在模型决策在飞时占用（工具执行不占席），本判据管决策窗口；慢工具轮不抑制（反思跑独立会话，不与工具争模型槽）。`Recent` 置于 novelty 检查之后取用（`Recent==nil ⇔ 无 novelty`，天然规避空面）。**不造 SlotQuery 面**：直接持有既有对象。
-- **抑制语义（C3 裁定：零时钟源）**：抑制=水位不动+既有 `deferred` 观察线记账（`DeferredCount/LastDeferredAt` 既有）；**重评=下一次 host-facing 提交触发既有 `ObserveCommit` 时重新评估**（既有机制，无 ticker、无新计时源）。**已知行为边界（如实入 gaps）**：会话安静下来且无新提交时，被抑制的冥想不自动恢复——「推迟」的上界是下一封消息；这是零新机制的诚实代价，规格 Scenario 以「下一次评估机会」表述。
+- **抑制语义（C3 裁定：零时钟源）**：抑制=水位不动+`pending` 保持为空+报告走既有 `SetObserver` 的 `TickOutcome`（`TickRhythm`+Reason 文字，不新增常量；deferred 回执只在注入后产生，抑制期不产生）；**重评=下一次 host-facing 提交触发既有 `ObserveCommit` 时重新评估**（既有机制，无 ticker、无新计时源）。**已知行为边界（如实入 gaps）**：会话安静下来且无新提交时，被抑制的冥想不自动恢复——「推迟」的上界是下一封消息；这是零新机制的诚实代价，规格 Scenario 以「下一次评估机会」表述。
 - **不造任何新读面/新计时器/新计数器/新同步入口**；测试沿用既有测试设施的注入方式（既有 fake 时间设施或既有构造的可选参数）。
 
 ## D6 被否方案
