@@ -25,7 +25,7 @@
 
 - D1：仅新测试文件+（如需）tests 内 fixture。禁碰生产代码。
 - D2：`runtime/agent/loop.go`、`runtime/agent/invocation.go`、`assembly/run.go`（ReadyFeed 注入段）、`assembly/facts.go`（admitsRange 界标不变量）、测试文件。ReadyFeed 面签名冻结（见 design D1），实现方式自定；不得改 decision inputs 落链语义。
-- D3：`assembly/host.go`（Invoke/gate 段）、`assembly/invoke.go`（LandInput 抽离）、`examples/wechat-bot/wechat.go`（per-session mutex 降级为入链门——P2-11 渠道级证据）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
+- D3：`assembly/host.go`（Invoke/gate/handoff latch 段）、`assembly/invoke.go`（LandInput/InvokeLanded）、`assembly/host_face.go`（inject 段：ErrAcceptedInFlight 不算失败）、`examples/wechat-bot/wechat.go`（Drive 段：同哨兵+mutex 降级）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
 - D4/D6：仅规格文件+wiki 锚页（锚 slug 保全）。
 - D5：`features/evolution/meditation/{driver,judgment}.go`、`assembly/host.go`（仅 NewDriver 调用点 :401，Clock+SlotQuery 注入）、`assembly/run.go`（仅 SlotQuery 注入段；与 D2 分段授权，D2 只写 ReadyFeed 段）、新测试。闸零值=现行为。
 - 预授权：单内 lint 自清（comment_policy 命令随令）；必须上报：任何需要动白名单外文件的连带（例如 loop 增加导出符号影响 api 面）。
