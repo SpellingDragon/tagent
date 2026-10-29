@@ -27,8 +27,8 @@
 - D2：`runtime/agent/loop.go`（每决策增量+退出判据）、`assembly/facts.go`（界标不变量校准）、测试文件。聚合复用既有 `observeReady`/`aggregateReady`/`SessionFacts`；不得改 decision inputs 落链语义。
 - D3：`assembly/host.go`（Invoke/gate 段：在途记录+KindUnknown 受理）、`assembly/host_face.go`（inject 段：KindUnknown 判已受理）、`examples/wechat-bot/wechat.go`（Drive 段：同判读+mutex 降级）+ 测试文件。ErrSlotHeld/ErrShutdownRefused/回执 "ok" 一字不变。
 - D4/D6：仅规格文件+wiki 锚页（锚 slug 保全）。
-- D5：`features/evolution/meditation/{driver,judgment}.go`、`assembly/run.go`（仅 Occupancy 注入段；与 D2 分段授权）、新测试。闸零值=现行为。
-- 预授权：单内 lint 自清（comment_policy 命令随令）；必须上报：任何需要动白名单外文件的连带（例如 loop 增加导出符号影响 api 面）。
+- D5：`features/evolution/meditation/{driver,judgment}.go`、`assembly/run.go`（仅 Occupancy 注入段；与 D2 分段授权）、新测试。闸零值=现行为。与 D3 串行仅为省事（无接口依赖——域 A 不动 Occupancy 语义，S3 如实）。
+- 预授权：单内 lint 自清（comment_policy 命令随令）；D4/D6 附带 `scripts/gates/doc_budget.json` 具名记账权（W6：wiki 锚页净增行按既有「先拒后具名落锁」惯例）；必须上报：任何需要动白名单外文件的连带（例如 loop 增加导出符号影响 api 面）。
 - 共享面：`assembly/run.go` 按段授权（D2=聚合段；D5=Occupancy 注入段，串行不相交）；`assembly/host.go` 全归 D3。
 
 ### 2.3 凭据（五查落点）

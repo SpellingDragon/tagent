@@ -11,17 +11,17 @@
 
 **不新增任何面/类型/哨兵。全部复用：** `Invocation.Ready`（注释本就自称「aggregated for the next decision」）、`observeReady`/`aggregateReady`（既有）、`SessionFacts`（既有读面）、`intake` 的 transcript 累积（既有）、`projection.endedAt` 界标（既有）。
 
-- **落链归属**：在途到达的外部输入复用既有 `Run.Invoke` 落链路径，事实的 `InvocationID` 记为**在途 range 的 invocation**（Host 在既有地址门内记录在途 inv——地址门既有对象的字段扩展，非新概念）。同 invocation 的事实不触发 `admitsRange` 的「新 range 首条输入」界标前移——**界标不动的保证来自既有判据本身，无需新增在途位**。
-- **消费**：`Drive` 每轮 `decide` 前重跑既有 `observeReady`+`aggregateReady`，输入=既有 `SessionFacts(addr)` 中 `InvocationID==本 range` 且 `admitsRange` 放行的事实；**去重=transcript 已含集合**（既有 transcript 本身就是累积面），不设水位游标。
+- **落链归属**：在途到达的外部输入走**既有 `Run.CommitToSession`**（它本就是「只落链、不驱动」的既有入口），事实 `InvocationID` 记为**在途 range 的 invocation**（Host 在既有地址门内记录在途 inv——地址门既有对象的字段扩展）；**它随带的 After 段由随后的 `observeReady` 承担，在途落链不再多跑一次 After**（防重复观测）。同 invocation 的事实不触发 `admitsRange` 的「新 range 首条输入」界标前移——界标不动的保证来自既有判据本身。
+- **消费**：`Drive` 每轮 `decide` 前重跑既有 `observeReady`+`aggregateReady`；读面走**既有 `HistoryFace` 接口增加的方法**（第 3 方法，签名与生产实现 `*Run.SessionFacts` 逐字一致——揭示既有能力，非新概念；`check_concept_budget` 名义上限 3 方法正好到顶）。输入=`SessionFacts(addr)` 中 `InvocationID==本 range` 且 `admitsRange` 放行的事实；**去重=本 range 已消费键集合**（即「哪些事实已进 transcript」的键形表达——既有 transcript 语义的最小必要形态，非新账本）；`skeleton_assert.go` 同步（D2 白名单已含）。
 - **退出判据扩展（唯一改动点）**：既有退出条件 `len(receipts)==0 && len(observations)==0` 增加一项——`aggregateReady` 增量非空则继续。**位置在既有 commit-transcript/commit-output 之前**（与 grill P2-2 修正一致：并入退出判定，不在 return 前另插 re-check）。
 - 红线条目照旧：progress notice 不进任何 decision 输入（既有红线，不因本变更松动）。
 
 ## D2 host Invoke 受理语义（零新概念版）
 
-- **在途受理**：`Host.Invoke` 在既有地址门内发现已有在途 turn 时——复用既有 `Run.Invoke` 落链该输入（归属在途 inv），返回 **既有形态** `Turn{Terminal: model.KindUnknown}` 且 `err=nil`。**不新增哨兵**：调用方已有的「无错误但 terminal 未知=未产出」判读即是受理语义；既有 `KindUnknown` 注释本就表达「状态不可判定」。
+- **在途受理**：`Host.Invoke` 在既有地址门内发现已有在途 turn 时——复用既有 `Run.Invoke` 落链该输入（归属在途 inv），返回 **既有形态** `Turn{Terminal: model.KindUnknown}` 且 `err=nil`。**不新增哨兵**：受理语义=`Turn` 自身注释的「or KindUnknown while no decision reached one」+ `err=nil`+0 决策；**不得引用 `model.Kind` 层面的「状态不可判定」**（其契约是 MUST 报警，两层不同域，规格 delta 写明「无 err 且 0 决策=已受理」防下游误报警）。
 - **无在途**：保持现状——拿门、起 turn、阻塞返回完整 Turn。
 - **末决策窗口**：由 D1 的退出判据扩展自然覆盖（消息在末决策期间落链→退出判定看到增量→继续而非退出）；门释放前若判据新增了增量（微窗口），持有方重跑一次同一判据——**同一判据重跑，不是新机制**。
-- **Host 组合缝**：`Run.Invoke` 保持唯一入口（落链+驱动一体，既有形态）；Host 的门内逻辑调整只决定「是否把返回的 Turn 交还调用方」，**不抽新函数、不改 Run 公共面**。
+- **Host 组合缝**：无在途走既有 `Run.Invoke`（落链+驱动一体）；在途走既有 `Run.CommitToSession`（只落链，不驱动、不重复 After）。**不抽新函数、不改任何公共面**。
 - follow-up 路径（fireNoticeTurn/driveSeat）**一字不动**。
 
 ## D3 gate 语义（域 A，零新概念）
@@ -36,9 +36,9 @@
 
 **不新增读面/计时器/计数器。全部复用：** 既有 novelty 门的扫描结果（`ScannedFact{Timestamp, SelfManaged, Attribution}` 已有「非自管新鲜事实」的全部判据）、既有 `retained`/`rearm` 语义、既有 verdict 通道。
 
-- **判据①（用户事件新鲜度）**：novelty 门已在扫描「Timestamp > lastMeditation 且非自管」的事实——**把「存在即 novel」的时间参数化**：该批事实中最近一条的 Timestamp 距 now 不足 `min_gap` → 本 tick 不 fire（冷却自最后非自管事实重置）。自管谱系在 `SelfManaged` 上已被既有判据排除（「家务回合不阻塞」条款的既有实现即此）。
-- **判据②（turn 在途）**：装配注入**既有 `*state.Occupancy`**（Loop 已持有、Host 已构造——同一既有对象注入），fire 前查「观察面事实所属地址的决策席占用」→ 占用不 fire。**不造 SlotQuery 面**：直接持有既有对象。
-- **抑制语义**：沿用既有 `retained`（语义本就是「保留到下次评估」）——抑制=retained 置位+水位不动；重评由**既有 rearm/interval 节拍**承担（间隔=`interval` 既有默认，**不新增 gateUntil 等待源**）。既无 ticker 的诚实上界保留在 gaps。
+- **判据①（用户事件新鲜度）**：novelty 门已在扫描「Timestamp > lastMeditation 且非自管」的事实——**把「存在即 novel」的时间参数化**：该批事实中最近一条的 Timestamp 距 now 不足 `min_gap` → 本 tick 不 fire（冷却自最后非自管事实重置）。**限定（W2 如实）**：判据只看已盖章谱系（`hostFacingStamp` 既有词表）；未盖章输入既有判据本就归自管，不纳入——与既有实现一致，不新增归一化。
+- **判据②（决策在途，语义收窄如实）**：装配注入**既有 `*state.Occupancy`**，fire 前查「该 session 的模型决策正在执行」→ 不 fire。**收窄说明**：既有 Occupancy 只在模型决策在飞时占用（工具执行不占席），故本判据管「决策窗口」；慢工具轮期间不抑制——反思跑独立会话，不与工具争模型槽，故语义上无必要。**不造 SlotQuery 面**：直接持有既有对象。
+- **抑制语义（C3 裁定：零时钟源）**：抑制=水位不动+既有 `deferred` 观察线记账（`DeferredCount/LastDeferredAt` 既有）；**重评=下一次 host-facing 提交触发既有 `ObserveCommit` 时重新评估**（既有机制，无 ticker、无新计时源）。**已知行为边界（如实入 gaps）**：会话安静下来且无新提交时，被抑制的冥想不自动恢复——「推迟」的上界是下一封消息；这是零新机制的诚实代价，规格 Scenario 以「下一次评估机会」表述。
 - **不造任何新读面/新计时器/新计数器/新同步入口**；测试沿用既有测试设施的注入方式（既有 fake 时间设施或既有构造的可选参数）。
 
 ## D6 被否方案
