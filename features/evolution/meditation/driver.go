@@ -210,7 +210,11 @@ func (d *Driver) fire(ctx context.Context) {
 // commit.
 func (d *Driver) pass(ctx context.Context) {
 	if held, reason := d.seatHeld(); held {
-		d.hold(time.Now().Add(d.interval))
+		wait := d.interval
+		if f := d.rhythmFloor(); f > 0 && (wait <= 0 || f < wait) {
+			wait = f
+		}
+		d.hold(time.Now().Add(wait))
 		d.notify(TickOutcome{Decision: TickDecision{Disposition: TickRhythm, Reason: reason}})
 		return
 	}
