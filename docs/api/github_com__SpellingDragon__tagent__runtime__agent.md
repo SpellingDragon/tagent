@@ -673,24 +673,26 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     - The settled result facts one decision paired are the stored input the
     next decision reduces. - The drive reads its range's chain again at every
     decision boundary: input that landed in the range while a decision ran
-    enters the next decision of that same range, and a decision that opened
-    no obligation still ends the round while that input stands unread.
-    - The transcript of this drive is committed beside the terminal answer
-    of its last decision, so the next invocation of this session reads the
-    range's history as it actually ended. - The whole drive is watched as
-    one in-flight production beside its invocation identity — the queueing
-    waits included — and confirms its stop only when the drive really ended.
-    - A progress notification of the range's own call commits as a fact of its
-    chain and enters no round head: the report is audit and projection material,
-    never input a decision speaks from. - A terminal notification of the
-    range's own call enters the round head as input material: a settle, a
-    failure or a cancellation is what an unattended follow-up turn speaks from,
-    and the progress reports beside it are skipped by their own category.
-    - A drive whose budget is spent runs one closing round and ends there:
-    the closing round delivers what the range already produced, its transcript
-    is committed the same way, and the obligation it opens is none. - The drive
-    is observed as one consumer run: its start and its end are DEBUG lines
-    carrying identities, counts and the terminal, never transcript content.
+    enters the next decision of that same range, and a decision that opened no
+    obligation still ends the round while that input stands unread. The read
+    starts behind the head the chain held when the drive began, so the material
+    an earlier range already took is never this range's input. - The transcript
+    of this drive is committed beside the terminal answer of its last decision,
+    so the next invocation of this session reads the range's history as it
+    actually ended. - The whole drive is watched as one in-flight production
+    beside its invocation identity — the queueing waits included — and confirms
+    its stop only when the drive really ended. - A progress notification of the
+    range's own call commits as a fact of its chain and enters no round head:
+    the report is audit and projection material, never input a decision speaks
+    from. - A terminal notification of the range's own call enters the round
+    head as input material: a settle, a failure or a cancellation is what an
+    unattended follow-up turn speaks from, and the progress reports beside it
+    are skipped by their own category. - A drive whose budget is spent runs
+    one closing round and ends there: the closing round delivers what the
+    range already produced, its transcript is committed the same way, and the
+    obligation it opens is none. - The drive is observed as one consumer run:
+    its start and its end are DEBUG lines carrying identities, counts and the
+    terminal, never transcript content.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could

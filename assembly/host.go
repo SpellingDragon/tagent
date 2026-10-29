@@ -675,7 +675,13 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 // the call reports is that the message is on the chain the turn in flight reads.
 //
 // A gate no drive holds names no range, and the call is not admitted here: the
-// caller takes the gate and drives its turn as it always did.
+// caller takes the gate and drives its turn as it always did. The gate is read
+// once more behind the commit for the reason the drive clears its range before
+// its own bookkeeping: a range may reach its last decision boundary while the
+// message lands, and that range reads the chain never again. A gate that names
+// no range from here on is answered the same way — the caller waits for the
+// address and drives a turn of its own, which reads the message as its input
+// instead of leaving it on a chain no decision of that range will read.
 func (h *Host) acceptInflight(ctx context.Context, req InvokeRequest) (agent.Turn, bool, error) {
 	inflight, running := h.gateOf(req.Address).running()
 	if !running {
@@ -689,6 +695,9 @@ func (h *Host) acceptInflight(ctx context.Context, req InvokeRequest) (agent.Tur
 				req.InvocationID, inflight, err)
 		}
 	}
+	if _, stillRunning := h.gateOf(req.Address).running(); !stillRunning {
+		return agent.Turn{}, false, nil
+	}
 	return agent.Turn{InvocationID: inflight, Terminal: model.KindUnknown}, true, nil
 }
 
@@ -696,7 +705,13 @@ func (h *Host) acceptInflight(ctx context.Context, req InvokeRequest) (agent.Tur
 // holds, so a user turn and an unattended follow-up turn of the same address
 // never run beside each other. The baseline of a user turn is read after the
 // gate is held and before the drive: the delivery of that turn reads exactly
-// the assistant bodies its own range committed past it.
+// the assistant bodies its own range committed past it. The address stops naming
+// the range as soon as the drive returns, because no boundary of that range
+// reads input after Invoke answered: an input that arrives from here on waits
+// for the token and drives a turn of its own instead of landing in a range that
+// would never read it, while the token itself stays held until this method
+// returns, so the settle account and the delivery read the chain without a
+// neighbour committing beside them.
 //
 // A follow-up drive carries the barrier of the settle account it answers on, and
 // the barrier is closed right after the terminal fact of the drive landed: the
@@ -725,6 +740,7 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 	lineage := deliveryLineageOf(req.TriggerSource)
 	ctx = withDeliveryLineage(ctx, lineage)
 	turn, err := h.run.Invoke(ctx, req)
+	gate.release()
 	if err != nil {
 		assemblyWarn("tagent: the invocation %s of %s ended by error: %v", req.InvocationID, req.Address.SessionID, err)
 		return turn, err
