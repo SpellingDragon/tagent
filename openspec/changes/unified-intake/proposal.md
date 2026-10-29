@@ -16,6 +16,7 @@
 
 - **(A) 单门事件流（零新概念）**：用户/外部输入到达即落链成事实（复用既有 `Run.Invoke` 路径）；turn 在途时消息**不排队等 turn**，由在途 turn 的**下一 decision 边界**用既有 `aggregateReady` 重新聚合消费（`Invocation.Ready`/`observeReady`/`SessionFacts`/`transcript`/`endedAt` 全部既有；唯一改动=退出判据扩一项）。
 - **(B) 冥想活跃闸（零新概念）**：节奏门叠两层既有判据——①novelty 扫描结果的时间参数化（最近非自管新鲜事实距 now 不足 `min_gap`→不 fire）；②既有 `*state.Occupancy` 决策席占用→不 fire；抑制沿用既有 `retained`/`rearm` 节拍，推迟非放弃。
+- **(D) 环境块归位（用户加项，零新概念）**：既有 `environmentBlock`（已含 tools/skills/mcp/任务清单）从「前缀段」改为**上下文末尾追加**；块文本加特殊标记环绕（`<environment>…</environment>`）；清单补 `prompt_version` 行（BoundaryView 已有该值）。承载=既有 `request->environment` 端口与既有装配/拼装面，不新增端口。
 - **(C) 规格 delta**：`persistent-event-loop` ADDED「在途 turn 的外部输入在 decision 边界消费」；`meditation-idle-gating` MODIFIED 节奏门条款加活跃闸（保留时间门槛禁令的其余部分）。
 
 ## 被否方案（D6 详）

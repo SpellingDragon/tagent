@@ -6,6 +6,7 @@
 |---|---|---|---|---|
 | 01 | decision-boundary | `persistent-event-loop`（ADDED） | 在途 turn 的每个 decision 边界重新聚合链上就绪事件（含用户/外部输入）；host Invoke 受理语义与 gate 降级 | `persistent-event-loop` 现条款（:94/:105/:123 保留不动） |
 | 02 | meditation-activity | `meditation-idle-gating`（MODIFIED） | 节奏门加用户事件新鲜度闸与决策席在途闸；自管回合不重置 | `event-metadata-contract` 的 trigger_source 读径（相同，不新建） |
+| 03 | environment-block | `framework-prompt`（MODIFIED） | 既有环境块改为上下文末尾追加+特殊标记环绕+prompt_version 行 | 01 域请求拼装面（接口常数） |
 
 ## D1 决策边界消费＝既有 ready 面的时序参数化（零新概念）
 
@@ -40,6 +41,13 @@
 - **判据②（决策在途，落地形态）**：构建时注入既有 `*state.Occupancy` 与 `event.InstanceID`（既有 `NewDriver` 构造加两参，非新类型）；fire 前取 `ScanVerdict.Recent.Identity.Key` → 既有 `Reflection.CommittedFact` 读回事实 → 其 `Owner` 地址查既有 `Slot(Owner, instance)` → 占用不 fire。**收窄说明**：Occupancy 只在模型决策在飞时占用（工具执行不占席），本判据管决策窗口；慢工具轮不抑制（反思跑独立会话，不与工具争模型槽）。`Recent` 置于 novelty 检查之后取用（`Recent==nil ⇔ 无 novelty`，天然规避空面）。**不造 SlotQuery 面**：直接持有既有对象。
 - **抑制语义（C3 裁定：零时钟源）**：抑制=水位不动+`pending` 保持为空+报告走既有 `SetObserver` 的 `TickOutcome`（`TickRhythm`+Reason 文字，不新增常量；deferred 回执只在注入后产生，抑制期不产生）；**重评=下一次 host-facing 提交触发既有 `ObserveCommit` 时重新评估**（既有机制，无 ticker、无新计时源）。**已知行为边界（如实入 gaps）**：会话安静下来且无新提交时，被抑制的冥想不自动恢复——「推迟」的上界是下一封消息；这是零新机制的诚实代价，规格 Scenario 以「下一次评估机会」表述。
 - **不造任何新读面/新计时器/新计数器/新同步入口**；测试沿用既有测试设施的注入方式（既有 fake 时间设施或既有构造的可选参数）。
+
+## D10 环境块归位（域 03，零新概念）
+
+- **现状**：`environmentBlock`（assembly/request.go:869）已产「## Environment/agent/model/tools/skills/mcp/tasks」清单，作为 `RoleSystem` 消息位列 **segments 最后一支**（前缀区末尾），transcript 在其后；无特殊标记、无 prompt_version。
+- **改动**：①块文本改为 `<environment>…</environment>` 环绕（块内清单保留+补 `prompt_version:` 行，值取既有 `BoundaryView.PromptVersion`）；②装配面 env 段**从 segments 表移除**，环境文本经既有 `BoundaryView` 结构**扩一个字段**承载（既有结构扩字段，与 intake 扩字段同例）；③loop 请求拼装处 `Messages = 前缀 + transcript + 环境消息`（**末尾追加**；Role 取既有 `RoleUser`——system 通道由 provider 独立抽取，环境通知按 user 消息承载与工具输出惯例一致）。
+- **不造**：不新增端口（`request->environment` 既有）、不新增消息类型、不新增常量族（标记文本在既有块内）。
+- **被否**：保留在前缀但加标记（位置语义仍错）；环境块拆成新消息类型（造概念）。
 
 ## D6 被否方案
 

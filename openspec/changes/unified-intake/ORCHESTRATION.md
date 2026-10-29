@@ -17,7 +17,8 @@
 | D4 | A5 | D3 | blocked | `openspec/specs/persistent-event-loop/spec.md` 经 delta、`docs/wiki/agent/event-flow.md` | 快 |
 | D5 | B1+B2（合同） | D3（席位面稳定） | blocked | `features/evolution/meditation/{driver,judgment}.go`+`tests/integration/evolution/meditation_activity_test.go`（新） | 中 |
 | D6 | B3 | D5 | blocked | `openspec/specs/meditation-idle-gating` 经 delta、`docs/wiki/evolution/evolution-architecture.md` | 快 |
-| D7 | F1–F4 | D4,D6 | blocked | — | 收尾 |
+| D8 | E1–E4（03 域） | D3 | blocked | `assembly/request.go`（environmentBlock/段表）、`runtime/agent/{request_assembly,loop}.go`（BoundaryView 扩字段+末尾拼装）、`tests/integration/execution/unified_intake_test.go`、delta/wiki | 中 |
+| D7 | F1–F4 | D4,D6,D8 | blocked | — | 收尾 |
 
 合单判据：A2/A3 同触 loop 装配面（文件簇相交）故合单；B1/B2 同文件簇合单。拆单收益：无——域内均 <3 叶，不拆。
 
@@ -41,7 +42,7 @@
 
 - D1 完成即释放红锚证据 → 立即派 D2。
 - D2 绿 → 派 D3（关键路径）；D3 绿 → **D4 与 D5 并行**（触碰集不相交：spec/wiki vs features）。
-- D5 绿 → D6；D6 绿 → D7。
+- D3 绿 → **D8 与 D4、D5 并行**（触碰集不相交：request/loop vs spec/wiki vs meditation）；D4/D5/D8 全绿 → D6 → D7。
 - 无长跑单（全部 <10min），无后台资源锁。
 
 ## 三、明细层
