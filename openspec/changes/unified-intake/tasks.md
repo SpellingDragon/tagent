@@ -3,7 +3,7 @@
 ```mermaid
 graph LR
   A1A[symptom anchor RED] --> A2[loop ready increment]
-  A2 --> A3[assembly inject ReadyFeed]
+  A2 --> A3[assembly wiring check]
   A3 --> A4[host Invoke semantics]
   A4 --> A5[spec delta + anchor migration]
   A5 --> B1[meditation anchors]
