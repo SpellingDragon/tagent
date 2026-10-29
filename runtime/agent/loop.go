@@ -216,7 +216,7 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // ready input of the range is never mixed with the input of another invocation.
 // - The episode record is written where the business process actually starts: at the first drive of the invocation's own ready input.
 // - The settled result facts one decision paired are the stored input the next decision reduces.
-// - The drive reads its range's chain again at every decision boundary: input that landed in the range while a decision ran enters the next decision of that same range, and a decision that opened no obligation still ends the round while that input stands unread.
+// - The drive reads its range's chain again at every decision boundary: input that landed in the range while a decision ran enters the next decision of that same range, and a decision that opened no obligation still ends the round while that input stands unread. The read starts behind the head the chain held when the drive began, so the material an earlier range already took is never this range's input.
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
 // - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
 // - A progress notification of the range's own call commits as a fact of its chain and enters no round head: the report is audit and projection material, never input a decision speaks from.
@@ -237,6 +237,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	defer l.sealCapture(ctx)
 	defer production.stop()
 	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
+	l.markRangeHead(inv)
 	l.observeReady(ctx, inv)
 	l.markConsumed(inv.InvocationID, inv.Ready)
 	history := l.sessionHistory(inv.Address)
@@ -479,9 +480,25 @@ func (l *Loop) markConsumed(invocationID event.InvocationID, events []event.Even
 	}
 }
 
+// markRangeHead records where the range of one drive begins on the chain of its session: the identity of the last fact the chain already held when the drive started, remembered by the range's intake. The boundary read of that drive starts behind it, so the material an earlier range committed under the same invocation identity is never read as input this range has not taken yet.
+// - The marker is an identity, never a position: the age fold rewrites the sequence the commits record, so a position names other material after a rewrite.
+// - The marker is recorded before the drive reads anything, so the head input of the drive itself stands behind it and is never re-read.
+// - A chain that held no fact at the start names no head, and the read of that drive starts at the head of the chain as it stands.
+func (l *Loop) markRangeHead(inv Invocation) {
+	facts := l.sessionFacts(inv.Address)
+	in := l.intakeFor(inv.InvocationID)
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	in.head = ""
+	if len(facts) > 0 {
+		in.head = facts[len(facts)-1].Key
+	}
+}
+
 // boundaryInput reads the range's own facts again at one decision boundary and answers the messages of the facts the range has not taken yet, in commit order: the input that landed in this range while the decision that just ended was running enters the next decision of that same range.
 // - Only the facts of this range are read: a fact of another invocation of the session is that range's input and never this one's.
 // - Only the facts that start a range are read: the reasoning, the calls, the output and the notices belong to the range in flight and are carried by the transcript.
+// - Only the facts behind the head the drive recorded are read: a fact the chain already held when the drive began belongs to a range that already ran, even when it carries this range's own identity — a restarted process counts its invocation identities from the start again, so the facts of the earlier process are material that already ended.
 // - The identity a fact committed under is what de-duplicates it, so the same text sent twice is two facts and stands in the request twice.
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
@@ -493,7 +510,7 @@ func (l *Loop) boundaryInput(ctx context.Context, inv Invocation) ([]model.Messa
 	fresh := make([]event.Event, 0, len(facts))
 	in := l.intakeFor(inv.InvocationID)
 	in.mu.Lock()
-	for _, evt := range facts {
+	for _, evt := range behindRangeHead(facts, in.head) {
 		if evt.InvocationID != inv.InvocationID || evt.Key == "" || !startsRange(evt) {
 			continue
 		}
@@ -508,6 +525,19 @@ func (l *Loop) boundaryInput(ctx context.Context, inv Invocation) ([]model.Messa
 		l.observeFact(ctx, inv, evt)
 	}
 	return aggregateReady(fresh)
+}
+
+// behindRangeHead reports the facts of one chain that stand behind the head its drive recorded: the fact the head names, and every fact before it, belongs to a range that already ran, so no boundary of this drive reads them. The head names an identity rather than a position because a fold rewrites the sequence the commits record. A chain that does not carry the head is answered whole: the marker names material this read cannot locate, and a chain read as empty would silently drop the input that landed in flight.
+func behindRangeHead(facts []event.Event, head event.EventID) []event.Event {
+	if head == "" {
+		return facts
+	}
+	for at, evt := range facts {
+		if evt.Key == head {
+			return facts[at+1:]
+		}
+	}
+	return facts
 }
 
 // startsRange reports whether one committed fact starts the range it belongs to:
@@ -1194,10 +1224,12 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 // and the wait of its call pairs it through this cache. A notification of one
 // invocation never reaches the intake of another.
 // - The read set names the facts standing in this range's transcript: the head input of its drive, the notices it read, and the input a decision boundary reported.
+// - The head names the fact the chain held when this range's drive began: the boundary reads of that drive start behind it, so the material an earlier range committed under this range's identity is never read again.
 // - The observed set names the facts whose After pass this loop already ran, so neither set is exported and a boundary that meets the same fact again doubles nothing.
 type intake struct {
 	mu       sync.Mutex
 	address  event.Address
+	head     event.EventID
 	waiters  map[event.TaskID][]chan delivered
 	settled  map[event.TaskID][]delivered
 	read     map[event.EventID]bool

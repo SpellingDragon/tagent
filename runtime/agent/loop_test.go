@@ -347,6 +347,102 @@ func TestTheBoundaryReadsTheChainAgain(t *testing.T) {
 	})
 }
 
+// TestTheBoundaryStartsAtTheRangeHead pins where the boundary read of one drive begins: behind the head the chain already held when the drive started.
+// - a fact an earlier process left under this range's own identity enters no decision of this drive
+// - the input that lands after the drive began is still read, so the head never ends the read of the chain
+// - the After pass of a fact the earlier process observed runs never here
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestTheBoundaryStartsAtTheRangeHead(t *testing.T) {
+	earlier := []event.Event{
+		invariantLandedFact("event-earlier-input", "invocation-1", "the input of the earlier turn"),
+		{Key: "event-earlier-output", Type: event.TypeAgentOutput, Timestamp: time.Now(),
+			Message: model.Message{Role: model.RoleAssistant, Content: "the answer of the earlier turn"},
+			Owner:   invariantLoopAddress, InvocationID: "invocation-1"},
+	}
+
+	t.Run("the facts of an earlier process under this identity enter no decision", func(t *testing.T) {
+		behaviour, ledger, out := rangeHeadDrive(t, earlier, nil)
+		if out.err != nil {
+			t.Fatalf("drive over a chain another process wrote = %v, want its own terminal", out.err)
+		}
+		if len(out.turn.Decisions) != 1 {
+			t.Fatalf("decisions = %d (%s), want the one decision: the input of the earlier turn is material that already ended",
+				len(out.turn.Decisions), invariantRequests(behaviour.requestMessages()))
+		}
+		for _, sent := range behaviour.requestMessages() {
+			if got := invariantCopies(sent, "the input of the earlier turn"); got != 0 {
+				t.Fatalf("copies of the earlier turn's input = %d, want 0: a restarted process counts this range's identity again, so the old fact stands before the head (%s)",
+					got, invariantRequests(behaviour.requestMessages()))
+			}
+		}
+		if got := ledger.count("event-earlier-input"); got != 0 {
+			t.Fatalf("After passes of the earlier turn's fact = %d, want none: that process observed it already", got)
+		}
+	})
+
+	t.Run("the input that lands after the drive began is still read", func(t *testing.T) {
+		behaviour, _, out := rangeHeadDrive(t, earlier, func(history *invariantLoopHistory) {
+			history.land(invariantLandedFact("event-landed", "invocation-1", "the message that arrived in flight"))
+		})
+		if out.err != nil {
+			t.Fatalf("drive beside input that landed in flight = %v, want the second decision to run", out.err)
+		}
+		if len(out.turn.Decisions) != 2 {
+			t.Fatalf("decisions = %d (%s), want the decision in flight beside the one that reads the landed input: the head begins the read, it never ends it",
+				len(out.turn.Decisions), invariantRequests(behaviour.requestMessages()))
+		}
+		sent := behaviour.requestMessages()
+		if got := invariantCopies(sent[len(sent)-1], "the message that arrived in flight"); got != 1 {
+			t.Fatalf("copies of the landed input in the next decision = %d, want exactly 1 (%s)",
+				got, invariantRequests(sent))
+		}
+	})
+}
+
+// rangeHeadDrive drives one invocation over a chain that already carries the facts the
+// caller names — the shape a restarted process leaves, because a session counts its
+// invocation identities from the start again — and lands the facts the caller names
+// while the decision of the drive runs.
+func rangeHeadDrive(t *testing.T, held []event.Event, land func(history *invariantLoopHistory)) (*invariantLoopModel, *invariantAfterLedger, invariantLoopResult) {
+	t.Helper()
+	behaviour := &invariantLoopModel{gate: make(chan struct{}), answer: "answer-a"}
+	loop, _, _ := invariantLoop(t, behaviour)
+	history := newInvariantLoopHistory()
+	loop.SetHistory(history)
+	for _, evt := range held {
+		history.land(evt)
+	}
+	ledger := &invariantAfterLedger{}
+	loop.SetFactPipelines(ledger.pipeline)
+	loop.SetPresentations(ledger.present)
+	done := make(chan invariantLoopResult, 1)
+	go func() {
+		turn, err := loop.Drive(context.Background(), Invocation{
+			InvocationID: "invocation-1",
+			Address:      invariantLoopAddress,
+			Instance:     "instance-a",
+			Ready: []event.Event{{
+				Key:     "event-probe",
+				Message: model.Message{Role: model.RoleUser, Content: "the message that opens this turn"},
+			}},
+		})
+		done <- invariantLoopResult{turn: turn, err: err}
+	}()
+	invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
+	if land != nil {
+		land(history)
+	}
+	close(behaviour.gate)
+	select {
+	case out := <-done:
+		return behaviour, ledger, out
+	case <-time.After(5 * time.Second):
+		t.Fatal("the drive did not end after the decision was let through")
+		return nil, nil, invariantLoopResult{}
+	}
+}
+
 // boundaryDrive drives one invocation whose single decision is held at the model gate,
 // lands the facts the caller names while that decision runs, and answers the drive.
 func boundaryDrive(t *testing.T, land func(history *invariantLoopHistory)) (*invariantLoopModel, *invariantAfterLedger, invariantLoopResult) {
