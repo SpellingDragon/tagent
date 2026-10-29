@@ -1,117 +1,111 @@
-> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+# 平台子系统（组合根 · 配置面 · 治理闸 · 严格解码 · 投递账本）
 
-# 平台子系统（治理 · 自进化 · 可靠性 · 可观测 · 记忆引擎 · MCP）
-
-本篇覆盖六个横切子系统与配置热重载。共同设计纪律：**全部配置门控、默认关闭 = 与既有行为逐字节一致**；不触碰任何工具 Declaration（prefix-cache 稳定）；失败以 result 渗透不中断 loop；观测点全部位于 Engine 侧。
-
-## 一、文件清单
-
-| 包 | 职责 |
-|----|------|
-| `features/evolution/governance/` | RiskClassifier（C5 纯函数四级分级）、BudgetManager（滑窗+epoch 持久化）、ApprovalManager（digest 绑定+目录重扫+**ApprovalChannel 送达抽象**：Deliver 失败不阻塞门）、DenialLedger（BindStore 延迟绑定持久审计）、GoalRegistry（**BindStore 事件持久化+重启回放重建**）、Policy（`Policy.Judge` 插件端口）决策管线、GovernanceTool leaf 装饰器；审批人工回应纯函数 RespondFile（digest 前缀匹配+幂等）/ParseApprovalReply（approve/reject 含中文动词）；`tool/govx/` 治理面工具五件套（goal_declare/goal_list/goal_resolve/denial_query/approval_list）——**entry only**，只登记/查询，批准权始终在人 |
-| `agent/reliability/` | DegradationManager（五依赖退化状态机）、Inbox（durable inbox-v2，受理前落盘）、AnchorStore（冥想锚点跨重启） |
-| `features/evolution/` | 进化域装配（激活判据/结构门/后验评估 posterior）、meditation 反思调度（watermark/digest/deliver）、governance 治理策略面（见上行）；refine/git-evolution 旧面已随架构减法退役 |
-| `memory/`（增量） | engine.go（C6 解耦缝契约：IndexBuilder/Retriever/MemoryEngine 及可选面，**居核心包**）、`engine/` 子包（适配器专区：engine_bridge、engine_inmemory hybrid RRF、embedder zhipu/mock/traced、diagnostics）、`kv/` 子包（KV 后端专区：localfile/rustviking，契约 KVStore 居核心 `kv.go`；**LocalFileKV 最小化裁决**——无 WAL/fsync 机，`Sync()`=按分区桶的增量快照 atomic tmp+rename，屏障成功后新进程可读回；掉电耐久不宣称，生产耐久档推迟 rustviking）、mem_spill（重放双写投影）、error_tracking——**mem_spill 与 error_tracking 两设计已放弃（2026-10-19），不复活；本行登记即完整交代**、consolidation（服务端指纹+**建议式触发**：容量 hint 经 engineBridge 写入旁路计数 → consolidation_hint 渗透+冥想 digest 候选清单；`consolidation_hint` 谱系在 `event` 包**显式登记为自管且不可投递**（见[谱系可见性](../reliability/durable-delivery.md#lineage-visibility)），snooze 静默窗；counts/recent 为会话态，重启重积累（接受丢失）；min_source_events 硬门控）、feedback 事件（回执-反馈因果绑定，OnSettle/API 双来源，guardrail 负反馈判据） |
-| `tool/mcp/`、`tool/memoryx/` | Registry（YAML mcp_servers+热同步）、mcp_call 网关（声明恒定+DepMCP 上报）；memory_consolidate、memory_health |
-| `event/`、`agent/`（增量） | EventTypeSpec 注册表（类型元数据单点）；turn root span、trace.go、plugin/attribution.go |
-| 根包（组织编排与热更） | `org_hotreload.go`（org 白名单子集指纹 canonical 化 + `orgCoordinator` 版本簿记单一真源：current/prev 双槽回滚环 + 有界诊断快照）、`tagent.go`（WithConfigPath 懒检查接线 + reload/rollback 编排 + 唯一已提交应用记录 `appliedRecord`）、`org_candidate_overlay.go`/`org_candidate_txn.go`（候选私有 overlay 与有序责任表——reload/rollback 共用一次候选事务，失败逆序回收）、`owner_retirement.go`（owner 义务轴与退役账）、`build_agent.go`（常驻构建纯函数段，冷启动/热新增/换代共用同一装配路径）、`partition_collision.go` 的 `agentMemoryFingerprint`/`changedMemoryAgents`、`agent.ResidentTopology`（copy-on-write 常驻绑定表）、`NewExecutorCandidate`/`StageExecutor`/`ActivateExecutor`/`PublishExecutor`/`BeginTurnLease`/`ExecutorRefs`、`event/wf_facts.go`（工作流事实与被动排除） |
-
-组件关系：Policy（`governance:`→GovernanceTool 装饰全部 leaf 工具、`evolution:`→GitEvolution 装配单元、`reliability:`→ReliableBus/inbox）派生自配置且默认关；Engine 常驻链为 EventBus→runEventLoop（tagent.turn span）→ContextManager→MemoryStore←ErrorTrackingStore(engineBridge(FileSegmentStore))；`refine`（仅 entry）以 register/status/rollback 驱动 git 仓（`[self-improve]` commit/revert/log）并写 improvement/evaluation 事件；MCP 侧 `mcp_servers`→Registry（热同步）→mcp_call/mcp_discover。
+`assembly` 是组合根：一份纯声明在这里变成活的运行时，进程内没有第二个装配入口。本篇的几个子系统不是并列的功能模块，而是**同一条装配链上的不同关卡**：配置面决定能声明什么，严格解码决定声明写错时怎么失败，治理闸决定一次调用放不放行，投递账本决定结果出去没有，观测/记忆/MCP 是链末的旁路与后端。共同纪律：能力缺席时按名拒绝或具名 gap，绝不给出"零读数"冒充空闲。
 
 <a id="composition-root"></a>
-## 二、顶层装配根（package tagent）
+## 一、组合根（`assembly/`）
 
-根包是 tagent 应用的装配组合根：封装 agent 实例化过程，按配置组装 `TagentAgent` 并接线跨边界依赖（模型解析见[模型解析与轨迹包裹](#model-wiring)）。内建工具经 `RegisterBuiltinTools()` 一次性注册（`registry.go`），外部工具经 `RegisterPlainTool()` 与 `RegisterToolAgent()` 注册；只有**既注册、又在该 agent 配置中声明**的工具才可用。`builtin.go` 承载内建 plain 工具的工厂函数。根包还承载两样**跨 agent 的授权面**：冥想观察面与投递白名单的装配期校验（`build_agent.go`，越界与盲投都具名拒启），以及进程内投递 API `DeliverToAgent`（`delivery.go`）——裁决表与语义见[持久投递·谱系可见性](../reliability/durable-delivery.md#lineage-visibility)。
+模块根已经没有 Go 源：`golden/runtime/architecture.json` 的 `root_package` 是 `assembly`，23 个文件整体在 `assembly/` 下，**目录名即包名**；包边界与 `// 契约:` 索引都以它为准。
+
+三个生命周期入口：`Boot(configPath, opts...)` 读一份宿主文档并带回 `*Host`；`Invoke(ctx, req)` 驱动一次回合；`Close(ctx)` 拆掉整个宿主。`Host` 拥有装配好的 run、结算驱动、反思调度与回环端点；出站消息面、审批面、投递面由调用方经 Option 注入，宿主不自己发明这些面。
+
+host 簇按域分文件：
+
+| 文件 | 域 |
+|---|---|
+| `host.go` | Boot / 驱动 / settle / 生命周期与关闭次序 |
+| `host_document.go` | 方言解码与装配（文档 → 共享声明 → 运行部件） |
+| `host_delivery.go` | 交付账本（义务登记、挂起、重发、销账） |
+| `host_tools.go` | send 工具、反思计划、注入端口 |
+| `host_face.go` | HTTP face：健康探针、任务端点、`/reload` |
+| `host_diagnostics.go` | 诊断面：统一运行读数 + 反思 / 训练 / 观测三面 |
+| `host_model.go` | 采样参数（temperature / thinking / reasoning_effort）的请求包装 |
+| `host_capture.go` | 轨迹采集：一次账户覆盖整次运行 |
+| `host_reload.go` | 热更新三档判据（见[组织级热重载](./org-hot-reload.md)） |
+
+装配链本体在其余文件：`run.go`（唯一公开装配入口与发布）、`prepare.go`（候选部件构造与资源登记）、`request.go`（请求装配与回放窗）、`invoke.go`（回合与关闭）、`tools.go`（工具受理闸与裁决适配）、`facts.go` / `commit.go` / `read.go`（事实与投影）、`settle_turn.go`（事件驱动的结算回合）。
+
+候选构造顺序固定：model → tools → prompt → plugins，外层再套工具受理 wrap。每个部件在**获取那一刻**把释放函数登记进候选账目，因此失败按获取逆序回收；共享面与在用资源不在任何账目里。
 
 <a id="config-surface"></a>
-## 三、顶层配置面（Config）
+## 二、配置面（`api/config` · `api/document`）
 
-`Config` 声明式且可序列化（YAML/JSON）；运行时依赖（模型实例、记忆存储等）经 Option 函数注入。设计以 agent 为中心：每个 agent 描述自己的设置（model、memory、tools）与通信意图（调用哪些 agent），顶层持有按 agent 名索引的配置表。工具私有配置走 `ToolRef.properties`（map[string]any），由各工具工厂反序列化为自己的 typed struct——共享结构不被工具私有字段污染（如 exec 工具在其中声明 `workspace`、`run_as_user`、`run_as_group`）。
+`Declaration` 是共享的声明词汇：`Entry` + `Agents []AgentSpec` + `Refs []ToolRef` + `Baseline` + `Servers map[string]MCPServerSpec`。`AgentSpec` 以 agent 为中心：自己声明的 `Model`、`Tools`、`Plugins`、`TaskPolicy`、`Files`、`Params`，以及四个域段 `Memory` / `Meditation` / `File` / `Exec`。
 
-<a id="testing-helpers"></a>
-## 四、导出测试辅助面
+工具私有参数走 `ToolRef{Name, Params map[string]string, Endpoint}`：共享结构不被工具私有字段污染，远程引用用 `Endpoint` 表达，本地可解析的引用留空。提示词与 skill 是 `FileRef{Path, Kind}`——**正文不在声明里**，只声明"哪个文件是提示词/skill"，正文在请求边界按文件读（所以改正文不需要重新发布，见[热更新三档](./org-hot-reload.md#restart-required-dimensions)）。
 
-`testing.go` 为 `tests/` 的集成测试暴露内部 API，属测试支撑面：生产代码不得依赖，其签名可无预警变更。
+`api/document.Document` 是运行时视图那一层：`Entry` + `Agents` + `Servers`，`Order()` 给稳定顺序（entry 优先），`Declaration()` 派生共享声明。宿主方言（`assembly/host_document.go`）是它在宿主侧的读法：核心共享段逐字节按 `api/document` 读，`app` 段保持不透明、原样携带。
 
-<a id="model-wiring"></a>
-## 五、模型解析与轨迹包裹
-
-`wiring.go` 的 `resolveAgentModel` 返回单个 agent 的 LLM 调用所用模型实例。解析顺序：`rc.modelOverrides` 的按名实例 → agent 自己的模型（按其 provider 查找，未声明时落全局 `cfg.Provider`）→ 全局默认模型 → `WithModel` 注入的 `rc.model`。启用时 `TrajectoryRecorder` 包裹每个返回实例（含 override 命中）：包裹位于 `SwappableModel` 之外，因此记录器观察换后流量；包裹按 `buildAgent` 调用构造，重复解析不会在同一实例上叠层。全局默认经 provider 注册表解析，纯 yaml 声明的模型同样可用。
-
-**缓存键是实例身份，不是别名**（`modelCacheKey`）：三档解析路径（agent／global／direct）共用同一份拼写，键含**用途**、provider 别名、**实际协议**、model 名、**实际端点**与**凭据来源的 env 名**，以 `0x1f` 分隔（该字符不会出现在这些值里，因此别名与端点的拼接不会撞成同一个键）。两条取舍各有代价：**身份先于键**——协议、端点与凭据来源名必须在查缓存**之前**确定，否则换了端点的第二次解析会命中别名键上的旧实例（不报错的错法）；**凭据的值绝不进键**——进键等于把秘密抄进一份可诊断的字符串，而换 key 本不该造第二个实例；密钥值在解析时经 `os.Getenv` 读取，因此轮换密钥不需要任何重建通道。`providers` 在热更维度表里因此走**结构换代**而**不进须重启拒表**：它的消费点在解析期（判据见 [维度分类](./org-hot-reload.md#restart-required-dimensions)）。
-
-<a id="workspace-scratch"></a>
-## 六、工作区暂存与清理
-
-`workspace` 包集中管理磁盘暂存：`Root` 归一暂存根，`ToolOutputPath` 给出超限工具输出的落盘位置（`<root>/tool-output/`，服务 OutputLimitTool 与 ActionTool）。`Cleaner` 周期回收按年龄与文件数双重上界封顶累积。命令工作目录不属于暂存面：exec 继承进程工作目录，其相对路径语义与暂存根无关。
+声明面在三处被读，**读的时刻决定热更档位**：Boot（构造消费点，改了须重启）、发布（换代重建绑定）、请求边界（提示词与 skill 正文、回放窗——下一回合就生效）。
 
 <a id="governance-gate"></a>
-## 七、治理闸（governance）
+## 三、治理闸（`features/evolution/governance`）
 
-全部 agent 的非 wrapper leaf 工具经 GovernanceTool 过闸：`classify → critical 批准 → goal → budget → 记账`。critical 未批准 → deny+Hold（外部落盘 `approvals/<id>.json` 即生效，Check 节流重扫目录）；预算滑窗按 agent 独立持久化；审计事件（DenialLedger）共享单实例、写 entry memStore 治理分区（durable）；`enforcement: warn` 只记账放行，`strict` 拒绝。账本共享而预算独立，因此一次拒绝必须自带来源：记录带 `DenialRecord.AgentName`，由组合根按 agent 名注入 → 写入治理事件 `metadata["agent"]` → 回读时仍在。**分级判据取工具声明名，不取注册 ID**：`GovernanceTool` 用内层工具 `Declaration().Name` 构造 `RiskContext`，注册时的装配别名根本不进分级面。
+治理不是"包在工具外面的装饰器"，而是插件材料流 `call->ruling` 端口上的一个实例：`Policy` 报 `Port() = plugin.PortCallRuling`，实现 `Governor.Judge(pass)`。
 
-**认知资产写审批**：`DefaultRules` 含 `exec.cognitive-asset-write` → critical（写形态命中 `resources/prompts/`、`skills/`、`scripts/` 时人在环批准，refine 登记不豁免）。这是 cognitive-asset-guard 的**脚手架**（文本匹配可绕），其上有默认开启、不依赖 governance 的 **D1 hash 漂移审计**（不可绕兜底），终态方向是**权限域分离**（资产目录对 exec 物理只读）；全貌见 [cognitive-asset-guard.md](./cognitive-asset-guard.md)。
+一次调用过闸的完整链：
 
-**拒绝以工具结果回给模型，而不是 Go error**：`warn` 放行只记账；`strict` 与批准挂起都返回一段以 `[governance_denied]` 开头的**结果文本**（带原因、风险级别、命中规则，并指引"调整操作或走批准/goal 登记后重试"），调用本身不执行、也不作为错误抛出——被拒的理由必须出现在模型读得到的地方，否则它既看不见为什么失败，也没有自纠的入口。
+| 步 | 发生处 | 产物 |
+|---|---|---|
+| 变换 | `Pipeline.Before` 的 transform 在私有副本上改正 call | 最终 call |
+| 打分 | 同一趟的 risk face 出 grade | 最强 grade（只读一次，不重算） |
+| 传导 | 派发层把这一趟压进 context（`plugin.WithCallPass`） | 一次调用一次 pass |
+| 裁决 | 受理 wrap 的适配读回 pass → `Governor.Judge` | `Decision` |
+| 分类 | 适配器把裁决翻成任务受理结论 | `RulingDeny` / `RulingHold` / `RulingRun` |
 
-<a id="evolution-wiring"></a>
-## 八、自进化（evolution · git 原生）
+三态语义：
 
-自进化不采用 bundle 快照/发布道——违反哲学四原则（文件即真源/复用 git/默认自迭代/信号建议式）。开关 `evolution.enabled`（默认关 → 零行为变化）决定这套装配是否存在；启用时构造 git 原生自进化单元，`refine` 由 buildAgent 直接追加（不经注册表、仅 entry）；启动自检 git 仓**只 Warn 不阻断**——不在仓里时改文件仍然生效，只是没有留痕与评估保护。该单元挂在 entry 身上的三处：`refine` 工具（每次 entry 构建都追加）、bundle id 提供者（取最近一次改进 commit）、Stop closer（agent 关停时回收自进化的后台工作）；后两者属**进程级 once 绑定**——热重建壳不重复绑（同一门见[资源所有权](./resource-ownership.md)）。
+- **拒**是终局：调用不执行，模型读到与调用配对的**工具结果**（带规则与理由），而不是 Go error——被拒的理由必须出现在模型读得到的地方，否则它既看不见为什么失败，也没有自纠入口。
+- **挂起**（`hold`）是等待不是拒绝：调用交给审批面，宿主回 `HoldReceipt`，模型读到"parked awaiting approval"；批准或拒绝之后走同一条受理路径。
+- **放行**（`allow` / `record`）：`record` 额外要求这次执行进审计台账。
 
-自我改进循环 = **冥想（引擎：反思时机+产物生成）× refine（git 登记通道）× consolidation（记忆通道）**。冥想是一个机制——判据与动作唯一，观察面缺省＝自身分区（入口 agent 的**自体维护**＝自察），显式列出他人分区即同构 agent 的**旁路冥想**，同一引擎同一判据不分面，见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。refine 三 op：**register**（产物落盘后登记：`[self-improve]` 标记 commit（仅 add 显式受控路径，默认 `resources/prompts/**`,`skills/**`,`scripts/**`）+ improvement 事件即评估窗口锚）/ **status**（git log 过滤 + 窗口结论四态 join + 未登记产物提醒）/ **rollback**（安全 revert：仅改进标记 commit，防误 revert 用户提交；回滚是终态不再评估）。后验评估：register 后 `judge_delay` 到期 guardrail（确定性）+ LLMJudge（质性）各评估一次，**劣化只写 evaluation 事件**（verdict+证据+`refine rollback <sha>` 建议文案）——经冥想 digest/召回渗透，框架永不动手 revert；样本不足显示「insufficient」不冒充健康。版本章：事件 Metadata 的 bundle_id 值=最新 improvement 的 commit sha（guardrail/feedback 沿因果边精确 join，缓存=性能层、事件=真源）；git 双轨台账 = git log（人审计）+ improvement/evaluation 事件（agent recall/join 控制面）。⚠ 生产部署=独立 clone 部署仓；在源码仓内跑 example，改进 commit 会落入源码仓。
-
-<a id="reliability-switches"></a>
-## 九、常驻可靠性（reliability）
-
-四项各自独立的开关（全部空/false = 现状零行为变化）：
-
-- **ReliableBus**（开关 `bus_spill_dir` 非空）：**全量持久受理**，不是「满则溢出」——`PublishContext` 在返回回执**之前**把每个输入写进 durable inbox（`agent/reliability/inbox.go`，v2），channel 只承载唤醒脉冲，因此队列忙闲与是否落盘无关；at-least-once，重启后未 ack 的信封按严格序号重投；存在 `*.spill` 残留或未排空的 v1 树时**拒绝升级**（fail-loud，由前一个二进制排空，v2 从不猜测式迁移）；每个 agent 只用自己的子目录 `<bus_spill_dir>/<agent>`（防多 agent 事件串流），该目录**在构建期就存在**；开关为空则回退纯 channel（易失，行为与旧 channel 逐字节一致）。四态边界见下节；三段状态机见 [持久投递与依赖退化](../reliability/durable-delivery.md)；
-- **DegradationManager**（开关 **`degradation_enabled`**，**独立布尔，与 governance 配置无耦合**）：memory/disk/rustviking/model/mcp 五依赖退化-恢复状态机（ErrorTrackingStore 最外层装饰 memStore + event_loop 上报 model 失败 + mcp_call 上报 DepMCP）；状态迁移写 governance degraded 事件（可观测/可 recall）；**降级行为层**（三项独立配置默认全关）：model 退化→turn 间退避（`degradation_model_backoff`）、mcp 退化→mcp_call 熔断+半开探测（`degradation_mcp_probe_every`）、disk 退化→禁新 spawn（`degradation_disk_block_spawn`，SpawnResult.Blocked 以可读 result 渗透，进行中任务不受影响）；
-- **mem_spill**（开关 `mem_spill_dir` 非空，**且仅在 `degradation_enabled` 为真时接线**——它是退化状态机的存储兜底步）：StoreEvent 失败 → JSONL 兜底落盘，memory 恢复自动重放（重放前 GetEvent 预检幂等）；
-- **AnchorStore**（开关 `meditation_anchor_dir` 非空）：冥想单锚 last-meditation（执行水位：节奏门量它判两次执行的下限、新鲜度判据窗口以它为头；观察面缺省即自身分区）按 agent 名分文件持久化（`<dir>/<agent>.json`），锚缺失＝冷启动直通一次（读尽存量后自锁，幂等安全）；pending 有意不持久化；历史锚文件里的旧空闲锚键 Load 即忽略，无迁移。锚点与判据的关系见 [agent 引擎篇 §2.14](../agent/agent-architecture.md#meditation-curator)。
-
-### 投递四态边界（volatile → durable → processed → delivered）
-
-契约见 `openspec/specs/persistent-event-loop`「输入处理确认与幂等」；四态**互不等价**，逐态诚实标注，绝不把前态冒充后态：
-
-| 态 | 含义 | 代码锚点 | 崩溃存活 | 承诺边界 |
-|----|------|---------|---------|---------|
-| volatile accepted | 入内存 channel，未过 inbox 屏障 | `PublishReceipt{Durable:false}`（`agent/event_bus.go`） | 否 | 队列满/超时/存储失败 SHALL NOT 表示为 accepted |
-| durable accepted | 文件+目录屏障完成后的回执 | `PublishReceipt{Durable:true}`、`Inbox.Enqueue`（fsync + 目录同步后才 durable，`agent/reliability/inbox.go`） | 是 | 202/accepted **只表示接收**，不表示已处理/已送达 |
-| processed | turn 消费、事实链写处理回执并耐久后 ack inbox | `TypeInboxReceipt`（非投影、30d=去重窗口，`event/inbox_receipt.go`）；claim 不删原件，未 ack 崩溃可重试 | 是 | **至少一次**，不宣称 exactly-once；超 30d 同 request-id 不承诺幂等 |
-| delivered | 经 outputCh 呈现给宿主/消费者 | outputCh（final 不回灌 EventBus）；慢消费者 2s 宽限→溢出落盘票据 | — | 投递仅经 outputCh，与 bus 自触发脉冲无关 |
-
-未启用可靠模式（`bus_spill_dir` 空）= 纯 volatile：无 durable inbox，行为与旧 channel 逐字节一致。
-
-## 十、配置热重载（非重启）
-
-与上述 opt-in 子系统不同，热重载是运行机制层，默认启用。版本获取点是**业务 turn 起点**（`ContextManager.BeginTurnLease`：先做一次非阻塞配置检查，再钉定本 turn 的执行代），不在每次 LLM 迭代重编配置；ops 入口 `CheckOrgReload` 与生产懒检查、回滚共用同一协调器入口，不形成第二生效路径。reload 与 rollback 只是配置来源不同，共用**一次候选事务**（取私有快照 → 候选构造 → 单闸门提交；任一步失败按责任表获取逆序回收，fail-closed 服务旧代）。按序门：①entry 身份先拒（改名在候选资源构建之前拒绝，后续解析一律以启动时 `cfg.Entry` 为基准）；②memory 先检（`agentMemoryFingerprint` 逐 owner 取指纹，`changedMemoryAgents` 判定域＝**已有 owner ∩ 本代可路由**，命中即拒绝并明示须重启；新 agent 自带 memory 段属全新 owner 不误拒，摘路由的名字不判；粘性保留：同名重入回到判定域，旧指纹仍作基准）；③退役中同名重入先拒（复用不可能、新 owner 会开第二 writer）；④org 指纹对比（`computeOrgFingerprint` 白名单子集），指纹不变＝数值热更——五个热参随唯一已提交应用记录轮转、**消费边界现读**，无 push、无逐实例广播，`desired ≠ effective` 是「改了没生效」的直接诊断；⑤结构变更 → 候选事务（候选解析域＝在线 owner 快照＋本候选新增者，remote-only 引用不创建本地 owner；remote-only 这一格必须让发布循环也认，否则一份冷启动能正常加载的配置会在**第一次热更被永久封死**），已存在 agent 只换执行面（`NewExecutorCandidate` → `StageExecutor`），热新增 agent 完整常驻构造，单闸门提交（换 runner、发布执行面、轮转应用记录、激活各 owner 代并重接任务监视），失败逆序回收，drain-free（进行中 turn 持旧代跑完）；⑥移除≠退役（摘除只去掉新代可路由集合与工具声明，原 owner 保留至其义务清零后由排空面退役，存储身份基准不因实例退役丢弃；换代装配产生的**声明持有** `heldBy` 不计入义务轴）；⑦代际诊断与回滚（`orgCoordinator` 是版本簿记单一真源，`OrgStatus{generation, fingerprint, desired, lastAppliedAt, lastFailure, agents[]}`、实时引用债与关闭相位经 `OrgDiagnostics` 分组呈现，均只读；`Rollback()` 取回滚环双槽里的上一份完整有效配置，走同一候选事务发布为新序号）。
-
-热更维度的完整分类（哪些走热参、哪些走换代、哪些**具名拒绝并须重启**）见[维度分类](./org-hot-reload.md#restart-required-dimensions)。`model_override` 是最容易归错的一格：它**不是配置维度也不是热参**，而是**每次调用携带的引用名**，生效窗口属代际：[模型引用快照钉定](../agent/execution-generations.md#model-reference-pinning)。边界：数值热更 ⊂ 结构变更换代 ⊂ 子树热增删随候选发布 ⊂ `memory.*`（已有 owner）变更明确拒绝；序号/指纹为不透明诊断标签；无界历史被禁（回滚环仅双槽）。
+两条 fail-closed：context 上没有 pass 时拒绝裁决（不猜），`strict` 级别且没有审批面时拒绝一切调用（不默认放行）。分级判据取**工具声明名**、不取注册别名：风险规则按工具声明名做最长前缀匹配，未命中落默认档——注册时的装配别名根本不进分级面。
 
 <a id="strict-decode"></a>
-## 十一、配置解码的严格度契约（api/config）
+## 四、严格解码（`api/config`）
 
-**所有配置入口共用同一个严格解码实现**：未知字段一律让加载**明确失败**，而不是静默忽略一个拼错的关键字。新增配置入口必须走这个包，不得另立第二套严格度——多套严格度迟早出现"某条路径静默接受拼错的键"，那类缺陷的表现是配置看起来生效了而实际没有。
+一个策略、两个入口：`decodeDeclaration` 守护**声明词汇**自己；`DecodeStrict(source, data, v)` 把同一套拒绝词汇给**调用方自有 schema**（宿主文档这种带连接注册表、治理段、应用段的方言）用——它按 `v` 的 yaml 标签递归走完整个结构，宿主不再自己写第二套严格度。
 
 | 输入 | 行为 | 为什么 |
 |---|---|---|
-| 未知字段 | 失败，并在错误里点名该字段 | 拼错的键若被忽略，用户会以为改动了行为 |
-| YAML 首个文档之后的**尾随文档** | 失败 | 静默忽略第二个文档会让用户以为其中配置已生效 |
-| JSON 首个值之后的**尾随内容** | 失败 | 拼接两份配置绝不可能是用户意图 |
-| 完全空的文档 | 成功，解出零值 | "没写"与"写错"必须区分；空配置是合法的默认起点 |
-| 票据的 `0x` 前缀形式 | 正常解析 | 这是模型复述标识符的合法形式（宽容是设计，不是巧合） |
+| schema 外的键 | 失败，报**源 / 行 / 字段路径**（`ErrUnknownConfigKey`） | 拼错的键若被忽略，用户会以为改动了行为 |
+| 同一个键写两次 | 失败 | 后写的赢等于静默丢掉前者 |
+| YAML 首个文档之后的尾随文档 | 失败 | 静默忽略第二份文档会让用户以为其中配置已生效 |
+| JSON 首个值之后的尾随内容 | 失败 | 拼接两份配置不可能是用户意图 |
+| 完全空的文档 | 成功，解出零值 | "没写"与"写错"必须区分 |
+| `.yaml` / `.yml` / `.json` 之外的扩展名 | 按名拒绝 | 猜格式等于让一份 YAML 被静默解成零值 |
 
-同一处还守护工具面的**路由白名单**：未列入白名单的操作名一律显式拒绝——已退役的旧操作名重新出现时，宁可报错也不静默接管。
+同族的封闭性纪律：工具操作名是闭集（`tool/spec` 的 `Op`），集合外的操作在任何后端被触达之前按名拒绝——已退役的旧操作名重新出现时，宁可报错也不静默接管。
 
-## 十二、可观测、记忆引擎、MCP 与装饰器顺序
+## 五、投递与交付账本
 
-- **可观测（默认 noop 零开销）**：turn root span（`tagent.turn`，含 EventKey/trigger_source 属性）为根，框架层 span（trpc llmflow/functioncall 自动埋点）挂为子树；trace_id/span_id 经 attribution 在**构造时**注入事件 Metadata（先于 StoreEvent，事件不可变保持）、写入 TrajectoryRecorder 的 LLMCallRecord（omitempty 向后兼容）、经 task Origin→settle Metadata 管道建立跨 turn span link；设 `OTEL_EXPORTER_OTLP_ENDPOINT` 导出。
-- **记忆引擎与语义召回（memory.engine）**：C6 解耦缝（IndexBuilder/Retriever/MemoryEngine）隔离引擎实现，engineBridge 装饰 store（未配置时原样返回）；异步嵌入 worker（选择性生成：external_input/agent_output）→ 向量 KV 持久化（独立键前缀）→ 启动异步重建（窗口期退化关键词）；recall query 模式融合：向量 topK ∪ 关键词 topK → RRF(k=60)，逐跳降级链保底关键词。实测（真实 zhipu embedding-3）：512 维分离度 ≈ 1024 维，默认推荐 512。
-- **MCP 闭环（tool/mcp）**：`mcp_servers` 顶层声明（transport 归一化兼容 streamable-http 等写法；api_key_env → Bearer header）；Registry 读时惰性 mtime 热同步（增删免重启，manual 条目不被配置同步删除）；`mcp_call` 网关声明恒定（server/tool/args 三参），失败返回自纠材料（可用清单/InputSchema 回显）；`mcp_discover` 实时读注册表输出如实调用指引。实测注意：zhipu web-search-prime 的真实工具名为下划线风格 `web_search_prime`。
-- **装饰器顺序（冻结契约 C2）**：ErrorTrackingStore(engineBridge(FileSegmentStore))——退化追踪最外层，引擎旁路中间；治理包裹在 refine 追加之后、OutputLimitTool 之前（治理先于执行，OutputLimit 封顶最终输出）；提示词真源唯一（git-native）：文件即真源——mtime 热载直生效，改进经 refine register 登记纳入评估保护，无版本遮蔽层。
+一次模型产出的正文，在离开宿主之前先成为**持久的交付义务**（`assembly/host_delivery.go`）：
+
+| 记账态 | 含义 |
+|---|---|
+| `owed` | 已生成、尚未交出；先登记后发送，崩溃窗口才不漏送 |
+| `held` | 审查挂起：渠道什么都没有，批准后只交一次 |
+| `retry` | 发送被渠道拒：义务仍在，可重发 |
+| `sent` | 真交出 |
+| `refused` | 审查拒绝并销账（`[send_denied]` 结果文本） |
+| `headless` | 没有入口地址（调用方驱动）：具名销账，不假装投递成功 |
+
+进程内投递走另一条缝：`state.SendFace` 只对白名单内的目标受理，目标不在运行就以 `ErrDeliveryTargetNotRunning` 具名拒，回执照**受理序**登记进该站点的 mailbox。两类记录的分工是"谁把话送出去"与"这条话有没有被交出去"，术语口径见[存储概念图](../../demos/storage-concept-map.html)的交付账本与席位两卡。
+
+## 六、观测、反思、记忆、MCP（旁路与后端）
+
+- **观测**（`features/telemetry`）：commit observer / log observer / OTEL 三面，全部在事实提交之后读，是只读旁路。
+- **反思与演进**（`features/evolution`）：激活判据、评估门（gate / judge / posterior）、冥想调度、治理策略面；只在开关打开时装配，默认关＝零行为变化。
+- **记忆**（`memory`）：分区、账本、重放、查询与检索、嵌入器；查询面是只读投影，事实链是唯一来源（链管身份与因果、原文仓管字节、账本管责任）。
+- **MCP**（`tool/mcp`）：`mcp_servers` 声明 → 每代发布重绑（停答即停、新增即答、没变保持连接）→ `mcp_call` 网关；声明变化进指纹，因此必换代、必重绑。
 
 ## 已知缺口与演进方向
 
-治理审计带来源 agent 字段：`DenialRecord.AgentName`（json `agent,omitempty`）经 `GateDeps.AgentName` 由组合根按 agent 名注入 → 写事件 `metadata["agent"]` → `rebuildFromStore` 回读。慢道 replay/shadow 门为预留（nil 通过 + 审批门默认拒）；bundle.Params/Model 仅存储就绪、无运行期应用点。Jaeger OTLP 实录与 AReaL reward 消费格式核对为环境实装项（非代码缺口）。启用后 agent 在各复杂场景的行为反应见 [agent-behavior-matrix.md](./agent-behavior-matrix.md)（分场景分类，溯源代码）。完整裁决与修复账本：`openspec/changes/LEDGER.md`、`openspec/changes/archive/2026-09-06-tagent-evolution-roadmap/execution-dag.md`；行为契约：`openspec/specs/`。
+| 缺口 | 现状与防线 | 候选方向 |
+|---|---|---|
+| 治理只覆盖原生工具受理面 | 闸在受理 wrap 上，凡经该 wrap 的调用都过闸；绕过 wrap 直接调用的路径不受保护（当前没有这样的生产路径，但也没有结构约束阻止新增） | 把"注册即过闸"变成装配期不变量（骨架断言） |
+| 交付账本与进程内投递是两条缝 | 账本管"结果的持久义务"，`SendFace` 管"进程内站点受理"，两者各自的边界清晰但没有一张统一的读数 | 诊断面把两侧按同一地址合读 |
+| 诊断面的三面开关各自独立 | 关闭的面以理由作答而不是零读数；但没有"某面关闭导致另一面读数失真"的联动声明 | 在统一运行读数里带上各面开关状态 |
+| 双严格入口靠纪律对齐 | `decodeDeclaration` 与 `DecodeStrict` 共享拒绝词汇（同包、同错误族），但两者的字段遍历是两段代码 | 由一份 schema 走查同时服务两入口 |
+
+延伸：[存储概念图](../../demos/storage-concept-map.html)（12 个存储概念与 L1/L2/L3 受众分层）· [存储时光机](../../demos/storage-time-travel.html)
