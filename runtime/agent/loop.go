@@ -990,6 +990,7 @@ func (l *Loop) publish(presentation view.Presentation) {
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
 // - The model production of one decision is watched beside its invocation identity and confirms its stop when the reduction really ended.
 // - The closing round marks its request on the boundary, carries the closing instruction after the transcript, runs under the short closing timeout and admits none of the calls it issues.
+// - The environment block the boundary rendered trails the request as its last message, behind the transcript and the closing instruction, so the dynamic material never enters the prefix.
 func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound) (Decision, model.Outcome, []model.Message, []model.Message, error) {
 	if round.final {
 		var cancel context.CancelFunc
@@ -1030,11 +1031,14 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		view.promptVersion = boundary.PromptVersion
 	}
 	view.visibleSkills = boundary.VisibleSkills
-	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript)+1)
+	messages := make([]model.Message, 0, len(boundary.Messages)+len(transcript)+2)
 	messages = append(messages, boundary.Messages...)
 	messages = append(messages, transcript...)
 	if round.final {
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
+	}
+	if boundary.Environment != "" {
+		messages = append(messages, model.Message{Role: model.RoleUser, Content: boundary.Environment})
 	}
 	req := model.Request{Messages: messages, Tools: tools}
 	l.fixCapture(ctx, decisionID, view, req)
