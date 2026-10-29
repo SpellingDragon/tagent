@@ -264,9 +264,9 @@ func (r *ToolResources) SetVisible(selection VisibleSelection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visible = VisibleSelection{
-		Tools:  append([]string(nil), selection.Tools...),
-		MCP:    append([]string(nil), selection.MCP...),
-		Skills: append([]string(nil), selection.Skills...),
+		Tools:  cloneNames(selection.Tools),
+		MCP:    cloneNames(selection.MCP),
+		Skills: cloneNames(selection.Skills),
 	}
 }
 
@@ -276,10 +276,20 @@ func (r *ToolResources) Visible() VisibleSelection {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return VisibleSelection{
-		Tools:  append([]string(nil), r.visible.Tools...),
-		MCP:    append([]string(nil), r.visible.MCP...),
-		Skills: append([]string(nil), r.visible.Skills...),
+		Tools:  cloneNames(r.visible.Tools),
+		MCP:    cloneNames(r.visible.MCP),
+		Skills: cloneNames(r.visible.Skills),
 	}
+}
+
+// cloneNames copies one narrowing list and keeps its emptiness: a nil list is
+// the full face, an empty list is a face that exposes nothing, and append onto
+// a nil slice would collapse the second into the first.
+func cloneNames(list []string) []string {
+	if list == nil {
+		return nil
+	}
+	return append(make([]string, 0, len(list)), list...)
 }
 
 // Tools reports the registered native tools of these resources in

@@ -74,6 +74,20 @@ func TestToolFaceKeepsTheVisibleSubset(t *testing.T) {
 	}
 }
 
+// TestToolFaceKeepsAnEmptySelectionNarrow checks a named-but-empty selection exposes nothing while a nil list is the full face.
+func TestToolFaceKeepsAnEmptySelectionNarrow(t *testing.T) {
+	resources := NewToolResources("native-tools")
+	binding := AgentBinding{Tools: []trpctool.Tool{toolFaceTool{name: "alpha"}}, Set: resources}
+	resources.SetVisible(VisibleSelection{Tools: []string{}})
+	tools, order := ToolFace(binding)
+	if len(tools) != 0 || len(order) != 0 {
+		t.Fatalf("face = (%d tools, order %v), want nothing visible for an empty selection", len(tools), order)
+	}
+	if got := resources.Visible().Tools; got == nil {
+		t.Fatalf("visible tools = nil, want the empty subset kept distinct from the full face")
+	}
+}
+
 // TestToolFaceRefusesNoCallableTool checks every named tool answers from the same map the loop dispatches with.
 func TestToolFaceRefusesNoCallableTool(t *testing.T) {
 	resources := NewToolResources("native-tools", nil)
