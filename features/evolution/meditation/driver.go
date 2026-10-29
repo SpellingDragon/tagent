@@ -202,12 +202,15 @@ func (d *Driver) fire(ctx context.Context) {
 }
 
 // pass runs one reflection pass and reports the reading to the host observer. A
-// pass the observed session holds a decision seat for waits for the next
-// host-facing commit: the watermark stays where it stands and no reflection input
-// is pending. A pass the rhythm floor holds back keeps the episode open until the
-// window opens, so the same observation is evaluated again without a new commit.
+// pass the observed session holds a decision seat for keeps the episode open on
+// the standing rearm rhythm: the watermark stays where it stands, no reflection
+// input is pending, and the window is evaluated again once the seat may have
+// been released. A pass the rhythm floor holds back keeps the episode open until
+// the window opens, so the same observation is evaluated again without a new
+// commit.
 func (d *Driver) pass(ctx context.Context) {
 	if held, reason := d.seatHeld(); held {
+		d.hold(time.Now().Add(d.interval))
 		d.notify(TickOutcome{Decision: TickDecision{Disposition: TickRhythm, Reason: reason}})
 		return
 	}
