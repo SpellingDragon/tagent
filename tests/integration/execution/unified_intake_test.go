@@ -14,11 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // intakeEntryAgent names the material this anchor is written in, so every message is
@@ -42,6 +45,16 @@ const (
 	// intakeInFlightBody is the message that lands in the chain of the turn in flight,
 	// committed through the run's own write face while the slow call is parked.
 	intakeInFlightBody = "intake: the message that lands in the chain in flight"
+	// intakeEnvironmentOpen and intakeEnvironmentClose mark the dynamic environment
+	// block a request closes with, so the anchor reads the block by its markers alone.
+	intakeEnvironmentOpen  = "<environment>"
+	intakeEnvironmentClose = "</environment>"
+	// intakeEnvironmentPrompt is the prompt body the environment document declares,
+	// so the block names a fixed content version instead of the empty face.
+	intakeEnvironmentPrompt = "intake: the prompt body the environment block names"
+	// intakeEnvironmentTool is the tool face the environment declaration carries,
+	// so the block names a real tool instead of the empty face.
+	intakeEnvironmentTool = "env-probe"
 )
 
 // intakeAcceptWindow bounds how long an in-flight invocation may take to answer (the
@@ -279,6 +292,137 @@ func TestTheChainKeepsTheSameTextTwice(t *testing.T) {
 		t.Fatalf("copies of one text landed as two facts = %d, want 2: the committed identity de-duplicates and the content does not (%s)",
 			copies, intakeDescribe(scene.requests))
 	}
+}
+
+// TestTheEnvironmentBlockTrailsTheContext checks where the environment block stands in the request the model reads.
+//
+// - positive: the last message of every request is the environment block, carried under the declared markers
+// - positive: the block names the tool face beside the declared prompt version
+// - negative: no message ahead of it carries the marker, so the block never enters the prefix
+// - negative: an agent declaring no environment block closes on its transcript alone
+// - consumer: assembly.Assemble + Run.Invoke, read back from the native requests the model entry was driven with
+//
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
+func TestTheEnvironmentBlockTrailsTheContext(t *testing.T) {
+	t.Run("the block trails the context of every request", func(t *testing.T) {
+		requests := intakeEnvironmentDrive(t, true)
+		if len(requests) == 0 {
+			t.Fatal("model requests = 0, want the turn served")
+		}
+		for index, request := range requests {
+			if len(request.Messages) == 0 {
+				t.Fatalf("request %d carries no message", index)
+			}
+			last := request.Messages[len(request.Messages)-1]
+			if last.Role != model.RoleUser || !strings.Contains(last.Content, intakeEnvironmentOpen) ||
+				!strings.Contains(last.Content, intakeEnvironmentClose) {
+				t.Fatalf("last message of request %d = (%q, %q), want the marked environment block trailing the context (%s)",
+					index, last.Role, last.Content, intakeEnvironmentShape(requests))
+			}
+			for at, message := range request.Messages[:len(request.Messages)-1] {
+				if strings.Contains(message.Content, intakeEnvironmentOpen) {
+					t.Fatalf("message %d of request %d carries the environment marker: the block never enters the prefix (%s)",
+						at, index, intakeEnvironmentShape(requests))
+				}
+			}
+			for _, want := range []string{"- agent: " + intakeEntryAgent, "- model: " + intakeEntryModel, "- skills: (none)", "- mcp: (none)", "- tasks: 0 open"} {
+				if !strings.Contains(last.Content, want) {
+					t.Fatalf("environment block = %q, want it to name %q", last.Content, want)
+				}
+			}
+			if tools := intakeEnvironmentValue(last.Content, "- tools:"); !strings.Contains(tools, intakeEnvironmentTool) {
+				t.Fatalf("environment block tool face = %q, want it to name %q (%q)", tools, intakeEnvironmentTool, last.Content)
+			}
+			if version := intakeEnvironmentValue(last.Content, "- prompt_version:"); version == "" || version == "(none)" {
+				t.Fatalf("environment block prompt version = %q, want the content version the request boundary fixed (%q)", version, last.Content)
+			}
+		}
+	})
+
+	t.Run("negative: an undeclared block adds no trailing message", func(t *testing.T) {
+		requests := intakeEnvironmentDrive(t, false)
+		if len(requests) == 0 {
+			t.Fatal("model requests = 0, want the turn served")
+		}
+		for index, request := range requests {
+			for at, message := range request.Messages {
+				if strings.Contains(message.Content, intakeEnvironmentOpen) {
+					t.Fatalf("message %d of request %d = (%q, %q), want no environment block for an agent that declares none (%s)",
+						at, index, message.Role, message.Content, intakeEnvironmentShape(requests))
+				}
+			}
+		}
+	})
+}
+
+// intakeEnvironmentDrive runs one turn over the assembled runtime and answers the
+// native requests the model entry was driven with. The declared run boots the
+// agent that declares the block; the negative run boots the same agent declaring
+// none, so the two runs differ in the declaration alone.
+func intakeEnvironmentDrive(t *testing.T, declared bool) []model.Request {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	root := t.TempDir()
+	promptPath := filepath.Join(root, "system.md")
+	if err := os.WriteFile(promptPath, []byte(intakeEnvironmentPrompt), 0o644); err != nil {
+		t.Fatalf("write the declared prompt file: %v", err)
+	}
+	provider := &convModel{name: intakeEntryModel, answer: func(*model.Request) *model.Response {
+		return convFinalTurn(intakeFinalBody)
+	}}
+	decl := &config.Declaration{
+		Entry: intakeEntryAgent,
+		Agents: []config.AgentSpec{{
+			ID:               intakeEntryAgent,
+			Model:            intakeEntryModel,
+			EnvironmentBlock: declared,
+			Files:            []config.FileRef{{Path: promptPath, Kind: config.FileKindPrompt}},
+		}},
+	}
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
+		intakeEntryAgent: {Model: provider, Tools: []trpctool.CallableTool{&convTool{name: intakeEnvironmentTool, output: intakeFinalBody}}},
+	}, assembly.WithGovernance(passPolicy{}))
+	if err != nil {
+		t.Fatalf("assemble the runtime: %v", err)
+	}
+	turn, err := run.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID: intakeFirstInvocation,
+		Address:      event.Address{AgentID: intakeEntryAgent, SessionID: intakeSession},
+		Input:        []model.Message{{Role: model.RoleUser, Content: intakeFirstBody}},
+	})
+	if err != nil || turn.Terminal != model.KindCompleted {
+		t.Fatalf("the environment turn = (%v, %v), want it to end by its own terminal", turn.Terminal, err)
+	}
+	return provider.recorded()
+}
+
+// intakeEnvironmentValue reports the value one line prefix carries in the block.
+func intakeEnvironmentValue(block, linePrefix string) string {
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, linePrefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, linePrefix))
+		}
+	}
+	return ""
+}
+
+// intakeEnvironmentShape renders the roles and the trailing marker of every
+// request, so a failure states where the block really stands.
+func intakeEnvironmentShape(requests []model.Request) string {
+	described := make([]string, 0, len(requests))
+	for index, request := range requests {
+		roles := make([]string, 0, len(request.Messages))
+		marked := ""
+		for _, message := range request.Messages {
+			roles = append(roles, string(message.Role))
+			if strings.Contains(message.Content, intakeEnvironmentOpen) {
+				marked = string(message.Role)
+			}
+		}
+		described = append(described, fmt.Sprintf("#%d roles=%v marked=%q", index, roles, marked))
+	}
+	return "[" + strings.Join(described, "; ") + "]"
 }
 
 // intakeLandingScene is one run of the boundary anchor: the turn that was in flight and
