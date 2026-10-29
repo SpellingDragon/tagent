@@ -1,103 +1,48 @@
-> **历史文档（historical-verbatim）**：本篇描述已移除的生产实现；当前架构见 [docs/wiki/README.md](README.md#当前架构速览)。文中文件引用按各篇快照提交锚定。
+> **本篇是当期契约**：代码注释 `// 契约: docs/wiki/agent/event-flow.md#<锚>` 指向本页各节。实现面在 `runtime/agent/`（`loop.go`/`invocation.go`/`request_assembly.go`/`final_round.go`）与 `runtime/state/`（`occupancy.go`/`authority.go`），投影面在 `memory/replay/`（`projection.go`/`replay_budget.go`/`age_segments.go`），装配面在 `assembly/`（`facts.go`/`request.go`/`age_fold.go`/`host_delivery.go`）。
 
-# 事件流与上下文压缩机制
+# 一条链，一条事件流：从输入到交付
+
+三个概念分清楚，本页每个判据都落在其一：**链**管身份与因果（轻、恒可重放）· **原文仓**管字节（重、按需取、可过期）· **账本**管责任（任务迁移、消费回执、交付七态）；其余一切现算。白话版见 [storage-concept-map.html](../../demos/storage-concept-map.html) 与 [storage-time-travel.html](../../demos/storage-time-travel.html)。
 
 <a id="event-stream-overview"></a>
-## 一、整体事件流
-
-用户/外部输入、工具回调、子 Agent 结果、后台任务 settle 四类生产者的写入都汇聚到 EventBus（persistentBus）；`runEventLoop` 每 turn 一 trace（`tagent.turn`）批量 Pull，`BuildInvocation` 合并为一条 model.Message 后交 ContextManager → 框架 Runner；Runner 产出经 outputCh 交外部消费者（wechat-bot / HTTPAPI）。final 响应**只经 outputCh 投递，不回灌 EventBus**——无 bus echo，循环靠 `Pull` 阻塞等待下一个外部/任务事件。
-
-**task_settled 结构化语义**：`settle_status` 五值 `completed/failed/alive-detached/suspect|watch/unknown`——failed 显式携带（`SettleFailed` 或 Err），**未知 Kind 映射 unknown 并告警**，不再默认 completed；反馈按 status 极性落库。Origin 缺失的结算打 `lineage_absent` 标记，回收 turn 降级 `task-unstamped`（宿主 fail-closed 扣留）；控制键（settle_status/task_id/lineage_absent/detached_at_ms）不进 Origin baggage。
-
-**task_settled 回收 turn**：长命令/子 agent 经任务层异步执行，后台结算时 `TaskManager` 发一条自包含的 `task_settled` 事件（复用 `external_input` 类型，`source=task`）到 EventBus，像外部输入一样触发回收 turn——循环空闲则唤醒、进行中则排队（不打断当前 turn）。事件携带原 spawn turn 的 trace 锚（Origin→Metadata 管道），回收 turn 的 root span 据此建 OTel span link（见 [platform 篇](../platform/platform-subsystems.md)）。机制细节见 [agent-architecture.md §2.10](agent-architecture.md#core-components) 任务层。
-
-### 冷启动重建序（R1→R2→R3）
-
-持久循环启动前，build 路径按固定顺序从事实链重建三层状态（均一次、进空态、无据则 no-op）：
-
-1. **投影重建**（`RebuildProjectionFromWAL`）：最新 compaction 事件作 snapshot + `MinEventKey` 写序尾部回放，逐字节复原上下文（prefix-cache 复用）；先于 spill 重放接线；
-2. **任务 registry 重建**（`RebuildTaskRegistryFromWAL`）：`task_spawned` − 终态 settle 纯全量回放，running→suspect 交存活探测裁决；
-3. **常驻会话重挂**（`ReattachResidentSessions`）：tmux list 对账 ResidentMeta → 存活会话重挂 → TaskID 桥把 suspect 任务提升回 running；
-4. **spill 重放双写**（mem_spill 兜底路径）：重放成功事件补投影，恢复「存储⇔投影同点」在退化路径的等价语义。
-
-三层重建只发生在**常驻构建**（冷启动与热新增 agent）：已存在 agent 的执行换代只换执行面，不重建投影、registry 与会话绑定——状态原封流过，在途 turn 持旧代跑完（见 [agent 篇 §2.13](agent-architecture.md#core-components)）。
+## 一、事件流总览：四步一个环，四块一条事件
+环只有四步（`event-loop` 的四步，见 [docs/EXTENSIONS.md](../../EXTENSIONS.md)）：**Ready**（这批事件是谁的、给谁看）→ **消费**（本调用一次 drive）→ **Backflow**（回合进行中读到的终结结算）→ **投递**（按冻结路由交给目标）。一条事件有四个块：identity（事件键）、content（角色与正文）、ownership（分区与实例）、ledger（父键与因果）；`RoleOf` 把投影类型映到模型角色，表外类型按 `ErrProjectionTypeUnmapped` 具名拒绝——不猜、不降级成某一种角色。
 
 <a id="runner-flow"></a>
-## 二、Runner 内部流转
-
-`runner.Run` → 创建/复用 session → 追加用户消息（ResponseEvent RoleUser）→ Plugin.OnEvent 链（SummaryPlugin 注入 Tag + `event_summary` 元数据（原文视图，非内容总结）→ MemoryPlugin 持久化 + 写 StateDelta）→ ContentRequestProcessor 从 `session.Events` 构建 messages → BeforeModel 回调链 → `model.GenerateContent` → FunctionCallResponseProcessor（工具执行/ReAct 控制）→ 追加 response event → EmitEvent 到 channel。
-
-## 三、BeforeModel 回调链
-
-上下文重建收敛为**一个统一的 BeforeModel 装配回调**（另有任务看板注入与诊断日志回调）。投影是**唯一装配源**：除 system 消息外，不读取框架 `Request.Messages` 的任何内容。链条：Step 1 `EventBus.TryPull → persistBusEvent → projection`；Step 2 `ContextCompressor.Compress(refs)` 原生时间线渲染（带 `[evt_KEY|type]` hex 前缀）；Step 3 重建 `[system] + render(投影)`；随后看板回调注入（不入投影）与诊断回调。
-
-**无读回、无当前轮抽取**：所有事件（驱动请求、ReAct 内部的 assistant/tool 步骤、final）均在事件插件管线内同步写入投影（见 §四），框架对工具结果事件的 completion-wait 保证下一次 BeforeModel 时投影必已完整（构造保证，非时序碰巧）。旧版 `extractCurrentTurnMessages`/`filterUser` 读回启发式已删除。
-
-**原生时间线渲染**：回合内同步工具交互以原生协议形态呈现——thinking_plan 渲染为 assistant 消息并携带原生 ToolCalls（content 纯散文，**系统永不生成文本调用语法**，因为任何文本调用语法都会被模型模仿产生伪调用），action_command 渲染为 role=tool 并以 ToolID 与前序调用配对。配对合法性在渲染期单点**双向**保障：无法配对的结果（id 丢失、其调用被压缩掉）降级为 user 侧输入注记（`demoteToInputNote`，内容与关联 id 保留）；反向地，结果不在渲染序列中的 assistant tool_calls 被剥离（骨架模型下 L1 常态丢弃 `action_command`，无此规则会每轮发出悬空调用）。跨回合异步结果（task_settled 等）始终是通知类 input 事件，靠 task id 文本关联。EventKey 字符串形态统一为 16 进制（`FormatEventKey`/`ParseEventKey`）。
+## 二、一个回合在核内的流转
+回合由 `Loop.Drive` 自己驱动，不再借框架 Runner 消费一张外部消息表：`agent.Agent.Decide` 拿到的是一次装配好的请求，模型只提供词汇。一次 drive 的顺序是：`observeReady`（ready 里的每一条事件按下标成事实，空键跳过）→ 会话历史 + ready 合成 transcript → 循环 `decide`（`model.Model.GenerateContent` 出流，`model.ReduceChannel` 做**唯一一次**终结归约）→ 决策落事实并提交通知 → 终结即停。三处边界写死：归约只发生一次（不二次解释流机制）；工具调用只经适配器的 call 面；本回合的 `Turn{Decisions,Terminal,Failure,FinalRound}` 是唯一结果记录，不另立第二份。
 
 <a id="event-pipeline-atomic"></a>
-## 四、事件插件管线：存储 + 投影同点原子
-
-过滤序：`evt == nil` → return nil；Response 或 Choices 为空 → 同步类事件跳过；`IsPartial` → 流式增量仅聚合事件入库/入投影；退化空 `agent_output` → 不存储、不投影。通过后：生成 Snowflake EventKey → `inferEventInfo`（按 Role 推断 EventType + summary）→ 构建 FullEvent（Content 经 sanitize，填 ToolID）→ **归因盖章** Metadata（agent_name 基线 + ctx Attribution：rollout_id / turn trace_id/span_id，先于 StoreEvent）→ StoreEvent → `ProjectionSink.Append(ref)`（ctx 绑定的 per-invocation 投影，存储↔投影同点原子）→ 写 StateDelta 元数据契约（event_key / partition_id / event_type / event_summary）。
-
-> 投影写入位于插件管线（而非消费 goroutine）：框架对工具结果事件的 completion-wait 覆盖插件处理，使"BeforeModel 时投影完整"成为构造保证。RunFlow 用 `plugin.WithProjectionSink` 把当前 invocation 的投影绑到 ctx，主循环与子 agent 天然隔离。
-
-`persistBusEvent` 把总线事件存为 FullEvent（EventKey 由 ContextManager 的 partitionID 以 Snowflake 生成、EventType 从消息角色推断、正文与摘要取自 AgentEvent 的 Message 载荷）并立刻追加进投影。返回值的语义是提交事实：事实已存或本来已存（重放去重路径）都为 true，只有 StoreEvent 失败且投影追加被门住才为 false。下游 submit 门把 false 映射为 transient 提交——不启动模型、认领重新入队；回合回声（`turnEcho`）与 MemoryPlugin 回声跳过只在**所选事实全部提交之后**安装。
+## 三、事实提交：存储与投影同点，幂等按身份
+事实落链与投影追加是**同一次提交**（`assembly/facts.go:recordMapped`）：先 Append 事实，再按**身份**移动滚动边界。四条判据：同一条事实重投不产第二条（`sameFactOf` 按身份判等）；同一身份带不同内容按 `storedFactConflict` 拒，不覆盖；提交失败即整条不进（不先投影后存储）；边界移动与事实同点，读者永远看不到「已可见但未投影」。
 
 <a id="projection-lifecycle"></a>
-## 五、SessionProjection 生命周期
-
-写入端两条：事件插件管线（MemoryPlugin store 成功后 `ProjectionSink.Append(ref)`，载荷 EventKey / PartitionID / EventType / EventSummary / Role）与 bus 外部输入（`persistBusEvent`，**不注 turn trace 锚**——设计边界）。投影是 `EventReference` 数组、EventKey 幂等去重。读取端：`ContextCompressor.Compress` 读 refs → 解析 + 原生时间线渲染 + 压缩生成 retainedRefs → `projection.Replace(retainedRefs)`（旧 refs 替换为新摘要 + 保留近期，重建 seen）。
+## 四、投影生命周期：边界按身份记，预算是每次现算
+投影是 `ReplayProjection`（entries/seen/originals/consumed/fold/boundary/recovery），`Append` 按事件键幂等。滚动边界记的是**身份**（`replayEntry.endedAt`），不是位置——折叠会重写序列，位置边界会在重写后指错对象。边界内的判定 `admitsRange`：`TypeExternalInput`，或 `TypeFeedback` 且触发源为 `task`；换言之能被拿来回放的只有外部输入与本 agent 自己的随动反馈。呈现预算是**每次装配现算**（`AssembleBudget`/`AssembleBudgetPrefix`），绝不读回上一次的形态：每一条目按所剩 room 取第一个装得下的形态，`Full → Ticket → Summary → notice card`；notice 类（feedback 族）**可缩不可丢**，4 字符/令牌是唯一换算常数。
 
 <a id="unified-compression"></a>
-## 六、ContextCompressor 统一压缩
-
-`Compress(ctx, refs)` → `resolveRef` 解析历史 refs（最近 `recentFullCount` 条取 MemoryStore 完整 Content——默认 keepRecent×4，覆盖最近 keepRecent 个完整回合，显式配置优先；更老 refs 直接用 EventSummary 收敛查询规模；打 `[evt_KEY|type]` 前缀）→ 渲染期配对合法性（双向，见 §三）→ `usedTokens ≤ threshold` 则 pass-through（消息与 refs 均不变），否则 SmartCompressor 骨架 L0-L3 → `buildRetainedRefs`（扫压缩后消息的 `[evt_KEY]` 前缀得 retainedKeys；未存活 ref 汇入滚动 summary）→ 返回 Messages + RetainedRefs + Notices。
-
-> 关键点：保留消息**原样携带前缀**，`buildRetainedRefs` 据此判断哪些 ref 被压缩、哪些保留，最后 `projection.Replace(retainedRefs)` 一次原子替换。
-
-**6.1 骨架段模型**：组织单元是**以 `agent_output` 为界的完整任务回合**——段 `[external_input, (thinking_plan|action_command)*, agent_output]`，识别优先经 `[evt_KEY|type]` 前缀（`ParseEventKeyAndType`），缺前缀退回启发式（assistant 且无 tool_calls）。连续 `external_input` 归入同一进行中段；无 `agent_output` 的尾部为进行中段（`IsComplete=false`），永不压缩。段内二分是事件类型纯函数（`IsSkeletonMessage`）：骨架 = `external_input` + `agent_output`；中间事件 = `action_command` / `thinking_plan`。
-
-**6.2 定级**：`age = totalSegs - 1 - segIdx`（0 = 最新段），`keepRecent` 默认 2：
-
-| 级别 | 触发 | 段内保留 | 段内丢弃 |
-|------|------|---------|---------|
-| L0 | 进行中段 或 `age < keepRecent` | 全部消息 | 无 |
-| L1 | `age < keepRecent*2` | 骨架 + `thinking_plan` | `action_command`（tool 先丢） |
-| L2 | `age ≥ keepRecent*2`（老化封顶档） | 仅骨架 | `action_command` + `thinking_plan` |
-| L3 | 仅预算升级（骨架化后仍超预算；段龄不触发） | （整段移出时间线） | 全段 → 滚动 summary |
-
-丢弃序 `tool > assistant`：工具结果体积最大、复用价值最低先丢；`thinking_plan` 承载推理脉络后丢。预算不足时先把老段压到 L2，仍超再按最老优先逐段 L3。预算升级 O(n)：预计算每段四级成本 `cost[i][0..3]`（4n 次 Estimate）后，升级步骤仅 O(1) 增量更新。
-
-**6.3 多段压缩归档出口（L3）**：L3 段**整段不进入压缩产物**——其 event key 不出现在输出中，由 `buildRetainedRefs` 自然收编进滚动 summaryRef：`extractCardLine` 为骨架事件生成带 `[hex]` 召回票据的卡片行。这条路径**零 LLM 可走通**（无摘要模型时 `curateCards` 沉底计数兜底，不失败不降级），为 `external_input` ref 打通归档出口——段数随轮次收敛，不随时间线单调膨胀。
-
-`processTurn` 是唯一的回合原语：冻结/丢弃 → durable submit 门 → BuildInvocation → 投影、触发源与元数据绑定 → 回合租约 → RunFlow（有界重试）→ 结果归约 → durable finish/回执/ack → 空闲锚。持久循环对每次拉到的批次调用一次，子 agent 的 Run 为它自己的调用调用一次。durable 步骤自分类：不携带认领的事件的批次既提交不了也 ack 不了（瞬态委派从不进入 durable 信封）。回合代际绑定恒由 `cm.BeginTurnLease()` 取得——持久循环拿属主 CM 的当前面，子调用拿发起代的面。
+## 五、三龄段折叠：折叠的是呈现，不是链
+旧的分级压缩器已整体退场，现在是**三龄段折叠**：`LevelOfAge(age, keepRecent)` 给段定级（`DefaultAgeKeepRecent=2`），`BandOfLevel` 把它们合成三档——`BandNew`（L0 原样）、`BandMid`（L1/L2）、`BandOld`（L3）。`FoldByAge` 只在体积达阈（`DefaultAgeVolumeThreshold=4096` 字节）时动手：新段的过程细节（`thinking_plan` + `action_command`）折成一条 `segment_fold`；中段与老段折成一条 `history_summary` 置顶。产物用**内容寻址负键**（`-seg-<hex>`/`-hist-<hex>`），同内容不产第二件，因此重复触发是幂等的。每次折叠判定落一条 `compress.request` 事实（`AgeProducerSegmentAge`），折没折都留痕。执行者是 `assembly/age_fold.go` 的 `AgeFoldPlugin`：一个 `fact->observation` 的 PostCommitObserver，**事实提交之后**才折，失败只记具名 gap——不回滚、不重跑、不写事实。原文仍在原文仓，票据与 recall 可达，折叠只改这一次要发出去的那张脸。渲染侧另有一道单点**双向**的配对校验（`assembly/request.go:restoreCallPairing`）：配不上调用的结果降级成 user 侧输入注记（内容与关联 id 都留），结果不在序列里的 assistant tool_calls 被剥离——**系统永不生成文本调用语法**，因为任何文本调用语法都会被模型模仿成伪调用。
 
 <a id="e2e-turn-sequence"></a>
-## 七、一次完整请求的端到端时序
-
-用户 `InjectMessage` → Bus → `runEventLoop` Pull 并 `startTurnSpan`（trigger_source 等属性）→ `BuildInvocation + RunFlow`，绑 ProjectionSink + Attribution（turn trace 锚）+ OriginSpawner → `runner.Run` → `Plugin.OnEvent(user)` → `ProjectionSink.Append(ref)` → ContentRequestProcessor 构建 messages → BeforeModel `assembleRequest`（`GetAll` → 原生时间线渲染 → `[system]+render(投影)`；`projection.Replace(retainedRefs)`）→ `GenerateContent` → response/tool_calls → `Plugin.OnEvent(assistant/tool events)` → Append refs → emit event channel → outputCh 交消费者（克隆事件 + trigger_source/`meta_*` 元数据）→ `endTurnSpan`。
-
-## 八、压缩前后投影变化示例
-
-| 阶段 | SessionProjection 内容 |
-|------|----------------------|
-| 压缩前 | `[ref1(user), ref2(tool), ref3(asst_out), ref4(user), ref5(tool), ref6(asst_out), ref7(user), ref8(tool), ref9(asst_out)]`（3 个 agent_output 界定的回合段） |
-| KeepRecent=1，老段 L3 多段压缩 | `[summaryRef(context_compress), ref7(user), ref8(tool), ref9(asst_out)]` |
-| 注入前缀后 LLM 看到 | `[evt_summary|context_compress]…`、`[evt_7|external_input]`、`[evt_8|action_command]`、`[evt_9|agent_output]` |
-
-> 旧事件被吸收进**滚动** summary ref（形如 `[Compacted N] + 卡片行序列 + recent keys`，跨轮计数累计、卡片继承，永不静默丢历史）；卡片行里的 hex key 即召回票据，LLM 可 `recall(items=[{key}])` 精确回补原文，或 `recall(orchestrate=true)` 请求多跳编排（当前未接线，返回确定性迭代指引）。**诚实 miss**：票据未命中（原文已超 TTL/淘汰）时逐项显式标注 `"miss":true` 并计 `"misses":N`，**零伪造**；断链（父事件缺失）返回 `Complete=false` 如实降级。
+## 六、一次完整回合的端到端时序
+宿主端点收请求（`assembly/host_face.go`：**先鉴权后读体**，未认证即 `ErrHostUnauthenticated`）→ 装配 `Invocation{InvocationID,Address,Instance,Ready}` → `Loop.Drive`：ready 逐条成事实 → 每轮决策前 `Occupy` 会话决策席（同址已有在途即 `ErrSlotHeld`，不并行不插队）→ `RequestFace` 装配请求（固定布局：system 单条恒首位、压缩摘要作 user 级注记、assistant 恒等于模型真实产出）→ `Decide` → tool 调用经适配器执行、结果作为事实提交 → 决策与通知提交 → 终结即 `Vacate` 席位 → 通知由 `assembly/host_delivery.go` 按冻结路由投递，未接受的保留义务。`Backflow` 是回合进行中读终结结算的那条缝：`progress` 落成事实，`settled`/`failed`/`cancelled` 才进入终结处理。
 
 <a id="trace-anchor"></a>
-## 九、trace 锚点：span 与轨迹两条投影必须互链，且不得造假
-
-事件携带 trace 锚点，使读者能从一条事实跳到对应 span。三条底线：noop span（没有真实 SpanContext）一律**降级为空值**而不是伪造 ID；无效 SpanContext 不得产出可用 ID；link 为空就**不建 link**——用假链掩盖断链，比断链本身更难查。
+## 七、trace 锚点：span 与轨迹两条投影必须互链，且不得造假
+事实带归因章（rollout_id / trace_id / span_id），读者能从一条事实跳到对应 span。三条底线：noop span（没有真实 SpanContext）一律**降级为空值**而不是伪造 ID；无效 SpanContext 不得产出可用 ID；link 为空就**不建 link**——用假链掩盖断链，比断链本身更难查。
 
 <a id="multi-user-isolation"></a>
-## 十、多用户并发派发：每条产出只许带发起者的会话标识
+## 八、多用户并发：读权按对授权，调用元数据随输入流动
+一个常驻会话会同时收到多个主体的输入，隔离是两条独立判据。**读权**：`state.Authority` 只记「某主体可读某目标地址」这一对（`GrantRead`），检查只读已记授权、**从不顺手记一条**（问过不等于有权），空白授权拒绝一切读（`ErrReadNotAllowed`）；授权只覆盖那一个 subject×target 对，不扩散到邻会话。**归属**：产出只能携带**发起它的那条输入**的会话标识，调用元数据只能随自己的输入流动，不得暂存在共享实例状态上。症状决定了它必须单独存在：投递目标按会话标识回退选择，一旦串了用户，后果是「给 A 的回信送进 B 的会话」——不报错、不可撤销、事后无法从日志还原。
 
-一个常驻 loop 会同时收到多个用户的输入（`InjectMessageWithMetadata` 携带各自的 `chat_id`）。判据是：**产出的事件必须携带发起它的那条输入的会话标识**，事件经 `StateDelta` 的 `meta_chat_id` 外显这一标识。按该键分桶之后，每个桶里只应该出现属于该用户的内容——一个都不许落到别人的桶里。它的症状决定了它必须单独存在：投递目标在宿主侧按 `meta_chat_id` 回退选择会话，一旦派发串了用户，后果是"给 A 的回信送进 B 的会话"：不报错、不可撤销，事后也无法从日志还原。因此它钉的是装配侧的一条不变量：调用元数据只能随自己的输入流动，不得暂存在共享的实例状态上（同一条理由也决定了 `Run` 的逐调用本地装配）。
+<a id="watchdog-final-round"></a>
+## 九、看门狗收尾轮：预算到期的下一次决策就是收尾轮
+`FinalRoundPolicy{MaxRounds,Budget,Prompt,Timeout}` 装在 `Loop.SetFinalRound` 上，四条红线：两个预算都为 0 时 drive 恒无界；预算只在**回合边界**读，绝不切断已在途的决策；**至多跑一轮**收尾轮，它返回即结束 drive；收尾轮发出的工具调用**一律不受理**——每个调用以配对回执如实拒绝（`finalRoundRefusal`），因为"交付"不该开新义务。收尾轮有三处标记：请求边界 `RequestBoundary.FinalRound`、请求尾部携带收尾指令、按自己的短超时（缺省 30s）运行；`Turn.FinalRound` 报出原因是 `rounds` 还是 `budget`（自终则空）。收尾之后照旧走 `Shutdown.Close` 的真实终结判定——上限生效与优雅收尾两全。
 
-## <a id="watchdog-final-round"></a> 已知缺口
-
-**收尾轮缺口已闭合**：`Loop.SetFinalRound` 装上预算后，回合预算（`MaxRounds`）或时间预算（`Budget`）耗尽的回合边界上，下一次决策即收尾轮——请求边界以 `RequestBoundary.FinalRound` 标注、请求尾部携带收尾指令（总结、交付已有产物、关闭引用）、按自己的短超时运行；收尾轮投递既有产物、不受理任何工具调用（每个调用以配对回执如实拒绝），drive 在它返回时结束并走既有 drain（`Shutdown.Close` 的真实终结判定），因此"上限生效＋优雅收尾"两全。零值策略保持 drive 无界。单 session 循环、handoff schema 两项仍声明于 [agent-architecture.md](agent-architecture.md) 末章。
+## 已知缺口与演进方向
+| 缺口 | 现状与防线 | 候选方向 |
+|---|---|---|
+| 折叠阈是字节数，不是模型视角的价值 | 体积阈能挡住无界膨胀，但「哪一段值得留」仍只看年龄与体积 | 以消费回执与票据命中率作第三判据 |
+| 呈现降级对读者不可见 | `Full→Ticket→Summary` 的降级只体现在发出文本里，没有一条「这一条被降级了」的旁路记录 | 降级计数进 telemetry 的消耗面 |
+| 单会话循环 | 一次 drive 服务一个地址；多主体靠授权与席位隔离，不是多循环 | 会话路由层（多循环共享链与原文仓） |
