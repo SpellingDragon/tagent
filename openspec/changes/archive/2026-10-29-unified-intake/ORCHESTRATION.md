@@ -59,6 +59,7 @@
 | 2 | D2 | ✓ | HistoryFace 第 3 方法+每决策重聚合+退出判据；`8a0113c1`；新锚 4/4 | 引入 host 三红（转 D2R） |
 | 3 | D3 | ✓ | 在途受理 `KindUnknown`+CommitToSession 拆段+wechat 锁降级；`666284ba`；D1 正锚转绿、三哨兵零改动；渠道锚绿 | A4 暂缓勾选（待 D2R） |
 | 4 | D2R | ✓ | 起点界标（`540928db`）三红转绿；末窗口（`cdd2b1a1`）新锚先红后绿；全树绿 | 注明残余竞态（见下） |
-| 5 | D8∥D5∥D4 | 待派 | — | — |
+| 5 | D8∥D5∥D4 | ✓ | 环境块末尾追加（`6c3b34b0`）、冥想重评排期（`6c7e882c`/`a71e3d87`）、场景夹具随环境块归位（`11477c2c`）；E1–E4/B1–B3/D5R2 全勾 | 全叶勾选 |
+| 6 | D7（F1–F4） | ✓ | F1 主规格零改动（`git diff a0f057e0..HEAD -- openspec/specs` 空）；F2 十门全绿（lint/build/根测试三连/双示例/场景 `match` run `93e3413f`/变异 `gate.ok=true`/预算/两项 validate）；F3 双锚绿 + 红锚点 `41580639`/`bdb88238` 重跑 FAIL + 行为回滚探针（`boundaryInput` 返空、删判据①）各红；F4 归档 `2026-10-29-unified-intake`、规格 `+70/−3`（含 CLI 落地的 orchestration +9）、doc-budget 21955→22022 具名随迁 | 归档提交 `ac0464cc`；四残余入 run-notes |
 
-**残余（如实入 spec gaps）**：`[drive 最后一次 boundary 读 → run.Invoke 返回]` 内到达的消息可能在新 turn 请求中出现两份（悬空已消除；彻底解法需跨 host/loop 的「不再读链」信号，超本变更授权，登记下轮）。
+**残余（如实入 spec gaps）**：`[drive 最后一次 boundary 读 → run.Invoke 返回]` 内到达的消息可能在新 turn 请求中出现两份（悬空已消除；彻底解法需跨 host/loop 的「不再读链」信号，超本变更授权，登记下轮）。完整四条（竞态副本、boot 文档方言无 `environment_block` 字段、计划外的 `Reflection.MinGap` 访问器、负载抖动观察）见 [run-notes.md](run-notes.md)「残余」节。
