@@ -45,10 +45,10 @@ const (
 	// intakeInFlightBody is the message that lands in the chain of the turn in flight,
 	// committed through the run's own write face while the slow call is parked.
 	intakeInFlightBody = "intake: the message that lands in the chain in flight"
-	// intakeEnvironmentOpen and intakeEnvironmentClose mark the dynamic environment
-	// block a request closes with, so the anchor reads the block by its markers alone.
-	intakeEnvironmentOpen  = "<environment>"
-	intakeEnvironmentClose = "</environment>"
+	// intakeEnvironmentSection is the named section the dynamic environment block
+	// opens with: the system channel carries it the way the fixed prompt carries
+	// its own material, so no marker of our own stands beside the adapter framing.
+	intakeEnvironmentSection = "## Environment"
 	// intakeEnvironmentPrompt is the prompt body the environment document declares,
 	// so the block names a fixed content version instead of the empty face.
 	intakeEnvironmentPrompt = "intake: the prompt body the environment block names"
@@ -294,17 +294,18 @@ func TestTheChainKeepsTheSameTextTwice(t *testing.T) {
 	}
 }
 
-// TestTheEnvironmentBlockTrailsTheContext checks where the environment block stands in the request the model reads.
+// TestTheEnvironmentBlockClosesTheSystemMaterial checks where the environment block stands in the request the model reads.
 //
-// - positive: the last message of every request is the environment block, carried under the declared markers
-// - positive: the block names the tool face beside the declared prompt version
-// - negative: no message ahead of it carries the marker, so the block never enters the prefix
-// - negative: an agent declaring no environment block closes on its transcript alone
+// - positive: the last system message of every request is the environment section; every message after it is conversation
+// - positive: the section names the tool face beside the declared prompt version
+// - negative: no message carries a self-made marker, so the block never poses as conversation
+// - positive: the tool face travels the native Tools field — the request carries no tool schema as text
+// - negative: an agent declaring no environment block carries no environment section at all
 // - consumer: assembly.Assemble + Run.Invoke, read back from the native requests the model entry was driven with
 //
 // 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
-func TestTheEnvironmentBlockTrailsTheContext(t *testing.T) {
-	t.Run("the block trails the context of every request", func(t *testing.T) {
+func TestTheEnvironmentBlockClosesTheSystemMaterial(t *testing.T) {
+	t.Run("the block closes the system material of every request", func(t *testing.T) {
 		requests := intakeEnvironmentDrive(t, true)
 		if len(requests) == 0 {
 			t.Fatal("model requests = 0, want the turn served")
@@ -313,41 +314,59 @@ func TestTheEnvironmentBlockTrailsTheContext(t *testing.T) {
 			if len(request.Messages) == 0 {
 				t.Fatalf("request %d carries no message", index)
 			}
-			last := request.Messages[len(request.Messages)-1]
-			if last.Role != model.RoleUser || !strings.Contains(last.Content, intakeEnvironmentOpen) ||
-				!strings.Contains(last.Content, intakeEnvironmentClose) {
-				t.Fatalf("last message of request %d = (%q, %q), want the marked environment block trailing the context (%s)",
-					index, last.Role, last.Content, intakeEnvironmentShape(requests))
+			lastSystem := -1
+			for at, message := range request.Messages {
+				if message.Role == model.RoleSystem {
+					lastSystem = at
+				}
 			}
-			for at, message := range request.Messages[:len(request.Messages)-1] {
-				if strings.Contains(message.Content, intakeEnvironmentOpen) {
-					t.Fatalf("message %d of request %d carries the environment marker: the block never enters the prefix (%s)",
+			if lastSystem < 0 {
+				t.Fatalf("request %d carries no system message (%s)", index, intakeEnvironmentShape(requests))
+			}
+			block := request.Messages[lastSystem]
+			if !strings.HasPrefix(block.Content, intakeEnvironmentSection) {
+				t.Fatalf("last system message of request %d = %q, want it to open with the environment section (%s)",
+					index, block.Content, intakeEnvironmentShape(requests))
+			}
+			for at := lastSystem + 1; at < len(request.Messages); at++ {
+				if request.Messages[at].Role == model.RoleSystem {
+					t.Fatalf("message %d of request %d is system material behind the conversation: the block closes the system channel (%s)",
 						at, index, intakeEnvironmentShape(requests))
 				}
 			}
 			for _, want := range []string{"- agent: " + intakeEntryAgent, "- model: " + intakeEntryModel, "- skills: (none)", "- mcp: (none)", "- tasks: 0 open"} {
-				if !strings.Contains(last.Content, want) {
-					t.Fatalf("environment block = %q, want it to name %q", last.Content, want)
+				if !strings.Contains(block.Content, want) {
+					t.Fatalf("environment block = %q, want it to name %q", block.Content, want)
 				}
 			}
-			if tools := intakeEnvironmentValue(last.Content, "- tools:"); !strings.Contains(tools, intakeEnvironmentTool) {
-				t.Fatalf("environment block tool face = %q, want it to name %q (%q)", tools, intakeEnvironmentTool, last.Content)
+			if tools := intakeEnvironmentValue(block.Content, "- tools:"); !strings.Contains(tools, intakeEnvironmentTool) {
+				t.Fatalf("environment block tool face = %q, want it to name %q (%q)", tools, intakeEnvironmentTool, block.Content)
 			}
-			if version := intakeEnvironmentValue(last.Content, "- prompt_version:"); version == "" || version == "(none)" {
-				t.Fatalf("environment block prompt version = %q, want the content version the request boundary fixed (%q)", version, last.Content)
+			if version := intakeEnvironmentValue(block.Content, "- prompt_version:"); version == "" || version == "(none)" {
+				t.Fatalf("environment block prompt version = %q, want the content version the request boundary fixed (%q)", version, block.Content)
+			}
+			if request.Tools[intakeEnvironmentTool] == nil {
+				t.Fatalf("native tools of request %d carry no %q: the tool face travels the Tools field, never the transcript (%s)",
+					index, intakeEnvironmentTool, intakeEnvironmentShape(requests))
+			}
+			for at, message := range request.Messages {
+				if strings.Contains(message.Content, `"parameters"`) || strings.Contains(message.Content, "<environment>") {
+					t.Fatalf("message %d of request %d carries tool schema or a self-made marker: the parser layer owns both framings (%q)",
+						at, index, message.Content)
+				}
 			}
 		}
 	})
 
-	t.Run("negative: an undeclared block adds no trailing message", func(t *testing.T) {
+	t.Run("negative: an undeclared block carries no environment section", func(t *testing.T) {
 		requests := intakeEnvironmentDrive(t, false)
 		if len(requests) == 0 {
 			t.Fatal("model requests = 0, want the turn served")
 		}
 		for index, request := range requests {
 			for at, message := range request.Messages {
-				if strings.Contains(message.Content, intakeEnvironmentOpen) {
-					t.Fatalf("message %d of request %d = (%q, %q), want no environment block for an agent that declares none (%s)",
+				if strings.Contains(message.Content, intakeEnvironmentSection) {
+					t.Fatalf("message %d of request %d = (%q, %q), want no environment section for an agent that declares none (%s)",
 						at, index, message.Role, message.Content, intakeEnvironmentShape(requests))
 				}
 			}
@@ -413,14 +432,14 @@ func intakeEnvironmentShape(requests []model.Request) string {
 	described := make([]string, 0, len(requests))
 	for index, request := range requests {
 		roles := make([]string, 0, len(request.Messages))
-		marked := ""
+		section := ""
 		for _, message := range request.Messages {
 			roles = append(roles, string(message.Role))
-			if strings.Contains(message.Content, intakeEnvironmentOpen) {
-				marked = string(message.Role)
+			if strings.Contains(message.Content, intakeEnvironmentSection) {
+				section = string(message.Role)
 			}
 		}
-		described = append(described, fmt.Sprintf("#%d roles=%v marked=%q", index, roles, marked))
+		described = append(described, fmt.Sprintf("#%d roles=%v section=%q", index, roles, section))
 	}
 	return "[" + strings.Join(described, "; ") + "]"
 }

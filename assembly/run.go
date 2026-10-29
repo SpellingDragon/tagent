@@ -476,6 +476,25 @@ func (r *Run) bindMCPServers(ctx context.Context, servers []mcpgw.DeclaredServer
 	return nil
 }
 
+// NarrowFace narrows the face one agent may see from the next request boundary
+// on, or opens it again when the selection carries no list: the binding is not
+// republished, so the change reaches the very next request. The host and the
+// plugins that guard one agent call this; the request's tools, the environment
+// block and the capture view all read the narrowed face.
+func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection state.VisibleSelection) error {
+	handle, err := r.bindings.Borrow(ctx, agent)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = handle.Release(ctx) }()
+	resources, ok := handle.Binding.Set.(*state.ToolResources)
+	if !ok {
+		return fmt.Errorf("tagent: agent %q carries no tool resources to narrow", agent)
+	}
+	resources.SetVisible(selection)
+	return nil
+}
+
 // CloseMCPServers releases every MCP server the live registry holds: the close
 // closes each server's connection exactly once, waits for the calls still in
 // flight and answers the release errors it accumulated. An embedding process

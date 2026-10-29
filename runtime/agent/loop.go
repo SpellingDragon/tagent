@@ -1007,14 +1007,9 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		return Decision{}, model.Outcome{}, nil, nil, err
 	}
 
-	tools := make(map[string]trpctool.Tool, len(handle.Binding.Tools))
-	callable := make(map[string]trpctool.CallableTool, len(handle.Binding.Tools))
-	for _, tool := range handle.Binding.Tools {
-		if tool == nil || tool.Declaration() == nil {
-			continue
-		}
-		name := tool.Declaration().Name
-		tools[name] = tool
+	tools, toolOrder := state.ToolFace(handle.Binding)
+	callable := make(map[string]trpctool.CallableTool, len(tools))
+	for name, tool := range tools {
 		if native, ok := tool.(trpctool.CallableTool); ok {
 			callable[name] = native
 		}
@@ -1036,10 +1031,10 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if round.final {
 		messages = append(messages, model.Message{Role: model.RoleUser, Content: round.prompt})
 	}
-	if boundary.Environment != "" {
-		messages = append(messages, model.Message{Role: model.RoleUser, Content: boundary.Environment})
+	if boundary.DynamicSystem != "" {
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: boundary.DynamicSystem})
 	}
-	req := model.Request{Messages: messages, Tools: tools}
+	req := model.Request{Messages: messages, Tools: tools, ToolOrder: toolOrder}
 	l.fixCapture(ctx, decisionID, view, req)
 
 	production := &inFlightProducer{}
@@ -1539,12 +1534,8 @@ func modelViewOf(binding state.AgentBinding) modelView {
 		modelName:     binding.Model.Info().Name,
 		promptVersion: binding.PromptSource.Version,
 	}
-	for _, tool := range binding.Tools {
-		if tool == nil || tool.Declaration() == nil {
-			continue
-		}
-		view.visibleTools = append(view.visibleTools, tool.Declaration().Name)
-	}
+	_, order := state.ToolFace(binding)
+	view.visibleTools = append(view.visibleTools, order...)
 	return view
 }
 

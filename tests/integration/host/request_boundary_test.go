@@ -155,6 +155,11 @@ func TestSkillBodyReachesNextRequest(t *testing.T) {
 	if !carriesSystemBody(requests[1], "extra body v1") {
 		t.Fatalf("second request = %+v, want the loaded skill body carried as boundary material", requests[1].Messages)
 	}
+	if trailing := requests[1].Messages[len(requests[1].Messages)-1]; trailing.Role != model.RoleSystem ||
+		!strings.Contains(trailing.Content, "extra body v1") {
+		t.Fatalf("last message = (%q, %q), want the dynamic section closing the request with the loaded body",
+			trailing.Role, trailing.Content)
+	}
 	if got := countBody(requests[1], "greet body v1"); got != 1 {
 		t.Fatalf("second request carries the greet body %d times, want exactly once beside its load", got)
 	}

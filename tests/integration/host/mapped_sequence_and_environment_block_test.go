@@ -141,7 +141,7 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 		}
 	}
 	for _, message := range got {
-		if strings.Contains(message.Content, environmentBlockOpen) {
+		if strings.Contains(message.Content, "## Environment") {
 			t.Fatalf("request carries an environment block the agent never declared: %v", got)
 		}
 	}
@@ -156,8 +156,57 @@ func TestProjectionAbsentKeepsTheTranscript(t *testing.T) {
 	}
 }
 
+// TestFixedPromptFilesMergeIntoOneSystemMessage checks the declared prompt files enter the request as one system message.
+//
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
+func TestFixedPromptFilesMergeIntoOneSystemMessage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	writePromptAt(t, filepath.Join(root, "prompts", "a.md"), "prompt body a\n")
+	writePromptAt(t, filepath.Join(root, "prompts", "b.md"), "prompt body b\n")
+	provider := &entryModel{name: "model-a", answer: func(*model.Request) *model.Response {
+		return entryFinalTurn("settled")
+	}}
+	decl := &config.Declaration{
+		Entry: "agent-a",
+		Agents: []config.AgentSpec{{
+			ID:    "agent-a",
+			Model: "model-a",
+			Files: []config.FileRef{
+				{Path: filepath.Join(root, "prompts", "a.md"), Kind: config.FileKindPrompt},
+				{Path: filepath.Join(root, "prompts", "b.md"), Kind: config.FileKindPrompt},
+			},
+		}},
+	}
+	run, err := assembly.Assemble(ctx, decl, map[event.AgentID]assembly.NativeAgent{
+		"agent-a": {Model: provider},
+	}, assembly.WithGovernance(passPolicy{}))
+	if err != nil {
+		t.Fatalf("assemble the runtime: %v", err)
+	}
+	invokeTurn(t, run, "inv-merge-1", event.Address{AgentID: "agent-a", SessionID: "session-merge"}, "看看前缀")
+
+	requests := provider.recorded()
+	if len(requests) != 1 {
+		t.Fatalf("recorded requests = %d, want exactly one formal request", len(requests))
+	}
+	got := requests[0].Messages
+	if len(got) != 2 {
+		t.Fatalf("request carries %d messages, want the merged prompt and the input: %v", len(got), got)
+	}
+	if got[0].Role != model.RoleSystem ||
+		!strings.Contains(got[0].Content, "prompt body a") || !strings.Contains(got[0].Content, "prompt body b") {
+		t.Fatalf("message 0 = (%q, %q), want one system message carrying both prompt files", got[0].Role, got[0].Content)
+	}
+	if got[1].Role != model.RoleUser || got[1].Content != "看看前缀" {
+		t.Fatalf("message 1 = (%q, %q), want the invocation input", got[1].Role, got[1].Content)
+	}
+}
+
 // TestEnvironmentBlockClosesTheRequestAssembly checks where the declared environment block stands.
-//   - the block is the last message of the request, behind the mapped sequence and the invocation's own input
+//   - the block is the last part of the boundary assembly, after the mapped sequence
+//   - the invocation's own input still closes the request behind it
 //   - the block names the agent, the empty tool, skill and MCP faces and the empty task table
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
@@ -194,20 +243,19 @@ func TestEnvironmentBlockClosesTheRequestAssembly(t *testing.T) {
 	}
 	got := requests[1].Messages
 	if len(got) != 4 {
-		t.Fatalf("second request carries %d messages, want the two mapped facts, the input and the block: %v", len(got), got)
+		t.Fatalf("second request carries %d messages, want the two mapped facts, the input and the trailing block: %v", len(got), got)
 	}
 	for i := 0; i < 3; i++ {
-		if strings.Contains(got[i].Content, environmentBlockOpen) {
-			t.Fatalf("message %d carries the environment marker, want it behind the mapped sequence and the input", i)
+		if strings.Contains(got[i].Content, "## Environment") {
+			t.Fatalf("message %d carries the environment block, want it behind the mapped sequence and the input", i)
 		}
 	}
 	if got[2].Role != model.RoleUser || got[2].Content != "第二轮输入" {
 		t.Fatalf("message 2 = (%q, %q), want the invocation input ahead of the block", got[2].Role, got[2].Content)
 	}
 	block := got[3]
-	if block.Role != model.RoleUser || !strings.HasPrefix(block.Content, environmentBlockOpen+"\n") ||
-		!strings.HasSuffix(block.Content, environmentBlockClose) {
-		t.Fatalf("message 3 = (%q, %q), want the marked environment block trailing the request", block.Role, block.Content)
+	if block.Role != model.RoleSystem || !strings.HasPrefix(block.Content, "## Environment\n") {
+		t.Fatalf("message 3 = (%q, %q), want the environment block closing the request", block.Role, block.Content)
 	}
 	for _, want := range []string{
 		"- agent: agent-a",
@@ -279,18 +327,37 @@ func TestEnvironmentBlockNamesTheAvailableFaces(t *testing.T) {
 	}
 	got := requests[0].Messages
 	if len(got) != 4 {
-		t.Fatalf("request carries %d messages, want the prompt, the skill body, the input and the block: %v", len(got), got)
+		t.Fatalf("request carries %d messages, want the prompt, the skill body, the block and the input: %v", len(got), got)
 	}
 	block := got[len(got)-1]
-	if block.Role != model.RoleUser || !strings.HasPrefix(block.Content, environmentBlockOpen+"\n") ||
-		!strings.HasSuffix(block.Content, environmentBlockClose) {
-		t.Fatalf("message %d = (%q, %q), want the marked environment block trailing the request", len(got)-1, block.Role, block.Content)
+	if block.Role != model.RoleSystem || !strings.HasPrefix(block.Content, "## Environment\n") {
+		t.Fatalf("message %d = (%q, %q), want the environment block closing the request", len(got)-1, block.Role, block.Content)
 	}
-	if input := got[len(got)-2]; input.Role != model.RoleUser || input.Content != "看看环境" {
-		t.Fatalf("message %d = (%q, %q), want the range input ahead of the block", len(got)-2, input.Role, input.Content)
+	if last := got[len(got)-2]; last.Role != model.RoleUser || last.Content != "看看环境" {
+		t.Fatalf("message %d = (%q, %q), want the range input ahead of the block", len(got)-2, last.Role, last.Content)
 	}
 	if !strings.Contains(got[0].Content, "system prompt") || !strings.Contains(got[1].Content, "greet body v1") {
 		t.Fatalf("request prefix = %v, want the fixed prompt and skill bodies in front of the block", got[:2])
+	}
+	listed := map[string]bool{}
+	for _, line := range strings.Split(block.Content, "\n") {
+		if !strings.HasPrefix(line, "- tools: ") {
+			continue
+		}
+		for _, name := range strings.Split(strings.TrimPrefix(line, "- tools: "), ", ") {
+			if name = strings.TrimSpace(name); name != "" && name != "(none)" {
+				listed[name] = true
+			}
+		}
+	}
+	if len(listed) != len(requests[0].Tools) {
+		t.Fatalf("environment list names %d tools (%v), want the %d the request carries: one face for both",
+			len(listed), listed, len(requests[0].Tools))
+	}
+	for name := range requests[0].Tools {
+		if !listed[name] {
+			t.Fatalf("environment list omits %q while the request carries it: the model would miss a callable tool", name)
+		}
 	}
 	for _, want := range []string{
 		"- skills: greet",
@@ -396,9 +463,11 @@ func TestEnvironmentBlockNamesTheOpenObligations(t *testing.T) {
 		t.Fatalf("recorded requests = %d, want exactly one request of the observing range", len(requests))
 	}
 	got := requests[0].Messages
-	if len(got) != 2 || !strings.HasPrefix(got[1].Content, environmentBlockOpen+"\n") ||
-		!strings.HasSuffix(got[1].Content, environmentBlockClose) {
-		t.Fatalf("request = %v, want the environment block trailing the input", got)
+	if len(got) != 2 || !strings.HasPrefix(got[1].Content, "## Environment\n") {
+		t.Fatalf("request = %v, want the environment block closing the request", got)
+	}
+	if got[0].Role != model.RoleUser {
+		t.Fatalf("message 0 = (%q, %q), want the range input ahead of the block", got[0].Role, got[0].Content)
 	}
 	block := got[1].Content
 	if !strings.Contains(block, "- tasks: 1 open") {

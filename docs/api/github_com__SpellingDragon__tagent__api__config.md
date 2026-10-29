@@ -93,7 +93,10 @@ type AgentSpec struct {
 	// Model references the model the agent uses. The reference is a name that
 	// the composition root resolves; this package never resolves it.
 	Model string
-	// Tools lists the agent's tool, sub-agent and remote references.
+	// Tools lists the agent's tool, sub-agent and remote references. The list
+	// is the configured face, the most the agent may ever see: the face a
+	// request carries is a subset of it, the full list by default, and the host
+	// narrows it at run time without republishing the binding.
 	Tools []ToolRef
 	// Plugins lists the agent's plugin references in pipeline order.
 	Plugins []string

@@ -670,7 +670,10 @@ func (d *hostDocument) modelFor(id string, client *http.Client) (trpcmodel.Model
 
 // buildModel constructs one native model from an explicit provider and model
 // name: the reentrant step both Boot and a lease rebuild run, so a model
-// replacement reads the very construction the first generation read.
+// replacement reads the very construction the first generation read. The
+// adapter's cache reorder is off: it would lift the trailing dynamic system
+// section the loop appends, and the layout already keeps the stable prefix
+// first without it.
 func (d *hostDocument) buildModel(id, providerName, modelName string, client *http.Client) (trpcmodel.Model, error) {
 	providerName = strings.TrimSpace(providerName)
 	provider, ok := d.Providers[providerName]
@@ -698,7 +701,10 @@ func (d *hostDocument) buildModel(id, providerName, modelName string, client *ht
 			endpoint = override
 		}
 	}
-	opts := []openai.Option{openai.WithAPIKey(key)}
+	opts := []openai.Option{
+		openai.WithAPIKey(key),
+		openai.WithOptimizeForCache(false),
+	}
 	if id == strings.TrimSpace(d.Entry) {
 		opts = append(opts, openai.WithChatTelemetry(true))
 	}

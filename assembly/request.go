@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -403,12 +404,13 @@ func (r *Run) requestBoundary(ctx context.Context, boundary agent.RequestBoundar
 	_, sequence, registered := r.replaySlotLocked(event.Address{AgentID: boundary.Agent, SessionID: boundary.Chain.SessionID})
 	r.mu.Unlock()
 	assembly := requestAssembly{
-		run:         r,
-		boundary:    boundary,
-		fixer:       fixer,
-		sequence:    sequence,
-		registered:  registered,
-		fixedSkills: map[string]bool{},
+		run:               r,
+		boundary:          boundary,
+		fixer:             fixer,
+		sequence:          sequence,
+		registered:        registered,
+		fixedSkills:       map[string]bool{},
+		loadedSkillBodies: map[string]string{},
 	}
 	return assembly.assemble(ctx)
 }
@@ -451,27 +453,30 @@ func (a *projectionAssembler) assemble(ctx context.Context) ([]model.Message, er
 // skill bodies the fixed files already carry and the content version the
 // request runs on.
 type requestAssembly struct {
-	run           *Run
-	boundary      agent.RequestBoundary
-	fixer         *fileFixer
-	sequence      replayEntry
-	registered    bool
-	fixedSkills   map[string]bool
-	promptVersion string
-	assembler     projectionAssembler
+	run               *Run
+	boundary          agent.RequestBoundary
+	fixer             *fileFixer
+	sequence          replayEntry
+	registered        bool
+	fixedSkills       map[string]bool
+	loadedSkillBodies map[string]string
+	promptVersion     string
+	assembler         projectionAssembler
 }
 
 // assemble declares the segments of the layout in the fixed order, runs them
-// through the one assembler and answers the boundary view they produce. An
-// agent declaring the environment block receives the block beside the prefix:
-// the block is rendered here, after every segment settled the content version
-// it names, and the loop appends it behind the transcript instead of the
-// prefix carrying it.
+// through the one assembler and answers the boundary view they produce. The
+// prefix carries only the stable material: the declared prompt and the declared
+// skill bodies, each merged into one system message, beside the history
+// projection. Everything that changes while the run goes — the bodies a skill
+// load published and the environment block — is rendered into the dynamic
+// section and appended by the loop as the request's last message, so a change
+// there never moves the stable prefix the provider caches.
 func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, error) {
+	a.publishSkillBodies(ctx)
 	if a.fixer != nil {
-		a.assembler.segment(a.fixedFiles)
+		a.assembler.segment(a.fixedSystem)
 	}
-	a.assembler.segment(a.loadedSkillBodies)
 	if a.registered {
 		a.assembler.segment(a.projectedMainContext)
 	}
@@ -479,37 +484,81 @@ func (a *requestAssembly) assemble(ctx context.Context) (agent.BoundaryView, err
 	if err != nil {
 		return agent.BoundaryView{}, err
 	}
-	view := agent.BoundaryView{Messages: messages, PromptVersion: a.promptVersion, VisibleSkills: visibleSkillsOf(a.boundary.Binding)}
-	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
-		view.Environment = a.run.environmentBlock(ctx, a.boundary, a.promptVersion)
-	}
-	return view, nil
+	return agent.BoundaryView{
+		Messages:      messages,
+		PromptVersion: a.promptVersion,
+		VisibleSkills: a.narrowSkillNames(mergeSkillNames(visibleSkillsOf(a.boundary.Binding), a.loadedSkillNames())),
+		DynamicSystem: a.dynamicSystem(ctx),
+	}, nil
 }
 
-// fixedFiles reads the declared prompt and skill bodies afresh at this boundary
+// dynamicSystem renders the dynamic system section the request closes with: the
+// bodies the skill loads published, in skill-name order, beside the environment
+// block an agent declares last. The section travels the system channel as the
+// request's final message, so each family adapter frames it as system material
+// while the stable prefix ahead of it keeps its cache.
+func (a *requestAssembly) dynamicSystem(ctx context.Context) string {
+	var b strings.Builder
+	for _, name := range a.loadedSkillNames() {
+		body := a.loadedSkillBodies[name]
+		if body == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "## Skill: %s\n%s\n\n", name, body)
+	}
+	if a.run.agentSpecOf(a.boundary.Agent).EnvironmentBlock {
+		b.WriteString(a.run.environmentBlock(ctx, a.boundary, a.promptVersion))
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// environmentBlock contributes the closing system section of the request: the
+// faces the request carries beside the open asynchronous work at this boundary,
+// rendered as the named Markdown section the fixed prompt's own material uses.
+// The material travels the system channel, so each family adapter turns it into
+// its own system framing instead of the request posing as conversation.
+func (a *requestAssembly) environmentBlock(ctx context.Context) ([]model.Message, error) {
+	return []model.Message{{Role: model.RoleSystem, Content: a.run.environmentBlock(ctx, a.boundary, a.promptVersion)}}, nil
+}
+
+// fixedSystem reads the declared prompt and skill bodies afresh at this boundary
 // and contributes them as the leading system messages, in the structural order
 // the binding carries. The skill names it read are kept beside the messages, so
 // the loaded-skill segment never repeats a body the fixed files already carry.
-func (a *requestAssembly) fixedFiles(ctx context.Context) ([]model.Message, error) {
+func (a *requestAssembly) fixedSystem(ctx context.Context) ([]model.Message, error) {
 	snapshot, err := a.fixer.fixate(ctx, a.boundary.Binding.PromptSource)
 	if err != nil {
 		return nil, err
 	}
-	messages := make([]model.Message, 0, len(snapshot.Files))
+	var prompts, skillBodies []string
+	visibleSkills := a.visibleSkillSet()
 	for _, fixed := range snapshot.Files {
-		messages = append(messages, model.Message{Role: model.RoleSystem, Content: fixed.Content})
 		if fixed.Ref.Kind == config.FileKindSkill {
-			a.fixedSkills[skillNameOf(fixed.Ref.Path)] = true
+			name := skillNameOf(fixed.Ref.Path)
+			a.fixedSkills[name] = true
+			if visibleSkills != nil && !visibleSkills[name] {
+				continue
+			}
+			skillBodies = append(skillBodies, fixed.Content)
+			continue
 		}
+		prompts = append(prompts, fixed.Content)
 	}
 	if snapshot.Version != "" {
 		a.promptVersion = snapshot.Version
 	}
+	messages := make([]model.Message, 0, 2)
+	if len(prompts) > 0 {
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: strings.Join(prompts, "\n\n")})
+	}
+	if len(skillBodies) > 0 {
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: strings.Join(skillBodies, "\n\n")})
+	}
 	return messages, nil
 }
 
-// loadedSkillBodies contributes the skill bodies a load already fixed for the
-// request: the bodies the binding's tool resources fixed on the declared skill
+// publishSkillBodies records the skill bodies a load already fixed for the
+// request into the dynamic section: the bodies the binding's tool resources fixed on the declared skill
 // files, beside the bodies the agent's skill_dirs load tool published through
 // its sink. Skill-name order, once each, and never a body the fixed files
 // already carry. It runs after the fixed-file segment, so the names that
@@ -517,10 +566,20 @@ func (a *requestAssembly) fixedFiles(ctx context.Context) ([]model.Message, erro
 // nowhere else: a declared skill file keeps its request-boundary fixed view on
 // the binding, while a skill_dirs load has no such file declaration to fix a
 // view on and publishes through the sink instead.
-func (a *requestAssembly) loadedSkillBodies(context.Context) ([]model.Message, error) {
-	bodies := map[string]string{}
+func (a *requestAssembly) publishSkillBodies(context.Context) {
+	bodies := a.loadedSkillBodies
+	declared := map[string]bool{}
+	for _, ref := range a.boundary.Binding.PromptSource.Files {
+		if ref.Kind == config.FileKindSkill {
+			declared[skillNameOf(ref.Path)] = true
+		}
+	}
+	visibleSkills := a.visibleSkillSet()
 	hold := func(name, body string) {
-		if name == "" || body == "" || a.fixedSkills[name] {
+		if name == "" || body == "" || declared[name] || a.fixedSkills[name] {
+			return
+		}
+		if visibleSkills != nil && !visibleSkills[name] {
 			return
 		}
 		if _, held := bodies[name]; held {
@@ -530,7 +589,7 @@ func (a *requestAssembly) loadedSkillBodies(context.Context) ([]model.Message, e
 	}
 	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
 	if !ok {
-		return nil, nil
+		return
 	}
 	for _, load := range resources.SkillLoads() {
 		if !load.Loaded {
@@ -543,16 +602,116 @@ func (a *requestAssembly) loadedSkillBodies(context.Context) ([]model.Message, e
 			hold(load.Name, load.Body)
 		}
 	}
-	names := make([]string, 0, len(bodies))
-	for name := range bodies {
+}
+
+// visibleSkillSet reports the skills the visible face keeps as a set, or nil
+// when the selection names no subset: the fixed skill bodies and the dynamic
+// section read the same face, so the prefix never carries a body the visible
+// list omits.
+func (a *requestAssembly) visibleSkillSet() map[string]bool {
+	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
+	if !ok {
+		return nil
+	}
+	visible := resources.Visible().Skills
+	if visible == nil {
+		return nil
+	}
+	set := make(map[string]bool, len(visible))
+	for _, name := range visible {
+		set[name] = true
+	}
+	return set
+}
+
+// narrowedSkillsOf reports the declared skills the visible face keeps: a nil
+// selection keeps every declaration, and a named subset keeps the
+// intersection. The environment block and the request's visible skills read
+// one face.
+func narrowedSkillsOf(binding state.AgentBinding) []string {
+	names := visibleSkillsOf(binding)
+	resources, ok := binding.Set.(*state.ToolResources)
+	if !ok {
+		return names
+	}
+	visible := resources.Visible().Skills
+	if visible == nil {
+		return names
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if slices.Contains(visible, name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// narrowSkillNames reports the skill names the visible face keeps: a nil
+// selection keeps every name, and a named subset keeps the intersection.
+func (a *requestAssembly) narrowSkillNames(names []string) []string {
+	resources, ok := a.boundary.Binding.Set.(*state.ToolResources)
+	if !ok {
+		return names
+	}
+	visible := resources.Visible().Skills
+	if visible == nil {
+		return names
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		if slices.Contains(visible, name) {
+			kept = append(kept, name)
+		}
+	}
+	return kept
+}
+
+// visibleMCPOf reports the MCP references the visible face keeps, by reference
+// name: a nil selection keeps every configured reference.
+func visibleMCPOf(spec config.AgentSpec, binding state.AgentBinding) []string {
+	refs := spec.Tools
+	if resources, ok := binding.Set.(*state.ToolResources); ok {
+		if visible := resources.Visible().MCP; visible != nil {
+			kept := make([]config.ToolRef, 0, len(refs))
+			for _, ref := range refs {
+				if slices.Contains(visible, ref.Name) {
+					kept = append(kept, ref)
+				}
+			}
+			refs = kept
+		}
+	}
+	return endpointsOf(refs)
+}
+
+// mergeSkillNames reports the union of two skill-name lists, each name once,
+// in name order: the visible face the request carries and the dynamic section
+// name the same set.
+func mergeSkillNames(declared, loaded []string) []string {
+	seen := make(map[string]bool, len(declared)+len(loaded))
+	names := make([]string, 0, len(declared)+len(loaded))
+	for _, list := range [][]string{declared, loaded} {
+		for _, name := range list {
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// loadedSkillNames reports the published skill bodies in skill-name order.
+func (a *requestAssembly) loadedSkillNames() []string {
+	names := make([]string, 0, len(a.loadedSkillBodies))
+	for name := range a.loadedSkillBodies {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	messages := make([]model.Message, 0, len(names))
-	for _, name := range names {
-		messages = append(messages, model.Message{Role: model.RoleSystem, Content: bodies[name]})
-	}
-	return messages, nil
+	return names
 }
 
 // carriesContributedLoad reports whether one binding carries the contributed
@@ -892,25 +1051,27 @@ func environmentBlockDebug(format string, args ...any) {
 // behind its transcript, for an agent that declares it: the agent the request
 // runs as, the tool, skill and MCP faces available to it, the content version
 // its prompt files fixed and the asynchronous work it holds open at this
-// boundary. The block is carried under the declared markers and the loop
-// appends it as its own user message after everything else, because everything
-// in it changes with the run while the material ahead of it — the fixed prompt,
-// the skill bodies and the transcript — does not, so the changing part never
-// moves the stable prefix it follows.
+// boundary. The block is the closing section of the request's system material,
+// rendered as a named Markdown section the way the fixed prompt renders its own:
+// the system channel is what the family adapters turn into their own system
+// framing, so the block never poses as conversation. Everything in it changes
+// with the run while the material ahead of it — the fixed prompt and the skill
+// bodies — does not, so the changing part never moves the stable prefix it
+// follows, and no marker of our own is invented beside the adapter's framing.
 func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary, promptVersion string) string {
 	spec := r.agentSpecOf(boundary.Agent)
 	open, omitted := r.openTaskLines(ctx)
 	environmentBlockGenerations.Add(1)
 	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s tasks=%d omitted=%d", boundary.Agent, len(open)+omitted, omitted)
 	var b strings.Builder
-	b.WriteString("<environment>\n")
+	b.WriteString("## Environment\n")
 	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)
 	if modelName := modelNameOf(boundary.Binding); modelName != "" {
 		fmt.Fprintf(&b, "- model: %s\n", modelName)
 	}
 	fmt.Fprintf(&b, "- tools: %s\n", listOrNone(toolNamesOf(boundary.Binding)))
-	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(visibleSkillsOf(boundary.Binding)))
-	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(endpointsOf(spec.Tools)))
+	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(narrowedSkillsOf(boundary.Binding)))
+	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(visibleMCPOf(spec, boundary.Binding)))
 	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
 	fmt.Fprintf(&b, "- tasks: %d open\n", len(open)+omitted)
 	if len(open) == 0 {
@@ -922,8 +1083,7 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	if omitted > 0 {
 		fmt.Fprintf(&b, "  - (+%d more)\n", omitted)
 	}
-	b.WriteString("</environment>")
-	return b.String()
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // openTaskLines reports the obligations this run owes as the environment block
@@ -951,33 +1111,14 @@ func (r *Run) openTaskLines(ctx context.Context) ([]string, int) {
 	return lines[:environmentTaskLines], len(lines) - environmentTaskLines
 }
 
-// toolNamesOf reports the tool names one binding exposes to the model, in name
-// order and each named once: the tools the binding carries beside the tools its
-// tool resources registered, so the file and skill families the request face
-// carries are named with the contributed ones.
+// toolNamesOf reports the tool names one binding's request carries, in the
+// order the request emits them: the published tools in name order first, the
+// tools registered after publication behind them. The list reads the same face
+// the request's Tools come from, so the model never reads a name it cannot
+// call.
 func toolNamesOf(binding state.AgentBinding) []string {
-	seen := map[string]bool{}
-	var names []string
-	collect := func(name string) {
-		if name == "" || seen[name] {
-			return
-		}
-		seen[name] = true
-		names = append(names, name)
-	}
-	for _, tool := range binding.Tools {
-		if tool == nil || tool.Declaration() == nil {
-			continue
-		}
-		collect(tool.Declaration().Name)
-	}
-	if resources, ok := binding.Set.(*state.ToolResources); ok {
-		for _, record := range resources.Resources() {
-			collect(record.Name)
-		}
-	}
-	sort.Strings(names)
-	return names
+	_, order := state.ToolFace(binding)
+	return order
 }
 
 // endpointsOf reports the MCP faces one declaration makes available, as the

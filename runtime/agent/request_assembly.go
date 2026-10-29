@@ -53,12 +53,12 @@ type RequestBoundary struct {
 type BoundaryView struct {
 	// Messages are the prefix messages of the request, in fixed layout order.
 	Messages []model.Message
-	// Environment is the dynamic environment block the request closes with,
-	// rendered under its declared markers: the faces the request carries beside
-	// the open asynchronous work at this boundary. The loop appends it as the
-	// last message of the request, behind the transcript. An empty block appends
-	// nothing, so an agent declaring none keeps the request at its transcript.
-	Environment string
+	// DynamicSystem is the dynamic system section the request closes with: the
+	// bodies the skill loads published beside the environment block an agent
+	// declares, rendered as one system message the loop appends as the last
+	// message of the request. The stable prefix ahead of it keeps the provider
+	// cache; an empty section appends nothing.
+	DynamicSystem string
 	// PromptVersion is the content version the request boundary fixed.
 	PromptVersion string
 	// VisibleSkills lists the skill names the boundary material makes visible to

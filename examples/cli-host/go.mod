@@ -4,7 +4,7 @@ go 1.24.1
 
 replace github.com/SpellingDragon/tagent => ../..
 
-replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.1
+replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.2
 
 require (
 	github.com/SpellingDragon/tagent v0.0.0-00010101000000-000000000000
