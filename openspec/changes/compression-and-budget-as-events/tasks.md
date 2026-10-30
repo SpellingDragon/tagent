@@ -2,13 +2,13 @@
 
 ## L1 事件契约
 
-- [ ] 新增 `api/event/compress_product.go`（字段、内容寻址 ID、Fact 实现、单测）
-- [ ] 新增 `api/event/final_round_request.go`（字段、内容寻址 ID、Fact 实现、单测）
-- [ ] `api/event/types.go` 注册两个类型；FACT-VOCABULARY 增两行
+- [x] 新增 `api/event/compress_product.go`（字段、内容寻址 ID、Fact 实现、单测）——`29735dfc`
+- [x] 新增 `api/event/final_round_request.go`（字段、内容寻址 ID、Fact 实现、单测）——`29735dfc`
+- [x] `api/event` 注册两个类型；FACT-VOCABULARY 增两行——实现形态：`Fact` 接口（`FactKey`/`FactType`）在类型文件内实现，`types.go` 无需改动（`29735dfc`）
 
 ## L2 压缩三段式
 
-- [ ] `memory/replay`：把「判定」与「执行」拆开（`JudgeByAge` 只报应折段与 request；`FoldByAge` 保留执行，供 consumer 复用）
+- [x] `memory/replay`：把「判定」与「执行」拆开（`PlanByAge` 只报应折段与 request；`ApplyProducts` 保留执行，供 consumer 复用）——`3d668df8`；`FoldByAge` 兼容保留
 - [ ] `assembly`: `AgeFoldPlanner` 只提交 request；新增 `CompressionConsumer` 读 request 执行并提交 product
 - [ ] 投影：product 事实到达时产出合成条目（键/正文/覆盖区间）；`renderProjection` 不变
 - [ ] 恢复：`seedReplay` 读 product 重建合成条目，删除 `restoreFoldForm` 重折路径
