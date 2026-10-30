@@ -22,6 +22,8 @@
 | 4 | 声明 | `config` | `Fingerprint(d)` 的规范指纹 hex（`api/config/fact.go`） | `config.declaration` | 指纹只取声明面：同内容重载同一身份；源文档 `Raw` 与运行期绑定不入指纹；config 不 import event，结构性满足 `Fact` |
 | 5 | 引用票据 | `memory/ledger` | `OriginalRef.Key`（原文 blob 的规范 hex 键，`reference.go`） | `memory.original` | 去重域（owner/format/retention）只分开票据、不重标识 blob：同内容多票据共键，`Put` 不失效既有票据 |
 | 7 | 压缩请求 | `event` | `CompressRequest.ID`（producer‖subject‖reason 内容寻址，`api/event/compress_request.go`；日志随事实入链） | `compress.request` | 同判定同身份：重复/重试判定不分叉第二条请求，`At` 只作首落盘戳；消费后单次 retire |
+| 8 | 压缩产物 | `event` | `CompressProduct.ID`（request‖producer‖key 内容寻址，`api/event/compress_product.go`） | `compress.product` | 一条 request 至多一条产物：重试执行同身份；键与正文是投影恢复的唯一来源 |
+| 9 | 收尾判定 | `event` | `FinalRoundRequest.ID`（range‖reason 内容寻址，`api/event/final_round_request.go`） | `final_round.request` | 同一 range 同原因至多一条：判定输入（轮次/耗时）随事实走但不入身份 |
 
 合成身份的语义（具名裁定）：通知的身份是它自己携带的四元组，`Notice.Event` 指向的已提交事实**永不替换**这个身份，所以四元组才是 `FactKey` 的输入、被指向的事件只是消费线索；声明的身份是规范指纹（`api/config/fact.go` 具名注释）；票据的身份是原文 hex 键，去重域只决定票据能否并存，不改写身份。
 

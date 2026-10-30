@@ -57,6 +57,12 @@ var (
 // CompressRequestType is a frozen type word, not a computed value.
 const _ = CompressRequestType
 
+// CompressProductType is a frozen type word, not a computed value.
+const _ = CompressProductType
+
+// FinalRoundRequestType is a frozen type word, not a computed value.
+const _ = FinalRoundRequestType
+
 // The model replacement family keeps its declared shapes: the judgment a
 // producer files, its identity derivation and the event it commits as.
 var (
