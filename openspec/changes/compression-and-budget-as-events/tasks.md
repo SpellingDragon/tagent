@@ -1,27 +1,63 @@
 # 任务
 
-## L1 事件契约
+## D1 消费循环骨架（红锚先行）
 
-- [x] 新增 `api/event/compress_product.go`（字段、内容寻址 ID、Fact 实现、单测）——`29735dfc`
-- [x] 新增 `api/event/final_round_request.go`（字段、内容寻址 ID、Fact 实现、单测）——`29735dfc`
-- [x] `api/event` 注册两个类型；FACT-VOCABULARY 增两行——实现形态：`Fact` 接口（`FactKey`/`FactType`）在类型文件内实现，`types.go` 无需改动（`29735dfc`）
+- [ ] 红锚：慢工具期间用户补充被回答（当前 dispatch 阻塞，预期红）
+- [ ] 红锚：同会话不同来源的输入进入同一次模型请求（当前按 invocation 分隔，预期红）
+- [ ] 新建 `runtime/agent/consumer.go`：每会话一个消费 goroutine，pull → dispatch → model → 回到 pull
+- [ ] 消费循环拉取面：从事实链读「上次 agent_output 之后」的事件，按事件类型分派
+- [ ] 停止面：context 取消即停止；重启后从链读出恢复位置
 
-## L2 压缩三段式
+## D2 入口收敛
 
-- [x] `memory/replay`：把「判定」与「执行」拆开（`PlanByAge` 只报应折段与 request；`ApplyProducts` 保留执行，供 consumer 复用）——`3d668df8`；`FoldByAge` 兼容保留
-- [ ] `assembly`: `AgeFoldPlanner` 只提交 request；新增 `CompressionConsumer` 读 request 执行并提交 product
-- [ ] 投影：product 事实到达时产出合成条目（键/正文/覆盖区间）；`renderProjection` 不变
-- [ ] 恢复：`seedReplay` 读 product 重建合成条目，删除 `restoreFoldForm` 重折路径
-- [ ] 红锚：重启后投影含 product 合成条目且不重折；smoke 断言恢复严格（键相等）
+- [ ] `Host.Invoke`：删 `acceptInflight`（受理判定）与 `driveLocked` 的 gate hold/release；改为提交事实 → 唤醒消费循环 → 等待 agent_output
+- [ ] `InjectEvent`：改为提交事实 → 唤醒消费循环（不启动 Drive）
+- [ ] `fireNoticeTurn`：改为 CommitToSession → 唤醒消费循环
+- [ ] 红锚：入口提交后消费循环接到事件并驱动模型
 
-## L3 预算耗尽事件化
+## D3 工具等待解除
 
-- [ ] `assembly`: `FinalRoundPlanner` 按 policy 评估并提交 `final_round.request`
-- [ ] `runtime/agent`: 决策边界读本 range 的 request → `closingRound` 以 request 为准（四红线不变）；无 request 时本地快判并补提交
-- [ ] 红锚：预算耗尽后下一轮为收尾轮且链上有一条 request；未接 planner 时行为不变
+- [ ] `dispatch`：派发全部调用后立即返回，删除逐个 `await`
+- [ ] 工具结果以事件回到队列（已有的 Backflow 路径保持）
+- [ ] 消费循环在下一次拉取时读到工具结果事件 → 组装上下文 → 调用模型
+- [ ] 红锚：快结果先到先消费（不等慢结果）
+- [ ] 红锚：慢任务期间新输入被回答（对齐 prototype TestAgentPipelineAsyncDispatch）
 
-## L4 迁移与验收
+## D4 A/B 闭合与段边界
 
-- [ ] smoke/event-integrity 场景随契约迁移（compress 事实、final_round 事实）
-- [ ] 文档：event-flow 收尾轮段、FACT-VOCABULARY、README 一句
-- [ ] 门：根全量 + lint + event-short 十轮 + event-long
+- [ ] 模型最终回复（无工具调用）→ 立即 commit `agent_output` → 闭合段
+- [ ] 投影段边界：由消费关系（本次回答实际消费了哪些输入）决定，而非链上位置
+- [ ] 后续到达的输入（B）属于下一段；不被已闭合段误标
+- [ ] 红锚：A 期间 B 落链 → A 回答闭合 → B 在下一段被消费
+
+## D5 删除 gate / Occupancy 收敛
+
+- [ ] 删除 `addressGate` 结构（token + inflight + hold/release/running）
+- [ ] 删除 `Host.gates` map
+- [ ] 冥想判据②：改读消费循环运行状态（该会话是否有模型请求在执行）
+- [ ] 查询面（`Sites`/`Inventory`）：读消费循环状态
+- [ ] 红锚：并发两请求同 session → 第二个返回受理收据，消费循环合并处理
+
+## D6 压缩三段式接线（已完成 L1+L2a）
+
+- [ ] `AgeFoldPlugin` 改为只调 `PlanByAge` 并提交 `compress.request`
+- [ ] 新增 `CompressionConsumer`：收到 request → `ApplyProducts` → 提交 `compress.product`
+- [ ] `seedReplay` 读 product 重建合成条目，删除 `restoreFoldForm` 重折
+- [ ] 红锚：重启后投影含 product 合成条目且不重折
+
+## D7 预算事件化
+
+- [ ] `FinalRoundPlanner`（PostCommit 观察者）按 policy 提交 `final_round.request`
+- [ ] 消费循环在模型调用前读本会话的 request → 读到则为收尾轮（四红线不变）
+- [ ] 红锚：预算耗尽后下一次模型调用为收尾轮且链上有一条 request
+
+## D8 迁移与验收
+
+- [ ] smoke/event-integrity 场景迁移（消费循环行为、compress 事实、final_round 事实）
+- [ ] 文档：README「消费循环与事件驱动」节、event-flow 消费段、GLOSSARY
+- [ ] 门：根全量 + lint + race + event-short 十轮 + event-long
+
+## 已完成（前序批次）
+
+- [x] L1 事件契约：`compress.product` + `final_round.request`（提交 29735dfc）
+- [x] L2a 判定/执行拆分：`PlanByAge` / `ApplyProducts`（提交 3d668df8）
