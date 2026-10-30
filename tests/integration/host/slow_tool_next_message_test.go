@@ -125,6 +125,9 @@ func TestSlowToolDoesNotBlockNextConsumption(t *testing.T) {
 	if first := awaitIntegrityDrive(t, ended, "the turn whose tool ran"); first.err != nil {
 		t.Fatalf("the turn whose tool ran ended by error: %v", first.err)
 	}
+	if err := host.Close(ctx); err != nil {
+		t.Fatalf("close the slow-tool host: %v", err)
+	}
 }
 
 // slowToolRequestCarries reports whether one request carried the named user
@@ -162,16 +165,19 @@ func newSlowToolSender(base recordingSender) *slowToolSender {
 	}
 }
 
-// Send parks the first body until the check releases it and hands every body to
-// the stand-in, so the tool reads as running and every delivered body is read.
+// Send parks the note of the slow tool — the body that tool carries — until
+// the check releases it, and hands every body to the stand-in, so the tool
+// reads as running while the answers of the session still leave.
 func (s *slowToolSender) Send(ctx context.Context, target event.Address, body string) error {
-	s.parkOnce.Do(func() {
-		close(s.arrived)
-		select {
-		case <-s.release:
-		case <-ctx.Done():
-		}
-	})
+	if body == slowToolNote {
+		s.parkOnce.Do(func() {
+			close(s.arrived)
+			select {
+			case <-s.release:
+			case <-ctx.Done():
+			}
+		})
+	}
 	err := s.base.Send(ctx, target, body)
 	if err == nil {
 		select {
