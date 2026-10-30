@@ -1,5 +1,12 @@
 package event // import "github.com/SpellingDragon/tagent/api/event"
 
+The compress product family: the product a consumer minted for one compress
+request, stated as the fact it is — which request it answers, which producer
+executed it, the product key the projection carries, the entries the product
+covers and the product text. A product is filed once per request: the identity
+is content-addressed over the request and the key, so a retried execution
+answers the same identity instead of filing a second product.
+
 The compress request family: the judgment that material is due for compression,
 stated as the fact it is — who judged, why, what was judged and the identity
 the judgment is quoted by — and never as the instruction that performs the
@@ -15,6 +22,12 @@ a card sequence) and the log that files it (memory) live in three domains,
 and the event axis is the one package all three already speak. The producer and
 the reason a mechanism states stay with that mechanism; this file states the
 fact they are quoted by.
+
+The final round request family: the judgment that one range's budget is spent
+and its next decision is the closing round, stated as the fact it is — which
+range, why, and the inputs the judgment read. A producer files the judgment,
+the loop reads it at a decision boundary and runs the closing round; a range
+carries one request however often the judgment is re-evaluated.
 
 The model replacement family: the judgment that one agent's model reference
 moves from the version in effect to another version, stated as the fact it is —
@@ -101,8 +114,14 @@ const (
     fact carries beside the frozen trigger source stamp: the version the move
     starts from, the version it asks for and the result the producer states.
 
+const CompressProductType = "compress.product"
+    CompressProductType is the frozen type of a compress product fact.
+
 const CompressRequestType = "compress.request"
     CompressRequestType is the frozen type of a compress request fact.
+
+const FinalRoundRequestType = "final_round.request"
+    FinalRoundRequestType is the frozen type of a final round request fact.
 
 const MetaPrefix = "meta_"
     MetaPrefix marks a pass-through business metadata key: any key carrying
@@ -146,6 +165,40 @@ type AgentID string
 type AttemptID string
     AttemptID identifies one observable model attempt; a retry hidden below the
     decision boundary does not fake a new attempt.
+
+type CompressProduct struct {
+	// ID is the identity of the product: content-addressed over the answers and
+	// the product key, so one request answers one product identity.
+	ID EventID
+	// Answers names the judgment this product answers and the mechanism that
+	// executed the compression.
+	Answers ProductAnswers
+	// Key is the product key the projection carries the entry under; its prefix
+	// states the kind.
+	Key EventID
+	// Covered lists the entry keys the product covers, in their original order.
+	Covered []EventID
+	// Text is the product text the projection presents.
+	Text string
+}
+    CompressProduct is one compress product fact: the material a consumer folded
+    for one judgment. It is immutable once filed, and it is the only source the
+    projection restores a synthetic product entry from. What the product is — a
+    folded segment or a history summary — is read off the key's prefix, and the
+    filing moment is the commit stamp of the fact, so neither is stated twice.
+
+func CompressProductFor(request EventID, producer string, key EventID, covered []EventID, text string) CompressProduct
+    CompressProductFor returns the product fact one execution files:
+    the identity is content-addressed over the request it answers and the key
+    it carries, so a repeated execution of the same judgment files nothing new.
+    The filing moment stays zero for the log to stamp on first filing.
+
+func (p CompressProduct) FactKey() string
+    FactKey returns the product's identity as a fact key: the identity one
+    execution is quoted by, unchanged by every retry of that execution.
+
+func (p CompressProduct) FactType() string
+    FactType returns the frozen type a compress product is read as.
 
 type CompressRequest struct {
 	// ID is the identity of the judgment: the content-addressed key the request
@@ -294,6 +347,37 @@ type Fact interface {
     one fact is asked MUST NOT re-derive an identity from a non-identity field
     or rewrite a quoted identity
 
+type FinalRoundRequest struct {
+	// ID is the identity of the judgment: content-addressed over the range and
+	// the reason, so the same judgment never files a second request.
+	ID EventID
+	// Range is the invocation whose budget the judgment read.
+	Range InvocationID
+	// Reason states why the budget is spent: the round count or the elapsed time.
+	Reason string
+	// Rounds is the number of tool rounds the range had run when judged.
+	Rounds int
+	// Elapsed is the time the range had spent when judged.
+	Elapsed time.Duration
+}
+    FinalRoundRequest is one final round request fact: the judgment that a
+    range's budget is spent. It is immutable once filed, and its identity is
+    independent of the moment and the measured inputs, so one range answers one
+    request.
+
+func FinalRoundRequestFor(rangeID InvocationID, reason string, rounds int, elapsed time.Duration) FinalRoundRequest
+    FinalRoundRequestFor returns the request fact one judgment files:
+    the identity is content-addressed over the range and the reason, so a
+    re-evaluation of the same spent budget answers the same identity. The filing
+    moment stays zero for the log to stamp on first filing.
+
+func (r FinalRoundRequest) FactKey() string
+    FactKey returns the request's identity as a fact key: the identity one range
+    is quoted by, unchanged by every re-evaluation of the same budget.
+
+func (r FinalRoundRequest) FactType() string
+    FactType returns the frozen type a final round request is read as.
+
 type InstanceID string
     InstanceID identifies one runtime instance. Rebuilding an agent under the
     same name yields a different instance.
@@ -387,6 +471,15 @@ func ParseEventMeta(meta map[string]string) ParsedMeta
     key lands in its named field, a MetaPrefix entry lands in PassThrough,
     and any other entry lands in Unknown; no entry is dropped and the input map
     is left exactly as it was.
+
+type ProductAnswers struct {
+	// Request is the judgment this product answers.
+	Request EventID
+	// Producer names the mechanism that executed the compression.
+	Producer string
+}
+    ProductAnswers names the judgment one product answers beside the mechanism
+    that executed it.
 
 type SessionID string
     SessionID identifies one conversation session of an agent.

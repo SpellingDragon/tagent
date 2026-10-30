@@ -1,5 +1,10 @@
 package replay // import "github.com/SpellingDragon/tagent/memory/replay"
 
+The fold plan: the judgment one producer files and one consumer executes.
+A plan reads a projection and answers the products a fold would mint without
+touching it; applying the products answers the entries one direct fold answers,
+so the two halves of compression never share a step.
+
 The segment-age axis of the mapped sequence: a projection is partitioned
 into task-turn segments that close at an agent output, exactly the way the
 deterministic compress level reads them, and each segment is placed in one
@@ -192,6 +197,22 @@ type AgeFoldPlan struct {
     and the rendered volume a projection may carry before a fold is due.
     A plan naming no window or no threshold reads the defaults.
 
+type AgeFoldPlanReport struct {
+	// Volume is the rendered volume the judgment read.
+	Volume int
+	// Threshold is the volume the plan measures against.
+	Threshold int
+	// Triggered reports whether the material is over its bound.
+	Triggered bool
+	// Counts reports what the products would consume.
+	Counts FoldedCounts
+	// Products lists the products the plan would mint, in application order.
+	Products []FoldProduct
+}
+    AgeFoldPlanReport is the judgment of one fold plan: what the plan would
+    consume and the products it would mint, beside the volume it read. Reading a
+    plan never touches the projection.
+
 type AgeFoldReport struct {
 	// Volume is the rendered volume the projection carried, in bytes.
 	Volume int
@@ -329,6 +350,28 @@ type EventChain interface {
     The redline list (3 rules): MUST page the chain in EventKey write order,
     after the given key. MUST refuse a page limit below one by name. MUST NOT
     answer a failed read as an empty chain.
+
+type FoldProduct struct {
+	// Entry is the synthetic entry the projection carries under Entry.Key.
+	Entry ProjectionEntry
+	// Covered lists the entry keys the product consumes, in their original
+	// order: the process detail of one closed segment, or the middle bands.
+	Covered []event.EventID
+	// Request is the judgment this product answers.
+	Request event.CompressRequest
+}
+    FoldProduct is one product a plan would mint: the synthetic entry to place,
+    the entries it covers and the compress request it answers. A product is
+    what a producer judges and what a consumer executes, so the judgment and the
+    execution never share a step.
+
+type FoldedCounts struct {
+	// Segment counts the process-detail entries a segment product consumes.
+	Segment int
+	// Middle counts the entries a history summary consumes.
+	Middle int
+}
+    FoldedCounts reports what one fold judgment would consume.
 
 type MemoryEventChain struct {
 	// Has unexported fields.
@@ -497,6 +540,12 @@ func (p *ReplayProjection) Append(_ context.Context, entry ProjectionEntry)
     budgets and the fact reads back unchanged either way. An append is an
     in-memory mutation, so it takes the port's context with nothing to cancel.
 
+func (p *ReplayProjection) ApplyProducts(products []FoldProduct)
+    ApplyProducts places the products a judgment minted onto the projection:
+    each covered entry is replaced by its product, a history summary lands ahead
+    of the material it summarizes, and a product whose entry is already held
+    changes nothing — applying one judgment twice is applying it once.
+
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error)
     AssembleBudget packs the projection into one agent request of the given
     token budget and returns the entries the request is assembled from,
@@ -569,6 +618,11 @@ func (p *ReplayProjection) Len() int
 
 func (p *ReplayProjection) Original(key event.EventID) (string, bool)
     Original returns the kept original text of one keyed entry.
+
+func (p *ReplayProjection) PlanByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldPlanReport, error)
+    PlanByAge judges one fold plan without touching the projection: it answers
+    the products the fold would mint, so a producer can file the judgment and a
+    consumer can execute it later, each on its own.
 
 func (p *ReplayProjection) RecoveryHint() *ProjectionEntry
     RecoveryHint returns the recovery hint entry a rebuild left, nil before one.
