@@ -4086,7 +4086,9 @@ func smokeLongAssemble(t *testing.T, plan smokeCalibrationPlan, run *smokeCalibr
 // smokeLongReconcile 按计划逐身份核账：每个输入/重绑标记恰有一次入口请求，
 // 每个非故障委派恰有一次结算通知，每个非故障输入与重绑恰有一次动作外发；
 // 故障点只由负锚分类，丢弃即静默丢失；故障步可能一次都到不了模型，首尝试
-// 单列、不并进重试数。
+// 单列、不并进重试数。委派输入的动作外发按形态核账：工具轮的 mid-flight
+// 叙述只在它由一次自己的请求作答时投递（形态只从录到的请求携带的材料判），
+// 并合形态下出现一次就是多投。
 func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, report *smokeLongReport) smokeLongReconciliation {
 	requests := provider.recorded()
 	lasts := make([]string, len(requests))
@@ -4198,13 +4200,22 @@ func smokeLongReconcile(provider *smokeProvider, plan smokeCalibrationPlan, repo
 			recon.DuplicateActions = append(recon.DuplicateActions, fmt.Sprintf("%s x%d", key, got))
 		}
 	}
+	reject := func(want, marker string) {
+		if got := observed[want+" "+marker]; got != 0 {
+			recon.DuplicateActions = append(recon.DuplicateActions, fmt.Sprintf("%s %s x%d", want, marker, got))
+		}
+	}
 	for _, step := range plan.Timeline {
 		if step.Kind != "input" || smokeLongIsFaultStep(plan, step) {
 			continue
 		}
 		if step.Shape == "delegate" {
-			expect("delegate ack", step.Marker)
 			expect("settle-ack", step.Marker)
+			if smokeDelegateAnsweredAlone(provider, step.Marker) {
+				expect("delegate ack", step.Marker)
+			} else {
+				reject("delegate ack", step.Marker)
+			}
 			continue
 		}
 		expect("answer", step.Marker)

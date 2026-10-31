@@ -52,6 +52,7 @@ const failureNoticeSummary = "failure-notice"
 //   - Each body stands as a durable delivery obligation before its send: a stop between the
 //     record and the confirmed send is answered by a restart that sends the body, and the
 //     obligation is settled under the identity the generation registered.
+//   - Only a body whose obligation is still owed is sent: a body an earlier process delivered under the same invocation identity carries a settled receipt and is left as it stands. A run beside no durable account sends every body it generated, because nothing outside it ever recorded a discharge.
 func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender MessageSender, lineage string, turn agent.Turn) {
 	if sender == nil {
 		return
@@ -70,10 +71,16 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender Mess
 		assemblyDebug("tagent: the invocation of %s produced no deliverable assistant body", addr.SessionID)
 		return
 	}
-	if _, err := h.recordDeliveryOwed(ctx, addr, lineage, bodies); err != nil {
-		assemblyWarn("tagent: the delivery obligations of %s were not registered: %v", addr.SessionID, err)
+	owed := bodies
+	if h.deliveryDurable() != nil && addr.AgentID == h.entry {
+		filtered, err := h.recordDeliveryOwed(ctx, addr, lineage, bodies)
+		if err != nil {
+			assemblyWarn("tagent: the delivery obligations of %s were not registered: %v", addr.SessionID, err)
+		} else {
+			owed = filtered
+		}
 	}
-	for _, body := range bodies {
+	for _, body := range owed {
 		obligation, _ := freshObligationOf(body)
 		delivery := plugin.Delivery{Content: body.content, Lineage: lineage, Target: addr}
 		if _, cause := h.deliverObligation(ctx, obligation, sender, delivery); cause != "" {

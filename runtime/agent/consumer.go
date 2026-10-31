@@ -91,9 +91,13 @@ type Consumer struct {
 	mu sync.Mutex
 	// awaited names the tasks the flying segment admitted and has not paired
 	// yet; a settled result of one of them belongs to the segment.
-	awaited  sync.Map
-	cursor   event.EventID
-	read     map[event.EventID]bool
+	awaited sync.Map
+	cursor  event.EventID
+	read    map[event.EventID]bool
+	// seeded reports whether the first pull of this loop has already marked
+	// the driving facts the boot found inside closed segments as read; a loop
+	// that boots over no chain holds nothing to seed.
+	seeded   bool
 	flying   *segment
 	results  []segmentResult
 	segCount int
@@ -259,6 +263,10 @@ func (c *Consumer) pullDriving() pulledEvents {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.seeded {
+		c.seeded = true
+		c.seedAnsweredLocked(facts, lastOutput)
+	}
 	from := 0
 	if c.cursor != "" {
 		for at, evt := range facts {
@@ -285,6 +293,29 @@ func (c *Consumer) pullDriving() pulledEvents {
 	}
 	c.cursor = facts[len(facts)-1].Key
 	return pull
+}
+
+// seedAnsweredLocked marks the driving facts one boot finds inside a closed
+// segment as read. The chain a fresh process opens on presents every closed
+// segment as the history prefix of its next request, so the input behind that
+// boundary was carried by the segment that closed there: reading it as fresh
+// input again would drive a second answer over a question the history already
+// holds, once per boot. Only the driving facts past the last agent_output —
+// the material of a segment the process died beside — drive the first pull.
+//
+// - A chain beside no agent_output is one segment in flight from its head, so nothing is marked and every driving fact it holds drives.
+// - The boundary is read from the chain the pull holds, never from the process clock: a fact the restart cannot yet see stays unanswered rather than being seeded away.
+func (c *Consumer) seedAnsweredLocked(facts []event.Event, lastOutput int) {
+	if lastOutput < 0 {
+		return
+	}
+	for at := 0; at < lastOutput; at++ {
+		evt := facts[at]
+		if evt.Key == "" || !startsRange(evt) {
+			continue
+		}
+		c.read[evt.Key] = true
+	}
 }
 
 // openSegment mints the range identity of one segment over the driving facts
