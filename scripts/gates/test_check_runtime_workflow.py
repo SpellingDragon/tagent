@@ -394,11 +394,14 @@ def assert_event_producer_jobs(workflow):
     long_job = jobs["event-integrity-long"]
     long_step = step_with(long_job, "--scope event-long")
     long_run = long_step.get("run") or ""
-    # --timeout bounds ONE go test process, cold compile included: 03.11
-    # re-measured 2026-10-28 at up to 1149s per shard (and over the old
-    # 1200s on slow push runs), so 2400s must fit inside the 45m job cap.
+    # --timeout bounds ONE go test process, cold compile included: the
+    # 256-window shard measured 3086s end to end in a local -race run (seed 1),
+    # because the 256-token window makes every request assemble its history
+    # under the smallest budget the matrix names. 5400s bounds that shard at
+    # 1.75x and must fit inside the 120m job cap; the 32768-window shards still
+    # measure 787-1111s (run 41216521132).
     for needle in ('--seed "$SEED"', '--window "$WINDOW"', "--repeat 1",
-                   "--timeout 2400",
+                   "--timeout 5400",
                    '--out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"'):
         if needle not in long_run:
             raise AssertionError(
@@ -410,10 +413,10 @@ def assert_event_producer_jobs(workflow):
     long_env = long_step.get("env") or {}
     if long_env.get("SEED") != "${{ matrix.seed }}" or long_env.get("WINDOW") != "${{ matrix.window }}":
         raise AssertionError("matrix values must reach the long command via env")
-    if long_job.get("timeout-minutes") != 45:
+    if long_job.get("timeout-minutes") != 120:
         raise AssertionError(
-            "event-integrity-long timeout-minutes must be the 03.11 measurement "
-            "(1149s max shard, 2400s --timeout, 45m job cap)")
+            "event-integrity-long timeout-minutes must be the measured budget "
+            "(256-window shard 3086s local, 5400s --timeout, 120m job cap)")
     assert_single_artifact_upload(
         "event-integrity-long", long_job,
         "event-integrity-long-seed-${{ matrix.seed }}-window-${{ matrix.window }}",
