@@ -3309,6 +3309,7 @@ func symptomStableTexts(rig *smokeRig, chat string, timeout time.Duration) []str
 // TestLocalSmokeSymptomAcceptedSilent 是症状直译锚 G1：委派被受理后、任务结算前，用户不该收到“已受理/在跑/稍后会通知你”这一类确认。
 // - 正锚 silent_until_settled：模型后续请求里与本调用配对的 tool result 恰为最小 "ok"，不携带 task id、状态词、后台任务与结算承诺。
 // - 叠加锚 silent_until_settled：受理后、结算前本会话 outbound=0；脚本模型安静时它先于修复即绿，不替代模型世界判据。
+// - 桩的安静面：结算通知可能单独或与回执合批到达，桩对未脚本化的请求一律安静返回，防停机应答落进结算窗口冒充产品失败。
 // - 负锚 legitimate_answer_still_delivered：正常提问的回答仍必须投递，防静默吞正常输出。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
 func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
@@ -3330,10 +3331,6 @@ func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
 					`{"input":"produce `+marker+`"}`))
 				return true
 			}
-			// Every other request stays silent: the settle notice may reach the
-			// model batched with the receipt or alone, and a fallback answer
-			// here would land in the settle-window this anchor watches as a
-			// product failure it is not.
 			fmt.Fprint(w, smokeAnswerBody(""))
 			return true
 		}
