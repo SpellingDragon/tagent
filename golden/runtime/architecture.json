@@ -111,7 +111,7 @@
       "pattern": "runtime/task/approval",
       "role": "task-approval",
       "required": true,
-      "reason": "审批是任务生命周期的一环：ApprovalChannel 与 ApprovalManager 的台账/扫描/裁决归 task 域的子包，只引 plugin 的裁决词汇（package-zero-debt 终审反转显式登记）。"
+      "reason": "审批是任务生命周期的一环：ApprovalChannel 与 ApprovalManager 的台账/扫描/裁决归 task 域的子包，引 plugin 的裁决词汇、event 的注意力事实词汇与父包的 Attention 面（package-zero-debt 终审反转显式登记；注意力原语统一后显式登记父包边）。"
     },
     {
       "pattern": "api/model",
@@ -579,7 +579,9 @@
     {
       "from": "runtime/task/approval",
       "allow": [
-        "api/plugin"
+        "api/event",
+        "api/plugin",
+        "runtime/task"
       ],
       "forbidden": [
         "runtime/agent",
@@ -592,7 +594,7 @@
         "features/telemetry",
         "assembly"
       ],
-      "reason": "审批是任务生命周期的子包：只引 plugin 的 RiskLevel/Decision 裁决词汇，不反向依赖治理或执行器（package-zero-debt 终审反转）。"
+      "reason": "审批是任务生命周期的子包：引 plugin 的 RiskLevel/Decision 裁决词汇与 event 的注意力事实词汇，并以 runtime/task 的 Attention 面承载在场与裁决（父包只导出注意力原语，子包不反向持真源）；不反向依赖治理或执行器（package-zero-debt 终审反转，注意力原语统一后显式登记父子边）。"
     },
     {
       "from": "features/rl",

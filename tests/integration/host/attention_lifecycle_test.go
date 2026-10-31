@@ -6,8 +6,6 @@ package host
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -22,8 +20,8 @@ import (
 // TestAttentionClearsApprovalOnAnswer pins the approval symptom anchor: an answered approval is gone for every reader.
 //
 // - the critical send call is held and answered as approved
-// - the request file under the approval directory is gone after the answer
-// - the lookup face reports the answered request as nothing at all
+// - the pending face lists the answered request nowhere after the answer
+// - the request file stays a channel record that no presence face reads
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
 func TestAttentionClearsApprovalOnAnswer(t *testing.T) {
@@ -66,20 +64,18 @@ func TestAttentionClearsApprovalOnAnswer(t *testing.T) {
 	if held.RiskLevel != plugin.RiskCritical {
 		t.Fatalf("pending request = %+v, want the send call held at the critical grade", held)
 	}
+	if present := approvals.AttentionPresence(ctx); len(present) != 1 {
+		t.Fatalf("the held approval stands in the attention presence as %+v, want exactly the one question it raised", present)
+	}
 	if _, err := approvals.Decide(held.ID, approval.ApprovalApproved, "attention-anchor"); err != nil {
 		t.Fatalf("answer the held request: %v", err)
 	}
 
-	if entries, err := os.ReadDir(root); err == nil {
-		for _, entry := range entries {
-			if filepath.Ext(entry.Name()) != ".json" {
-				continue
-			}
-			t.Fatalf("the answered approval %s still stands in the request directory as %q: an answered question is gone for every reader", held.ID, entry.Name())
-		}
+	if pending := approvals.Pending(); len(pending) != 0 {
+		t.Fatalf("the answered approval %s still stands on the pending face: %+v", held.ID, pending)
 	}
-	if decided := approvals.Lookup(held.ToolName, held.ArgsDigest); decided != nil && decided.Status == approval.ApprovalApproved {
-		t.Fatalf("the lookup face still reports the answered approval %s as approved: an answered question is gone for every reader", held.ID)
+	if present := approvals.AttentionPresence(ctx); len(present) != 0 {
+		t.Fatalf("the answered approval %s still stands in the attention presence: %+v", held.ID, present)
 	}
 	if err := host.Close(ctx); err != nil {
 		t.Fatalf("close the host: %v", err)

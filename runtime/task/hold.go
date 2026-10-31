@@ -108,6 +108,18 @@ var ErrApprovalIdentityMismatch = errors.New("task: the approval response names 
 // by name and never silently applied to the changed arguments.
 var ErrApprovalDigestMismatch = errors.New("task: the approval response names other arguments than the held ones")
 
+// errHoldFactConflict reports one attention fact key offered twice for other
+// content: the first response of one hold stands for that hold, so the second is
+// refused by name instead of overwriting the ruling already recorded.
+var errHoldFactConflict = errors.New("task: the attention fact key of this hold stands for other content")
+
+// holdAnswerGranted and holdAnswerDenied are the words one approval response is
+// filed under, so a ruling reads back as the decision it stated.
+const (
+	holdAnswerGranted = "granted"
+	holdAnswerDenied  = "denied"
+)
+
 // NewApprovalID issues the approval identity of one hold: "approval-" beside the
 // lowercase hex of 16 random bytes. tagent issues it when the host parks a call
 // in a hold, so one held call is resolved against a globally unique identity
@@ -145,23 +157,107 @@ type ApprovalAnswer struct {
 }
 
 // HoldBook is the waiting table of the approval channel: it records the hold of
-// one parked task beside the first approval response that hold received, and
-// answers a query with that hold while the wait is open. The book consumes one
-// response per hold and observes waits otherwise, so a query resolves and
-// finalizes nothing.
+// one parked task as an attention question, files the first approval response the
+// hold received as that question's answer, and answers a query with that hold
+// while the wait is open. The attention chain carries which holds are still
+// waiting and which response took effect; the response cache beside it is the
+// first ruling's own detail, never a second truth. The book consumes one response
+// per hold and observes waits otherwise, so a query resolves and finalizes
+// nothing.
 type HoldBook struct {
 	mu      sync.Mutex
 	holds   map[event.TaskID]Hold
 	answers map[string]ApprovalAnswer
+	chain   *holdChain
+	face    *Attention
 }
 
-// NewHoldBook returns an empty waiting table of the approval channel.
+// NewHoldBook returns an empty waiting table of the approval channel, filing on
+// the in-memory attention chain it keeps for the holds no composition supplies
+// one for.
 func NewHoldBook() *HoldBook {
-	return &HoldBook{holds: map[event.TaskID]Hold{}, answers: map[string]ApprovalAnswer{}}
+	chain := newHoldChain()
+	return &HoldBook{
+		holds:   map[event.TaskID]Hold{},
+		answers: map[string]ApprovalAnswer{},
+		chain:   chain,
+		face:    NewAttention(chain),
+	}
 }
 
-// Record stores the waiting state of one parked task. A repeated record of the
-// same task keeps the waiting state already stored.
+// holdChain is the fact chain the waiting table files its questions and answers
+// on: the facts in landing order beside the fact each key landed as. It carries
+// no presence of its own, so a face rebuilt over it answers the same presence.
+type holdChain struct {
+	mu    sync.Mutex
+	order []event.Event
+	held  map[event.EventID]event.Event
+}
+
+// newHoldChain returns an empty fact chain the waiting table files on.
+func newHoldChain() *holdChain {
+	return &holdChain{held: map[event.EventID]event.Event{}}
+}
+
+// RecordAttention stores one attention fact and reports whether this call stored
+// it: a repeat of the fact the key already names answers false and stores
+// nothing, and a key already standing for other content is refused beside
+// errHoldFactConflict, so the first response of one hold keeps that hold.
+func (c *holdChain) RecordAttention(_ context.Context, fact event.Event) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if held, ok := c.held[fact.Key]; ok {
+		if held.Type != fact.Type || held.Message.Content != fact.Message.Content ||
+			held.Meta[event.MetaKeyEventSummary] != fact.Meta[event.MetaKeyEventSummary] {
+			return false, fmt.Errorf("%w: %s", errHoldFactConflict, fact.Key)
+		}
+		return false, nil
+	}
+	c.held[fact.Key] = fact
+	c.order = append(c.order, fact)
+	return true, nil
+}
+
+// AttentionFacts returns every attention fact the chain holds, in landing order.
+func (c *holdChain) AttentionFacts(_ context.Context) ([]event.Event, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]event.Event(nil), c.order...), nil
+}
+
+// holdQuestion is the attention question one recorded hold raises: the approval
+// identity the hold is resolved against as its target, the digest it is bound to
+// as its lineage, and the reason the call waits as its text.
+func holdQuestion(hold Hold) AttentionFact {
+	return AttentionFact{
+		Type:    event.TypeAttentionQuestion,
+		Kind:    AttentionKindApproval,
+		Target:  hold.ApprovalID,
+		Lineage: hold.ExpectedDigest,
+		Detail:  AttentionDetail{Text: hold.Reason},
+	}
+}
+
+// holdAnswer is the attention answer one response states: whether the held call
+// proceeds, rendered as the word the answer carries, beside the reason the host
+// stated.
+func holdAnswer(hold Hold, answer ApprovalAnswer) AttentionFact {
+	word := holdAnswerDenied
+	if answer.Granted {
+		word = holdAnswerGranted
+	}
+	return AttentionFact{
+		Type:    event.TypeAttentionAnswer,
+		Kind:    AttentionKindApproval,
+		Target:  hold.ApprovalID,
+		Lineage: hold.ExpectedDigest,
+		Detail:  AttentionDetail{Text: word, By: answer.Reason},
+	}
+}
+
+// Record stores the waiting state of one parked task as the attention question it
+// waits under. A repeated record of the same task keeps the waiting state already
+// stored.
 func (b *HoldBook) Record(hold Hold) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -169,6 +265,7 @@ func (b *HoldBook) Record(hold Hold) {
 		return
 	}
 	b.holds[hold.TaskID] = hold
+	_, _ = b.face.Commit(context.Background(), holdQuestion(hold))
 }
 
 // Waiting reports the waiting state of one parked task and whether the task is
@@ -186,10 +283,11 @@ func (b *HoldBook) Waiting(taskID event.TaskID) (Hold, bool) {
 // call was parked, and answer.ExpectedDigest must match the digest of the
 // arguments that were held. A response that matches neither is refused beside
 // ErrApprovalIdentityMismatch or ErrApprovalDigestMismatch and is never applied
-// to another call or to the same call over changed arguments. A repeated
-// response under the same approval identity is idempotent: the first response
-// takes effect and the repeat reports that first ruling without consuming a
-// second one.
+// to another call or to the same call over changed arguments. The response lands
+// as the answer of the question the hold raised, so a repeated response under the
+// same approval identity is idempotent: the first response takes effect, the
+// chain refuses the second landing and the repeat reports the first ruling
+// without consuming a second one.
 func (b *HoldBook) Resolve(taskID event.TaskID, answer ApprovalAnswer) (ApprovalAnswer, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -206,6 +304,21 @@ func (b *HoldBook) Resolve(taskID event.TaskID, answer ApprovalAnswer) (Approval
 	if prior, ok := b.answers[hold.ApprovalID]; ok {
 		return prior, nil
 	}
+	if err := b.landAnswer(hold, answer); err != nil {
+		if errors.Is(err, errHoldFactConflict) {
+			if prior, ok := b.answers[hold.ApprovalID]; ok {
+				return prior, nil
+			}
+		}
+		return ApprovalAnswer{}, err
+	}
 	b.answers[hold.ApprovalID] = answer
 	return answer, nil
+}
+
+// landAnswer files one response as the answer of the question its hold raised, so
+// the chain carries which response took effect for that hold.
+func (b *HoldBook) landAnswer(hold Hold, answer ApprovalAnswer) error {
+	_, err := b.face.Commit(context.Background(), holdAnswer(hold, answer))
+	return err
 }

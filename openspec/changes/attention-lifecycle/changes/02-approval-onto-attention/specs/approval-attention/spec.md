@@ -43,8 +43,10 @@ lineage SHALL 逐字匹配才生效，参数变更后的调用 MUST NOT 读到�
 ### Requirement: 裁决落定即清除在场
 
 approved 或 denied 的 answer 落链后，该审批 SHALL 不再出现在场读回（Pending
-面与 attention 在场集一致）；审批文件面的残留 SHALL 同步撤下，外部 approver
-的既有写入口（JSON 文件）SHALL 继续可用且裁决路径不变。
+面与 attention 在场集一致）；经文件面到达的外部裁决 SHALL 在落 answer 后撤下
+其请求文件，而本进程裁决 SHALL 保留其文件作为通道审计记录；两种文件都 MUST
+NOT 参与在场判定，外部 approver 的既有写入口（JSON 文件）SHALL 继续可用且
+裁决路径不变。
 
 #### Scenario: 症状锚——回答后不再在场
 

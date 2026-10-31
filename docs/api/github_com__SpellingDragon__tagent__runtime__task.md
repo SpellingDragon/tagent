@@ -722,17 +722,23 @@ type HoldBook struct {
 	// Has unexported fields.
 }
     HoldBook is the waiting table of the approval channel: it records the hold
-    of one parked task beside the first approval response that hold received,
-    and answers a query with that hold while the wait is open. The book consumes
-    one response per hold and observes waits otherwise, so a query resolves and
-    finalizes nothing.
+    of one parked task as an attention question, files the first approval
+    response the hold received as that question's answer, and answers a query
+    with that hold while the wait is open. The attention chain carries which
+    holds are still waiting and which response took effect; the response
+    cache beside it is the first ruling's own detail, never a second truth.
+    The book consumes one response per hold and observes waits otherwise,
+    so a query resolves and finalizes nothing.
 
 func NewHoldBook() *HoldBook
-    NewHoldBook returns an empty waiting table of the approval channel.
+    NewHoldBook returns an empty waiting table of the approval channel, filing
+    on the in-memory attention chain it keeps for the holds no composition
+    supplies one for.
 
 func (b *HoldBook) Record(hold Hold)
-    Record stores the waiting state of one parked task. A repeated record of the
-    same task keeps the waiting state already stored.
+    Record stores the waiting state of one parked task as the attention question
+    it waits under. A repeated record of the same task keeps the waiting state
+    already stored.
 
 func (b *HoldBook) Resolve(taskID event.TaskID, answer ApprovalAnswer) (ApprovalAnswer, error)
     Resolve consumes one approval response for the hold of the named task and
@@ -742,9 +748,10 @@ func (b *HoldBook) Resolve(taskID event.TaskID, answer ApprovalAnswer) (Approval
     the arguments that were held. A response that matches neither is refused
     beside ErrApprovalIdentityMismatch or ErrApprovalDigestMismatch and is
     never applied to another call or to the same call over changed arguments.
-    A repeated response under the same approval identity is idempotent: the
-    first response takes effect and the repeat reports that first ruling without
-    consuming a second one.
+    The response lands as the answer of the question the hold raised,
+    so a repeated response under the same approval identity is idempotent:
+    the first response takes effect, the chain refuses the second landing and
+    the repeat reports the first ruling without consuming a second one.
 
 func (b *HoldBook) Waiting(taskID event.TaskID) (Hold, bool)
     Waiting reports the waiting state of one parked task and whether the task is

@@ -8,12 +8,12 @@
 // would have stopped.
 //
 // A parked batch is neither truncated nor degraded: it is registered as one
-// approval request a human reads, the wait happens inside the dispatch that
-// would have admitted it, and an approved batch runs every call in the order
-// the response issued them. A batch that is denied, that outlives its
-// validity, or whose invocation is cancelled runs nothing, and a batch beside
-// no wired approval book is refused whole rather than cut down to a limit
-// nobody approved. The redline list (4 rules):
+// attention question of the approval channel a human answers, the wait happens
+// inside the dispatch that would have admitted it, and an approved batch runs
+// every call in the order the response issued them. A batch that is denied, that
+// outlives its validity, or whose invocation is cancelled runs nothing, and a
+// batch beside no wired approval book is refused whole rather than cut down to a
+// limit nobody approved. The redline list (4 rules):
 //
 //   - MUST park one over-limit response as exactly one approval request, and answer every call of it with its own receipt.
 //   - MUST admit an approved batch whole and in the order the response issued it, with no call dropped.
@@ -147,10 +147,13 @@ func (l *Loop) fusesOf() FuseLimits {
 // through: the registration an approver reads, and the read the wait polls for
 // its ruling. It is exactly the part of the approval channel the fuses use, so
 // the approval manager satisfies it as it stands and the execution core keeps
-// no second book of its own.
+// no second book of its own: the registration files one attention question and
+// the ruling is the answer it waits for, so a process that starts over the same
+// chain reads the same wait back.
 //
-// The redline list (3 rules):
+// The redline list (4 rules):
 // MUST register one request per batch under the identity the fuse minted, and report the request as registered.
+// MUST read the ruling from the book the composition wired, never from a wait the fuse keeps itself.
 // MUST report the effective state of that request, so an expired request never reads as a standing approval.
 // MUST NOT answer a batch the book never filed: an unknown digest answers none, never a fabricated approval.
 type ApprovalBook interface {
