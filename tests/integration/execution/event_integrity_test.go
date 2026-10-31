@@ -134,22 +134,19 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	if delegated.TaskID == "" || delegated.TaskID == toolCall.TaskID {
 		t.Fatalf("delegated task = %q beside the tool task %q, want a task identity of its own", delegated.TaskID, toolCall.TaskID)
 	}
-	delegatedNotice, ok := eventIntegrityNoticeOfTask(notices, delegated.TaskID)
-	if !ok {
-		t.Fatalf("no notice identity recorded for the delegated task %q; notices = %+v", delegated.TaskID, notices)
-	}
+	delegatedNotice := eventIntegrityAwaitConsumed(t, host.Run(), addr, delegated.TaskID)
 	if delegatedNotice.Ref.Notice.Kind != task.NoticeSettled || delegatedNotice.Ref.Notice.Seq != 0 {
 		t.Fatalf("delegated notice identity = %s, want the settled terminal at seq 0", delegatedNotice.Ref.Notice.FactKey())
 	}
 	if delegatedNotice.Ref.Address != addr {
 		t.Fatalf("delegated notice target = %+v, want the issuing address %+v", delegatedNotice.Ref.Address, addr)
 	}
-	delegatedNotice = eventIntegrityAwaitConsumed(t, host.Run(), addr, delegated.TaskID)
 
-	followUp := eventIntegrityNoticeFacts(host.Run().SessionFacts(addr))
+	settled := host.Run().SessionFacts(addr)
+	followUp := eventIntegrityNoticeFacts(settled)
 	if len(followUp) != 1 {
 		t.Fatalf("notice facts = %d, want the one follow-up range the delegated settle fired; facts = %s",
-			len(followUp), eventIntegrityFactsSummary(facts))
+			len(followUp), eventIntegrityFactsSummary(settled))
 	}
 	notice := eventIntegrityNoticeOfFact(followUp[0])
 	if got, want := followUp[0].Key, agent.NoticeFactKey(followUp[0].InvocationID, notice); got != want {
@@ -161,7 +158,7 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	if followUp[0].Owner != addr || followUp[0].TaskID != delegated.TaskID {
 		t.Fatalf("notice fact = %+v, want it owned by %+v and carrying the delegated task %q", followUp[0], addr, delegated.TaskID)
 	}
-	if got := eventIntegrityFactKeyCount(facts, followUp[0].Key); got != 1 {
+	if got := eventIntegrityFactKeyCount(settled, followUp[0].Key); got != 1 {
 		t.Fatalf("facts under the notice key %q = %d, want exactly 1", followUp[0].Key, got)
 	}
 
