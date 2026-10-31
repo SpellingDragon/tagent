@@ -100,6 +100,10 @@ const (
 	_ = TypeFeedback
 	_ = TypeGovernance
 
+	_ = TypeAttentionQuestion
+	_ = TypeAttentionAnswer
+	_ = TypeAttentionClearance
+
 	_ = MetaKeyEventKey
 	_ = MetaKeyPartitionID
 	_ = MetaKeyEventType
@@ -109,6 +113,12 @@ const (
 	_ = MetaKeyBundleID
 	_ = MetaKeyNoticeKind
 	_ = MetaKeyTaskID
+
+	_ = MetaKeyAttentionKind
+	_ = MetaKeyAttentionTarget
+	_ = MetaKeyAttentionLineage
+	_ = MetaKeyAttentionExpiresMs
+	_ = MetaKeyAttentionClearance
 
 	_ = MetaPrefix
 )

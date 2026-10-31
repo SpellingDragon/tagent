@@ -19,10 +19,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 
-// TestAttentionClearsApprovalOnAnswer is the approval symptom anchor: once a
-// held call is answered, the question it raised is gone for every reader —
-// the request directory the external approver watches carries no file for it,
-// and the lookup face the gate reads reports no standing approval.
+// TestAttentionClearsApprovalOnAnswer pins the approval symptom anchor: an answered approval is gone for every reader.
 //
 // - the critical send call is held and answered as approved
 // - the request file under the approval directory is gone after the answer
@@ -89,12 +86,7 @@ func TestAttentionClearsApprovalOnAnswer(t *testing.T) {
 	}
 }
 
-// TestAttentionClearsNoticeOnWorkEnd is the work-end symptom anchor: a
-// notification nobody consumed is gone once the host's work ends — after the
-// close drains, the notice dimension of the read face lists it nowhere.
-// The delegation settles a real notification, and the follow-up turn it fires
-// is answered by a refusal, so the notice stands unconsumed exactly as the
-// anchor's scene requires and the close measures the work-end clearance alone.
+// TestAttentionClearsNoticeOnWorkEnd pins the work-end symptom anchor: an unconsumed notification is gone once the host's work ends.
 //
 // - the delegated task settles and the notification fires its follow-up turn
 // - the refusal leaves the notification unconsumed when the close begins
@@ -107,15 +99,13 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 
 	provider := newScriptedProvider(t)
-	calls := 0
 	provider.answer = func(index int) string {
-		calls++
-		switch calls {
-		case 1:
+		switch index {
+		case 0:
 			return wakeDelegate("call-attention-worker", "compute the anchor total")
-		case 2:
+		case 1:
 			return scriptedAnswerOf("the settled worker reports the anchor body")
-		case 3:
+		case 2:
 			return scriptedAnswerOf("the entry closed over its delegation")
 		default:
 			return scriptedRefusalAnswer("the follow-up model call refused")
@@ -142,8 +132,16 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 	if turn := invokeScriptedTurn(t, ctx, host, string(addr.SessionID)); turn.Terminal != model.KindCompleted {
 		t.Fatalf("the entry turn terminal = %v, want the turn to close after its delegation", turn.Terminal)
 	}
-	waitForSettle(t, "the refused follow-up turn to run", func() bool {
-		return len(provider.servedModels()) >= 3
+	waitForSettle(t, "the refused follow-up turn to reach its model", func() bool {
+		return len(provider.servedModels()) >= 4
+	})
+	waitForSettle(t, "the notice material to land on the chain", func() bool {
+		for _, fact := range host.Run().SessionFacts(addr) {
+			if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyTriggerSource] == "task" {
+				return true
+			}
+		}
+		return false
 	})
 
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -1,5 +1,28 @@
 package task // import "github.com/SpellingDragon/tagent/runtime/task"
 
+The attention face: one question put to a target thread or person, the answer
+it is ruled with, and the clearance that removes it, each kept as a fact on
+the chain instead of in a store of its own. The face offers two methods — a
+commit that files one question, answer or clearance, and a read that answers the
+questions the chain still holds as questions — and every reading is derived from
+the facts alone, so a process that starts over the same chain reads back what it
+held before it stopped.
+
+- a question names the kind it is asked under, the target it is put to,
+the lineage it came from and how long it stands - one question identity is that
+kind, target and lineage; the role a fact plays is hashed beside it - an answer
+and a clearance name a question the chain already holds, and one naming no such
+question is refused by name - presence is a question no answer and no clearance
+names, judged against the validity it was filed under - validity is judged when
+the chain is read, with the clock the face reads its time from
+
+The redline list (4 rules): MUST derive every reading from the facts the chain
+holds, never from process memory. MUST refuse an answer or a clearance naming
+no question on the chain, by name, before anything lands. MUST NOT hold,
+scan or expire an attention fact on a goroutine or a timer of its own. MUST NOT
+reach the composition root: the chain is a narrow port the composition supplies
+to this package.
+
 This file holds the logical status of a task: the classification of how long
 the task's recorded state has stood unchanged. It is a second read-out beside
 the status machine, never a value the machine stores: the status a task holds is
@@ -31,6 +54,29 @@ the registry owns the life of a task, the manager owns its obligations, and the
 commit carrier records the transitions.
 
 CONSTANTS
+
+const (
+	// AttentionKindApproval is the kind of a question a pending approval raises.
+	AttentionKindApproval = "approval"
+	// AttentionKindNotice is the kind of a question the human half of a notification raises.
+	AttentionKindNotice = "notice"
+	// AttentionKindSummary is the kind of a question a reflection delivery asks.
+	AttentionKindSummary = "summary"
+)
+    AttentionKindApproval, AttentionKindNotice and AttentionKindSummary name the
+    kind words an attention question is asked under.
+
+const (
+	// AttentionClearanceAnswer is the clearance of a question its answer removed.
+	AttentionClearanceAnswer = "answer"
+	// AttentionClearanceExpiry is the clearance of a question whose validity ran out.
+	AttentionClearanceExpiry = "expiry"
+	// AttentionClearanceWorkEnd is the clearance of a question the work ended on.
+	AttentionClearanceWorkEnd = "work-end"
+)
+    AttentionClearanceAnswer, AttentionClearanceExpiry and
+    AttentionClearanceWorkEnd name the clearance words one clearance fact
+    carries.
 
 const (
 	// PolicyDefault is the name of DefaultPolicy; the empty name selects it too.
@@ -75,6 +121,30 @@ var ErrApprovalIdentityMismatch = errors.New("task: the approval response names 
     ErrApprovalIdentityMismatch reports an approval response that does not name
     the approval identity the hold was issued under. The response is refused by
     name and never applied to another call or to another hold.
+
+var ErrAttentionClearanceUnknown = errors.New("task: the clearance names no known clearance word")
+    ErrAttentionClearanceUnknown reports a clearance fact whose word is none of
+    answer, expiry and work-end.
+
+var ErrAttentionIdentityMissing = errors.New("task: the attention fact names no target or no lineage")
+    ErrAttentionIdentityMissing reports an attention fact naming no target or no
+    lineage, so two questions could not be told apart by identity.
+
+var ErrAttentionKindUnknown = errors.New("task: the attention question names no known kind")
+    ErrAttentionKindUnknown reports a question asked under a kind word the
+    frozen vocabulary does not carry.
+
+var ErrAttentionNoChain = errors.New("task: the attention face is attached to no fact chain")
+    ErrAttentionNoChain reports a face attached to no fact chain, so nothing can
+    be filed and no presence can be read.
+
+var ErrAttentionQuestionMissing = errors.New("task: the attention fact names a question the chain does not hold")
+    ErrAttentionQuestionMissing reports an answer or a clearance naming a
+    question the chain does not hold, so no orphan answer or clearance lands.
+
+var ErrAttentionRoleUnknown = errors.New("task: the attention fact names no question, answer or clearance role")
+    ErrAttentionRoleUnknown reports an attention fact whose type is none of the
+    three frozen roles, so the chain is offered nothing.
 
 var ErrCallFrameMissing = errors.New("task: the wrapped call carries no call frame")
     ErrCallFrameMissing reports a wrapped call carrying no call frame, so it
@@ -288,6 +358,113 @@ type Approver func(ctx context.Context, tool string, jsonArgs []byte) (Ruling, e
     Approver reports the approval decision one call is admitted under,
     judging the tool name and the native arguments the call carries. An approver
     reporting an error refuses the call closed rather than guessing a decision.
+
+type Attention struct {
+	// Has unexported fields.
+}
+    Attention is the attention face over one fact chain: it files questions,
+    answers and clearances, and reads the questions the chain still holds as
+    questions. The face keeps no state of its own, so a rebuilt face over the
+    same chain answers the same presence.
+
+func NewAttention(chain attentionChain, opts ...AttentionOption) *Attention
+    NewAttention returns the attention face over one fact chain. A nil chain is
+    accepted, and every call on the face is refused beside ErrAttentionNoChain,
+    so a composition that attaches no chain fails loudly instead of reading an
+    empty presence.
+
+func (a *Attention) Commit(ctx context.Context, fact AttentionFact) (event.EventID, error)
+    Commit files one attention fact on the chain and answers the identity
+    it is filed under. A question is filed under the kind, target and
+    lineage it names. An answer or a clearance names a question the chain
+    already holds, and one naming no such question is refused beside
+    ErrAttentionQuestionMissing before anything lands. A repeated filing of one
+    role answers the identity already on the chain and records no second fact,
+    and the fact already recorded stands.
+
+func (a *Attention) Present(ctx context.Context, filter AttentionFilter) ([]AttentionQuestion, error)
+    Present answers the questions the chain still holds as questions: those no
+    answer and no clearance names, each beside whether its validity had run out
+    when the chain was read. An answered or cleared question is not reported at
+    all, and one whose validity ran out is reported expired rather than as one
+    awaiting an answer.
+
+type AttentionDetail struct {
+	// Text is the question a question puts or the ruling an answer states; a
+	// clearance states no model-readable text.
+	Text string
+	// By names the person who ruled, on an answer, and is empty on every other role.
+	By string
+	// ExpiresMs is the validity of a question as an absolute millisecond stamp;
+	// zero reads as cleared when the work ends.
+	ExpiresMs int64
+	// Clearance is the word a clearance names: answer, expiry or work-end.
+	Clearance string
+}
+    AttentionDetail is the detail one attention fact states beside its identity:
+    the text a question puts or an answer rules, the person who ruled,
+    the validity a question stands under and the word a clearance names. A field
+    is zero on the roles that state nothing through it.
+
+type AttentionFact struct {
+	// Type is the role the fact plays: question, answer or clearance.
+	Type string
+	// Kind is the kind word the question is asked under, empty reading as approval.
+	Kind string
+	// Target is the thread or person the question is put to.
+	Target string
+	// Lineage is the context the question came from: a call identity, a task
+	// identity or a reflection source.
+	Lineage string
+	// Detail is what the role states beside its identity.
+	Detail AttentionDetail
+}
+    AttentionFact is one attention fact offered to the commit face: the role it
+    plays, the question identity it names and the detail that role states. Kind,
+    Target and Lineage together name one question, so a question, its answer and
+    its clearance always meet on the same identity.
+
+func (f AttentionFact) FactKey() string
+    FactKey returns the fact's stable identity: the role it plays hashed beside
+    the question identity it names, so a repeated filing of one role answers the
+    key already on the chain.
+
+func (f AttentionFact) FactType() string
+    FactType returns the frozen type the fact is read as: the role it plays.
+
+type AttentionFilter struct {
+	// Kind matches the questions asked under that kind word, empty matching every kind.
+	Kind string
+	// Target matches the questions put to that thread or person, empty matching every target.
+	Target string
+}
+    AttentionFilter narrows a presence read to one kind, one target or both;
+    an empty field matches every value.
+
+type AttentionOption func(*Attention)
+    AttentionOption configures an attention face at construction.
+
+func WithAttentionClock(now func() time.Time) AttentionOption
+    WithAttentionClock injects the clock a presence read judges validity by,
+    so a test drives an expiry deterministically instead of waiting for one.
+
+type AttentionQuestion struct {
+	// Kind is the kind word the question was asked under.
+	Kind string
+	// Target is the thread or person the question was put to.
+	Target string
+	// Lineage is the context the question came from.
+	Lineage string
+	// ExpiresMs is the validity the question was filed under, zero reading as
+	// cleared when the work ends.
+	ExpiresMs int64
+	// Expired reports whether the validity had run out at the read, so the
+	// question is reported expired and never as one awaiting an answer.
+	Expired bool
+}
+    AttentionQuestion is one question the chain still holds as a question:
+    the identity it was asked under, the validity it stands on and whether that
+    validity had run out when the chain was read.
 
 type BlockedObligation struct {
 	// Notice is the identity of the notification whose obligation is blocked.

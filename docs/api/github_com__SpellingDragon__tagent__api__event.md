@@ -66,6 +66,16 @@ const (
 	TypeFeedback        = "feedback"
 	TypeGovernance      = "governance"
 
+	// TypeAttentionQuestion is the frozen type of a question put to a target
+	// thread or person: the opening fact of one attention lifecycle.
+	TypeAttentionQuestion = "attention.question"
+	// TypeAttentionAnswer is the frozen type of the ruling a question is
+	// answered with.
+	TypeAttentionAnswer = "attention.answer"
+	// TypeAttentionClearance is the frozen type of the fact that removes a
+	// question from the presence read.
+	TypeAttentionClearance = "attention.clearance"
+
 	// LineageDelegation is the trigger-source stamp of a delegated call: the
 	// delegated turn is traffic the agent manages for itself, so the stamp
 	// opens no host-facing gate and is never a freshness fact.
@@ -73,8 +83,8 @@ const (
 )
 
     TypeExternalInput, TypeAgentOutput, TypeActionCommand, TypeThinkingPlan,
-    TypeContextCompress, TypeTaskSettled, TypeFeedback and TypeGovernance are
-    the frozen skeleton event type strings.
+    TypeContextCompress, TypeTaskSettled, TypeFeedback, TypeGovernance and the
+    three TypeAttention roles are the frozen skeleton event type strings.
 
     LineageDelegation is the trigger-source stamp a delegated call carries on
     its admission record: the delegated turn is traffic the agent manages for
@@ -93,13 +103,30 @@ const (
 	MetaKeyBundleID            = "bundle_id"
 	MetaKeyNoticeKind          = "kind"
 	MetaKeyTaskID              = "task_id"
+
+	// MetaKeyAttentionKind names the kind a question is asked under: approval,
+	// notice or summary, an absent entry reading as approval.
+	MetaKeyAttentionKind = "attention.kind"
+	// MetaKeyAttentionTarget names the thread or person a question is put to.
+	MetaKeyAttentionTarget = "attention.target"
+	// MetaKeyAttentionLineage names the context a question came from: a call
+	// identity, a task identity or a reflection source.
+	MetaKeyAttentionLineage = "attention.lineage"
+	// MetaKeyAttentionExpiresMs names the validity of a question as an absolute
+	// millisecond stamp; zero reads as cleared when the work ends.
+	MetaKeyAttentionExpiresMs = "attention.expires_ms"
+	// MetaKeyAttentionClearance names the word a clearance carries: answer,
+	// expiry or work-end.
+	MetaKeyAttentionClearance = "attention.clearance"
 )
     MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
     MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
-    MetaKeyNoticeKind and MetaKeyTaskID name the frozen metadata keys: the event
-    identity, its partition, its type and summary, the trigger source, the
-    settle trigger lineage, the bundle attribution, the kind of the notification
-    a notice fact reports and the task it reports on.
+    MetaKeyNoticeKind, MetaKeyTaskID and the five MetaKeyAttention entries
+    name the frozen metadata keys: the event identity, its partition, its type
+    and summary, the trigger source, the settle trigger lineage, the bundle
+    attribution, the kind of the notification a notice fact reports, the task
+    it reports on, and the kind, target, lineage, validity and clearance word an
+    attention fact carries.
 
 const (
 	// MetaKeyModelFromVersion names the version the move starts from.
