@@ -361,7 +361,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	})
 	r.loop.SetFactPipelines(r.factPipeline)
 	r.loop.SetRequestFace(r.requestBoundary)
-	inventory := query.NewInventory(runReading{run: r})
+	inventory := query.NewInventory(hostReading{runReading: runReading{run: r}, approvals: cfg.approvals})
 	r.projection = query.NewProjection(inventory, projectionWindow)
 	r.mcpServers = mcpgw.NewServerRegistry()
 	r.mcpGateways = mcpgw.NewGateways(r.mcpServers, mcpgw.NewRegistryDiscovery())

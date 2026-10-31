@@ -38,17 +38,19 @@ SHALL 同步撤下；清除 SHALL 只作用于在场读数，MUST NOT 删除任�
 
 ### Requirement: 工作结束清除写死
 
-宿主 `Close` 排空成功后 SHALL 为全部在场的 question（链上事实存在者）落
-clearance=work-end 事实，读面随即清空；排空失败或未排空 MUST NOT 清除；
-清除后重启读回 SHALL 保持清空态。notice 与 summary 的在场是读时推导
-（自通知状态与投递事实），MUST NOT 为推导在场补造 question/clearance 假对，
-其清除由读面判定：过期读侧判、工作结束由排空后的状态推导。
+宿主 `Close` 排空成功后，attention 读面 SHALL 整体退出在场（全有或全无：
+排空未完成则一条不清）；排空失败或未排空 MUST NOT 清除。三类在场均为读时
+推导（approval 类自 question/answer 事实，notice 与 summary 自通知状态与投递
+事实），MUST NOT 为推导在场补造 question/clearance 假对；清除判定：过期读侧
+判、工作结束由排空完成态门控。一次工作结束后的清空是**该次读数**：重启是新
+工作，仍无 answer 的 question 恢复在场——答案未到，问题就还在。
 
 #### Scenario: 症状锚——无人消费的通知在工作结束不再挂着
 
 - **WHEN** 一条结算通知无人消费直至宿主 Close 排空完成（症状锚
   `TestAttentionClearsNoticeOnWorkEnd`）
-- **THEN** 投影 SHALL 不再报告该通知在场，且重启后读回一致
+- **THEN** 该次读数 SHALL 不再报告该通知在场（工作结束截面的症状由合并线的
+  排空消费与读面门控共同清偿）
 
 #### Scenario: 排空失败不清
 

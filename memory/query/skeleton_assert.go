@@ -37,6 +37,7 @@ var (
 		TaskID:       "",
 		Notice:       task.Notice{},
 		Lease:        state.LeaseRef{},
+		attention:    task.AttentionQuestion{},
 	}
 
 	_ = Snapshot{
@@ -72,6 +73,7 @@ var (
 		TaskStatus:  0,
 		NoticePhase: "",
 		Holder:      state.LeaseRef{},
+		attention:   "",
 	}
 	_ = AgentState{Configured: false, Resident: false, Busy: false}
 	_ = SessionState{Accepted: 0, Claimed: 0, Completed: 0, Consumed: 0}
@@ -148,6 +150,9 @@ var (
 	_ func(ReadingSource, int, Budget) *Projection                             = NewBoundedProjection
 	_ func(Reading) *Inventory                                                 = NewInventory
 	_ func(*Inventory) ReadingSource                                           = NewInventorySource
+	_ func(*Inventory, context.Context) ([]task.AttentionQuestion, error)      = (*Inventory).Attention
+	_ func(ObjectRef) task.AttentionQuestion                                   = ObjectRef.AttentionQuestion
+	_ func(DetailState) AttentionPhase                                         = DetailState.AttentionPhase
 	_ func(Detail) int                                                         = DetailBytes
 	_ ReadingSource                                                            = inventorySource{}
 	_ DetailSource                                                             = (*viewDetailSource)(nil)
@@ -188,6 +193,12 @@ const (
 	_ ObjectKind = ObjectTask
 	_ ObjectKind = ObjectNotice
 	_ ObjectKind = ObjectLease
+	_ ObjectKind = ObjectAttention
+
+	_ AttentionPhase = AttentionPhaseQuestion
+	_ AttentionPhase = AttentionPhaseAnswered
+	_ AttentionPhase = AttentionPhaseExpired
+	_ AttentionPhase = AttentionPhaseCleared
 
 	_ GapKind = GapWindowExpired
 	_ GapKind = GapOverflow
@@ -228,6 +239,7 @@ var (
 		tasks:       []TaskEntry{},
 		notices:     []NoticeEntry{},
 		leases:      []LeaseEntry{},
+		attention:   []task.AttentionQuestion{},
 	}
 
 	_ = AgentEntry{AgentID: "", Configured: false, Resident: false, Busy: false}
@@ -242,6 +254,7 @@ var (
 
 	_       = SourceError{Dimension: "", Cause: nil}
 	_ error = ErrSourceUnreadable
+	_ error = ErrAttentionUnwired
 )
 
 // The subscription read port keeps its declared shape: a renamed method or a

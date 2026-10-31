@@ -308,7 +308,7 @@ func applyHostGCTrace() {
 //
 // - Every decision of a segment runs under the lineage of the material that opened it, so a body a call of that decision sends leaves under the line of its own turn instead of the send tool's own default; the direct drive stamps the same line on its context.
 //
-// - The one approval book of a boot is the host-attached book when the caller mounted it, and a boot-local book under <root>/approvals only fills a process that declared none, so a caller that mounted the default book keeps ruling the very book it handed over; the risk-rule gate and the loop's batch fuse read that same book.
+// - The one approval book of a boot is the host-attached book when the caller mounted it, and a boot-local book under <root>/approvals only fills a process that declared none, so a caller that mounted the default book keeps ruling the very book it handed over; the risk-rule gate, the loop's batch fuse and the assembly's attention reading read that same book, so the presence a reader sees and the seat a held call is parked through are one book and never two.
 //
 // - A fuse declaration on the entry agent wires the loop: a response above the call cap or past the long-context threshold parks its whole batch on that one book before anything executes, and a declaration that names neither knob leaves the limits the process already declared in place.
 //
@@ -525,6 +525,9 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	if cfg.enforcement != "" {
 		options = append(options, WithEnforcement(cfg.enforcement))
+	}
+	if hostApprovals != nil {
+		options = append(options, WithApprovals(hostApprovals))
 	}
 	run, err := Assemble(ctx, decl, natives, options...)
 	if err != nil {
