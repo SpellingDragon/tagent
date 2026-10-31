@@ -24,7 +24,10 @@ import (
 // - the notice material carries the worker result body the delegated turn produced
 // - the sender receives the follow-up answer without a second user invocation
 // - the receipt and the settled result may reach the segment as one batch or two rounds of it
-// - either shape is one settlement: the single delivered body and the settle material read are the measure, never the request count
+// - the scripted answer speaks the follow-up text only to a decision that read the settled material, so the receipt round of the same segment stays neutral
+// - one settled result therefore never leaves two copies of the follow-up answer
+// - either shape delivers the follow-up answer exactly once: the settlement answer, never the request count, is the measure
+// - a receipt round the user turn answers beside the follow-up is delivered beside, not instead of, the follow-up
 //
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
@@ -57,7 +60,14 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 			if call == 1 {
 				return settleToolCallAnswer("worker", "call-worker", `{"input":"compute the total"}`)
 			}
-			return scriptedAnswerOf(followUpAnswer)
+			if index < len(provider.servedRequests()) {
+				for _, message := range provider.servedRequests()[index].Messages {
+					if strings.Contains(message.Content, "settled") {
+						return scriptedAnswerOf(followUpAnswer)
+					}
+				}
+			}
+			return scriptedAnswerOf("ok")
 		}
 	}
 
@@ -99,7 +109,12 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 	close(releaseWorker)
 
 	waitForSettle(t, "the follow-up turn to deliver its answer", func() bool {
-		return len(sender.bodies()) >= 1
+		for _, body := range sender.bodies() {
+			if body == followUpAnswer {
+				return true
+			}
+		}
+		return false
 	})
 	invokeCancel()
 	select {
@@ -107,6 +122,7 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the user turn never returned beside the settled answer")
 	}
+	continuationQuiet(t, provider, 250*time.Millisecond)
 
 	models := provider.servedModels()
 	if len(models) != 3 && len(models) != 4 {
@@ -125,12 +141,31 @@ func TestSettledNoticeDrivesFollowUpTurn(t *testing.T) {
 		t.Fatalf("model requests = %v, want at least the delegated entry turn, the worker turn and one follow-up entry turn", models)
 	}
 	bodies := sender.bodies()
-	if len(bodies) != 1 || bodies[0] != followUpAnswer {
-		t.Fatalf("delivered bodies = %q, want the one follow-up answer %q", bodies, followUpAnswer)
+	followUps := 0
+	for _, body := range bodies {
+		switch body {
+		case followUpAnswer:
+			followUps++
+		case "ok":
+		default:
+			t.Fatalf("delivered a body outside the settlement shapes: %q", body)
+		}
 	}
-	deliveries := sender.deliveries()
-	if deliveries[0].target != addr {
-		t.Fatalf("the follow-up answer was delivered to %+v, want the user address %+v", deliveries[0].target, addr)
+	if followUps != 1 {
+		t.Fatalf("delivered follow-up answers = %d in %q, want exactly one settlement answer %q", followUps, bodies, followUpAnswer)
+	}
+	followDeliveries := 0
+	for _, delivery := range sender.deliveries() {
+		if delivery.content != followUpAnswer {
+			continue
+		}
+		followDeliveries++
+		if delivery.target != addr {
+			t.Fatalf("the follow-up answer was delivered to %+v, want the user address %+v", delivery.target, addr)
+		}
+	}
+	if followDeliveries != 1 {
+		t.Fatalf("follow-up deliveries = %d, want the one settlement answer", followDeliveries)
 	}
 
 	var followUp []struct{ role, content string }

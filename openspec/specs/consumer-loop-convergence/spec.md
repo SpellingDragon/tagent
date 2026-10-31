@@ -1,6 +1,10 @@
-# consumer-loop-convergence
+# consumer-loop-convergence Specification
 
-## ADDED Requirements
+## Purpose
+
+本规范定义每会话常驻消费循环的收敛面：输入入口只提交事件并唤醒循环、工具派发后不等结果、回合输出闭合上下文段、运行状态取代地址 gate。
+
+## Requirements
 
 ### Requirement: 每会话一个常驻消费循环
 

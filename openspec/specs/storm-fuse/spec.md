@@ -1,6 +1,10 @@
-# storm-fuse
+# storm-fuse Specification
 
-## ADDED Requirements
+## Purpose
+
+本规范定义长响应风暴的熔断：单响应工具调用整批挂人审而不截断、降级消息限长、长上下文同形态挂审，且关闭态零行为差异。
+
+## Requirements
 
 ### Requirement: 单响应工具调用整批挂人审
 

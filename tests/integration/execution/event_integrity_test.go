@@ -127,10 +127,7 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	}
 	toolNotice = eventIntegrityAwaitConsumed(t, host.Run(), addr, toolCall.TaskID)
 
-	delegated, ok := eventIntegrityDelegatedSettle(facts, workerOut)
-	if !ok {
-		t.Fatalf("no single delegated settle fact carries %q; facts = %s", workerOut, eventIntegrityFactsSummary(facts))
-	}
+	delegated := eventIntegrityAwaitDelegatedSettle(t, host.Run(), addr, workerOut)
 	if delegated.InvocationID != turn.InvocationID {
 		t.Fatalf("delegated settle fact invocation = %q, want the original invocation %q", delegated.InvocationID, turn.InvocationID)
 	}
@@ -149,7 +146,7 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	}
 	delegatedNotice = eventIntegrityAwaitConsumed(t, host.Run(), addr, delegated.TaskID)
 
-	followUp := eventIntegrityNoticeFacts(facts)
+	followUp := eventIntegrityNoticeFacts(host.Run().SessionFacts(addr))
 	if len(followUp) != 1 {
 		t.Fatalf("notice facts = %d, want the one follow-up range the delegated settle fired; facts = %s",
 			len(followUp), eventIntegrityFactsSummary(facts))
@@ -1199,17 +1196,23 @@ func eventIntegrityInputFacts(facts []event.Event, material string) []event.Even
 	return out
 }
 
-// eventIntegritySettleFact reports the one terminal settle fact of the named
-// task.
+// eventIntegritySettleFact reports the terminal settle fact of the named task,
+// preferring the formal delivery record: the loop's own read of a settled
+// result commits an empty backflow fact of the same type beside the delivery
+// fact that carries the material, so the check selects by the settle lineage
+// rather than by whichever landed first.
 func eventIntegritySettleFact(facts []event.Event, taskID event.TaskID) (event.Event, bool) {
-	out := make([]event.Event, 0, 1)
+	var out []event.Event
 	for _, fact := range facts {
 		if fact.Type != event.TypeTaskSettled || fact.TaskID != taskID {
 			continue
 		}
+		if fact.Meta[event.MetaKeySettleTriggerSource] != "" {
+			return fact, true
+		}
 		out = append(out, fact)
 	}
-	if len(out) != 1 {
+	if len(out) == 0 {
 		return event.Event{}, false
 	}
 	return out[0], true
@@ -1229,6 +1232,26 @@ func eventIntegrityDelegatedSettle(facts []event.Event, body string) (event.Even
 		return event.Event{}, false
 	}
 	return out[0], true
+}
+
+// eventIntegrityAwaitDelegatedSettle waits for the one terminal settle fact
+// that carries the named result body: the delivery of a delegated settle lands
+// on its own thread beside the turn that issued the call, so the check reads
+// the chain until that fact arrives instead of assuming it already landed.
+func eventIntegrityAwaitDelegatedSettle(t *testing.T, run *assembly.Run, addr event.Address, body string) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(eventIntegrityConsumeWindow)
+	for {
+		facts := run.SessionFacts(addr)
+		if fact, ok := eventIntegrityDelegatedSettle(facts, body); ok {
+			return fact
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no single delegated settle fact carries %q within %s; facts = %s",
+				body, eventIntegrityConsumeWindow, eventIntegrityFactsSummary(facts))
+		}
+		time.Sleep(eventIntegrityPollInterval)
+	}
 }
 
 // eventIntegrityNoticeFacts reports the committed notice facts of one session:

@@ -1,6 +1,10 @@
-# compression-pipeline
+# compression-pipeline Specification
 
-## ADDED Requirements
+## Purpose
+
+本规范定义压缩的判定、执行与恢复：判定与产物各成事实，未接消费方时行为等价，恢复从产物事实重建而不重新折叠。
+
+## Requirements
 
 ### Requirement: 压缩的判定与执行各成事实
 

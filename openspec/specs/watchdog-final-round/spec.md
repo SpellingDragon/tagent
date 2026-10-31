@@ -1,6 +1,10 @@
-# watchdog-final-round
+# watchdog-final-round Specification
 
-## ADDED Requirements
+## Purpose
+
+本规范定义收尾轮判定的事实化：预算耗尽以 `final_round.request` 事实落链，loop 在决策边界读取该事实决定收尾轮，判定与执行分离。
+
+## Requirements
 
 ### Requirement: 预算耗尽是一条事实
 

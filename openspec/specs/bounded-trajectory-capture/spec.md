@@ -1,6 +1,10 @@
-# bounded-trajectory-capture
+# bounded-trajectory-capture Specification
 
-## ADDED Requirements
+## Purpose
+
+本规范定义轨迹捕获的内存边界与折叠清理：常驻快照集合受字节预算约束，超预算时换出落盘并可读回；折叠重写投影时同步清理原文副本；内存事实面按会话热窗口保留。
+
+## Requirements
 
 ### Requirement: 轨迹捕获常驻有界
 

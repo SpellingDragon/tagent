@@ -1,6 +1,10 @@
-# memory-observation
+# memory-observation Specification
 
-## ADDED Requirements
+## Purpose
+
+本规范定义运行时内存观测面：pprof 端点与 gctrace 开关，作为堆棘轮残差钉死与长期内存回归的证据面。
+
+## Requirements
 
 ### Requirement: 运行时内存观测面
 

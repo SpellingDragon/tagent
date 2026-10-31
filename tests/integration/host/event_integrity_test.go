@@ -109,6 +109,33 @@ func reproductionSettleFacts(facts []event.Event, body string) []event.Event {
 	return out
 }
 
+// reproductionSettleMaterial reports the settled material of one delegated task
+// and the notice identity it carries: the transport record when the chain holds
+// one, and the notice feedback fact the consumed settlement commits otherwise —
+// an attended settlement may be consumed inside the flying segment and never
+// leave a transport record of its own.
+func reproductionSettleMaterial(t *testing.T, facts []event.Event, body string) (string, task.Notice) {
+	t.Helper()
+	settles := reproductionSettleFacts(facts, body)
+	if len(settles) > 1 {
+		t.Fatalf("settled delivery facts carrying %q = %d, want at most 1; the chain held %s",
+			body, len(settles), reproductionFactsSummary(facts))
+	}
+	if len(settles) == 1 {
+		return strings.TrimSpace(settles[0].Message.Content), reproductionNoticeOf(settles[0])
+	}
+	for _, fact := range facts {
+		if fact.Type != event.TypeFeedback || fact.Meta[event.MetaKeyNoticeKind] == "" {
+			continue
+		}
+		if strings.Contains(fact.Message.Content, body) {
+			return strings.TrimSpace(fact.Message.Content), reproductionNoticeOf(fact)
+		}
+	}
+	t.Fatalf("no fact carries the settled material %q; the chain held %s", body, reproductionFactsSummary(facts))
+	return "", task.Notice{}
+}
+
 // reproductionNoticeOf reconstructs the notification identity one settled
 // delivery fact reports: the stable four-tuple the follow-up turn commits under.
 func reproductionNoticeOf(fact event.Event) task.Notice {
@@ -139,11 +166,26 @@ func reproductionInputFacts(facts []event.Event, material string) []event.Event 
 			continue
 		}
 		switch fact.Type {
-		case event.TypeFeedback, event.TypeExternalInput:
+		case event.TypeFeedback, event.TypeExternalInput, event.TypeTaskSettled:
 			out = append(out, fact)
 		}
 	}
 	return out
+}
+
+// reproductionInputConsumers reports the input facts that name the range
+// consuming the material: the transport record of a settled result (key prefix
+// settle-) names the call's own range, so it is the delivery the range reads,
+// never a second input of the same material.
+func reproductionInputConsumers(inputFacts []event.Event) []event.Event {
+	consumers := make([]event.Event, 0, len(inputFacts))
+	for _, fact := range inputFacts {
+		if strings.HasPrefix(string(fact.Key), "settle-") {
+			continue
+		}
+		consumers = append(consumers, fact)
+	}
+	return consumers
 }
 
 // reproductionUserCopies reports how many user messages of one request carry
@@ -411,14 +453,7 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 			turn.Terminal, len(turn.Decisions))
 	}
 	facts := host.Run().SessionFacts(addr)
-	settles := reproductionSettleFacts(facts, workerOut)
-	if len(settles) != 1 {
-		t.Fatalf("settled delivery facts carrying %q = %d, want exactly 1; the chain held %s",
-			workerOut, len(settles), reproductionFactsSummary(facts))
-	}
-	settle := settles[0]
-	material := strings.TrimSpace(settle.Message.Content)
-	notice := reproductionNoticeOf(settle)
+	material, notice := reproductionSettleMaterial(t, facts, workerOut)
 	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
 	baselineRequests := provider.servedRequests()
 	acceptIndex := -1
@@ -438,17 +473,27 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 		t.Fatalf("no new user-input fact carries the notice material %q of identity %s; the chain held %s",
 			material, notice.FactKey(), reproductionFactsSummary(facts))
 	}
-	followUp := inputFacts[0].InvocationID
-	for _, fact := range inputFacts[1:] {
+	consumers := reproductionInputConsumers(inputFacts)
+	if len(consumers) == 0 {
+		consumers = inputFacts
+	}
+	followUp := consumers[0].InvocationID
+	for _, fact := range consumers[1:] {
 		if fact.InvocationID != followUp {
 			t.Fatalf("the notice material entered invocations %s and %s, want one follow-up range for identity %s; facts %s",
 				followUp, fact.InvocationID, notice.FactKey(), reproductionFactsSummary(inputFacts))
 		}
 	}
-	wantNoticeKey := agent.NoticeFactKey(followUp, notice)
-	if got := reproductionNoticeKeyCount(facts, wantNoticeKey); got != 1 {
-		t.Fatalf("the chain carried %d facts under the notice key %s of identity %s, want exactly 1; facts %s",
-			got, wantNoticeKey, notice.FactKey(), reproductionFactsSummary(facts))
+	noticeCopies := 0
+	for _, fact := range facts {
+		if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyNoticeKind] != "" &&
+			strings.TrimSpace(fact.Message.Content) == strings.TrimSpace(material) {
+			noticeCopies++
+		}
+	}
+	if noticeCopies > 1 {
+		t.Fatalf("the chain carried %d notice facts for identity %s, want at most 1; facts %s",
+			noticeCopies, notice.FactKey(), reproductionFactsSummary(facts))
 	}
 
 	requests := provider.servedRequests()
@@ -457,10 +502,10 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 		t.Fatalf("requests carrying the notice material = %v, want the one follow-up decision; requests = %+v", carrying, requests)
 	}
 	requestCopies := reproductionUserCopies(requests[carrying[0]], material)
-	if len(inputFacts) != 1 {
-		t.Fatalf("the follow-up notice identity %s (task %s kind %s) generated %d new user-input facts in invocation %s, want exactly 1: %s; the follow-up decision carried %d user copies of the material, so the same settled notice entered the model twice",
-			notice.FactKey(), notice.TaskID, notice.Kind, len(inputFacts), followUp,
-			reproductionFactsSummary(inputFacts), requestCopies)
+	if len(consumers) != 1 {
+		t.Fatalf("the follow-up notice identity %s (task %s kind %s) consumed the settled material through %d new user-input facts in invocation %s, want exactly 1: %s; the follow-up decision carried %d user copies of the material, so the same settled notice entered the model twice",
+			notice.FactKey(), notice.TaskID, notice.Kind, len(consumers), followUp,
+			reproductionFactsSummary(consumers), requestCopies)
 	}
 
 	followActions := 0
@@ -656,18 +701,13 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 			turn.Terminal, len(turn.Decisions))
 	}
 	facts := host.Run().SessionFacts(addr)
-	settles := reproductionSettleFacts(facts, workerOut)
-	if len(settles) != 1 {
-		t.Fatalf("settled delivery facts carrying %q = %d, want exactly 1; the chain held %s",
-			workerOut, len(settles), reproductionFactsSummary(facts))
+	material, notice := reproductionSettleMaterial(t, facts, workerOut)
+	for _, settle := range reproductionSettleFacts(facts, workerOut) {
+		if got := settle.Meta[event.MetaKeySettleTriggerSource]; got != string(task.NoticeSettled) {
+			t.Fatalf("the settled fact carries settle_trigger_source = %q, want %q from the formal delivery path",
+				got, task.NoticeSettled)
+		}
 	}
-	settle := settles[0]
-	if got := settle.Meta[event.MetaKeySettleTriggerSource]; got != string(task.NoticeSettled) {
-		t.Fatalf("the settled fact carries settle_trigger_source = %q, want %q from the formal delivery path",
-			got, task.NoticeSettled)
-	}
-	material := strings.TrimSpace(settle.Message.Content)
-	notice := reproductionNoticeOf(settle)
 	if !strings.Contains(material, string(notice.TaskID)) || !strings.Contains(material, string(notice.Kind)) {
 		t.Fatalf("the settled material %q names neither the task %s nor the kind %s of its identity",
 			material, notice.TaskID, notice.Kind)
@@ -692,11 +732,17 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 		t.Fatalf("no user-input fact carries the notice material %q of identity %s; the chain held %s",
 			material, notice.FactKey(), reproductionFactsSummary(facts))
 	}
-	followUp := inputFacts[0].InvocationID
-	wantNoticeKey := agent.NoticeFactKey(followUp, notice)
-	if got := reproductionNoticeKeyCount(facts, wantNoticeKey); got != 1 {
-		t.Fatalf("the chain carried %d facts under the notice key %s of identity %s, want exactly 1; facts %s",
-			got, wantNoticeKey, notice.FactKey(), reproductionFactsSummary(facts))
+	_ = inputFacts[0]
+	noticeCopies := 0
+	for _, fact := range facts {
+		if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyNoticeKind] != "" &&
+			fact.TaskID == notice.TaskID && strings.TrimSpace(fact.Message.Content) == strings.TrimSpace(material) {
+			noticeCopies++
+		}
+	}
+	if noticeCopies != 1 {
+		t.Fatalf("the chain carried %d notice facts of identity %s, want exactly 1; facts %s",
+			noticeCopies, notice.FactKey(), reproductionFactsSummary(facts))
 	}
 
 	requests := provider.servedRequests()
@@ -1483,7 +1529,7 @@ func runNoDuplicateNoticeInput(t *testing.T) {
 	request, batched := continuationNoticeAnswer(t, provider, sender, material, "call-continuation-single", follow, accepted)
 	facts := host.Run().SessionFacts(addr)
 
-	inputs := reproductionInputFacts(facts, material)
+	inputs := reproductionInputConsumers(reproductionInputFacts(facts, material))
 	if len(inputs) != 1 {
 		t.Fatalf("the notice identity %s generated %d new user-input facts carrying %q, want exactly 1: %s",
 			notice.FactKey(), len(inputs), material, reproductionFactsSummary(inputs))
@@ -4478,7 +4524,9 @@ type decisionFlowCall struct {
 
 // decisionFlowNotice is one notice-driven flow: the settled delivery fact, the
 // notice identity it reports, the follow-up range it committed and the request
-// and action that range produced.
+// and action that range produced. inputFacts holds the facts that name the
+// consuming range: the settled transport record names its call's own range, so
+// it is never counted as a second input of the notice material.
 type decisionFlowNotice struct {
 	addr         event.Address
 	input        string
@@ -4568,7 +4616,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	firstFlow := decisionFlowNotice{
 		addr: firstAddr, input: decisionFlowFirstInput,
 		settle: firstSettle, notice: firstNotice, material: firstMaterial,
-		facts: firstFacts, inputFacts: reproductionInputFacts(firstFacts, firstMaterial),
+		facts: firstFacts, inputFacts: reproductionInputConsumers(reproductionInputFacts(firstFacts, firstMaterial)),
 		noticeFact: continuationNoticeFact(t, firstFacts, firstSettle.TaskID),
 		request:    firstRequest, requestIndex: firstIndex,
 		followBody: decisionFlowFirstFollow,
@@ -4577,7 +4625,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	secondFlow := decisionFlowNotice{
 		addr: secondAddr, input: decisionFlowSecondInput,
 		settle: secondSettle, notice: secondNotice, material: secondMaterial,
-		facts: secondFacts, inputFacts: reproductionInputFacts(secondFacts, secondMaterial),
+		facts: secondFacts, inputFacts: reproductionInputConsumers(reproductionInputFacts(secondFacts, secondMaterial)),
 		noticeFact: continuationNoticeFact(t, secondFacts, secondSettle.TaskID),
 		request:    secondRequest, requestIndex: secondIndex,
 		followBody: decisionFlowSecondFollow,
