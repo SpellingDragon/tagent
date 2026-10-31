@@ -36,6 +36,15 @@ var (
 	_ func(*ReplayProjection, context.Context, int, int) ([]ProjectionEntry, error) = (*ReplayProjection).AssembleBudgetPrefix
 
 	_ func(*ReplayProjection, context.Context, AgeFoldPlan) (AgeFoldReport, error) = (*ReplayProjection).FoldByAge
+
+	// The judgment, the execution and the restore of one fold keep their shapes:
+	// a plan reads the projection, the products it answers are placed onto it,
+	// and the products a chain recorded are read back from their facts.
+	_ func(*ReplayProjection, context.Context, AgeFoldPlan) (AgeFoldPlanReport, error) = (*ReplayProjection).PlanByAge
+	_ func(*ReplayProjection, []FoldProduct)                                           = (*ReplayProjection).ApplyProducts
+	_ func(*ReplayProjection, []event.CompressProduct)                                 = (*ReplayProjection).RestoreProducts
+	_                                                                                  = FoldProduct{Entry: ProjectionEntry{}, Covered: []event.EventID{}, Request: event.CompressRequest{}}
+	_                                                                                  = AgeFoldPlanReport{Volume: 0, Threshold: 0, Triggered: false, Counts: FoldedCounts{}, Products: []FoldProduct{}}
 )
 
 // The segment-age axis keeps its declared shapes: one band per age band, the

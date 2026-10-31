@@ -1,5 +1,11 @@
 package assembly // import "github.com/SpellingDragon/tagent/assembly"
 
+The compression consumer: the execution half of compression. A producer judges
+material over its bound and files a compress request; the consumer reads the
+material that request names, folds it through the projection and files the
+compress product the execution minted. Judgment and execution share no step,
+so what material went is a fact of the chain beside why it went.
+
 Boot is the turnkey entry of the composition root: it reads one host document,
 resolves the declaration it carries, and returns the Host the application
 drives. The Host owns the assembled run, the scheduled reflection and the
@@ -132,6 +138,9 @@ CONSTANTS
 
 const AgeFoldPluginName = "age-fold"
     AgeFoldPluginName is the stable name the age fold plugin instance answers.
+
+const CompressionConsumerName = "compress-consumer"
+    CompressionConsumerName is the stable name the compression consumer answers.
 
 const DiagnosticSwitchEnv = "TAGENT_DIAGNOSTICS"
     DiagnosticSwitchEnv names the environment variable the host reads the
@@ -303,6 +312,16 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
     acquired. MUST NOT carry a stand-in governance in a formal assembly.
     MUST NOT return a half-assembled run beside a publication failure.
 
+    - The producer of the closing round reads the budget its own agent declares
+    over the same declaration the loop's table was set from, so the judgment
+    the chain carries names the policy the drive runs under. - The consumer of
+    compression judgments is an instance of the material flow like the fold that
+    judges them, so every agent's After pass executes the judgments already
+    filed instead of waiting for a producer to hand them over. - The producer of
+    the closing round is an instance of the same flow: every agent's After pass
+    judges the budget of the segment its commit grew, so the closing round of a
+    spent budget stands on the chain as the fact it is.
+
 func Boot(configPath string, opts ...HostOption) (*Host, error)
     Boot reads one host document and returns the assembled host: the declaration
     is resolved from the document, the models, tool instances, storage tier,
@@ -310,6 +329,32 @@ func Boot(configPath string, opts ...HostOption) (*Host, error)
     Assemble, and the reflection driver and the loopback endpoints start beside
     it. Every failure before the assembly returns the named refusal and leaves
     nothing running.
+
+    - The meditation pass yields to the model requests of the observed session,
+    and the read of them is the consumption loop's own: the driver is assembled
+    before the loop is, so the face is a method value that reads it when a pass
+    runs.
+
+    - Every decision of a segment runs under the lineage of the material that
+    opened it, so a body a call of that decision sends leaves under the line of
+    its own turn instead of the send tool's own default; the direct drive stamps
+    the same line on its context.
+
+    - The one approval book of a boot is the host-attached book when the caller
+    mounted it, and a boot-local book under <root>/approvals only fills a
+    process that declared none, so a caller that mounted the default book keeps
+    ruling the very book it handed over; the risk-rule gate and the loop's batch
+    fuse read that same book.
+
+    - A fuse declaration on the entry agent wires the loop: a response above the
+    call cap or past the long-context threshold parks its whole batch on that
+    one book before anything executes, and a declaration that names neither knob
+    leaves the limits the process already declared in place.
+
+    - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads
+    when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses
+    this host starts trace, and names in one line that the host process itself
+    traces only when it was launched beside it.
 
 func DiagnosticSwitchesFromEnv() (DiagnosticSwitches, error)
     DiagnosticSwitchesFromEnv reads the diagnostic switches the host process
@@ -345,19 +390,19 @@ TYPES
 type AgeFoldPlugin struct {
 	// Has unexported fields.
 }
-    AgeFoldPlugin folds the projection of the session the committed fact belongs
-    to once its rendered volume passes the window threshold: the process detail
-    of the older task turns collapses into fold products and the middle band
-    into one history summary, so a long session replays into the window it
-    declared instead of over it.
+    AgeFoldPlugin judges the projection of the session the committed fact
+    belongs to once its rendered volume passes the window threshold: the process
+    detail of the older task turns is due for a fold and the middle band for one
+    history summary. The plugin files each judgment as a compress request and
+    executes nothing of it, so why material goes is a fact beside the product
+    that says what went, and the consumer that reads the request does the
+    folding.
 
     The plugin is an instance of the material flow like any other: it reads
-    the fact material and answers an observation, so the pipeline dispatches
-    it beside the reflection driver and the commit that grew the projection
-    is the trigger. How material folds stays the projection's own rule — the
-    plugin judges nothing about it. Every judgment the fold answered is filed
-    as a compress request on the chain, so why material went is a fact like any
-    other.
+    the fact material and answers an observation, so the pipeline dispatches it
+    beside the reflection driver and the commit that grew the projection is the
+    trigger. How material folds stays the projection's own rule — the plugin
+    judges nothing about it.
 
 func NewAgeFoldPlugin(sessions SessionFolds) *AgeFoldPlugin
     NewAgeFoldPlugin assembles the fold plugin over the session face of one run.
@@ -368,19 +413,73 @@ func (p *AgeFoldPlugin) Name() string
     Name reports the stable name of this plugin instance.
 
 func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error
-    ObserveCommit folds the projection of the session the committed fact belongs
-    to once that projection's rendered volume passes the window threshold,
-    and files the compression judgment of every product the fold minted.
+    ObserveCommit judges the projection of the session the committed fact
+    belongs to once that projection's rendered volume passes the window
+    threshold, and files the judgment of every product the fold would mint. The
+    material itself is left as it stands: the consumer that reads the judgment
+    does the folding.
 
-    The duty is read-only over the fact: a fact whose session registered no
-    projection, a session whose window names no positive token window and a
-    projection still inside its threshold each leave the commit as it stands.
-    A fold that ran rewrote the projection only, and a failed fold is reported
-    without rolling the commit back.
+    The duty is read-only over the fact and over the projection: a fact whose
+    session registered no projection, a session whose window names no positive
+    token window and a projection still inside its threshold each leave the
+    commit as it stands. A failed judgment is reported without rolling the
+    commit back.
 
 func (p *AgeFoldPlugin) Port() plugin.Port
     Port reports the consumption the plugin serves: one committed fact in,
     one observation out. The observation is the fold the fact may trigger.
+
+type CompressionConsumer struct {
+	// Has unexported fields.
+}
+    CompressionConsumer executes the compression judgments filed on a chain.
+    It reads the material one request names, executes the fold the judgment
+    already made and files the product, so the projection restores that product
+    from the chain instead of folding the material a second time.
+
+    The redline list (3 rules): MUST file at most one product per request:
+    the product identity is content-addressed over the judgment. MUST NOT judge
+    material of its own: only the requests already on the chain are executed.
+    MUST NOT execute a judgment whose material does not stand: it stays pending
+    rather than answering a product of other material.
+
+func NewCompressionConsumer(sessions compressSessions) *CompressionConsumer
+    NewCompressionConsumer assembles the consumer over the session face of
+    one run. A nil face answers no session, so an assembly mounted beside none
+    executes nothing instead of failing on the first commit.
+
+func (c *CompressionConsumer) Execute(ctx context.Context, session event.SessionID) error
+    Execute runs every judgment of one session no product answers yet: it reads
+    the material the judgment named, folds it and files the product beside it.
+    A session whose chain registered no projection, and a window naming no
+    positive token window, execute nothing — the judgment stays pending as the
+    unexecuted judgment it is.
+
+    The pass reads the projection and never judges it: whether material is over
+    its bound is already the request on the chain, and the plan only answers
+    which product that request names.
+
+func (c *CompressionConsumer) Name() string
+    Name reports the stable name of this plugin instance.
+
+func (c *CompressionConsumer) NoteProduct(product event.CompressProduct)
+    NoteProduct notes one product a chain already carries, so the judgment it
+    answers is never executed a second time: this is the restart path, where the
+    products of a chain answer judgments the process does not hold.
+
+func (c *CompressionConsumer) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit executes the judgments one session filed that no product
+    answers yet: the fact that triggered it names the session, and every
+    judgment of that session stands where the producer left it.
+
+func (c *CompressionConsumer) Port() plugin.Port
+    Port reports the consumption the consumer serves: one committed fact in,
+    one execution of the judgments already on the chain.
+
+func (c *CompressionConsumer) Record(session event.SessionID, request event.CompressRequest)
+    Record notes one judgment a producer filed for a session, so the consumer
+    executes it. A judgment already noted is noted once: the identity is
+    content-addressed, so a re-filed judgment is the same judgment.
 
 type DiagnosticFace struct {
 	// Subsystem names the face this reading belongs to.
@@ -637,12 +736,12 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
     user address of the entry agent delivers the fresh assistant output through
     the message sender; every other address is driven headless.
 
-    A user message that arrives while a drive of that address is already running
-    is admitted into the chain of that running range instead of parking outside
-    the gate: the message reaches the next decision boundary of the turn in
-    flight, and the call answers the admission itself — no decision reached and
-    no error. Every other arrival, and a user arrival beside a gate no drive
-    holds, takes the gate and drives a turn of its own, exactly as before.
+    A user message commits as a fact of its session and wakes the resident
+    consumption loop of its address: the loop pulls the message with whatever
+    else arrived, batches them into one model request, and the call answers with
+    the aggregated turn of the segment that consumed it — a second entry whose
+    message the same segment consumed answers the same turn. Every other address
+    drives a turn of its own through the run, exactly as before.
 
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is
@@ -1132,6 +1231,12 @@ func (r *Run) LeasePublications() []rl.ModelIdentity
     LeasePublications reports the versions the model leases installed through
     this run's default publication entry, in installation order, as a copy the
     caller owns.
+
+func (r *Run) ModelInFlight(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool)
+    ModelInFlight reports the model request one site is executing, read off the
+    consumption loop of this run: the range the decision serves and the identity
+    of the decision itself. A site in another instance, a run beside no loop and
+    a site running no request each answer no flight.
 
 func (r *Run) NarrowFace(ctx context.Context, agent event.AgentID, selection state.VisibleSelection) error
     NarrowFace narrows the face one agent may see from the next request boundary

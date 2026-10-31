@@ -104,9 +104,12 @@ func TestTheMicroWindowMessageIsConsumedByTheNextTurn(t *testing.T) {
 	if len(landed) != 1 {
 		t.Fatalf("facts carrying the arriving message = %d, want the one fact the turn that follows commits as its own input", len(landed))
 	}
-	if landed[0].InvocationID != second.turn.InvocationID {
-		t.Fatalf("the fact carrying the arriving message belongs to the range %q, want the range that followed %q: "+
-			"a fact landed under a range past its last boundary is material no decision of it reads",
+	if landed[0].InvocationID == first.turn.InvocationID {
+		t.Fatalf("the fact carrying the arriving message belongs to the range %q of the turn that already ended: "+
+			"a fact landed under a range past its last boundary is material no decision of it reads", landed[0].InvocationID)
+	}
+	if decisionFlowSegmentRange(landed[0].InvocationID, addr) {
+		t.Fatalf("the fact carrying the arriving message carries the segment range %q, want the submitter identity the entry handed its own commit beside the range %q that read it",
 			landed[0].InvocationID, second.turn.InvocationID)
 	}
 

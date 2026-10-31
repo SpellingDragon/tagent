@@ -41,19 +41,23 @@ const failureNoticeTruncated = "（已截断）"
 // by.
 const failureNoticeSummary = "failure-notice"
 
-// deliverFresh delivers the assistant bodies the session's committed facts carry past
-// the invocation baseline through the sender; a session the chain maps onto a projection
-// commits no transcript history, so the facts are the one read face both session kinds share.
+// deliverFresh delivers the assistant bodies the invocation that just ended
+// generated through the sender; a session the chain maps onto a projection
+// commits no transcript history, so the facts are the one read face both session
+// kinds share. The bodies are read by the identity of that invocation, never by a
+// position of the chain: the chain is held to the hot window of its session, so a
+// position read at an earlier moment names other material.
 //   - A body wins over a failure: a turn that produced a deliverable answer delivers it.
 //   - A failed turn without a body delivers the raw recorded cause; no cause stays silent.
 //   - Each body stands as a durable delivery obligation before its send: a stop between the
 //     record and the confirmed send is answered by a restart that sends the body, and the
 //     obligation is settled under the identity the generation registered.
-func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline int, sender MessageSender, lineage string, turn agent.Turn) {
+//   - Only a body whose obligation is still owed is sent: a body an earlier process delivered under the same invocation identity carries a settled receipt and is left as it stands. A run beside no durable account sends every body it generated, because nothing outside it ever recorded a discharge.
+func (h *Host) deliverFresh(ctx context.Context, addr event.Address, sender MessageSender, lineage string, turn agent.Turn) {
 	if sender == nil {
 		return
 	}
-	bodies := freshAssistantOf(h.run.SessionFacts(addr), baseline)
+	bodies := generatedBodiesOf(h.run.SessionFacts(addr), turn.InvocationID)
 	if len(bodies) == 0 {
 		if turn.Terminal == model.KindFailed {
 			if notice := failureNoticeText(turn.Failure); notice != "" {
@@ -67,10 +71,16 @@ func (h *Host) deliverFresh(ctx context.Context, addr event.Address, baseline in
 		assemblyDebug("tagent: the invocation of %s produced no deliverable assistant body", addr.SessionID)
 		return
 	}
-	if _, err := h.recordDeliveryOwed(ctx, addr, lineage, bodies); err != nil {
-		assemblyWarn("tagent: the delivery obligations of %s were not registered: %v", addr.SessionID, err)
+	owed := bodies
+	if h.deliveryDurable() != nil && addr.AgentID == h.entry {
+		filtered, err := h.recordDeliveryOwed(ctx, addr, lineage, bodies)
+		if err != nil {
+			assemblyWarn("tagent: the delivery obligations of %s were not registered: %v", addr.SessionID, err)
+		} else {
+			owed = filtered
+		}
 	}
-	for _, body := range bodies {
+	for _, body := range owed {
 		obligation, _ := freshObligationOf(body)
 		delivery := plugin.Delivery{Content: body.content, Lineage: lineage, Target: addr}
 		if _, cause := h.deliverObligation(ctx, obligation, sender, delivery); cause != "" {
@@ -808,27 +818,12 @@ func assistantBodyOf(evt event.Event) (freshBody, bool) {
 	return freshBody{fact: evt.Key, content: content}, true
 }
 
-// freshAssistantOf reports the plain assistant bodies one session's committed
-// facts carry past the baseline: the bodies the invocation that just ended
-// produced, and nothing an earlier delivery already carried.
-func freshAssistantOf(facts []event.Event, baseline int) []freshBody {
-	if baseline > len(facts) {
-		baseline = len(facts)
-	}
-	bodies := make([]freshBody, 0, 4)
-	for _, evt := range facts[baseline:] {
-		if body, ok := assistantBodyOf(evt); ok {
-			bodies = append(bodies, body)
-		}
-	}
-	return bodies
-}
-
 // generatedBodiesOf reports the plain assistant bodies one invocation generated:
-// the bodies the follow-up turn of a notification committed under its own
-// four-part identity, read back from the chain a restart rebuilt. A drive names
-// its facts by invocation identity, so the bodies of the turn are recoverable
-// after the process that generated them is gone.
+// the bodies the turn committed under its own four-part identity, read back from
+// the chain a restart rebuilt. A drive names its facts by invocation identity, so
+// the bodies of the turn are recoverable after the process that generated them is
+// gone, and the delivery of a closed segment, the hand-off of a settled notice and
+// the registration a follow-up turn leaves all read the same set.
 func generatedBodiesOf(facts []event.Event, invocation event.InvocationID) []freshBody {
 	if invocation == "" {
 		return nil

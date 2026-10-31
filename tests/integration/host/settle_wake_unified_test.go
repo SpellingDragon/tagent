@@ -59,11 +59,19 @@ func wakeDelegate(callID, input string) string {
 // repeated commit of the very same settle fact, which is an idempotent hit that
 // still runs its After pass. Exactly one follow-up turn may answer the
 // provider; the mailbox claim is the account that keeps the second fire out.
+//
+// The script reads the request instead of counting decisions: a segment that is
+// still flying when the notice lands reads the settle material in its own next
+// decision, and a segment that already closed lets the notice open a range of
+// its own. Both shapes read the settle material exactly once, so the decision
+// that carries it — never the position of the call — is what the follow-up turn
+// is, and the accept decision beside it answers as the plain entry answer.
 func runWakeDuplicateFire(t *testing.T) {
 	wakeEnv(t)
 
 	const (
 		workerBody     = "the delegated worker reports the total is 42"
+		entryAnswer    = "the entry accepted the delegation"
 		followUpAnswer = "the settle reached the user exactly once"
 	)
 	provider := newScriptedProvider(t)
@@ -74,26 +82,28 @@ func runWakeDuplicateFire(t *testing.T) {
 	followUpStarted := make(chan struct{})
 	var releaseOnce sync.Once
 	var mu sync.Mutex
-	entryCalls := 0
-	provider.answer = func(index int) string {
-		models := provider.servedModels()
-		if models[index] == "model-worker" {
+	entryCalls, followUps := 0, 0
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if request.Model == "model-worker" {
 			workerOnce.Do(func() { close(workerSeen) })
 			<-releaseWorker
-			return scriptedAnswerOf(workerBody)
+			return scriptedAnswerOf(workerBody), nil
 		}
 		mu.Lock()
+		defer mu.Unlock()
+		if settleDriveReadsMaterial(request, workerBody) {
+			followUps++
+			if followUps == 1 {
+				close(followUpStarted)
+				<-holdFollowUp
+			}
+			return scriptedAnswerOf(followUpAnswer), nil
+		}
 		entryCalls++
-		call := entryCalls
-		mu.Unlock()
-		if call == 1 {
-			return wakeDelegate("call-worker", "compute the total")
+		if entryCalls == 1 {
+			return wakeDelegate("call-worker", "compute the total"), nil
 		}
-		if call == 2 {
-			close(followUpStarted)
-			<-holdFollowUp
-		}
-		return scriptedAnswerOf(followUpAnswer)
+		return scriptedAnswerOf(entryAnswer), nil
 	}
 	releaseHold := func() { releaseOnce.Do(func() { close(holdFollowUp) }) }
 	defer releaseHold()
@@ -153,18 +163,18 @@ func runWakeDuplicateFire(t *testing.T) {
 
 	releaseHold()
 	waitForSettle(t, "the follow-up turn to deliver its answer", func() bool {
-		return len(sender.bodies()) >= 1
+		return deliveredCopies(sender.bodies(), followUpAnswer) == 1
 	})
 	time.Sleep(1500 * time.Millisecond)
 
 	mu.Lock()
-	turns := entryCalls
+	turns := followUps
 	mu.Unlock()
-	if turns != 2 {
-		t.Fatalf("entry model turns = %d, want the delegating decision beside exactly one follow-up turn", turns)
+	if turns != 1 {
+		t.Fatalf("entry follow-up turns = %d, want the one the delivered settle drove and no turn beside the repeated fire", turns)
 	}
 	bodies := sender.bodies()
-	if len(bodies) != 1 || bodies[0] != followUpAnswer {
+	if got := deliveredCopies(bodies, followUpAnswer); got != 1 {
 		t.Fatalf("delivered bodies = %q, want the one follow-up answer %q", bodies, followUpAnswer)
 	}
 	if err := host.Close(ctx); err != nil {
@@ -176,11 +186,18 @@ func runWakeDuplicateFire(t *testing.T) {
 // boots the next process over the same storage: the unconsumed notice must
 // resume its turn without any user input and deliver the answer the first
 // attempt never reached.
+//
+// The script reads the request instead of counting decisions, so the shape that
+// reads the settle material in the decision the parked call left in flight and
+// the shape that lets the notice open a range of its own both hold the same
+// attempt: what the check counts is the decisions that read the settlement, and
+// the assertion is the one answer that reaches the user.
 func runWakeRestartResume(t *testing.T) {
 	wakeEnv(t)
 
 	const (
 		workerBody     = "the delegated worker reports the total is 7"
+		entryAnswer    = "the entry accepted the delegation"
 		followUpAnswer = "the resumed follow-up reached the user without a second request"
 	)
 	provider := newScriptedProvider(t)
@@ -191,26 +208,28 @@ func runWakeRestartResume(t *testing.T) {
 	followUpStarted := make(chan struct{})
 	var releaseOnce sync.Once
 	var mu sync.Mutex
-	entryCalls := 0
-	provider.answer = func(index int) string {
-		models := provider.servedModels()
-		if models[index] == "model-worker" {
+	entryCalls, followUps := 0, 0
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if request.Model == "model-worker" {
 			workerOnce.Do(func() { close(workerSeen) })
 			<-releaseWorker
-			return scriptedAnswerOf(workerBody)
+			return scriptedAnswerOf(workerBody), nil
 		}
 		mu.Lock()
+		defer mu.Unlock()
+		if settleDriveReadsMaterial(request, workerBody) {
+			followUps++
+			if followUps == 1 {
+				close(followUpStarted)
+				<-holdFollowUp
+			}
+			return scriptedAnswerOf(followUpAnswer), nil
+		}
 		entryCalls++
-		call := entryCalls
-		mu.Unlock()
-		if call == 1 {
-			return wakeDelegate("call-worker", "compute the total")
+		if entryCalls == 1 {
+			return wakeDelegate("call-worker", "compute the total"), nil
 		}
-		if call == 2 {
-			close(followUpStarted)
-			<-holdFollowUp
-		}
-		return scriptedAnswerOf(followUpAnswer)
+		return scriptedAnswerOf(entryAnswer), nil
 	}
 	releaseHold := func() { releaseOnce.Do(func() { close(holdFollowUp) }) }
 	defer releaseHold()
@@ -262,17 +281,17 @@ func runWakeRestartResume(t *testing.T) {
 		t.Fatalf("boot the restored host: %v", err)
 	}
 	waitForSettle(t, "the resumed follow-up to deliver its answer", func() bool {
-		return len(sender.bodies()) >= 1
+		return deliveredCopies(sender.bodies(), followUpAnswer) == 1
 	})
 	bodies := sender.bodies()
-	if len(bodies) != 1 || bodies[0] != followUpAnswer {
+	if got := deliveredCopies(bodies, followUpAnswer); got != 1 {
 		t.Fatalf("delivered bodies = %q, want the one resumed answer %q", bodies, followUpAnswer)
 	}
 	mu.Lock()
-	turns := entryCalls
+	followed := followUps
 	mu.Unlock()
-	if turns < 3 {
-		t.Fatalf("entry model turns = %d, want the delegating decision, the stopped attempt and the resumed follow-up", turns)
+	if followed < 2 {
+		t.Fatalf("decisions that read the settlement = %d, want the stopped attempt and the resumed follow-up", followed)
 	}
 	if err := restored.Close(ctx); err != nil {
 		t.Fatalf("close the restored host: %v", err)
@@ -283,12 +302,19 @@ func runWakeRestartResume(t *testing.T) {
 // settled notification no turn has started: both must be waiting in the
 // mailbox account of the next boot, because a stop keeps unconsumed notices
 // instead of clearing the queue behind it.
+//
+// The script reads the request instead of counting decisions, so the two shapes
+// a landed notice takes — read by the segment still flying beside its own
+// delegation, or read by a range the notice opens after that segment closed —
+// both hold one attempt per session: the check counts the decisions that read
+// each session's settlement and the resumed answers that reach the user.
 func runWakeStopRetains(t *testing.T) {
 	wakeEnv(t)
 
 	const (
 		workerBodyA    = "the first worker reports the total is 1"
 		workerBodyB    = "the second worker reports the total is 2"
+		entryAnswer    = "the entry accepted the delegation"
 		followUpAnswer = "a retained notice resumed after the stop"
 	)
 	provider := newScriptedProvider(t)
@@ -301,9 +327,9 @@ func runWakeStopRetains(t *testing.T) {
 	var releaseOnce sync.Once
 	var mu sync.Mutex
 	entryCalls, workerCalls := 0, 0
-	provider.answer = func(index int) string {
-		models := provider.servedModels()
-		if models[index] == "model-worker" {
+	followUpsA, followUpsB := 0, 0
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if request.Model == "model-worker" {
 			mu.Lock()
 			workerCalls++
 			worker := workerCalls
@@ -312,27 +338,35 @@ func runWakeStopRetains(t *testing.T) {
 			case 1:
 				close(workerSeenA)
 				<-releaseWorkerA
-				return scriptedAnswerOf(workerBodyA)
+				return scriptedAnswerOf(workerBodyA), nil
 			default:
 				close(workerSeenB)
 				<-releaseWorkerB
-				return scriptedAnswerOf(workerBodyB)
+				return scriptedAnswerOf(workerBodyB), nil
 			}
 		}
 		mu.Lock()
-		entryCalls++
-		call := entryCalls
-		mu.Unlock()
-		switch call {
-		case 1:
-			return wakeDelegate("call-a", "the first total")
-		case 2:
-			return wakeDelegate("call-b", "the second total")
-		case 3:
-			close(followUpStarted)
-			<-holdFollowUp
+		defer mu.Unlock()
+		if settleDriveReadsMaterial(request, workerBodyA) {
+			followUpsA++
+			if followUpsA == 1 {
+				close(followUpStarted)
+				<-holdFollowUp
+			}
+			return scriptedAnswerOf(followUpAnswer), nil
 		}
-		return scriptedAnswerOf(followUpAnswer)
+		if settleDriveReadsMaterial(request, workerBodyB) {
+			followUpsB++
+			return scriptedAnswerOf(followUpAnswer), nil
+		}
+		entryCalls++
+		switch entryCalls {
+		case 1:
+			return wakeDelegate("call-a", "the first total"), nil
+		case 2:
+			return wakeDelegate("call-b", "the second total"), nil
+		}
+		return scriptedAnswerOf(entryAnswer), nil
 	}
 	releaseHold := func() { releaseOnce.Do(func() { close(holdFollowUp) }) }
 	defer releaseHold()
@@ -412,17 +446,20 @@ func runWakeStopRetains(t *testing.T) {
 		t.Fatalf("boot the restored host: %v", err)
 	}
 	waitForSettle(t, "both retained notices to resume", func() bool {
-		return len(sender.bodies()) >= 2
+		return deliveredCopies(sender.bodies(), followUpAnswer) >= 2
 	})
 	bodies := sender.bodies()
-	if len(bodies) < 2 {
+	if got := deliveredCopies(bodies, followUpAnswer); got != 2 {
 		t.Fatalf("delivered bodies = %q, want one resumed answer per retained notice", bodies)
 	}
 	mu.Lock()
-	turns := entryCalls
+	turns, first, second := entryCalls, followUpsA, followUpsB
 	mu.Unlock()
-	if turns < 5 {
-		t.Fatalf("entry model turns = %d, want two delegating decisions, the stopped attempt and the two resumed follow-ups", turns)
+	if first < 1 || second < 1 {
+		t.Fatalf("decisions that read each session's settlement = (%d, %d), want one per retained notice", first, second)
+	}
+	if turns > 4 {
+		t.Fatalf("entry model turns = %d, want at most the two delegating decisions and the accept decision beside each of them", turns)
 	}
 	if err := restored.Close(ctx); err != nil {
 		t.Fatalf("close the restored host: %v", err)
@@ -431,12 +468,19 @@ func runWakeStopRetains(t *testing.T) {
 
 // runWakeConsumedNoReplay is the guard beside the resume check: a notice whose
 // turn completed and consumed its entry never fires again across a further
-// restart.
+// restart. The script answers the decision that read the settlement material,
+// so the same answers serve the shape that reads the notice in the decision the
+// parked call left in flight and the shape that reads it in a range of its own.
+//
+// - The guard is about a notice whose entry is consumed, so the check waits for the signal every shape of the landed notice holds: the follow-up answer the segment delivered reaching the sender exactly once.
+// - The durable account is read only after the close and never beside a live host: opening the storage tier over a root a host still writes drops the temporary file of an in-flight barrier (memory/ledger readShardSnapshot drops it on every open), and the settle commit it cuts is the very receipt this guard reads — a poll loop over the tier therefore fails the drive it is waiting for.
+// - A stop beside a body whose send never returned leaves an obligation the next process delivers, which the owed-delivery check pins instead of this guard.
 func runWakeConsumedNoReplay(t *testing.T) {
 	wakeEnv(t)
 
 	const (
 		workerBody     = "the delegated worker reports the total is 5"
+		entryAnswer    = "the entry accepted the delegation"
 		followUpAnswer = "the consumed settle never came back"
 	)
 	provider := newScriptedProvider(t)
@@ -444,22 +488,24 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	releaseWorker := make(chan struct{})
 	var workerOnce sync.Once
 	var mu sync.Mutex
-	entryCalls := 0
-	provider.answer = func(index int) string {
-		models := provider.servedModels()
-		if models[index] == "model-worker" {
+	entryCalls, settlements := 0, 0
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if request.Model == "model-worker" {
 			workerOnce.Do(func() { close(workerSeen) })
 			<-releaseWorker
-			return scriptedAnswerOf(workerBody)
+			return scriptedAnswerOf(workerBody), nil
 		}
 		mu.Lock()
-		entryCalls++
-		call := entryCalls
-		mu.Unlock()
-		if call == 1 {
-			return wakeDelegate("call-worker", "compute the total")
+		defer mu.Unlock()
+		if settleDriveReadsMaterial(request, workerBody) {
+			settlements++
+			return scriptedAnswerOf(followUpAnswer), nil
 		}
-		return scriptedAnswerOf(followUpAnswer)
+		entryCalls++
+		if entryCalls == 1 {
+			return wakeDelegate("call-worker", "compute the total"), nil
+		}
+		return scriptedAnswerOf(entryAnswer), nil
 	}
 
 	root := t.TempDir()
@@ -492,15 +538,29 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	invokeCancel()
 	<-invoked
 	close(releaseWorker)
-	waitForSettle(t, "the follow-up turn to deliver its answer", func() bool {
-		return len(sender.bodies()) >= 1
+	waitForSettle(t, "the follow-up answer to reach its sender", func() bool {
+		return deliveredCopies(sender.bodies(), followUpAnswer) >= 1
 	})
 	if err := host.Close(ctx); err != nil {
 		t.Fatalf("close the host: %v", err)
 	}
+	if got := deliveredCopies(sender.bodies(), followUpAnswer); got != 1 {
+		t.Fatalf("delivered copies of %q = %d, want the one the consumed notice owns", followUpAnswer, got)
+	}
+	records := owedDeliveryRecords(t, root)
+	if len(tierKeys(t, root, settleConsumePrefix)) == 0 {
+		t.Fatalf("no consumption receipt stands beside the delivered notice, want the one the landed generation wrote")
+	}
+	if owed := recordsInState(records, owedState); len(owed) != 0 {
+		t.Fatalf("delivery obligations standing owed after the close = %+v, want none beside a delivered answer", owed)
+	}
+	if sent := recordsCarrying(records, followUpAnswer); len(sent) != 1 || sent[0].Status != sentState {
+		t.Fatalf("the record of %q after the close = %+v, want the one record settled as sent", followUpAnswer, sent)
+	}
 
 	mu.Lock()
 	turns := entryCalls
+	answers := settlements
 	mu.Unlock()
 	bodies := len(sender.bodies())
 
@@ -511,9 +571,13 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 	mu.Lock()
 	after := entryCalls
+	answered := settlements
 	mu.Unlock()
 	if after != turns {
 		t.Fatalf("entry model turns after the restart = %d, want the %d the consumed notice never exceeds", after, turns)
+	}
+	if answered != answers {
+		t.Fatalf("settlement answers after the restart = %d, want the %d the consumed notice already closed", answered, answers)
 	}
 	if got := len(sender.bodies()); got != bodies {
 		t.Fatalf("delivered bodies after the restart = %d, want the %d the consumed notice already delivered", got, bodies)
@@ -521,4 +585,17 @@ func runWakeConsumedNoReplay(t *testing.T) {
 	if err := restored.Close(ctx); err != nil {
 		t.Fatalf("close the restored host: %v", err)
 	}
+}
+
+// deliveredCopies counts how many of the delivered bodies carry exactly the
+// named answer, so a check of one answer reaching the user once reads the
+// bodies it was actually delivered as instead of the position of a decision.
+func deliveredCopies(bodies []string, answer string) int {
+	copies := 0
+	for _, body := range bodies {
+		if body == answer {
+			copies++
+		}
+	}
+	return copies
 }

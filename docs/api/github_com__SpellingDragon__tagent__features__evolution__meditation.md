@@ -248,19 +248,20 @@ type Driver struct {
     commit the held session may never send.
 
 func NewDriver(reflection *Reflection, interval, minGap time.Duration,
-	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
+	modelInFlight func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
 	instance event.InstanceID) *Driver
     NewDriver assembles the event-driven reflection face over one reflection
     loop, the floor between two fires, the floor between two consumed
-    reflections, the read of the observed session's execution seat and the
-    instance that seat is held in.
+    reflections, the read of whether a model request of the observed session is
+    executing and the instance that request runs in.
 
     The interval is measured from the last fire; the first fire is never
     held back, so the first event of a process is answered at once,
-    and a non-positive interval disables that floor. The min gap stays the
-    reflection's own rhythm floor, read from the execution watermark, so a fired
-    but not yet consumed reflection is never re-fired early. A nil seat read or
-    an empty instance leaves the pass its rhythm alone.
+    and a non-positive interval disables that floor. The min gap stays
+    the reflection's own rhythm floor, read from the execution watermark,
+    so a fired but not yet consumed reflection is never re-fired early.
+    A nil consumption-state read or an empty instance leaves the pass its rhythm
+    alone.
 
 func (d *Driver) Name() string
     Name reports the stable name of this plugin instance.
@@ -269,7 +270,7 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error
     ObserveCommit reads the fact one commit wrote and advances the driver's
     timer state when that fact names an interaction someone awaits, recording
     the session that material belongs to beside it: the pass reflects on that
-    session's seat.
+    session's model request.
 
     The pass itself runs detached from the committing turn: a reflection spends
     a model call, and a user turn never waits for it. A failed read is reported

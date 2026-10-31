@@ -69,19 +69,25 @@ type SessionFolds interface {
 	FileCompressRequest(ctx context.Context, session event.SessionID, request event.CompressRequest) error
 }
 
-// AgeFoldPlugin folds the projection of the session the committed fact belongs
+// AgeFoldPlugin judges the projection of the session the committed fact belongs
 // to once its rendered volume passes the window threshold: the process detail of
-// the older task turns collapses into fold products and the middle band into one
-// history summary, so a long session replays into the window it declared instead
-// of over it.
+// the older task turns is due for a fold and the middle band for one history
+// summary. The plugin files each judgment as a compress request and executes
+// nothing of it, so why material goes is a fact beside the product that says
+// what went, and the consumer that reads the request does the folding.
 //
 // The plugin is an instance of the material flow like any other: it reads the
 // fact material and answers an observation, so the pipeline dispatches it beside
 // the reflection driver and the commit that grew the projection is the trigger.
 // How material folds stays the projection's own rule — the plugin judges nothing
-// about it. Every judgment the fold answered is filed as a compress request on
-// the chain, so why material went is a fact like any other.
-type AgeFoldPlugin struct{ sessions SessionFolds }
+// about it.
+type AgeFoldPlugin struct {
+	sessions SessionFolds
+	// executor runs the judgments the plugin files, so the material folds in the
+	// commit that judged it instead of waiting for the next commit to observe
+	// the request.
+	executor compressExecutor
+}
 
 // The plugin serves the fact→observation port the reflection driver serves, and
 // observes every commit the run makes.
@@ -97,6 +103,16 @@ func NewAgeFoldPlugin(sessions SessionFolds) *AgeFoldPlugin {
 	return &AgeFoldPlugin{sessions: sessions}
 }
 
+// setExecutor attaches the consumer that executes the judgments this plugin
+// files. A plugin beside no executor still judges and files, so a host that
+// mounts no consumer reads every judgment on the chain and gets no product.
+func (p *AgeFoldPlugin) setExecutor(executor compressExecutor) {
+	if p == nil {
+		return
+	}
+	p.executor = executor
+}
+
 // Name reports the stable name of this plugin instance.
 func (p *AgeFoldPlugin) Name() string { return AgeFoldPluginName }
 
@@ -106,15 +122,15 @@ func (p *AgeFoldPlugin) Port() plugin.Port {
 	return plugin.PortFactObservation
 }
 
-// ObserveCommit folds the projection of the session the committed fact belongs
+// ObserveCommit judges the projection of the session the committed fact belongs
 // to once that projection's rendered volume passes the window threshold, and
-// files the compression judgment of every product the fold minted.
+// files the judgment of every product the fold would mint. The material itself is
+// left as it stands: the consumer that reads the judgment does the folding.
 //
-// The duty is read-only over the fact: a fact whose session registered no
-// projection, a session whose window names no positive token window and a
-// projection still inside its threshold each leave the commit as it stands. A
-// fold that ran rewrote the projection only, and a failed fold is reported
-// without rolling the commit back.
+// The duty is read-only over the fact and over the projection: a fact whose
+// session registered no projection, a session whose window names no positive
+// token window and a projection still inside its threshold each leave the commit
+// as it stands. A failed judgment is reported without rolling the commit back.
 func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if p == nil || p.sessions == nil {
 		return nil
@@ -134,7 +150,7 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if threshold <= 0 {
 		return nil
 	}
-	report, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{
+	report, err := projection.PlanByAge(ctx, replay.AgeFoldPlan{
 		KeepRecent:      window.KeepRecentTasks,
 		VolumeThreshold: threshold,
 	})
@@ -144,12 +160,15 @@ func (p *AgeFoldPlugin) ObserveCommit(ctx context.Context, id event.EventID) err
 	if !report.Triggered {
 		return nil
 	}
-	for _, request := range report.Requests {
-		if err := p.sessions.FileCompressRequest(ctx, session, request); err != nil {
+	for _, product := range report.Products {
+		if err := p.sessions.FileCompressRequest(ctx, session, product.Request); err != nil {
 			return err
 		}
 	}
-	return nil
+	if p.executor == nil {
+		return nil
+	}
+	return p.executor.Execute(ctx, session)
 }
 
 // ageFoldSessions is the session face of one run the fold plugin observes
@@ -194,11 +213,12 @@ func (s ageFoldSessions) FileCompressRequest(ctx context.Context, session event.
 }
 
 // fileCompressRequest lands one compression judgment in the live ledger of this
-// run under the identity the judgment is quoted by. A judgment already on record
-// is left as it stands: the identity is content-addressed, so a re-filed
-// judgment is the same judgment and never a second fact. The fact carries no
-// message, because a judgment about material is not material of its own and must
-// never enter the projection it judged.
+// run under the identity the judgment is quoted by, and notes it to the consumer
+// that executes judgments. A judgment already on record is left as it stands: the
+// identity is content-addressed, so a re-filed judgment is the same judgment and
+// never a second fact. The fact carries no message, because a judgment about
+// material is not material of its own and must never enter the projection it
+// judged.
 // A judgment the commit refused lands in no ledger at all, and the refusal is
 // recorded at this call site instead of being answered as a filed judgment: the
 // fold reports the gap rather than leaving a judgment silently unkept.
@@ -211,22 +231,23 @@ func (r *Run) fileCompressRequest(ctx context.Context, session event.SessionID, 
 	}
 	r.mu.Lock()
 	_, filed := r.facts[request.ID]
+	consumer := r.compress
 	r.mu.Unlock()
-	if filed {
-		return nil
+	if !filed {
+		stamp := request.At
+		if stamp.IsZero() {
+			stamp = time.Now()
+		}
+		if _, err := r.commitFactChecked(ctx, event.Event{
+			Key:       request.ID,
+			Type:      request.FactType(),
+			Timestamp: stamp,
+			Meta:      map[string]string{event.MetaKeyEventSummary: request.Reason},
+			Owner:     event.Address{SessionID: session},
+		}); err != nil {
+			assemblyWarn("tagent: the compression judgment of session %s was not committed err=%v", session, err)
+		}
 	}
-	stamp := request.At
-	if stamp.IsZero() {
-		stamp = time.Now()
-	}
-	if _, err := r.commitFactChecked(ctx, event.Event{
-		Key:       request.ID,
-		Type:      request.FactType(),
-		Timestamp: stamp,
-		Meta:      map[string]string{event.MetaKeyEventSummary: request.Reason},
-		Owner:     event.Address{SessionID: session},
-	}); err != nil {
-		assemblyWarn("tagent: the compression judgment of session %s was not committed err=%v", session, err)
-	}
+	consumer.Record(session, request)
 	return nil
 }

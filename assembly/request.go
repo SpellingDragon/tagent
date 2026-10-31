@@ -212,8 +212,8 @@ func (f *fileFixer) fixate(ctx context.Context, source state.PromptSource) (stat
 // replayEntry is one session chain's mapped sequence registered for replay: the
 // projection itself beside the window the declaration replays it into, how many
 // of its leading entries have ended — the material a request presents, while the
-// entries still in flight stay with the transcript that carries them — and the
-// invocation whose range those in-flight entries belong to.
+// entries still in flight stay with the transcript that carries them — and
+// whether the chain carries a segment that has not closed yet.
 type replayEntry struct {
 	projection *replay.ReplayProjection
 	window     FoldWindow
@@ -224,16 +224,23 @@ type replayEntry struct {
 	// or falls past the shortened sequence and silently moves the in-flight
 	// notice into the budgeted prefix. An empty identity names a chain with no
 	// range in flight, so every entry is ended material.
-	endedAt         event.EventID
-	rangeInvocation event.InvocationID
+	endedAt event.EventID
+	// rangeOpen reports whether the chain carries a segment that has not
+	// closed yet: the input that started it opened it, and only the
+	// agent_output that closed it ends it. Input that lands beside the open
+	// segment belongs to that segment and never moves the ended boundary.
+	rangeOpen bool
 }
 
 // endedPrefix reports the position the ended material of the registered sequence
 // ends at, resolved against the sequence as it stands now: the position of the
-// entry the boundary names by identity. A boundary naming no entry — a chain
-// that admitted no range yet, or one whose opening entry a fold has already
-// consumed — reports the end of the sequence, so every entry is ended material
-// and none of the range in flight is presented twice.
+// entry the boundary names by identity — inclusive for the agent_output that
+// closed a segment (its answer is ended material the next segment presents),
+// exclusive for the input that opened the next range (it belongs to that range
+// and the drive or loop of it carries it). A boundary naming no entry — a
+// chain that admitted no range yet, or one whose opening entry a fold has
+// already consumed — reports the end of the sequence, so every entry is ended
+// material and none of the range in flight is presented twice.
 func (h replayEntry) endedPrefix() int {
 	if h.projection == nil {
 		return 0
@@ -243,6 +250,9 @@ func (h replayEntry) endedPrefix() int {
 	}
 	for at, entry := range h.projection.Entries() {
 		if entry.Key == h.endedAt {
+			if entry.Type == event.TypeAgentOutput {
+				return at + 1
+			}
 			return at
 		}
 	}
@@ -850,7 +860,7 @@ func projectedSegment(ctx context.Context, run *Run, projection *replay.ReplayPr
 		}
 		message := model.Message{Role: role, Content: presentedProjectionContent(entry)}
 		if run != nil {
-			run.restoreCallPairing(&messages, &message, entry, paired)
+			run.restoreCallPairing(ctx, &messages, &message, entry, paired)
 		}
 		messages = append(messages, message)
 	}
@@ -901,8 +911,16 @@ func projectionBudget(projection *replay.ReplayProjection, window FoldWindow, pr
 // live fact recovers — a restarted run whose facts left with its process —
 // presents as it stands: the entry keeps no pairing and the protocol gate names
 // the break rather than the request silently carrying a broken pair.
-func (r *Run) restoreCallPairing(out *[]model.Message, message *model.Message, entry replay.ProjectionEntry, paired map[string]bool) {
+//
+// - A fact the hot window trimmed from the live ledger still pairs: the storage tier holds the committed body, so the pairing follows the entry wherever the window cut it and a long chain presents whole.
+func (r *Run) restoreCallPairing(ctx context.Context, out *[]model.Message, message *model.Message, entry replay.ProjectionEntry, paired map[string]bool) {
 	fact, held := r.factOf(entry.Key)
+	if !held {
+		restored, err := r.CommittedEvent(ctx, entry.Key)
+		if err == nil {
+			fact, held = restored, true
+		}
+	}
 	switch message.Role {
 	case model.RoleAssistant:
 		if held && len(fact.Message.ToolCalls) > 0 {

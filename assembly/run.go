@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -147,6 +148,9 @@ type Run struct {
 	// factOrder keeps the commit order of the live facts, so a read of one
 	// session's chain answers in the order that chain was written.
 	factOrder []event.EventID
+	// sessionFactCount counts the live facts each session chain holds, so the
+	// per-commit window trim stays O(1) until a chain can actually hold a cut.
+	sessionFactCount map[event.SessionID]int
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
 	factSeq uint64
@@ -206,10 +210,17 @@ type Run struct {
 	// the AttachReplay seam made names no agent and is kept under the bare
 	// session for every user of it.
 	replays map[event.Address]replayEntry
-	// ageFold folds a session's projection once its replay fills the window the
+	// ageFold judges a session's projection once its replay fills the window the
 	// declaration gave it; it is mounted on every agent that declares a window.
 	ageFold *AgeFoldPlugin
-	closing bool
+	// compress executes the judgments the age fold files: the consumer folds the
+	// material a compress request names and files the product beside it.
+	compress *CompressionConsumer
+	// finalRound judges the watchdog budget of a range off its chain and files
+	// the closing round it answered: the judgment is a fact, and the consumer
+	// that runs the closing round reads it at its own decision boundary.
+	finalRound *agent.FinalRoundPlanner
+	closing    bool
 }
 
 // Assemble builds the minimal public assembly of the runtime and publishes the
@@ -230,6 +241,10 @@ type Run struct {
 // MUST free only what the failed candidate acquired.
 // MUST NOT carry a stand-in governance in a formal assembly.
 // MUST NOT return a half-assembled run beside a publication failure.
+//
+// - The producer of the closing round reads the budget its own agent declares over the same declaration the loop's table was set from, so the judgment the chain carries names the policy the drive runs under.
+// - The consumer of compression judgments is an instance of the material flow like the fold that judges them, so every agent's After pass executes the judgments already filed instead of waiting for a producer to hand them over.
+// - The producer of the closing round is an instance of the same flow: every agent's After pass judges the budget of the segment its commit grew, so the closing round of a spent budget stands on the chain as the fact it is.
 func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.AgentID]NativeAgent, opts ...Option) (*Run, error) {
 	if decl == nil {
 		return nil, errors.New("tagent: the assembly carries no declaration")
@@ -253,32 +268,36 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		}
 	}
 	r := &Run{
-		instance:       newInstanceID(),
-		bindings:       state.NewBindings(),
-		occupancy:      state.NewOccupancy(),
-		inspector:      inspectorSubject,
-		admission:      task.NewMemoryAdmission(),
-		sites:          map[event.Address]bool{},
-		facts:          map[event.EventID]event.Event{},
-		fixers:         map[event.AgentID]*fileFixer{},
-		replays:        map[event.Address]replayEntry{},
-		landedSeq:      map[int]int64{},
-		approver:       cfg.approver,
-		policy:         cfg.policy,
-		enforcement:    cfg.enforcement,
-		recorder:       cfg.recorder,
-		observer:       cfg.observer,
-		execManager:    cfg.execManager,
-		capture:        cfg.capture,
-		leases:         map[event.AgentID]*leaseState{},
-		pendingModels:  map[event.AgentID]model.Model{},
-		leaseObservers: map[event.AgentID]*rl.LeaseObserver{},
+		instance:         newInstanceID(),
+		bindings:         state.NewBindings(),
+		occupancy:        state.NewOccupancy(),
+		inspector:        inspectorSubject,
+		admission:        task.NewMemoryAdmission(),
+		sites:            map[event.Address]bool{},
+		facts:            map[event.EventID]event.Event{},
+		sessionFactCount: map[event.SessionID]int{},
+		fixers:           map[event.AgentID]*fileFixer{},
+		replays:          map[event.Address]replayEntry{},
+		landedSeq:        map[int]int64{},
+		approver:         cfg.approver,
+		policy:           cfg.policy,
+		enforcement:      cfg.enforcement,
+		recorder:         cfg.recorder,
+		observer:         cfg.observer,
+		execManager:      cfg.execManager,
+		capture:          cfg.capture,
+		leases:           map[event.AgentID]*leaseState{},
+		pendingModels:    map[event.AgentID]model.Model{},
+		leaseObservers:   map[event.AgentID]*rl.LeaseObserver{},
 	}
 	for id, held := range cfg.leases {
 		lease := held
 		r.leases[id] = &lease
 	}
+	r.compress = NewCompressionConsumer(ageFoldSessions{run: r})
 	r.ageFold = NewAgeFoldPlugin(ageFoldSessions{run: r})
+	r.ageFold.setExecutor(r.compress)
+	r.finalRound = agent.NewFinalRoundPlanner(finalRoundChain{run: r}, r.finalRoundPolicyOf)
 	if cfg.reflectionAnchors != "" {
 		anchors, err := meditation.NewAnchorStore(cfg.reflectionAnchors)
 		if err != nil {
@@ -292,6 +311,12 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 			return nil, err
 		}
 		r.plugins = instances
+	}
+	if r.compress != nil {
+		r.plugins = append(r.plugins, r.compress)
+	}
+	if r.finalRound != nil {
+		r.plugins = append(r.plugins, r.finalRound)
 	}
 	r.authority = state.NewAuthority()
 	var durable *state.DurableCommit
@@ -1248,9 +1273,16 @@ func seedObservedEvents(ctx context.Context, tier *ledger.Tier) (*memory.MemoryE
 // seedReplay registers the mapped sequence every session chain already
 // committed, so a restarted run presents the material the tier holds to its
 // next request instead of reading a transcript no process carries any more.
-// Every committed fact is held in the live ledger of this run beside the
-// registration (see seedFact), so a projected entry resolves the fact it was
-// minted from and the call-result pairing survives the restart. The whole
+// Every committed fact enters the live ledger of this run beside the
+// registration (see seedFact), which is held to the hot window of its chain at
+// the end of the replay, so a restart reads the ledger a process that stayed up
+// carries; a projected entry resolves the fact it was minted from and the
+// call-result pairing survives the restart. A compression
+// product the chain holds is placed onto the projection of its session as the
+// synthetic entry it recorded: the chain says which entries the product covered,
+// so the restart restores the fold form the process left without folding the
+// material again, and a judgment whose product the chain misses is read as the
+// unexecuted judgment it is. The whole
 // registered sequence reads as ended material: a cold start has no range in
 // flight, and the next committed input opens the first one, which
 // moves the boundary without dropping a restored entry. A session whose
@@ -1267,6 +1299,7 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		window     FoldWindow
 	}
 	seeds := map[event.Address]*sessionSeed{}
+	products := map[event.Address][]event.CompressProduct{}
 	var order []event.Address
 	for _, stored := range events {
 		body, err := memory.DecodeEventBody(stored.Body)
@@ -1278,6 +1311,16 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 		r.seedFact(evt)
 		addr := replayAddressOf(evt)
 		if addr.SessionID == "" {
+			continue
+		}
+		if evt.Type == event.CompressProductType {
+			product, stated := compressProductOf(evt)
+			if !stated {
+				assemblyWarn("tagent: the compression product %s states no readable product and is not restored", evt.Key)
+				continue
+			}
+			products[addr] = append(products[addr], product)
+			r.compress.NoteProduct(product)
 			continue
 		}
 		entry, ok := mappedEntryOf(evt)
@@ -1294,16 +1337,15 @@ func (r *Run) seedReplay(ctx context.Context, tier *ledger.Tier) error {
 			order = append(order, addr)
 		}
 		seed.projection.Append(ctx, entry)
-		if err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {
-			return err
-		}
 	}
 	for _, addr := range order {
 		seed := seeds[addr]
+		seed.projection.RestoreProducts(products[addr])
 		if err := r.attachScopedReplay(addr, seed.window, seed.projection); err != nil {
 			return err
 		}
 	}
+	r.trimSeededFacts()
 	if len(order) > 0 {
 		r.attachNoticeFeed()
 	}
@@ -1323,38 +1365,6 @@ func (r *Run) seedFact(evt event.Event) {
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
 }
-
-// restoreFoldForm folds one replayed projection at the commit boundaries the
-// chain recorded, exactly as the age fold plugin judges every live commit: the
-// registered sequence then carries the fold form the process left instead of the
-// raw sequence the fold had already consumed, so the first request after the
-// restart reads the same summary the live process read. The fold is
-// projection-derived: every judgment it re-derives is already a compress request
-// on the chain, so the restore files nothing back and writes no fact of its own.
-// The fold threshold is one identity of the window and never the registration
-// gate: a window naming no tokens measures its fold against the default model
-// window instead of folding nothing, so the restored chain keeps the fold form
-// the age rules give it. A fold refused by the context fails the boot instead
-// of silently leaving the material at one shape the chain never had.
-func restoreFoldForm(ctx context.Context, projection *replay.ReplayProjection, window FoldWindow) error {
-	if projection == nil {
-		return nil
-	}
-	measured := window
-	if measured.MaxTokens <= 0 {
-		measured.MaxTokens = defaultFoldWindowTokens
-	}
-	_, err := projection.FoldByAge(ctx, replay.AgeFoldPlan{
-		KeepRecent:      measured.KeepRecentTasks,
-		VolumeThreshold: measured.VolumeThresholdBytes(),
-	})
-	return err
-}
-
-// defaultFoldWindowTokens is the model window a fold measures against when the
-// declaration names no tokens: the fold threshold is the window's own identity,
-// so a zero window reads the default measure instead of dissolving the fold.
-const defaultFoldWindowTokens = 32000
 
 // seedLandedSeq reports the last sequence slot every partition already
 // committed, so the landing path of a restarted run continues the positions the
@@ -1937,4 +1947,190 @@ func (r *Run) LeaseLosses() []error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]error(nil), r.leaseLosses...)
+}
+
+// metaKeyFinalRoundRange, metaKeyFinalRoundReason, metaKeyFinalRoundRounds and
+// metaKeyFinalRoundElapsed are the metadata keys a final round request fact states
+// the fields of its judgment under: a request is a judgment about a range and never
+// material of a transcript, so the event metadata is the one durable carrier of
+// what it judged.
+const (
+	metaKeyFinalRoundRange   = "final_round_range"
+	metaKeyFinalRoundReason  = "final_round_reason"
+	metaKeyFinalRoundRounds  = "final_round_rounds"
+	metaKeyFinalRoundElapsed = "final_round_elapsed"
+)
+
+// finalRoundChain is the chain face the final round planner reads one commit
+// through: the live ledger of this run beside the declaration it published last.
+type finalRoundChain struct{ run *Run }
+
+// The face satisfies the chain port the planner judges and files through.
+var _ agent.FinalRoundChain = finalRoundChain{}
+
+// AddressOf reports the (agent, session) address one committed fact belongs to;
+// a fact this run holds no record of, and a fact naming no agent or no session,
+// belongs to no chain.
+func (c finalRoundChain) AddressOf(_ context.Context, id event.EventID) (event.Address, bool) {
+	c.run.mu.Lock()
+	evt, held := c.run.facts[id]
+	c.run.mu.Unlock()
+	if !held {
+		return event.Address{}, false
+	}
+	addr := event.Address{AgentID: agentOf(evt), SessionID: sessionOf(evt)}
+	return addr, addr.IsComplete()
+}
+
+// SegmentOf reports the segment one address flies, as one budget judgment reads
+// it.
+func (c finalRoundChain) SegmentOf(_ context.Context, addr event.Address) (agent.FinalRoundSegment, bool) {
+	return c.run.finalRoundSegmentOf(addr)
+}
+
+// FileFinalRoundRequest files one judgment on the chain of the address whose
+// budget it judged.
+func (c finalRoundChain) FileFinalRoundRequest(ctx context.Context, addr event.Address, request event.FinalRoundRequest) error {
+	return c.run.fileFinalRoundRequest(ctx, addr, request)
+}
+
+// finalRoundSegmentOf reports the segment one address flies, read as one budget
+// judgment reads it: the facts committed past the last agent_output of that
+// chain, the range the newest of them names, the tool rounds that range ran and
+// the moment the earliest of them landed. The agent_output fact closes the
+// segment before it, so the material a closed range produced is never judged as
+// the material of the range in flight.
+//
+// The redline list (3 rules):
+// MUST read the segment from the committed facts of the address alone.
+// MUST answer no segment for an address beside no fact past its last agent_output.
+// MUST NOT count a round the range did not run: only the call facts of the range in flight are rounds.
+func (r *Run) finalRoundSegmentOf(addr event.Address) (agent.FinalRoundSegment, bool) {
+	if !addr.IsComplete() {
+		return agent.FinalRoundSegment{}, false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	segment := make([]event.Event, 0, len(r.factOrder))
+	for at := len(r.factOrder) - 1; at >= 0; at-- {
+		evt, held := r.facts[r.factOrder[at]]
+		if !held || sessionOf(evt) != addr.SessionID || agentOf(evt) != addr.AgentID {
+			continue
+		}
+		if evt.Type == event.TypeAgentOutput {
+			break
+		}
+		segment = append(segment, evt)
+	}
+	if len(segment) == 0 {
+		return agent.FinalRoundSegment{}, false
+	}
+	rangeID := event.InvocationID("")
+	for _, evt := range segment {
+		if evt.InvocationID != "" {
+			rangeID = evt.InvocationID
+			break
+		}
+	}
+	started := segment[len(segment)-1].Timestamp
+	if rangeID == "" || started.IsZero() {
+		return agent.FinalRoundSegment{}, false
+	}
+	rounds := 0
+	for _, evt := range segment {
+		if evt.Type == event.TypeThinkingPlan && evt.InvocationID == rangeID {
+			rounds++
+		}
+	}
+	return agent.FinalRoundSegment{Range: rangeID, Rounds: rounds, Started: started}, true
+}
+
+// fileFinalRoundRequest lands one final round judgment in the live ledger of
+// this run under the identity the judgment is quoted by. The fact is the
+// judgment itself: it carries no message, so it never enters the projection it
+// judged, and it commits outside the After pass, so the judgment just filed
+// never re-enters the observation that filed it.
+// A range already carrying a request answers as filed, whatever reason that
+// earlier judgment named: one range carries one request, so a later evaluation
+// of the same range never rewrites the fact the first one filed. A judgment the
+// ledger refused is recorded at this call site rather than answered as filed.
+func (r *Run) fileFinalRoundRequest(ctx context.Context, addr event.Address, request event.FinalRoundRequest) error {
+	if !addr.IsComplete() {
+		return errors.New("tagent: the final round judgment names no agent address")
+	}
+	if request.ID == "" || request.Range == "" {
+		return errors.New("tagent: the final round judgment names no identity")
+	}
+	r.mu.Lock()
+	filed := r.finalRoundFiledLocked(request.Range)
+	r.mu.Unlock()
+	if filed {
+		return nil
+	}
+	if _, err := r.commitFactChecked(ctx, finalRoundRequestEvent(addr, request, time.Now())); err != nil {
+		if errors.Is(err, memory.ErrFactKeyConflict) {
+			return nil
+		}
+		assemblyWarn("tagent: the final round judgment of range %s was not committed err=%v", request.Range, err)
+	}
+	return nil
+}
+
+// finalRoundFiledLocked reports whether the chain already carries a request for
+// one range: the judgment identity is content-addressed over the range and the
+// reason, so both reasons a judgment can name are read back by the identity they
+// would file. The read is taken under the run lock the caller holds.
+func (r *Run) finalRoundFiledLocked(rangeID event.InvocationID) bool {
+	for _, reason := range []string{string(agent.FinalRoundRounds), string(agent.FinalRoundBudget)} {
+		if _, held := r.facts[event.FinalRoundRequestFor(rangeID, reason, 0, 0).ID]; held {
+			return true
+		}
+	}
+	return false
+}
+
+// finalRoundRequestEvent renders one judgment as the fact it commits as: the
+// judgment identity as the event key, the address whose range was judged as the
+// owner and as the range the fact belongs to, and the five fields of the
+// judgment in the event metadata. The message stays empty, because a judgment
+// about a range is not material of its transcript and must never enter the
+// projection it judged.
+func finalRoundRequestEvent(addr event.Address, request event.FinalRoundRequest, at time.Time) event.Event {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	return event.Event{
+		Key:       request.ID,
+		Type:      request.FactType(),
+		Timestamp: at,
+		Meta: map[string]string{
+			event.MetaKeyEventSummary: "final round request " + request.Reason,
+			metaKeyFinalRoundRange:    string(request.Range),
+			metaKeyFinalRoundReason:   request.Reason,
+			metaKeyFinalRoundRounds:   strconv.Itoa(request.Rounds),
+			metaKeyFinalRoundElapsed:  request.Elapsed.String(),
+		},
+		Owner:        addr,
+		InvocationID: request.Range,
+	}
+}
+
+// finalRoundPolicyOf reports the watchdog budget the drives of one agent run
+// under: the budget the declaration in effect names for that agent, and the
+// entry agent's budget while it names none of its own. The read runs over the
+// same declaration the loop's budget table was set from, so the judgment the
+// planner files names the policy the drive runs under. An assembly beside no
+// published declaration answers the zero policy, which keeps every drive
+// unbounded.
+func (r *Run) finalRoundPolicyOf(agentID event.AgentID) agent.FinalRoundPolicy {
+	r.mu.Lock()
+	decl := r.current.Plan.Declaration
+	r.mu.Unlock()
+	if decl == nil {
+		return agent.FinalRoundPolicy{}
+	}
+	if policy, held := agentFinalRoundPolicies(decl)[agentID]; held {
+		return policy
+	}
+	return finalRoundPolicy(decl)
 }

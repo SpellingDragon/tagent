@@ -30,6 +30,11 @@ import (
 )
 
 // TestEventIntegrityNoticeIdentity checks the notification identity and its idempotency over the formal assembly.
+// - the settle notice is read by the next decision of the invocation that issued the call
+// - a notice that opens a range of its own is read by the follow-up; one that lands beside a parked call is read by the decision in flight
+// - both shapes read the notice once, so the follow-up step of the script is optional
+// - the decision that read the notice answers it, and the consumer delivers that segment's answer to the address the notice was accepted on
+// - both shapes are one reply delivered once, so the check reads the body the endpoint served to that very request instead of naming which one
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func TestEventIntegrityNoticeIdentity(t *testing.T) {
 	t.Run("tool_and_subagent_notice_reaches_original_invocation", runNoticeReachesOriginalInvocation)
@@ -44,7 +49,7 @@ func TestEventIntegrityNoticeIdentity(t *testing.T) {
 // declared worker agent over Boot and Host.Invoke, and reads back the identity
 // and the responsibility range of both terminal notifications.
 // - the send tool settles one task whose terminal notification carries the fact of the call and reaches the next decision of the invocation that issued it
-// - the delegated worker settles a task of its own whose terminal notification carries the original invocation and fires exactly one follow-up range at the original address
+// - the delegated worker settles a task of its own whose terminal notification carries the original invocation and is read once by the next decision of that invocation, which answers it
 // - both identities come from the production points: one term settles one task, and no notice is invented by the check
 func runNoticeReachesOriginalInvocation(t *testing.T) {
 	const (
@@ -66,8 +71,8 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 		answers(eventIntegrityAnswerOf(accepted))
 	script.expect("model-worker", "the worker answers the delegated turn", eventIntegrityTail(workerInput)).
 		answers(eventIntegrityAnswerOf(workerOut))
-	followStep := script.expect("model-entry", "the settled notice fires its follow-up", eventIntegrityCarriesSettleNotice(workerOut)).
-		answers(eventIntegrityAnswerOf(followed))
+	script.expect("model-entry", "the settled notice fires its follow-up", eventIntegrityCarriesSettleNotice(workerOut)).
+		answers(eventIntegrityAnswerOf(followed)).optional()
 	provider.decide = script.decide
 
 	sender := newEventIntegritySender()
@@ -85,11 +90,10 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 		t.Fatalf("entry turn = (%v, %d decisions), want the completed turn of its three decisions",
 			turn.Terminal, len(turn.Decisions))
 	}
-	script.await(t, followStep)
+	sender.awaitDelivered(t, addr, note)
 	if got := sender.delivered(addr, note); got != 1 {
 		t.Fatalf("the send body reached the user %d times, want exactly the one delivery", got)
 	}
-	sender.awaitDelivered(t, addr, followed)
 
 	facts := host.Run().SessionFacts(addr)
 	toolCall, ok := eventIntegrityActionFact(facts, "call-notice-tool")
@@ -121,38 +125,28 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	if toolNotice.Ref.Address != addr || toolNotice.Ref.Notice.Round < 1 {
 		t.Fatalf("tool notice = %+v, want it owned by %+v at its execution round", toolNotice.Ref, addr)
 	}
-	if toolNotice.State.NoticePhase != query.NoticePhaseConsumed {
-		t.Fatalf("tool notice phase = %q, want consumed after the mailbox claim and completion", toolNotice.State.NoticePhase)
-	}
+	toolNotice = eventIntegrityAwaitConsumed(t, host.Run(), addr, toolCall.TaskID)
 
-	delegated, ok := eventIntegrityDelegatedSettle(facts, workerOut)
-	if !ok {
-		t.Fatalf("no single delegated settle fact carries %q; facts = %s", workerOut, eventIntegrityFactsSummary(facts))
-	}
+	delegated := eventIntegrityAwaitDelegatedSettle(t, host.Run(), addr, workerOut)
 	if delegated.InvocationID != turn.InvocationID {
 		t.Fatalf("delegated settle fact invocation = %q, want the original invocation %q", delegated.InvocationID, turn.InvocationID)
 	}
 	if delegated.TaskID == "" || delegated.TaskID == toolCall.TaskID {
 		t.Fatalf("delegated task = %q beside the tool task %q, want a task identity of its own", delegated.TaskID, toolCall.TaskID)
 	}
-	delegatedNotice, ok := eventIntegrityNoticeOfTask(notices, delegated.TaskID)
-	if !ok {
-		t.Fatalf("no notice identity recorded for the delegated task %q; notices = %+v", delegated.TaskID, notices)
-	}
+	delegatedNotice := eventIntegrityAwaitConsumed(t, host.Run(), addr, delegated.TaskID)
 	if delegatedNotice.Ref.Notice.Kind != task.NoticeSettled || delegatedNotice.Ref.Notice.Seq != 0 {
 		t.Fatalf("delegated notice identity = %s, want the settled terminal at seq 0", delegatedNotice.Ref.Notice.FactKey())
 	}
 	if delegatedNotice.Ref.Address != addr {
 		t.Fatalf("delegated notice target = %+v, want the issuing address %+v", delegatedNotice.Ref.Address, addr)
 	}
-	if delegatedNotice.State.NoticePhase != query.NoticePhaseConsumed {
-		t.Fatalf("delegated notice phase = %q, want consumed after the mailbox claim and completion", delegatedNotice.State.NoticePhase)
-	}
 
-	followUp := eventIntegrityNoticeFacts(facts)
+	settled := host.Run().SessionFacts(addr)
+	followUp := eventIntegrityNoticeFacts(settled)
 	if len(followUp) != 1 {
 		t.Fatalf("notice facts = %d, want the one follow-up range the delegated settle fired; facts = %s",
-			len(followUp), eventIntegrityFactsSummary(facts))
+			len(followUp), eventIntegrityFactsSummary(settled))
 	}
 	notice := eventIntegrityNoticeOfFact(followUp[0])
 	if got, want := followUp[0].Key, agent.NoticeFactKey(followUp[0].InvocationID, notice); got != want {
@@ -164,13 +158,15 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	if followUp[0].Owner != addr || followUp[0].TaskID != delegated.TaskID {
 		t.Fatalf("notice fact = %+v, want it owned by %+v and carrying the delegated task %q", followUp[0], addr, delegated.TaskID)
 	}
-	if got := eventIntegrityFactKeyCount(facts, followUp[0].Key); got != 1 {
+	if got := eventIntegrityFactKeyCount(settled, followUp[0].Key); got != 1 {
 		t.Fatalf("facts under the notice key %q = %d, want exactly 1", followUp[0].Key, got)
 	}
 
 	requests := provider.requests()
-	if len(requests) != 5 {
-		t.Fatalf("model requests = %d, want one per scripted decision", len(requests))
+	if len(requests) < 4 || len(requests) > 5 {
+		t.Fatalf("model requests = %d, want the three decisions of the entry beside the worker's one, "+
+			"and the one follow-up decision when the notice opens a range of its own (%s)",
+			len(requests), eventIntegrityDescribeRequests(requests))
 	}
 	for _, callID := range []string{"call-notice-tool", "call-notice-worker"} {
 		next := eventIntegrityRequestsFirstCarryingToolCall(requests, eventIntegrityEntryModel, callID)
@@ -189,7 +185,18 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	material := strings.TrimSpace(followUp[0].Message.Content)
 	carrying := eventIntegrityRequestsCarryingUser(requests, material)
 	if len(carrying) != 1 {
-		t.Fatalf("requests carrying the notice material = %v, want the one follow-up decision", carrying)
+		t.Fatalf("requests carrying the notice material = %v, want the one decision that read it (%s)",
+			carrying, eventIntegrityDescribeRequests(requests))
+	}
+	answered := provider.answerOf(carrying[0])
+	if answered == "" {
+		t.Fatalf("request %d read the notice material beside no served answer (%s)",
+			carrying[0], eventIntegrityDescribeRequests(requests))
+	}
+	sender.awaitDelivered(t, addr, answered)
+	if got := sender.delivered(addr, answered); got != 1 {
+		t.Fatalf("the reply %q of the decision that read the settle notice reached the user %d times, "+
+			"want exactly the one delivery of the segment it closed", answered, got)
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the notice identity script left violations: %v", violations)
@@ -284,11 +291,12 @@ func runConflictingNoticeBody(t *testing.T) {
 	}
 }
 
-// runCrossInvocationNoticeScoping drives two invocations that issue the same
-// native call identity and requires their notices to stay two identities.
-// - the same call identifier in two invocations admits two tasks with distinct task identities
+// runCrossInvocationNoticeScoping drives two entries that issue the same native
+// call identity and requires their notices to stay two identities.
+// - each entry lands its own input fact under the identity the drive named, and each is answered by a segment of its own that the consumption loop minted
+// - the same call identifier in the two segments admits two tasks with distinct task identities
 // - each terminal fact stays in its own responsibility range and each notice keeps its own four-tuple and fact key
-// - accepting both notices into one mailbox keeps two entries: different invocations are never merged
+// - accepting both notices into one mailbox keeps two entries: different segments are never merged
 func runCrossInvocationNoticeScoping(t *testing.T) {
 	const (
 		firstInput  = "send the first scoped notice"
@@ -324,71 +332,77 @@ func runCrossInvocationNoticeScoping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the second invocation ended by error: %v", err)
 	}
-	if firstTurn.InvocationID != "invocation-scope-one" || secondTurn.InvocationID != "invocation-scope-two" {
-		t.Fatalf("turn invitations = (%q, %q), want the identities the drives named",
+	if firstTurn.Terminal != model.KindCompleted || secondTurn.Terminal != model.KindCompleted {
+		t.Fatalf("turns of the two entries = (%v, %v), want each to be answered by the segment that consumed it",
+			firstTurn.Terminal, secondTurn.Terminal)
+	}
+	if firstTurn.InvocationID == secondTurn.InvocationID {
+		t.Fatalf("turn identities = %q and %q, want the two ranges the consumption loop minted, one per entry",
 			firstTurn.InvocationID, secondTurn.InvocationID)
 	}
 
 	facts := host.Run().SessionFacts(addr)
+	for at, named := range []event.InvocationID{"invocation-scope-one", "invocation-scope-two"} {
+		landed := eventIntegrityInputFacts(facts, []string{firstInput, secondInput}[at])
+		if len(landed) != 1 {
+			t.Fatalf("input facts carrying the entry %q = %d, want the one fact that entry committed; facts = %s",
+				named, len(landed), eventIntegrityFactsSummary(facts))
+		}
+		if landed[0].InvocationID != named {
+			t.Fatalf("input fact of the entry = %q, want the identity the drive named %q: each source keeps its own",
+				landed[0].InvocationID, named)
+		}
+	}
 	calls := eventIntegrityActionFactsByCall(facts, "call-shared")
 	if len(calls) != 2 {
-		t.Fatalf("action facts carrying call-shared = %d, want one per invocation; facts = %s",
+		t.Fatalf("action facts carrying call-shared = %d, want one per segment; facts = %s",
 			len(calls), eventIntegrityFactsSummary(facts))
 	}
 	if calls[0].TaskID == calls[1].TaskID {
-		t.Fatalf("task ids of the two invocations = %q, want distinct identities for one native call identity", calls[0].TaskID)
+		t.Fatalf("task ids of the two segments = %q, want distinct identities for one native call identity", calls[0].TaskID)
 	}
-	seenInvocation := map[event.InvocationID]event.TaskID{}
+	if calls[0].InvocationID == calls[1].InvocationID {
+		t.Fatalf("action facts of the two segments carry the invocation %q, want each to stay in the range that issued it",
+			calls[0].InvocationID)
+	}
 	for _, call := range calls {
-		seenInvocation[call.InvocationID] = call.TaskID
-	}
-	if len(seenInvocation) != 2 {
-		t.Fatalf("invocations of the two calls = %+v, want both responsibility ranges recorded", seenInvocation)
-	}
-	for invocationID, taskID := range seenInvocation {
-		settle, ok := eventIntegritySettleFact(facts, taskID)
+		settle, ok := eventIntegritySettleFact(facts, call.TaskID)
 		if !ok {
 			t.Fatalf("no single settle fact for task %q of invocation %q; facts = %s",
-				taskID, invocationID, eventIntegrityFactsSummary(facts))
+				call.TaskID, call.InvocationID, eventIntegrityFactsSummary(facts))
 		}
-		if settle.InvocationID != invocationID {
-			t.Fatalf("settle fact of task %q carries invocation %q, want its own %q", taskID, settle.InvocationID, invocationID)
+		if settle.InvocationID != call.InvocationID {
+			t.Fatalf("settle fact of task %q carries invocation %q, want its own %q", call.TaskID, settle.InvocationID, call.InvocationID)
 		}
 	}
 
 	notices := eventIntegrityNotices(t, host.Run(), addr)
-	firstNotice, ok := eventIntegrityNoticeOfTask(notices, seenInvocation["invocation-scope-one"])
+	firstNotice, ok := eventIntegrityNoticeOfTask(notices, calls[0].TaskID)
 	if !ok {
-		t.Fatalf("no notice for the first invocation; notices = %+v", notices)
+		t.Fatalf("no notice for the first segment; notices = %+v", notices)
 	}
-	secondNotice, ok := eventIntegrityNoticeOfTask(notices, seenInvocation["invocation-scope-two"])
+	secondNotice, ok := eventIntegrityNoticeOfTask(notices, calls[1].TaskID)
 	if !ok {
-		t.Fatalf("no notice for the second invocation; notices = %+v", notices)
+		t.Fatalf("no notice for the second segment; notices = %+v", notices)
 	}
 	if firstNotice.Ref.Notice.FactKey() == secondNotice.Ref.Notice.FactKey() {
-		t.Fatalf("notice identities of the two invocations = %s and %s, want two identities",
+		t.Fatalf("notice identities of the two segments = %s and %s, want two identities",
 			firstNotice.Ref.Notice.FactKey(), secondNotice.Ref.Notice.FactKey())
 	}
-	if firstNotice.State.NoticePhase != query.NoticePhaseConsumed || secondNotice.State.NoticePhase != query.NoticePhaseConsumed {
-		t.Fatalf("notice phases = (%q, %q), want each invocation's own notice consumed",
-			firstNotice.State.NoticePhase, secondNotice.State.NoticePhase)
-	}
-	keyOne := agent.NoticeFactKey("invocation-scope-one", firstNotice.Ref.Notice)
-	keyTwo := agent.NoticeFactKey("invocation-scope-two", secondNotice.Ref.Notice)
+	firstNotice = eventIntegrityAwaitConsumed(t, host.Run(), addr, firstNotice.Ref.Notice.TaskID)
+	secondNotice = eventIntegrityAwaitConsumed(t, host.Run(), addr, secondNotice.Ref.Notice.TaskID)
+	keyOne := agent.NoticeFactKey(calls[0].InvocationID, firstNotice.Ref.Notice)
+	keyTwo := agent.NoticeFactKey(calls[1].InvocationID, secondNotice.Ref.Notice)
 	if keyOne == keyTwo {
 		t.Fatalf("notice keys = %q and %q, want the range identity kept apart", keyOne, keyTwo)
 	}
 
 	store := newEventIntegrityStore(t, ctx, addr, firstNotice.Ref.InstanceID)
-	for _, notice := range []task.Notice{firstNotice.Ref.Notice, secondNotice.Ref.Notice} {
+	for at, notice := range []task.Notice{firstNotice.Ref.Notice, secondNotice.Ref.Notice} {
 		if err := store.track(ctx, notice.TaskID); err != nil {
 			t.Fatalf("register the delivery route of %q: %v", notice.TaskID, err)
 		}
-		invocationID := "invocation-scope-two"
-		if notice == firstNotice.Ref.Notice {
-			invocationID = "invocation-scope-one"
-		}
-		delivery := eventIntegrityDeliveryContext(ctx, addr, firstNotice.Ref.InstanceID, event.InvocationID(invocationID))
+		delivery := eventIntegrityDeliveryContext(ctx, addr, firstNotice.Ref.InstanceID, calls[at].InvocationID)
 		if err := store.accept(delivery, notice); err != nil {
 			t.Fatalf("accept the notice %s of its own invocation: %v", notice.FactKey(), err)
 		}
@@ -403,6 +417,12 @@ func runCrossInvocationNoticeScoping(t *testing.T) {
 	if mailbox[0].InvocationID == mailbox[1].InvocationID {
 		t.Fatalf("mailbox invocations = (%q, %q), want each notice under its own responsibility range",
 			mailbox[0].InvocationID, mailbox[1].InvocationID)
+	}
+	for _, entry := range mailbox {
+		if entry.InvocationID != calls[0].InvocationID && entry.InvocationID != calls[1].InvocationID {
+			t.Fatalf("mailbox entry = %+v, want it booked under one of the two ranges the segments minted (%q, %q)",
+				entry, calls[0].InvocationID, calls[1].InvocationID)
+		}
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the cross-invocation script left violations: %v", violations)
@@ -610,6 +630,7 @@ type eventIntegrityProvider struct {
 	mu     sync.Mutex
 	models []string
 	bodies []map[string]json.RawMessage
+	served []string
 	decide func(eventIntegrityRequest) (string, error)
 }
 
@@ -638,6 +659,7 @@ func (p *eventIntegrityProvider) serve(w http.ResponseWriter, r *http.Request) {
 	index := len(p.bodies)
 	p.models = append(p.models, modelName)
 	p.bodies = append(p.bodies, body)
+	p.served = append(p.served, "")
 	decide := p.decide
 	p.mu.Unlock()
 
@@ -652,6 +674,9 @@ func (p *eventIntegrityProvider) serve(w http.ResponseWriter, r *http.Request) {
 			payload = decided
 		}
 	}
+	p.mu.Lock()
+	p.served[index] = payload
+	p.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	fmt.Fprint(w, payload)
@@ -667,6 +692,28 @@ func (p *eventIntegrityProvider) requests() []eventIntegrityRequest {
 		out = append(out, eventIntegrityDecodeRequest(index, p.models[index], body))
 	}
 	return out
+}
+
+// answerOf reports the assistant body the endpoint served on the request of one
+// ordinal, so a check reads the reply a decision really produced instead of the
+// body it meant to produce.
+func (p *eventIntegrityProvider) answerOf(index int) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if index < 0 || index >= len(p.served) {
+		return ""
+	}
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(p.served[index]), &decoded); err != nil || len(decoded.Choices) == 0 {
+		return ""
+	}
+	return decoded.Choices[0].Message.Content
 }
 
 // endpoint reports the base URL the host document's provider entry names.
@@ -807,15 +854,16 @@ type eventIntegrityStream struct {
 }
 
 // eventIntegrityStep is one declared decision: the request it matches and the
-// answer it serves.
+// answer it serves. An optional step is one only a declared shape reaches: the
+// drive may read the material it waits for inside a decision already in
+// flight, so the step records the shape the run took instead of a violation.
 type eventIntegrityStep struct {
-	name        string
-	identity    string
-	match       func(eventIntegrityRequest) bool
-	answer      string
-	taken       bool
-	arrived     chan struct{}
-	arrivedOnce sync.Once
+	name     string
+	identity string
+	match    func(eventIntegrityRequest) bool
+	answer   string
+	maySkip  bool
+	taken    bool
 }
 
 // newEventIntegrityScript returns the script a drive declares its steps over.
@@ -832,7 +880,7 @@ func (s *eventIntegrityScript) expect(identity, name string, match func(eventInt
 		s.byIdentity[identity] = stream
 		s.streams = append(s.streams, stream)
 	}
-	step := &eventIntegrityStep{name: name, identity: identity, match: match, arrived: make(chan struct{})}
+	step := &eventIntegrityStep{name: name, identity: identity, match: match}
 	stream.steps = append(stream.steps, step)
 	return step
 }
@@ -840,6 +888,13 @@ func (s *eventIntegrityScript) expect(identity, name string, match func(eventInt
 // answers declares the payload the endpoint serves on this step.
 func (s *eventIntegrityStep) answers(payload string) *eventIntegrityStep {
 	s.answer = payload
+	return s
+}
+
+// optional declares a step of one shape beside the shape that may fold it into
+// a decision already declared, so a drive that takes either shape audits clean.
+func (s *eventIntegrityStep) optional() *eventIntegrityStep {
+	s.maySkip = true
 	return s
 }
 
@@ -861,7 +916,6 @@ func (s *eventIntegrityScript) decide(request eventIntegrityRequest) (string, er
 	}
 	stream.next++
 	step.taken = true
-	step.arrivedOnce.Do(func() { close(step.arrived) })
 	return step.answer, nil
 }
 
@@ -873,25 +927,26 @@ func (s *eventIntegrityScript) violateLocked(kind, detail string) error {
 	return errors.New(line)
 }
 
-// await waits until the declared step is reached.
-func (s *eventIntegrityScript) await(t *testing.T, step *eventIntegrityStep) {
-	t.Helper()
-	select {
-	case <-step.arrived:
-	case <-time.After(60 * time.Second):
-		t.Fatalf("the scripted step %q of %q was never reached", step.name, step.identity)
+// eventIntegrityDescribeRequests renders the requests the endpoint served, in the
+// shape a failure states what the model was really asked.
+func eventIntegrityDescribeRequests(requests []eventIntegrityRequest) string {
+	described := make([]string, 0, len(requests))
+	for _, request := range requests {
+		described = append(described, fmt.Sprintf("#%d %s", request.Index, request.describe()))
 	}
+	return strings.Join(described, "; ")
 }
 
 // audit reports the violations the drive left against its script, beside every
-// declared step the drive never reached.
+// declared step the drive never reached. A step declared optional is a shape the
+// drive may take instead of another, so its absence is no violation.
 func (s *eventIntegrityScript) audit() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := append([]string(nil), s.violations...)
 	for _, stream := range s.streams {
 		for _, step := range stream.steps {
-			if !step.taken {
+			if !step.taken && !step.maySkip {
 				out = append(out, fmt.Sprintf("missing: step %q of %q was never reached", step.name, stream.identity))
 			}
 		}
@@ -1126,17 +1181,35 @@ func eventIntegrityActionFactsByCall(facts []event.Event, callID string) []event
 	return out
 }
 
-// eventIntegritySettleFact reports the one terminal settle fact of the named
-// task.
-func eventIntegritySettleFact(facts []event.Event, taskID event.TaskID) (event.Event, bool) {
+// eventIntegrityInputFacts reports the external input facts of one session whose
+// message carries the named material.
+func eventIntegrityInputFacts(facts []event.Event, material string) []event.Event {
 	out := make([]event.Event, 0, 1)
+	for _, fact := range facts {
+		if fact.Type == event.TypeExternalInput && strings.Contains(fact.Message.Content, material) {
+			out = append(out, fact)
+		}
+	}
+	return out
+}
+
+// eventIntegritySettleFact reports the terminal settle fact of the named task,
+// preferring the formal delivery record: the loop's own read of a settled
+// result commits an empty backflow fact of the same type beside the delivery
+// fact that carries the material, so the check selects by the settle lineage
+// rather than by whichever landed first.
+func eventIntegritySettleFact(facts []event.Event, taskID event.TaskID) (event.Event, bool) {
+	var out []event.Event
 	for _, fact := range facts {
 		if fact.Type != event.TypeTaskSettled || fact.TaskID != taskID {
 			continue
 		}
+		if fact.Meta[event.MetaKeySettleTriggerSource] != "" {
+			return fact, true
+		}
 		out = append(out, fact)
 	}
-	if len(out) != 1 {
+	if len(out) == 0 {
 		return event.Event{}, false
 	}
 	return out[0], true
@@ -1156,6 +1229,26 @@ func eventIntegrityDelegatedSettle(facts []event.Event, body string) (event.Even
 		return event.Event{}, false
 	}
 	return out[0], true
+}
+
+// eventIntegrityAwaitDelegatedSettle waits for the one terminal settle fact
+// that carries the named result body: the delivery of a delegated settle lands
+// on its own thread beside the turn that issued the call, so the check reads
+// the chain until that fact arrives instead of assuming it already landed.
+func eventIntegrityAwaitDelegatedSettle(t *testing.T, run *assembly.Run, addr event.Address, body string) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(eventIntegrityConsumeWindow)
+	for {
+		facts := run.SessionFacts(addr)
+		if fact, ok := eventIntegrityDelegatedSettle(facts, body); ok {
+			return fact
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no single delegated settle fact carries %q within %s; facts = %s",
+				body, eventIntegrityConsumeWindow, eventIntegrityFactsSummary(facts))
+		}
+		time.Sleep(eventIntegrityPollInterval)
+	}
 }
 
 // eventIntegrityNoticeFacts reports the committed notice facts of one session:
@@ -1245,6 +1338,40 @@ func eventIntegrityNoticeCount(notices []query.Detail, taskID event.TaskID) int 
 		}
 	}
 	return count
+}
+
+// eventIntegrityConsumeWindow bounds how long one notice may take to reach its
+// consumption, and eventIntegrityPollInterval is how often the projection is
+// read while it waits.
+const (
+	eventIntegrityConsumeWindow = 30 * time.Second
+	eventIntegrityPollInterval  = 20 * time.Millisecond
+)
+
+// eventIntegrityAwaitConsumed waits until the notice of one task reads as
+// consumed on the projection. The consumption is the receipt of a turn that
+// really ran: the settle driver claims the seat, the material the notice
+// commits opens the segment the consumption loop drives, and only the turn that
+// segment lands closes the entry — so the check waits for the account instead of
+// reading it beside a turn that may still be running.
+func eventIntegrityAwaitConsumed(t *testing.T, run *assembly.Run, addr event.Address, taskID event.TaskID) query.Detail {
+	t.Helper()
+	deadline := time.Now().Add(eventIntegrityConsumeWindow)
+	for {
+		notices := eventIntegrityNotices(t, run, addr)
+		detail, ok := eventIntegrityNoticeOfTask(notices, taskID)
+		switch {
+		case ok && detail.State.NoticePhase == query.NoticePhaseConsumed:
+			return detail
+		case time.Now().After(deadline):
+			if !ok {
+				t.Fatalf("no single notice recorded for task %q; notices = %+v", taskID, notices)
+			}
+			t.Fatalf("notice phase of task %q = %q, want the consumption the live sink books beside the landed turn",
+				taskID, detail.State.NoticePhase)
+		}
+		time.Sleep(eventIntegrityPollInterval)
+	}
 }
 
 // eventIntegrityRequestsFirstCarryingToolCall reports the ordinal of the first
@@ -1392,9 +1519,7 @@ func eventIntegrityNoticeFromFormalRun(t *testing.T, ctx context.Context, sessio
 	if !ok {
 		t.Fatalf("no single notice of task %q; notices = %+v", call.TaskID, notices)
 	}
-	if detail.State.NoticePhase != query.NoticePhaseConsumed {
-		t.Fatalf("formal notice phase = %q, want the consumption the live sink books", detail.State.NoticePhase)
-	}
+	detail = eventIntegrityAwaitConsumed(t, host.Run(), addr, call.TaskID)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the formal run of %q left script violations: %v", session, violations)
 	}

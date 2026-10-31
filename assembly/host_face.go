@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +38,9 @@ const (
 	hostFaceBodyLimit = 1 << 20
 	// hostShutdownGrace is the span a close gives the in-flight requests.
 	hostShutdownGrace = 5 * time.Second
+	// hostSettleWindow bounds how long a notice follow-up waits for the flying
+	// segment's ruling on one settled task before it drives beside the segment.
+	hostSettleWindow = 10 * time.Second
 )
 
 // hostFace serves the host's three loopback endpoints: the liveness probe a
@@ -106,10 +110,14 @@ func (h *Host) counters() (uint64, int, uint64) {
 	return turns, facts, h.deliveries.acceptedCount()
 }
 
+// hostProfiles names the runtime profiles the debug endpoints publish: the live
+// heap, the goroutines that stand, and the allocation history of the process.
+var hostProfiles = []string{"heap", "goroutine", "allocs"}
+
 // Handler returns the endpoints of the face: GET /healthz answers the liveness
-// probe, GET /metrics answers the counters, POST /task admits one injection,
-// and POST /reload rereads the configuration source and answers the model
-// changes it judged.
+// probe, GET /metrics answers the counters, GET /debug/pprof/{heap,goroutine,allocs}
+// answers one runtime profile, POST /task admits one injection, and POST /reload
+// rereads the configuration source and answers the model changes it judged.
 func (f *hostFace) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -117,9 +125,30 @@ func (f *hostFace) Handler() http.Handler {
 		io.WriteString(w, "ok")
 	})
 	mux.HandleFunc("GET /metrics", f.metrics)
+	for _, name := range hostProfiles {
+		mux.HandleFunc("GET /debug/pprof/"+name, f.profile(name))
+	}
 	mux.HandleFunc("POST /task", f.inject)
 	mux.HandleFunc("POST /reload", f.reload)
 	return mux
+}
+
+// profile answers one runtime profile of the process. The endpoint authorizes
+// exactly as the task and reload endpoints do, and for the same reason the
+// counter face does not: a heap or goroutine dump carries the message content
+// the process holds, so a face beside a configured credential refuses a request
+// that arrives without it and a face beside none admits the loopback peer only.
+// The listener is the loopback address, so no profile leaves the machine.
+func (f *hostFace) profile(name string) http.HandlerFunc {
+	serve := pprof.Handler(name)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := f.authorize(r); err != nil {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="tagent"`)
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		serve.ServeHTTP(w, r)
+	}
 }
 
 // reload rereads the configuration source and answers the model changes the

@@ -222,13 +222,15 @@ jobs:
 
   event-integrity-long:
     runs-on: ubuntu-latest
-    # 03.11 measured all six shards end to end: 533/799/623/792/530/878s, so
-    # the slowest shard is 878s. --timeout 1200 gives ~1.4x headroom on that
-    # shard, and timeout-minutes 25 (1500s) leaves ~300s for checkout, toolchain
-    # setup, tmux install and the artifact upload. The 03.10 extrapolation
-    # (2.39min) and the earlier 109-110s-per-shard claim were both wrong by
-    # 5-8x; 4/6 shards exceeded the old 600s bound.
-    timeout-minutes: 45
+    # 03.11 measured all six shards end to end at 533-878s before the resident
+    # consumption loops landed. The 32768-token shards still measure 787-1111s
+    # (run 41216521132), but the 256-token window assembles every request's
+    # history under the smallest budget the matrix names, and that shard now
+    # measures 3086s end to end in a local -race run (seed 1, window 256): 2400s
+    # killed it mid-shard and the 45m job cap left no room either. --timeout 5400
+    # bounds one shard at 1.75x the measurement, and timeout-minutes 120 (7200s)
+    # leaves ~1800s for checkout, toolchain setup, tmux install and the upload.
+    timeout-minutes: 120
     strategy:
       # A red shard must not cancel the other five: every combination keeps
       # its own evidence.
@@ -252,13 +254,14 @@ jobs:
       # shards add up to 7200 inputs / 720 restarts, and a single shard is never
       # written as 7200/720. --repeat 1 keeps one independent process per
       # combination. --timeout bounds ONE go test process, cold build included:
-      # 03.11 measured 533-878s per shard, so 1200s (~1.4x the 878s maximum)
-      # replaces the uncalibrated 600s that 4/6 shards exceeded.
+      # the 256-window shard measured 3086s in a local -race run, so 5400s
+      # (1.75x) replaces the 2400s calibrated when the 32768 shards were the
+      # slowest (787-1111s on run 41216521132).
       - name: Event integrity long (one 1200-input/120-restart shard)
         env:
           SEED: ${{ matrix.seed }}
           WINDOW: ${{ matrix.window }}
-        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 2400 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 5400 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
       - name: Upload event-long shard evidence
         if: always()
         uses: actions/upload-artifact@v4

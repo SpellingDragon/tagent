@@ -121,12 +121,17 @@ func (a *ApprovalManager) DeliveryGaps() []DeliveryGap {
 // digest itself, so the registration keeps the digest binding the hold was
 // issued over.
 //
-// A channel that fails records a visible gap and never fails the registration
-// (the gate is a gate, never a wall), and a repeated registration under the
-// same identity keeps the request already stored. A request that cannot be
-// written to its file is reported to the caller beside the request, which stays
-// registered in memory: a hold waits either way and is never turned into a
-// denial by a channel-side failure.
+// The request file lands before the in-memory index names the request: a
+// registration is the file, so a ruling of that identity is written only after
+// the pending body it rules on reached the disk, and the two writes of one
+// identity never share a temporary file. The write and the index entry it
+// registers are one step of the store lock, so no rescan slips between them. A
+// channel that fails records a visible gap
+// and never fails the registration (the gate is a gate, never a wall), and a
+// repeated registration under the same identity keeps the request already stored.
+// A request that cannot be written to its file is reported to the caller beside
+// the request, which stays registered in memory: a hold waits either way and is
+// never turned into a denial by a channel-side failure.
 func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs []byte, risk plugin.RiskLevel, rule, reason string) (*ApprovalRequest, error) {
 	if id == "" {
 		return nil, ErrApprovalIdentityMissing
@@ -155,11 +160,11 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 		a.mu.Unlock()
 		return stored, nil
 	}
-	a.index[id] = req
 	snapshot := *req
+	err := a.write(&snapshot)
+	a.index[id] = req
 	channels := append([]ApprovalChannel(nil), a.channels...)
 	a.mu.Unlock()
-	err := a.write(&snapshot)
 	for _, ch := range channels {
 		if deliverErr := ch.Deliver(ctx, snapshot); deliverErr != nil {
 			a.recordGap(DeliveryGap{Request: id, Err: deliverErr})
@@ -175,7 +180,9 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 // ErrApprovalNotFound, a ruling that names no known decision is refused beside
 // ErrApprovalRulingUnknown, and a ruling that arrived after the request expired
 // is refused beside ErrApprovalExpired — an expired request is treated as not
-// approved and is never made runnable by a late response.
+// approved and is never made runnable by a late response. The ruling reaches the
+// request file under the store lock the index entry is read and rewritten under,
+// so a rescan never reads a pending body back over a landed ruling.
 func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*ApprovalRequest, error) {
 	if status != ApprovalApproved && status != ApprovalDenied {
 		return nil, ErrApprovalRulingUnknown
@@ -198,8 +205,9 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*
 	req.Status = status
 	req.DecidedBy = by
 	snapshot := *req
+	err := a.write(&snapshot)
 	a.mu.Unlock()
-	return &snapshot, a.write(&snapshot)
+	return &snapshot, err
 }
 
 // Lookup reports the request the gate reads one (tool, arguments) pair under:

@@ -193,6 +193,17 @@ type Loop struct {
 	final     FinalRoundPolicy
 	finals    map[event.AgentID]FinalRoundPolicy
 	losses    []RecordingLoss
+	consumers *Consumers
+	flight    map[event.Address]modelFlight
+	// fuses holds the execution-side storm fuses this loop admits under: the
+	// per-response call cap and the long-context threshold a drive declares for
+	// itself replaces. A member at zero is its fuse off, so a loop beside no
+	// declaration admits exactly what it admitted before the fuses existed.
+	fuses FuseLimits
+	// book is the approval face a fuse parks a batch through. A loop beside no
+	// book refuses a parked batch whole instead of truncating it, so a storm is
+	// never cut down to a limit nobody approved.
+	book ApprovalBook
 }
 
 // NewLoop returns the event loop over the state owner's borrowing face, the
@@ -205,6 +216,9 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 		instance: instance,
 		facts:    facts,
 		intakes:  map[event.InvocationID]*intake{},
+		flight:   map[event.Address]modelFlight{},
+		fuses:    DefaultFuseLimits(),
+		book:     DefaultApprovalBook(),
 	}
 }
 
@@ -218,6 +232,7 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // - The settled result facts one decision paired are the stored input the next decision reduces.
 // - The drive reads its range's chain again at every decision boundary: input that landed in the range while a decision ran enters the next decision of that same range, and a decision that opened no obligation still ends the round while that input stands unread. The read starts behind the head the chain held when the drive began, so the material an earlier range already took is never this range's input.
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
+// - The direct drive flies no resident loop, so the input a writer beside this drive committed past the range that last closed has no segment to land in: the drive adopts it as its opening material instead of losing it between the ended prefix and its own ready input.
 // - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
 // - A progress notification of the range's own call commits as a fact of its chain and enters no round head: the report is audit and projection material, never input a decision speaks from.
 // - A terminal notification of the range's own call enters the round head as input material: a settle, a failure or a cancellation is what an unattended follow-up turn speaks from, and the progress reports beside it are skipped by their own category.
@@ -245,7 +260,8 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	if err != nil {
 		return turn, err
 	}
-	transcript := append(append([]model.Message(nil), history...), ready...)
+	opening := append(l.inflightInput(inv), ready...)
+	transcript := append(append([]model.Message(nil), history...), opening...)
 	policy := l.finalRoundFor(inv.Address.AgentID)
 	started := time.Now()
 	rounds := 0
@@ -254,7 +270,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		transcript = append(transcript, landed...)
 		transcript = append(transcript, l.terminalNotes(inv)...)
 		round := closingRound(policy, rounds, time.Since(started))
-		decision, outcome, receipts, observations, decideErr := l.decide(ctx, inv, transcript, round)
+		decision, outcome, receipts, running, decideErr := l.decide(ctx, inv, transcript, round)
 		if decideErr != nil {
 			return turn, decideErr
 		}
@@ -278,7 +294,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 				return l.failCommit(turn, commitErr)
 			}
 			return turn, nil
-		} else if len(receipts) == 0 && len(observations) == 0 && len(landed) == 0 {
+		} else if len(receipts) == 0 && len(landed) == 0 {
 			l.commitTranscript(inv.Address, append(transcript[len(history):], assistantOf(outcome)))
 			if commitErr := l.commitOutput(ctx, inv, decision, outcome); commitErr != nil {
 				return l.failCommit(turn, commitErr)
@@ -287,9 +303,90 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		}
 		transcript = append(transcript, assistantOf(outcome))
 		transcript = append(transcript, receipts...)
-		transcript = append(transcript, observations...)
+		transcript = append(transcript, l.awaitSettled(ctx, inv, decision, running)...)
 		rounds++
 	}
+}
+
+// inflightInput reads the input a session chain carries past the range that
+// last closed — the entry input a writer beside this drive committed after the
+// last agent_output fact, in commit order. Only the entry input is adopted: a
+// notice fact is the material the notice read (terminalNotes) already carries,
+// and adopting it too would present one notification to the decision twice. A
+// resident consumption loop pulls such a fact into the segment it flies; the
+// direct drive, which flies none, adopts it here so a cross-session delivery
+// landing on an idle session reaches the next
+// request instead of standing between the ended prefix that stops at the
+// closed range and the ready input that names this invocation. The ready input
+// of the drive is already carried by its caller and stays out of the read, and
+// a fact that starts no range belongs to the range that committed it.
+func (l *Loop) inflightInput(inv Invocation) []model.Message {
+	facts := l.sessionFacts(inv.Address)
+	if len(facts) == 0 {
+		return nil
+	}
+	closed := -1
+	for at, evt := range facts {
+		if evt.Type == event.TypeAgentOutput {
+			closed = at
+		}
+	}
+	if closed == len(facts)-1 {
+		return nil
+	}
+	ready := make(map[event.EventID]bool, len(inv.Ready))
+	for _, evt := range inv.Ready {
+		ready[evt.Key] = true
+	}
+	var adopted []event.Event
+	for at := closed + 1; at < len(facts); at++ {
+		evt := facts[at]
+		if evt.Key == "" || ready[evt.Key] || evt.Type != event.TypeExternalInput {
+			continue
+		}
+		adopted = append(adopted, evt)
+	}
+	if len(adopted) == 0 {
+		return nil
+	}
+	msgs, err := aggregateReady(adopted)
+	if err != nil {
+		consumerWarn("tagent: the in-flight input of %s did not aggregate: %v", inv.InvocationID, err)
+		return nil
+	}
+	return msgs
+}
+
+// awaitSettled waits for the settled result of every call one decision admitted
+// as a background task and answers each as the observation of its call: the
+// direct-drive path of Run.Invoke runs its whole multi-round exchange under one
+// synchronous call, so it pairs every admitted result before the next decision
+// reads. The resident consumption path never enters here: its segments harvest
+// the arrivals its own pulls read and never block beside a call (see
+// runtime/agent/consumer.go). A wait the context ended answers the named
+// placeholder instead of the result that never arrived, so the next decision
+// reads the absence it stands beside.
+func (l *Loop) awaitSettled(ctx context.Context, inv Invocation, decision Decision, running []admittedCall) []model.Message {
+	if len(running) == 0 {
+		return nil
+	}
+	pipeline, pipeErr := plugin.NewFlow(decision.Binding.Plugins)
+	in := l.intakeFor(inv.InvocationID)
+	observations := make([]model.Message, 0, len(running))
+	for _, adm := range running {
+		arrival, ok := in.await(ctx, adm.taskID)
+		if !ok {
+			if err := ctx.Err(); err != nil {
+				return observations
+			}
+			arrival = delivered{msg: model.Message{Content: "tagent: the tool result did not arrive before the wait ended"}}
+		}
+		observations = append(observations, observationOf(arrival.msg, adm.callID, adm.tool))
+		if arrival.fact != "" && pipeErr == nil {
+			l.publish(pipeline.After(ctx, arrival.fact))
+		}
+	}
+	return observations
 }
 
 // failCommit reports one drive whose output fact did not commit: the turn ends
@@ -363,6 +460,9 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	in := l.intakeFor(invocationID)
 	l.commitSettled(context.Background(), invocationID, in.rangeAddress(), notice)
 	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
+	if consumers := l.consumersOf(); consumers != nil {
+		consumers.Wake(in.rangeAddress())
+	}
 }
 
 // commitProgressFact commits one progress notification as a notice fact of the
@@ -962,6 +1062,69 @@ func (l *Loop) SetPresentations(sink PresentationSink) {
 	l.present = sink
 }
 
+// SetConsumers attaches the resident consumption loops this loop drives the
+// decisions of, so a settled backflow wakes the loop of the address its range
+// runs at. A loop beside no consumers keeps its backflow parked in the intake,
+// exactly as before.
+func (l *Loop) SetConsumers(consumers *Consumers) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.consumers = consumers
+}
+
+// consumersOf reports the attached consumption loops, or none.
+func (l *Loop) consumersOf() *Consumers {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.consumers
+}
+
+// modelFlight is the model decision one address runs: the range it serves and
+// the identity of the decision itself.
+type modelFlight struct {
+	invocation event.InvocationID
+	decision   event.DecisionID
+}
+
+// InFlightModel reports the model decision the consumption state of one address
+// carries, or that no model request of that address is executing.
+//
+// The redline list (3 rules):
+// MUST report the decision this loop runs, never a decision another loop runs.
+// MUST report no flight once the decision of that address ended.
+// MUST NOT take a decision just to read it: the read starts nothing.
+func (l *Loop) InFlightModel(addr event.Address) (event.InvocationID, event.DecisionID, bool) {
+	if l == nil {
+		return "", "", false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	flight, held := l.flight[addr]
+	if !held {
+		return "", "", false
+	}
+	return flight.invocation, flight.decision, true
+}
+
+// markModelInFlight records the decision one address is running and answers the
+// release that clears it: the consumption state a reader sees is the decision
+// the loop actually flies, and a released decision leaves no flight behind.
+func (l *Loop) markModelInFlight(addr event.Address, invocation event.InvocationID, decision event.DecisionID) func() {
+	l.mu.Lock()
+	if l.flight == nil {
+		l.flight = map[event.Address]modelFlight{}
+	}
+	l.flight[addr] = modelFlight{invocation: invocation, decision: decision}
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if flight, held := l.flight[addr]; held && flight.decision == decision {
+			delete(l.flight, addr)
+		}
+	}
+}
+
 // publish hands one After pass presentation to the attached sink, or drops the
 // presentation while no sink is attached: the drop is the presentation's own,
 // and the committed fact it was rendered from stays untouched.
@@ -989,14 +1152,17 @@ func (l *Loop) publish(presentation view.Presentation) {
 // - The handle is released once the work the decision set in motion has ended, never because a newer generation was published meanwhile.
 // - The model production of one decision is watched beside its invocation identity and confirms its stop when the reduction really ended.
 // - The closing round marks its request on the boundary, carries the closing instruction after the transcript, runs under the short closing timeout and admits none of the calls it issues.
+// - The fuses of one decision are read off the request as it stands before the dispatch: the usage of a response lands after the dispatch the fuses rule.
 // - The environment block the boundary rendered trails the request as its last message, behind the transcript and the closing instruction, so the dynamic material never enters the prefix.
-func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound) (Decision, model.Outcome, []model.Message, []model.Message, error) {
+func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
 	if round.final {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, round.timeout)
 		defer cancel()
 	}
 	decisionID := l.nextDecisionID(inv)
+	release := l.markModelInFlight(inv.Address, inv.InvocationID, decisionID)
+	defer release()
 	attemptID := event.AttemptID(fmt.Sprintf("attempt-%s", decisionID))
 	if err := l.occupy(ctx, inv, decisionID); err != nil {
 		return Decision{}, model.Outcome{}, nil, nil, err
@@ -1036,6 +1202,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	}
 	req := model.Request{Messages: messages, Tools: tools, ToolOrder: toolOrder}
 	l.fixCapture(ctx, decisionID, view, req)
+	ruling := l.rulingOf(messages)
 
 	production := &inFlightProducer{}
 	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
@@ -1048,6 +1215,10 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	l.recordAttempt(ctx, inv, decisionID, attemptID, outcome)
 	consumerDebug("tagent: consumer decision invocation=%s decision=%s terminal=%s calls=%d closing=%t",
 		inv.InvocationID, decisionID, outcome.Kind, len(callsOf(outcome)), round.final)
+	if ruling.threshold > 0 && ruling.tokens > ruling.threshold {
+		consumerDebug("tagent: consumer long-context fuse invocation=%s decision=%s approx_tokens=%d threshold=%d calls=%d",
+			inv.InvocationID, decisionID, ruling.tokens, ruling.threshold, len(callsOf(outcome)))
+	}
 
 	decision := Decision{
 		DecisionID:   decisionID,
@@ -1059,7 +1230,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
 
 	var receipts []model.Message
-	var observations []model.Message
+	var running []admittedCall
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
 		if round.final {
 			receipts = refuseClosingCalls(callsOf(outcome))
@@ -1068,7 +1239,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 				_ = handle.Release(ctx)
 				return decision, outcome, nil, nil, commitErr
 			}
-			receipts, observations, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable)
+			receipts, running, err = l.dispatch(ctx, inv, decision, callsOf(outcome), callable, ruling)
 			if err != nil {
 				_ = handle.Release(ctx)
 				return decision, outcome, nil, nil, err
@@ -1076,17 +1247,16 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		}
 	}
 	_ = handle.Release(ctx)
-	return decision, outcome, receipts, observations, nil
+	return decision, outcome, receipts, running, nil
 }
 
 // dispatch admits every tool call of one decision through the task wrapper of
 // the borrowed generation and answers each call with the single receipt of its
 // admission as the paired tool message of that call. The admission loop admits
-// every call first — one call's wait for its settlement never blocks the next
-// call's admission — and the wait for the settled results happens outside that
-// loop. Each settled result returns as the observation of its call beside the
-// receipts, entering the next decision as input material rather than as a
-// second synchronous response under the same call identifier.
+// every call first, and the drive ends beside the receipts it answered — the
+// settled result of each admitted call returns as the event the follow-up
+// decision the settle path fires reads, never as a synchronous response this
+// dispatch waits for.
 // - The plugin pipeline of the borrowed generation runs its one Before pass per call before that call is admitted, and its After pass only over facts whose canonical commit already happened.
 // - The pipeline is assembled from the instances of that generation: every declared port dispatches its instance exactly as NewFlow dispatches it, so the loop and the plugin set share one dispatch and no second assembly arises here.
 // - The one Before pass travels on the context into the admission ruling beside the call frame, so the pre-execution ruling consumes the risk grade its risk faces rendered and never runs a second risk face of its own.
@@ -1095,18 +1265,25 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 // - Every call of this decision is already admitted and answered with its receipt before the first wait for a settled result begins.
 // - The settled result fact is the stored event the next decision of this range reduces; a call that recorded no fact contributes none.
 // - The After pass reads only a fact whose canonical commit already happened: a failed observation is a visible gap in the returned presentation and never rolls the committed fact back, and a dropped presentation drops the presentation only. The presentation is the read-out the inspection face consumes; the loop keeps the committed fact itself.
-func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool) ([]model.Message, []model.Message, error) {
+// - The ruling of the response rules the calls before the first admission: a response the fuse holds is parked as one approval batch inside this dispatch, answered call by call when the batch does not run, and admitted whole in the order it was issued when the batch is approved. A call of a held response is never dispatched before the ruling that allows it, so the storm it belongs to leaves no task, no result fact and no degraded message behind.
+// - The wait of a parked batch holds no model seat (the decision slot is vacated before this dispatch runs) and ends with the ruling, the expiry of the request or the cancellation of the invocation.
+func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, calls []model.ToolCall, tools map[string]trpctool.CallableTool, ruling callRuling) ([]model.Message, []admittedCall, error) {
 	pipeline, err := plugin.NewFlow(decision.Binding.Plugins)
 	if err != nil {
 		return nil, nil, err
 	}
-	in := l.intakeFor(inv.InvocationID)
-	receipts := make([]model.Message, 0, len(calls))
-	type admittedCall struct {
-		callID string
-		tool   string
-		taskID event.TaskID
+	var notice []model.Message
+	if fuse := ruling.fuseOver(len(calls)); fuse != "" {
+		batch := parkedBatchOf(decision, calls, ruling, fuse)
+		outcome, by := l.awaitBatch(ctx, batch)
+		consumerDebug("tagent: consumer tool fuse invocation=%s decision=%s fuse=%s calls=%d cap=%d threshold=%d tokens=%d ruling=%s approval=%s",
+			inv.InvocationID, decision.DecisionID, fuse, len(calls), ruling.cap, ruling.threshold, ruling.tokens, outcome, batch.id)
+		if outcome != batchApproved {
+			return batchReceipts(calls, batchRefusalText(outcome, batch, len(calls), ruling, by)), nil, nil
+		}
+		notice = append(notice, batchApprovalNotice(len(calls), batch, by))
 	}
+	receipts := make([]model.Message, 0, len(calls)+len(notice))
 	var running []admittedCall
 	for _, call := range calls {
 		pass, beforeErr := pipeline.Before(ctx, call)
@@ -1150,22 +1327,8 @@ func (l *Loop) dispatch(ctx context.Context, inv Invocation, decision Decision, 
 			receipts = append(receipts, paired(call.ID, name, answerText(callErr, out)))
 		}
 	}
-	observations := make([]model.Message, 0, len(running))
-	for _, adm := range running {
-		arrival, ok := in.await(ctx, adm.taskID)
-		if !ok {
-			if err := ctx.Err(); err != nil {
-				return nil, nil, err
-			}
-			observations = append(observations, observationOf(model.Message{Content: "tagent: the tool result did not arrive before the wait ended"}, adm.callID, adm.tool))
-			continue
-		}
-		observations = append(observations, observationOf(arrival.msg, adm.callID, adm.tool))
-		if arrival.fact != "" {
-			l.publish(pipeline.After(ctx, arrival.fact))
-		}
-	}
-	return receipts, observations, nil
+	receipts = append(receipts, notice...)
+	return receipts, running, nil
 }
 
 // occupy takes the session decision slot for the named decision, waiting for

@@ -159,6 +159,7 @@ var agentKeys = []string{
 	"id", "parent_id", "model", "tools", "plugins", "task_policy", "files", "params",
 	"final_round", "max_tokens", "compress_threshold", "keep_recent_tasks", "environment_block",
 	"temperature", "thinking_enabled", "reasoning_effort", "max_tool_iterations",
+	"max_calls_per_response", "long_context_tokens", "capture_budget_mb",
 	"memory", "meditation", "file", "exec",
 }
 
@@ -222,6 +223,15 @@ func decodeAgent(source, path string, n *sourceNode) (*AgentSpec, error) {
 		return nil, err
 	}
 	if a.MaxToolIterations, err = countField(source, joinField(path, "max_tool_iterations"), fields["max_tool_iterations"]); err != nil {
+		return nil, err
+	}
+	if a.MaxCallsPerResponse, err = countField(source, joinField(path, "max_calls_per_response"), fields["max_calls_per_response"]); err != nil {
+		return nil, err
+	}
+	if a.LongContextTokens, err = countField(source, joinField(path, "long_context_tokens"), fields["long_context_tokens"]); err != nil {
+		return nil, err
+	}
+	if a.CaptureBudgetMB, err = countField(source, joinField(path, "capture_budget_mb"), fields["capture_budget_mb"]); err != nil {
 		return nil, err
 	}
 	if a.Memory, err = memoryField(source, joinField(path, "memory"), fields["memory"]); err != nil {

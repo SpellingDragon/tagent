@@ -49,6 +49,22 @@ const (
 // settleDriveSession names the one session every single-drive check drives.
 const settleDriveSession = "session-settle-single-drive"
 
+// settleDriveReadsMaterial reports whether one request read the material the
+// settle face committed for a delegated call: the notice carries the worker's
+// report, so the decision whose transcript holds it is the follow-up turn. The
+// check selects on that material instead of the request ordinal, because the
+// consumer owns the segment shape: the settlement is read by the decision the
+// parked call left in flight (the batched shape) or by a range of its own (the
+// separate shape), and the same script answers either one.
+func settleDriveReadsMaterial(request scriptedRequest, material string) bool {
+	for _, message := range request.Messages {
+		if message.Role == string(model.RoleUser) && strings.Contains(message.Content, material) {
+			return true
+		}
+	}
+	return false
+}
+
 // settleDriveWorkerBody, settleDriveEntryBody and settleDriveFollowUpBody are
 // the three bodies the scripted provider answers with: the worker report, the
 // entry turn's own answer, and the follow-up answer the child holds in its
@@ -248,8 +264,11 @@ func settleDriveEventsNamed(path, name string) int {
 }
 
 // settleDriveTally is the account a single-drive check keeps of what the
-// provider was asked: the entry turns answered beside the follow-up turns among
-// them.
+// provider was asked: the entry decisions that answered no settlement beside the
+// decisions that read one. The split is the shape-free account of one delegated
+// turn: the delegating decision answers no settlement, the one decision that read
+// the settlement is the follow-up, and whether the accept decision stands between
+// them is the segment shape the consumer took.
 type settleDriveTally struct {
 	mu         sync.Mutex
 	entryCalls int
@@ -275,22 +294,21 @@ func runSingleDriveAcrossKill(t *testing.T) {
 
 	provider := newScriptedProvider(t)
 	tally := &settleDriveTally{}
-	provider.answer = func(index int) string {
-		if provider.servedModels()[index] == "model-worker" {
-			return scriptedAnswerOf(settleDriveWorkerBody)
+	provider.decide = func(request scriptedRequest) (string, error) {
+		if request.Model == "model-worker" {
+			return scriptedAnswerOf(settleDriveWorkerBody), nil
 		}
 		tally.mu.Lock()
 		defer tally.mu.Unlock()
-		tally.entryCalls++
-		switch tally.entryCalls {
-		case 1:
-			return wakeDelegate("call-worker", "compute the total")
-		case 2:
-			return scriptedAnswerOf(settleDriveEntryBody)
-		default:
+		if settleDriveReadsMaterial(request, settleDriveWorkerBody) {
 			tally.followUps++
-			return scriptedAnswerOf(settleDriveFollowUpBody)
+			return scriptedAnswerOf(settleDriveFollowUpBody), nil
 		}
+		tally.entryCalls++
+		if tally.entryCalls == 1 {
+			return wakeDelegate("call-worker", "compute the total"), nil
+		}
+		return scriptedAnswerOf(settleDriveEntryBody), nil
 	}
 	root, out := t.TempDir(), t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
@@ -301,8 +319,11 @@ func runSingleDriveAcrossKill(t *testing.T) {
 	child.kill(t)
 
 	entryCalls, followUps := tally.counts()
-	if entryCalls != 3 || followUps != 1 {
-		t.Fatalf("entry turns before the kill = %d beside %d follow-ups, want the delegating decision, its answer and the one follow-up", entryCalls, followUps)
+	if followUps != 1 {
+		t.Fatalf("settlement answers before the kill = %d, want the one the delegating turn owes", followUps)
+	}
+	if entryCalls != 1 && entryCalls != 2 {
+		t.Fatalf("decisions answered beside the settlement = %d, want the delegating decision and, only when the settlement opened a range of its own, the accept decision beside it", entryCalls)
 	}
 
 	restored, sender := bootRestoredSettleDrive(t, configPath)

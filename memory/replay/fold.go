@@ -43,6 +43,8 @@ var ErrFoldEmpty = errors.New("memory: fold needs at least one projection entry"
 // records the fullBoundary value the tail is replayed after, and the summary
 // entry is returned first on every restore.
 //
+// - The entries the summary alone represents leave the projection with their per-key material (the original text, the dedup key and the consumed mark) while a retained ref keeps its own, so the rewritten sequence carries no copy of the material the summary speaks for.
+//
 // - A projection already carrying a compaction payload answers that payload's summary entry and moves nothing, so one body of material folds once even when a rebuilt projection is offered to the fold again.
 func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 	if err := ctx.Err(); err != nil {
@@ -118,6 +120,7 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error) {
 	p.boundary = boundary
 	summaryEntry := entryOfRef(summaryRef)
 	p.entries = append([]ProjectionEntry{summaryEntry}, refEntries...)
+	p.forgetDroppedLocked()
 	return summaryEntry, nil
 }
 

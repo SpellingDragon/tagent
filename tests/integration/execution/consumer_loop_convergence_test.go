@@ -1,12 +1,11 @@
-// 契约: openspec/changes/compression-and-budget-as-events/specs/consumer-loop-convergence/spec.md
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
 //
-// Red anchors for the consumer-loop convergence: each test names a behavior the
-// current implementation does not hold. The convergence turns each red anchor green.
+// The anchors of the consumer-loop convergence: one resident loop per address
+// drives every input of that address, and no decision waits for a dispatched
+// call.
 //
 // - the slow-tool anchor: a new user message is answered while a slow tool is still running
 // - the cross-source anchor: two invocations of one session batch into one model request
-//
-// 契约: openspec/changes/compression-and-budget-as-events/specs/consumer-loop-convergence/spec.md
 package execution
 
 import (
@@ -23,14 +22,12 @@ import (
 )
 
 // TestSlowToolDoesNotBlockNewInput checks that a new user message reaches the model while a slow tool is still running.
+// - the first turn issues a tool call that parks inside the sender (the gated send face the intake anchor uses)
+// - a second message arrives at the same session while that call is blocked
+// - positive: the model serves a request that reads the second message before the gated call is released
+// - the parked call is released at the end, so both turns settle before the harness closes the host
 //
-// The first turn issues a tool call that parks inside the sender (the gated send face the
-// intake anchor uses); while that call is blocked, a second message arrives at the same
-// session. The anchor asserts the model serves a request that reads the second message
-// before the gated call is released. Under the current dispatch-wait behavior the model
-// waits for the parked call to settle, so no such request is served and this anchor is red.
-//
-// 契约: openspec/changes/compression-and-budget-as-events/specs/consumer-loop-convergence/spec.md
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -40,7 +37,6 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 	host := intakeBoot(t, provider, sender)
 	addr := event.Address{AgentID: intakeEntryAgent, SessionID: intakeSession}
 
-	// Drive the first turn: it issues the slow send call and parks inside it.
 	firstDone := make(chan struct{})
 	go func() {
 		defer close(firstDone)
@@ -52,7 +48,6 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 	}()
 	sender.awaitParked(t)
 
-	// Send a new message while the first turn's send call is still blocking.
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
@@ -63,10 +58,6 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 		})
 	}()
 
-	// The anchor expects the model to serve a request that reads "ping" while
-	// the send call is still blocking. The current implementation dispatches the
-	// call and waits for its settlement before the next pull, so no request
-	// reading "ping" is served until the call is released.
 	pollDeadline := time.After(5 * time.Second)
 	served := false
 	for !served {
@@ -88,23 +79,17 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 		}
 	}
 
-	// Release the gated call and let both turns settle.
 	sender.release()
 	<-firstDone
 	<-secondDone
 }
 
 // TestCrossSourceBatching checks that two inputs from different invocations of one session enter the same model request.
+// - whichever input the loop of the address pulls first opens the segment, and the other joins the next request that segment serves
+// - positive: one request reads both inputs together, never one request per invocation
+// - the parked send call is released at the end, so the task it admitted settles before the harness closes the host
 //
-// Two invocations arrive nearly simultaneously at the same session; the consumer loop
-// batches them into one model request. The current implementation starts one Drive per
-// invocation and never batches two invocations of one session, so it serves two requests
-// and this anchor is red.
-//
-// This anchor retires the standing assertion in native_conversation_roundtrip_test.go
-// that "two invocations of one session decide independently and never batch".
-//
-// 契约: openspec/changes/compression-and-budget-as-events/specs/consumer-loop-convergence/spec.md
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestCrossSourceBatching(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -135,25 +120,27 @@ func TestCrossSourceBatching(t *testing.T) {
 	}()
 	wg.Wait()
 
+	sender.release()
+
 	requests := provider.requests()
-	// The consumer loop batches both inputs into one model request; the current
-	// implementation serves one request per invocation, so two invocations that
-	// arrive together are served separately.
-	if len(requests) != 1 {
-		t.Fatalf("model requests = %d, want exactly 1 beside two invocations of one session batched (%s)",
-			len(requests), convergenceDescribeRequests(requests))
-	}
-	hasFirst, hasSecond := false, false
-	for _, msg := range requests[0].Messages {
-		if msg.Role == "user" && strings.Contains(msg.Content, "first question") {
-			hasFirst = true
+	batched := false
+	for _, req := range requests {
+		hasFirst, hasSecond := false, false
+		for _, msg := range req.Messages {
+			if msg.Role == "user" && strings.Contains(msg.Content, "first question") {
+				hasFirst = true
+			}
+			if msg.Role == "user" && strings.Contains(msg.Content, "second question") {
+				hasSecond = true
+			}
 		}
-		if msg.Role == "user" && strings.Contains(msg.Content, "second question") {
-			hasSecond = true
+		if hasFirst && hasSecond {
+			batched = true
+			break
 		}
 	}
-	if !hasFirst || !hasSecond {
-		t.Fatalf("the batched request carries both inputs (first=%t second=%t)", hasFirst, hasSecond)
+	if !batched {
+		t.Fatalf("no model request reads both inputs together (%s)", convergenceDescribeRequests(requests))
 	}
 }
 

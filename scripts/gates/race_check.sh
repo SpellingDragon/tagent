@@ -117,7 +117,7 @@ race_check_classify() {
 
 pkgs=("$@")
 if [ ${#pkgs[@]} -eq 0 ]; then
-	pkgs=(. ./memory/... ./runtime/agent/... ./evolution/ ./api/event/ ./tool/... ./api/plugin/ ./rl/)
+	pkgs=(./assembly/... ./memory/... ./runtime/... ./features/... ./api/... ./tool/...)
 fi
 
 if [ -n "${RACE_CHECK_CLASSIFY_ONLY:-}" ]; then

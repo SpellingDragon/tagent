@@ -57,11 +57,12 @@ const (
 	intakeEnvironmentTool = "env-probe"
 )
 
-// intakeAcceptWindow bounds how long an in-flight invocation may take to answer (the
-// anchor's red assertion is that it answers nothing at all), intakeBootWindow bounds
-// the wait for the call to park, intakeSettleWindow guards a harness that broke, and
-// intakeParkCeiling bounds one parked delivery so a call nothing releases fails by
-// name instead of hanging the package.
+// intakeAcceptWindow bounds how long an in-flight invocation is read for an answer
+// before the parked call is released: the answer of such an invocation belongs to the
+// segment that reads the release, so one that answers earlier drove a turn of its own.
+// intakeBootWindow bounds the wait for the call to park, intakeSettleWindow guards a
+// harness that broke, and intakeParkCeiling bounds one parked delivery so a call
+// nothing releases fails by name instead of hanging the package.
 const (
 	intakeAcceptWindow = 2 * time.Second
 	intakeBootWindow   = 20 * time.Second
@@ -71,12 +72,15 @@ const (
 
 // TestMessageReachesTheNextDecisionOfAInFlightTurn checks that a message arriving inside a slow call reaches the next decision of the same turn.
 //
-// - positive: the invocation of that message is answered as accepted and the message stands in the next decision once
+// - positive: the invocation of that message is answered by the segment the turn in flight drives, the completed turn of its two decisions
+// - positive: the message stands in the next decision of that segment once, and lands as one fact
 // - negative: the decision already running reads nothing of it, and the turn in flight ends by its own terminal
-// - negative: on the gate-shaped intake the message opens a turn of its own, which is the shape this anchor measures against
+// - negative: the message drives no segment of its own, so the run serves the two decisions of the one turn in flight
 // - negative: a fact landing beside unfinished material only appends, so the projection prefix that stood stays an exact prefix
 // - negative: a progress notice enters no decision input, in this window too
-// - negative: two identical texts sent in one turn stand in the input twice, since the consumed identity de-duplicates
+// - negative: two identical texts sent in one turn are read twice, since the consumed identity de-duplicates
+// - no request may carry the text more times than the two facts hold it: a third copy in one request would be a fact read twice as fresh material
+// - the identity each fact commits under keeps the two apart, so the text is never collapsed into one read
 // - consumer: every invocation is one Host.Invoke over a host booted from a real document, read back from the requests served
 //
 // 契约: docs/wiki/agent/event-flow.md
@@ -86,17 +90,18 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 
 		t.Run("positive: the in-flight invocation is accepted and the message reaches the next decision once", func(t *testing.T) {
 			accepted := scene.accepted[0]
-			if accepted.waited {
-				t.Fatalf("the invocation of the in-flight message returned nothing within %s: it parked on the session gate, "+
-					"so the message waits for the turn to end instead of reaching the decision boundary of the turn in flight "+
-					"(requests served beside it = %d)", intakeAcceptWindow, len(scene.requests))
-			}
 			if accepted.err != nil {
-				t.Fatalf("invoke beside the in-flight turn = %v, want the message accepted beside no error", accepted.err)
+				t.Fatalf("invoke beside the in-flight turn = %v, want the message answered beside no error", accepted.err)
 			}
-			if accepted.turn.Terminal != model.KindUnknown || len(accepted.turn.Decisions) != 0 {
-				t.Fatalf("accepted turn = (%v, %d decisions), want the receipt the host answers an in-flight message with: "+
-					"no decision reached and no error", accepted.turn.Terminal, len(accepted.turn.Decisions))
+			if accepted.turn.Terminal != model.KindCompleted || len(accepted.turn.Decisions) != 2 {
+				t.Fatalf("accepted turn = (%v, %d decisions), want the completed turn of the segment that consumed the message: "+
+					"the call that was parked beside the decision that read its result (%s)",
+					accepted.turn.Terminal, len(accepted.turn.Decisions), intakeDescribe(scene.requests))
+			}
+			if accepted.turn.InvocationID != scene.first.InvocationID {
+				t.Fatalf("the message was answered by the turn %q, want the segment %q the turn already runs: "+
+					"a message that lands in flight is read by the decision of that segment, not by a turn of its own",
+					accepted.turn.InvocationID, scene.first.InvocationID)
 			}
 			at, ok := intakeDecisionAfterCall(scene.requests)
 			if !ok {
@@ -121,24 +126,6 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 				t.Fatalf("copies of the in-flight message in the decision already running = %d, want 0: "+
 					"a running decision is never fed the message that arrives beside it (%s)",
 					copies, intakeDescribe(scene.requests))
-			}
-			accepted := scene.accepted[0]
-			at, ok := intakeDecisionAfterCall(scene.requests)
-			if !ok {
-				t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
-			}
-			copies := intakeUserCopies(scene.requests[at], intakeSecondBody)
-			if accepted.waited {
-				// TODO(A5): migrate this branch onto the added requirement when the anchor set moves
-				if copies != 0 {
-					t.Fatalf("copies of the in-flight message in the next decision = %d, want the baseline shape of 0 "+
-						"beside an invocation that never returned (%s)", copies, intakeDescribe(scene.requests))
-				}
-				if carriers := intakeRequestsCarryingUser(scene.requests, intakeSecondBody); len(carriers) == 0 {
-					t.Fatalf("requests = %s, want the baseline to read the message in a turn of its own after the gate freed it",
-						intakeDescribe(scene.requests))
-				}
-				return
 			}
 			if len(scene.requests) != 2 {
 				t.Fatalf("model requests = %d (%s), want the two decisions of the one in-flight turn: "+
@@ -184,22 +171,39 @@ func TestMessageReachesTheNextDecisionOfAInFlightTurn(t *testing.T) {
 
 	t.Run("the same text sent twice in one turn stands in the input twice", func(t *testing.T) {
 		scene := intakeDrive(t, intakeRepeatBody, intakeRepeatBody)
-		at, ok := intakeDecisionAfterCall(scene.requests)
-		if !ok {
-			t.Fatalf("requests = %s, want the decision that reads the result of %s", intakeDescribe(scene.requests), intakeSlowCallID)
+		landed := intakeFactsCarrying(scene.facts, intakeRepeatBody)
+		if len(landed) != 2 {
+			t.Fatalf("facts carrying the same text = %d, want the two facts the two entries committed (%s)",
+				len(landed), intakeDescribe(scene.requests))
 		}
-		if copies := intakeUserCopies(scene.requests[at], intakeRepeatBody); copies != 2 {
-			t.Fatalf("copies of the same text in the next decision = %d, want 2: the consumed identity de-duplicates "+
-				"and the content does not (%s)", copies, intakeDescribe(scene.requests))
+		if landed[0].Key == landed[1].Key {
+			t.Fatalf("fact keys of the two entries = %q, want two identities beside one text: "+
+				"the chain de-duplicates by the identity a fact commits under, never by the content it reads as", landed[0].Key)
+		}
+		read := make([]int, 0, 2)
+		copies := 0
+		for _, request := range scene.requests {
+			if got := intakeUserCopies(request, intakeRepeatBody); got > 0 {
+				read = append(read, request.Index)
+				copies += got
+				if got > len(landed) {
+					t.Fatalf("request %d carries the same text %d times, want at most the %d facts that hold it",
+						request.Index, got, len(landed))
+				}
+			}
+		}
+		if copies < len(landed) {
+			t.Fatalf("the same text served to the model %d times in requests %v, want each of the %d facts read: "+
+				"the consumed identity de-duplicates and the content does not (%s)", copies, read, len(landed), intakeDescribe(scene.requests))
 		}
 	})
 }
 
 // TestInflightUserMessageIsAcceptedNotQueued checks that a message arriving beside a running turn is accepted onto that turn's chain, not queued behind the gate.
 //
-// - positive: the call answers while the turn in flight is still parked, with no decision and no error
-// - positive: the fact commits under the identity of the range in flight, which is the input that range reads at its next decision
-// - negative: the in-flight turn reads the message once and drives no turn of its own for it, so nothing is queued beside the gate
+// - positive: the message is answered by the segment the turn in flight drives, the completed turn of its two decisions
+// - positive: the fact commits under the identity of the entry that submitted it, which is the source association the segment reads
+// - negative: the in-flight turn reads the message once and drives no segment of its own for it, so nothing is queued beside the gate
 // - consumer: Host.Invoke over a host booted from a real document, read back from the requests served and the run's own chain
 //
 // 契约: docs/wiki/agent/event-flow.md
@@ -207,28 +211,27 @@ func TestInflightUserMessageIsAcceptedNotQueued(t *testing.T) {
 	scene := intakeDrive(t, intakeSecondBody)
 
 	accepted := scene.accepted[0]
-	if accepted.waited {
-		t.Fatalf("the invocation of the in-flight message answered nothing within %s: a message beside a running turn is accepted, not queued behind the gate that turn holds", intakeAcceptWindow)
-	}
 	if accepted.err != nil {
-		t.Fatalf("invoke beside the in-flight turn = %v, want the message accepted beside no error", accepted.err)
+		t.Fatalf("invoke beside the in-flight turn = %v, want the message answered beside no error", accepted.err)
 	}
-	if accepted.turn.Terminal != model.KindUnknown || len(accepted.turn.Decisions) != 0 {
-		t.Fatalf("accepted turn = (%v, %d decisions), want the receipt of an admission: no decision reached and no error",
-			accepted.turn.Terminal, len(accepted.turn.Decisions))
+	if accepted.turn.Terminal != model.KindCompleted || len(accepted.turn.Decisions) != 2 {
+		t.Fatalf("accepted turn = (%v, %d decisions), want the completed turn of the segment that consumed the message (%s)",
+			accepted.turn.Terminal, len(accepted.turn.Decisions), intakeDescribe(scene.requests))
 	}
-	if accepted.turn.InvocationID != intakeFirstInvocation {
-		t.Fatalf("the accepted receipt names the range %q, want the range in flight %q: the message is input of the turn already running",
-			accepted.turn.InvocationID, intakeFirstInvocation)
+	if accepted.turn.InvocationID != scene.first.InvocationID {
+		t.Fatalf("the message was answered by the turn %q, want the segment %q the turn already runs: "+
+			"a message accepted beside a running turn is material of that segment, so it queues nothing beside the gate",
+			accepted.turn.InvocationID, scene.first.InvocationID)
 	}
 
 	landed := intakeFactsCarrying(scene.facts, intakeSecondBody)
 	if len(landed) != 1 {
 		t.Fatalf("facts carrying the in-flight message = %d, want the one fact the acceptance commits: a queued message is committed later, and only once it drives its own turn", len(landed))
 	}
-	if landed[0].InvocationID != intakeFirstInvocation {
-		t.Fatalf("the landed fact belongs to the range %q, want the range in flight %q: an input admitted beside a running turn is that range's material",
-			landed[0].InvocationID, intakeFirstInvocation)
+	submitted := event.InvocationID(intakeSecondInvocation + "-0")
+	if landed[0].InvocationID != submitted {
+		t.Fatalf("the landed fact belongs to %q, want the entry identity %q: each source keeps its own association beside the segment that reads it",
+			landed[0].InvocationID, submitted)
 	}
 
 	at, ok := intakeDecisionAfterCall(scene.requests)
@@ -614,6 +617,14 @@ type intakeProvider struct {
 	mu     sync.Mutex
 	models []string
 	bodies []map[string]json.RawMessage
+	// firstAnswer overrides the answer of the first request, so an anchor
+	// scripts the calls its opening decision issues; empty serves the one slow
+	// send call the in-flight anchors park on.
+	firstAnswer string
+	// answers overrides the answer of the request at one index, so an anchor
+	// scripts the calls of a round that is not the first one; an index beside no
+	// entry serves the final answer, or the slow call for the first request.
+	answers map[int]string
 }
 
 // newIntakeProvider starts the endpoint and closes it with the test.
@@ -645,6 +656,12 @@ func (p *intakeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	payload := intakeFinalAnswer(intakeFinalBody)
 	if index == 0 {
 		payload = intakeToolCallAnswer("send", intakeSlowCallID, `{"content":`+intakeQuoted(intakeSlowBody)+`}`)
+		if p.firstAnswer != "" {
+			payload = p.firstAnswer
+		}
+	}
+	if scripted, held := p.answers[index]; held {
+		payload = scripted
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -814,6 +831,13 @@ func (s *intakeSender) release() {
 	s.once.Do(func() { close(s.freed) })
 }
 
+// accepted reports the bodies the outbound face accepted so far, in send order.
+func (s *intakeSender) accepted() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.bodies...)
+}
+
 // intakeHostDocument renders the one document the anchor boots: the entry agent
 // keeps the declared send tool, whose outbound face the anchor supplies, so one
 // real decision can be parked inside a real tool execution.
@@ -837,12 +861,20 @@ func intakeHostDocument(root, endpoint string) string {
 // reaches the runtime through the public entry the deployment uses.
 func intakeBoot(t *testing.T, provider *intakeProvider, sender assembly.MessageSender) *assembly.Host {
 	t.Helper()
+	return intakeBootDocument(t, provider, sender, intakeHostDocument)
+}
+
+// intakeBootDocument boots the formal host of the document one anchor renders,
+// so a test that declares a budget reaches the runtime through the very
+// document face a deployment declares it under.
+func intakeBootDocument(t *testing.T, provider *intakeProvider, sender assembly.MessageSender, render func(root, endpoint string) string) *assembly.Host {
+	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
-	if err := os.WriteFile(configPath, []byte(intakeHostDocument(root, provider.endpoint())), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(render(root, provider.endpoint())), 0o644); err != nil {
 		t.Fatalf("write the host document: %v", err)
 	}
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
@@ -892,18 +924,6 @@ func intakeFactsCarrying(facts []event.Event, material string) []event.Event {
 	for _, fact := range facts {
 		if strings.Contains(fact.Message.Content, material) && fact.Type == event.TypeExternalInput {
 			out = append(out, fact)
-		}
-	}
-	return out
-}
-
-// intakeRequestsCarryingUser reports the requests that carry the named material
-// as user input.
-func intakeRequestsCarryingUser(requests []intakeRequest, material string) []int {
-	out := make([]int, 0, len(requests))
-	for at, request := range requests {
-		if intakeUserCopies(request, material) > 0 {
-			out = append(out, at)
 		}
 	}
 	return out

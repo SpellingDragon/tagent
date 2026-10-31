@@ -186,7 +186,7 @@ func TestLocalSmoke(t *testing.T) {
 
 	runSmokePump(t, rig, provider, cfg, logs, obs)
 	runSmokeFoldChecks(t, rig, provider, obs)
-	runSmokeMeditationCheck(t, rig, provider, logs, obs)
+	runSmokeMeditationCheck(t, rig, provider, cfg, logs, obs)
 	runSmokeTrajectoryCheck(t, rig, cfg, provider, obs)
 	reportSmokeObservability(t, logs, obs)
 }
@@ -443,11 +443,7 @@ func driveSmokeRound(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *
 		}
 	case smokeDelegate:
 		rig.postTask(text)
-		rig.waitText(chat, "delegate ack "+marker, 120*time.Second)
-		rig.waitText(chat, "settle-ack "+marker, 120*time.Second)
-		if !smokeSettleRequestSeen(provider, marker) {
-			t.Fatalf("round %d settle follow-up carries no worker body %q", round, "worker result "+marker)
-		}
+		smokeAwaitDelegateAck(t, rig, provider, chat, marker, 120*time.Second)
 	case smokeApproval:
 		rig.postTask(text)
 		held := rig.waitHeldDelivery(chat, "hold-ack "+marker, 120*time.Second)
@@ -465,15 +461,73 @@ func driveSmokeRound(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *
 	}
 }
 
-// smokeSettleRequestSeen 报告是否有一次结转回合读到了该轮的结算通知（正文含
-// 子 agent 结果）。
+// smokeAwaitDelegateAck 等委派轮收尾并核对它的投递形态：段语义下工具轮之后段挂起
+// （工具轮的叙述不作为文本投递），结算通知与子 agent 结果并进同一个消费批次时由同一次
+// 请求读入，那一次回答闭合段、只投递一条正文；两者分两次请求读入时才是旧的两条投递。
+// - 结算答复（settle-ack）在两种形态下都恰好投递一次：它就是闭合段的那次回答
+// - 工具轮的 mid-flight 叙述（delegate ack）只在它由一次自己的请求作答时投递，并合形态下不投递
+// - 形态只从请求实际携带的材料判，不看投递条数或轮次名
+func smokeAwaitDelegateAck(t *testing.T, rig *smokeRig, provider *smokeProvider, chat, marker string, timeout time.Duration) {
+	t.Helper()
+	rig.waitText(chat, "settle-ack "+marker, timeout)
+	if !smokeSettleRequestSeen(provider, marker) {
+		t.Fatalf("the settle answer for %s read no request carrying the worker body %q\nrecent requests:\n%s",
+			marker, "worker result "+marker, rig.recentRequests(8))
+	}
+	if got := smokeErrorsTextCount(rig, chat, "settle-ack "+marker); got != 1 {
+		t.Fatalf("the settle answer for %s was delivered %d time(s), want exactly one", marker, got)
+	}
+	alone := smokeDelegateAnsweredAlone(provider, marker)
+	switch got := smokeErrorsTextCount(rig, chat, "delegate ack "+marker); {
+	case alone && got != 1:
+		t.Fatalf("the separate delegate answer for %s was delivered %d time(s), want exactly one\nrecent outbound:\n%s",
+			marker, got, rig.recentOutbound(8))
+	case !alone && got != 0:
+		t.Fatalf("the batched delegate turn of %s delivered its tool-round body %d time(s), want none: one closed segment delivers one answer\nrecent outbound:\n%s",
+			marker, got, rig.recentOutbound(8))
+	}
+}
+
+// smokeSettleRequestSeen 报告是否有一次请求读到了该轮的结算通知（正文含子 agent 结果）。
+// 段语义下通知与工具结果可以并进同一次请求，所以判据是“请求里有这条通知”，而不是
+// “最后一条用户消息就是通知”：并合形态里最后一条用户消息可能是工具结果帧。
 func smokeSettleRequestSeen(provider *smokeProvider, marker string) bool {
 	for _, req := range provider.recorded() {
-		last := smokeLastUserText(req.Messages)
-		if strings.Contains(last, "tagent: task") && strings.Contains(last, "settled") &&
-			strings.Contains(last, "worker result "+marker) {
+		if smokeSettleNoticeOf(req.Messages, marker) != "" {
 			return true
 		}
+	}
+	return false
+}
+
+// smokeSettleNoticeOf 报告请求里那条结算通知的正文，没有时回报空串：通知是循环折成
+// 用户角色帧之外的独立材料，正文以 tagent: task 起、带 settled 字样并携带子 agent 结果。
+func smokeSettleNoticeOf(messages []smokeModelMessage, marker string) string {
+	for _, msg := range messages {
+		if msg.Role != string(tagentmodel.RoleUser) {
+			continue
+		}
+		content := strings.TrimSpace(msg.Content)
+		if strings.HasPrefix(content, "tagent: task") && strings.Contains(content, "settled") &&
+			strings.Contains(content, "worker result "+marker) {
+			return content
+		}
+	}
+	return ""
+}
+
+// smokeDelegateAnsweredAlone 报告委派结果是否由一次还没读到结算通知的请求回答：那次
+// 请求里工具结果在、通知不在，是挂起的决策单独作答（旧的两条投递）。并合形态下唯一的
+// 那次请求同时读入结果与通知，这里回报 false。
+func smokeDelegateAnsweredAlone(provider *smokeProvider, marker string) bool {
+	for _, req := range provider.recorded() {
+		if !smokePairedResult(req.Messages, "call-worker-"+marker) {
+			continue
+		}
+		if smokeSettleNoticeOf(req.Messages, marker) != "" {
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -566,44 +620,26 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 // runSmokeMeditationCheck 断言冥想：事件驱动触发 → 反思 → deliver_summary →
 // 用户会话链可见，并由下一轮请求读到。
 // - the reflection summary lands on the driven session first: production Drive moves the injection address, then /task
-// - the driver is event-driven: after a quiet pump only new host-facing traffic opens the rhythm floor, so the wait drives probe turns
-func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvider, logs *smokeLogRecorder, obs *smokeObservation) {
+// - the driver is event-driven: only new host-facing traffic opens a pass, and the rhythm floor reads the age of the newest such fact
+// - every probe turn is followed by a window quiet for longer than the declared floor, so the held pass re-evaluates and lands
+func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvider, cfg *smokeConfig, logs *smokeLogRecorder, obs *smokeObservation) {
 	t.Helper()
+	floor := smokeMeditationFloor(t, cfg)
 	deadline := time.Now().Add(120 * time.Second)
 	reflectionChat := ""
-	probe := 0
-	for {
-		for _, chat := range smokeChats {
-			for _, evt := range rig.sessionFacts(chat) {
-				if evt.Type != event.TypeExternalInput {
-					continue
-				}
-				if evt.Meta[event.MetaKeyTriggerSource] != "meditation" {
-					continue
-				}
-				if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
-					continue
-				}
-				obs.ReflectionFact = string(evt.Key)
-				obs.ReflectionSeen = true
-				reflectionChat = chat
-				t.Logf("[matrix 7] the reflection summary reached the session chain of %s: key=%s", chat, evt.Key)
-			}
-		}
-		if obs.ReflectionSeen {
-			break
-		}
+	for probe := 1; !smokeScanReflection(t, rig, obs, &reflectionChat); probe++ {
 		if time.Now().After(deadline) {
 			t.Fatalf("no meditation summary landed in a user session chain within %s (reflect requests=%d)\nfacts:\n%s\nreflect requests:\n%s\nlogs:\n%s",
 				120*time.Second, smokeRequestsFor(provider, smokeReflectModel), rig.factDigest(), smokeRequestDetail(provider, smokeReflectModel), logs.digest("reflection", "deliver_summary", "meditation", "tool", "budget"))
 		}
-		probe++
 		marker := fmt.Sprintf("SMOKE-R75%02d", probe)
 		chat := smokeChats[probe%len(smokeChats)]
 		rig.drive(chat, marker+" meditation probe")
 		rig.waitText(chat, "answer "+marker, 30*time.Second)
-		time.Sleep(time.Second)
+		smokeAwaitMeditationWindow(t, rig, obs, &reflectionChat, floor+2*time.Second)
 	}
+	t.Logf("[matrix 7] the reflection summary reached a user session chain: chat=%s key=%s",
+		reflectionChat, obs.ReflectionFact)
 	if smokeRequestsFor(provider, smokeReflectModel) == 0 {
 		t.Fatal("the reflection loop answered no model request")
 	}
@@ -616,6 +652,57 @@ func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvide
 	}
 	t.Logf("[matrix 7] the next user turn read the reflection summary: reflect requests=%d",
 		smokeRequestsFor(provider, smokeReflectModel))
+}
+
+// smokeMeditationFloor 读出文档渲染的反思节律下限：冥想判据按「最新 host-facing 事实」
+// 的年龄计时，夹具要在这个下限之外留出静默窗口，不能自造比它更密的事实。
+func smokeMeditationFloor(t *testing.T, cfg *smokeConfig) time.Duration {
+	t.Helper()
+	floor, err := time.ParseDuration(cfg.meditationMinGap())
+	if err != nil {
+		t.Fatalf("parse the documented reflection min gap %q: %v", cfg.meditationMinGap(), err)
+	}
+	if floor <= 0 {
+		t.Fatalf("the documented reflection min gap %q is not a positive window", cfg.meditationMinGap())
+	}
+	return floor
+}
+
+// smokeScanReflection 扫各用户会话链上是否有冥想摘要事实，并把它记进观测与目标会话。
+func smokeScanReflection(t *testing.T, rig *smokeRig, obs *smokeObservation, chat *string) bool {
+	t.Helper()
+	landed := false
+	for _, session := range smokeChats {
+		for _, evt := range rig.sessionFacts(session) {
+			if evt.Type != event.TypeExternalInput {
+				continue
+			}
+			if evt.Meta[event.MetaKeyTriggerSource] != "meditation" {
+				continue
+			}
+			if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
+				continue
+			}
+			obs.ReflectionFact = string(evt.Key)
+			obs.ReflectionSeen = true
+			*chat = session
+			landed = true
+		}
+	}
+	return landed
+}
+
+// smokeAwaitMeditationWindow 在不制造新事实的前提下等一个节律窗口：窗口内反复扫摘要是否
+// 落地，扫到就提前返回，窗口走完仍未落地交回调用方再开一次探测。
+func smokeAwaitMeditationWindow(t *testing.T, rig *smokeRig, obs *smokeObservation, chat *string, window time.Duration) {
+	t.Helper()
+	until := time.Now().Add(window)
+	for time.Now().Before(until) {
+		if smokeScanReflection(t, rig, obs, chat) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // smokeRequestsFor 报告某个模型名已经回答的请求数。
@@ -843,6 +930,25 @@ func smokeEntryDigest(entries []replay.ProjectionEntry) string {
 		lines = append(lines, fmt.Sprintf("- key=%s type=%s %s", entry.Key, entry.Type, head))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// smokeIntegrityFoldVolume 量折叠后的投影体积：只量折叠自己可达的材料。负向档把
+// 冥想节奏放到 1ms/0s，反思回合的注入（SMOKE-REFLECTION …）与入口 agent 对这条无标记
+// 注入的兜底回答（脚本无标记时答 "answer SMOKE-R0"）会在测量期间落链：它们是折叠之后
+// 到达的新事实，不是折叠产物，计进去会把“折完回到窗口内”变成时序抽奖。正向档把冥想
+// 钉在 1h，这里没有可排除的条目。
+func smokeIntegrityFoldVolume(entries []replay.ProjectionEntry) int {
+	windowed := make([]replay.ProjectionEntry, 0, len(entries))
+	for _, entry := range entries {
+		if strings.Contains(entry.Content, smokeReflectionMarker) {
+			continue
+		}
+		if entry.Type == string(event.TypeAgentOutput) && smokeMarkerRE.FindString(entry.Content) == "" {
+			continue
+		}
+		windowed = append(windowed, entry)
+	}
+	return len(replay.RenderProjection(windowed))
 }
 
 // smokeRequestsContaining 渲染所有含该子串的模型请求片段，供"投影有、组装没有"的对照。
@@ -2024,7 +2130,7 @@ func smokeIntegrityReplacementRefused(t *testing.T) {
 	rig.drive(chat, smokeIntegrityReplacementWarmTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityReplacementWarmTurn, 120*time.Second)
 
-	host.cfg.Doc = smokeErrorsBadProviderDocument
+	host.cfg.Doc = smokeErrorsBadProviderDocumentOver(smokeApprovalDocument)
 	result := rig.smokeIntegrityReload(smokeReloadModel)
 	if result.err != nil {
 		t.Fatalf("the refused replacement: %v", result.err)
@@ -2123,7 +2229,7 @@ func smokeIntegrityCapturePositive(t *testing.T) {
 	rig.drive(chat, smokeIntegrityCaptureTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityCaptureTurn, 120*time.Second)
 	rig.postTask(smokeIntegrityCaptureSecond + " smoke delegate")
-	rig.waitText(chat, "delegate ack "+smokeIntegrityCaptureSecond, 120*time.Second)
+	smokeAwaitDelegateAck(t, rig, provider, chat, smokeIntegrityCaptureSecond, 120*time.Second)
 	smokeIntegrityWaitReflectSettled(t, provider, 300*time.Millisecond, 60*time.Second)
 
 	host.close(t)
@@ -2555,7 +2661,7 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			wantRendered, smokeEntryDigest(entries), smokeRequestsContaining(provider, "history summary"))
 	}
 	threshold := assembly.FoldWindow{MaxTokens: 2000, CompressThreshold: 0.3}.VolumeThresholdBytes()
-	if volume := len(replay.RenderProjection(entries)); volume > threshold {
+	if volume := smokeIntegrityFoldVolume(entries); volume > threshold {
 		t.Fatalf("the folded projection is %d bytes, want <= the %d-byte window\nprojection:\n%s",
 			volume, threshold, smokeEntryDigest(entries))
 	}
@@ -3068,11 +3174,15 @@ var (
 )
 
 // symptomRig 起一台症状锚专用宿主：独立临时根、脚本 provider 与替身通道；冥想
-// 节奏拉到 1h，避免本轮测量被反思回合插队。
+// 节奏拉到 1h，避免本轮测量被反思回合插队。节奏的两面都要拉：driver 的 interval
+// 只管两次发射之间，反思自身的 rhythm 判据看的是「最新 host-facing 事实」的年龄，
+// 只把 interval 拉到 1h 时它仍会在 10s（文档渲染的 min_gap）静默后发射并把摘要投进
+// 被测会话——等 30s 的投递断言因此会变成时序抽奖。
 func symptomRig(t *testing.T) (*smokeRig, *smokeProvider) {
 	t.Helper()
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	cfg.MeditationInterval = "1h"
+	cfg.MeditationMinGap = "1h"
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
 	cfg.Endpoint = provider.endpoint()
 	cfg.write(t)
@@ -3199,6 +3309,7 @@ func symptomStableTexts(rig *smokeRig, chat string, timeout time.Duration) []str
 // TestLocalSmokeSymptomAcceptedSilent 是症状直译锚 G1：委派被受理后、任务结算前，用户不该收到“已受理/在跑/稍后会通知你”这一类确认。
 // - 正锚 silent_until_settled：模型后续请求里与本调用配对的 tool result 恰为最小 "ok"，不携带 task id、状态词、后台任务与结算承诺。
 // - 叠加锚 silent_until_settled：受理后、结算前本会话 outbound=0；脚本模型安静时它先于修复即绿，不替代模型世界判据。
+// - 桩的安静面：结算通知可能单独或与回执合批到达，桩对未脚本化的请求一律安静返回，防停机应答落进结算窗口冒充产品失败。
 // - 负锚 legitimate_answer_still_delivered：正常提问的回答仍必须投递，防静默吞正常输出。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
 func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
@@ -3220,7 +3331,8 @@ func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
 					`{"input":"produce `+marker+`"}`))
 				return true
 			}
-			return false
+			fmt.Fprint(w, smokeAnswerBody(""))
+			return true
 		}
 
 		rig.drive(symptomChat, marker+" 后台跑一下这个任务")
