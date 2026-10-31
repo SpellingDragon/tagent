@@ -150,6 +150,40 @@ func reproductionNoticeOf(fact event.Event) task.Notice {
 	return task.Notice{TaskID: taskID, Kind: kind}
 }
 
+// reproductionAwaitNoticeFact waits for the one notice feedback fact the notice
+// turn of a settlement commits. That turn lands on its own thread beside the
+// answer that consumed its material, so the check reads the chain until the
+// fact arrives instead of assuming the turn already ran.
+func reproductionAwaitNoticeFact(t *testing.T, host *assembly.Host, addr event.Address, taskID event.TaskID, material string) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		facts := host.Run().SessionFacts(addr)
+		var found []event.Event
+		for _, fact := range facts {
+			if fact.Type != event.TypeFeedback || fact.Meta[event.MetaKeyNoticeKind] == "" {
+				continue
+			}
+			if fact.TaskID != taskID || strings.TrimSpace(fact.Message.Content) != strings.TrimSpace(material) {
+				continue
+			}
+			found = append(found, fact)
+		}
+		if len(found) > 1 {
+			t.Fatalf("the chain carried %d notice facts of task %s, want exactly 1; facts %s",
+				len(found), taskID, reproductionFactsSummary(found))
+		}
+		if len(found) == 1 {
+			return found[0]
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no notice fact of task %s carrying the settled material arrived within 30s; facts %s",
+				taskID, reproductionFactsSummary(facts))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // reproductionInputFacts reports the new user-input facts that carry the notice
 // material: the feedback fact a notice commits beside the external input fact a
 // follow-up range commits. A fact that is the transport record of the notice
@@ -468,6 +502,7 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 		script.release(followStep)
 	}
 	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batchedShape), 30*time.Second)
+	facts = host.Run().SessionFacts(addr)
 	inputFacts := reproductionInputFacts(facts, material)
 	if len(inputFacts) == 0 {
 		t.Fatalf("no new user-input fact carries the notice material %q of identity %s; the chain held %s",
@@ -726,6 +761,7 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 		script.release(followStep)
 	}
 	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batchedShape), 30*time.Second)
+	facts = host.Run().SessionFacts(addr)
 
 	inputFacts := reproductionInputFacts(facts, material)
 	if len(inputFacts) == 0 {
@@ -733,16 +769,9 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 			material, notice.FactKey(), reproductionFactsSummary(facts))
 	}
 	_ = inputFacts[0]
-	noticeCopies := 0
-	for _, fact := range facts {
-		if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyNoticeKind] != "" &&
-			fact.TaskID == notice.TaskID && strings.TrimSpace(fact.Message.Content) == strings.TrimSpace(material) {
-			noticeCopies++
-		}
-	}
-	if noticeCopies != 1 {
-		t.Fatalf("the chain carried %d notice facts of identity %s, want exactly 1; facts %s",
-			noticeCopies, notice.FactKey(), reproductionFactsSummary(facts))
+	noticeFact := reproductionAwaitNoticeFact(t, host, addr, notice.TaskID, material)
+	if want := agent.NoticeFactKey(noticeFact.InvocationID, notice); noticeFact.Key != want {
+		t.Fatalf("the notice fact key = %s, want the notice identity key %s", noticeFact.Key, want)
 	}
 
 	requests := provider.servedRequests()
