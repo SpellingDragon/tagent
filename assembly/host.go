@@ -1029,6 +1029,14 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 			_, _, key := noticeMaterialOf(ctx, fact)
 			defer h.holdNoticeAccount(key, barrier)()
 		}
+		// A settled result the flying segment still waits for is harvested by
+		// that segment's own next decision, which settles the account through
+		// settleConsumedNotices; driving a notice turn beside it would consume
+		// one settlement twice. A task the segment already paired — or never
+		// admitted — takes the notice-driven follow-up.
+		if consumer := consumers.Ensure(addr); consumer != nil && consumer.Awaits(noticeTaskIDOf(fact)) {
+			return nil
+		}
 		key, err := h.commitNoticeMaterial(ctx, addr, fact)
 		if err != nil {
 			return err

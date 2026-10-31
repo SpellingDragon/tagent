@@ -88,7 +88,10 @@ type Consumer struct {
 	done        chan struct{}
 	cancel      context.CancelFunc
 
-	mu       sync.Mutex
+	mu sync.Mutex
+	// awaited names the tasks the flying segment admitted and has not paired
+	// yet; a settled result of one of them belongs to the segment.
+	awaited  sync.Map
 	cursor   event.EventID
 	read     map[event.EventID]bool
 	flying   *segment
@@ -164,6 +167,16 @@ func (c *Consumer) consume(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// Awaits reports whether the flying segment still waits for the settled result
+// of the named task: only then is that result harvested by the segment's own
+// next decision, so a notice-driven follow-up must leave it to the segment. A
+// task the segment already harvested — or never admitted — answers false, and
+// the follow-up drives.
+func (c *Consumer) Awaits(taskID event.TaskID) bool {
+	_, held := c.awaited.Load(taskID)
+	return held
 }
 
 // flyingSegment reports the segment this address flies, or none.
@@ -307,7 +320,7 @@ func drivingTrigger(events []event.Event) string {
 // - The receipts alone drive the next round only when no call is running: a decision whose every call was refused owes the model the refusal it reads, so it decides again at once, while a decision with calls in flight parks — each settlement and each input that lands wakes the loop, and the next decision reads the result beside whatever else arrived.
 // - The closing round admits none of the calls it issued: the receipts it leaves are the refusals the model reads, and no further round may read them, so the segment closes on the closing round exactly as the direct drive ends on the one it ran.
 func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
-	harvested := seg.harvest(ctx, c.loop)
+	harvested := seg.harvest(ctx, c.loop, &c.awaited)
 	if len(harvested) > 0 {
 		seg.transcript = append(seg.transcript, harvested...)
 		seg.dirty = true
@@ -351,6 +364,7 @@ func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
 	}
 	for _, adm := range running {
 		seg.pending[adm.taskID] = adm
+		c.awaited.Store(adm.taskID, true)
 	}
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
 		seg.transcript = append(seg.transcript, assistantOf(outcome))
@@ -449,7 +463,7 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 // observed through the pipeline of the decision that admitted it. The harvest
 // never waits: a call whose result has not arrived stays pending, and the loop
 // returns to the pull beside it.
-func (s *segment) harvest(ctx context.Context, l *Loop) []model.Message {
+func (s *segment) harvest(ctx context.Context, l *Loop, awaited *sync.Map) []model.Message {
 	if len(s.pending) == 0 {
 		return nil
 	}
@@ -472,6 +486,9 @@ func (s *segment) harvest(ctx context.Context, l *Loop) []model.Message {
 			delete(in.settled, taskID)
 		}
 		delete(s.pending, taskID)
+		if awaited != nil {
+			awaited.Delete(taskID)
+		}
 		paired = append(paired, pairing{call: call, item: item})
 	}
 	in.mu.Unlock()
