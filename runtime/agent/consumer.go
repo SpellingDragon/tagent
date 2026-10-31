@@ -169,14 +169,51 @@ func (c *Consumer) consume(ctx context.Context) {
 	}
 }
 
-// Awaits reports whether the flying segment still waits for the settled result
-// of the named task: only then is that result harvested by the segment's own
-// next decision, so a notice-driven follow-up must leave it to the segment. A
-// task the segment already harvested — or never admitted — answers false, and
-// the follow-up drives.
-func (c *Consumer) Awaits(taskID event.TaskID) bool {
-	_, held := c.awaited.Load(taskID)
-	return held
+// TaskState names what became of one settled result on this address: the
+// flying segment still awaits it, a segment already paired it, or a closed
+// segment left it unpaired. The notice-driven follow-up reads the state to know
+// whether any consumer already took the result.
+type TaskState string
+
+const (
+	// TaskAwaited: the flying segment admitted the task and has not paired it.
+	TaskAwaited TaskState = "awaited"
+	// TaskConsumed: a segment paired the result already.
+	TaskConsumed TaskState = "consumed"
+	// TaskOrphaned: the segment that admitted the task closed without pairing it.
+	TaskOrphaned TaskState = "orphaned"
+)
+
+// AwaitTaskState waits until the named task stops being awaited by a flying
+// segment and answers the settled state: the segment either pairs the result
+// (consumed) or closes beside it (orphaned). A wait the context ends answers
+// the state as it stands, so the caller decides over a named moment instead of
+// guessing across the window between admission and the segment's close.
+func (c *Consumer) AwaitTaskState(ctx context.Context, taskID event.TaskID) TaskState {
+	for {
+		switch state := c.TaskState(taskID); state {
+		case TaskAwaited:
+		default:
+			return state
+		}
+		select {
+		case <-ctx.Done():
+			return c.TaskState(taskID)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// TaskState reports what became of the named task on this address. A task this
+// address never admitted answers empty, which the notice-driven follow-up reads
+// as unattended and drives.
+func (c *Consumer) TaskState(taskID event.TaskID) TaskState {
+	value, held := c.awaited.Load(taskID)
+	if !held {
+		return ""
+	}
+	state, _ := value.(TaskState)
+	return state
 }
 
 // flyingSegment reports the segment this address flies, or none.
@@ -364,7 +401,7 @@ func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
 	}
 	for _, adm := range running {
 		seg.pending[adm.taskID] = adm
-		c.awaited.Store(adm.taskID, true)
+		c.awaited.Store(adm.taskID, TaskAwaited)
 	}
 	if outcome.Kind == model.KindCompleted && outcome.Body != nil && outcome.Body.IsToolCallResponse() {
 		seg.transcript = append(seg.transcript, assistantOf(outcome))
@@ -444,6 +481,9 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 	if c.deliver != nil {
 		c.deliver(ctx, c.addr, answer)
 	}
+	for taskID := range seg.pending {
+		c.awaited.Store(taskID, TaskOrphaned)
+	}
 	c.mu.Lock()
 	c.flying = nil
 	c.results = append(c.results, segmentResult{consumed: seg.consumed, turn: turn, err: cause, trigger: seg.trigger})
@@ -487,7 +527,7 @@ func (s *segment) harvest(ctx context.Context, l *Loop, awaited *sync.Map) []mod
 		}
 		delete(s.pending, taskID)
 		if awaited != nil {
-			awaited.Delete(taskID)
+			awaited.Store(taskID, TaskConsumed)
 		}
 		paired = append(paired, pairing{call: call, item: item})
 	}

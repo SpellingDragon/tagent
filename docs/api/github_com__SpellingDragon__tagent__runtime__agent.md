@@ -333,8 +333,20 @@ type Consumer struct {
     waiting entry only from the segment that consumed its input, never from a
     neighbour's.
 
+func (c *Consumer) AwaitTaskState(ctx context.Context, taskID event.TaskID) TaskState
+    AwaitTaskState waits until the named task stops being awaited by a flying
+    segment and answers the settled state: the segment either pairs the result
+    (consumed) or closes beside it (orphaned). A wait the context ends answers
+    the state as it stands, so the caller decides over a named moment instead of
+    guessing across the window between admission and the segment's close.
+
 func (c *Consumer) Done() <-chan struct{}
     Done reports the channel that closes when the consumption loop ended.
+
+func (c *Consumer) TaskState(taskID event.TaskID) TaskState
+    TaskState reports what became of the named task on this address. A task this
+    address never admitted answers empty, which the notice-driven follow-up
+    reads as unattended and drives.
 
 func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (SegmentAnswer, error)
     WaitAnswer waits for the segment that consumed any of the named input keys
@@ -1323,6 +1335,20 @@ func (s *Shutdown) Watch(taskID event.TaskID, stopped func() bool) error
     MUST NOT report a drain while any registered production has not confirmed
     its stop.
 
+type TaskState string
+    TaskState names what became of one settled result on this address:
+    the flying segment still awaits it, a segment already paired it, or a closed
+    segment left it unpaired. The notice-driven follow-up reads the state to
+    know whether any consumer already took the result.
+
+const (
+	// TaskAwaited: the flying segment admitted the task and has not paired it.
+	TaskAwaited TaskState = "awaited"
+	// TaskConsumed: a segment paired the result already.
+	TaskConsumed TaskState = "consumed"
+	// TaskOrphaned: the segment that admitted the task closed without pairing it.
+	TaskOrphaned TaskState = "orphaned"
+)
 type Turn struct {
 	// InvocationID is the range the turn belongs to.
 	InvocationID event.InvocationID

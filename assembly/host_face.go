@@ -38,6 +38,9 @@ const (
 	hostFaceBodyLimit = 1 << 20
 	// hostShutdownGrace is the span a close gives the in-flight requests.
 	hostShutdownGrace = 5 * time.Second
+	// hostSettleWindow bounds how long a notice follow-up waits for the flying
+	// segment's ruling on one settled task before it drives beside the segment.
+	hostSettleWindow = 10 * time.Second
 )
 
 // hostFace serves the host's three loopback endpoints: the liveness probe a

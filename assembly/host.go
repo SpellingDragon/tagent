@@ -1010,6 +1010,7 @@ func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) error {
 // - An address a resident consumption loop owns is driven by that loop alone: the notice material commits as the fact it is and the wake hands it to the next pull of the loop, so no follow-up turn runs beside the segment the loop may already fly. The entry the notification was accepted on is settled beside the turn the loop lands, exactly as a direct drive settles it: the entry waits for the segment that consumed the material, the landed terminal is recorded as its attempt, and only then is the consumption receipt written — an entry is never closed beside a turn that never ran. The answer leaves through the delivery face of the consumer, which is the same path a user turn's answer leaves by.
 //
 // - The segment that consumes the material answers the entry only after its own delivery, so the account of the entry is registered here, under the key the material lands as and before the commit: the delivery face of the consumer closes it beside the segment that consumed that key, and a segment that closed without reading the material leaves the account owed for the wake.
+// - A settled result the flying segment still awaits is harvested by that segment's own next decision (the account settles through settleConsumedNotices), so the notice turn drives only a task already paired or never admitted.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {
 		return ErrHostClosed
@@ -1029,13 +1030,17 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 			_, _, key := noticeMaterialOf(ctx, fact)
 			defer h.holdNoticeAccount(key, barrier)()
 		}
-		// A settled result the flying segment still waits for is harvested by
-		// that segment's own next decision, which settles the account through
-		// settleConsumedNotices; driving a notice turn beside it would consume
-		// one settlement twice. A task the segment already paired — or never
-		// admitted — takes the notice-driven follow-up.
-		if consumer := consumers.Ensure(addr); consumer != nil && consumer.Awaits(noticeTaskIDOf(fact)) {
-			return nil
+		if consumer := consumers.Ensure(addr); consumer != nil {
+			settleWait, settleCancel := context.WithTimeout(ctx, hostSettleWindow)
+			state := consumer.AwaitTaskState(settleWait, noticeTaskIDOf(fact))
+			settleCancel()
+			if state == agent.TaskConsumed {
+				return nil
+			}
+			if state == agent.TaskAwaited {
+				assemblyWarn("tagent: the segment of %s still awaits the settled task %s; the notice turn drives beside it",
+					addr.SessionID, noticeTaskIDOf(fact))
+			}
 		}
 		key, err := h.commitNoticeMaterial(ctx, addr, fact)
 		if err != nil {
