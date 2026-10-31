@@ -113,8 +113,8 @@ BASELINE = (
     ("struct-fields", "tool/subagent/subagent.go:Definition", 10),
     # Declaration 6f（声明面本体）：组织声明=入口/代理/引用/基线/MCP 服务器代际/原始文档，MCP 面随 mcp_servers 声明下沉各成一格，拆开会让声明面出现影子结构。
     ("struct-fields", "api/config/config.go:Declaration", 6),
-    # AgentSpec 17f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget，回放预算由窗口推导。段是声明字段，不是影子结构，拆开会让声明面重新长出机制层。
-    ("struct-fields", "api/config/config.go:AgentSpec", 21),
+    # AgentSpec 24f（声明面本体）：单个 agent 的声明格＝核心（身份/模型/引用/参数/回合预算/回放窗口）＋熔断两镜（max_calls_per_response/long_context_tokens，单响应调用量与长上下文阈值，人审挂起式）＋捕获预算（capture_budget_mb，轨迹常驻上限）＋ memory/meditation/file/exec 四个域段平铺在同一格；窗口三字段（max_tokens/compress_threshold/keep_recent_tasks）替代 replay_budget；三个熔断/预算键与 max_tool_iterations 同模式，是声明字段不是影子结构（oom-bounded-capture-and-storm-fuse）。
+    ("struct-fields", "api/config/config.go:AgentSpec", 24),
     # MeditationSpec 6f：冥想运行声明本体，六个格分别是启用、节奏两格、提示、观察面与回流白名单，字段即声明形状。
     ("struct-fields", "api/config/config.go:MeditationSpec", 6),
     # event.ParsedMeta 9f（00.25 具名登记）：ParseEventMeta 的解析结果本体＝数据面，
@@ -132,7 +132,8 @@ BASELINE = (
     ("struct-fields", "features/evolution/posterior.go:Evaluation", 6),
     ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
     ("struct-fields", "memory/event_body.go:EventBody", 20),  # 2026-10-26: full-fact fidelity (fidelity-and-recovery 2.2) names every field a restore needs; ratchet kept, count follows the declared design
-    ("struct-fields", "memory/replay/projection.go:ChainFact", 6),
+    ("struct-fields", "memory/replay/projection.go:ChainFact", 7),
+    ("struct-fields", "memory/replay/projection.go:ProjectionEntry", 6),
     ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
     ("struct-fields", "memory/query_events.go:EventRecord", 7),
     ("struct-fields", "memory/query_events.go:QueryOptions", 9),

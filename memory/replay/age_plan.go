@@ -8,6 +8,8 @@ package replay
 
 import (
 	"context"
+	"strings"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -110,7 +112,9 @@ func planFold(entries []ProjectionEntry, plan AgeFoldPlan) AgeFoldPlanReport {
 // ApplyProducts places the products a judgment minted onto the projection: each
 // covered entry is replaced by its product, a history summary lands ahead of the
 // material it summarizes, and a product whose entry is already held changes
-// nothing — applying one judgment twice is applying it once.
+// nothing — applying one judgment twice is applying it once. A covered entry
+// leaves the projection with its per-key material (the kept original, the dedup
+// key and the consumed mark), so the maps say what the rewritten entries say.
 func (p *ReplayProjection) ApplyProducts(products []FoldProduct) {
 	if len(products) == 0 {
 		return
@@ -118,6 +122,7 @@ func (p *ReplayProjection) ApplyProducts(products []FoldProduct) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.entries = applyFoldProducts(p.entries, products)
+	p.forgetDroppedLocked()
 }
 
 // applyFoldProducts places one batch of products onto a fixed entry sequence.
@@ -167,6 +172,91 @@ func applyFoldProducts(entries []ProjectionEntry, products []FoldProduct) []Proj
 		out = append(out, product)
 	}
 	return append(append([]ProjectionEntry(nil), heads...), out...)
+}
+
+// RestoreProducts places the products a chain recorded onto the projection: the
+// product fact names the key, the text and the entries it covers, so a restore
+// rebuilds the entry the fold minted instead of folding the material again. The
+// kind of product is read off the key's prefix and its moment off the first
+// entry it covers, which is the moment the fold itself gave it. A key no fold
+// mints, and a product whose entry the projection already holds, change nothing.
+func (p *ReplayProjection) RestoreProducts(products []event.CompressProduct) {
+	if len(products) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, product := range products {
+		restored, ok := foldProductOf(product, p.entries)
+		if !ok {
+			continue
+		}
+		p.entries = applyFoldProducts(p.entries, []FoldProduct{restored})
+	}
+	p.forgetDroppedLocked()
+}
+
+// foldProductOf reads one product fact back as the fold product it recorded: the
+// entry under the key the fact names, its kind read off the key prefix and its
+// moment the moment the first covered entry carries. A key no fold mints answers
+// no product, so a fact naming material this package never folded is skipped
+// rather than placed under invented keys.
+func foldProductOf(product event.CompressProduct, entries []ProjectionEntry) (FoldProduct, bool) {
+	kind, ok := foldKindOf(product.Key)
+	if !ok {
+		return FoldProduct{}, false
+	}
+	return FoldProduct{
+		Entry: ProjectionEntry{
+			Key:     product.Key,
+			Type:    kind,
+			Summary: foldSummaryOf(kind),
+			Content: product.Text,
+			Time:    coveredMomentOf(product.Covered, entries),
+		},
+		Covered: append([]event.EventID(nil), product.Covered...),
+		Request: event.CompressRequest{ID: product.Answers.Request},
+	}, true
+}
+
+// foldKindOf reports the product kind one synthetic key names: the fold files a
+// segment fold and a history summary under one prefix each, and the prefix is
+// the only thing the fact carries about what it minted.
+func foldKindOf(key event.EventID) (string, bool) {
+	name := strings.TrimPrefix(string(key), "-")
+	switch {
+	case strings.HasPrefix(name, ageSegmentKeyPrefix+"-"):
+		return ProjectionTypeSegmentFold, true
+	case strings.HasPrefix(name, ageHistoryKeyPrefix+"-"):
+		return ProjectionTypeHistorySummary, true
+	default:
+		return "", false
+	}
+}
+
+// foldSummaryOf reports the one-line read a product of one kind carries, the
+// same line the fold writes beside the text it mints.
+func foldSummaryOf(kind string) string {
+	if kind == ProjectionTypeHistorySummary {
+		return "history summary"
+	}
+	return "segment fold"
+}
+
+// coveredMomentOf reports the moment the first covered entry carries: the fold
+// stamps a product with the moment of the material it opened on, so a restored
+// product reads the same moment the folded one did. Covered material the
+// projection does not carry answers the zero moment, so a restore never
+// invents one.
+func coveredMomentOf(covered []event.EventID, entries []ProjectionEntry) time.Time {
+	for _, key := range covered {
+		for _, entry := range entries {
+			if entry.Key == key {
+				return entry.Time
+			}
+		}
+	}
+	return time.Time{}
 }
 
 // processDetailKeys reports the keys of the process-detail entries of one

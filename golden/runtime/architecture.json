@@ -382,12 +382,13 @@
       "from": "runtime/agent",
       "allow": [
         "api/event",
-        "runtime/state",
         "api/model",
         "api/plugin",
-        "runtime/task",
         "api/view",
-        "features/evolution/governance"
+        "features/evolution/governance",
+        "runtime/state",
+        "runtime/task",
+        "runtime/task/approval"
       ],
       "forbidden": [
         "features/rl",

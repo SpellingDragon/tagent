@@ -97,9 +97,12 @@ func (a *ApprovalManager) Decide(id string, status ApprovalStatus, by string) (*
     repeated response is idempotent: it reports the first ruling again instead
     of consuming a second one. A ruling over an unknown identity is refused
     beside ErrApprovalNotFound, a ruling that names no known decision is refused
-    beside ErrApprovalRulingUnknown, and a ruling that arrived after the request
-    expired is refused beside ErrApprovalExpired — an expired request is treated
-    as not approved and is never made runnable by a late response.
+    beside ErrApprovalRulingUnknown, and a ruling that arrived after the
+    request expired is refused beside ErrApprovalExpired — an expired request
+    is treated as not approved and is never made runnable by a late response.
+    The ruling reaches the request file under the store lock the index entry is
+    read and rewritten under, so a rescan never reads a pending body back over a
+    landed ruling.
 
 func (a *ApprovalManager) DeliveryGaps() []DeliveryGap
     DeliveryGaps reports the visible channel failures recorded so far.
@@ -127,6 +130,11 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
     digest itself, so the registration keeps the digest binding the hold was
     issued over.
 
+    The request file lands before the in-memory index names the request:
+    a registration is the file, so a ruling of that identity is written only
+    after the pending body it rules on reached the disk, and the two writes of
+    one identity never share a temporary file. The write and the index entry it
+    registers are one step of the store lock, so no rescan slips between them.
     A channel that fails records a visible gap and never fails the registration
     (the gate is a gate, never a wall), and a repeated registration under the
     same identity keeps the request already stored. A request that cannot be

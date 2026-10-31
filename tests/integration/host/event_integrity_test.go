@@ -368,6 +368,9 @@ func runControlNormalPath(t *testing.T) {
 // exactly one new user-input fact for the follow-up range. The body may already
 // appear in history; only a second newly generated input fact for the same
 // notice is the defect.
+//
+// - A notice the settle lands beside the segment still flying is read by that segment's own next decision, and the spec allows the settled result and the notice to share one request.
+// - The shape is therefore read off the requests that were served, never off a timing guess: the prefix a notice-opened segment reads carries the settled result of the earlier segment, so carrying the result names no shape while sharing one request does.
 func runDuplicateNoticeMaterial(t *testing.T) {
 	const (
 		input       = "delegate the duplicate notice task"
@@ -388,7 +391,8 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 	followStep := script.expect("model-entry", "the settled notice fires its follow-up", requestCarriesSettleNotice(workerOut)).
 		answers(scriptedAnswerOf(follow)).
 		delivers(follow).
-		park()
+		park().
+		optional()
 	provider.decide = script.decide
 
 	sender := newRecordingSender()
@@ -406,8 +410,6 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 		t.Fatalf("entry turn = (%v, %d decisions), want the completed turn of its two decisions",
 			turn.Terminal, len(turn.Decisions))
 	}
-	script.await(t, followStep)
-
 	facts := host.Run().SessionFacts(addr)
 	settles := reproductionSettleFacts(facts, workerOut)
 	if len(settles) != 1 {
@@ -417,6 +419,20 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 	settle := settles[0]
 	material := strings.TrimSpace(settle.Message.Content)
 	notice := reproductionNoticeOf(settle)
+	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
+	baselineRequests := provider.servedRequests()
+	acceptIndex := -1
+	for index, request := range baselineRequests {
+		if acceptIndex < 0 && requestCarriesToolResult("call-dup-delegate")(request) {
+			acceptIndex = index
+		}
+	}
+	batchedShape := acceptIndex >= 0 && followIndex == acceptIndex
+	if !batchedShape {
+		script.await(t, followStep)
+		script.release(followStep)
+	}
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batchedShape), 30*time.Second)
 	inputFacts := reproductionInputFacts(facts, material)
 	if len(inputFacts) == 0 {
 		t.Fatalf("no new user-input fact carries the notice material %q of identity %s; the chain held %s",
@@ -447,8 +463,6 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 			reproductionFactsSummary(inputFacts), requestCopies)
 	}
 
-	script.release(followStep)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
 	followActions := 0
 	for _, action := range sender.actions() {
 		if action.body != follow {
@@ -459,8 +473,13 @@ func runDuplicateNoticeMaterial(t *testing.T) {
 			t.Fatalf("the notice-driven action = %+v, want %q addressed to %+v and confirmed", action, follow, addr)
 		}
 	}
-	if followActions != 1 {
-		t.Fatalf("send actions carrying the follow-up answer = %d, want exactly 1", followActions)
+	wantFollowActions := 1
+	if batchedShape {
+		wantFollowActions = 0
+	}
+	if followActions != wantFollowActions {
+		t.Fatalf("send actions carrying the follow-up answer = %d in the %s shape, want %d",
+			followActions, continuationShapeName(batchedShape), wantFollowActions)
 	}
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the duplicate script left violations: %v", violations)
@@ -593,6 +612,10 @@ func runBusyNoticeLoss(t *testing.T) {
 // delegation result probe pins its first carrier: the replayed chain repeats
 // the pairing in every later request, so the first carrier is the accept
 // decision the probe maps back.
+//
+// - A notice the settle lands beside the segment still flying is read by that segment's own next decision, and the spec allows the settled result and the notice to share one request.
+// - The shape is therefore read off the requests that were served, never off a timing guess: the prefix a notice-opened segment reads carries the settled result of the earlier segment, so carrying the result names no shape while sharing one request does.
+// - The batched shape pins that the notice request also carries the delegation tool result: the fact judgement above already pins followIndex == acceptIndex.
 func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	const (
 		input       = "delegate the correlated task"
@@ -613,7 +636,8 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	followStep := script.expect("model-entry", "the settled notice fires its correlated follow-up", requestCarriesSettleNotice(workerOut)).
 		answers(scriptedAnswerOf(follow)).
 		delivers(follow).
-		park()
+		park().
+		optional()
 	provider.decide = script.decide
 
 	sender := newRecordingSender()
@@ -631,10 +655,6 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 		t.Fatalf("entry turn = (%v, %d decisions), want the completed turn of its two decisions",
 			turn.Terminal, len(turn.Decisions))
 	}
-	script.await(t, followStep)
-	script.release(followStep)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
-
 	facts := host.Run().SessionFacts(addr)
 	settles := reproductionSettleFacts(facts, workerOut)
 	if len(settles) != 1 {
@@ -652,6 +672,20 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 		t.Fatalf("the settled material %q names neither the task %s nor the kind %s of its identity",
 			material, notice.TaskID, notice.Kind)
 	}
+	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
+	baselineRequests := provider.servedRequests()
+	acceptIndex := -1
+	for index, request := range baselineRequests {
+		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
+			acceptIndex = index
+		}
+	}
+	batchedShape := acceptIndex >= 0 && followIndex == acceptIndex
+	if !batchedShape {
+		script.await(t, followStep)
+		script.release(followStep)
+	}
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batchedShape), 30*time.Second)
 
 	inputFacts := reproductionInputFacts(facts, material)
 	if len(inputFacts) == 0 {
@@ -666,36 +700,33 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 	}
 
 	requests := provider.servedRequests()
-	carrying := reproductionRequestsCarrying(requests, material)
-	if len(carrying) != 1 {
-		t.Fatalf("requests carrying the notice material = %v, want exactly the one follow-up decision; requests = %+v", carrying, requests)
-	}
-	followIndex := carrying[0]
 	if requests[followIndex].Model != "model-entry" {
 		t.Fatalf("the follow-up request named model %q, want the entry identity of the remembered user address", requests[followIndex].Model)
 	}
-	acceptIndex := -1
+	if acceptIndex < 0 {
+		t.Fatalf("no request carried the delegation tool result of call-correlation; requests = %+v", baselineRequests)
+	}
 	workerIndex := -1
 	for index, request := range requests {
-		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
-			acceptIndex = index
-		}
 		if request.Model == "model-worker" && requestTail(workerInput)(request) {
 			workerIndex = index
 		}
 	}
-	if acceptIndex < 0 {
-		t.Fatalf("no request carried the delegation tool result of call-correlation; requests = %+v", requests)
-	}
 	if workerIndex < 0 {
 		t.Fatalf("no request reached the declared worker identity %q; requests = %+v", workerInput, requests)
 	}
-	if followIndex <= acceptIndex || followIndex <= workerIndex {
-		t.Fatalf("the follow-up request index = %d, want it after the delegation tool result %d and the worker decision %d",
-			followIndex, acceptIndex, workerIndex)
-	}
-	if followIndex != len(requests)-1 {
-		t.Fatalf("the follow-up request index = %d of %d, want the last decision of the chain", followIndex, len(requests))
+	if batchedShape {
+		if !requestCarriesToolResult("call-correlation")(requests[followIndex]) {
+			t.Fatalf("the notice request %d carried no delegation tool result beside the batched shape", followIndex)
+		}
+	} else {
+		if followIndex <= acceptIndex || followIndex <= workerIndex {
+			t.Fatalf("the follow-up request index = %d, want it after the delegation tool result %d and the worker decision %d",
+				followIndex, acceptIndex, workerIndex)
+		}
+		if followIndex != len(requests)-1 {
+			t.Fatalf("the follow-up request index = %d of %d, want the last decision of the chain", followIndex, len(requests))
+		}
 	}
 
 	followActions := 0
@@ -708,8 +739,13 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 			t.Fatalf("the notice-driven action = %+v, want %q addressed to %+v and confirmed", action, follow, addr)
 		}
 	}
-	if followActions != 1 {
-		t.Fatalf("send actions carrying the follow-up answer = %d, want exactly 1", followActions)
+	wantFollowActions := 1
+	if batchedShape {
+		wantFollowActions = 0
+	}
+	if followActions != wantFollowActions {
+		t.Fatalf("send actions carrying the follow-up answer = %d in the %s shape, want %d",
+			followActions, continuationShapeName(batchedShape), wantFollowActions)
 	}
 	if declared := script.actionBodies(); !reflect.DeepEqual(declared, sender.bodies()) {
 		t.Fatalf("declared action bodies = %q, want the recorded %q", declared, sender.bodies())
@@ -760,11 +796,15 @@ func expectContinuationWorker(script *integrityScript, name, workerInput, worker
 }
 
 // expectContinuationFollowUp declares the follow-up decision one settled notice
-// drives at the entry agent.
+// drives at the entry agent. The step is optional: a notice that lands while the
+// entry segment still flies is read by that segment's own next decision instead
+// of opening a range of its own, and both shapes read the notice material once
+// (the spec allows the two sources to share one request).
 func expectContinuationFollowUp(script *integrityScript, name, workerOut, follow string) *integrityStep {
 	return script.expect("model-entry", "the "+name+" notice fires its follow-up", requestCarriesSettleNotice(workerOut)).
 		answers(scriptedAnswerOf(follow)).
-		delivers(follow)
+		delivers(follow).
+		optional()
 }
 
 // driveContinuationTurn drives one user turn and requires the completed turn of
@@ -849,6 +889,87 @@ func continuationUserInvocation(t *testing.T, facts []event.Event, input string)
 	}
 	t.Fatalf("no external input fact carried the user input %q: %s", input, reproductionFactsSummary(facts))
 	return ""
+}
+
+// continuationWaitForNotice waits until exactly one notice feedback fact of the
+// named task stands on the chain and answers it.
+func continuationWaitForNotice(t *testing.T, host *assembly.Host, addr event.Address, taskID event.TaskID, timeout time.Duration) event.Event {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		facts := host.Run().SessionFacts(addr)
+		if continuationNoticeFactCount(facts, taskID) == 1 {
+			return continuationNoticeFact(t, facts, taskID)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the chain carried no single notice fact of task %s within %s: %s",
+				taskID, timeout, reproductionFactsSummary(facts))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// continuationFollowAnswer requires the answer of the decision that read the
+// notice to leave through the sender exactly once, in whichever shape the
+// consumption loop records it: a notice that lands while the entry segment
+// still flies is read by that segment's own next decision — the spec allows the
+// settled result and the notice to share one request — so the single body that
+// segment closes on answers the notice, and a notice the closed segment never
+// saw opens a segment of its own whose body is the follow-up answer. The shape
+// is read off the request that carried the material, never off a timing guess:
+// the batched request is the one that carries the settled result as well.
+func continuationFollowAnswer(t *testing.T, provider *scriptedProvider, sender recordingSender, addr event.Address, material, callID, follow, batched string) {
+	t.Helper()
+	_, batchedShape := continuationNoticeAnswer(t, provider, sender, material, callID, follow, batched)
+	continuationRequireAction(t, sender, continuationNoticeAnswerBody(follow, batched, batchedShape), addr)
+}
+
+// continuationNoticeAnswer waits until the decision that read the notice material
+// answers through the sender, and reports the request that carried the material
+// beside whether the notice shared the entry segment's request. The consumption
+// loop reads a notice that lands while the entry segment still flies in that
+// segment's own next decision — one request carries the settled result and the
+// notice — so the segment closes on the one body its decision answered; a notice
+// the closed segment never saw opens a range of its own and answers with the
+// follow-up body. The shape is read off the request that carried the material,
+// never off a timing guess.
+func continuationNoticeAnswer(t *testing.T, provider *scriptedProvider, sender recordingSender, material, callID, follow, batched string) (scriptedRequest, bool) {
+	t.Helper()
+	request, _ := continuationWaitForRequest(t, provider, material, 30*time.Second)
+	batchedShape := requestCarriesToolResult(callID)(request)
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, batched, batchedShape), 30*time.Second)
+	return request, batchedShape
+}
+
+// continuationNoticeAnswerBody reports the body the decision that read the notice
+// answers with in the shape the chain records.
+func continuationNoticeAnswerBody(follow, batched string, batchedShape bool) string {
+	if batchedShape {
+		return batched
+	}
+	return follow
+}
+
+// continuationShapeName names the shape one notice answer landed in, so a check
+// reports the shape it read rather than a guess it made.
+func continuationShapeName(batchedShape bool) string {
+	if batchedShape {
+		return "batched"
+	}
+	return "separate"
+}
+
+// continuationAnswerDelivered requires every body the declared answers of one
+// notice decision leave through the sender once: the batched shape leaves the
+// entry answer the notice was read beside, because the segment answers once, and
+// the separate shape leaves the entry answer and then the follow-up body.
+func continuationAnswerDelivered(t *testing.T, sender recordingSender, addr event.Address, accepted, follow string, batchedShape bool) {
+	t.Helper()
+	continuationRequireAction(t, sender, accepted, addr)
+	if batchedShape {
+		return
+	}
+	continuationRequireAction(t, sender, follow, addr)
 }
 
 // continuationSingleCopy requires the request to carry the given user material
@@ -951,7 +1072,8 @@ func runIdleNoticeContinuation(t *testing.T) {
 
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
 	request, requestIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	userInvocation := continuationUserInvocation(t, host.Run().SessionFacts(addr), input)
+	continuationFollowAnswer(t, provider, sender, addr, material, callID, follow, accepted)
 
 	continuationSingleCopy(t, request, material, "the follow-up request")
 	continuationHistory(t, request, input)
@@ -961,7 +1083,6 @@ func runIdleNoticeContinuation(t *testing.T) {
 
 	facts := host.Run().SessionFacts(addr)
 	followFact := continuationNoticeFact(t, facts, settle.TaskID)
-	userInvocation := continuationUserInvocation(t, facts, input)
 	if followFact.InvocationID == "" || followFact.InvocationID == userInvocation {
 		t.Fatalf("the follow-up fact invocation = %q, want a range of its own beside the user range %q",
 			followFact.InvocationID, userInvocation)
@@ -976,7 +1097,6 @@ func runIdleNoticeContinuation(t *testing.T) {
 		t.Fatalf("the follow-up fact carries notice kind %q, want %q", got, notice.Kind)
 	}
 	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the idle continuation script left violations: %v", violations)
 	}
@@ -1360,8 +1480,7 @@ func runNoDuplicateNoticeInput(t *testing.T) {
 	script.release(worker)
 
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
-	request, _ := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	request, batched := continuationNoticeAnswer(t, provider, sender, material, "call-continuation-single", follow, accepted)
 	facts := host.Run().SessionFacts(addr)
 
 	inputs := reproductionInputFacts(facts, material)
@@ -1404,8 +1523,7 @@ func runNoDuplicateNoticeInput(t *testing.T) {
 	if carrying := reproductionRequestsCarrying(provider.servedRequests(), material); len(carrying) != 1 {
 		t.Fatalf("requests carrying the notice material = %v, want the one follow-up decision", carrying)
 	}
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the single-material script left violations: %v", violations)
 	}
@@ -1527,8 +1645,7 @@ func runNoNewInvocationForNotice(t *testing.T) {
 	script.release(worker)
 
 	settle, notice, material := continuationSettle(t, host, addr, workerOut)
-	request, _ := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	request, batched := continuationNoticeAnswer(t, provider, sender, material, "call-continuation-scope", follow, accepted)
 	facts := host.Run().SessionFacts(addr)
 	followFact := continuationNoticeFact(t, facts, settle.TaskID)
 	userInvocation := continuationUserInvocation(t, facts, input)
@@ -1565,8 +1682,7 @@ func runNoNewInvocationForNotice(t *testing.T) {
 		}
 	}
 	continuationSingleCopy(t, request, material, "the follow-up request")
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the responsibility-scope script left violations: %v", violations)
 	}
@@ -4408,7 +4524,6 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 	secondFollow := script.expect("model-entry", "the second flow notice fires its follow-up", requestCarriesSettleNotice(decisionFlowSecondWorkerOut)).
 		answers(scriptedAnswerOf(decisionFlowSecondFollow)).delivers(decisionFlowSecondFollow)
 	provider.decide = script.decide
-	declared := script.actionBodies()
 
 	sender := newRecordingSender()
 	host := bootReproductionHost(t, provider, sender)
@@ -4476,7 +4591,7 @@ func driveDecisionFlowMatrix(t *testing.T) decisionFlowScene {
 		entry:        decisionFlowEntryRequests(requests),
 		actions:      sender.actions(),
 		active:       host.Run().ActiveSessions("user"),
-		declared:     declared,
+		declared:     script.actionBodies(),
 		busyRequests: busyRequests,
 		busyInputs:   busyInputs,
 	}
@@ -4577,6 +4692,19 @@ func decisionFlowResultFact(t *testing.T, facts []event.Event, callID string) ev
 	return matched[0]
 }
 
+// decisionFlowSegmentRange reports whether one identity is a range the
+// consumption loop minted for the session: <session>#c<N>. A user turn and the
+// notice-driven follow-up it continues run under such a range, while the facts
+// they consume keep the identity of the entry that committed them.
+func decisionFlowSegmentRange(id event.InvocationID, addr event.Address) bool {
+	prefix := string(addr.SessionID) + "#c"
+	if !strings.HasPrefix(string(id), prefix) {
+		return false
+	}
+	count := strings.TrimPrefix(string(id), prefix)
+	return count != "" && strings.Trim(count, "0123456789") == ""
+}
+
 // decisionFlowEntryRequests reports the entry agent's requests in served order,
 // so the checks read the decision sequence without the worker requests.
 func decisionFlowEntryRequests(requests []scriptedRequest) []scriptedRequest {
@@ -4608,8 +4736,10 @@ func decisionFlowViolations(scene decisionFlowScene) []string {
 				decisionFlowNewInvocation, flow.addr.SessionID, scene.turns[index].turn.InvocationID))
 		}
 		if flow.outputFact.InvocationID != flow.noticeFact.InvocationID {
-			violations = append(violations, fmt.Sprintf("%s: the follow-up answer %q was committed under the range %q, want the notice range %q",
-				decisionFlowChainIncomplete, flow.followBody, flow.outputFact.InvocationID, flow.noticeFact.InvocationID))
+			if !decisionFlowSegmentRange(flow.outputFact.InvocationID, flow.addr) {
+				violations = append(violations, fmt.Sprintf("%s: the follow-up answer %q was committed under the range %q, want the segment range the loop minted that read the notice %q",
+					decisionFlowChainIncomplete, flow.followBody, flow.outputFact.InvocationID, flow.noticeFact.InvocationID))
+			}
 		}
 	}
 	violations = append(violations, decisionFlowWindowViolations(scene)...)
@@ -4627,9 +4757,12 @@ func decisionFlowTurnViolations(turn decisionFlowTurn) []string {
 		violations = append(violations, fmt.Sprintf("%s: the user turn %q = (%v, %d decisions), want the completed turn of the %d decisions its chain declares",
 			decisionFlowChainIncomplete, turn.input, turn.turn.Terminal, len(turn.turn.Decisions), turn.decisions))
 	}
-	if turn.turn.InvocationID == "" || turn.inputFact.InvocationID != turn.turn.InvocationID {
-		violations = append(violations, fmt.Sprintf("%s: the input %q was committed under the range %q but the turn ran under %q, want the continuation inside the original invocation",
-			decisionFlowChainIncomplete, turn.input, turn.inputFact.InvocationID, turn.turn.InvocationID))
+	if turn.turn.InvocationID == "" || !decisionFlowSegmentRange(turn.turn.InvocationID, turn.addr) {
+		violations = append(violations, fmt.Sprintf("%s: the user turn %q ran under the range %q, want the segment range the loop minted at %s",
+			decisionFlowChainIncomplete, turn.input, turn.turn.InvocationID, turn.addr.SessionID))
+	} else if turn.inputFact.InvocationID == turn.turn.InvocationID {
+		violations = append(violations, fmt.Sprintf("%s: the input %q was committed under the segment range %q, want the submitter identity the entry handed it beside the range the turn ran under",
+			decisionFlowChainIncomplete, turn.input, turn.inputFact.InvocationID))
 	}
 	if turn.outputFact.InvocationID != turn.turn.InvocationID {
 		violations = append(violations, fmt.Sprintf("%s: the final answer %q was committed under the range %q, want the original invocation %q the decisions continued in",
@@ -5022,11 +5155,14 @@ func runDecisionFlowPositive(t *testing.T, scene decisionFlowScene) {
 		t.Fatalf("the decision after the send carried the send result %v and the next one issued the subagent call %v, want both: %+v / %+v",
 			carriesSend, issuesWorker, scene.entry[1].Messages, scene.entry[2].Messages)
 	}
-	if first.inputFact.InvocationID != first.turn.InvocationID ||
-		first.outputFact.InvocationID != first.turn.InvocationID ||
+	if first.outputFact.InvocationID != first.turn.InvocationID ||
 		first.calls[0].fact.InvocationID != first.turn.InvocationID {
-		t.Fatalf("the first turn ranged [input %q, answer %q, send result %q], want the original invocation %q throughout",
-			first.inputFact.InvocationID, first.outputFact.InvocationID, first.calls[0].fact.InvocationID, first.turn.InvocationID)
+		t.Fatalf("the first turn ranged [answer %q, send result %q], want the segment range %q the decisions continued in",
+			first.outputFact.InvocationID, first.calls[0].fact.InvocationID, first.turn.InvocationID)
+	}
+	if first.inputFact.InvocationID == first.turn.InvocationID || first.inputFact.InvocationID == "" {
+		t.Fatalf("the committed input ranged %q beside the turn range %q, want the submitter identity the entry handed it",
+			first.inputFact.InvocationID, first.turn.InvocationID)
 	}
 	if scene.flows[0].requestIndex >= scene.flows[1].requestIndex {
 		t.Fatalf("the in-flight follow-up request index = %d and the retained one = %d, want the retained notice continued after the in-flight turn",
@@ -5420,6 +5556,9 @@ func smallWindowFollowUpRequest(t *testing.T, provider *scriptedProvider, timeou
 // and the result body must reach the model there even though the fold shrank the
 // sequence the boundary was measured on and the budget alone would present the
 // notice as its one-word summary.
+//
+// - The notice lands while the entry segment still flies when the settled result and the notice reach the same pull: that one request carries both sources, so the segment answers once with the body the settled result drives.
+// - A notice the closed segment never saw opens a range of its own and answers with the follow-up body; the shape is read off the request.
 func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	const (
 		fillOne     = "the first note of the small window session"
@@ -5448,7 +5587,8 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	worker := expectContinuationWorker(script, "the small window task", workerInput, workerOut).park()
 	script.expect("model-entry", "the small window notice fires its follow-up", requestMentionsSettleNotice).
 		answers(scriptedAnswerOf(follow)).
-		delivers(follow)
+		delivers(follow).
+		optional()
 	provider.decide = script.decide
 
 	sender := newRecordingSender()
@@ -5506,9 +5646,9 @@ func runNoticeVisibleUnderSmallWindow(t *testing.T) {
 	if want := agent.NoticeFactKey(followFact.InvocationID, notice); followFact.Key != want {
 		t.Fatalf("the follow-up fact key = %s, want the notice identity key %s", followFact.Key, want)
 	}
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
+	batched := requestCarriesToolResult(callID)(request)
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batched), 30*time.Second)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the small window script left violations: %v", violations)
 	}
@@ -5567,6 +5707,9 @@ func runNoticeInputWithoutProjection(t *testing.T) {
 // runNoticeInputUnderState drives the delegation and the settled notice of one
 // state, and requires the notice identity and its result body to reach the
 // follow-up request exactly once.
+//
+// - The notice lands while the entry segment still flies when the settled result and the notice reach the same pull: that one request carries both sources, so the segment answers once with the body the settled result drives.
+// - A notice the closed segment never saw opens a range of its own and answers with the follow-up body; the shape is read off the request, never off a timing guess.
 func runNoticeInputUnderState(t *testing.T, state projectionlessState) {
 	const (
 		input       = "delegate the projectionless continuation task"
@@ -5601,10 +5744,12 @@ func runNoticeInputUnderState(t *testing.T, state projectionlessState) {
 	}
 
 	request := projectionlessFollowUpRequest(t, provider, script, material, state.name)
-	reproductionWaitForBody(t, sender, follow, 30*time.Second)
+	batched := requestCarriesToolResult(callID)(request)
+	reproductionWaitForBody(t, sender, continuationNoticeAnswerBody(follow, accepted, batched), 30*time.Second)
 
 	continuationSingleCopy(t, request, material, "the follow-up request of the "+state.name+" state")
 	continuationHistory(t, request, input)
+	continuationAnswerDelivered(t, sender, addr, accepted, follow, batched)
 
 	facts := host.Run().SessionFacts(addr)
 	followFact := continuationNoticeFact(t, facts, settle.TaskID)
@@ -5613,8 +5758,6 @@ func runNoticeInputUnderState(t *testing.T, state projectionlessState) {
 	}
 	t.Logf("state=%s projection=%t notice=%s fact_key=%s request_index=%d material=%q",
 		state.name, state.projection, notice.FactKey(), followFact.Key, request.Index, strings.SplitN(material, "\n", 2)[0])
-	continuationRequireAction(t, sender, accepted, addr)
-	continuationRequireAction(t, sender, follow, addr)
 	if violations := script.audit(); len(violations) != 0 {
 		t.Fatalf("the projectionless script of the %s state left violations: %v", state.name, violations)
 	}

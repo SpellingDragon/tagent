@@ -34,6 +34,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/runtime/task/approval"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
@@ -183,6 +184,10 @@ type Host struct {
 	face       *hostFace
 	meditation *meditation.Driver
 	settle     *SettleDriver
+	// consumers owns the resident consumption loops of the run: one per user
+	// address an entry wakes, each the only driver of the model decisions of
+	// its address. It stays nil beside no assembled run loop.
+	consumers *agent.Consumers
 	// execManager is the execution resource ledger the declared exec face
 	// acquires through; the host is the production consumer of its lifecycle:
 	// the manager observes state changes after a call returned, and the host
@@ -202,9 +207,18 @@ type Host struct {
 	// at, so a terminal notice that lands after the turn ended still finds the
 	// explicit address its follow-up turn runs at.
 	userAddresses map[event.SessionID]event.Address
-	invocations   uint64
-	closed        bool
-	closeErr      error
+	// noticeAccounts holds the settle account of the follow-up turn one notice
+	// material drives, under the key that material lands as, from before the
+	// commit until the delivery of the segment that consumed it closes the entry.
+	// A consumer segment answers the entry that waits on it only after its own
+	// delivery, so the account of the entry is settled on the delivery face
+	// instead of behind the wait: a stop inside the send then leaves a landed
+	// attempt the restart closes with its receipt instead of a notice it drives a
+	// second time.
+	noticeAccounts map[event.EventID]settleBarrier
+	invocations    uint64
+	closed         bool
+	closeErr       error
 
 	// gates holds the one-slot gate of each session address: a channel, never a
 	// mutex, so a cancelled follow-up leaves the wait instead of outliving the
@@ -225,13 +239,82 @@ var (
 	_ func(*Host, context.Context) (hostReloadReport, error)          = (*Host).Reload
 )
 
+// hostApprovalsDir is the directory under the storage root the boot-local
+// approval book lives in when the host attaches none of its own.
+const hostApprovalsDir = "approvals"
+
+// hostGCTraceEnv names the environment variable that asks for the runtime's GC
+// trace, and hostGCTraceSetting is the GODEBUG entry it asks for.
+const (
+	hostGCTraceEnv     = "TAGENT_GCTRACE"
+	hostGCTraceSetting = "gctrace=1"
+)
+
+// hostSwitchOn reports whether the environment value names a switch left on.
+func hostSwitchOn(value string) bool {
+	on, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && on
+}
+
+// hostGODEBUGSetting reports the value the GODEBUG declaration names for key,
+// and an empty string when the declaration carries no such key.
+func hostGODEBUGSetting(debug, key string) string {
+	for _, entry := range strings.Split(debug, ",") {
+		name, value, ok := strings.Cut(strings.TrimSpace(entry), "=")
+		if ok && name == key {
+			return value
+		}
+	}
+	return ""
+}
+
+// applyHostGCTrace reads the GC trace switch of this process and reports what a
+// boot can do about it. The runtime reads gctrace when the process starts, so a
+// GODEBUG written here stays inert for this process: the measurement is one
+// program that sets the variable after start and collects without one trace
+// line, beside the same program launched with GODEBUG=gctrace=1 and tracing
+// every collection. The boot therefore names the boundary in its report and
+// leaves the merged value standing for the subprocesses this process starts.
+func applyHostGCTrace() {
+	if !hostSwitchOn(os.Getenv(hostGCTraceEnv)) {
+		return
+	}
+	debug := strings.TrimSpace(os.Getenv("GODEBUG"))
+	if declared := hostGODEBUGSetting(debug, "gctrace"); declared != "" {
+		assemblyInfo("tagent: %s names the GC trace and GODEBUG=%q was declared before the process started, so the collections of this process trace with gctrace=%s",
+			hostGCTraceEnv, debug, declared)
+		return
+	}
+	merged := hostGCTraceSetting
+	if debug != "" {
+		merged = debug + "," + hostGCTraceSetting
+	}
+	if err := os.Setenv("GODEBUG", merged); err != nil {
+		assemblyWarn("tagent: %s names the GC trace but GODEBUG could not be set: %v", hostGCTraceEnv, err)
+		return
+	}
+	assemblyWarn("tagent: %s names the GC trace but GODEBUG carried no gctrace, and the runtime reads gctrace only when the process starts: this process traces no collection. Launch it with GODEBUG=%s to trace it; GODEBUG=%q stands for the subprocesses this host starts",
+		hostGCTraceEnv, hostGCTraceSetting, merged)
+}
+
 // Boot reads one host document and returns the assembled host: the
 // declaration is resolved from the document, the models, tool instances,
 // storage tier, embedder and reflection plan are built for it, the run is
 // assembled through Assemble, and the reflection driver and the loopback
 // endpoints start beside it. Every failure before the assembly returns the
 // named refusal and leaves nothing running.
+//
+// - The meditation pass yields to the model requests of the observed session, and the read of them is the consumption loop's own: the driver is assembled before the loop is, so the face is a method value that reads it when a pass runs.
+//
+// - Every decision of a segment runs under the lineage of the material that opened it, so a body a call of that decision sends leaves under the line of its own turn instead of the send tool's own default; the direct drive stamps the same line on its context.
+//
+// - The one approval book of a boot is the host-attached book when the caller mounted it, and a boot-local book under <root>/approvals only fills a process that declared none, so a caller that mounted the default book keeps ruling the very book it handed over; the risk-rule gate and the loop's batch fuse read that same book.
+//
+// - A fuse declaration on the entry agent wires the loop: a response above the call cap or past the long-context threshold parks its whole batch on that one book before anything executes, and a declaration that names neither knob leaves the limits the process already declared in place.
+//
+// - TAGENT_GCTRACE=1 asks for the runtime's GC trace, which the runtime reads when the process starts: a boot merges GODEBUG=gctrace=1 so the subprocesses this host starts trace, and names in one line that the host process itself traces only when it was launched beside it.
 func Boot(configPath string, opts ...HostOption) (*Host, error) {
+	applyHostGCTrace()
 	doc, err := loadHostDocument(configPath)
 	if err != nil {
 		return nil, err
@@ -297,9 +380,21 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, err
 	}
+	hostApprovals := cfg.approvals
+	if hostApprovals == nil {
+		if root := storageRootOf(plan); root != "" {
+			dir := filepath.Join(root, hostApprovalsDir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				cancel()
+				return nil, fmt.Errorf("tagent: create the approvals directory %s: %w", dir, err)
+			}
+			book := approval.NewApprovalManager(dir, 0)
+			hostApprovals = book
+		}
+	}
 	var capture *rl.TrajectoryCapture
 	if root := storageRootOf(plan); root != "" {
-		capture, err = openHostCapture(root)
+		capture, err = openHostCapture(root, specOfLocked(decl, event.AgentID(decl.Entry)).CaptureBudgetMB)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -361,7 +456,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		}
 		options = append(options, WithPolicy(governance.Open(
 			governance.WithRiskRules(riskRules...),
-			governance.WithApprovals(cfg.approvals),
+			governance.WithApprovals(hostApprovals),
 		)))
 	}
 	if capture != nil {
@@ -398,7 +493,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 			if err != nil {
 				return nil, err
 			}
-			driver = meditation.NewDriver(reflection, meditationPlan.interval, meditationPlan.minGap, run.occupancy.Slot, run.instance)
+			driver = meditation.NewDriver(reflection, meditationPlan.interval, meditationPlan.minGap, run.ModelInFlight, run.instance)
 			driver.SetObserver(func(outcome meditation.TickOutcome) {
 				assemblyInfo("tagent: meditation driver of %s: %s (%s)", meditationPlan.agent, outcome.Decision.Disposition, outcome.Decision.Reason)
 			})
@@ -436,6 +531,19 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, err
 	}
+	if entrySpec := specOfLocked(decl, event.AgentID(decl.Entry)); entrySpec.MaxCallsPerResponse > 0 || entrySpec.LongContextTokens > 0 {
+		run.loop.SetFuseLimits(agent.FuseLimits{
+			CallCap:           entrySpec.MaxCallsPerResponse,
+			LongContextTokens: entrySpec.LongContextTokens,
+		})
+	}
+	if hostApprovals != nil {
+		if cfg.approvals != nil {
+			run.loop.SetApprovalBook(hostApprovals)
+		} else if agent.DefaultApprovalBook() == nil {
+			run.loop.SetApprovalBook(hostApprovals)
+		}
+	}
 	recallPort.Bind(run)
 	meditationPort.Bind(run)
 	host = &Host{
@@ -462,6 +570,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
+	host.consumers = agent.NewConsumers(run.loop, ctx, host.deliverClosedSegment)
+	host.consumers.SetTurnContext(func(decisionCtx context.Context, trigger string) context.Context {
+		return withDeliveryLineage(decisionCtx, deliveryLineageOf(trigger))
+	})
+	run.loop.SetConsumers(host.consumers)
 	if settleDriver != nil {
 		settleDriver.Wake()
 	}
@@ -625,12 +738,12 @@ func (h *Host) stopTelemetry(ctx context.Context) error {
 // user address of the entry agent delivers the fresh assistant output through
 // the message sender; every other address is driven headless.
 //
-// A user message that arrives while a drive of that address is already running
-// is admitted into the chain of that running range instead of parking outside
-// the gate: the message reaches the next decision boundary of the turn in
-// flight, and the call answers the admission itself — no decision reached and no
-// error. Every other arrival, and a user arrival beside a gate no drive holds,
-// takes the gate and drives a turn of its own, exactly as before.
+// A user message commits as a fact of its session and wakes the resident
+// consumption loop of its address: the loop pulls the message with whatever
+// else arrived, batches them into one model request, and the call answers with
+// the aggregated turn of the segment that consumed it — a second entry whose
+// message the same segment consumed answers the same turn. Every other address
+// drives a turn of its own through the run, exactly as before.
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	if h == nil || h.run == nil {
 		return agent.Turn{}, ErrHostClosed
@@ -646,6 +759,7 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	}
 	user := req.Address.AgentID == h.entry
 	sender := h.sender
+	consumers := h.consumers
 	h.mu.Unlock()
 	if user && sender == nil {
 		return agent.Turn{}, fmt.Errorf("%w: the turn runs at the user address of %q", ErrHostSenderMissing, h.entry)
@@ -653,10 +767,8 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	if req.InvocationID == "" {
 		req.InvocationID = h.nextInvocation(req.Address)
 	}
-	if user {
-		if turn, accepted, err := h.acceptInflight(ctx, req); accepted {
-			return turn, err
-		}
+	if user && consumers != nil {
+		return h.invokeConsumed(ctx, req)
 	}
 	unlock, err := h.lockAddressContext(ctx, req.Address)
 	if err != nil {
@@ -666,52 +778,136 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	return h.driveLocked(ctx, req)
 }
 
-// acceptInflight lands the messages of one user request in the chain of the
-// range a drive is running at that address, and answers the admission itself.
-// The facts commit under the identity of the running range, so that drive reads
-// them at its own next decision boundary instead of a second turn opening after
-// it; the After pass of each fact stays with that boundary read, which observes
-// one fact of its range once. The answer carries no decision and no error: what
-// the call reports is that the message is on the chain the turn in flight reads.
+// invokeConsumed lands the input of one user request as the facts of its
+// session, wakes the resident consumption loop of its address, and answers
+// with the aggregated turn of the segment that consumed them: the model
+// request the loop served read the message beside whatever else arrived. The
+// fresh bodies of the closing answer leave through the sender from the
+// consumer's own delivery face, once per closed segment, so an entry that only
+// waits on the segment never delivers a body a second time.
 //
-// A gate no drive holds names no range, and the call is not admitted here: the
-// caller takes the gate and drives its turn as it always did. The gate is read
-// once more behind the commit for the reason the drive clears its range before
-// its own bookkeeping: a range may reach its last decision boundary while the
-// message lands, and that range reads the chain never again. A gate that names
-// no range from here on is answered the same way — the caller waits for the
-// address and drives a turn of its own, which reads the message as its input
-// instead of leaving it on a chain no decision of that range will read.
-func (h *Host) acceptInflight(ctx context.Context, req InvokeRequest) (agent.Turn, bool, error) {
-	inflight, running := h.gateOf(req.Address).running()
-	if !running {
-		return agent.Turn{}, false, nil
-	}
+// - An entry whose context ended while its segment still flies answers the abandoned turn it asked for: the caller reads a cancelled turn beside no error, exactly as the direct drive answers one, and the segment stays with the loop that still flies it.
+func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	now := time.Now()
+	keys := make([]event.EventID, 0, len(req.Input))
 	for _, msg := range req.Input {
-		evt := h.run.inputEventOf(req, msg, inflight, now)
-		if _, err := h.run.commitOnly(ctx, req.Address, evt); err != nil {
-			return agent.Turn{}, true, fmt.Errorf("tagent: the input of %s was not committed into the chain of the range in flight %s: %w",
-				req.InvocationID, inflight, err)
+		evt := h.run.inputEventOf(req, msg, req.InvocationID, now)
+		id, err := h.run.commitOnly(ctx, req.Address, evt)
+		if err != nil {
+			return agent.Turn{}, fmt.Errorf("tagent: the input of %s did not commit: %w", req.InvocationID, err)
+		}
+		if id != "" {
+			keys = append(keys, id)
 		}
 	}
-	if _, stillRunning := h.gateOf(req.Address).running(); !stillRunning {
-		return agent.Turn{}, false, nil
+	h.rememberUserAddress(req.Address)
+	consumer := h.consumers.Ensure(req.Address)
+	if consumer == nil {
+		return agent.Turn{}, ErrHostClosed
 	}
-	return agent.Turn{InvocationID: inflight, Terminal: model.KindUnknown}, true, nil
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, keys)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return agent.Turn{InvocationID: req.InvocationID, Terminal: model.KindCancelled}, nil
+		}
+		return answer.Turn, err
+	}
+	return answer.Turn, nil
+}
+
+// deliverClosedSegment hands the fresh answer of one closed consumption segment
+// to the outbound face of its address: the assistant bodies the invocation of
+// that segment generated leave under the lineage the material that opened it
+// named, and the answer of a segment no entry waits on — the one
+// a settle notice drives into being — leaves by the very same path. A host
+// closed beside the closing segment delivers nothing, and the obligation stays
+// owed to the restart.
+//
+// The settle account of an entry whose notice material this segment consumed is
+// closed here, before the answer leaves: the entry that waits on the segment
+// reads its answer only after this face ran, so closing the account behind the
+// wait would leave the terminal of a landed turn unrecorded for as long as the
+// send runs. A stop inside the send is then answered by a restart that closes
+// the landed attempt instead of driving the notice a second time.
+func (h *Host) deliverClosedSegment(ctx context.Context, addr event.Address, answer agent.SegmentAnswer) {
+	h.mu.Lock()
+	closed := h.closed
+	sender := h.sender
+	h.mu.Unlock()
+	if closed {
+		return
+	}
+	h.settleConsumedNotices(ctx, answer)
+	h.deliverFresh(ctx, addr, sender, deliveryLineageOf(answer.Trigger), answer.Turn)
+}
+
+// settleConsumedNotices closes the settle account of every entry whose notice
+// material the closing segment consumed: the terminal the segment landed is
+// recorded as the attempt of its notification, the delivery obligation of every
+// body the turning segment generated is registered, and the consumption receipt
+// of the entry is written. The registration is taken, not read, so one delivery
+// closes one entry exactly once.
+func (h *Host) settleConsumedNotices(ctx context.Context, answer agent.SegmentAnswer) {
+	for _, barrier := range h.takeNoticeAccounts(answer.Consumed) {
+		if err := h.settleTerminal(withSettleBarrier(ctx, barrier), answer.Turn); err != nil {
+			assemblyWarn("tagent: the settle account of %s was not closed beside the segment that consumed it: %v",
+				barrier.notice.FactKey(), err)
+		}
+	}
+}
+
+// holdNoticeAccount registers the settle account of one notice material under
+// the key that material lands as, so the delivery of the segment that consumes
+// it closes the entry before the answer leaves. The returned func drops a
+// registration nothing consumed, so a segment that closed without reading the
+// material never settles an entry it did not answer.
+func (h *Host) holdNoticeAccount(key event.EventID, barrier settleBarrier) func() {
+	if key == "" {
+		return func() {}
+	}
+	h.mu.Lock()
+	if h.noticeAccounts == nil {
+		h.noticeAccounts = map[event.EventID]settleBarrier{}
+	}
+	h.noticeAccounts[key] = barrier
+	h.mu.Unlock()
+	return func() {
+		h.mu.Lock()
+		delete(h.noticeAccounts, key)
+		h.mu.Unlock()
+	}
+}
+
+// takeNoticeAccounts reports the settle accounts registered under any of the
+// keys one closed segment consumed and drops them: the segment that consumed an
+// entry's material is the one turn that entry is closed beside.
+func (h *Host) takeNoticeAccounts(consumed []event.EventID) []settleBarrier {
+	if len(consumed) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var held []settleBarrier
+	for _, key := range consumed {
+		barrier, ok := h.noticeAccounts[key]
+		if !ok {
+			continue
+		}
+		delete(h.noticeAccounts, key)
+		held = append(held, barrier)
+	}
+	return held
 }
 
 // driveLocked drives one invocation whose session gate the caller already
 // holds, so a user turn and an unattended follow-up turn of the same address
-// never run beside each other. The baseline of a user turn is read after the
-// gate is held and before the drive: the delivery of that turn reads exactly
-// the assistant bodies its own range committed past it. The address stops naming
-// the range as soon as the drive returns, because no boundary of that range
-// reads input after Invoke answered: an input that arrives from here on waits
-// for the token and drives a turn of its own instead of landing in a range that
-// would never read it, while the token itself stays held until this method
-// returns, so the settle account and the delivery read the chain without a
-// neighbour committing beside them.
+// never run beside each other. The delivery of a user turn reads the assistant
+// bodies its own range committed, anchored on the identity of the invocation
+// rather than on a position of the chain read at the gate: the chain is held to
+// its hot window, so a position names other material once the window moves. The
+// token stays held until this method returns, so the settle account and the
+// delivery read the chain without a neighbour committing beside them.
 //
 // A follow-up drive carries the barrier of the settle account it answers on, and
 // the barrier is closed right after the terminal fact of the drive landed: the
@@ -729,18 +925,12 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 	user := req.Address.AgentID == h.entry
 	sender := h.sender
 	h.mu.Unlock()
-	gate := h.gateOf(req.Address)
-	gate.hold(req.InvocationID)
-	defer gate.release()
-	var baseline int
 	if user {
 		h.rememberUserAddress(req.Address)
-		baseline = len(h.run.SessionFacts(req.Address))
 	}
 	lineage := deliveryLineageOf(req.TriggerSource)
 	ctx = withDeliveryLineage(ctx, lineage)
 	turn, err := h.run.Invoke(ctx, req)
-	gate.release()
 	if err != nil {
 		assemblyWarn("tagent: the invocation %s of %s ended by error: %v", req.InvocationID, req.Address.SessionID, err)
 		return turn, err
@@ -750,7 +940,7 @@ func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, 
 		return turn, err
 	}
 	if user {
-		h.deliverFresh(ctx, req.Address, baseline, sender, lineage, turn)
+		h.deliverFresh(ctx, req.Address, sender, lineage, turn)
 	}
 	return turn, nil
 }
@@ -816,6 +1006,10 @@ func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) error {
 // stopped or failed turn reports the incomplete delivery by name, so the entry
 // stays owed for the next wake instead of a receipt recording a turn nobody
 // read.
+//
+// - An address a resident consumption loop owns is driven by that loop alone: the notice material commits as the fact it is and the wake hands it to the next pull of the loop, so no follow-up turn runs beside the segment the loop may already fly. The entry the notification was accepted on is settled beside the turn the loop lands, exactly as a direct drive settles it: the entry waits for the segment that consumed the material, the landed terminal is recorded as its attempt, and only then is the consumption receipt written — an entry is never closed beside a turn that never ran. The answer leaves through the delivery face of the consumer, which is the same path a user turn's answer leaves by.
+//
+// - The segment that consumes the material answers the entry only after its own delivery, so the account of the entry is registered here, under the key the material lands as and before the commit: the delivery face of the consumer closes it beside the segment that consumed that key, and a segment that closed without reading the material leaves the account owed for the wake.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {
 		return ErrHostClosed
@@ -825,42 +1019,52 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 	}
 	h.mu.Lock()
 	closed := h.closed
+	consumers := h.consumers
 	h.mu.Unlock()
 	if closed {
 		return ErrHostClosed
+	}
+	if consumers.Has(addr) {
+		if barrier, held := settleBarrierFrom(ctx); held {
+			_, _, key := noticeMaterialOf(ctx, fact)
+			defer h.holdNoticeAccount(key, barrier)()
+		}
+		key, err := h.commitNoticeMaterial(ctx, addr, fact)
+		if err != nil {
+			return err
+		}
+		consumer := consumers.Ensure(addr)
+		if consumer == nil {
+			return ErrHostClosed
+		}
+		consumer.Wake()
+		answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
+		if err != nil {
+			return err
+		}
+		if err := h.settleTerminal(ctx, answer.Turn); err != nil {
+			assemblyWarn("tagent: the notice invocation %s of %s left its settle account open: %v",
+				answer.Turn.InvocationID, addr.SessionID, err)
+			return err
+		}
+		if answer.Turn.Terminal != model.KindCompleted {
+			return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, answer.Turn.InvocationID, answer.Turn.Terminal)
+		}
+		return nil
 	}
 	unlock, err := h.lockAddressContext(ctx, addr)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	kind := noticeKindOf(fact)
-	notice := task.Notice{TaskID: noticeTaskIDOf(fact), Kind: kind, Event: fact.Key}
-	identified := notice
+	if _, err := h.commitNoticeMaterial(ctx, addr, fact); err != nil {
+		return err
+	}
+	identified := task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}
 	if barrier, held := settleBarrierFrom(ctx); held {
 		identified = barrier.notice
 	}
 	invocationID := noticeInvocation(identified)
-	material := strings.TrimSpace(fact.Message.Content)
-	if material == "" {
-		material = settleNoticeText(notice)
-	}
-	if _, err := h.run.CommitToSession(ctx, addr, event.Event{
-		Key:       agent.NoticeFactKey(invocationID, notice),
-		Type:      event.TypeFeedback,
-		Timestamp: time.Now(),
-		Meta: map[string]string{
-			event.MetaKeyTriggerSource: "task",
-			event.MetaKeyEventSummary:  string(kind),
-			event.MetaKeyNoticeKind:    string(kind),
-			event.MetaKeyTaskID:        string(notice.TaskID),
-		},
-		Message:      model.Message{Role: model.RoleUser, Content: material},
-		InvocationID: invocationID,
-		TaskID:       notice.TaskID,
-	}); err != nil {
-		return err
-	}
 	turn, err := h.driveLocked(ctx, InvokeRequest{
 		InvocationID:  invocationID,
 		Address:       addr,
@@ -873,6 +1077,54 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, invocationID, turn.Terminal)
 	}
 	return nil
+}
+
+// noticeMaterialOf reports the three identities one notification material lands
+// under: the notification the fact names, the four-part invocation the follow-up
+// turn drives under — the entry's own identity when the drive carries the
+// barrier of its settle account — and the key the material is stored as. The key
+// is derived from those identities alone, so the account of the entry can be
+// registered before the commit writes the material.
+func noticeMaterialOf(ctx context.Context, fact event.Event) (task.Notice, event.InvocationID, event.EventID) {
+	notice := task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}
+	identified := notice
+	if barrier, held := settleBarrierFrom(ctx); held {
+		identified = barrier.notice
+	}
+	invocationID := noticeInvocation(identified)
+	return notice, invocationID, agent.NoticeFactKey(invocationID, notice)
+}
+
+// commitNoticeMaterial lands one notification fact as the input material of its
+// address: the notice reads as one user message under its own invocation
+// identity, and the identity is the notification's own four-part one, so the
+// material is the fact the next consumer of that address pulls — never a
+// message a second producer mints beside it. The answer is the identity of the
+// committed fact, which is the key the pull of the address reads it under and
+// the key an entry waits on.
+func (h *Host) commitNoticeMaterial(ctx context.Context, addr event.Address, fact event.Event) (event.EventID, error) {
+	notice, invocationID, key := noticeMaterialOf(ctx, fact)
+	material := strings.TrimSpace(fact.Message.Content)
+	if material == "" {
+		material = settleNoticeText(notice)
+	}
+	if _, err := h.run.CommitToSession(ctx, addr, event.Event{
+		Key:       key,
+		Type:      event.TypeFeedback,
+		Timestamp: time.Now(),
+		Meta: map[string]string{
+			event.MetaKeyTriggerSource: "task",
+			event.MetaKeyEventSummary:  string(notice.Kind),
+			event.MetaKeyNoticeKind:    string(notice.Kind),
+			event.MetaKeyTaskID:        string(notice.TaskID),
+		},
+		Message:      model.Message{Role: model.RoleUser, Content: material},
+		InvocationID: invocationID,
+		TaskID:       notice.TaskID,
+	}); err != nil {
+		return "", err
+	}
+	return key, nil
 }
 
 // noticeInvocation reports the invocation identity one follow-up turn of a
@@ -968,6 +1220,9 @@ func (h *Host) Close(ctx context.Context) error {
 	h.closed = true
 	h.mu.Unlock()
 	var first error
+	if h.consumers != nil {
+		h.consumers.Stop()
+	}
 	if h.settle != nil {
 		h.settle.Stop()
 	}
@@ -1127,45 +1382,15 @@ func (h *Host) injectAddress(label string) event.Address {
 
 // addressGate is the one-slot gate that serializes the drives of one session:
 // the token is held by the drive in flight, and a waiter parks on the channel
-// instead of a mutex, so a cancelled follow-up leaves the wait. Beside the token
-// the gate names the range the holder drives, which is the identity an input
-// admitted while the drive runs commits under.
+// instead of a mutex, so a cancelled follow-up leaves the wait.
 type addressGate struct {
 	token chan struct{}
-	// mu guards inflight, the range the holder of the token drives; it reads
-	// empty beside a gate no drive holds.
-	mu       sync.Mutex
-	inflight event.InvocationID
 }
 
 // gateOf reports the one-slot gate of one session address.
 func (h *Host) gateOf(addr event.Address) *addressGate {
 	value, _ := h.gates.LoadOrStore(addr, &addressGate{token: make(chan struct{}, 1)})
 	return value.(*addressGate)
-}
-
-// hold names the range the drive of the token is about to run, so an input that
-// arrives beside it commits into that range's chain.
-func (g *addressGate) hold(invocation event.InvocationID) {
-	g.mu.Lock()
-	g.inflight = invocation
-	g.mu.Unlock()
-}
-
-// release forgets the range the drive of the token ran. It runs before the token
-// is handed back, so a gate that reads free names no range.
-func (g *addressGate) release() {
-	g.mu.Lock()
-	g.inflight = ""
-	g.mu.Unlock()
-}
-
-// running reports the range the holder of the token drives, and false beside a
-// gate whose holder named none.
-func (g *addressGate) running() (event.InvocationID, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.inflight, g.inflight != ""
 }
 
 // lockAddress serializes the drives of one session.

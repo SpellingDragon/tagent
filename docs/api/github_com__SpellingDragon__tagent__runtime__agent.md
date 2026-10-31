@@ -11,6 +11,58 @@ obligations of every call the agent admitted. The execution face is a port the
 composition root wires; the loop, the delegation ledger and the close gate are
 the behaviour behind it.
 
+The resident consumption loop of one (agent, session) address: pull the events
+that arrived → dispatch them by what they are → call the model once when they
+drive → return to the pull. The loop never waits for a dispatched tool to
+settle: each settled result arrives as the event it is and drives the next
+decision of the segment it belongs to.
+
+The producing half of the final round judgment: the watchdog budget of one
+(agent, session) range is judged off the chain the range committed, and a spent
+budget is filed as the final_round.request fact of that range. The fact states
+which range, why and the inputs the judgment read; what the consumer runs from
+it — the closing round — is the reading half, and this planner never decides
+anything else.
+
+The execution-side storm fuses of the loop: one model response that issues more
+tool calls than the loop's declaration admits is parked as one approval batch
+instead of being dispatched, and both fuses — the per-response call cap and
+the long-context threshold — park through this one code point, so neither the
+direct drive nor a consumption segment carries a storm the other path would have
+stopped.
+
+A parked batch is neither truncated nor degraded: it is registered as one
+approval request a human reads, the wait happens inside the dispatch that
+would have admitted it, and an approved batch runs every call in the order
+the response issued them. A batch that is denied, that outlives its validity,
+or whose invocation is cancelled runs nothing, and a batch beside no wired
+approval book is refused whole rather than cut down to a limit nobody approved.
+The redline list (4 rules):
+
+  - MUST park one over-limit response as exactly one approval request, and
+    answer every call of it with its own receipt.
+  - MUST admit an approved batch whole and in the order the response issued it,
+    with no call dropped.
+  - MUST hold no model seat while a batch waits: the decision slot is vacated
+    before the dispatch that parks it.
+  - MUST NOT change anything when both limits stand at zero, so a loop beside no
+    declaration admits exactly as it did before.
+
+CONSTANTS
+
+const (
+	// DefaultResponseCallCap is the call cap a producer applies when it wants
+	// the documented production default: one percent of the storm the fuse was
+	// built for, and well above the peak of a healthy session.
+	DefaultResponseCallCap = 64
+	// DefaultLongContextTokens is the assembled prompt size past which a
+	// producer holds a response for approval, chosen where the model starts
+	// degrading on a long conversation.
+	DefaultLongContextTokens = 50_000
+)
+const FinalRoundPlannerName = "final-round-planner"
+    FinalRoundPlannerName is the stable name the final round planner answers.
+
 VARIABLES
 
 var (
@@ -163,6 +215,33 @@ type Agent interface {
     receipt as a result: an admitted call settles only after its own obligations
     clear.
 
+type ApprovalBook interface {
+	// Request registers one pending approval request and reports it as stored.
+	Request(ctx context.Context, id, tool string, jsonArgs []byte, risk plugin.RiskLevel, rule, reason string) (*approval.ApprovalRequest, error)
+	// Lookup reports the request one (tool, arguments) pair is read under with
+	// its effective status.
+	Lookup(tool, argsDigest string) *approval.ApprovalRequest
+}
+    ApprovalBook is the narrow face one parked batch is registered and resolved
+    through: the registration an approver reads, and the read the wait polls for
+    its ruling. It is exactly the part of the approval channel the fuses use,
+    so the approval manager satisfies it as it stands and the execution core
+    keeps no second book of its own.
+
+    The redline list (3 rules): MUST register one request per batch under
+    the identity the fuse minted, and report the request as registered.
+    MUST report the effective state of that request, so an expired request never
+    reads as a standing approval. MUST NOT answer a batch the book never filed:
+    an unknown digest answers none, never a fabricated approval.
+
+func DefaultApprovalBook() ApprovalBook
+    DefaultApprovalBook reports the approval book a loop is constructed beside.
+
+func SetDefaultApprovalBook(book ApprovalBook) ApprovalBook
+    SetDefaultApprovalBook declares the approval book every loop constructed
+    after this call parks through, and reports the book it replaced so a caller
+    restores the previous one when its own scope ends.
+
 type BoundaryView struct {
 	// Messages are the prefix messages of the request, in fixed layout order.
 	Messages []model.Message
@@ -239,6 +318,75 @@ type CloseRequest struct {
     accepted, and it never reports a drain while a producer has not stopped:
     a producer that answers that it has not stopped keeps the drain open until
     real termination is confirmed or the deadline arrives.
+
+type Consumer struct {
+	// Has unexported fields.
+}
+    Consumer is the resident consumption loop of one address. It is the only
+    driver of the model decisions of its address: every entry commits its facts
+    and wakes the loop, the loop pulls what arrived, and the answer a waiting
+    entry reads is the closed segment that consumed its input.
+
+    The redline list (3 rules): MUST return to the pull after each model call,
+    never exit beside a dispatched call. MUST NOT wait for every dispatched
+    call: the first arrived result drives the next decision. MUST answer a
+    waiting entry only from the segment that consumed its input, never from a
+    neighbour's.
+
+func (c *Consumer) Done() <-chan struct{}
+    Done reports the channel that closes when the consumption loop ended.
+
+func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (SegmentAnswer, error)
+    WaitAnswer waits for the segment that consumed any of the named input keys
+    and answers its aggregated turn. An input the flying segment already took
+    answers when that segment closes; an input no segment took yet answers when
+    the next pull drives one.
+
+func (c *Consumer) Wake()
+    Wake signals the loop that events may have arrived: the signal merges,
+    so a wake that lands while the loop consumes keeps it turning once more.
+
+type Consumers struct {
+	// Has unexported fields.
+}
+    Consumers owns the resident consumption loops of a run: one per address an
+    entry wakes, each the only driver of the model decisions of its address.
+    The loops live as long as the context they were started under; a loop that
+    ended is never restarted in place, and the chain carries the position a
+    restart resumes from. Every closed segment hands its fresh answer to the
+    one delivery face of the set, so the answer of a segment no entry waits on
+    leaves through the same path the answer of a waited segment does.
+
+func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Consumers
+    NewConsumers assembles the consumption loops of one run over the loop that
+    drives its decisions, living as long as the named context does. The delivery
+    face receives the fresh answer of every closed segment and may be nil,
+    in which case the answers stay on the chain.
+
+func (cs *Consumers) Ensure(addr event.Address) *Consumer
+    Ensure answers the consumption loop of one address, assembling and starting
+    it on first use: the loop resumes behind the last agent_output the chain
+    carries — the inputs past it are the material a restart still owes — and a
+    chain beside no agent_output at all resumes from its head, so an unanswered
+    input stays owed instead of vanishing behind a restart.
+
+func (cs *Consumers) Has(addr event.Address) bool
+    Has reports whether one address carries a resident consumption loop.
+
+func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger string) context.Context)
+    SetTurnContext attaches the decorator every decision of every segment these
+    loops fly runs under: the host stamps the lineage of the material that
+    opened the segment, so a body a call of that decision sends leaves under
+    the line of its own turn. The setter is separate from the constructor so the
+    declared construction shape of the set stays as it is.
+
+func (cs *Consumers) Stop()
+    Stop ends every consumption loop this set owns; the loops answer their done
+    channels and the segments they left flying stay on the chain for a restart.
+
+func (cs *Consumers) Wake(addr event.Address)
+    Wake signals the consumption loop of one address; an address beside no loop
+    wakes nothing, and the entry that owns its facts ensures the loop itself.
 
 type Decision struct {
 	// DecisionID identifies this decision.
@@ -462,6 +610,65 @@ type FactResolver func(id event.EventID) (model.Message, bool)
     carries. The fact identity comes from the settled notification of a call,
     so the loop pairs the tool message with the call it answers.
 
+type FinalRoundChain interface {
+	// AddressOf reports the (agent, session) address one committed fact belongs
+	// to; a fact beside no agent or no session belongs to no chain.
+	AddressOf(ctx context.Context, id event.EventID) (event.Address, bool)
+	// SegmentOf reports the segment one address flies: the facts committed past
+	// the last agent_output of that chain, read as one judgment's material.
+	SegmentOf(ctx context.Context, addr event.Address) (FinalRoundSegment, bool)
+	// FileFinalRoundRequest files one judgment on the chain of the address whose
+	// budget it judged; a range already carrying a request answers as filed.
+	FileFinalRoundRequest(ctx context.Context, addr event.Address, request event.FinalRoundRequest) error
+}
+    FinalRoundChain is the chain face the planner reads one commit through:
+    the address a committed fact belongs to, the segment that address flies and
+    the filing of the judgment the segment's spent budget answered.
+
+    The redline list (3 rules): MUST answer a fact no chain owns as unowned,
+    and a chain beside no range in flight as no segment. MUST report the rounds
+    and the start the chain records, never a count the planner keeps. MUST NOT
+    commit a second request for a range that already carries one.
+
+type FinalRoundPlanner struct {
+	// Has unexported fields.
+}
+    FinalRoundPlanner files the closing round of a range as the fact it is:
+    it reads the segment one commit grew, judges the budget its own agent
+    declares and files the final_round.request of the range whose budget is
+    spent. The judgment is read off the chain, so a fresh process judges the
+    same chain the same way, and the identity of the fact is content-addressed,
+    so a re-evaluation of the same range files nothing twice.
+
+    The planner is an instance of the material flow like any other: it reads
+    the committed fact and answers a read-only observation, so the pipeline
+    dispatches it beside the reflection driver and the age fold. Its own filing
+    is a commit of the range and never a second observation, so the judgment it
+    just filed never re-enters this pass.
+
+func NewFinalRoundPlanner(chain FinalRoundChain, policy func(event.AgentID) FinalRoundPolicy) *FinalRoundPlanner
+    NewFinalRoundPlanner assembles the planner over the chain face of one run
+    and the budget table of the declaration it published last. A nil face or
+    a nil table files nothing, so an assembly mounted beside neither judges no
+    budget instead of failing on the first commit.
+
+func (p *FinalRoundPlanner) Name() string
+    Name reports the stable name of this planner instance.
+
+func (p *FinalRoundPlanner) ObserveCommit(ctx context.Context, id event.EventID) error
+    ObserveCommit judges the budget of the segment one committed fact belongs to
+    and files the closing round of the range whose budget is spent.
+
+    The duty is read-only over the fact and over the chain: a fact beside no
+    agent address, a chain beside no range in flight, a segment within both of
+    its budgets and an agent that declares no budget each leave the commit as it
+    stands. The filing is the one write, and a failure to file it is reported to
+    the pipeline as the named gap beside a fact that stays committed.
+
+func (p *FinalRoundPlanner) Port() plugin.Port
+    Port reports the consumption the planner serves: one committed fact in,
+    the judgment of one spent budget out.
+
 type FinalRoundPolicy struct {
 	// MaxRounds bounds the tool rounds one drive may run; 0 removes the bound.
 	MaxRounds int
@@ -503,6 +710,49 @@ const (
 )
     FinalRoundNone, FinalRoundRounds and FinalRoundBudget name the reasons a
     closing round runs under.
+
+func FinalRoundDue(policy FinalRoundPolicy, rounds int, elapsed time.Duration) FinalRoundReason
+    FinalRoundDue reports why the closing round of one range is due at the
+    budget it has spent, or FinalRoundNone while the range may continue:
+    the judgment the loop reads at its own decision boundary, and the one a
+    producer files as the final_round.request fact of the range it judged.
+    Both budgets are read at a round boundary, so a decision already in flight
+    is never cut by this reading.
+
+type FinalRoundSegment struct {
+	// Range is the invocation whose budget the judgment reads.
+	Range event.InvocationID
+	// Rounds is the number of tool rounds the range ran before the judgment.
+	Rounds int
+	// Started is the moment the segment's earliest fact landed: the clock the
+	// time budget is spent against.
+	Started time.Time
+}
+    FinalRoundSegment is the material one final round judgment reads off the
+    chain of one address: the range its next decision serves, the tool rounds
+    that range already ran and the moment the segment's first fact landed.
+
+type FuseLimits struct {
+	// CallCap bounds the tool calls one model response may admit without an
+	// approval.
+	CallCap int
+	// LongContextTokens is the assembled prompt size past which a response is
+	// held for approval whatever it issues.
+	LongContextTokens int
+}
+    FuseLimits is the execution-side fuse declaration of one loop: a member
+    at zero is its fuse off, so the zero declaration admits exactly what the
+    runtime admitted before the fuses existed.
+
+func DefaultFuseLimits() FuseLimits
+    DefaultFuseLimits reports the declaration a loop is constructed beside.
+
+func SetDefaultFuseLimits(limits FuseLimits) FuseLimits
+    SetDefaultFuseLimits declares the fuses every loop constructed after this
+    call is built beside, and reports the declaration it replaced so a caller
+    restores the previous one when its own scope ends. A loop already running
+    keeps the declaration it was constructed with until its own setter replaces
+    it.
 
 type HandoffEnvelope struct {
 	// Intent is the task the delegated turn exists to serve.
@@ -680,26 +930,39 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     - The settled result facts one decision paired are the stored input the
     next decision reduces. - The drive reads its range's chain again at every
     decision boundary: input that landed in the range while a decision ran
-    enters the next decision of that same range, and a decision that opened no
-    obligation still ends the round while that input stands unread. The read
-    starts behind the head the chain held when the drive began, so the material
-    an earlier range already took is never this range's input. - The transcript
-    of this drive is committed beside the terminal answer of its last decision,
-    so the next invocation of this session reads the range's history as it
-    actually ended. - The whole drive is watched as one in-flight production
-    beside its invocation identity — the queueing waits included — and confirms
-    its stop only when the drive really ended. - A progress notification of the
-    range's own call commits as a fact of its chain and enters no round head:
-    the report is audit and projection material, never input a decision speaks
-    from. - A terminal notification of the range's own call enters the round
-    head as input material: a settle, a failure or a cancellation is what an
-    unattended follow-up turn speaks from, and the progress reports beside it
-    are skipped by their own category. - A drive whose budget is spent runs
-    one closing round and ends there: the closing round delivers what the
-    range already produced, its transcript is committed the same way, and the
-    obligation it opens is none. - The drive is observed as one consumer run:
-    its start and its end are DEBUG lines carrying identities, counts and the
-    terminal, never transcript content.
+    enters the next decision of that same range, and a decision that opened
+    no obligation still ends the round while that input stands unread.
+    The read starts behind the head the chain held when the drive began,
+    so the material an earlier range already took is never this range's input.
+    - The transcript of this drive is committed beside the terminal answer of
+    its last decision, so the next invocation of this session reads the range's
+    history as it actually ended. - The direct drive flies no resident loop,
+    so the input a writer beside this drive committed past the range that
+    last closed has no segment to land in: the drive adopts it as its opening
+    material instead of losing it between the ended prefix and its own ready
+    input. - The whole drive is watched as one in-flight production beside its
+    invocation identity — the queueing waits included — and confirms its stop
+    only when the drive really ended. - A progress notification of the range's
+    own call commits as a fact of its chain and enters no round head: the report
+    is audit and projection material, never input a decision speaks from.
+    - A terminal notification of the range's own call enters the round head as
+    input material: a settle, a failure or a cancellation is what an unattended
+    follow-up turn speaks from, and the progress reports beside it are skipped
+    by their own category. - A drive whose budget is spent runs one closing
+    round and ends there: the closing round delivers what the range already
+    produced, its transcript is committed the same way, and the obligation
+    it opens is none. - The drive is observed as one consumer run: its start
+    and its end are DEBUG lines carrying identities, counts and the terminal,
+    never transcript content.
+
+func (l *Loop) InFlightModel(addr event.Address) (event.InvocationID, event.DecisionID, bool)
+    InFlightModel reports the model decision the consumption state of one
+    address carries, or that no model request of that address is executing.
+
+    The redline list (3 rules): MUST report the decision this loop runs,
+    never a decision another loop runs. MUST report no flight once the decision
+    of that address ended. MUST NOT take a decision just to read it: the read
+    starts nothing.
 
 func (l *Loop) RecordingLosses() []RecordingLoss
     RecordingLosses reports the training records the production points could
@@ -719,6 +982,11 @@ func (l *Loop) SetAgentFinalRounds(policies map[event.AgentID]FinalRoundPolicy)
     so a publication that drops a budget leaves no earlier entry behind.
     A nil or empty table clears every per-agent entry.
 
+func (l *Loop) SetApprovalBook(book ApprovalBook)
+    SetApprovalBook attaches the approval book this loop parks a batch through.
+    A nil book leaves the fuses with no channel, and a parked batch is then
+    refused whole instead of being truncated.
+
 func (l *Loop) SetCapture(capture Capture)
     SetCapture attaches the trajectory capture face this loop fixes each
     decision's request view through, admits each observed attempt through and
@@ -726,6 +994,12 @@ func (l *Loop) SetCapture(capture Capture)
     or seal is a counted recording loss and never reaches the model decision,
     and the setter is separate from the constructor so the declared construction
     shape of the loop stays as it is.
+
+func (l *Loop) SetConsumers(consumers *Consumers)
+    SetConsumers attaches the resident consumption loops this loop drives the
+    decisions of, so a settled backflow wakes the loop of the address its range
+    runs at. A loop beside no consumers keeps its backflow parked in the intake,
+    exactly as before.
 
 func (l *Loop) SetFactCommit(commit FactCommit)
     SetFactCommit attaches the commit face the loop commits the facts it
@@ -749,11 +1023,20 @@ func (l *Loop) SetFinalRound(policy FinalRoundPolicy)
     unbounded. The setter is separate from the constructor so the declared
     construction shape of the loop stays as it is.
 
+func (l *Loop) SetFuseLimits(limits FuseLimits)
+    SetFuseLimits attaches the fuses this loop admits under: the declaration
+    the composition root reads off the agent specification, replaced whole so a
+    reload of the declaration never leaves half of a previous one in force.
+
 func (l *Loop) SetHistory(face HistoryFace)
     SetHistory attaches the session transcript face this loop reads the shared
     session history from and commits one ended drive's transcript back to.
     The setter is separate from the constructor so the declared construction
     shape of the loop stays as it is.
+
+func (l *Loop) SetLongContextTokens(tokens int)
+    SetLongContextTokens attaches the long-context threshold alone; zero or a
+    negative value leaves the fuse off.
 
 func (l *Loop) SetNoticeFeed(feed NoticeFeed)
     SetNoticeFeed attaches the incremental read face the drive reads the
@@ -777,6 +1060,11 @@ func (l *Loop) SetRequestFace(face RequestFace)
     skill bodies and the replayed projection of the session chain. A nil face
     keeps every request at its transcript alone. The setter is separate from the
     constructor so the declared construction shape of the loop stays as it is.
+
+func (l *Loop) SetResponseCallCap(cap int)
+    SetResponseCallCap attaches the per-response tool call cap alone; zero or
+    a negative value leaves the cap off. The composition root that carries only
+    this key wires it without assembling a second declaration.
 
 func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) error)
     SetWatch attaches the registration the close of this agent confirms the
@@ -923,6 +1211,25 @@ type RequestFace func(ctx context.Context, boundary RequestBoundary) (BoundaryVi
     the prefix in the fixed layout from contents read fresh at this boundary.
     MUST refuse a chain that names no session by name. MUST NOT cross any
     package edge into the projection layer.
+
+type SegmentAnswer struct {
+	Turn     Turn
+	Err      error
+	Trigger  string
+	Consumed []event.EventID
+}
+    SegmentAnswer is the closed-segment answer one waiting entry reads:
+    the aggregated turn, the named cause of a failed segment, the trigger-source
+    stamp the segment opened on, which names the lineage its answer leaves
+    under, and the keys of the inputs the segment consumed, so a face that
+    delivers the answer knows which entries that segment answered.
+
+type SegmentDelivery func(ctx context.Context, addr event.Address, answer SegmentAnswer)
+    SegmentDelivery is the face the host hands one closed segment's fresh
+    answer to: the address whose chain the segment committed its output to,
+    and the answer the entries waiting on that segment read. A consumer beside
+    no face delivers nothing and leaves every answer on the chain, which is the
+    shape a loop driven by tests keeps.
 
 type Shutdown struct {
 	// Has unexported fields.

@@ -28,6 +28,14 @@ import (
 // mapped sequence speaks.
 const mappedSummaryRunes = 120
 
+// factWindow bounds the live facts one session chain of this run keeps: the most
+// recent entries beside the whole segment still in flight — the turn-end fact that
+// closed the previous segment together with every entry committed after it. A
+// drive reads the segment it flies and the transcript it presents, so the window is
+// the bound of what a live read reaches; the durable chain of the storage tier
+// keeps the whole history.
+const factWindow = 2048
+
 // factCommitFormat and factCommitRetention name the reference registration
 // every committed fact of this run carries: the original format and the
 // retention policy the recall reference is registered under.
@@ -81,6 +89,12 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	r.mu.Lock()
 	r.facts[evt.Key] = evt
 	r.factOrder = append(r.factOrder, evt.Key)
+	if session := sessionOf(evt); session != "" {
+		r.sessionFactCount[session]++
+		if r.sessionFactCount[session] >= factWindow {
+			r.trimFactsLocked(session)
+		}
+	}
 	r.mu.Unlock()
 	if !mapped {
 		return evt.Key, nil
@@ -88,6 +102,102 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 	r.attachDeclaredReplay(evt)
 	r.recordMapped(evt, entry)
 	return evt.Key, nil
+}
+
+// trimFactsLocked holds the chain of one session to its hot window: the entries
+// before the window and before the segment in flight leave the live ledger, and
+// the commit order is trimmed beside the map so neither grows with the history of
+// the chain. The durable chain of the storage tier is untouched, so a fact outside
+// the window is still read back by identity. The read is taken under the run lock
+// the caller holds; the per-session live count the caller guards with keeps a
+// far-below-window chain at O(1) per commit, so the full scan only starts once
+// a chain can actually hold a cut.
+func (r *Run) trimFactsLocked(session event.SessionID) {
+	if session == "" {
+		return
+	}
+	keys := make([]event.EventID, 0, len(r.factOrder))
+	for _, key := range r.factOrder {
+		if evt, held := r.facts[key]; held && sessionOf(evt) == session {
+			keys = append(keys, key)
+		}
+	}
+	cut := keys[:r.windowCutLocked(keys)]
+	for _, key := range cut {
+		delete(r.facts, key)
+	}
+	r.sessionFactCount[session] -= len(cut)
+	dropped := map[event.EventID]struct{}{}
+	for _, key := range cut {
+		dropped[key] = struct{}{}
+	}
+	r.compactFactOrderLocked(dropped)
+}
+
+// trimSeededFacts holds every chain a restart replayed to its hot window: the
+// seeded ledger is read as the live one, so a restart answers the window a
+// process that stayed up carries. The chains are grouped in one pass and the
+// commit order is trimmed once.
+func (r *Run) trimSeededFacts() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	chains := make(map[event.SessionID][]event.EventID, 8)
+	for _, key := range r.factOrder {
+		evt, held := r.facts[key]
+		if !held {
+			continue
+		}
+		if session := sessionOf(evt); session != "" {
+			chains[session] = append(chains[session], key)
+		}
+	}
+	dropped := make(map[event.EventID]struct{}, len(r.factOrder))
+	for session, keys := range chains {
+		cut := keys[:r.windowCutLocked(keys)]
+		for _, key := range cut {
+			dropped[key] = struct{}{}
+			delete(r.facts, key)
+		}
+		r.sessionFactCount[session] = len(keys) - len(cut)
+	}
+	r.compactFactOrderLocked(dropped)
+}
+
+// windowCutLocked reports how many leading entries of one chain its hot window
+// drops: the window keeps the most recent factWindow entries beside the segment a
+// drive may still read, which is the turn-end fact that closed the previous
+// segment together with every entry committed after it. A chain beside no
+// turn-end fact is one segment in flight from its head, so it is kept whole.
+func (r *Run) windowCutLocked(keys []event.EventID) int {
+	cut := len(keys) - factWindow
+	if cut < 0 {
+		cut = 0
+	}
+	for at := len(keys) - 1; at >= 0; at-- {
+		if r.facts[keys[at]].Type == event.TypeAgentOutput {
+			if at < cut {
+				cut = at
+			}
+			return cut
+		}
+	}
+	return 0
+}
+
+// compactFactOrderLocked removes the named identities from the commit order of
+// this run, so the order reads the facts the live ledger still holds.
+func (r *Run) compactFactOrderLocked(dropped map[event.EventID]struct{}) {
+	if len(dropped) == 0 {
+		return
+	}
+	kept := r.factOrder[:0]
+	for _, key := range r.factOrder {
+		if _, gone := dropped[key]; gone {
+			continue
+		}
+		kept = append(kept, key)
+	}
+	r.factOrder = kept
 }
 
 // persistFact writes one fact of this run to the storage tier it declares: the
@@ -207,19 +317,21 @@ func storedFactConflict(key event.EventID, stored ledger.StoredEvent, body memor
 
 // recordMapped appends one mapped entry to the sequence of its session and
 // moves the boundary between the material that ended and the material still in
-// flight: a new range is admitted by the input material that starts it under an
-// invocation of its own, and that first fact is where everything the earlier
-// ranges committed becomes ended material the next request presents while the
-// transcript stops carrying it. Facts of the range in flight — the reasoning,
-// the calls, the output of a round and the notice of a call it admitted — stay
-// behind that boundary, because the transcript of the drive carries them. A
-// notice fact is a mapped fact like any other, so a notification enters the
+// flight: the boundary advances only where a segment stands closed — the
+// agent_output fact that closed it — so the input that starts the next range
+// lands every earlier segment committed as ended material the next request
+// presents while the transcript stops carrying it. Facts of the range in
+// flight — the input a second entry lands beside the open segment, the
+// reasoning, the calls, the output of a round and the notice of a call it
+// admitted — stay behind that boundary, because the consumer of the open
+// segment carries them: the resident loop pulls what arrives into the segment
+// it flies, and a drive reads its own range's input again at its next decision
+// boundary (runtime/agent Loop boundaryInput).
+// A notice fact is a mapped fact like any other, so a notification enters the
 // chain's projection as it commits and the range reads it back as a projection
 // increment instead of from a lane of its own.
-// - The boundary never moves for a fact of the range it already stands at: input that
-// lands under the invocation of the range in flight is that drive's own material, so
-// the drive reads it again at its next decision boundary instead of the boundary
-// presenting it as ended material (runtime/agent Loop boundaryInput).
+//
+// - Boundary move on close: the agent_output that closed a segment lands the segment itself as ended material — the boundary moves onto it (inclusive, see endedPrefix), so a later arrival presents everything the closed segment committed, the input that reached the chain while it flew but no decision of it read included.
 func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -228,10 +340,14 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 		return
 	}
 	held.projection.Append(context.Background(), entry)
-	if admitsRange(evt) && held.rangeInvocation != evt.InvocationID {
+	if evt.Type == event.TypeAgentOutput {
 		held.endedAt = evt.Key
+		held.rangeOpen = false
 	}
-	held.rangeInvocation = evt.InvocationID
+	if admitsRange(evt) && !held.rangeOpen {
+		held.endedAt = evt.Key
+		held.rangeOpen = true
+	}
 	r.replays[slot] = held
 }
 

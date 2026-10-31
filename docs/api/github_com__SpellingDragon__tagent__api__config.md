@@ -146,6 +146,23 @@ type AgentSpec struct {
 	// agent may take. Zero declares no bound of its own, which leaves the
 	// watchdog budget of the final round section as the only round bound.
 	MaxToolIterations int
+	// MaxCallsPerResponse bounds the tool calls one model response may admit.
+	// A response above the bound parks its whole batch on the approval book as
+	// one request: nothing executes until a human approves it (approved runs
+	// the batch whole, refused runs nothing), so a degraded response can never
+	// flood the chain. Zero declares no bound of its own.
+	MaxCallsPerResponse int
+	// LongContextTokens names the prompt size past which this agent's requests
+	// take the long-context guard: every tool call of the response parks on the
+	// approval book as one batch, the same way an over-cap response does. Zero
+	// keeps the guard off.
+	LongContextTokens int
+	// CaptureBudgetMB bounds the resident memory the trajectory capture of this
+	// agent's requests keeps beside its fixed snapshots, in megabytes. The
+	// oldest snapshot beyond the budget is swapped out to the capture storage
+	// and reads back on demand. Zero reads the declaration default of 64; one
+	// is the tightest budget the capture accepts.
+	CaptureBudgetMB int
 
 	// Memory is the memory section this agent declares: the storage tier its
 	// facts persist through, the namespaces it may read across partitions and

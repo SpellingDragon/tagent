@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -33,6 +35,45 @@ var ErrCaptureSnapshotMissing = errors.New("rl: the capture holds no snapshot be
 // bounded admission queue is the one write point of a capture, and a capture
 // beside none admits nothing.
 var ErrCaptureSinkMissing = errors.New("rl: the trajectory capture was built beside no sink")
+
+// ErrCaptureSwapFailed reports a fixed snapshot the capture could not swap out
+// of its resident set: the snapshot stays resident and readable, and the
+// overrun is named here rather than hidden as a bound the capture kept.
+var ErrCaptureSwapFailed = errors.New("rl: the capture could not swap the evicted snapshot out")
+
+const (
+	// DefaultCaptureBudgetBytes is the resident byte budget a capture takes when
+	// its construction names none: 64MB of fixed request snapshots.
+	DefaultCaptureBudgetBytes int64 = 64 << 20
+	// MinCaptureBudgetBytes is the smallest resident budget a capture obeys: a
+	// budget below it, a negative one included, is tightened to it, because a set
+	// smaller than it keeps no full request view and a negative budget is never
+	// read as unlimited.
+	MinCaptureBudgetBytes int64 = 1 << 20
+	// snapshotResidentOverhead is the bookkeeping allowance one resident snapshot
+	// is accounted with beside its encoded bytes: the decoded view is allocated in
+	// a size class above the bytes, and the set keeps the struct, the message
+	// slice and the map entry beside them.
+	snapshotResidentOverhead int64 = 4 << 10
+)
+
+// CaptureBudget is the resident bound of one capture's fixed snapshots beside
+// the store its evicted snapshots are swapped out to: the resident set stays
+// within Bytes, and a snapshot that does not fit leaves the heap for SwapDir
+// while its index stays, so it is still read back in fix order.
+//
+// A capture beside no SwapDir keeps what it fixes resident: there is nowhere to
+// swap a view out to, and a release with nowhere to write would be a loss rather
+// than a release.
+type CaptureBudget struct {
+	// Bytes is the resident byte budget of the fixed snapshots; zero takes
+	// DefaultCaptureBudgetBytes and a value below MinCaptureBudgetBytes is
+	// tightened to the floor.
+	Bytes int64
+	// SwapDir is the directory evicted snapshots are written to and read back
+	// from; an empty directory leaves the fixed snapshots resident.
+	SwapDir string
+}
 
 // 契约: docs/wiki/rl/rl-architecture.md#trajectory-capture
 //
@@ -65,15 +106,20 @@ type CaptureScope interface {
 //   - A request view is fixed before the request starts and is never rebuilt from the options of a finished call.
 //   - An attempt is admitted through the bounded sink and never waits on the writer: a refused record is a named loss, not a blocked request.
 //   - A capture seals at the end of the turn it observed and reports what the writer actually confirmed.
+//   - The fixed snapshots are a bounded resident set: a snapshot the budget cannot hold leaves the heap for the swap store and stays readable by reference.
 type TrajectoryCapture struct {
-	id     string
-	sink   *CaptureSink
-	policy SnapshotPolicy
+	id      string
+	sink    *CaptureSink
+	policy  SnapshotPolicy
+	budget  int64
+	swapDir string
 
 	mu        sync.Mutex
 	seq       uint64
 	fixed     []fixedSnapshot
 	snapshots map[string]RequestSnapshot
+	resident  int64
+	evictFrom int
 }
 
 var _ CaptureScope = (*TrajectoryCapture)(nil)
@@ -82,10 +128,13 @@ var _ CaptureScope = (*TrajectoryCapture)(nil)
 // it was fixed for: the reference is the read handle the decision records, and
 // the decision names whose request the content answers. The pair is kept as one
 // entry rather than two indexes, so a decision is never read beside a snapshot
-// that was fixed for another one.
+// that was fixed for another one. The size is the resident bytes the entry is
+// accounted with, kept beside the index so an eviction never encodes the view it
+// releases.
 type fixedSnapshot struct {
 	decision event.DecisionID
 	ref      SnapshotRef
+	size     int64
 }
 
 // NewTrajectoryCapture returns the capture of one trajectory over its bounded
@@ -93,16 +142,34 @@ type fixedSnapshot struct {
 // capture identity or sink is refused by name: a capture seals the account of
 // the identity it belongs to and drains into exactly one write point.
 func NewTrajectoryCapture(id string, sink *CaptureSink, policy SnapshotPolicy) (*TrajectoryCapture, error) {
+	return NewTrajectoryCaptureWithBudget(id, sink, policy, CaptureBudget{})
+}
+
+// NewTrajectoryCaptureWithBudget returns the capture of one trajectory under the
+// resident byte budget of its fixed snapshots and the store an evicted snapshot
+// is swapped out to. A missing capture identity or sink is refused by name, and
+// a budget below the floor is tightened to it rather than obeyed: a capture
+// never runs unbounded because it was built with a small bound.
+func NewTrajectoryCaptureWithBudget(id string, sink *CaptureSink, policy SnapshotPolicy, budget CaptureBudget) (*TrajectoryCapture, error) {
 	if id == "" {
 		return nil, ErrCaptureIDMissing
 	}
 	if sink == nil {
 		return nil, ErrCaptureSinkMissing
 	}
+	bytes := budget.Bytes
+	if bytes == 0 {
+		bytes = DefaultCaptureBudgetBytes
+	}
+	if bytes < MinCaptureBudgetBytes {
+		bytes = MinCaptureBudgetBytes
+	}
 	return &TrajectoryCapture{
 		id:        id,
 		sink:      sink,
 		policy:    policy,
+		budget:    bytes,
+		swapDir:   budget.SwapDir,
 		snapshots: map[string]RequestSnapshot{},
 	}, nil
 }
@@ -138,13 +205,17 @@ func (c *TrajectoryCapture) Record(ctx context.Context, attempt AttemptRecord) (
 }
 
 // Seal closes the capture through its sink and reports the manifest the writer
-// confirmed. A second seal returns the first manifest, so the seal of a turn
-// that was already sealed is never a second account.
+// confirmed, then releases the resident snapshots to the swap store: a sealed
+// capture keeps the views it fixed readable while they leave the heap. A
+// second seal returns the first manifest, so the seal of a turn that was
+// already sealed is never a second account.
 func (c *TrajectoryCapture) Seal(ctx context.Context) (CaptureManifest, error) {
 	if c == nil || c.sink == nil {
 		return CaptureManifest{}, ErrCaptureSinkMissing
 	}
-	return c.sink.Seal(ctx)
+	manifest, err := c.sink.Seal(ctx)
+	c.releaseResident()
+	return manifest, err
 }
 
 // Ledger reports the loss account of the capture's sink.
@@ -158,13 +229,101 @@ func (c *TrajectoryCapture) Ledger() CaptureLedger {
 // keep records one fixed snapshot beside the reference it is read back under and
 // the decision whose request it was fixed for. The snapshot is kept once per
 // reference: the same decision fixing a second snapshot keeps both, each under
-// its own identity.
-func (c *TrajectoryCapture) keep(decisionID event.DecisionID, ref SnapshotRef, snapshot RequestSnapshot) {
+// its own identity. The set is bounded: the oldest snapshots are swapped out
+// before this one is admitted once the budget cannot hold both, so the resident
+// set never peaks above its budget by a whole view.
+func (c *TrajectoryCapture) keep(decisionID event.DecisionID, ref SnapshotRef, snapshot RequestSnapshot, size int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	swapErr := c.evictLocked(size)
 	c.seq++
-	c.fixed = append(c.fixed, fixedSnapshot{decision: decisionID, ref: ref})
+	c.fixed = append(c.fixed, fixedSnapshot{decision: decisionID, ref: ref, size: size})
 	c.snapshots[ref.SnapshotID] = snapshot
+	c.resident += size
+	return swapErr
+}
+
+// evictLocked swaps the oldest resident snapshots out until one snapshot of the
+// given size fits the budget, and keeps releasing down to the low-water mark
+// once a release is owed: a set pinned at the very boundary swaps out one view
+// per fix, while a set released past it amortizes the swap-out over a run of
+// fixes. The scans advance one cursor past the entries already released, so
+// fixing a snapshot in a long trajectory never rescans the index it already
+// evicted. A capture beside no swap store keeps every snapshot resident, and a
+// swap that fails keeps its snapshot resident and is reported by name rather
+// than counted as a bound the capture kept.
+func (c *TrajectoryCapture) evictLocked(admit int64) error {
+	if c.swapDir == "" || c.resident+admit <= c.budget {
+		return nil
+	}
+	low := c.lowWater()
+	for c.evictFrom < len(c.fixed) && (c.resident > low || c.resident+admit > c.budget) {
+		entry := c.fixed[c.evictFrom]
+		c.evictFrom++
+		if _, held := c.snapshots[entry.ref.SnapshotID]; !held {
+			continue
+		}
+		if err := c.swapOutLocked(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lowWater reports the resident bytes an eviction releases the set down to: half
+// the budget, so a set that once outgrew its budget is not pinned at the
+// boundary and a swap-out covers a run of fixes rather than one.
+func (c *TrajectoryCapture) lowWater() int64 {
+	return c.budget / 2
+}
+
+// swapOutLocked writes one resident snapshot to the swap store and drops its
+// content from the heap: the index keeps the entry, so the snapshot still reads
+// back in fix order while it leaves the resident set.
+func (c *TrajectoryCapture) swapOutLocked(entry fixedSnapshot) error {
+	snapshot, held := c.snapshots[entry.ref.SnapshotID]
+	if !held {
+		return nil
+	}
+	if err := writeSwapFile(c.swapDir, entry.ref, snapshot); err != nil {
+		return err
+	}
+	delete(c.snapshots, entry.ref.SnapshotID)
+	c.resident -= entry.size
+	return nil
+}
+
+// readLocked reads one fixed snapshot back by reference: the resident copy when
+// the set still holds it, and the swapped-out content — rechecked against the
+// reference it was fixed under — when the budget released it.
+func (c *TrajectoryCapture) readLocked(ref SnapshotRef) (RequestSnapshot, error) {
+	if snapshot, held := c.snapshots[ref.SnapshotID]; held {
+		return snapshot, nil
+	}
+	if c.swapDir == "" {
+		return RequestSnapshot{}, fmt.Errorf("%w: %s", ErrCaptureSnapshotMissing, ref.SnapshotID)
+	}
+	return readSwapFile(c.swapDir, ref)
+}
+
+// releaseResident writes every resident snapshot to the swap store and drops it
+// from the heap, so a sealed capture holds none of the views it fixed while
+// they stay readable in fix order. A swap that fails keeps its snapshot
+// resident: a release with nowhere to write would be a loss, not a release.
+func (c *TrajectoryCapture) releaseResident() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.swapDir == "" {
+		return
+	}
+	for c.evictFrom < len(c.fixed) {
+		entry := c.fixed[c.evictFrom]
+		c.evictFrom++
+		if _, held := c.snapshots[entry.ref.SnapshotID]; !held {
+			continue
+		}
+		_ = c.swapOutLocked(entry)
+	}
 }
 
 // nextSnapshotID mints the identity of one request snapshot: the decision it
@@ -204,11 +363,12 @@ type DecisionSnapshot struct {
 
 // Snapshots reports every safe request snapshot this capture fixed, in fix
 // order, each beside the decision whose request it was fixed for, answered from
-// the copies the capture keeps: a snapshot reads back as the content it fixed
-// and is never rebuilt from the options of a finished call. The slices of one
-// snapshot are the kept slices, so a caller that writes them edits the kept
-// copy; SnapshotOf is the persisted read that rechecks a reference's digest.
-// A capture beside no fixed snapshot answers none.
+// the copies the capture keeps or from the swap store it released them to: a
+// snapshot reads back as the content it fixed and is never rebuilt from the
+// options of a finished call. The slices of one resident snapshot are the kept
+// slices, so a caller that writes them edits the kept copy; a released snapshot
+// reads back as a copy the caller owns. SnapshotOf is the persisted read that
+// rechecks a reference's digest. A capture beside no fixed snapshot answers none.
 func (c *TrajectoryCapture) Snapshots() []DecisionSnapshot {
 	if c == nil {
 		return nil
@@ -217,8 +377,8 @@ func (c *TrajectoryCapture) Snapshots() []DecisionSnapshot {
 	defer c.mu.Unlock()
 	out := make([]DecisionSnapshot, 0, len(c.fixed))
 	for _, one := range c.fixed {
-		snapshot, held := c.snapshots[one.ref.SnapshotID]
-		if !held {
+		snapshot, err := c.readLocked(one.ref)
+		if err != nil {
 			continue
 		}
 		out = append(out, DecisionSnapshot{Decision: one.decision, Snapshot: snapshot})
@@ -228,16 +388,22 @@ func (c *TrajectoryCapture) Snapshots() []DecisionSnapshot {
 
 // SnapshotOf reads one fixed snapshot back through its reference: the content
 // is rechecked against the reference digest, so a snapshot that does not match
-// is refused as a mismatch rather than answered as the referenced one.
+// is refused as a mismatch rather than answered as the referenced one. A
+// snapshot the resident budget released reads back from the swap store under the
+// same digest recheck.
 func (c *TrajectoryCapture) SnapshotOf(ref SnapshotRef) (RequestSnapshot, error) {
 	if c == nil {
 		return RequestSnapshot{}, ErrCaptureSnapshotMissing
 	}
 	c.mu.Lock()
 	snapshot, held := c.snapshots[ref.SnapshotID]
+	swapDir := c.swapDir
 	c.mu.Unlock()
 	if !held {
-		return RequestSnapshot{}, fmt.Errorf("%w: %s", ErrCaptureSnapshotMissing, ref.SnapshotID)
+		if swapDir == "" {
+			return RequestSnapshot{}, fmt.Errorf("%w: %s", ErrCaptureSnapshotMissing, ref.SnapshotID)
+		}
+		return readSwapFile(swapDir, ref)
 	}
 	content, err := MarshalSnapshot(snapshot)
 	if err != nil {
@@ -264,10 +430,13 @@ var _ Capture = (*scopedCapture)(nil)
 // starts, under the capture's projection policy, and returns the view reference
 // the decision records: the reference names the kept snapshot, its digest and
 // the read entry it is read back through, and the parameters digest names the
-// generation configuration the request actually carried.
+// generation configuration the request actually carried. The snapshot is encoded
+// once, so the bytes that bound the resident set are the bytes the reference
+// digests.
 //
 // The request is observed and never edited, and a view is never rebuilt from
-// the options of a finished call.
+// the options of a finished call. A snapshot the capture could not swap out
+// stays resident and the overrun is reported by name rather than swallowed.
 func (s *scopedCapture) Snapshot(ctx context.Context, req model.Request) (ModelViewRef, error) {
 	if err := ctx.Err(); err != nil {
 		return ModelViewRef{}, err
@@ -276,11 +445,14 @@ func (s *scopedCapture) Snapshot(ctx context.Context, req model.Request) (ModelV
 	if err != nil {
 		return ModelViewRef{}, err
 	}
-	ref, err := snapshot.Ref(s.owner.nextSnapshotID(s.decisionID), "capture/"+s.owner.id+"/"+string(s.decisionID))
+	content, err := MarshalSnapshot(snapshot)
 	if err != nil {
 		return ModelViewRef{}, err
 	}
-	s.owner.keep(s.decisionID, ref, snapshot)
+	ref := snapshotRef(content, s.owner.nextSnapshotID(s.decisionID), "capture/"+s.owner.id+"/"+string(s.decisionID))
+	if err := s.owner.keep(s.decisionID, ref, snapshot, int64(len(content))+snapshotResidentOverhead); err != nil {
+		return ModelViewRef{}, err
+	}
 	view := s.view
 	view.Snapshot = ref
 	view.ParametersDigest = digestBytes(snapshot.Parameters)
@@ -413,6 +585,50 @@ func digestBytes(body []byte) string {
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
+}
+
+// swapFileName reports the plain file name one snapshot is swapped out under:
+// the digest of its identity, so a decision identity that carries a separator or
+// a traversal never reaches out of the swap directory.
+func swapFileName(snapshotID string) string {
+	sum := sha256.Sum256([]byte(snapshotID))
+	return "snapshot-" + hex.EncodeToString(sum[:]) + ".json"
+}
+
+// writeSwapFile writes one snapshot into the swap store: the bytes written are
+// the bytes MarshalSnapshot encodes, so reading it back rechecks exactly the
+// digest the reference carries. A write that fails is reported by name and never
+// counted as a swap out.
+func writeSwapFile(dir string, ref SnapshotRef, snapshot RequestSnapshot) error {
+	content, err := MarshalSnapshot(snapshot)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrCaptureSwapFailed, ref.SnapshotID, err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrCaptureSwapFailed, ref.SnapshotID, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, swapFileName(ref.SnapshotID)), content, 0o600); err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrCaptureSwapFailed, ref.SnapshotID, err)
+	}
+	return nil
+}
+
+// readSwapFile reads one swapped-out snapshot back and rechecks it against the
+// reference it was fixed under: a store that holds no such file answers a
+// missing snapshot, content that does not match the reference is refused as a
+// mismatch, and a file that cannot be read is refused as unreadable.
+func readSwapFile(dir string, ref SnapshotRef) (RequestSnapshot, error) {
+	content, err := os.ReadFile(filepath.Join(dir, swapFileName(ref.SnapshotID)))
+	if errors.Is(err, os.ErrNotExist) {
+		return RequestSnapshot{}, fmt.Errorf("%w: %s", ErrCaptureSnapshotMissing, ref.SnapshotID)
+	}
+	if err != nil {
+		return RequestSnapshot{}, fmt.Errorf("%w: %s: %v", ErrSnapshotUnreadable, ref.SnapshotID, err)
+	}
+	if err := VerifySnapshot(ref, content); err != nil {
+		return RequestSnapshot{}, err
+	}
+	return ParseSnapshot(content)
 }
 
 // captureSealTimeout bounds the seal one turn waits for: a writer that does not

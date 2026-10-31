@@ -3247,10 +3247,13 @@ func smokeLongConcurrent(plan smokeCalibrationPlan, round int) bool {
 	return false
 }
 
-// smokeLongWant 报告一个输入步应等到的外发正文前缀；委派输入两步。
+// smokeLongWant 报告一个输入步应等到的外发正文前缀。委派输入的中间叙述
+// （delegate ack）在段语义下是形态相关的可选投递：仅当它由一次自己的请求作答时
+// 出现，合批形态下不出现；收尾正文（settle-ack）是段闭合的恒投递，等它即等这一
+// 步落地，可选叙述由 positive 的全量身份对账兑底。
 func (s smokeCalibrationStep) smokeLongWant() []string {
 	if s.Shape == "delegate" {
-		return []string{"delegate ack " + s.Marker, "settle-ack " + s.Marker}
+		return []string{"settle-ack " + s.Marker}
 	}
 	return []string{"answer " + s.Marker}
 }

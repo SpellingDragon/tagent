@@ -1,5 +1,5 @@
-github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.2 h1:xq24Y82CobKqyh2nfz9iuCye/kaEYqUtRr8eYEVpCRw=
-github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.2/go.mod h1:bIZcN4N9sGpA42sWfE98XCPl9ZgMi6fMDLGYOaXNe9A=
+github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.3 h1:XU03iIF1iyVCYKpaSF+UYqrcKKpmwoml/yWro4eRFQU=
+github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.3/go.mod h1:bIZcN4N9sGpA42sWfE98XCPl9ZgMi6fMDLGYOaXNe9A=
 github.com/bmatcuk/doublestar/v4 v4.9.1 h1:X8jg9rRZmJd4yRy7ZeNDRnM+T3ZfHv15JiBJ/avrEXE=
 github.com/bmatcuk/doublestar/v4 v4.9.1/go.mod h1:xBQ8jztBU6kakFMg+8WGxn0c6z1fTSPVIjEY1Wr7jzc=
 github.com/bufbuild/protocompile v0.14.1 h1:iA73zAf/fyljNjQKwYzUHD6AD4R8KMasmwa/FBatYVw=

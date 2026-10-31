@@ -42,6 +42,8 @@ func passingCheck(name state.CheckName) state.CheckAnswer {
 // - a native multi-turn tool call roundtrip keeps the messages and the pairings, each call answered by its own paired receipt
 // - a paired receipt carries the admission and the task id of its call, never the settled result of that call
 // - two invocations of one session decide independently: their requests are never batched and a failed terminal never carries its neighbour down
+// - the never-batch bullet above names the direct-drive path (Run.Invoke, one whole exchange per invocation)
+// - the resident loop the host entry drives batches; see consumer_loop_convergence_test.go
 // - each request ends on its own invocation's input while the session history already committed may sit in front of it
 // - a settled task backflow drives the next decision of the invocation that issued the call on the binding generation effective when that decision begins
 // - each settled result enters the next decision as its own observation under the preserved call identifier, never a second tool response

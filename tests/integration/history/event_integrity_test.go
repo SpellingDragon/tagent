@@ -1044,6 +1044,7 @@ func restoreAssertSeed(t *testing.T, o restoreOutcome) {
 		{"call identity", o.Seed.CallID},
 		{"task identity", string(o.Seed.TaskID)},
 		{"invocation identity", string(o.Seed.Invocation)},
+		{"turn range identity", string(o.Seed.TurnInvocation)},
 		{"runtime instance", string(o.Seed.Instance)},
 		{"input event identity", string(o.Seed.InputFact)},
 		{"result event identity", string(o.Seed.ResultFact)},
@@ -1118,17 +1119,17 @@ func restoreAssertAttribution(t *testing.T, outcome func(*testing.T, string) res
 			t.Fatalf("the %s restart rebuilt no task %s; recovery=%+v", mode, o.Seed.TaskID, o.Recover.Recovery)
 		}
 
-		invocation, held := restoreInvocationOf(o.Recover, o.Seed.Invocation)
+		invocation, held := restoreInvocationOf(o.Recover, o.Seed.TurnInvocation)
 		if !held {
-			t.Fatalf("the %s restart read no invocation %s; invocations=%+v", mode, o.Seed.Invocation, o.Recover.Invocations)
+			t.Fatalf("the %s restart read no invocation %s; invocations=%+v", mode, o.Seed.TurnInvocation, o.Recover.Invocations)
 		}
 		if invocation.Address != o.Seed.Address {
 			t.Fatalf("the %s restart attributed invocation %s to %+v, want the committed site %+v",
-				mode, o.Seed.Invocation, invocation.Address, o.Seed.Address)
+				mode, o.Seed.TurnInvocation, invocation.Address, o.Seed.Address)
 		}
 		if invocation.Instance != o.Seed.Instance {
 			t.Fatalf("the %s restart attributed invocation %s to instance %q, want the admitting instance %q",
-				mode, o.Seed.Invocation, invocation.Instance, o.Seed.Instance)
+				mode, o.Seed.TurnInvocation, invocation.Instance, o.Seed.Instance)
 		}
 
 		taskView, held := restoreTaskOf(o.Recover, o.Seed.TaskID)
@@ -1166,9 +1167,9 @@ func restoreAssertPairing(t *testing.T, outcome func(*testing.T, string) restore
 			t.Fatalf("the %s restart paired task %s with call %q, want the call the provider issued %q",
 				mode, chain.TaskID, chain.CallID, o.Seed.CallID)
 		}
-		if chain.Invocation != o.Seed.Invocation {
-			t.Fatalf("the %s restart paired task %s with invocation %q, want %q",
-				mode, chain.TaskID, chain.Invocation, o.Seed.Invocation)
+		if chain.Invocation != o.Seed.TurnInvocation {
+			t.Fatalf("the %s restart paired task %s with invocation %q, want the range %q the turn ran under",
+				mode, chain.TaskID, chain.Invocation, o.Seed.TurnInvocation)
 		}
 		if chain.Source != o.Seed.Address {
 			t.Fatalf("the %s restart paired task %s with source %+v, want %+v",
@@ -4530,9 +4531,14 @@ type restoreChildReport struct {
 	Mode  string `json:"mode"`
 	PID   int    `json:"pid"`
 
-	Invocation event.InvocationID `json:"invocation,omitempty"`
-	Instance   event.InstanceID   `json:"instance,omitempty"`
-	Address    event.Address      `json:"address,omitempty"`
+	// Invocation is the identity the entry submitted the turn under, and
+	// TurnInvocation is the range the consumption loop minted for the segment
+	// that ran it: the committed input fact keeps the submitter's identity, and
+	// the facts the turn itself committed name its own range.
+	Invocation     event.InvocationID `json:"invocation,omitempty"`
+	TurnInvocation event.InvocationID `json:"turn_invocation,omitempty"`
+	Instance       event.InstanceID   `json:"instance,omitempty"`
+	Address        event.Address      `json:"address,omitempty"`
 
 	Input      string        `json:"input,omitempty"`
 	InputFact  event.EventID `json:"input_fact,omitempty"`
@@ -4819,7 +4825,10 @@ func seedRestoreProcess(t *testing.T, mode, root, out string) {
 	defer cancel()
 	rig := newRestoreRig(t, root)
 	rig.scriptToolTurn(recall.QueryToolName, restoreCallID, restoreWatchArguments, restoreSeedAnswer)
-	rig.mustInvoke(ctx, restoreSeedInvocation, restoreSeedInput)
+	turn, err := rig.invoke(ctx, restoreSeedInvocation, restoreSeedInput)
+	if err != nil {
+		t.Fatalf("drive the seed turn: %v", err)
+	}
 	run := rig.host.Run()
 
 	input := persistenceFactByContent(t, run, restoreSeedInput)
@@ -4832,22 +4841,30 @@ func seedRestoreProcess(t *testing.T, mode, root, out string) {
 		t.Fatalf("the seed turn sent no model request")
 	}
 	call := restoreCallOf(t, requests)
+	if input.InvocationID != event.InvocationID(restoreSeedInvocation) {
+		t.Fatalf("the committed input fact of the seed turn attributed to %q, want the submitter identity %q: the segment the loop ran mints its own range beside it",
+			input.InvocationID, restoreSeedInvocation)
+	}
+	if !strings.HasPrefix(string(turn.InvocationID), string(persistenceAddress.SessionID)+"#c") {
+		t.Fatalf("the seed turn ran under the range %q, want a segment range of %s", turn.InvocationID, persistenceAddress.SessionID)
+	}
 	report := restoreChildReport{
-		Mode:       mode,
-		PID:        os.Getpid(),
-		Invocation: restoreSeedInvocation,
-		Address:    persistenceAddress,
-		Instance:   input.InstanceID,
-		Input:      input.Message.Content,
-		InputFact:  input.Key,
-		CallID:     call.ToolCalls[0].ID,
-		CallText:   call.Content,
-		ToolName:   call.ToolCalls[0].Name,
-		ResultText: result.Message.Content,
-		ResultFact: result.Key,
-		Answer:     answer.Message.Content,
-		AnswerFact: answer.Key,
-		TaskID:     result.TaskID,
+		Mode:           mode,
+		PID:            os.Getpid(),
+		Invocation:     restoreSeedInvocation,
+		TurnInvocation: turn.InvocationID,
+		Address:        persistenceAddress,
+		Instance:       input.InstanceID,
+		Input:          input.Message.Content,
+		InputFact:      input.Key,
+		CallID:         call.ToolCalls[0].ID,
+		CallText:       call.Content,
+		ToolName:       call.ToolCalls[0].Name,
+		ResultText:     result.Message.Content,
+		ResultFact:     result.Key,
+		Answer:         answer.Message.Content,
+		AnswerFact:     answer.Key,
+		TaskID:         result.TaskID,
 	}
 	t.Logf("restore seed: committed input=%s result=%s answer=%s task=%s call=%s instance=%s",
 		report.InputFact, report.ResultFact, report.AnswerFact, report.TaskID, report.CallID, report.Instance)

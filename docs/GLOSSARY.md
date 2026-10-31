@@ -13,6 +13,9 @@
 | 义务（obligation） | 任务尚未兑现的承诺，按"在等什么"分类（等工具、等投递、已移交），带归属方与推进方；队列空不等于义务已清。 | 欠条：写下才算数，划掉要有回执。 | `runtime/task/registry.go`（`Obligations`）；`memory/query/reading.go`（`Reading.Obligations`） |
 | 退位（retire） | 一个部件或条目不再担任主职责，但记录保留、不删除也不改写：`SummaryPlugin` 退位为元数据标注、压缩请求被消费时 retire 一次、模型版本被换下后标记 retired 但仍服务已持有的流。 | 退居二线：岗位交出去，档案留在册。 | [memory-curation 契约](../openspec/specs/memory-curation/spec.md)；`api/event/compress_request.go`；`features/rl/replacement.go` |
 | 事件门（event integrity gate） | 每 MR 必跑的事件消费完整性三档：short 十次独立进程、long 六个 (seed,window) 组合各一次、变异门按冻结清单逐个具名杀死（未命中的算 uncovered 直接红）；required 只汇总三档，不替代旧检查。 | 出厂全检：三道不同工位都过才放行，少一道不许出厂。 | `scripts/preflight.sh`；[OPERATION](OPERATION.md#event-gates) |
+| 消费循环（consumption loop） | 一个 `(agent, session)` 地址一条常驻 goroutine：拉取已到达的事件、按类型分派、有驱动事件时调一次模型，然后回到拉取，不等派发的工具返回；入口只提交事实并唤醒它。 | 值班员守着收件箱：来一件处理一件，不站在传送带前等某一台机器。 | `runtime/agent/consumer.go`；`assembly/host.go`（`invokeConsumed`） |
+| 段（segment） | 消费循环的一次连续处理：从驱动事件开段（范围身份 `<session>#cN`），跨工具结果与新输入续轮，到模型无工具调用的最终回复落 `agent_output` 时闭合；它就是投影折叠与 turn 的单位。 | 一张工单：从受理到结论，中途补材料不换单，结案才归档。 | `runtime/agent/consumer.go`（`openSegment`/`closeSegment`）；`assembly/facts.go`（`recordMapped`） |
+| 风暴熔断（storm fuse） | 一个模型响应发出过多调用、或请求提示已过长时，整批调用不截断也不降级，而是停成一条人审请求（摘要只列工具与参数指纹）；等待发生在原本要派发它的那次派发内，批准=整批按序执行、拒绝/超期/取消=零执行，没有审批簿就整批拒绝。 | 关口安检：一件行李也不拆，整车排队等签字；没盖章的整车原路退回。 | `runtime/agent/fuse.go`（`FuseLimits`/`parkedBatchOf`/`awaitBatch`）；`runtime/task/approval/approval_store.go`（审批簿） |
 
 ## 二、事实七族
 

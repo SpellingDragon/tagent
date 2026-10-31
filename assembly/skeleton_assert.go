@@ -126,3 +126,42 @@ var (
 
 	_ func(*Run, event.SessionID) ([]replay.ProjectionEntry, bool) = (*Run).ReplayEntries
 )
+
+// The compression consumer is the execution half of the same flow: an instance
+// of the fact→observation port that reads the judgments a producer filed, the
+// session face it reads them through, and the handoff a producer reaches it by.
+var (
+	_ plugin.Instance           = (*CompressionConsumer)(nil)
+	_ plugin.PostCommitObserver = (*CompressionConsumer)(nil)
+	_ compressExecutor          = (*CompressionConsumer)(nil)
+	_ compressSessions          = ageFoldSessions{}
+
+	_ func(compressSessions) *CompressionConsumer = NewCompressionConsumer
+	_ func(*AgeFoldPlugin, compressExecutor)      = (*AgeFoldPlugin).setExecutor
+
+	_ func(*CompressionConsumer, context.Context, event.SessionID) error = (*CompressionConsumer).Execute
+	_ func(*CompressionConsumer, event.SessionID, event.CompressRequest) = (*CompressionConsumer).Record
+	_ func(*CompressionConsumer, event.CompressProduct)                  = (*CompressionConsumer).NoteProduct
+	_ func(*CompressionConsumer) string                                  = (*CompressionConsumer).Name
+	_ func(*CompressionConsumer) plugin.Port                             = (*CompressionConsumer).Port
+
+	_ string = CompressionConsumerName
+)
+
+// The producer of the closing round serves the same fact→observation port: it
+// reads the segment a commit grew through the run's own chain face and files the
+// judgment of a spent budget back on that chain.
+var (
+	_ plugin.Instance           = (*agent.FinalRoundPlanner)(nil)
+	_ plugin.PostCommitObserver = (*agent.FinalRoundPlanner)(nil)
+	_ agent.FinalRoundChain     = finalRoundChain{}
+
+	_ func(agent.FinalRoundChain, func(event.AgentID) agent.FinalRoundPolicy) *agent.FinalRoundPlanner = agent.NewFinalRoundPlanner
+
+	_ func(*agent.FinalRoundPlanner) string      = (*agent.FinalRoundPlanner).Name
+	_ func(*agent.FinalRoundPlanner) plugin.Port = (*agent.FinalRoundPlanner).Port
+
+	_ = agent.FinalRoundSegment{}
+
+	_ string = agent.FinalRoundPlannerName
+)

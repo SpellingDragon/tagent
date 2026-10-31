@@ -69,6 +69,12 @@ const (
 	// oldest bands fold into.
 	ProjectionTypeHistorySummary = "history_summary"
 
+	// ageSegmentKeyPrefix and ageHistoryKeyPrefix are the prefixes the two
+	// product keys are minted under: the prefix is what a product fact states
+	// about the kind of entry it restores.
+	ageSegmentKeyPrefix = "seg"
+	ageHistoryKeyPrefix = "hist"
+
 	// AgeProducerSegmentAge names the mechanism that judges a projection due for
 	// an age fold.
 	AgeProducerSegmentAge = "memory.replay.segment-age"
@@ -220,10 +226,9 @@ type AgeFoldReport struct {
 // oldest bands are replaced by one history summary placed first. A projection
 // whose volume stays inside the threshold is left exactly as it stands.
 //
-// The fold is deterministic over the sequence it reads and files the judgment
-// as a compress request rather than rewriting any fact: the products enter the
-// projection under content-addressed synthetic keys, so folding the same
-// sequence twice mints the same keys and appends no second product.
+// - The entries a product replaces leave the projection with their per-key material (the kept original, the dedup key and the consumed mark), so a fold of the same sequence twice finds nothing left to drop.
+//
+// - The fold is deterministic over the sequence it reads and files the judgment as a compress request rather than rewriting any fact: the products enter the projection under content-addressed synthetic keys, so folding the same sequence twice mints the same keys and appends no second product.
 func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (AgeFoldReport, error) {
 	if err := ctx.Err(); err != nil {
 		return AgeFoldReport{}, err
@@ -268,6 +273,7 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
 		report.Requests = append(report.Requests, ageRequest(AgeReasonHistorySummary, summary))
 	}
 	p.entries = kept
+	p.forgetDroppedLocked()
 	return report, nil
 }
 
@@ -293,7 +299,7 @@ func foldProcessDetail(entries []ProjectionEntry, complete bool) (int, *Projecti
 		return 0, nil
 	}
 	product := ProjectionEntry{
-		Key:     ageKey("seg", process),
+		Key:     ageKey(ageSegmentKeyPrefix, process),
 		Type:    ProjectionTypeSegmentFold,
 		Summary: "segment fold",
 		Content: "folded segment process: " + strings.Join(lines, "; "),
@@ -343,7 +349,7 @@ func historySummaryOf(entries []ProjectionEntry) ProjectionEntry {
 		lines = append(lines, historySummaryLine(entry))
 	}
 	return ProjectionEntry{
-		Key:     ageKey("hist", entries),
+		Key:     ageKey(ageHistoryKeyPrefix, entries),
 		Type:    ProjectionTypeHistorySummary,
 		Summary: "history summary",
 		Content: strings.Join(lines, "; "),

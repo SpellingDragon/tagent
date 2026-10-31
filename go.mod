@@ -70,7 +70,11 @@ require (
 // DEPENDENCY DEBT (pinned module — the retirement condition is part of the pin).
 //
 // What is pinned: trpc.group/trpc-go/trpc-agent-go now resolves to the fork tag
-// github.com/SpellingDragon/trpc-agent-go@v1.11.2-tagent.2 = upstream v1.11.2
+// github.com/SpellingDragon/trpc-agent-go@v1.11.2-tagent.3 = upstream v1.11.2
+// plus the stream-close, ordered-tools and the 4KB downgrade-payload commits
+// (every sanitize downgrade message is bounded, so a degraded storm cannot
+// fatten the chain through its downgrades). The tag is published, so a fresh
+// clone builds from the module proxy.
 // plus the 4 stream-close-contract commits (close event streams only after the
 // producer is done) and the ordered-tools commit (Request.ToolOrder names the
 // order tool definitions are emitted in, so a caller keeps stable tools ahead
@@ -109,4 +113,4 @@ require (
 //
 // Historical note (R1, design D6): the pin replaced a local `replace` to an
 // out-of-tree checkout, which made the build depend on one machine's disk layout.
-replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.2
+replace trpc.group/trpc-go/trpc-agent-go => github.com/SpellingDragon/trpc-agent-go v1.11.2-tagent.3

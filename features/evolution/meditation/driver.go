@@ -27,10 +27,11 @@ type Driver struct {
 	interval   time.Duration
 	minGap     time.Duration
 
-	// slot reads the execution seat of one observed address: it is the runtime's
-	// own occupancy read, handed over as that object's own method, so the driver
-	// reports the seat the executor holds rather than a copy of it.
-	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool)
+	// modelInFlight reads the consumption state of one observed address: whether
+	// a model request of that address is executing right now. It is the
+	// consumption loop's own read, handed over as a function, so the driver
+	// reports the request the loop actually flies rather than a copy of it.
+	modelInFlight func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool)
 	// instance is the runtime instance the observed session sits in.
 	instance event.InstanceID
 
@@ -48,7 +49,7 @@ type Driver struct {
 	// held episode re-evaluates when the floor elapses instead of spinning.
 	holdUntil time.Time
 	// owner is the address the latest host-facing commit names: the session whose
-	// decision seat the next pass waits on.
+	// model request the next pass waits on.
 	owner    event.Address
 	firing   bool
 	retained bool
@@ -66,24 +67,25 @@ var (
 
 // NewDriver assembles the event-driven reflection face over one reflection loop,
 // the floor between two fires, the floor between two consumed reflections, the
-// read of the observed session's execution seat and the instance that seat is
-// held in.
+// read of whether a model request of the observed session is executing and the
+// instance that request runs in.
 //
 // The interval is measured from the last fire; the first fire is never held
 // back, so the first event of a process is answered at once, and a non-positive
 // interval disables that floor. The
 // min gap stays the reflection's own rhythm floor, read from the execution
 // watermark, so a fired but not yet consumed reflection is never re-fired early.
-// A nil seat read or an empty instance leaves the pass its rhythm alone.
+// A nil consumption-state read or an empty instance leaves the pass its rhythm
+// alone.
 func NewDriver(reflection *Reflection, interval, minGap time.Duration,
-	slot func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
+	modelInFlight func(addr event.Address, instance event.InstanceID) (event.InvocationID, event.DecisionID, bool),
 	instance event.InstanceID) *Driver {
 	d := &Driver{
-		reflection: reflection,
-		interval:   interval,
-		minGap:     minGap,
-		slot:       slot,
-		instance:   instance,
+		reflection:    reflection,
+		interval:      interval,
+		minGap:        minGap,
+		modelInFlight: modelInFlight,
+		instance:      instance,
 	}
 	d.stopCtx, d.stopCancel = context.WithCancel(context.Background())
 	if reflection != nil {
@@ -111,7 +113,8 @@ func (d *Driver) SetObserver(observer func(TickOutcome)) {
 
 // ObserveCommit reads the fact one commit wrote and advances the driver's timer
 // state when that fact names an interaction someone awaits, recording the session
-// that material belongs to beside it: the pass reflects on that session's seat.
+// that material belongs to beside it: the pass reflects on that session's model
+// request.
 //
 // The pass itself runs detached from the committing turn: a reflection spends a
 // model call, and a user turn never waits for it. A failed read is reported and
@@ -202,14 +205,14 @@ func (d *Driver) fire(ctx context.Context) {
 }
 
 // pass runs one reflection pass and reports the reading to the host observer. A
-// pass the observed session holds a decision seat for keeps the episode open on
-// the standing rearm rhythm: the watermark stays where it stands, no reflection
-// input is pending, and the window is evaluated again once the seat may have
-// been released. A pass the rhythm floor holds back keeps the episode open until
-// the window opens, so the same observation is evaluated again without a new
-// commit.
+// pass the observed session is running a model request for keeps the episode
+// open on the standing rearm rhythm: the watermark stays where it stands, no
+// reflection input is pending, and the window is evaluated again once the
+// request may have ended. A pass the rhythm floor holds back keeps the episode
+// open until the window opens, so the same observation is evaluated again
+// without a new commit.
 func (d *Driver) pass(ctx context.Context) {
-	if held, reason := d.seatHeld(); held {
+	if held, reason := d.modelInFlightOf(); held {
 		wait := d.interval
 		if f := d.rhythmFloor(); f > 0 && (wait <= 0 || f < wait) {
 			wait = f
@@ -280,21 +283,23 @@ func (d *Driver) hold(until time.Time) {
 	d.mu.Unlock()
 }
 
-// seatHeld reports whether the session the latest host-facing commit names holds a
-// decision seat, beside the reading that names the occupant. A driver assembled
-// without a seat read or in no instance has no seat to wait on.
-func (d *Driver) seatHeld() (bool, string) {
+// modelInFlightOf reports whether the session the latest host-facing commit names
+// is running a model request, beside the reading that names the decision it
+// runs. A driver assembled without a consumption-state read or in no instance
+// has no request to wait on: an empty instance is answered here, once, and never
+// handed to the read.
+func (d *Driver) modelInFlightOf() (bool, string) {
 	d.mu.Lock()
-	slot, instance, owner := d.slot, d.instance, d.owner
+	modelInFlight, instance, owner := d.modelInFlight, d.instance, d.owner
 	d.mu.Unlock()
-	if slot == nil || instance == "" || owner.IsZero() {
+	if modelInFlight == nil || instance == "" || owner.IsZero() {
 		return false, ""
 	}
-	invocation, decision, held := slot(owner, instance)
+	invocation, decision, held := modelInFlight(owner, instance)
 	if !held {
 		return false, ""
 	}
-	return true, fmt.Sprintf("the decision seat of %s/%s is held by the decision %s of %s", owner.AgentID, owner.SessionID, decision, invocation)
+	return true, fmt.Sprintf("the model request of %s/%s is executing as the decision %s of %s", owner.AgentID, owner.SessionID, decision, invocation)
 }
 
 // rearm settles one pass: it releases the firing state when no observation was

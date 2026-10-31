@@ -544,7 +544,10 @@ func (p *ReplayProjection) ApplyProducts(products []FoldProduct)
     ApplyProducts places the products a judgment minted onto the projection:
     each covered entry is replaced by its product, a history summary lands ahead
     of the material it summarizes, and a product whose entry is already held
-    changes nothing — applying one judgment twice is applying it once.
+    changes nothing — applying one judgment twice is applying it once. A covered
+    entry leaves the projection with its per-key material (the kept original,
+    the dedup key and the consumed mark), so the maps say what the rewritten
+    entries say.
 
 func (p *ReplayProjection) AssembleBudget(ctx context.Context, budget int) ([]ProjectionEntry, error)
     AssembleBudget packs the projection into one agent request of the given
@@ -594,6 +597,11 @@ func (p *ReplayProjection) Fold(ctx context.Context) (ProjectionEntry, error)
     payload records the fullBoundary value the tail is replayed after, and the
     summary entry is returned first on every restore.
 
+    - The entries the summary alone represents leave the projection with their
+    per-key material (the original text, the dedup key and the consumed mark)
+    while a retained ref keeps its own, so the rewritten sequence carries no
+    copy of the material the summary speaks for.
+
     - A projection already carrying a compaction payload answers that payload's
     summary entry and moves nothing, so one body of material folds once even
     when a rebuilt projection is offered to the fold again.
@@ -605,10 +613,14 @@ func (p *ReplayProjection) FoldByAge(ctx context.Context, plan AgeFoldPlan) (Age
     oldest bands are replaced by one history summary placed first. A projection
     whose volume stays inside the threshold is left exactly as it stands.
 
-    The fold is deterministic over the sequence it reads and files the judgment
-    as a compress request rather than rewriting any fact: the products enter
-    the projection under content-addressed synthetic keys, so folding the same
-    sequence twice mints the same keys and appends no second product.
+    - The entries a product replaces leave the projection with their per-key
+    material (the kept original, the dedup key and the consumed mark), so a fold
+    of the same sequence twice finds nothing left to drop.
+
+    - The fold is deterministic over the sequence it reads and files the
+    judgment as a compress request rather than rewriting any fact: the products
+    enter the projection under content-addressed synthetic keys, so folding the
+    same sequence twice mints the same keys and appends no second product.
 
 func (p *ReplayProjection) FullBoundary() event.EventID
     FullBoundary returns the event-key boundary the compaction payload carried.
@@ -626,6 +638,15 @@ func (p *ReplayProjection) PlanByAge(ctx context.Context, plan AgeFoldPlan) (Age
 
 func (p *ReplayProjection) RecoveryHint() *ProjectionEntry
     RecoveryHint returns the recovery hint entry a rebuild left, nil before one.
+
+func (p *ReplayProjection) RestoreProducts(products []event.CompressProduct)
+    RestoreProducts places the products a chain recorded onto the projection:
+    the product fact names the key, the text and the entries it covers, so a
+    restore rebuilds the entry the fold minted instead of folding the material
+    again. The kind of product is read off the key's prefix and its moment off
+    the first entry it covers, which is the moment the fold itself gave it.
+    A key no fold mints, and a product whose entry the projection already holds,
+    change nothing.
 
 type Segment struct {
 	// Index is the position of the segment in the projection, oldest first.

@@ -58,7 +58,7 @@ type integrityStream struct {
 
 // integrityStep is one declared decision: the request it matches, the answer it
 // serves, the outbound body it declares beside an optional park the check
-// releases.
+// releases, and whether the step may stay unreached.
 type integrityStep struct {
 	name        string
 	identity    string
@@ -68,6 +68,7 @@ type integrityStep struct {
 	arrived     chan struct{}
 	arrivedOnce sync.Once
 	hold        chan struct{}
+	unreachedOK bool
 }
 
 // newIntegrityScript returns the script a drive declares its steps over.
@@ -109,6 +110,15 @@ func (s *integrityStep) park() *integrityStep {
 	return s
 }
 
+// optional declares that the step may stay unreached: the consumption batch of
+// a session may read the material this step answers in the same request that
+// answers the decision before it, so the shape this step pins is one of two
+// legal shapes and never a missing step.
+func (s *integrityStep) optional() *integrityStep {
+	s.unreachedOK = true
+	return s
+}
+
 // stepsOf reports the declared steps of one identity in declaration order.
 func (s *integrityScript) stepsOf(identity string) []*integrityStep {
 	stream := s.byIdentity[identity]
@@ -119,13 +129,18 @@ func (s *integrityScript) stepsOf(identity string) []*integrityStep {
 }
 
 // actionBodies reports the outbound bodies the script declares, in declaration
-// order, so the checks compare them with the actions the sender recorded.
+// order, so the checks compare them with the actions the sender recorded. A step
+// the drive never reached owns no body: an optional step the consumption batch
+// folded into the decision before it delivered nothing of its own.
 func (s *integrityScript) actionBodies() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []string
 	for _, stream := range s.streams {
-		for _, step := range stream.steps {
+		for index, step := range stream.steps {
+			if index >= stream.next {
+				continue
+			}
 			if step.body != "" {
 				out = append(out, step.body)
 			}
@@ -206,6 +221,9 @@ func (s *integrityScript) audit() []integrityViolation {
 	out := append([]integrityViolation(nil), s.violations...)
 	for _, stream := range s.streams {
 		for _, step := range stream.steps[stream.next:] {
+			if step.unreachedOK {
+				continue
+			}
 			out = append(out, integrityViolation{
 				kind:   integrityMissing,
 				detail: fmt.Sprintf("step %q of model %q was declared but never reached", step.name, step.identity),
