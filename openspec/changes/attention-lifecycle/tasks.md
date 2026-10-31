@@ -24,8 +24,8 @@ flowchart LR
 
 ## W1
 
-- [ ] 01 域四件套评审通过（编排者）—— 验证：本 tasks.md 勾选 + 01/specs strict 校验通过
-- [ ] 01 域实施完成并入 next —— 验证：`go test ./runtime/task/... ./api/event/... -count=1` exit 0
+- [x] 01 域四件套评审通过（编排者，阶段 5 自审即评审）—— 验证：本 tasks.md 勾选 + 01/specs strict 校验通过
+- [x] 01 域实施完成并入合并线（门改判后 next=本分支）—— 验证：`go test ./api/event/... ./runtime/task -count=1` exit 0（ok ×2）
 - [x] 两条症状锚已落仓库且红着（立案当日凭据入台账） —— 验证：`go test ./tests/integration/host -run '^TestAttentionClears' -count=1` 失败（红锚凭据已入 ORCHESTRATION 台账）
 
 ## W2（并发，触碰集见 design D6）

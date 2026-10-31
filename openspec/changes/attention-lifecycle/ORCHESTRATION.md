@@ -51,5 +51,5 @@ W1 一轮；W2 每域一轮 + 一轮返工余量；W3 一轮。全部孙任务�
 |---|---|---|
 | 2026-11-01 立案 | 用户四项裁定（收编面=审批+notice 全量/summary 投影接入；中档 3 域；全量门；两红锚）+ 三路径现状调查（approval_store.go / inventory.go / deliver.go 实证） | 计划工件建于分支 attention-lifecycle（基线 origin/next 21ba86a3） |
 | 2026-11-01 红锚落库 | `go test ./tests/integration/host -run '^TestAttentionClears' -count=2` 两锚皆红：锚 1 于 attention_lifecycle_test.go:85（Lookup 仍报 answered approval 为 approved），锚 2 于 :164（未消费通知 Close 后以 phase "accepted" 挂着）；comment_policy 对新文件零 finding（余 17 条为 next 既有 consumer_loop_convergence_test.go 的基线状态，不属本变更） | 症状锚已按 R33 第一天红着；一级 tasks W1 红锚项勾选 |
-| 待办 | 启动门核实命令与凭据；W1 派发单冻结 | 门过前不冻结文件清单 |
+| 2026-11-01 W1-01 五查+清偿 | 编排者复验：6 测试 -count=1/3 全绿、concept budget ok:true 非基线超标 0、白名单净（FACT-VOCABULARY +1 为申报偏离，已具名落锁 22267→22268）；T1 两红由编排者清偿（锚 doc 收一行意图、gen_godoc 重生成 69 文件）→ lint exit 0；锚②加固为确定性红（等第 4 请求+notice 材料落链再 Close，8/8 红；锚① 3/3 红）；提交 c9048cb3 | W1 完成：01 域 T1–T6 全勾；消费者锚空缺如实记账——T2–T4 的生产消费者由 W2 两单兑底（01 域本身无消费者，计划内） |
 | 2026-11-01 02:22 门状态 | `gh pr checks 33`（run 41224322781）：绿=openspec/race/mutations/symptoms/format-and-contract/validators/long×3(32768)；红=test（TestSettleWakeUnified 20s 窗 flaky，本地 -count=10 全绿）与 event-integrity-short（45m 上限被取消，日志“operation was canceled”，非测试失败，系 6 长分片同 runner 挤占）；pending=long×3(256 分片，新预算 120m 跑至约 90 分钟) | 处置：等 256 分片释放 runner 后 `gh run rerun 41224322781 --failed`；此间不 push（push 会取消在跑分片） |
