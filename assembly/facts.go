@@ -341,11 +341,11 @@ func (r *Run) recordMapped(evt event.Event, entry replay.ProjectionEntry) {
 	}
 	held.projection.Append(context.Background(), entry)
 	if evt.Type == event.TypeAgentOutput {
-		held.endedAt = evt.Key
+		held.endedAt = entry.Key
 		held.rangeOpen = false
 	}
 	if admitsRange(evt) && !held.rangeOpen {
-		held.endedAt = evt.Key
+		held.endedAt = entry.Key
 		held.rangeOpen = true
 	}
 	r.replays[slot] = held

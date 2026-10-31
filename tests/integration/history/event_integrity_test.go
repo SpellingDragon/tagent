@@ -1835,6 +1835,7 @@ func TestEventIntegrityProjection(t *testing.T) {
 	t.Run("fold_product_no_self_trigger", runFoldProductNoSelfTrigger)
 	t.Run("actual_request_assembly", runActualRequestAssembly)
 	t.Run("notice_visible_under_fold", runNoticeVisibleUnderFold)
+	t.Run("range_head_survives_fold_rewrite", runRangeHeadSurvivesFoldRewrite)
 }
 
 // runSmallWindowFoldAndRestore is the positive anchor of the projection fold.
@@ -3570,6 +3571,74 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 	if !containsMessage(request.Messages, material, model.RoleUser) {
 		t.Fatalf("the request of the notice range = %+v, want the notice identity and its material %q; the notice fact is in the chain, so the loss is the visibility the rewrite left, not the ledger",
 			request.Messages, material)
+	}
+}
+
+// runRangeHeadSurvivesFoldRewrite pins that the ended boundary of the range in
+// flight is an identity, never a position: the age fold rewrites the sequence
+// the commits record, so a stored position names other material or falls past
+// the shortened sequence — the request of that range then presents the notice
+// that opened it a second time as ended material beside the transcript.
+// - the notice that opens the range lands, then a fold rewrites the sequence under it
+// - the request of that range reads the notice material exactly once
+func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	provider := &replayModel{name: "model-a"}
+	run, addr := newFoldWindowRun(t, ctx, provider)
+	for turn := 0; turn < 3; turn++ {
+		commitProjectionTurn(t, ctx, run, addr, turn)
+	}
+
+	const (
+		invocation = event.InvocationID("inv-range-head-under-fold")
+		taskID     = event.TaskID("task-77")
+		material   = "tagent: task task-77 settled\nresult:\nthe fold-rewritten head worker reports 91"
+	)
+	notice := task.Notice{TaskID: taskID, Kind: task.NoticeSettled}
+	before := len(projectionEntriesOf(t, run, addr.SessionID))
+	if _, err := run.CommitToSession(ctx, addr, event.Event{
+		Key:       agent.NoticeFactKey(invocation, notice),
+		Type:      event.TypeFeedback,
+		Timestamp: projectionBase.Add(time.Hour),
+		Meta: map[string]string{
+			event.MetaKeyTriggerSource: "task",
+			event.MetaKeyEventSummary:  string(task.NoticeSettled),
+			event.MetaKeyNoticeKind:    string(task.NoticeSettled),
+			event.MetaKeyTaskID:        string(taskID),
+		},
+		Message:      model.Message{Role: model.RoleUser, Content: material},
+		InvocationID: invocation,
+		TaskID:       taskID,
+	}); err != nil {
+		t.Fatalf("commit the notice: %v", err)
+	}
+	after := projectionEntriesOf(t, run, addr.SessionID)
+	if len(after) >= before {
+		t.Fatalf("the notice commit folded nothing (entries before=%d after=%d), so the sequence the boundary was measured on still stands", before, len(after))
+	}
+
+	if _, err := run.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID:  invocation,
+		Address:       addr,
+		TriggerSource: "task",
+	}); err != nil {
+		t.Fatalf("drive the notice range: %v", err)
+	}
+	requests := provider.recorded()
+	if len(requests) == 0 {
+		t.Fatal("the notice range drove no model request")
+	}
+	copies := 0
+	for _, msg := range requests[len(requests)-1].Messages {
+		if strings.Contains(msg.Content, "task-77 settled") {
+			copies++
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("copies of the range-opening notice in its own request = %d, want exactly 1: "+
+			"a position boundary the fold rewrote presents the notice a second time as ended material (request = %+v)",
+			copies, requests[len(requests)-1].Messages)
 	}
 }
 

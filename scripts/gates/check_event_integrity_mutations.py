@@ -146,19 +146,29 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # The injected defect is unchanged — the notice material re-enters
             # the follow-up range as a second input fact beside its notice fact.
             old=(
-                "\tturn, err := h.driveLocked(ctx, InvokeRequest{\n"
-                "\t\tInvocationID:  invocationID,\n"
-                "\t\tAddress:       addr,\n"
-                "\t\tTriggerSource: \"task\",\n"
-                "\t})\n"
+                "\t\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
+                "\t\tif err != nil {\n"
+                "\t\t\treturn err\n"
+                "\t\t}\n"
+                "\t\tconsumer := consumers.Ensure(addr)\n"
             ),
             new=(
-                "\tturn, err := h.driveLocked(ctx, InvokeRequest{\n"
-                "\t\tInvocationID:  invocationID,\n"
-                "\t\tAddress:       addr,\n"
-                "\t\tTriggerSource: \"task\",\n"
-                "\t\tInput:         []model.Message{{Role: model.RoleUser, Content: material}},\n"
-                "\t})\n"
+                "\t\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
+                "\t\tif err != nil {\n"
+                "\t\t\treturn err\n"
+                "\t\t}\n"
+                "\t\tif extra := strings.TrimSpace(fact.Message.Content); extra != \"\" {\n"
+                "\t\t\t_, _ = h.run.commitOnly(ctx, addr, event.Event{\n"
+                "\t\t\t\tType:         event.TypeExternalInput,\n"
+                "\t\t\t\tTimestamp:    time.Now(),\n"
+                "\t\t\t\tMessage:      model.Message{Role: model.RoleUser, Content: extra},\n"
+                "\t\t\t\tOwner:        addr,\n"
+                "\t\t\t\tSource:       addr,\n"
+                "\t\t\t\tTarget:       addr,\n"
+                "\t\t\t\tInvocationID: noticeInvocation(task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}),\n"
+                "\t\t\t})\n"
+                "\t\t}\n"
+                "\t\tconsumer := consumers.Ensure(addr)\n"
             ),
         ),
         test_package="./tests/integration/host",
@@ -416,7 +426,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 "\t// or falls past the shortened sequence and silently moves the in-flight\n"
                 "\t// notice into the budgeted prefix. An empty identity names a chain with no\n"
                 "\t// range in flight, so every entry is ended material.\n"
-                "\tendedAt         event.EventID\n"
+                "\tendedAt event.EventID\n"
             ),
             new="\tended           int\n",
         ),
@@ -426,10 +436,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 old=(
                     "// endedPrefix reports the position the ended material of the registered sequence\n"
                     "// ends at, resolved against the sequence as it stands now: the position of the\n"
-                    "// entry the boundary names by identity. A boundary naming no entry — a chain\n"
-                    "// that admitted no range yet, or one whose opening entry a fold has already\n"
-                    "// consumed — reports the end of the sequence, so every entry is ended material\n"
-                    "// and none of the range in flight is presented twice.\n"
+                    "// entry the boundary names by identity — inclusive for the agent_output that\n"
+                    "// closed a segment (its answer is ended material the next segment presents),\n"
+                    "// exclusive for the input that opened the next range (it belongs to that range\n"
+                    "// and the drive or loop of it carries it). A boundary naming no entry — a\n"
+                    "// chain that admitted no range yet, or one whose opening entry a fold has\n"
+                    "// already consumed — reports the end of the sequence, so every entry is ended\n"
+                    "// material and none of the range in flight is presented twice.\n"
                     "func (h replayEntry) endedPrefix() int {\n"
                     "\tif h.projection == nil {\n"
                     "\t\treturn 0\n"
@@ -439,6 +452,9 @@ MUTATIONS: Tuple[Mutation, ...] = (
                     "\t}\n"
                     "\tfor at, entry := range h.projection.Entries() {\n"
                     "\t\tif entry.Key == h.endedAt {\n"
+                    "\t\t\tif entry.Type == event.TypeAgentOutput {\n"
+                    "\t\t\t\treturn at + 1\n"
+                    "\t\t\t}\n"
                     "\t\t\treturn at\n"
                     "\t\t}\n"
                     "\t}\n"
@@ -477,15 +493,25 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 file="assembly/facts.go",
                 old=(
                     "\theld.projection.Append(context.Background(), entry)\n"
-                    "\tif admitsRange(evt) && held.rangeInvocation != evt.InvocationID {\n"
-                    "\t\theld.endedAt = evt.Key\n"
+                    "\tif evt.Type == event.TypeAgentOutput {\n"
+                    "\t\theld.endedAt = entry.Key\n"
+                    "\t\theld.rangeOpen = false\n"
+                    "\t}\n"
+                    "\tif admitsRange(evt) && !held.rangeOpen {\n"
+                    "\t\theld.endedAt = entry.Key\n"
+                    "\t\theld.rangeOpen = true\n"
                     "\t}\n"
                 ),
                 new=(
                     "\tposition := held.projection.Len()\n"
                     "\theld.projection.Append(context.Background(), entry)\n"
-                    "\tif admitsRange(evt) && held.rangeInvocation != evt.InvocationID {\n"
+                    "\tif evt.Type == event.TypeAgentOutput {\n"
                     "\t\theld.ended = position\n"
+                    "\t\theld.rangeOpen = false\n"
+                    "\t}\n"
+                    "\tif admitsRange(evt) && !held.rangeOpen {\n"
+                    "\t\theld.ended = position\n"
+                    "\t\theld.rangeOpen = true\n"
                     "\t}\n"
                 ),
             ),
@@ -518,22 +544,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
             "restore anchor TestEventIntegrityProjection/restart_restores_fold_form"
         ),
         description=(
-            "Restore the replay of the chain flat: seedReplay registers the raw mapped "
-            "sequence without re-folding it at the commit boundaries the chain recorded, "
-            "so a restart presents material the fold had already consumed and the fold "
-            "rule mints a second set of products over it instead of restoring the form "
-            "the process left."
+            "Restore the replay of the chain without its fold products: seedReplay "
+            "skips rebuilding the synthetic entries the committed compress.product "
+            "facts carry, so a restart presents the material those products had "
+            "already covered as raw detail instead of the folded form the process "
+            "left."
         ),
         replacement=Replacement(
             file="assembly/run.go",
             old=(
-                "\t\tseed.projection.Append(ctx, entry)\n"
-                "\t\tif err := restoreFoldForm(ctx, seed.projection, seed.window); err != nil {\n"
-                "\t\t\treturn err\n"
-                "\t\t}\n"
+                "\t\tseed := seeds[addr]\n"
+                "\t\tseed.projection.RestoreProducts(products[addr])\n"
             ),
             new=(
-                "\t\tseed.projection.Append(ctx, entry)\n"
+                "\t\tseed := seeds[addr]\n"
+                "\t\t_ = products[addr]\n"
             ),
         ),
         test_package="./tests/integration/history",

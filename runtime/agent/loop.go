@@ -338,7 +338,10 @@ func (l *Loop) inflightInput(inv Invocation) []model.Message {
 	var adopted []event.Event
 	for at := closed + 1; at < len(facts); at++ {
 		evt := facts[at]
-		if evt.Key == "" || ready[evt.Key] || !startsRange(evt) {
+		// Only the entry input is adopted here: a notice fact is the material
+		// the notice read (terminalNotes) already carries, and adopting it too
+		// would present one notification to the decision twice.
+		if evt.Key == "" || ready[evt.Key] || evt.Type != event.TypeExternalInput {
 			continue
 		}
 		adopted = append(adopted, evt)
