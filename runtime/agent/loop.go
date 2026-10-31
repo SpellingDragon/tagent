@@ -309,10 +309,13 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 }
 
 // inflightInput reads the input a session chain carries past the range that
-// last closed — the facts a writer beside this drive committed after the last
-// agent_output fact, in commit order. A resident consumption loop pulls such a
-// fact into the segment it flies; the direct drive, which flies none, adopts it
-// here so a cross-session delivery landing on an idle session reaches the next
+// last closed — the entry input a writer beside this drive committed after the
+// last agent_output fact, in commit order. Only the entry input is adopted: a
+// notice fact is the material the notice read (terminalNotes) already carries,
+// and adopting it too would present one notification to the decision twice. A
+// resident consumption loop pulls such a fact into the segment it flies; the
+// direct drive, which flies none, adopts it here so a cross-session delivery
+// landing on an idle session reaches the next
 // request instead of standing between the ended prefix that stops at the
 // closed range and the ready input that names this invocation. The ready input
 // of the drive is already carried by its caller and stays out of the read, and
@@ -338,9 +341,6 @@ func (l *Loop) inflightInput(inv Invocation) []model.Message {
 	var adopted []event.Event
 	for at := closed + 1; at < len(facts); at++ {
 		evt := facts[at]
-		// Only the entry input is adopted here: a notice fact is the material
-		// the notice read (terminalNotes) already carries, and adopting it too
-		// would present one notification to the decision twice.
 		if evt.Key == "" || ready[evt.Key] || evt.Type != event.TypeExternalInput {
 			continue
 		}
