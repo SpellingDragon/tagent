@@ -3,8 +3,7 @@
 > 本文件只编排：进度账目 + 波次 + 收尾 F 任务。孙任务与验收命令在二级域的
 > tasks.md；派发唯一依据是 ORCHESTRATION.md。
 
-> 启动门：`event-driven-consumption`（PR #33 线）已落地 next 并归档——attention
-> 动 notice/settle 面，代码基线必须含消费循环语义，否则本计划文件清单即漂移。
+> 启动门（2026-11-01 用户改判）：并行推进、完成后一并合并——attention 的实施基线 = 含 PR #33 内容的合并线（oom-storm-fuse-and-consumer-loops + 本计划），两条线在同一分支汇合后一次推送、一次 CI；不再等待 PR #33 的 CI 先行变绿。
 
 > 波次语义：波次仅是汇报分组，不是栅栏；解锁 = 前置域入 next。
 

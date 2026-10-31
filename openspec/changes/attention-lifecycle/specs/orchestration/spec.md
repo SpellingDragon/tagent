@@ -10,9 +10,10 @@ approval-attention、attention-clearance）。
 
 ### Requirement: 启动门未过不得派发
 
-编排者在启动门（`event-driven-consumption` 变更已归档于 next）核实通过前，
-SHALL NOT 派发任何二级域实施单；门未过时的唯一动作是把门的状态写入
-ORCHESTRATION.md 台账。
+编排者在启动门（用户裁定：attention 与 PR #33 并行推进、在同一分支汇合后
+一并合并；实施基线 = 含 PR #33 内容的合并线）核实通过前，SHALL NOT 派发
+任何二级域实施单；门未过时的唯一动作是把门的状态写入 ORCHESTRATION.md
+台账。
 
 #### Scenario: 门未过时派发被拒
 
