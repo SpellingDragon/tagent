@@ -38,19 +38,13 @@ These are framework composition directions. External connectors are not all bund
 | Proactive behavior | External inputs, model decisions, tools and reflection inputs | Applications supply sources, rules and authorization; the measured next reflection smoke failed |
 | Persistence | Local recovery, execution-resource observation, durable delivery obligations and receipts | Primarily a trusted, single-machine scope; semantic supervision and distributed deployment require additional work |
 
-**Router–Worker is naturally understood as main–subagent orchestration.** The main agent coordinates interactions; workers execute in separate contexts. Instructions, visible tools and input ownership make that division concrete. Direct thread-to-worker routing is a host/plugin composition point, not a claim that a complete subscription system ships by default.
+**One useful organization is main–subagent orchestration.** The main agent coordinates interactions; child agents execute in separate contexts. Instructions, visible tools and input ownership make that division concrete. Direct topic-to-child-session routing is a host/plugin composition point, not a claim that a complete subscription system ships by default. Public discussions of Super-agents are linked under [References and acknowledgments](#references-and-acknowledgments).
 
 ## Event-driven and composable
 
 Inputs and execution outcomes become traceable facts. Plugins govern calls, contribute environment information, observe facts, shape model-visible views and request compression. Projections and request assembly determine what the model sees; retained originals support later reads.
 
 The six named ports and dependency boundaries are documented in [extensions](docs/EXTENSIONS.md). The public entry points live in `assembly/`; optional governance, reflection, telemetry and training capabilities live under `features/`.
-
-### Learning alongside DeepSeek Harness / DSH
-
-[DSH's architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) uses Cordis plugins, typed events and reversible registrations. Durable session records, live agent events and capability events serve different purposes. [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) composes that host into an application.
-
-tagent is an independent Go implementation built on `trpc-agent-go`. Its durable-fact design and explicit plugin ports provide another practical way to explore these ideas; it does not implement the Cordis plugin protocol.
 
 ## The hard parts of running continuously
 
@@ -92,5 +86,13 @@ Module map: `assembly/` composition and hosts; `api/` contracts; `runtime/` agen
 Pre-release: APIs, configuration and storage formats may change. Current deployments primarily assume a trusted single machine. Local atomic replacement is not a power-loss durability guarantee. See `go.mod` for the upstream fork boundary.
 
 Contributions welcome: new hosts, event sources, tools, recovery scenarios and reproducible evaluations.
+
+## References and acknowledgments
+
+- Thank you to the maintainers and contributors of [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) for the underlying framework and tool ecosystem used by tagent.
+- Thank you to the DeepSeek Harness team for publishing the [Super-agent design article](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg), [DSH architecture documentation](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md) and [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype). They offer valuable public discussions and examples of long-running agents, events and plugin composition.
+- Related exploration: [SpellingDragon/dsh-superagent-prototype](https://github.com/SpellingDragon/dsh-superagent-prototype) is an experimental fork of the upstream prototype. Its `tagent` branch explores call-boundary constraints, recoverable delivery obligations and progressive policy (record → warn → enforce). Execution remains on DSH; the fork does not import tagent's runtime.
+
+tagent is maintained independently. These materials are cited for technical reading and do not imply affiliation, collaboration or endorsement by DeepSeek. Actual dependencies are listed in [go.mod](go.mod).
 
 [Apache-2.0](LICENSE)
