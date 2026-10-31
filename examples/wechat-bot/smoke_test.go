@@ -3330,7 +3330,12 @@ func TestLocalSmokeSymptomAcceptedSilent(t *testing.T) {
 					`{"input":"produce `+marker+`"}`))
 				return true
 			}
-			return false
+			// Every other request stays silent: the settle notice may reach the
+			// model batched with the receipt or alone, and a fallback answer
+			// here would land in the settle-window this anchor watches as a
+			// product failure it is not.
+			fmt.Fprint(w, smokeAnswerBody(""))
+			return true
 		}
 
 		rig.drive(symptomChat, marker+" 后台跑一下这个任务")
