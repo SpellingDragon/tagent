@@ -84,8 +84,8 @@ func TestAttentionClearsApprovalOnAnswer(t *testing.T) {
 
 // TestAttentionClearsNoticeOnWorkEnd pins the work-end symptom anchor: an unconsumed notification is gone once the host's work ends.
 //
-// - the delegated task settles and the notification fires its follow-up turn
-// - the refusal leaves the notification unconsumed when the close begins
+// - the delegated task settles and its notification stands on the chain
+// - the close drains the work to its end without the notification pending
 // - the notice dimension lists the notification nowhere after the drain
 //
 // 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
@@ -128,9 +128,6 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 	if turn := invokeScriptedTurn(t, ctx, host, string(addr.SessionID)); turn.Terminal != model.KindCompleted {
 		t.Fatalf("the entry turn terminal = %v, want the turn to close after its delegation", turn.Terminal)
 	}
-	waitForSettle(t, "the refused follow-up turn to reach its model", func() bool {
-		return len(provider.servedModels()) >= 4
-	})
 	waitForSettle(t, "the notice material to land on the chain", func() bool {
 		for _, fact := range host.Run().SessionFacts(addr) {
 			if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyTriggerSource] == "task" {

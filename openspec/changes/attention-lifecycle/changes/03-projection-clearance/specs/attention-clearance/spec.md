@@ -38,9 +38,11 @@ SHALL 同步撤下；清除 SHALL 只作用于在场读数，MUST NOT 删除任�
 
 ### Requirement: 工作结束清除写死
 
-宿主 `Close` 排空成功后 SHALL 为全部未决 attention 落 clearance=work-end 事实，
-读面随即全部清空；排空失败或未排空 MUST NOT 清除；清除后重启读回 SHALL 保持
-清空态。
+宿主 `Close` 排空成功后 SHALL 为全部在场的 question（链上事实存在者）落
+clearance=work-end 事实，读面随即清空；排空失败或未排空 MUST NOT 清除；
+清除后重启读回 SHALL 保持清空态。notice 与 summary 的在场是读时推导
+（自通知状态与投递事实），MUST NOT 为推导在场补造 question/clearance 假对，
+其清除由读面判定：过期读侧判、工作结束由排空后的状态推导。
 
 #### Scenario: 症状锚——无人消费的通知在工作结束不再挂着
 
@@ -68,12 +70,13 @@ notice 四元组、settle 驱动与段语义 MUST NOT 改动；已被段消费�
 ### Requirement: 反思投递按 summary kind 接入
 
 `deliver_summary` 投递 SHALL 产生一条 kind=summary 的在场记录（投递路径
-`CommitToSession` 不动）；目标会话下一轮请求读到该摘要 SHALL 即视为消费并清除
-在场；未被读到的摘要 SHALL 在工作结束清除中清场。
+`CommitToSession` 不动，在场为读时推导）；目标会话产出下一轮输出 SHALL 即视为
+该摘要已被读到并清除在场（design 回退条款的宽清除点）；未被读到的摘要 SHALL
+在读面随工作结束退出在场。
 
 #### Scenario: 读到即清
 
-- **WHEN** 一条摘要投递后目标会话的下一轮请求组装读到它
+- **WHEN** 一条摘要投递后目标会话产出下一轮输出
 - **THEN** 该 summary 的在场记录 SHALL 被清除，且链上投递事实俱在
 
 #### Scenario: 未读到则随工作结束清
