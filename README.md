@@ -1,190 +1,136 @@
-# tagent
+# tagent — 让 Agent 持续推进工作
 
-事件驱动的 agent 运行时：一切状态皆链上事实，一切行为皆事件响应。Go 单仓（`github.com/SpellingDragon/tagent`）；宿主示例（微信 bot 与 CLI host）位于独立 module。
+**A Go AI agent framework for Super-agent systems: event-driven, composable, and built for recoverable work.**
 
-## 30 秒看懂
+简体中文 | [English](README.en.md)
 
-- **问题**：长会话 Agent 上下文膨胀、崩溃失忆、外部副作用重复、结果发送途中崩溃永久漏送。
-- **做法**：事件链唯一事实源；三龄段折叠 + `[evt_key]` 票据；tmux 重启重挂；**先交接后销账**的交付义务（崩溃后已生成结果必达，容忍恰一次重投）；责任统一在 task（受理/结算/清偿），执行细节留给适配器；事件完整性门禁。
+tagent 是一个事件驱动的 **Go Agent 框架**。用它组合主 Agent 与子 Agent、工具、记忆、治理和宿主，把一次请求扩展为能够跟进后续信息、回流后台结果、跨进程重启继续处理责任的系统。底层基于 `trpc-agent-go`；WeChat bot 和 CLI 是两个宿主示例。
 
-一分钟版本（问题、架构图、三个关键机制、测试证据、边界）见 [docs/PROJECT.md](docs/PROJECT.md)；十分钟机制导览见 [docs/wiki/mechanism-tour.md](docs/wiki/mechanism-tour.md)。
+[零凭据运行](#一分钟运行) · [为什么是-super-agent-实践](#为什么是-super-agent-实践) · [架构](#事件驱动与插件架构) · [实测数据](docs/SMOKE-RESULTS.md) · [机制导览](docs/wiki/mechanism-tour.md) · [贡献](CONTRIBUTING.md)
 
-## 目录地图
+## 可以用它构建什么
 
-模块根只有目录没有 Go 源——每个顶层目录一个职责：
-
-| 目录 | 职责 |
-|---|---|
-| `assembly/` | **组合根**：宿主装配与会话运行面（`assembly.Boot`/`assembly.Assemble` 的家；host 驱动/交付账本/文档装配/HTTP face 都在此按域分文件） |
-| `api/` | 跨包契约：事件类型、config 解码、六端口插件接口 |
-| `runtime/` | 执行核心：agent 循环（`runtime/agent`）与 task 责任层（`runtime/task`）——零训练形态、零 features 依赖 |
-| `memory/` | 链与投影：事件体、折叠、检索、query 投影 |
-| `tool/` | 执行适配器：exec（tmux）、subagent 委派、recall |
-| `features/` | 可选能力域：evolution（治理/冥想）、rl（轨迹/训练）、telemetry |
-| `cli/`、`examples/`、`tests/`、`golden/`、`scripts/` | 命令行、宿主示例（独立 module）、集成测试、契约黄金集、门禁脚本 |
-
-包边与依赖方向的权威表见 [docs/wiki/README.md](docs/wiki/README.md)。
-
-## 核心设计：三个挂点，一条链
-
-| 挂点 | 语义 | 谁在用 |
+| 你想构建的系统 | 怎样组织工作 | 需要接入什么 |
 |---|---|---|
-| **事件 x**（生产） | 不可变事实落链，带来源戳 | 渠道输入、工具调用、通知、冥想注入、模型替换、压缩请求 |
-| **插件 f(x)**（管线） | 请求路径上的可追溯映射 | 治理门（调用前判定）、呈现器、观测器 |
-| **消费 g(x)**（读链） | 一消费多事件，增量读 | 装配器、召回工具、冥想观察面、反思计时、训练导出 |
+| **研发协作助手** | 主 Agent 接待与协调，子 Agent 分别排查、评审、执行工具并回流结果 | 按需接入 Issue、PR、CI 等事件源与交付接口 |
+| **个人或团队工作助手** | 持续跟进讨论与任务，保存背景，在需要时形成交付 | 你使用的消息、邮件、日程或业务系统 |
+| **研究与知识工作流** | 分开检索、分析、核验和写作，按引用找回历史与原文 | 检索工具、MCP、知识源与产物出口 |
+| **运维与长程自动化** | 启动外部工作，观察结果，在重启后继续未清责任 | 命令执行环境、事件观察和外部进程监督 |
+| **Agent 实验与训练数据底座** | 固定实际模型请求、记录调用与结果，导出可追溯轨迹 | 你的评测、样本筛选与训练流程 |
 
-链是唯一真相：车道与投影都是缓存，崩溃后从链精确重建。
+这些是框架的组合方向；表中的外部平台连接器并不全部随仓库提供。可以嵌入自己的 Go 应用、实现新的宿主或插件。现成入口见 [CLI host](examples/cli-host/) 与 [WeChat bot](examples/wechat-bot/)。
 
-### 请求布局与可见面
+## 一分钟运行
 
-一次模型请求由三段构成：**稳定前缀**（声明的 prompt 一条 system、声明的技能正文一条 system、压缩摘要作 user 级注记）、**transcript**、**动态段**（运行时加载的技能正文加 `## Environment` 块，一条 system，是最后一条消息）。稳定内容前置、可变内容收尾——服务端前缀缓存只为末段失效。工具定义走 `Request.Tools`，顺序由 `ToolOrder` 表达（发布代工具在前，运行期后加载工具在后）。
+需要 Go 1.24.1+。先运行无凭据、无外部模型请求的最小宿主：
 
-agent 可见的工具、MCP 与技能是配置面的子集，默认等于配置全集；`Run.NarrowFace` 在运行期收窄（`nil` 名单=全集，空名单=该类什么都不给），变更在下一请求边界生效且不重发布绑定。请求的工具表、`ToolOrder`、环境块三行、技能正文与 capture 视图同读这一面：模型读到的名字都可调用，读到的正文都在清单里。
+```bash
+git clone https://github.com/SpellingDragon/tagent.git
+cd tagent/examples/cli-host
+go run . -c "hello"
+# mock reply: hello
+```
 
-### 事实提交后的统一分派
+这条路径使用真实公共装配和 Agent 调用链，只把模型替换成本地 mock。切换真实模型、交互式输入和持久档，见 [CLI host 指南](examples/cli-host/README.md)。需要完整工具与渠道装配时，参考 [WeChat 示例配置](examples/wechat-bot/tagent.yaml)，再按自己的场景组合。
 
-响应事实提交的行为只有一个形态——`PostCommitObserver` 插件入流，装配处可见、独立文件、零埋点：
+## 为什么是 Super-agent 实践
+
+一个助手同时处理多项工作时，用户不应该负责记住每个内部会话、搬运背景和追问遗漏的结果。tagent 提供了把这些系统职责落到代码中的基础：
+
+| Super-agent 思想 | tagent 的实践 | 当前边界 |
+|---|---|---|
+| **连续**：工作与上下文能接续 | 显式会话归属、主从委派、持久事实、事件投影、原文续读与关系召回 | 跨渠道／话题的业务归属由宿主与插件接线 |
+| **高效**：后台工作和交互分工 | 异步任务受理、子 Agent 执行、终态结果回流 | 同会话慢工具期间继续响应、跨来源合批仍在 next 收敛；不能等同于已完整实现全双工 |
+| **主动**：环境信息可以激活工作 | 输入扩展、模型判断、工具与子 Agent；反思是另一类输入来源 | 事件源、行动规则与授权由应用组合；反思在本次 next 长冒烟中未通过 |
+| **持久**：中断后仍能继续 | 本地事实恢复、执行资源观察、持久交付责任与回执、示例中的外部维护脚本 | 当前主要验证单机可信环境；语义 Watchdog、分布式部署需要另行实现与验证 |
+
+**Router–Worker 可以自然理解为 main–subagent。** 主 Agent 负责交互与协调，子 Agent 在独立上下文执行具体工作。提示词、工具面和输入归属共同落实分工。已知话题直达原有子会话，可以在宿主／插件中实现；这不等同于默认已经提供完整的 Thread 订阅系统。
+
+## 事件驱动与插件架构
 
 ```mermaid
 flowchart TB
-    UI["宿主渠道<br/>(微信 / CLI / HTTP)"] -->|"用户消息"| BOOT["assembly.Boot<br/>配置一条路装配"]
-    BOOT --> CHAIN[("会话链<br/>不可变事实")]
-
-    subgraph PIPE["pipeline.After —— 事实提交分派"]
-        direction LR
-        OBS["CommitObserver<br/>观测记录"]
-        MED["meditation.Driver<br/>反思计时"]
-        FOLD["AgeFoldPlugin<br/>三龄段压缩"]
-        LEASE["LeaseObserver<br/>模型热换"]
-        SETTLE["SettleDriver<br/>终结通知转轮"]
-    end
-
-    CHAIN --> PIPE
-    MED -->|"水位成熟"| REFLECT["反思回合<br/>独立会话"]
-    REFLECT -->|"deliver_summary<br/>模型显式决策"| CHAIN
-    LEASE -->|"replacement 事实"| SWAP["lease 换版本<br/>在途请求不换"]
-    FOLD -->|"体积超阈"| PROJ[("投影折叠<br/>中段/老段")]
-
-    subgraph READ["消费面 —— 增量读链"]
-        direction LR
-        ASM["装配器<br/>预算降级呈现"]
-        RCL["recall 工具<br/>语义检索"]
-        EXP["ChainExporter<br/>SFT 样本"]
-    end
-    CHAIN --> READ
-    PROJ --> ASM
-
-    classDef fact fill:#e8f4f8,stroke:#2196f3
-    classDef plugin fill:#fff3e0,stroke:#ff9800
-    classDef consumer fill:#e8f5e9,stroke:#4caf50
-    class CHAIN,PROJ fact
-    class OBS,MED,FOLD,LEASE,SETTLE,REFLECT,SWAP plugin
-    class ASM,RCL,EXP consumer
+    IN["你的应用：消息、业务事件、HTTP、CLI"] --> HOST["Host 与输入适配"]
+    HOST --> MAIN["主 Agent：交互与协调"]
+    MAIN --> SUB["子 Agent：独立执行"]
+    SUB --> TOOLS["工具、MCP 与执行环境"]
+    SUB -->|"终态结果回流"| MAIN
+    MAIN --> SEND["宿主交付与回执"]
+    HOST --> FACT[("不可变事实与责任")]
+    MAIN --> FACT
+    SUB --> FACT
+    FACT --> READ["投影、压缩与按需召回"]
+    READ --> MAIN
+    FACT --> PLUG["观察、治理、环境等插件"]
 ```
 
-## 会话上下文：滚动边界＋三龄段折叠
+三个基本动作：**生产事件、通过插件处理、按需消费事实**。历史原文保留在事实层；投影与请求呈现负责给模型恰当的信息。工具完成、任务结算、记忆整理与训练导出可以围绕同一组可追溯记录组合。
 
-当前回合走 transcript（in-flight），新输入到达即成为历史（ended）由投影接管。投影体积达窗口阈值时自动折叠——过程细节塌缩、历史摘要置顶，原文永在链上可回捞：
+扩展使用六个具名端口：调用转换、调用治理、请求环境、事实观察、事实呈现、压缩判定。执行核心与 `features/` 的治理、反思、遥测和训练能力域保持依赖边界。[扩展契约](docs/EXTENSIONS.md) · [术语](docs/GLOSSARY.md)
 
-```mermaid
-flowchart LR
-    subgraph NEW["新段（窗口内）"]
-        T["transcript 原文"]
-    end
-    subgraph MID["中段产物"]
-        F["过程细节折叠<br/>(thinking/工具调用→一条)"]
-    end
-    subgraph OLD["老段摘要"]
-        H["历史摘要一条<br/>装配时置顶"]
-    end
-    T -->|"段龄出窗<br/>体积超阈"| F -->|"再折叠"| H
-    H --> ASM2["装配呈现<br/>Full→Ticket→Summary"]
-    F --> ASM2
-    T --> ASM2
+### 与 DeepSeek Harness / DSH 的设计联系
 
-    classDef band fill:#f3e5f5,stroke:#9c27b0
-    classDef out fill:#e8f5e9,stroke:#4caf50
-    class T,F,H band
-    class ASM2 out
-```
+[DeepSeek Harness 架构](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)展示了事件与插件怎样支撑 Agent：Cordis 插件贡献服务、类型化事件和可撤销注册，模型、工具、会话日志与循环本身也由插件组合。其持久 Session 事件、运行中的 Agent 事件和能力扩展事件各有职责。
 
-## 成功语义：先交接后销账
+tagent 是独立的 Go 实现：以事实、投影和具名插件端口组合能力，底层使用 `trpc-agent-go`。这条设计线索与 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)的应用组织可以一起学习：
 
-持久化交付承诺一条路径贯穿到底——**已生成的结果不因崩溃而漏送**：
-
-- 结果正文在发送前先以 `owed` 义务落入持久账本（`delivery-fresh-<factKey>` 身份贯穿登记/补交接/恢复三面）；发送成功、回执落盘才销账。
-- 崩溃窗口任何一点重启：账本非空 → 恢复补投（发送后崩溃容忍恰一次重投，回执落地是阻止再次投递的唯一凭据）。
-- 状态提交全部 checked：持久化成功才发布内存态，失败具名返回（`RefuseDelivery`/`ApproveDelivery`/hold/restore 六点同形）。
-- 只有入口地址的正文登记交付义务；headless 地址的结果具名销账（`headless`），重启不会被误推渠道。
-
-## 责任模型：统一停在责任
-
-task 层只回答四个问题——接受了什么工作？谁负责推进到明确结果？结果交给谁？哪一步仍未确认？tmux 退出判定、子 Agent 结束、远程恢复留给执行适配器。验收锚钉死：**接入一个新工具，适配器只需提供执行、取消及恢复证据，宿主零补偿代码、核心零新生命周期状态**（`TestNewToolAdapterNeedsNoHostCompensation`）。
-
-配套纪律：
-
-- 独立写权状态过反事实检验——「删掉后能否从已有记录无歧义算回来」能则删写权改派生（progress 是事实不是状态位）；
-- 执行核心零训练形态——`runtime/` 不 import `features/*`，episode/decision 组织在训练侧，实际模型输入调用时固定（Capture）；
-- 插件扩展是六个具名端口（call→call / call→ruling / request→environment / fact→observation / fact→view / fact→compression），无组合词汇，见 [docs/EXTENSIONS.md](docs/EXTENSIONS.md)。
-
-## 能力矩阵
-
-| 能力 | 机制 | 配置面 |
+| 层次 | 关注什么 | 在 tagent 中看哪里 |
 |---|---|---|
-| **turnkey 装配** | `assembly.Boot(config)`——providers/工具面/存储/冥想/注入面一条路 | 宿主只填 Sender/Approver 端口 |
-| **热更新三档** | `/reload`：模型/提示词走新代发布；工具/存储/资源所有权变更具名拒绝要求重启（`ErrHostReloadRestartRequired`）；同指纹一次发布不开新代 | 改 yaml 不重启（一档内） |
-| **上下文压缩** | 三龄段折叠（AgeFoldPlugin）＋预算降级两道防线 | `max_tokens`＋`compress_threshold`(0.8)＋`keep_recent_tasks`(2)，缺省全默认 |
-| **冥想反思** | 事件驱动计时＋水位门＋防循环闭表（自产戳不触发） | `meditation:` 段，deliver_to 白名单 |
-| **语义召回** | embedding 混合检索＋按 key 回捞＋血统追踪 | `memory.engine:` 段 |
-| **治理审批** | 调用门（风险分级/审批 Hold/TTL）＋发布门 | `governance:` 段，critical 恒审批 |
-| **投递审核** | 发送插件唯一出口，投递前交审核（内容/血统/目标）；hold 批准补投、拒绝留审计 | DeliveryRuler，默认 allow |
-| **委派** | 声明面子 agent＋`call_subagent` 运行时组装＋settle 通知回合回传结果（受理回执=裸 `ok`） | agent 引用＋显式源 |
-| **per-agent 调优** | 思考开关/强度/温度/看门狗轮数各自独立 | 各 agent 段内声明 |
-| **命令执行** | tmux Executor＋三态监控；中间态仅落审计事实（`exec-state:`），不进模型 | `{ kind: tool, id: exec }` |
-| **审批闭环** | critical 自动 Hold→登记审批簿→微信下发→批准放行；声明式风险规则 | `governance.risk_rules` |
-| **技能正文** | skill_load 后正文经系统段进下一轮请求 | `skill_dirs` |
-| **训练数据** | Capture 轨迹（执行证据单点，含委派 worker 全入册）＋ChainExporter 导出 | 默认记录，零配置 |
-| **看门狗收口** | final_round：轮数/时长到限强制收尾轮 | 各 agent 自设，缺省无界 |
-| **可观测** | `GET /metrics`（Prometheus 计数）＋`telemetry.otel_enabled` OTel 开关 | `telemetry:` 段 |
+| 运行底座 | 输入、工具结果、持久记录和模型上下文怎样连接 | `runtime/`、`memory/` |
+| 可组合能力 | 治理、环境信息、观察与呈现怎样扩展 | `api/plugin/`、`features/` |
+| Super-agent 应用 | 主从分工、环境接入、主动策略和渠道交付 | `assembly/`、自定义宿主与插件 |
 
-## 快速开始
+DSH 的 Everything-is-a-Plugin 与 tagent 的具名端口不是相同插件协议；框架与应用之间的职责划分，为理解二者提供了共同入口。
 
-需要 Go 1.24.1+。
+## 长期运行，真正难在哪里
 
-```bash
-go build ./...                          # 构建全部包
-go test ./tests/integration/...         # 集成/契约测试
-bash scripts/lint.sh                    # 仓库门禁
-bash scripts/preflight.sh               # 提交前全量预检（lint+golden+双模块测试+冒烟+事件门三档）
-```
-
-事件完整性门（每 MR 三档：`event-integrity-short` 十次独立、`event-integrity-long` 六组合 7200 输入/720 重启、`event-integrity-mutations` 冻结变异）与 `event-integrity-required` 汇总**已落地且远端必跑**；症状锚（受理静默/完成恰一条/失败告知/exec 静默/无 send/投递 hold）走 `event-semantics-symptoms`。判据与 L1/L2/L3 边界见 [`docs/OPERATION.md`](docs/OPERATION.md#event-gates)。
-
-**本地冒烟**（全 mock 资源，纯 CPU/IO——1,142 回合/s）：
-
-```bash
-cd examples/wechat-bot
-go test -tags smoke ./... -run TestLocalSmoke -count=1 -timeout 30m -v
-go test -tags smoke -bench Benchmark -benchtime 30x -run '^$' ./...
-```
-
-## 文档导航
-
-| 入口 | 内容 |
+| 遇到的问题 | tagent 中的机制与取舍 |
 |---|---|
-| [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | **学习入口**：术语一行一对照 |
-| [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) | **扩展面**：六端口与扩展模块的边界与契约 |
-| [`docs/OPERATION.md`](docs/OPERATION.md) | **运维/门禁**：观测/工具链/风险面/事件门 |
-| [`docs/api/index.md`](docs/api/index.md) | **API 权威**：源码注释生成（改注释后 `bash scripts/gates/gen_godoc.sh` 重生成，禁止手改） |
-| [`docs/wiki/README.md`](docs/wiki/README.md) | 16 篇活契约页（随代码走）+ 历史档案（historical-verbatim） |
-| [`openspec/changes/archive/`](openspec/changes/archive/) | 实施台账 |
+| 工具受理了，结果却没有回到后续处理 | 区分受理、任务终态、通知投递与消费；结果走正式回流路径 |
+| 后台执行仍拖住新消息，输入被每次调用边界拆开 | next 正在收敛到每会话持续消费；相关红锚公开保留 |
+| 历史越来越长，压缩后又需要查原文 | 三龄段折叠、Full／Ticket／Summary 预算呈现、`recall_get` 分段续读与 `recall_trace` |
+| 正文已经产生，发送中断后永久漏送 | 发送前记录持久 `owed`，确认后销账，重启补交；存在发送成功但回执未落盘的重复窗口 |
+| 异步工作跨越模型／配置更新 | 发起时绑定与在途执行快照；新发布不改写已借用的执行依据 |
+| 环境输入与反思反复激活，产生无效工作或打扰 | 输入策略、授权范围、反思水位与节奏、调用治理和交付审核；需要运行证据检验 |
+| 进程已死，靠内部逻辑无法自救 | 外部环境监督和恢复信息；进程存活与任务语义进展分别监督 |
 
-## 版本与依赖
+记录实际模型请求与工具结果，也能为评测、排查和训练数据导出提供证据；这不表示框架已实现自动在线权重训练。
 
-- **v0.3.0**，pre-release 姿态（无迁移承诺），见 `CHANGELOG.md`。
-- 配置装载是**严格解码**：未知键拒绝启动（`unknown field`）。
-- `trpc-agent-go` 指向 fork（`replace`，回正条件见 `go.mod` 的 `TODO(upstream)`）。
+## 冒烟与吞吐评估
 
-## 许可证
+**2026-11-01 实测，开发快照 [`21ba86a`](https://github.com/SpellingDragon/tagent/tree/21ba86a371d1c932aec4d49ee49ee9dadaf832a7)。** 以下是示例宿主台架上的框架执行路径开销：本地 scripted HTTP 模型与替身出站，Go 1.24.1、linux/amd64、GOMAXPROCS=2；每项 30 次、重复 3 次，取 `ns/op` 中位数。不是实际 LLM、WeChat 网络吞吐或全部宿主的性能保证。
 
-Apache-2.0，见 [`LICENSE`](LICENSE)。
+| 基准场景 | 中位耗时 | 换算吞吐 |
+|---|---:|---:|
+| 同步回合：模型回答与交付 | 4.091 ms/op | 244.4 回合/s |
+| 委派到终态回流与交付 | 27.053 ms/op | 37.0 次/s |
+| 折叠关闭 | 4.489 ms/op | 222.8 回合/s |
+| 折叠开启 | 3.218 ms/op | 310.8 回合/s |
+| 3 会话并发 | 2.527 ms/op | 395.8 回合/s |
+| 10 会话并发 | 3.857 ms/op | 259.3 回合/s |
+
+**验证状态同样公开：** 该快照构建、CLI mock 与 18 组 benchmark 样本通过；长冒烟走过 300 轮主流程、45 次委派回流、15 次审核、文件／长文及历史折叠断言，但随后在反思阶段等待 2 分钟失败，完整测试为 **FAIL**。不能把部分断言通过记作整套通过。最近查到的真实 provider nightly 中 LLM 与 embedding 均为 **SKIPPED**。
+
+[完整口径、原始基准输出、失败位置与复现命令 →](docs/SMOKE-RESULTS.md)。小样本不用于证明压缩更快或并发线性扩展；历史 README 中缺少同口径证据的 1,142 回合/s 不再作为当前数据展示。
+
+## 深入与贡献
+
+| 入口 | 用途 |
+|---|---|
+| [项目导览](docs/PROJECT.md)、[机制导览](docs/wiki/mechanism-tour.md) | 理解问题、数据流与核心机制 |
+| [扩展契约](docs/EXTENSIONS.md)、[API](docs/api/index.md) | 嵌入框架、实现插件与宿主 |
+| [WeChat 示例](examples/wechat-bot/)、[CLI 示例](examples/cli-host/) | 两种传输与装配形态 |
+| [运行与门禁](docs/OPERATION.md)、[实测报告](docs/SMOKE-RESULTS.md) | 验证、恢复、可观测与当前边界 |
+| [贡献指南](CONTRIBUTING.md)、[变更记录](CHANGELOG.md) | 贡献代码、测试、插件和可复现实验 |
+
+目录：`assembly/` 组合根与宿主；`api/` 跨包契约；`runtime/` Agent 与任务责任；`memory/` 事实与投影；`tool/` 执行适配器；`features/` 可选能力；`examples/` 独立 module 示例。
+
+```bash
+go build ./...
+go test ./tests/integration/... -short -count=1
+# 两个 examples 是独立 Go module，需分别验证；完整门禁见 CONTRIBUTING.md。
+```
+
+项目处于 pre-release，API、配置与存储格式可能变化；当前以单机可信部署为主，本地持久化的原子替换不等于抗掉电保证。依赖 fork 的范围见 `go.mod`。欢迎贡献新的事件源、宿主、恢复场景与诚实的评测结果。
+
+[Apache-2.0](LICENSE)
