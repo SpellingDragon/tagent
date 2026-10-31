@@ -44,7 +44,7 @@ go run . -c "hello"
 | **主动**：环境信息可以激活工作 | 输入扩展、模型判断、工具与子 Agent；反思是另一类输入来源 | 事件源、行动规则与授权由应用组合；反思在本次 next 长冒烟中未通过 |
 | **持久**：中断后仍能继续 | 本地事实恢复、执行资源观察、持久交付责任与回执、示例中的外部维护脚本 | 当前主要验证单机可信环境；语义 Watchdog、分布式部署需要另行实现与验证 |
 
-**Router–Worker 可以自然理解为 main–subagent。** 主 Agent 负责交互与协调，子 Agent 在独立上下文执行具体工作。提示词、工具面和输入归属共同落实分工。已知话题直达原有子会话，可以在宿主／插件中实现；这不等同于默认已经提供完整的 Thread 订阅系统。
+**一种便于理解的组织方式是 main–subagent。** 主 Agent 负责交互与协调，子 Agent 在独立上下文执行具体工作。提示词、工具面和输入归属共同落实分工。已知话题直达原有子会话，可以在宿主／插件中实现；这不等同于默认已经提供完整的话题订阅系统。有关 Super-agent 的公开讨论，参见文末[参考与致谢](#参考与致谢)。
 
 ## 事件驱动与插件架构
 
@@ -67,20 +67,6 @@ flowchart TB
 三个基本动作：**生产事件、通过插件处理、按需消费事实**。历史原文保留在事实层；投影与请求呈现负责给模型恰当的信息。工具完成、任务结算、记忆整理与训练导出可以围绕同一组可追溯记录组合。
 
 扩展使用六个具名端口：调用转换、调用治理、请求环境、事实观察、事实呈现、压缩判定。执行核心与 `features/` 的治理、反思、遥测和训练能力域保持依赖边界。[扩展契约](docs/EXTENSIONS.md) · [术语](docs/GLOSSARY.md)
-
-### 与 DeepSeek Harness / DSH 的设计联系
-
-[DeepSeek Harness 架构](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)展示了事件与插件怎样支撑 Agent：Cordis 插件贡献服务、类型化事件和可撤销注册，模型、工具、会话日志与循环本身也由插件组合。其持久 Session 事件、运行中的 Agent 事件和能力扩展事件各有职责。
-
-tagent 是独立的 Go 实现：以事实、投影和具名插件端口组合能力，底层使用 `trpc-agent-go`。这条设计线索与 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)的应用组织可以一起学习：
-
-| 层次 | 关注什么 | 在 tagent 中看哪里 |
-|---|---|---|
-| 运行底座 | 输入、工具结果、持久记录和模型上下文怎样连接 | `runtime/`、`memory/` |
-| 可组合能力 | 治理、环境信息、观察与呈现怎样扩展 | `api/plugin/`、`features/` |
-| Super-agent 应用 | 主从分工、环境接入、主动策略和渠道交付 | `assembly/`、自定义宿主与插件 |
-
-DSH 的 Everything-is-a-Plugin 与 tagent 的具名端口不是相同插件协议；框架与应用之间的职责划分，为理解二者提供了共同入口。
 
 ## 长期运行，真正难在哪里
 
@@ -132,5 +118,13 @@ go test ./tests/integration/... -short -count=1
 ```
 
 项目处于 pre-release，API、配置与存储格式可能变化；当前以单机可信部署为主，本地持久化的原子替换不等于抗掉电保证。依赖 fork 的范围见 `go.mod`。欢迎贡献新的事件源、宿主、恢复场景与诚实的评测结果。
+
+## 参考与致谢
+
+- 感谢 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) 的维护者与贡献者，为 tagent 提供底层框架与工具生态。
+- 感谢 DeepSeek Harness 团队公开 [Super-agent 设计探索](https://mp.weixin.qq.com/s/zoS7GlReWPhfCjENGxXCdg)、[DSH 架构文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)和 [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype)。这些材料为持续运行的 Agent、事件驱动与插件组合提供了值得学习的讨论和实践。
+- 相关探索：[SpellingDragon/dsh-superagent-prototype](https://github.com/SpellingDragon/dsh-superagent-prototype) 是基于上述上游原型的实验 fork。其 `tagent` 分支尝试将调用边界约束、可恢复交付责任和渐进治理（record → warn → enforce）等实践用于原型；运行仍由 DSH 承担，未移植 tagent 运行时。
+
+tagent 是独立维护的项目，以上引用仅供技术阅读参考，不表示与 DeepSeek 存在隶属、合作或背书关系。实际依赖见 [go.mod](go.mod)。
 
 [Apache-2.0](LICENSE)
