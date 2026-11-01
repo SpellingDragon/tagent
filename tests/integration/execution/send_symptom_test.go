@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // symptomEntryAgent names the material the symptom anchor is written in: one entry agent
@@ -269,10 +270,8 @@ func symptomAwaitSendReceipt(t *testing.T, provider *symptomProvider, window tim
 	t.Helper()
 	deadline := time.Now().Add(window)
 	for {
-		for _, request := range provider.requests() {
-			if receipt, ok := symptomReceipt(request, symptomCallSend); ok {
-				return receipt, true
-			}
+		if receipt, ok := symptomReceipt(provider.requests(), symptomCallSend); ok {
+			return receipt, true
 		}
 		if !time.Now().Before(deadline) {
 			return "", false
@@ -281,21 +280,47 @@ func symptomAwaitSendReceipt(t *testing.T, provider *symptomProvider, window tim
 	}
 }
 
-// symptomReceipt reports the result text the model saw beside one call: the message the
-// call is answered in carries the call identity, and the result text itself follows it.
-func symptomReceipt(request intakeRequest, callID string) (string, bool) {
-	for index, message := range request.Messages {
-		if message.ToolCallID != callID {
-			continue
-		}
-		for _, later := range request.Messages[index+1:] {
-			if later.Role == string(model.RoleUser) {
+// symptomTaskNoticePrefix opens the input material one task notification lands as: the
+// notification names the task and the terminal it settled on, so a message opening with
+// it reports that task rather than answering a call of this transcript.
+const symptomTaskNoticePrefix = "tagent: task "
+
+// symptomReceipt reports the result text the model saw beside one call: the answer the
+// call settled into follows the message that carries the call identity, as the input
+// material the run hands the decision that reads it. Two other messages stand there
+// instead when the answer has not landed yet — the bare admission receipt the call was
+// acknowledged with while its result still runs, and the input material of a task
+// notification that settled in the same chain — and neither answers this call, so a
+// request carrying one of them reports no answer. The answered rendering supersedes the
+// receipt one in every request the run assembles after the result lands, so the newest
+// request carrying the call is read: a call whose answer still runs answers no receipt.
+func symptomReceipt(requests []intakeRequest, callID string) (string, bool) {
+next:
+	for at := len(requests) - 1; at >= 0; at-- {
+		request := requests[at]
+		for index, message := range request.Messages {
+			if message.ToolCallID != callID {
+				continue
+			}
+			if strings.TrimSpace(message.Content) != task.AdmissionReceiptText {
+				return message.Content, true
+			}
+			for _, later := range request.Messages[index+1:] {
+				if later.Role != string(model.RoleUser) || symptomTaskNotice(later.Content) {
+					continue
+				}
 				return later.Content, true
 			}
+			continue next
 		}
-		return message.Content, true
 	}
 	return "", false
+}
+
+// symptomTaskNotice reports whether one message is the input material of a task
+// notification, which reports the task it belongs to rather than the answer of a call.
+func symptomTaskNotice(content string) bool {
+	return strings.HasPrefix(strings.TrimSpace(content), symptomTaskNoticePrefix)
 }
 
 // symptomAwaitReviewerRound waits for a reviewing request that carries the re-entry body

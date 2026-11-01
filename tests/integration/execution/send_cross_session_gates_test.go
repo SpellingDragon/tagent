@@ -228,10 +228,8 @@ func (s *gateScene) awaitMeditationReceipt(t *testing.T, callID string) string {
 	t.Helper()
 	deadline := time.Now().Add(gateWindow)
 	for {
-		for _, request := range s.provider.requests() {
-			if receipt, ok := symptomReceipt(request, callID); ok {
-				return receipt
-			}
+		if receipt, ok := symptomReceipt(s.provider.requests(), callID); ok {
+			return receipt
 		}
 		if !time.Now().Before(deadline) {
 			t.Fatalf("no decision read the result of %q within %s:\n%s", callID, gateWindow, symptomDescribe(s.provider.requests()))

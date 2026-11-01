@@ -303,10 +303,8 @@ func reentryTerminalCount(facts []event.Event, taskID event.TaskID) int {
 func reentryAwaitReceipt(provider *reentryProvider, callID string, window time.Duration) (string, bool) {
 	deadline := time.Now().Add(window)
 	for {
-		for _, request := range provider.requests() {
-			if receipt, ok := symptomReceipt(request, callID); ok {
-				return receipt, true
-			}
+		if receipt, ok := symptomReceipt(provider.requests(), callID); ok {
+			return receipt, true
 		}
 		if !time.Now().Before(deadline) {
 			return "", false
