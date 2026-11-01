@@ -159,7 +159,9 @@ RunFlow 向 outputCh 发送事件时 MUST 设 2s 宽限；超限将事件全文�
 
 同一个 TagentAgent 的 StopLoop SHALL 为终结操作：再次 StartLoop SHALL 显式返回错误，不返回关闭通道，不创建第二个循环。需要重新运行时 SHALL 创建新 agent 并从事实链恢复。重复 Stop/Close SHALL 幂等；Start/Stop/Close 的并发状态转换 MUST 受同一生命周期同步机制保护。每次成功启动的输出通道 SHALL 恰关闭一次，循环异常退出也 SHALL 更新真实 active/terminated 状态。
 
-循环关闭 SHALL 以**真实义务收束**为准：先拒绝新输入、结算已接受义务、轮询真实停止确认；MUST NOT 把 `cancel` 调用或队列取空当作完成。非合作 producer 返回的 `false` MUST NOT 被当作已结束；截止期限到达 SHALL 返回未收束原因（见 02.9）。
+循环关闭 SHALL 以**静止收束（quiesce）**为准：先拒绝新输入（intake 关）、静止到不动点（工作收敛 ∧ 消费收敛 ∧ 写入者停止）；MUST NOT 把 `cancel` 调用或队列取空当作完成。非合作 producer 返回的 `false` MUST NOT 被当作已结束；截止期限到达 SHALL 返回未收束原因（见 02.9），且为 `Cut` 正常返回（非错误）。
+
+判定 SHALL 由事件唤醒驱动（新事实提交／执行体收尾信号），MUST NOT 以定时轮询实现；判定读权威账（`Unsettled()` 同源函数），不得读进程内影子账本。
 
 #### Scenario: Stop 后 Start 的往返
 
@@ -179,17 +181,17 @@ RunFlow 向 outputCh 发送事件时 MUST 设 2s 宽限；超限将事件全文�
 #### Scenario: 先拒新再结算
 
 - **WHEN** 循环开始关闭
-- **THEN** 新输入 SHALL 被拒绝，已接受义务 SHALL 被结算，MUST NOT 在关闭后仍受理新输入
+- **THEN** 新输入 SHALL 被拒绝，已接受义务 SHALL 静止收束，MUST NOT 在关闭后仍受理新输入；derived（关闭期由已有义务派生的回合）仍可被受理
 
 #### Scenario: 非合作 producer false 不伪结束
 
-- **WHEN** 关闭轮询一个非合作 producer，其返回 `false` 表示尚未结束
+- **WHEN** 关闭读一个非合作 producer 的停止确认，其返回 `false` 表示尚未结束
 - **THEN** 系统 MUST NOT 把该 `false` 当作已结束，SHALL 保持未收束直到真实停止确认或截止
 
 #### Scenario: 截止报告未收束原因
 
 - **WHEN** 关闭在截止期限到达时仍有未收束义务
-- **THEN** 关闭 SHALL 返回未收束原因，MUST NOT 以成功完成宣称
+- **THEN** 关闭 SHALL 返回未收束原因，且为 `Cut` 正常返回（非错误），MUST NOT 以成功完成宣称
 
 ### Requirement: 可判定的接收结果
 
@@ -540,3 +542,17 @@ progress 通知 SHALL 只作为其 range 的事实落链（通知身份与稳定
 
 - **WHEN** 在途 turn 的 decision 进行中到达外部输入
 - **THEN** 输入 SHALL 保留于链上待下一决策，MUST NOT 丢弃或覆盖
+
+### Requirement: 每 agent 地址的持久事件循环
+
+每个 agent 地址 SHALL 挂持久事件循环（drain mailbox → 合并为一条模型消息 → 执行一个 turn → 回到 drain），仅在显式 StopLoop/run 关闭时退出。直驱式"一次调用一个回合"的形态 MUST NOT 与持久循环并存为第二套驱动路径。
+
+#### Scenario: 循环跨越多次事件
+
+- **WHEN** 三次事件先后到达同一非入口地址
+- **THEN** 同一循环进程内连续处理，无第二次实例装配
+
+#### Scenario: 关闭即退出
+
+- **WHEN** run 关闭
+- **THEN** 全部地址循环退出并回收，无泄漏 goroutine

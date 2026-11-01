@@ -262,8 +262,8 @@ func TestTaskLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("obligations: %v", err)
 		}
-		if open.Count != 3 {
-			t.Fatalf("obligations = %+v, want three open obligations across the three classes", open)
+		if open.Count != 2 {
+			t.Fatalf("obligations = %+v, want the two open obligations across their classes: the refused notification is a consumption result and no longer owed", open)
 		}
 		byKind := map[task.ObligationKind]task.Obligation{}
 		for _, obligation := range open.Open {
@@ -272,20 +272,20 @@ func TestTaskLifecycle(t *testing.T) {
 			}
 			byKind[obligation.Kind] = obligation
 		}
-		if len(byKind) != 3 {
-			t.Fatalf("classes = %v, want the three obligation classes queryable", byKind)
+		if len(byKind) != 2 {
+			t.Fatalf("classes = %v, want the two obligation classes still owed queryable", byKind)
 		}
 		if byKind[task.ObligationAwaitingTool].Notice != (task.Notice{}) {
 			t.Fatalf("obligation = %+v, want the execution obligation to point at the task itself", byKind[task.ObligationAwaitingTool])
 		}
-		if byKind[task.ObligationAwaitingDelivery].Notice != first {
-			t.Fatalf("obligation = %+v, want the refused notification kept beside its old target", byKind[task.ObligationAwaitingDelivery])
+		if _, stillOwed := byKind[task.ObligationAwaitingDelivery]; stillOwed {
+			t.Fatalf("obligations = %+v, want the refused notification withdrawn from the owed set", open.Open)
 		}
 		if byKind[task.ObligationHandedOff].Notice != second {
 			t.Fatalf("obligation = %+v, want the unanswered notification handed to the new target", byKind[task.ObligationHandedOff])
 		}
 		if len(open.Blocked) != 1 || open.Blocked[0].Notice != first || open.Blocked[0].Reason != refusalText {
-			t.Fatalf("blocked = %+v, want the refused notification beside its reason", open.Blocked)
+			t.Fatalf("blocked = %+v, want the refused notification kept beside its reason on the diagnostic face", open.Blocked)
 		}
 
 		for _, record := range carrier.Facts(taskC) {

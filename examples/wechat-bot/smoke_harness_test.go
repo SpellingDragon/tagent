@@ -183,6 +183,8 @@ func (c *smokeConfig) write(t *testing.T) {
 
 // document 渲染宿主文档：入口 agent 小窗口高频折叠、多 agent、治理开启。
 // 入口不声明 send：正文只经自动投递出口落地，工具面无 send（D4）。
+// 冥想 agent 的工具面恰一个通信工具 send（D6）：跨会话投递是它的唯一写面，
+// 目标由反思输入的 delivery targets 段给出。
 func (c *smokeConfig) document() string {
 	if c.Doc != nil {
 		return c.Doc(c)
@@ -208,7 +210,7 @@ agents:
   smoke-reflect:
     model: smoke-reflect
     tools:
-      - { kind: tool, id: deliver_summary }
+      - { kind: tool, id: send }
     memory:
       read_namespaces: [%s]
     meditation:
@@ -355,8 +357,10 @@ func (p *smokeProvider) serve(w http.ResponseWriter, r *http.Request) {
 
 // answerFor 是本台架的响应脚本：委派子 agent 回结果正文、冥想 agent 投递摘要、
 // 入口 agent 先落工具调用再按回执/观察/结算通知收尾。
-// - an entry turn that ended with a tool call answers from the receipt or observation alone, never with a second call
-// - 受理回执按结构取键（tool 角色 + 本次调用的 id）：回执是裸 "ok"，正文里没有可识别的字样，按正文取键会让脚本答不上来而重复发起委派。
+//   - an entry turn that ended with a tool call answers from the receipt or observation alone, never with a second call
+//   - 受理回执按结构取键（tool 角色 + 本次调用的 id）：回执是裸 "ok"，正文里没有可识别的字样，按正文取键会让脚本答不上来而重复发起委派。
+//   - 冥想的投递是 send{target:{agent,session}}：目标取反思输入列出的活跃会话对，
+//     脚本不猜会址，读不到的退到台架注册的首个会话。
 func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage, index int) string {
 	last := smokeLastUserText(messages)
 	switch modelName {
@@ -366,8 +370,8 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 		if smokeEndedWithTool(messages) {
 			return smokeAnswerBody("reflection recorded")
 		}
-		return smokeToolCallBody(fmt.Sprintf("call-reflect-%d", index), "deliver_summary",
-			`{"content":"`+smokeReflectionMarker+" "+strconv.Itoa(index)+`"}`)
+		return smokeToolCallBody(fmt.Sprintf("call-reflect-%d", index), sendToolID,
+			smokeReflectionSendArgs(messages, index))
 	}
 	marker := smokeMarkerIn(messages)
 	if smokeEndedWithTool(messages) {
@@ -387,7 +391,7 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 			return smokeAnswerBody("hold-ack " + marker)
 		case strings.Contains(end, "call-retry"):
 			return smokeAnswerBody("approved-done " + marker)
-		case strings.Contains(end, "deliver_summary"):
+		case strings.Contains(end, "[send_"):
 			return smokeAnswerBody("reflection recorded")
 		}
 	}
@@ -1057,7 +1061,7 @@ func smokeLastContent(messages []smokeModelMessage) string {
 // smokeEndedWithTool 报告本次决策的最后一条消息是否已是工具交代：工具角色的
 // 结果消息（send 成功回执就是裸 ok 的工具结果），或循环折成用户角色的两种帧——
 // send 成功回执凭据本身（裸 ok）与回执帧/工具结果帧（{call-... task-N true/false ...} /
-// [deliver_summary_ok]）。
+// [send_denied] ... 与 [send_held] ...）。
 // 判"本轮是否已有交代"必须看最后一条消息的角色：帧本身就是用户角色，只看最后
 // 一条用户消息之后的尾巴会漏掉它。反思输入以 "[reflection]" 开头，所以帧前缀
 // 只认具体的结果标记，不能按 "[" 一刀切。
@@ -1071,7 +1075,7 @@ func smokeEndedWithTool(messages []smokeModelMessage) bool {
 	}
 	content := strings.TrimSpace(last.Content)
 	return strings.HasPrefix(content, "{") && strings.Contains(content, "call-") ||
-		smokeCredentialFrame(content) || strings.HasPrefix(content, "[deliver_summary_")
+		smokeCredentialFrame(content) || strings.HasPrefix(content, "[send_")
 }
 
 // smokePairedResult 报告请求的最后一条消息是不是给定调用的工具结果：按角色与
@@ -1093,7 +1097,7 @@ func smokePairedResult(messages []smokeModelMessage, callID string) bool {
 func smokeFrame(content string) bool {
 	content = strings.TrimSpace(content)
 	return strings.HasPrefix(content, "{") && strings.Contains(content, "call-") ||
-		smokeCredentialFrame(content) || strings.HasPrefix(content, "[deliver_summary_")
+		smokeCredentialFrame(content) || strings.HasPrefix(content, "[send_")
 }
 
 // smokeCredentialFrame 报告用户消息是不是 send 成功回执折成的帧：回执是凭据
@@ -1107,7 +1111,7 @@ func smokeCredentialFrame(content string) bool {
 const smokeSendCredential = "ok"
 
 // smokeMarkerIn 报告请求里最近一条非帧用户消息携带的冒烟标记：工具结果帧
-// （回执帧、send 凭据、[deliver_summary_ok]）自身不带标记，标记在它之前那条用户消息里。
+// （回执帧、send 凭据、[send_denied]/[send_held] 回执帧）自身不带标记，标记在它之前那条用户消息里。
 func smokeMarkerIn(messages []smokeModelMessage) string {
 	for i := len(messages) - 1; i >= 0; i-- {
 		msg := messages[i]
@@ -1125,8 +1129,47 @@ func smokeMarkerIn(messages []smokeModelMessage) string {
 }
 
 // smokeSendArgs 渲染审批轮 send 调用的参数（批准前后必须逐字节一致）。
+// D6 之后 send 的名字面是 {target, content}：目标取一个固定会话，审批在准入前
+// 扣留这次调用，参数只需逐字节稳定；投递面属于声明 meditation 的冥想 agent，
+// 入口以自己名义投递会按名拒绝，所以这条练刀的验收面是"扣留→批准→恰执行一次"。
 func smokeSendArgs(marker string) string {
-	return `{"content":"` + smokeApprovalMarker + " " + marker + `"}`
+	return `{"target":{"agent":"` + smokeSessionTag + `","session":"` + smokeApprovalTargetSession + `"},"content":"` + smokeApprovalMarker + " " + marker + `"}`
+}
+
+// smokeApprovalTargetSession 是审批轮 send 调用命名的固定目标会话：这条练刀不
+// 读投递结果，目标只是新参数面里必须出现的那一格。
+const smokeApprovalTargetSession = "smoke-approval-target"
+
+// smokeSendLineage 是跨会话 send 投递交到目标链上的 trigger 戳（assembly 侧
+// hostSendSessionLineage 的字面值）：交付正文是同伴发来的输入，不是本会话用户
+// 说的话，所以它读作自管产物。
+const smokeSendLineage = "send"
+
+// smokeSendDeniedPrefix 打开一份没有投递的拒绝回执（assembly 侧
+// hostSendDeniedPrefix 的字面值）：正文没落链，拒绝按名说出是哪一道门挡住了它。
+const smokeSendDeniedPrefix = "[send_denied] "
+
+// smokeReflectionTargetRE 取反思输入列出的一个投递目标：agent 配一个活跃会话，
+// 形如 - agent "smoke", session "smoke-run:smoke:smoke-chat-a"。
+var smokeReflectionTargetRE = regexp.MustCompile(`- agent "([^"]+)", session "([^"]+)"`)
+
+// smokeReflectionTarget 报告反思输入里列出的第一个投递目标；读不到的退到台架
+// 注册的首个会话，让脚本在交付面缺席时仍然发出一次形状合法的调用。
+func smokeReflectionTarget(messages []smokeModelMessage) (agent, session string) {
+	for _, msg := range messages {
+		if match := smokeReflectionTargetRE.FindStringSubmatch(msg.Content); match != nil {
+			return match[1], match[2]
+		}
+	}
+	return smokeSessionTag, smokeChats[0]
+}
+
+// smokeReflectionSendArgs 渲染一次冥想投递的参数：目标取反思输入列出的活跃
+// 会话对，正文带摘要标记与本轮请求下标，同一场景的多次投递因此正文各不相同。
+func smokeReflectionSendArgs(messages []smokeModelMessage, index int) string {
+	agent, session := smokeReflectionTarget(messages)
+	return `{"target":{"agent":"` + agent + `","session":"` + session + `"},"content":"` +
+		smokeReflectionMarker + " " + strconv.Itoa(index) + `"}`
 }
 
 // smokeLongBody 渲染超阈值的长文正文，长文降级由 sender 的截断回退承载。

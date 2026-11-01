@@ -34,6 +34,10 @@ var ErrDelegationMissing = errors.New("call_subagent: no delegation face is atta
 // ErrBindingsMissing reports a tool constructed with no borrowing face.
 var ErrBindingsMissing = errors.New("call_subagent: no borrowing face is attached")
 
+// ErrPipelineMissing reports a delegated round asked for from a delegation face that
+// carries no resident-instance face: nothing would run the round the call admitted.
+var ErrPipelineMissing = errors.New("call_subagent: the delegation face carries no resident instance")
+
 // ErrAddressIncomplete reports a call whose frame names no complete agent session.
 var ErrAddressIncomplete = errors.New("call_subagent: the call frame names no complete session")
 
@@ -65,6 +69,19 @@ type ResultDelegation interface {
 	CompleteWithResult(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID, text string) (task.Notice, error)
 }
 
+// delegatedPipeline is the resident-instance face a delegation ledger carries when the
+// turns it admits run on the instances of their own execution sites: one round is handed
+// to the site's resident instance and answered by the segment that consumed its input.
+//
+// 红线清单（2 条）：
+// MUST run the round on the resident instance of the execution site the call names
+// MUST NOT admit a second task of its own, nor settle the task this tool admitted
+type delegatedPipeline interface {
+	// Submit hands one round to the resident instance of its execution site and
+	// reports the terminal it ended at beside the body it produced.
+	Submit(ctx context.Context, in agent.DelegatedInput) (agent.DelegatedAnswer, error)
+}
+
 // ToolOptions is what the composition root fixes when it registers the tool: the parent
 // assembly inheritance reads, the builder the delegated turn runs on, the delegation face
 // the call is admitted through and the state owner's borrowing face.
@@ -79,6 +96,11 @@ type ToolOptions struct {
 	// Bindings is the state owner's borrowing face: the initiating generation a
 	// delegated turn inherits is taken here when the call is issued.
 	Bindings state.Borrow
+	// Continuations is the round-typed continuation point the delegated turns of
+	// this tool park in, so a task re-entered after it settled is served its next
+	// round on the same assembly. Nil keeps the one-round contract: nothing is
+	// registered and no second round is served.
+	Continuations *Continuations
 }
 
 // Tool is the call_subagent tool: one declaration naming both assembly sources, and a
@@ -89,13 +111,14 @@ type Tool struct {
 	faces   delegationFaces
 }
 
-// delegationFaces is the pair every delegating tool of this package admits a turn
-// through: the task face the call is admitted as and the borrowing face the
-// initiating generation is taken from. A target tool and the generic call share
-// exactly these two, so one admission path serves both.
+// delegationFaces is what every delegating tool of this package admits a turn through:
+// the task face the call is admitted as, the borrowing face the initiating generation is
+// taken from, and the continuation the served round parks in. A target tool and the
+// generic call share exactly these, so one admission path serves both.
 type delegationFaces struct {
-	delegation Delegation
-	bindings   state.Borrow
+	delegation    Delegation
+	bindings      state.Borrow
+	continuations *Continuations
 }
 
 // The tool satisfies the native callable tool port.
@@ -112,7 +135,11 @@ func NewTool(opts ToolOptions) (*Tool, error) {
 	return &Tool{
 		parent:  opts.Parent,
 		builder: opts.Builder,
-		faces:   delegationFaces{delegation: opts.Delegation, bindings: opts.Bindings},
+		faces: delegationFaces{
+			delegation:    opts.Delegation,
+			bindings:      opts.Bindings,
+			continuations: opts.Continuations,
+		},
 	}, nil
 }
 
@@ -231,12 +258,33 @@ func (t *Tool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	return receipt, nil
 }
 
+// subAddressOf reports the execution site one assembled call runs in: the address of the
+// assembled sub-agent inside the session of the caller, keyed by the native call identity
+// that issued it. The site is minted for the delegated turn itself, so the turn runs in a
+// place of its own rather than in the caller's site, while the notification of its task
+// returns to the caller that issued the call.
+func subAddressOf(caller event.Address, assembly *Assembly, callID string) event.Address {
+	agentID := event.AgentID(assembly.Name)
+	if agentID == "" {
+		agentID = caller.AgentID
+	}
+	return event.Address{
+		AgentID:   agentID,
+		SessionID: event.SessionID(fmt.Sprintf("%s#sub:%s", caller.SessionID, callID)),
+	}
+}
+
 // admit hands one assembled call to the delegation face: the call is admitted under the
-// identity of the decision that issued it, the initiating generation is borrowed for the
+// identity of the decision that issued it, at the execution site minted for the delegated
+// turn beside the caller it reports back to, the initiating generation is borrowed for the
 // reference the delegated turn inherits, and a fresh admission starts the delegated turn
 // beside the receipt it already returned, carrying the envelope the call declared.
 func (d delegationFaces) admit(ctx context.Context, builder Builder, frame task.CallFrame, assembly *Assembly, input string, envelope *agent.HandoffEnvelope) (task.AdmissionReceipt, error) {
 	if !frame.Address.IsComplete() {
+		return task.AdmissionReceipt{}, ErrAddressIncomplete
+	}
+	site := subAddressOf(frame.Address, assembly, frame.Identity.CallID)
+	if !site.IsComplete() {
 		return task.AdmissionReceipt{}, ErrAddressIncomplete
 	}
 	handle, err := d.bindings.Borrow(ctx, frame.Address.AgentID)
@@ -247,7 +295,7 @@ func (d delegationFaces) admit(ctx context.Context, builder Builder, frame task.
 		InvocationID:  frame.Identity.InvocationID,
 		DecisionID:    frame.Identity.DecisionID,
 		CallID:        frame.Identity.CallID,
-		Target:        frame.Address,
+		Sites:         agent.DelegationSites{Target: site, Issuer: frame.Address},
 		TriggerSource: event.LineageDelegation,
 		Ref:           handle.Ref,
 	})
@@ -259,43 +307,94 @@ func (d delegationFaces) admit(ctx context.Context, builder Builder, frame task.
 		return receipt, releaseErr
 	}
 	if receipt.Kind == task.AdmissionFresh {
-		go d.serve(context.WithoutCancel(ctx), builder, receipt.TaskID, assembly, frame.Address, input, envelope)
+		go d.serve(context.WithoutCancel(ctx), builder, receipt.TaskID, assembly, site, input, envelope)
 	}
 	return receipt, nil
 }
 
-// serve runs the delegated turn of one fresh admission and reports its terminal: a turn
-// that ends settles its task and one that fails reports the failure. A settle the ledger
-// refuses leaves the task where it is rather than inventing an outcome.
-func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID event.TaskID, assembly *Assembly, addr event.Address, input string, envelope *agent.HandoffEnvelope) {
-	status := task.StatusSettled
-	result, err := builder.Serve(ctx, assembly, Turn{
-		UserID:    string(addr.AgentID),
-		SessionID: string(addr.SessionID),
-		Input:     input,
-		Handoff:   envelope,
-	})
-	if err != nil {
-		status = task.StatusFailed
+// serve runs the delegated turn of one fresh admission at its own execution site and
+// reports its terminal: a turn that ends settles its task and one that fails reports the
+// failure. A settle the ledger refuses leaves the task where it is rather than inventing
+// an outcome.
+//
+// The round it serves is also the continuation a re-entry hands input to: the served task
+// is registered before the round runs and marked idle once it settled, so a re-entry
+// arriving inside the round is refused by name and one arriving after it serves the next
+// round of the same task. A tool carrying no continuation registers nothing.
+func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID event.TaskID, assembly *Assembly, site event.Address, input string, envelope *agent.HandoffEnvelope) {
+	if d.continuations != nil {
+		d.continuations.register(taskID, d, builder, assembly, site)
 	}
-	d.completeDelegation(ctx, taskID, status, result.Content)
+	status, body := d.runRound(ctx, builder, assembly, site, input, envelope)
+	_ = d.completeDelegation(ctx, taskID, status, body)
+	if d.continuations != nil {
+		d.continuations.idle(taskID)
+	}
 }
 
-// completeDelegation reports the terminal of one delegated turn beside the body it
-// produced: a delegation that carries result material is asked for it, and one that
-// does not is settled exactly as it was before the body travelled.
-func (d delegationFaces) completeDelegation(ctx context.Context, taskID event.TaskID, status task.Status, body string) {
-	if carrier, ok := d.delegation.(ResultDelegation); ok {
-		_, _ = carrier.CompleteWithResult(ctx, taskID, status, "", body)
-		return
+// runRound serves one round of one delegated task at the execution site the call minted
+// for it and reports the terminal it ended at beside the body it produced: the round is
+// handed to the resident instance of that site on the binding the assembly resolves, so
+// the turn runs on the site's own loop and never as a drive of this goroutine.
+//
+// A round that cannot run reports the cause it could not run for as its body, so the
+// settle notice of the task names what refused it instead of carrying an empty failure a
+// reader would have to attribute on its own.
+func (d delegationFaces) runRound(ctx context.Context, builder Builder, assembly *Assembly, site event.Address, input string, envelope *agent.HandoffEnvelope) (task.Status, string) {
+	pipeline, ok := d.delegation.(delegatedPipeline)
+	if !ok {
+		return task.StatusFailed, ErrPipelineMissing.Error()
 	}
-	_, _ = d.delegation.Complete(ctx, taskID, status, "")
+	bound, err := builder.Bind(ctx, assembly)
+	if err != nil {
+		return task.StatusFailed, named(err)
+	}
+	defer closeFace(bound.Set)
+	turn := Turn{UserID: string(site.AgentID), SessionID: string(site.SessionID), Input: input, Handoff: envelope}
+	answer, err := pipeline.Submit(ctx, agent.DelegatedInput{
+		Site:        site,
+		Binding:     bound,
+		Instruction: assembly.Instruction,
+		Request:     turn.request(ctx, builder.Facts, builder.RefBudget),
+	})
+	builder.sealCapture(ctx)
+	if err != nil {
+		return task.StatusFailed, named(err)
+	}
+	if answer.Status == task.StatusFailed && answer.Failure != "" {
+		return answer.Status, answer.Failure
+	}
+	return answer.Status, answer.Body
+}
+
+// completeDelegation reports the terminal of one delegated round beside the body it
+// produced: a delegation that carries result material is asked for it, and one that
+// does not is settled exactly as it was before the body travelled. The refusal is
+// returned so the caller of a re-entered round learns that the outcome it produced was
+// not recorded; a first round reports it beside the contract it always had.
+func (d delegationFaces) completeDelegation(ctx context.Context, taskID event.TaskID, status task.Status, body string) error {
+	if carrier, ok := d.delegation.(ResultDelegation); ok {
+		_, err := carrier.CompleteWithResult(ctx, taskID, status, "", body)
+		return err
+	}
+	_, err := d.delegation.Complete(ctx, taskID, status, "")
+	return err
 }
 
 // denied renders one refusal as result text: the named case beside the source, field and
 // reason it carries, and the statement that no task was admitted.
 func (t *Tool) denied(reason error) string {
 	return fmt.Sprintf("%s %s; no task was admitted", deniedMarker, named(reason))
+}
+
+// closeFace releases the tool-set connection one binding opened for the round it served:
+// the MCP face a delegated binding resolved stays open exactly as long as the round that
+// carries it, so the round that opened it closes it and no connection outlives its call.
+func closeFace(set trpctool.ToolSet) {
+	if set == nil {
+		return
+	}
+	_ = set.Close()
 }
 
 // named renders one refusal with the kind it wraps, so the text names the case and not

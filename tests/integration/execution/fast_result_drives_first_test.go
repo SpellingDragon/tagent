@@ -2,9 +2,9 @@
 //
 // The red anchor of the fast result: a decision that admits two calls is driven
 // by the first result that arrives, never by the last one. The opening decision
-// issues one call that settles at once and one that parks inside the outbound
-// face; the anchor asserts the model is served a request that reads the settled
-// fast result while the slow call is still running.
+// issues one MCP call whose tool answers at once and one whose execution parks on
+// the server the anchor holds; the anchor asserts the model is served a request
+// that reads the settled fast result while the slow call is still running.
 package execution
 
 import (
@@ -17,18 +17,19 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 )
 
 // fastResultSession, fastResultInvocation, fastResultCallID, fastResultBody,
 // fastResultOpening and fastResultWindow are the material the anchor is written
-// in: one session whose opening decision issues the two send calls, one body that
-// settles at once and one the outbound face parks.
+// in: one session whose opening decision issues the two MCP calls, one whose tool
+// answers at once and one whose execution the anchor parks.
 const (
 	fastResultSession    = "session-fast-result"
 	fastResultInvocation = "inv-fast-result"
 	// fastResultCallID is the call identity of the call that settles at once.
 	fastResultCallID = "call-fast-result"
-	// fastResultBody is the body that call delivers: the sender answers it at once.
+	// fastResultBody is the material that call hands the shortcut tool.
 	fastResultBody = "fast: the quick call finished"
 	// fastResultOpening is the message that opens the turn.
 	fastResultOpening = "fast: the message that opens the turn"
@@ -52,7 +53,7 @@ func TestFastResultDrivesBeforeSlowSettles(t *testing.T) {
 	defer cancel()
 
 	provider := newIntakeProvider(t)
-	provider.firstAnswer = fastResultTwoCalls()
+	provider.firstAnswer = fastResultTwoCalls(provider)
 	sender := newIntakeSender()
 	host := intakeBoot(t, provider, sender)
 	addr := event.Address{AgentID: intakeEntryAgent, SessionID: fastResultSession}
@@ -66,7 +67,7 @@ func TestFastResultDrivesBeforeSlowSettles(t *testing.T) {
 		})
 		done <- turn
 	}()
-	sender.awaitParked(t)
+	provider.anchor.awaitParked(t)
 
 	read := fastResultAwaitRequest(t, provider)
 	if copies := fastResultObservations(read); copies != 1 {
@@ -102,7 +103,7 @@ func TestFastResultDrivesBeforeSlowSettles(t *testing.T) {
 		t.Fatalf("the chain holds %d result fact(s) of the slow call, want 0: the turn ended before it settled", slow)
 	}
 
-	sender.release()
+	provider.anchor.release()
 }
 
 // fastResultAwaitRequest waits for the request that reads the settled fast
@@ -128,21 +129,19 @@ func fastResultAwaitRequest(t *testing.T, provider *intakeProvider) intakeReques
 
 // fastResultObservations counts the settled observations one request reads: the
 // settled result of a call enters the transcript as user material carrying the
-// settled body, while the admission receipt of that call answers under the tool
-// role — so the two never read as one observation.
+// body the call carried, while the admission receipt of that call answers under the
+// tool role — so the two never read as one observation. The two calls of this anchor
+// carry other bodies, so a request that reads one of them reads exactly one
+// observation.
 func fastResultObservations(request intakeRequest) int {
 	count := 0
 	for _, message := range request.Messages {
-		if message.Role == string(model.RoleUser) && strings.TrimSpace(message.Content) == fastResultSettledBody {
+		if message.Role == string(model.RoleUser) && strings.Contains(message.Content, fastResultBody) {
 			count++
 		}
 	}
 	return count
 }
-
-// fastResultSettledBody is the body a settled send call answers with: the whole
-// model-visible content of a delivery that happened.
-const fastResultSettledBody = "ok"
 
 // fastResultSettledFacts counts the result facts one chain committed for the
 // named call.
@@ -156,14 +155,14 @@ func fastResultSettledFacts(facts []event.Event, callID string) int {
 	return count
 }
 
-// fastResultTwoCalls renders the chat completion that issues two send calls from
-// one decision: the call that settles at once, and the call whose body the
-// outbound face parks.
-func fastResultTwoCalls() string {
-	fast := `{"id":"` + fastResultCallID + `","type":"function","function":{"name":"send","arguments":` +
-		intakeQuoted(`{"content":`+intakeQuoted(fastResultBody)+`}`) + `}}`
-	slow := `{"id":"` + intakeSlowCallID + `","type":"function","function":{"name":"send","arguments":` +
-		intakeQuoted(`{"content":`+intakeQuoted(intakeSlowBody)+`}`) + `}}`
+// fastResultTwoCalls renders the chat completion that issues two MCP calls from one
+// decision: the shortcut server's tool, which answers at once, and the anchor server's
+// tool, whose execution parks until the anchor releases it.
+func fastResultTwoCalls(provider *intakeProvider) string {
+	fast := `{"id":"` + fastResultCallID + `","type":"function","function":{"name":"` + mcpgw.ToolNameMCPCall + `","arguments":` +
+		intakeQuoted(provider.shortcut.callArgs(fastResultBody)) + `}}`
+	slow := `{"id":"` + intakeSlowCallID + `","type":"function","function":{"name":"` + mcpgw.ToolNameMCPCall + `","arguments":` +
+		intakeQuoted(provider.anchor.callArgs(intakeSlowBody)) + `}}`
 	return `{"id":"scripted-tool","object":"chat.completion","created":1699200000,"choices":[{"index":0,` +
 		`"message":{"role":"assistant","content":"calling","tool_calls":[` + fast + `,` + slow + `]},` +
 		`"finish_reason":"tool_calls"}]}`

@@ -444,8 +444,10 @@ func (e *stormInputEndpoint) requests() []intakeRequest {
 // endpoint reports the base URL the host document's provider entry names.
 func (e *stormInputEndpoint) endpoint() string { return e.server.URL + "/v1" }
 
-// stormInputBoot boots the formal host the input storm is driven against, over
-// the document the intake anchors use and the endpoint this case holds.
+// stormInputBoot boots the formal host the input storm is driven against, over the
+// document the intake anchors use and the endpoint this case holds. The storm holds the
+// opening decision itself, so the MCP tools the intake document grants are never called:
+// the two servers stand only so the document boots.
 func stormInputBoot(t *testing.T, endpoint *stormInputEndpoint, sender assembly.MessageSender) *assembly.Host {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
@@ -453,7 +455,8 @@ func stormInputBoot(t *testing.T, endpoint *stormInputEndpoint, sender assembly.
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
-	if err := os.WriteFile(configPath, []byte(intakeHostDocument(root, endpoint.endpoint())), 0o644); err != nil {
+	anchor, shortcut := newIntakeMCPPair(t)
+	if err := os.WriteFile(configPath, []byte(intakeHostDocument(root, endpoint.endpoint(), anchor.url(), shortcut.url())), 0o644); err != nil {
 		t.Fatalf("write the host document: %v", err)
 	}
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))

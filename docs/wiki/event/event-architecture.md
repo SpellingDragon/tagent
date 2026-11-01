@@ -57,6 +57,11 @@
 | `bundle_id` | `MetaKeyBundleID` | 装配面 | 版本可回溯 |
 | `kind` | `MetaKeyNoticeKind` | 通知落链面 | 按通知类别分派，绝不解析正文 |
 | `task_id` | `MetaKeyTaskID` | 通知落链面 | 按任务归集 |
+| `notice_source` | `MetaKeyNoticeSource` | 通知类的消息写入方（示例宿主已用的值是 `reincarnation`、`system_alert`、`delivery_receipt`） | 按来源查一条通知而不读正文；它与回合级的 `trigger_source` 是两个条目，互不覆盖 |
+| `delivery.target` | `MetaKeyDeliveryTarget` | 两族投递都盖：agent 自己发的正文与框架的结算通知，写法是 `agent/session` | 投递账目按目标回读 |
+| `delivery.identity` | `MetaKeyDeliveryIdentity` | 同上：发起方自己那份是发送方的调用身份，框架那份是通知身份 | 去重：同一身份重放不落第二条记录 |
+| `delivery.receipt` | `MetaKeyDeliveryReceipt` | 同上 | 回执：正文已进目标链（`sent`）；一条没带这个条目的事实按 `sent` 读 |
+| `delivery.source` | `MetaKeyDeliverySource` | 同上：发起这次投递的那个调用 | 把一个源事件的全部投递当一本账回读 |
 
 **透传前缀** `MetaPrefix = "meta_"`：任何带该前缀的键原样转发，且**永不被读作业务字段**——业务键与受控控制面因此不共用命名空间。
 

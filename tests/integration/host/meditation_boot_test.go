@@ -14,16 +14,15 @@ import (
 	"github.com/SpellingDragon/tagent/assembly"
 )
 
-// TestHostBootWiresTheMeditationDriver boots a host whose meditation session carries deliver_summary, then closes it:
+// TestHostBootWiresTheMeditationDriver boots a host whose meditation session carries the one cross-session communication tool, then closes it.
 // - the boot accepts the document and the run serves an empty active-session set
 // - Close stops the driver and returns no error
-//
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 func TestHostBootWiresTheMeditationDriver(t *testing.T) {
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	root := t.TempDir()
-	configPath := writeMeditationHostDocument(t, root, []string{"send"}, []string{"deliver_summary"})
+	configPath := writeMeditationHostDocument(t, root, []string{"send"}, []string{"send"})
 	host, err := assembly.Boot(configPath, assembly.WithSender(recordingSender{}))
 	if err != nil {
 		t.Fatalf("boot the host: %v", err)
@@ -44,12 +43,11 @@ func TestHostBootWiresTheMeditationDriver(t *testing.T) {
 	}
 }
 
-// TestHostBootRefusesMisplacedMeditationTools checks that a tool granted to the wrong agent refuses the boot by name:
-// - deliver_summary outside the meditation session is refused
-// - send on the meditation session is refused
-//
+// TestHostBootRefusesMeditationWhiteListWithoutSend checks the refusal of a reflection declaring a deliver_to white list beside no communication tool.
+// - a white list beside no tool at all is refused by name
+// - a white list beside a tool that is not the communication tool is refused the same way
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
-func TestHostBootRefusesMisplacedMeditationTools(t *testing.T) {
+func TestHostBootRefusesMeditationWhiteListWithoutSend(t *testing.T) {
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	cases := []struct {
@@ -58,8 +56,8 @@ func TestHostBootRefusesMisplacedMeditationTools(t *testing.T) {
 		meditationTools []string
 		want            string
 	}{
-		{"summary outside the meditation session", []string{"send", "deliver_summary"}, []string{"deliver_summary"}, "deliver_summary"},
-		{"send on the meditation session", []string{"send"}, []string{"deliver_summary", "send"}, "send"},
+		{"white list beside no tool", []string{"send"}, []string{}, "send"},
+		{"white list beside recall_trace", []string{"send"}, []string{"recall_trace"}, "send"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,9 +94,13 @@ func writeMeditationHostDocument(t *testing.T, root string, userTools, meditatio
 		b.WriteString("      - { kind: tool, id: " + name + " }\n")
 	}
 	b.WriteString("  meditator:\n")
-	b.WriteString("    tools:\n")
-	for _, name := range meditationTools {
-		b.WriteString("      - { kind: tool, id: " + name + " }\n")
+	if len(meditationTools) == 0 {
+		b.WriteString("    tools: []\n")
+	} else {
+		b.WriteString("    tools:\n")
+		for _, name := range meditationTools {
+			b.WriteString("      - { kind: tool, id: " + name + " }\n")
+		}
 	}
 	b.WriteString("    memory: { type: localfile, path: " + root + ", read_namespaces: [user] }\n")
 	b.WriteString("    meditation:\n")

@@ -25,6 +25,7 @@ import (
 	orgstate "github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -45,10 +46,10 @@ func TestEventIntegrityNoticeIdentity(t *testing.T) {
 	t.Run("multiple_progress_ordered_by_seq", runNoticeProgressOrder)
 }
 
-// runNoticeReachesOriginalInvocation drives one declared send tool beside one
+// runNoticeReachesOriginalInvocation drives one declared note tool beside one
 // declared worker agent over Boot and Host.Invoke, and reads back the identity
 // and the responsibility range of both terminal notifications.
-// - the send tool settles one task whose terminal notification carries the fact of the call and reaches the next decision of the invocation that issued it
+// - the note tool settles one task whose terminal notification carries the fact of the call and reaches the next decision of the invocation that issued it, and its body never reaches the outbound channel, which only the turn body leaves
 // - the delegated worker settles a task of its own whose terminal notification carries the original invocation and is read once by the next decision of that invocation, which answers it
 // - both identities come from the production points: one term settles one task, and no notice is invented by the check
 func runNoticeReachesOriginalInvocation(t *testing.T) {
@@ -62,9 +63,10 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	)
 	eventIntegrityEnv(t)
 	provider := newEventIntegrityProvider(t)
+	noticeTool := newEventIntegrityNotice(t)
 	script := newEventIntegrityScript()
 	script.expect("model-entry", "the entry sends its tool note", eventIntegrityTail(input)).
-		answers(eventIntegrityToolCallAnswer("send", "call-notice-tool", `{"content":"`+note+`"}`))
+		answers(eventIntegrityToolCallAnswer(mcpgw.ToolNameMCPCall, "call-notice-tool", noticeTool.callArgs(note)))
 	script.expect("model-entry", "the entry delegates the worker", eventIntegrityCarriesToolResult("call-notice-tool")).
 		answers(eventIntegrityToolCallAnswer("worker", "call-notice-worker", `{"input":"`+workerInput+`"}`))
 	script.expect("model-entry", "the entry accepts the delegated task", eventIntegrityCarriesToolResult("call-notice-worker")).
@@ -76,7 +78,7 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	provider.decide = script.decide
 
 	sender := newEventIntegritySender()
-	host := eventIntegrityBoot(t, provider, sender)
+	host := eventIntegrityBoot(t, provider, sender, noticeTool)
 	eventIntegrityKeepHost(t, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -90,22 +92,25 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 		t.Fatalf("entry turn = (%v, %d decisions), want the completed turn of its three decisions",
 			turn.Terminal, len(turn.Decisions))
 	}
-	sender.awaitDelivered(t, addr, note)
-	if got := sender.delivered(addr, note); got != 1 {
-		t.Fatalf("the send body reached the user %d times, want exactly the one delivery", got)
+	noticeTool.awaitExecutions(t, 1)
+	if got := noticeTool.executions(); got != 1 {
+		t.Fatalf("the note ran in the declared tool %d time(s), want exactly the one execution the entry issued", got)
+	}
+	if got := sender.delivered(addr, note); got != 0 {
+		t.Fatalf("the note reached the outbound channel %d time(s), want none: only the turn body leaves the host", got)
 	}
 
 	facts := host.Run().SessionFacts(addr)
 	toolCall, ok := eventIntegrityActionFact(facts, "call-notice-tool")
 	if !ok {
-		t.Fatalf("no action fact carries the send call identity; facts = %s", eventIntegrityFactsSummary(facts))
+		t.Fatalf("no action fact carries the note call identity; facts = %s", eventIntegrityFactsSummary(facts))
 	}
 	if toolCall.InvocationID != turn.InvocationID {
 		t.Fatalf("tool result fact invocation = %q, want the issuing invocation %q", toolCall.InvocationID, turn.InvocationID)
 	}
 	toolSettle, ok := eventIntegritySettleFact(facts, toolCall.TaskID)
 	if !ok {
-		t.Fatalf("no single settled fact for the send task %q; facts = %s", toolCall.TaskID, eventIntegrityFactsSummary(facts))
+		t.Fatalf("no single settled fact for the note task %q; facts = %s", toolCall.TaskID, eventIntegrityFactsSummary(facts))
 	}
 	if toolSettle.InvocationID != turn.InvocationID {
 		t.Fatalf("tool settle fact invocation = %q, want the original invocation %q", toolSettle.InvocationID, turn.InvocationID)
@@ -117,7 +122,7 @@ func runNoticeReachesOriginalInvocation(t *testing.T) {
 	notices := eventIntegrityNotices(t, host.Run(), addr)
 	toolNotice, ok := eventIntegrityNoticeOfTask(notices, toolCall.TaskID)
 	if !ok {
-		t.Fatalf("no notice identity recorded for the send task %q; notices = %+v", toolCall.TaskID, notices)
+		t.Fatalf("no notice identity recorded for the note task %q; notices = %+v", toolCall.TaskID, notices)
 	}
 	if toolNotice.Ref.Notice.Kind != task.NoticeSettled || toolNotice.Ref.Notice.Seq != 0 {
 		t.Fatalf("tool notice identity = %s, want the settled terminal at seq 0", toolNotice.Ref.Notice.FactKey())
@@ -306,19 +311,20 @@ func runCrossInvocationNoticeScoping(t *testing.T) {
 	)
 	eventIntegrityEnv(t)
 	provider := newEventIntegrityProvider(t)
+	notice := newEventIntegrityNotice(t)
 	script := newEventIntegrityScript()
 	script.expect("model-entry", "the first invocation sends its note", eventIntegrityTail(firstInput)).
-		answers(eventIntegrityToolCallAnswer("send", "call-shared", `{"content":"`+firstNote+`"}`))
+		answers(eventIntegrityToolCallAnswer(mcpgw.ToolNameMCPCall, "call-shared", notice.callArgs(firstNote)))
 	script.expect("model-entry", "the first invocation ends", eventIntegrityCarriesToolResult("call-shared")).
 		answers(eventIntegrityAnswerOf("the first invocation settled"))
 	script.expect("model-entry", "the second invocation sends its note", eventIntegrityTail(secondInput)).
-		answers(eventIntegrityToolCallAnswer("send", "call-shared", `{"content":"`+secondNote+`"}`))
+		answers(eventIntegrityToolCallAnswer(mcpgw.ToolNameMCPCall, "call-shared", notice.callArgs(secondNote)))
 	script.expect("model-entry", "the second invocation ends", eventIntegrityCarriesToolResult("call-shared")).
 		answers(eventIntegrityAnswerOf("the second invocation settled"))
 	provider.decide = script.decide
 
 	sender := newEventIntegritySender()
-	host := eventIntegrityBoot(t, provider, sender)
+	host := eventIntegrityBoot(t, provider, sender, notice)
 	eventIntegrityKeepHost(t, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -1081,11 +1087,28 @@ func (s *eventIntegritySender) awaitDelivered(t *testing.T, addr event.Address, 
 	}
 }
 
+// eventIntegrityNoticeServer, eventIntegrityNoticeTool and eventIntegrityNoticeRan
+// name the in-process MCP server the note call of the entry runs on: the note is
+// executed by a real tool inside the host, because no tool hands a body to the
+// outbound channel — only the turn body leaves the host.
+const (
+	eventIntegrityNoticeServer = "notice"
+	eventIntegrityNoticeTool   = "note"
+	eventIntegrityNoticeRan    = "the notice tool ran"
+)
+
+// newEventIntegrityNotice starts the in-process server the note call reaches, so the
+// entry's note is an execution the check reads back instead of a delivery.
+func newEventIntegrityNotice(t *testing.T) *intakeMCP {
+	t.Helper()
+	return newIntakeMCP(t, eventIntegrityNoticeServer, eventIntegrityNoticeTool, eventIntegrityNoticeRan, false)
+}
+
 // eventIntegrityHostDocument renders one host document whose entry agent keeps
-// the declared send tool beside the declared worker agent, and whose model
-// window is declared so the session chain carries the projection and the notice
-// feed the follow-up range reads.
-func eventIntegrityHostDocument(root, endpoint string) string {
+// the MCP gateway the note call runs through beside the declared worker agent, and
+// whose model window is declared so the session chain carries the projection and
+// the notice feed the follow-up range reads.
+func eventIntegrityHostDocument(root, endpoint, noticeURL string) string {
 	var b strings.Builder
 	b.WriteString("entry: user\n")
 	b.WriteString("provider: local\n")
@@ -1097,20 +1120,23 @@ func eventIntegrityHostDocument(root, endpoint string) string {
 	b.WriteString("    model: " + eventIntegrityEntryModel + "\n")
 	b.WriteString("    max_tokens: 32000\n")
 	b.WriteString("    tools:\n")
-	b.WriteString("      - { kind: tool, id: send }\n")
+	b.WriteString("      - { kind: tool, id: mcp_call }\n")
 	b.WriteString("      - { kind: agent, agent: " + eventIntegrityWorkerAgent + " }\n")
 	b.WriteString("  " + eventIntegrityWorkerAgent + ":\n")
 	b.WriteString("    model: " + eventIntegrityWorkerModel + "\n")
+	b.WriteString("mcp_servers:\n")
+	b.WriteString("  " + eventIntegrityNoticeServer + ": { transport: streamable-http, url: " + intakeQuoted(noticeURL) + " }\n")
 	b.WriteString("storage: { type: localfile, root: " + root + " }\n")
 	return b.String()
 }
 
-// eventIntegrityBoot boots the formal host the checks drive.
-func eventIntegrityBoot(t *testing.T, provider *eventIntegrityProvider, sender *eventIntegritySender) *assembly.Host {
+// eventIntegrityBoot boots the formal host the checks drive, beside the in-process
+// server the note call of the entry reaches.
+func eventIntegrityBoot(t *testing.T, provider *eventIntegrityProvider, sender *eventIntegritySender, notice *intakeMCP) *assembly.Host {
 	t.Helper()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
-	if err := os.WriteFile(configPath, []byte(eventIntegrityHostDocument(root, provider.endpoint())), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(eventIntegrityHostDocument(root, provider.endpoint(), notice.url())), 0o644); err != nil {
 		t.Fatalf("write the host document: %v", err)
 	}
 	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
@@ -1471,27 +1497,28 @@ type eventIntegrityFormalNotice struct {
 	notices      []query.Detail
 }
 
-// eventIntegrityNoticeFromFormalRun drives one declared send call over Boot and
+// eventIntegrityNoticeFromFormalRun drives one declared note call over Boot and
 // Host.Invoke and reads back the terminal notice the production point minted,
 // beside the invocation that issued the call and the site that owns the notice.
 func eventIntegrityNoticeFromFormalRun(t *testing.T, ctx context.Context, session, body string) eventIntegrityFormalNotice {
 	t.Helper()
 	const (
-		input  = "send one notice identity"
-		answer = "the entry read the settled send"
+		input  = "run one notice identity"
+		answer = "the entry read the settled notice"
 	)
 	callID := "call-" + session
 	eventIntegrityEnv(t)
 	provider := newEventIntegrityProvider(t)
+	notice := newEventIntegrityNotice(t)
 	script := newEventIntegrityScript()
 	script.expect(eventIntegrityEntryModel, "the entry sends its notice", eventIntegrityTail(input)).
-		answers(eventIntegrityToolCallAnswer("send", callID, `{"content":"`+body+`"}`))
+		answers(eventIntegrityToolCallAnswer(mcpgw.ToolNameMCPCall, callID, notice.callArgs(body)))
 	script.expect(eventIntegrityEntryModel, "the entry ends after the settle", eventIntegrityCarriesToolResult(callID)).
 		answers(eventIntegrityAnswerOf(answer))
 	provider.decide = script.decide
 
 	sender := newEventIntegritySender()
-	host := eventIntegrityBoot(t, provider, sender)
+	host := eventIntegrityBoot(t, provider, sender, notice)
 	eventIntegrityKeepHost(t, host)
 	addr := event.Address{AgentID: "user", SessionID: event.SessionID(session)}
 	turn, err := eventIntegrityInvoke(ctx, host, addr, "", input)
@@ -1499,11 +1526,15 @@ func eventIntegrityNoticeFromFormalRun(t *testing.T, ctx context.Context, sessio
 		t.Fatalf("the formal run of %q ended by error: %v", session, err)
 	}
 	if turn.Terminal != model.KindCompleted || len(turn.Decisions) != 2 {
-		t.Fatalf("formal turn of %q = (%v, %d decisions), want the two decisions of the send call",
+		t.Fatalf("formal turn of %q = (%v, %d decisions), want the two decisions of the note call",
 			session, turn.Terminal, len(turn.Decisions))
 	}
-	if got := sender.delivered(addr, body); got != 1 {
-		t.Fatalf("the send body reached the user %d times, want exactly the one delivery", got)
+	notice.awaitExecutions(t, 1)
+	if got := notice.executions(); got != 1 {
+		t.Fatalf("the notice ran in the declared tool %d time(s), want exactly the one execution of %q", got, session)
+	}
+	if got := sender.delivered(addr, body); got != 0 {
+		t.Fatalf("the note body reached the outbound channel %d time(s), want none: only the turn body leaves the host", got)
 	}
 
 	facts := host.Run().SessionFacts(addr)
@@ -1512,7 +1543,7 @@ func eventIntegrityNoticeFromFormalRun(t *testing.T, ctx context.Context, sessio
 		t.Fatalf("no single action fact carries %q; facts = %s", callID, eventIntegrityFactsSummary(facts))
 	}
 	if call.InvocationID != turn.InvocationID {
-		t.Fatalf("the send fact invocation = %q, want the issuing range %q", call.InvocationID, turn.InvocationID)
+		t.Fatalf("the note fact invocation = %q, want the issuing range %q", call.InvocationID, turn.InvocationID)
 	}
 	notices := eventIntegrityNotices(t, host.Run(), addr)
 	detail, ok := eventIntegrityNoticeOfTask(notices, call.TaskID)

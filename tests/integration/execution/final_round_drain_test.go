@@ -95,32 +95,31 @@ func TestFinalRoundClosesBesideRealDrain(t *testing.T) {
 		t.Fatalf("model requests = %d, want the tool round beside the closing round", got)
 	}
 
-	report, err := rig.shutdown.Close(ctx, agent.CloseRequest{
-		Address:  owner,
-		Deadline: time.Now().Add(10 * time.Second),
-	})
+	report, err := rig.close(ctx)
 	if err != nil || !report.Drained || len(report.Unsettled) != 0 {
-		t.Fatalf("close after the closing round = (%+v, %v), want the drain beside real termination", report, err)
+		t.Fatalf("close after the closing round = (%+v, %v), want the quiesce beside real termination", report, err)
 	}
 	admitted := rig.gate.taskIDs()
 	if len(admitted) != 1 {
-		t.Fatalf("tasks tracked by the close face = %v, want the one task the tool round opened", admitted)
+		t.Fatalf("tasks admitted by the tool face = %v, want the one task the tool round opened", admitted)
 	}
-	open, err := rig.shutdown.Obligations(ctx, admitted[0])
+	open, err := rig.manager.Obligations(ctx, admitted[0])
 	if err != nil || open.Count != 0 {
-		t.Fatalf("obligations of the admitted task after the drain = (%+v, %v), want every obligation settled for real", open, err)
+		t.Fatalf("obligations of the admitted task after the quiesce = (%+v, %v), want every obligation settled for real", open, err)
 	}
 }
 
 // finalRoundRig is the host loop of the closing-round case: the task manager
-// whose mailbox is the delivery face, the close face that fronts those
-// obligations, and the transcript face the drive commits into.
+// whose mailbox is the delivery face, the task face its criterion reads, the
+// writer ledger of the loop, and the transcript face the drive commits into.
 type finalRoundRig struct {
 	instance     event.InstanceID
 	invocationID event.InvocationID
 	bindings     *state.Bindings
 	loop         *agent.Loop
-	shutdown     *agent.Shutdown
+	manager      *task.MemoryManager
+	registry     *task.MemoryRegistry
+	writers      *agent.Writers
 	gate         *finalRoundGate
 	history      *finalRoundHistory
 	marks        *finalRoundMarks
@@ -131,14 +130,15 @@ type finalRoundRig struct {
 }
 
 // newFinalRoundRig builds the host loop over the given provider and tool, with
-// the tool registered through the task wrapper and its admissions tracked
-// beside the close face.
+// the tool registered through the task wrapper and the loop's productions
+// registered beside the writer ledger the close reads.
 func newFinalRoundRig(t *testing.T, provider model.Model, tool *convTool, owner event.Address) *finalRoundRig {
 	t.Helper()
 	rig := &finalRoundRig{
 		instance:     event.InstanceID("instance-final"),
 		invocationID: event.InvocationID("inv-final"),
 		bindings:     state.NewBindings(),
+		writers:      agent.NewWriters(),
 		history:      newFinalRoundHistory(),
 		marks:        &finalRoundMarks{},
 		facts:        map[event.EventID]model.Message{},
@@ -146,13 +146,11 @@ func newFinalRoundRig(t *testing.T, provider model.Model, tool *convTool, owner 
 	admission := task.NewMemoryAdmission()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), admission)
 	manager := task.NewMemoryManager(registry, nil, task.WithEnvelopeDeliverer(rig.envelope))
-	rig.shutdown = agent.NewShutdown(&delegationFace{MemoryManager: manager, MemoryRegistry: registry})
-	ledger := agent.NewDelegator(rig.shutdown, rig.bindings, rig.instance)
-	rig.shutdown.SetReconciler(ledger)
+	rig.manager = manager
+	rig.registry = registry
 	rig.gate = &finalRoundGate{
 		inner: task.Wrap(manager, tool,
 			task.WithResultRecorder(rig.record), task.WithMailbox(rig.mail)),
-		shutdown: rig.shutdown,
 	}
 	plan, err := state.NewStatePlan(state.OrgPlan{Declaration: &config.Declaration{
 		Entry:  string(owner.AgentID),
@@ -171,8 +169,37 @@ func newFinalRoundRig(t *testing.T, provider model.Model, tool *convTool, owner 
 	rig.loop = agent.NewLoop(rig.bindings, state.NewOccupancy(), rig.instance, rig.resolve)
 	rig.loop.SetHistory(rig.history)
 	rig.loop.SetRequestFace(rig.marks.face)
-	rig.loop.SetWatch(rig.shutdown.Watch)
+	rig.loop.SetWriters(rig.writers)
 	return rig
+}
+
+// finalRoundCriterion is the rest criterion of the closing-round case: the task
+// face of the rig, beside the mailbox answer no notification of this case stands
+// in.
+type finalRoundCriterion struct {
+	*task.MemoryManager
+	*task.MemoryRegistry
+}
+
+// Unconsumed reports the notifications a mailbox accepted and nobody consumed;
+// this case settles its notifications through the manager alone.
+func (finalRoundCriterion) Unconsumed(context.Context) ([]task.UnsettledNotice, error) {
+	return nil, nil
+}
+
+// close evaluates one close over the rest criterion of the rig and the writer
+// ledger beside it, so the case reports exactly what the production close reads.
+func (r *finalRoundRig) close(ctx context.Context) (agent.DrainReport, error) {
+	read := task.ReadUnsettled(ctx, finalRoundCriterion{MemoryManager: r.manager, MemoryRegistry: r.registry}, nil)
+	stopped, open := r.writers.Stopped()
+	report := agent.DrainReport{Drained: read.Resting() && stopped}
+	if !stopped {
+		report.Unsettled = agent.WriterObligations(open)
+	}
+	if !report.Drained {
+		return report, agent.ErrDrainUnsettled
+	}
+	return report, nil
 }
 
 // envelope reports the acceptance of every notification the manager offers for
@@ -215,11 +242,9 @@ func (r *finalRoundRig) resolve(id event.EventID) (model.Message, bool) {
 }
 
 // finalRoundGate is the tool face of the closing-round case: it hands every
-// call to the task wrapper and records the task of each fresh admission beside
-// the close face, so the drain settles the obligations the drive really opened.
+// call to the task wrapper and records the task each fresh admission opened.
 type finalRoundGate struct {
-	inner    trpctool.CallableTool
-	shutdown *agent.Shutdown
+	inner trpctool.CallableTool
 
 	mu    sync.Mutex
 	count int
@@ -229,7 +254,7 @@ type finalRoundGate struct {
 // Declaration returns the declaration of the wrapped tool unchanged.
 func (g *finalRoundGate) Declaration() *trpctool.Declaration { return g.inner.Declaration() }
 
-// Call admits one call through the task wrapper and tracks the task it opened.
+// Call admits one call through the task wrapper and records the task it opened.
 func (g *finalRoundGate) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	answer, err := g.inner.Call(ctx, jsonArgs)
 	if receipt, ok := answer.(task.AdmissionReceipt); ok && receipt.Accepted {
@@ -237,7 +262,6 @@ func (g *finalRoundGate) Call(ctx context.Context, jsonArgs []byte) (any, error)
 		g.count++
 		g.tasks = append(g.tasks, receipt.TaskID)
 		g.mu.Unlock()
-		g.shutdown.Track(receipt.TaskID)
 	}
 	return answer, err
 }

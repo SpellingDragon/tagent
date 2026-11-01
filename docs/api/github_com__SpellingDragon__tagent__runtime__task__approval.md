@@ -188,6 +188,10 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
     A request that cannot be written to its file, or whose question the chain
     refuses, is reported to the caller beside the request and the wait stands
     either way: a hold is never turned into a denial by a store-side failure.
+    A caller that asks under an id of its own while a standing question already
+    holds the pair names that same question: its id resolves the same ruling,
+    so deciding by the id one minted never misses the question the gate filed
+    first.
 
 type ApprovalOption func(*ApprovalManager)
     ApprovalOption configures an approval manager at construction.

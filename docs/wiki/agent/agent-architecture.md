@@ -57,6 +57,7 @@
 - **结果三值**（`ReflectionOutcome`）：`consumed`/`deferred`/`in-flight`；对一条不在等结果的输入报结局是具名拒绝（`ErrReflectionNotPending`），重复或过期的报告永不动水位。
 - **fail-closed**：观察面的读缝没接上即 `ErrObservedFaceUnwired`，门保持关闭——事实链是新鲜度判定的唯一数据面。一趟扫描有上界（`DefaultObservationPageLimit`、`DefaultDigestFactLimit`），积压超界就报界限而不是让这一趟无限长。
 - **产出与回流**：产物是写进**自己**分区的普通事实，不改被观察分区、不写压缩事件；回业务线只经 `deliver_to` 白名单，压缩权不转移（目标侧瘦身仍由它自己的阈值折叠承担）。
+- **长时闭环有回归门**：30–50 轮的反思循环跑在常规测试面（`tests/integration/evolution`，脚本模型驱动、节奏下限压到毫秒级、时钟注入），五面各一条断言——水位单调不回退、零重复消费、零资源泄漏（goroutine 与文件句柄计数）、跨会话投递逐目标恰一次、重启后从持久水位续接。断言只读事件计数与状态读数，不读墙钟（`TestInstancesSymptomReflectionGolden`、`TestReflectionGoldenMultiTarget`）。
 
 <a id="settle-driver"></a>
 ## 四、结算随动：一条通知起一个回合
@@ -73,6 +74,10 @@
 `SettleWake` 五方法就是这本账的全文：`RestoreOwed` 把持久账仍欠的未消费工作折回邮箱（停掉的运行留下的通知等下个决策，而不是随进程死掉）、`Unconsumed` 按账自己的次序报出未完成的条目、`Claim` 只给本执行器取走一条待办（一条通知只起一个回合）、`Release` 把已认领条目交还未认领池（停在认领旁的执行器保留欠账而不是占着）、`Consume` 在同一账上记下完成消费。驱动**自己不持队列**，所以它持有的东西不会因停止或重启而丢；`SettleAttempt` 是重启读的第二道栅栏——已落地终结的回合用消费回执关闭，不再驱动一次，于是「终结事实」与「回执」之间的一次停止不会重放第二个回合。落地判定写成同一道栅栏（`settleBarrier` 带地址、通知、终结写入与消费回执），在驱动返回与答案投递之前完成。随动回合与用户回合**共用同一地址闸，绝不同址并行**；`Close` 先停随动驱动并等在飞回合返回。
 
 委派结果正文随通知同行：`tool/subagent` 把 builder 的回合正文交给结算面，通知的 `Text` 携带正文（超限截断并标记），结算事实与随动回合读到的是同一份正文——正文不属于通知身份（`FactKey` 仍读 task/round/kind/seq），重试保持同一幂等键。
+
+**派发范围门**：随动回合要走跨会话投递时，`SettleDriver.DeclareScope` 先声明它按哪份名册判定——名册就是宿主文档声明的 agent 名册（`settleScopeOfDocument`），成员测试与 `send` 那侧白名单是**同一条规则**，两族派发不各判一套。驱动旁边没有声明、或声明为空名单，则**一切派发被拒**（fail-closed）；越界目标具名拒绝且目标零感知，被拒的条目留在邮箱账上，派发义务不因失败消失。
+
+**投递账目是读面**：`Run.DeliveryLedger()` 按源事件与目标回读本 run 提交过的投递事实（`Records`/`BySource`/`ByTarget`），逐条给出源事件、目标、投递身份、回执与事实类型；一条投递身份对应一条有效记录，查询不解析正文。两路投递的事实类型**分立**（agent 主动投递是 `external_input`，框架结算投递是 `task_settled`），投递元数据却同构（四键见[事件篇](../event/event-architecture.md#const-list)）。
 
 <a id="package-layout"></a>
 ## 五、包与文件结构
@@ -163,6 +168,8 @@ sequenceDiagram
 ## 十、子 Agent 调用：一条受理、一份交接、零补偿
 
 `tool/subagent` 不持活对象：一份声明（agents 文件或显式参数）要么解析成装配，要么具名拒绝，**被拒的声明不产出装配**。`call_subagent` 是模型可见的那一面，一次调用做三件事：把两个装配来源之一解析成装配、经委派面把这次调用**受理成任务**、用这次受理的回执作答。所以调用方拿到的第一句永远是回执而不是结果——结果随该任务的进度与终结到达。
+
+**执行在 sub 自己的会址上**：一次受理给这次委派铸一个专属会址 `<调用方会话>#sub:<原生调用号>`（`subAddressOf`，agent 是装配出来的那个 sub-agent），会址有自己的常驻消费实例——`Delegator.SetResident` 把 loop 交进来，`Loop.SubmitDelegated` 用 `Consumers.mount` 把这一轮投到该会址的实例上并等它闭合。于是 main–sub 是**数据编排关系**（发起方持有通向 sub 的一条事件管线），不是调用-阻塞关系：发起方回合照常继续，结果以 settle 通知回流发起方的责任范围，恰驱动它一次。子 agent 声明的 skills 与 MCP 由 `Builder.Bind` 解成绑定上的工具资源（`state.ToolResources`：skill 正文的请求边界定版、MCP 工具集）——委派回合不挂 tRPC agent，所以加载状态经绑定回流；连接随回合关闭，不活过它服务的这一轮。
 
 `Delegation` 是这次受理的记录：发起它的 invocation 与决策、原生调用号（逐字节保留、永不重生成）、受理成的 task、跑在哪个地址、触发源戳、以及该任务此后报的进度与终结。两条判据：委派的受理**有自己的去重后缀**——同一原生调用被工具包装受理的那次是另一次受理，共用键会把委派去重进包装的回执里；委派回合只跑在应用**显式选定**的会话里，委派永不创建自己的私有可写历史。
 

@@ -830,19 +830,19 @@ class EventContractTest(unittest.TestCase):
         payload = json.loads(out)
         self.assertTrue(payload["ok"])
         counts = payload["counts"]
-        self.assertEqual(counts["event_tests_total"], 29)
+        self.assertEqual(counts["event_tests_total"], 30)
         self.assertEqual(counts["event_diagnostic_tests"], 1)
-        self.assertEqual(counts["event_product_green_tests"], 28)
-        self.assertEqual(counts["event_subtests_unique"], 143)
-        self.assertEqual(counts["event_green_subtests"], 139)
+        self.assertEqual(counts["event_product_green_tests"], 29)
+        self.assertEqual(counts["event_subtests_unique"], 138)
+        self.assertEqual(counts["event_green_subtests"], 134)
         self.assertEqual(counts["event_diagnostic_subtests"], 4)
         self.assertEqual(counts["event_families_covered"], 8)
         self.assertEqual(counts["event_non_product_leaves"], 13)
         self.assertEqual(counts["event_whole_chain_entries"], 10)
         self.assertEqual(counts["event_matrix_inputs_total"], 7200)
         self.assertEqual(counts["event_matrix_restarts_total"], 720)
-        self.assertEqual(counts["event_scope_event_short_parents"], 28)
-        self.assertEqual(counts["event_scope_event_short_anchors"], 140)
+        self.assertEqual(counts["event_scope_event_short_parents"], 29)
+        self.assertEqual(counts["event_scope_event_short_anchors"], 135)
         self.assertEqual(counts["event_scope_event_long_parents"], 1)
         self.assertEqual(counts["event_scope_event_long_anchors"], 3)
         # Source discovery grows as the 00—03 leaves land their tests; the exact
@@ -851,7 +851,7 @@ class EventContractTest(unittest.TestCase):
         self.assertGreaterEqual(counts["event_source_discovered_tests"], 4)
         self.assertGreaterEqual(counts["event_source_discovered_subtests"], 19)
         self.assertEqual(counts["event_source_discovered_tests"]
-                         + counts["event_source_pending_tests"], 29)
+                         + counts["event_source_pending_tests"], 30)
         # The superseded control monolith was removed from the tree by the
         # 03.4—03.8 split; the graph still declares it as retained source-only,
         # so the gate lists it as absent instead of pretending the declaration
@@ -934,8 +934,8 @@ class EventContractTest(unittest.TestCase):
         code, out, err = self.contract_check(contract)
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["event_dual_role_subtests"], 11)
-        self.assertEqual(payload["counts"]["event_subtests_unique"], 143)
+        self.assertEqual(payload["counts"]["event_dual_role_subtests"], 12)
+        self.assertEqual(payload["counts"]["event_subtests_unique"], 138)
 
     def test_event_contract_rejects_reviving_superseded_source_only_test(self):
         contract = load_event_contract()
@@ -1132,8 +1132,8 @@ class EventEvidenceTest(EventFixture, unittest.TestCase):
                                      event_log(self.contract, tests))
         self.assertEqual(code, 0, out + err)
         payload = json.loads(out)
-        self.assertEqual(payload["counts"]["event_tests_checked"], 28)
-        self.assertEqual(payload["counts"]["event_anchors_checked"], 140)
+        self.assertEqual(payload["counts"]["event_tests_checked"], 29)
+        self.assertEqual(payload["counts"]["event_anchors_checked"], 135)
         self.assertEqual(payload["extra"]["repeat_index"], 1)
         self.assertEqual(payload["extra"]["repeat_total"], 10)
         self.assertIsNone(payload["productVerified"])
@@ -1278,7 +1278,7 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertEqual(len(summary["short_run_ids"]), 10)
         self.assertEqual(summary["long_combos"],
                          [[1, 256], [1, 32768], [7, 256], [7, 32768], [42, 256], [42, 32768]])
-        self.assertEqual(len(summary["test_ids"]), 28)
+        self.assertEqual(len(summary["test_ids"]), 29)
         self.assertIsNone(payload["productVerified"])
 
     def test_bundle_is_readable_after_it_is_copied_off_the_producer(self):
@@ -1368,11 +1368,11 @@ class EventBundleTest(EventFixture, unittest.TestCase):
         self.assertIn("bundle reuses run_id", out)
 
     def test_execution_credential_impersonation_fails(self):
-        # Positive control: one round legally carries all 27 cases of the scope.
+        # Positive control: one round legally carries all 29 cases of the scope.
         baseline = self.write_bundle("baseline")
         code, out, err = self.check_bundle(baseline)
         self.assertEqual(code, 0, out + err)
-        self.assertEqual(len(json.loads(out)["extra"]["bundle"]["test_ids"]), 28)
+        self.assertEqual(len(json.loads(out)["extra"]["bundle"]["test_ids"]), 29)
 
         # One run_id cannot stand for two independent rounds.
         shared = str(uuid.uuid4())

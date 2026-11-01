@@ -466,19 +466,52 @@ func (r *Reflection) reflectionEvent(now, since time.Time, digest DigestSummary)
 }
 
 // reflectionText renders the body of one reflection input: the injection moment,
-// the watermark the judgement started from, the digest of the pass and the static
-// prompt. An empty section is omitted, so a reflection with nothing to report
-// carries no empty shell.
+// the watermark the judgement started from, the digest of the pass, the sessions the
+// declared delivery targets currently bind and the static prompt. An empty section is
+// omitted, so a reflection with nothing to report carries no empty shell.
 func (r *Reflection) reflectionText(now, since time.Time, digest string) string {
 	parts := []string{fmt.Sprintf("[reflection] a scheduled reflection input\n\nlast consumed reflection: %s\ninjected at: %s",
 		describeMoment(since), now.UTC().Format(time.RFC3339Nano))}
 	if digest != "" {
 		parts = append(parts, digest)
 	}
+	if delivery := r.deliveryText(); delivery != "" {
+		parts = append(parts, delivery)
+	}
 	if r.cfg.Prompt != "" {
 		parts = append(parts, r.cfg.Prompt)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// deliveryText renders the delivery face of one reflection input: every declared
+// deliver_to target beside the sessions it currently binds, so the reflection turn
+// reads the exact agent and session pair a send call names instead of guessing one.
+//
+// A target binding no session is reported as such rather than left out: an omitted
+// target would read as a quiet one, and the turn would deliver nowhere without ever
+// being told why. A reflection with no declared delivery face renders no section at
+// all, so a self-maintaining loop reports no delivery it never had.
+func (r *Reflection) deliveryText() string {
+	delivery := r.cfg.Delivery
+	if len(delivery.Targets) == 0 || delivery.Sessions == nil {
+		return ""
+	}
+	lines := []string{"delivery targets (issue one send per live session, naming the agent and the session exactly as listed):"}
+	for _, target := range delivery.Targets {
+		bound := 0
+		for _, addr := range delivery.Sessions.ActiveSessions(event.AgentID(target)) {
+			if !addr.IsComplete() || addr.AgentID != event.AgentID(target) {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("- agent %q, session %q", string(addr.AgentID), string(addr.SessionID)))
+			bound++
+		}
+		if bound == 0 {
+			lines = append(lines, fmt.Sprintf("- agent %q: no live session, so a body sent there would be refused", target))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // describeMoment renders one anchor for a human reader, naming a start with no

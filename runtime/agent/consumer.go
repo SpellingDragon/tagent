@@ -9,7 +9,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,8 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
+	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
 )
 
 // admittedCall is one tool call a decision admitted as a background task: the
@@ -84,9 +88,20 @@ type Consumer struct {
 	// turnContext decorates the context of each decision with the lineage the
 	// segment opened on; nil leaves the decision context as it is.
 	turnContext func(ctx context.Context, trigger string) context.Context
-	wake        chan struct{}
-	done        chan struct{}
-	cancel      context.CancelFunc
+	// bound is the binding this address decides on when its material names one
+	// explicitly — the binding of a delegated execution site, which is the
+	// assembled sub-agent's own rather than one a published generation holds for
+	// a declared agent. A nil bound leaves every decision on the generation the
+	// borrowing face serves at its start.
+	bound  *state.AgentBinding
+	wake   chan struct{}
+	done   chan struct{}
+	cancel context.CancelFunc
+	// progress reports that this loop moved toward its fixed point: a segment
+	// closed, a result paired or a pull that drove nothing returned to the wait.
+	// A close waiting on the criterion of the run reads this instead of polling
+	// for the movement, so the wait is an event and the budget its only clock.
+	progress func()
 
 	mu sync.Mutex
 	// awaited names the tasks the flying segment admitted and has not paired
@@ -94,6 +109,14 @@ type Consumer struct {
 	awaited sync.Map
 	cursor  event.EventID
 	read    map[event.EventID]bool
+	// taken names the driving facts a segment of this process pulled, so a name
+	// that arrives for one of them knows its material was already driven here.
+	taken map[event.EventID]bool
+	// named names the driving facts the next pull must take whatever the closed
+	// segments of the chain present them as: the notification an entry still
+	// owes is named by the face that fires the attempt, never guessed from a
+	// position.
+	named map[event.EventID]bool
 	// seeded reports whether the first pull of this loop has already marked
 	// the driving facts the boot found inside closed segments as read; a loop
 	// that boots over no chain holds nothing to seed.
@@ -120,6 +143,8 @@ func newConsumer(addr event.Address, loop *Loop, deliver SegmentDelivery) *Consu
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
 		read:    map[event.EventID]bool{},
+		taken:   map[event.EventID]bool{},
+		named:   map[event.EventID]bool{},
 		notify:  make(chan struct{}),
 	}
 }
@@ -137,6 +162,31 @@ func (c *Consumer) run(ctx context.Context) {
 		case <-c.wake:
 		}
 		c.consume(ctx)
+		c.noteProgress()
+	}
+}
+
+// SetProgress attaches the pulse this loop reports each movement through, or
+// detaches it beside nil. The pulse is a report, never a judgment: a close reads
+// it to re-read its criterion at the moment the account moved and keeps its own
+// reading as the answer.
+func (c *Consumer) SetProgress(pulse func()) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.progress = pulse
+}
+
+// noteProgress reports one movement of this loop, or nothing while no pulse is
+// attached.
+func (c *Consumer) noteProgress() {
+	c.mu.Lock()
+	pulse := c.progress
+	c.mu.Unlock()
+	if pulse != nil {
+		pulse()
 	}
 }
 
@@ -146,6 +196,30 @@ func (c *Consumer) Wake() {
 	select {
 	case c.wake <- struct{}{}:
 	default:
+	}
+}
+
+// Drive names the facts that must drive the next pull of this address, whatever
+// the closed segments of the chain present them as: the notification an entry
+// still owes stands where the attempt that died left it, behind the answer that
+// attempt closed on, and no position of the chain can tell it from material that
+// closed segment already carried. The face that fires the attempt answers the
+// judgment on itself and names the fact here.
+//
+// - A fact a segment of this process already pulled is never named: the material is driven here already, and a second segment over it would answer one notification twice.
+// - The pull consumes the name it takes, so one name drives one segment and a segment that closed beside a failure leaves the next attempt free to name the fact again.
+// - A name says the fact drives and never what it carries: the material of a fact behind the last closed answer stays the pull's judgment, so a fact the closed prefix already presents is never read as two.
+func (c *Consumer) Drive(keys ...event.EventID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		if key == "" || c.taken[key] {
+			continue
+		}
+		c.named[key] = true
 	}
 }
 
@@ -171,6 +245,20 @@ func (c *Consumer) consume(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// Resting reports whether this loop stands between segments: no segment flies and
+// no wake waits to open one. The loop is the writer of its own address, so a loop
+// that rests writes nothing more at that site, and a close that reads it resting
+// reads a writer stopped rather than one merely paused.
+func (c *Consumer) Resting() bool {
+	if c == nil {
+		return true
+	}
+	if c.flyingSegment() != nil {
+		return false
+	}
+	return len(c.wake) == 0
 }
 
 // TaskState names what became of one settled result on this address: the
@@ -236,7 +324,10 @@ func (c *Consumer) flyingSegment() *segment {
 // drives without carrying: presenting it twice would read one fact as two.
 // The cursor is the identity of the last fact the chain held at the read, so a
 // fold rewrite that hides it re-reads the chain head — the read set keeps each
-// fact once by its own identity.
+// fact once by its own identity. A fact the face that fires an owed attempt
+// named drives wherever it stands, and the read of the whole chain starts from
+// the head while a name waits, because the fact it names stands behind the
+// cursor the previous pull left.
 type pulledEvents struct {
 	// driving lists every driving fact the pull took, carrying or not.
 	driving []event.Event
@@ -268,7 +359,7 @@ func (c *Consumer) pullDriving() pulledEvents {
 		c.seedAnsweredLocked(facts, lastOutput)
 	}
 	from := 0
-	if c.cursor != "" {
+	if c.cursor != "" && len(c.named) == 0 {
 		for at, evt := range facts {
 			if evt.Key == c.cursor {
 				from = at + 1
@@ -282,10 +373,13 @@ func (c *Consumer) pullDriving() pulledEvents {
 		if evt.Key == "" || !startsRange(evt) {
 			continue
 		}
-		if c.read[evt.Key] {
+		named := c.named[evt.Key]
+		if c.read[evt.Key] && !named {
 			continue
 		}
+		delete(c.named, evt.Key)
 		c.read[evt.Key] = true
+		c.taken[evt.Key] = true
 		pull.driving = append(pull.driving, evt)
 		if at > lastOutput {
 			pull.material = append(pull.material, evt)
@@ -420,7 +514,7 @@ func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
 	if c.turnContext != nil {
 		ctx = c.turnContext(ctx, seg.trigger)
 	}
-	decision, outcome, receipts, running, err := c.loop.decide(ctx, seg.inv, transcript, round)
+	decision, outcome, receipts, running, err := c.loop.decideOn(ctx, seg.inv, transcript, round, c.binding())
 	if err != nil {
 		c.closeSegment(ctx, seg, decision, outcome, round, err)
 		return true
@@ -525,6 +619,7 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 	c.notify = make(chan struct{})
 	c.mu.Unlock()
 	close(notify)
+	c.noteProgress()
 	consumerDebug("tagent: consumer segment close invocation=%s decisions=%d terminal=%s consumed=%d",
 		seg.inv.InvocationID, len(turn.Decisions), turn.Terminal, len(seg.consumed))
 }
@@ -623,13 +718,18 @@ func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (Segmen
 // Done reports the channel that closes when the consumption loop ended.
 func (c *Consumer) Done() <-chan struct{} { return c.done }
 
-// Consumers owns the resident consumption loops of a run: one per address an
-// entry wakes, each the only driver of the model decisions of its address. The
-// loops live as long as the context they were started under; a loop that ended
-// is never restarted in place, and the chain carries the position a restart
-// resumes from. Every closed segment hands its fresh answer to the one delivery
-// face of the set, so the answer of a segment no entry waits on leaves through
-// the same path the answer of a waited segment does.
+// Consumers owns the resident consumption loops of a run: exactly one per
+// complete agent address, each the only driver of the model decisions of its
+// address. The set is address-blind — an instance mounts at the first activity
+// of the address its material names, whether that address belongs to the entry
+// agent or to any other agent the run declared, and no address is guessed from
+// the entry the document names. The loops live as long as the context they were
+// started under; a loop that ended is never restarted in place, the chain
+// carries the position a restart resumes from, and a set stops mounting
+// instances once the run it belongs to stopped. Every closed segment hands its
+// fresh answer to the one delivery face of the set, so the answer of a segment
+// no entry waits on leaves through the same path the answer of a waited segment
+// does.
 type Consumers struct {
 	loop    *Loop
 	base    context.Context
@@ -639,6 +739,28 @@ type Consumers struct {
 	turnContext func(ctx context.Context, trigger string) context.Context
 	mu          sync.Mutex
 	live        map[event.Address]*Consumer
+	// stopped reports whether the run these loops belong to closed: a stopped
+	// set mounts no instance, so the calls of a closing run never start a
+	// driver beside the drain they are waiting on.
+	stopped bool
+	// progress is the pulse every loop of this set reports its movement
+	// through; nil reports nothing.
+	progress func()
+}
+
+// SetProgress attaches the pulse every loop of this set reports its movement
+// through, the mounted ones included. The setter is separate from the
+// constructor so the declared construction shape of the set stays as it is.
+func (cs *Consumers) SetProgress(pulse func()) {
+	if cs == nil {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.progress = pulse
+	for _, consumer := range cs.live {
+		consumer.SetProgress(pulse)
+	}
 }
 
 // SetTurnContext attaches the decorator every decision of every segment these
@@ -666,22 +788,29 @@ func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Co
 	return &Consumers{loop: loop, base: base, deliver: deliver, live: map[event.Address]*Consumer{}}
 }
 
-// Ensure answers the consumption loop of one address, assembling and starting
-// it on first use: the loop resumes behind the last agent_output the chain
-// carries — the inputs past it are the material a restart still owes — and a
-// chain beside no agent_output at all resumes from its head, so an unanswered
-// input stays owed instead of vanishing behind a restart.
+// Ensure answers the resident instance of one address, assembling and starting
+// it on first use. The address is the one the material itself names, so an
+// instance mounts for every complete agent address the run drives, never for the
+// entry agent alone.
+//
+// - Exactly one instance per address: the second Ensure of an address answers the instance already mounted, so one address never runs two drivers of its own decisions.
+// - The lifecycle is the run's: an instance lives as long as the context the set was built under, and a set that stopped mounts none, so a call arriving beside a drained run answers no instance instead of starting a driver beside the drain.
+// - The loop resumes behind the last agent_output the chain carries — the inputs past it are the material a restart still owes — and a chain beside no agent_output at all resumes from its head, so an unanswered input stays owed instead of vanishing behind a restart.
 func (cs *Consumers) Ensure(addr event.Address) *Consumer {
 	if cs == nil || !addr.IsComplete() {
 		return nil
 	}
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	if cs.stopped {
+		return nil
+	}
 	if consumer, ok := cs.live[addr]; ok {
 		return consumer
 	}
 	consumer := newConsumer(addr, cs.loop, cs.deliver)
 	consumer.turnContext = cs.turnContext
+	consumer.progress = cs.progress
 	consumer.cursor = lastOutputOf(cs.loop.sessionFacts(addr))
 	ctx, cancel := context.WithCancel(cs.base)
 	consumer.cancel = cancel
@@ -699,6 +828,30 @@ func lastOutputOf(facts []event.Event) event.EventID {
 		}
 	}
 	return ""
+}
+
+// binding reports the binding this address decides on, or nil while its material names
+// none: the read is taken under the mutex the mounting writer holds.
+func (c *Consumer) binding() *state.AgentBinding {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bound
+}
+
+// mount answers the resident instance of one address bound to the named binding: the
+// second Ensure of the address answers the instance already mounted, and an instance
+// mounted beside no binding of its own takes the binding this call names. The binding
+// is the one the decisions of the address run on, so a delegated execution site decides
+// on the assembled sub-agent's own material instead of a declared agent's generation.
+func (cs *Consumers) mount(addr event.Address, bound *state.AgentBinding) *Consumer {
+	consumer := cs.Ensure(addr)
+	if consumer == nil || bound == nil {
+		return consumer
+	}
+	consumer.mu.Lock()
+	consumer.bound = bound
+	consumer.mu.Unlock()
+	return consumer
 }
 
 // Wake signals the consumption loop of one address; an address beside no loop
@@ -726,17 +879,168 @@ func (cs *Consumers) Has(addr event.Address) bool {
 	return ok
 }
 
+// Resting reports whether every loop this set mounted stands between segments,
+// so the set writes nothing more at any of its addresses. A set this host mounts
+// nothing on reports resting: nothing of it flies.
+func (cs *Consumers) Resting() bool {
+	if cs == nil {
+		return true
+	}
+	cs.mu.Lock()
+	live := make([]*Consumer, 0, len(cs.live))
+	for _, consumer := range cs.live {
+		live = append(live, consumer)
+	}
+	cs.mu.Unlock()
+	for _, consumer := range live {
+		if !consumer.Resting() {
+			return false
+		}
+	}
+	return true
+}
+
 // Stop ends every consumption loop this set owns; the loops answer their done
-// channels and the segments they left flying stay on the chain for a restart.
+// channels, no further instance mounts for any address, and the segments the
+// ended loops left flying stay on the chain for a restart.
 func (cs *Consumers) Stop() {
 	if cs == nil {
 		return
 	}
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	cs.stopped = true
 	for _, consumer := range cs.live {
 		if consumer.cancel != nil {
 			consumer.cancel()
 		}
 	}
+}
+
+// ErrShutdownRefused and ErrDrainUnsettled are the named refusals of the close:
+// each one names the case it refuses instead of answering a silent default.
+var (
+	// ErrShutdownRefused reports new input offered to an agent whose close has
+	// begun. The close refuses new input first and admits nothing beside the
+	// drain.
+	ErrShutdownRefused = errors.New("agent: the close of this agent refuses new input")
+	// ErrDrainUnsettled reports a close that ended with obligations still open.
+	// An honest close reports this named unsettled state beside the reasons of
+	// what stayed open instead of a clean end.
+	ErrDrainUnsettled = errors.New("agent: the close did not reach real termination")
+)
+
+// reasonWriterNotStopped is the named reason beside a writer that has not
+// confirmed its stop when a close reports what stayed open.
+const reasonWriterNotStopped = "this writer has not confirmed its stop"
+
+// Reconciler is the delegation ledger a close lands the terminals of admitted
+// calls through: a terminal whose obligations have cleared is landed and the
+// booking beside it closes, while an obligation still open keeps the terminal
+// withheld exactly as it does beside a live turn. The close reads it as one of
+// its criteria, so a run is never reported at rest beside a terminal the ledger
+// still holds.
+//
+// The redline list (3 rules):
+// MUST land a pending terminal only once the obligations of that call are cleared.
+// MUST report every booking it still holds, so a close never reports a rest beside an unlanded terminal.
+// MUST NOT hold a terminal past the obligations it waits on, and MUST NOT report one before them.
+type Reconciler interface {
+	// Reconcile attempts the landing of one admitted call's terminal again and
+	// reports the status the record stands at afterwards.
+	Reconcile(ctx context.Context, taskID event.TaskID) (task.Status, error)
+	// Pending reports how many fresh admissions the ledger still books; each
+	// booking closes only when its terminal really lands.
+	Pending() int
+}
+
+// writer is one production a run started: the name a close reports it under.
+// The registration itself is the confirmation — a writer is live from the moment
+// its work began and stopped only at the moment that work really ended.
+type writer struct {
+	name string
+}
+
+// Writers is the ledger of the writers one run started: the whole drive of one
+// invocation, the model stream of each of its decisions, and the tool production
+// of each admitted call. A close reads it as one of its criteria, so a run writes
+// nothing more only once every writer confirmed its stop, and the ones that did
+// not are named in the report beside the work they were running. A writer is not
+// a task: the model stream in flight holds no task identity at all, so the ledger
+// names the production itself rather than minting an identity the task account
+// would have to carry, and the stop is confirmed by the production alone.
+//
+// The redline list (3 rules):
+// MUST register a writer when its work really starts and confirm its stop only when that work really ended.
+// MUST NOT read a cancelled request, an emptied queue or an elapsed budget as a stop.
+// MUST NOT report a writer stopped for one whose confirmation still answers false.
+type Writers struct {
+	mu   sync.Mutex
+	seq  int
+	live map[int]writer
+}
+
+// NewWriters returns an empty writer ledger.
+func NewWriters() *Writers {
+	return &Writers{live: map[int]writer{}}
+}
+
+// Begin registers one writer that is starting now and answers the confirmation
+// that closes its registration. The confirmation is idempotent and safe to call
+// from a defer: a second call reports the same stop and drops no other writer.
+// A ledger beside nil registers nothing and answers a confirmation that reports
+// nothing, so a loop or a run without a ledger keeps running unregistered.
+func (w *Writers) Begin(name string) func() {
+	if w == nil {
+		return func() {}
+	}
+	w.mu.Lock()
+	w.seq++
+	slot := w.seq
+	w.live[slot] = writer{name: name}
+	w.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			w.mu.Lock()
+			delete(w.live, slot)
+			w.mu.Unlock()
+		})
+	}
+}
+
+// Stopped reports whether every registered writer confirmed its stop, and names
+// the ones that did not in registration order. A writer whose registration is
+// still open has not stopped: the work it runs began and its end was never
+// confirmed, whatever the state of the request that started it.
+func (w *Writers) Stopped() (bool, []string) {
+	if w == nil {
+		return true, nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.live) == 0 {
+		return true, nil
+	}
+	slots := make([]int, 0, len(w.live))
+	for slot := range w.live {
+		slots = append(slots, slot)
+	}
+	sort.Ints(slots)
+	names := make([]string, 0, len(slots))
+	for _, slot := range slots {
+		names = append(names, w.live[slot].name)
+	}
+	return false, names
+}
+
+// WriterObligations renders the writers that have not confirmed their stop as
+// the report entries of one close: each one named by the production it runs
+// instead of by a task identity it never held.
+func WriterObligations(names []string) []UnsettledObligation {
+	out := make([]UnsettledObligation, 0, len(names))
+	for _, name := range names {
+		out = append(out, UnsettledObligation{Reason: reasonWriterNotStopped + ": " + name})
+	}
+	return out
 }

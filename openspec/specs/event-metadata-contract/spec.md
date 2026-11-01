@@ -149,3 +149,17 @@ Attribution 载体 MUST 补 BundleID；RunFlow 组装时读取当前 active bund
 - **WHEN** 投影或摘要被消费
 - **THEN** 源事实的 `Role`、`ToolCallID`、`ContentParts` 与正文 SHALL 保持原样
 - **AND** MUST NOT 被派生视图覆盖
+
+### Requirement: 逐消息来源可查
+
+通知/内部消息 SHALL 在其持久事实 Metadata 携带原始来源（`reincarnation`/`system_alert`/`receipt` 等），键名走 `MetaKey*` 单点定义；回合级 `trigger_source` MUST NOT 因混合输入被改写或丢失。运维通知与普通用户消息同批进入时，各自来源 SHALL 可从持久事实查询而无需解析正文。
+
+#### Scenario: 同批各自可查
+
+- **WHEN** 运维通知与用户消息同批进入并落事实
+- **THEN** 各自 Metadata 来源可分辨；`trigger_source` 仍反映回合触发者
+
+#### Scenario: 键同源
+
+- **WHEN** 写入与解析通知来源
+- **THEN** 键名引用 `MetaKey*` 唯一来源，无硬编码字符串

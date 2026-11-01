@@ -18,6 +18,8 @@
 
 六个端口就是闭表：`validatePort` 是一个 `switch`，六 case 全中返回 nil，其余按名拒（"不是本流的已声明端口"）。`assemble` 也是六 case 具名派发，每个 case 只做一次类型断言，断言不中即"声明的端口没有实现它的窄接口"。**曾经的 Material×Product 九常量矩阵已删**——没有任何一趟按"材料集合"走路，端口常量就是完整声明，读材料与产产物分开声明的写法也不再存在。
 
+**一个候选注记，不占槽**：`route`（event->ownership：把一条已提交的事件读作"它归谁"的判定）登记为第七端口的候选，只注记不占位——没有常量、没有窄接口、没有派发分支，声明它和声明任何未登记名一样按名拒。开它的条件写着两条：它要判的那层工作关系先存在，并且真有一个消费者声明它；在那之前闭表仍是六个。
+
 红线（`Instance` 的三条）：必须报告自己服务的那一个端口并实现它的窄接口；不得报告未实现其窄接口的端口；一个注册元素只服务一个端口（`call->ruling` 可同时带两张脸）。
 
 落在一趟里的词汇也是契约：`CallPass{Final, Risk, TriggerSource}` 是裁决者拿到的**全部输入**（最终 call、risk face 已出的最强档、派发层声明的触发来源），裁定没有隐藏输入；`RiskLevel` 四档 `low`/`medium`/`high`/`critical`，`Rank()` 是"取最强"与"比阈值"共用的唯一排序；`Disposition` 三值 `allow`/`record`/`hold`——拒不是第四种 Disposition，而是 `Decision.Refused()` 为真、`Denial` 非 nil 的终局结果，所以"挂起"永远不会被读成"拒绝"。
@@ -36,6 +38,8 @@ nil 实例、端口不在闭表、端口合法但没实现该端口的窄接口�
 
 `fact->observation` 内部还有一层区分：**observer-only** 只读事实（观测、日志、审计不欠任何工作，失败就是 gap）；**driver** 面被事实要求去启动别人欠的工作（follow-up 回合、一次投递），失败时义务仍欠着，于是回 `ErrObservationObligationRetained`——"观察失败"与"工作还欠着"是必须分开报的两件事。duty 在装配期从面本身读出（`dutyOfObserved`），注册处只声明一次。
 
+driver 面里跨会话派发的那一个还要过**范围门**：随动回合派发前先按宿主文档声明的 agent 名册声明范围（`SettleDriver.DeclareScope`），名册缺席或为空则一次都不派（fail-closed），越界目标具名拒、目标零感知。这与 `send` 那侧的白名单是**同一条成员规则**，不是第二套判据。
+
 ## 四、消费者：一次 pass 怎么走到裁决
 
 | 环节 | 位置 | 做什么 |
@@ -44,7 +48,8 @@ nil 实例、端口不在闭表、端口合法但没实现该端口的窄接口�
 | 前趟 | 同一处，每 call 一次 | `pipeline.Before` 出 pass；被拒的 call 拿到配对结果文本，不进准入 |
 | 传导 | 准入路径 | `plugin.WithCallPass(ctx, pass)` 把这一趟压在调用 context 上（键是包私有的 `callPassKey{}`，没有第二个写入口） |
 | 裁决 | `assembly/tools.go` 的受理 wrap | `policyRuling` 读回 pass → `Governor.Judge` → 任务受理结论三态（拒 / 挂起 / 放行） |
-| 取谱系 | `assembly/host_tools.go` | send 工具从 pass 取触发来源当投递谱系 |
+
+pass 的消费者到此为止：`CallPassFrom` 只被受理 wrap 读。send 工具不走这一趟——它不出网（唯一职责是跨 task、会话通信），没有投递谱系要取（谱系属于回合正文的出网交付，由派发层按触发源盖章）。
 
 `WithCallPass` / `CallPassFrom` 与端口类型同住 `api/plugin`：它们是**接口的一部分**（"裁决者拿到的那一份输入"），不是调用方的私有约定——把它挪到调用方，就会长出第二个传参约定。
 
@@ -59,7 +64,7 @@ nil 实例、端口不在闭表、端口合法但没实现该端口的窄接口�
 
 ## 六、与相邻缝的边界
 
-- **交付前审查**（`DeliveryRuler`，`delivery->disposition` 端口）是**另一个**端口：它裁决"这条正文该不该发出去"，与六端口闭表不重叠，契约在[治理分级处置](../agent/governance-enforcement.md#disposition-and-risk)。读成第七端口会让"工具调用裁决"与"投递审查"共用一套判据，而两者的对象与重试语义都不同。
+- **交付前审查**（`DeliveryRuler`，`delivery->disposition` 端口）是**另一条缝**：它裁决"这条正文该不该发出去"，与六端口闭表不重叠，契约在[治理分级处置](../agent/governance-enforcement.md#disposition-and-risk)。把它读成六端口之一，会让"工具调用裁决"与"投递审查"共用一套判据，而两者的对象与重试语义都不同。
 - **消费者协议**（订阅 / 投递 / 应用 / 关闭 / 观察的那几个面）不在本篇：它属事件消费器一侧，见 [docs/EXTENSIONS.md](../../EXTENSIONS.md) 第四节"消费器协议：三个实例、六个面，一条协议"。
 - **记忆写入**：本仓不再有 `MemoryPlugin` / `SummaryPlugin` 这类 `OnEvent` 钩子，事件持久化与摘要视图归记忆写入路径；`plugin` 只留这条材料流。
 

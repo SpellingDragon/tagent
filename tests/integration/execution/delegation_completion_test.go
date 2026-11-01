@@ -50,7 +50,7 @@ func TestDelegationCompletion(t *testing.T) {
 			InvocationID: "inv-a",
 			DecisionID:   turnA.Decisions[0].DecisionID,
 			CallID:       "call-a-1",
-			Target:       addrB,
+			Sites:        agent.DelegationSites{Target: addrB},
 			Ref:          refA,
 		})
 		if err != nil {
@@ -73,7 +73,7 @@ func TestDelegationCompletion(t *testing.T) {
 		}
 		rec := recordA[0]
 		if rec.TaskID != t1 || rec.InvocationID != "inv-a" || rec.DecisionID != turnA.Decisions[0].DecisionID ||
-			rec.CallID != "call-a-1" || rec.Target != addrB || rec.Ref != refA {
+			rec.CallID != "call-a-1" || rec.Sites.Target != addrB || rec.Ref != refA {
 			t.Fatalf("delegation record = %+v, want the call association of the admitted call on target %v", rec, addrB)
 		}
 		if rec.Status != task.StatusAccepted {
@@ -113,7 +113,7 @@ func TestDelegationCompletion(t *testing.T) {
 			InvocationID: "inv-b",
 			DecisionID:   turnB.Decisions[0].DecisionID,
 			CallID:       "call-b-1",
-			Target:       addrC,
+			Sites:        agent.DelegationSites{Target: addrC},
 			Ref:          refB,
 		})
 		if err != nil {
@@ -181,16 +181,16 @@ func TestDelegationCompletion(t *testing.T) {
 			InvocationID: "inv-a",
 			DecisionID:   "decision-a",
 			CallID:       "call-1",
-			Target:       addrB,
+			Sites:        agent.DelegationSites{Target: addrB},
 			Ref:          refA,
 		}
 
-		if _, err := rig.ledger.Delegate(ctx, agent.Delegation{Target: addrB, Ref: refA}); !errors.Is(err, agent.ErrDelegationIdentityMissing) {
+		if _, err := rig.ledger.Delegate(ctx, agent.Delegation{Sites: agent.DelegationSites{Target: addrB}, Ref: refA}); !errors.Is(err, agent.ErrDelegationIdentityMissing) {
 			t.Fatalf("delegate without a call identity = %v, want the named refusal", err)
 		}
 		incomplete := req
 		incomplete.CallID = "call-incomplete"
-		incomplete.Target = event.Address{AgentID: "agent-b"}
+		incomplete.Sites.Target = event.Address{AgentID: "agent-b"}
 		if _, err := rig.ledger.Delegate(ctx, incomplete); !errors.Is(err, agent.ErrDelegationAddressIncomplete) {
 			t.Fatalf("delegate to an incomplete target = %v, want the named refusal", err)
 		}
@@ -315,14 +315,14 @@ func TestDelegationCompletion(t *testing.T) {
 
 		receipt1, err := rig.ledger.Delegate(ctx, agent.Delegation{
 			InvocationID: "inv-a", DecisionID: "decision-a", CallID: "call-a-1",
-			Target: event.Address{AgentID: "agent-b", SessionID: "session-b"}, Ref: refA,
+			Sites: agent.DelegationSites{Target: event.Address{AgentID: "agent-b", SessionID: "session-b"}}, Ref: refA,
 		})
 		if err != nil {
 			t.Fatalf("delegate the first level: %v", err)
 		}
 		receipt2, err := rig.ledger.Delegate(ctx, agent.Delegation{
 			InvocationID: "inv-b", DecisionID: "decision-b", CallID: "call-b-1",
-			Target: event.Address{AgentID: "agent-c", SessionID: "session-c"}, Ref: refB,
+			Sites: agent.DelegationSites{Target: event.Address{AgentID: "agent-c", SessionID: "session-c"}}, Ref: refB,
 		})
 		if err != nil {
 			t.Fatalf("delegate the second level: %v", err)

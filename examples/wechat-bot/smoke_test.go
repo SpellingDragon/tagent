@@ -617,7 +617,7 @@ func runSmokeFoldChecks(t *testing.T, rig *smokeRig, provider *smokeProvider, ob
 	}
 }
 
-// runSmokeMeditationCheck 断言冥想：事件驱动触发 → 反思 → deliver_summary →
+// runSmokeMeditationCheck 断言冥想：事件驱动触发 → 反思 → send 跨会话投递 →
 // 用户会话链可见，并由下一轮请求读到。
 // - the reflection summary lands on the driven session first: production Drive moves the injection address, then /task
 // - the driver is event-driven: only new host-facing traffic opens a pass, and the rhythm floor reads the age of the newest such fact
@@ -630,7 +630,7 @@ func runSmokeMeditationCheck(t *testing.T, rig *smokeRig, provider *smokeProvide
 	for probe := 1; !smokeScanReflection(t, rig, obs, &reflectionChat); probe++ {
 		if time.Now().After(deadline) {
 			t.Fatalf("no meditation summary landed in a user session chain within %s (reflect requests=%d)\nfacts:\n%s\nreflect requests:\n%s\nlogs:\n%s",
-				120*time.Second, smokeRequestsFor(provider, smokeReflectModel), rig.factDigest(), smokeRequestDetail(provider, smokeReflectModel), logs.digest("reflection", "deliver_summary", "meditation", "tool", "budget"))
+				120*time.Second, smokeRequestsFor(provider, smokeReflectModel), rig.factDigest(), smokeRequestDetail(provider, smokeReflectModel), logs.digest("reflection", "send", "meditation", "tool", "budget"))
 		}
 		marker := fmt.Sprintf("SMOKE-R75%02d", probe)
 		chat := smokeChats[probe%len(smokeChats)]
@@ -677,7 +677,7 @@ func smokeScanReflection(t *testing.T, rig *smokeRig, obs *smokeObservation, cha
 			if evt.Type != event.TypeExternalInput {
 				continue
 			}
-			if evt.Meta[event.MetaKeyTriggerSource] != "meditation" {
+			if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 				continue
 			}
 			if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
@@ -1012,12 +1012,16 @@ const (
 	smokeIntegrityRouteTurn = "SMOKE-R7401"
 	// smokeIntegrityRouteDenied 是越权目标企图投递的正文：它不得落到任何会话链。
 	smokeIntegrityRouteDenied = "SMOKE-EI-ROUTE-DENIED"
+	// smokeIntegrityRouteDeniedAgent 是 deliver_to 白名单之外的 agent：投给它
+	// 必须按名拒绝。
+	smokeIntegrityRouteDeniedAgent = smokeWorkerModel
 	// smokeIntegrityRouteOK 是合法目标投递的正文。
 	smokeIntegrityRouteOK = "SMOKE-EI-ROUTE-OK"
 	// smokeIntegrityRouteAfter 是读到合法摘要的下一轮。
 	smokeIntegrityRouteAfter = "SMOKE-R7402"
-	// smokeIntegrityRouteDenial 是模型可读的具名拒绝片段。
-	smokeIntegrityRouteDenial = "the arguments name fields outside the declaration 'target'"
+	// smokeIntegrityRouteDenial 是模型可读的具名拒绝片段：拒绝既说出白名单属于
+	// 哪个 agent，也说出投递目标是谁。
+	smokeIntegrityRouteDenial = `the deliver_to white list of "smoke-reflect" names no "smoke-worker"`
 	// smokeIntegritySelfTurn 是自激场景的开场轮。
 	smokeIntegritySelfTurn = "SMOKE-R7501"
 	// smokeIntegritySelfFoldTurn 是自激场景里触发折叠的会话切换轮。
@@ -1063,12 +1067,12 @@ func TestEventIntegrityApprovalControl(t *testing.T) {
 	t.Run("consumer", smokeIntegrityApprovalConsumer)
 }
 
-// TestEventIntegrityReflectionDeliveryControl pins the reflection delivery:
+// TestEventIntegrityReflectionWhiteListControl pins the reflection delivery:
 // - positive checks the authorised target receives the summary once
 // - negative checks an out-of-scope target is refused by name and the legal path still works
 // - negative also checks the delivery does not reopen the novelty gate
-// - consumer checks deliver_summary -> InjectReflection -> the target's next request over the formal chain
-func TestEventIntegrityReflectionDeliveryControl(t *testing.T) {
+// - consumer checks send{target:{agent,session}} -> the target's next request over the formal chain
+func TestEventIntegrityReflectionWhiteListControl(t *testing.T) {
 	t.Run("positive", smokeIntegrityReflectionPositive)
 	t.Run("negative", smokeIntegrityReflectionNegative)
 	t.Run("consumer", smokeIntegrityReflectionConsumer)
@@ -1116,13 +1120,31 @@ type smokeIntegrityHost struct {
 
 // bootSmokeIntegrityHost 装配一段场景的宿主。interval/minGap 决定冥想节奏：
 // "1h" 让首次宿主可见提交触发唯一一次反思（计数可确定），"1ms" 放开节奏用于
-// 判定自身产物是否重开新颖门。
+// 判定自身产物是否重开新颖门。默认文档给入口不声明 send、也不带风险规则：
+// D6 之后 send 是冥想唯一的通信工具，一条按工具名分级的 critical 规则会把冥想
+// 自己的投递也扣留，所以只有审批类场景（bootSmokeApprovalHost）用审批夹具。
 func bootSmokeIntegrityHost(t *testing.T, interval, minGap string) *smokeIntegrityHost {
+	t.Helper()
+	return bootSmokeIntegrityHostOver(t, interval, minGap, nil)
+}
+
+// bootSmokeApprovalHost 装配审批类场景的宿主：文档重新声明入口的 send 并把它
+// 标成 critical，审批通道（tool+digest/TTL/重试执行）因此有一个 critical 工具
+// 来练。演练的验收面是“扣留 -> 裁决 -> 重试恰执行一次”：风险规则按工具名
+// 分级、不分 agent，所以这份夹具只能给不走投递的场景用。
+func bootSmokeApprovalHost(t *testing.T, interval, minGap string) *smokeIntegrityHost {
+	t.Helper()
+	return bootSmokeIntegrityHostOver(t, interval, minGap, smokeApprovalDocument)
+}
+
+// bootSmokeIntegrityHostOver 装配一段场景的宿主：doc 决定这份文档是否额外
+// 声明审批夹具（nil = 默认文档）。
+func bootSmokeIntegrityHostOver(t *testing.T, interval, minGap string, doc func(*smokeConfig) string) *smokeIntegrityHost {
 	t.Helper()
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
 	cfg.MeditationInterval = interval
-	cfg.Doc = smokeApprovalDocument
+	cfg.Doc = doc
 	if minGap != "" {
 		cfg.MeditationMinGap = minGap
 	}
@@ -1144,7 +1166,7 @@ func (h *smokeIntegrityHost) close(t *testing.T) {
 // smokeIntegrityApprovalPositive 判定审批门：critical 调用被扣留，批准只记录裁决，
 // 重试才执行一次，正文只归审批会话。
 func smokeIntegrityApprovalPositive(t *testing.T) {
-	host := bootSmokeIntegrityHost(t, "1h", "")
+	host := bootSmokeApprovalHost(t, "1h", "")
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
@@ -1194,7 +1216,7 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 // smokeIntegrityApprovalNegative 判定裁决不驱动执行：批准只记录裁决；改参后的
 // 重试不得沿用旧批准，必须重新扣留；审批人会话不收到任何执行正文。
 func smokeIntegrityApprovalNegative(t *testing.T) {
-	host := bootSmokeIntegrityHost(t, "1h", "")
+	host := bootSmokeApprovalHost(t, "1h", "")
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
@@ -1344,7 +1366,7 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 // registerHandlers -> HTTP /task。无会话时注入面拒绝且不驱动模型；首次渠道入站
 // 被准入并驱动一轮；审批经渠道裁决、经 /task 重试执行一次；随后注入面读一轮。
 func smokeIntegrityApprovalConsumer(t *testing.T) {
-	host := bootSmokeIntegrityHost(t, "5s", "")
+	host := bootSmokeApprovalHost(t, "5s", "")
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
@@ -1410,7 +1432,7 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 }
 
 // smokeIntegrityReflectionPositive 判定回流落授权目标一次：meditation 触发一次
-// 反思，模型显式 deliver_summary，内容只进目标会话，且下一次正式请求读到它。
+// 反思，模型显式 send{target:{agent,session}}，内容只进目标会话，且下一次正式请求读到它。
 func smokeIntegrityReflectionPositive(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
@@ -1451,7 +1473,10 @@ func smokeIntegrityReflectionNegative(t *testing.T) {
 }
 
 // smokeIntegrityWrongRoute 只触发一次反思：模型先试图把摘要投给声明之外的
-// 审批人会话，被拒后读到具名拒绝并改投声明目标。越权正文因此不得落到任何链。
+// agent（白名单只认 smoke），被拒后读到具名拒绝并改投声明目标。越权正文因此
+// 不得落到任何链。
+// - 合法投递发出后该轮读到回执，反思收尾。
+// - 模型读到具名拒绝后改投声明目标，正文随那次投递落链。
 func smokeIntegrityWrongRoute(t *testing.T) {
 	installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
@@ -1468,20 +1493,20 @@ func smokeIntegrityWrongRoute(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		last := smokeLastContent(messages)
+		agent, session := smokeReflectionTarget(messages)
 		switch {
-		case strings.Contains(last, "[deliver_summary_denied]"):
-			denied = true
-			fmt.Fprint(w, smokeToolCallBody("call-reflect-route-ok", "deliver_summary",
-				`{"content":"`+smokeIntegrityRouteOK+`"}`))
-			return true
-		case strings.Contains(last, "[deliver_summary_ok]"):
+		case denied:
 			delivered = true
 			fmt.Fprint(w, smokeAnswerBody("reflection recorded"))
 			return true
+		case strings.Contains(smokeIntegrityText(messages), smokeSendDeniedPrefix):
+			denied = true
+			fmt.Fprint(w, smokeToolCallBody("call-reflect-route-ok", sendToolID,
+				`{"target":{"agent":"`+agent+`","session":"`+session+`"},"content":"`+smokeIntegrityRouteOK+`"}`))
+			return true
 		}
-		fmt.Fprint(w, smokeToolCallBody("call-reflect-route-denied", "deliver_summary",
-			`{"content":"`+smokeIntegrityRouteDenied+`","target":"`+smokeApproverChat+`"}`))
+		fmt.Fprint(w, smokeToolCallBody("call-reflect-route-denied", sendToolID,
+			`{"target":{"agent":"`+smokeIntegrityRouteDeniedAgent+`","session":"`+session+`"},"content":"`+smokeIntegrityRouteDenied+`"}`))
 		return true
 	}
 
@@ -1512,7 +1537,7 @@ func smokeIntegrityWrongRoute(t *testing.T) {
 		if req.Model != smokeReflectModel {
 			continue
 		}
-		if strings.Contains(req.text(), smokeIntegrityRouteDenial) && strings.Contains(req.text(), "'target'") {
+		if strings.Contains(req.text(), smokeIntegrityRouteDenial) && strings.Contains(req.text(), `"`+smokeIntegrityRouteDeniedAgent+`"`) {
 			readable = true
 			break
 		}
@@ -1540,7 +1565,7 @@ func smokeIntegrityWrongRoute(t *testing.T) {
 	}
 	accepted := 0
 	for _, evt := range rig.sessionFacts(chat) {
-		if evt.Meta[event.MetaKeyTriggerSource] == meditation.LineageReflection &&
+		if evt.Meta[event.MetaKeyTriggerSource] == smokeSendLineage &&
 			strings.Contains(evt.Message.Content, smokeIntegrityRouteOK) {
 			accepted++
 		}
@@ -1594,7 +1619,7 @@ func smokeIntegrityReflectionSelfManaged(t *testing.T) {
 }
 
 // smokeIntegrityReflectionConsumer 只走正式装配链：渠道入站（registerHandlers）
-// 驱动一轮，冥想 agent 的 deliver_summary 经 InjectReflection 落到目标会话链，
+// 驱动一轮，冥想 agent 的 send{target:{agent,session}} 落到目标会话链，
 // 随后的 HTTP /task 请求从正式装配里读到它；审批人链保持零投递。
 func smokeIntegrityReflectionConsumer(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
@@ -1618,14 +1643,14 @@ func smokeIntegrityReflectionConsumer(t *testing.T) {
 		}
 		for _, msg := range req.Messages {
 			for _, call := range msg.ToolCalls {
-				if call.Function.Name == "deliver_summary" {
+				if call.Function.Name == sendToolID {
 					deliveredByHost = true
 				}
 			}
 		}
 	}
 	if !deliveredByHost {
-		t.Fatalf("the hosted meditation agent issued no deliver_summary call\nreflect requests:\n%s",
+		t.Fatalf("the hosted meditation agent issued no send call\nreflect requests:\n%s",
 			smokeRequestDetail(provider, smokeReflectModel))
 	}
 	if delivery.Target != rig.addressOf(chat) {
@@ -1650,7 +1675,7 @@ func smokeIntegrityReflectionConsumer(t *testing.T) {
 	if got := smokeIntegrityReflectionDeliveries(rig, chat); got != 1 {
 		t.Fatalf("the reflection landed %d time(s) on %s, want exactly one", got, chat)
 	}
-	t.Logf("[integrity-reflection-consumer] deliver_summary by the hosted meditation agent -> InjectReflection -> %s read %s; the approver chain stayed empty",
+	t.Logf("[integrity-reflection-consumer] send by the hosted meditation agent -> the target chain -> %s read %s; the approver chain stayed empty",
 		chat, smokeReflectionMarker)
 }
 
@@ -1661,7 +1686,7 @@ func smokeIntegrityReflectionDeliveries(rig *smokeRig, chat string) int {
 		if evt.Type != event.TypeExternalInput {
 			continue
 		}
-		if evt.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
+		if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 			continue
 		}
 		if strings.Contains(evt.Message.Content, smokeReflectionMarker) {
@@ -2121,6 +2146,7 @@ func smokeIntegrityReplacementRepeat(t *testing.T) {
 // smokeIntegrityReplacementRefused 把入口模型热换到未声明的 provider：替换事实
 // 照常提交，租约重建被拒（Unwrap 到 rl.ErrLeaseRebuildFailed），不发布新版本，
 // 下一轮仍由租约持有的版本服务。
+// - 底稿与起机渲染的那一档逐字节一致：本段宿主以默认文档起机，审批档额外声明入口 send 与 risk_rules，热换会先在 requires a restart 被拒。
 func smokeIntegrityReplacementRefused(t *testing.T) {
 	host := bootSmokeIntegrityHost(t, "1h", "")
 	defer host.close(t)
@@ -2130,7 +2156,7 @@ func smokeIntegrityReplacementRefused(t *testing.T) {
 	rig.drive(chat, smokeIntegrityReplacementWarmTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityReplacementWarmTurn, 120*time.Second)
 
-	host.cfg.Doc = smokeErrorsBadProviderDocumentOver(smokeApprovalDocument)
+	host.cfg.Doc = smokeErrorsBadProviderDocumentOver(nil)
 	result := rig.smokeIntegrityReload(smokeReloadModel)
 	if result.err != nil {
 		t.Fatalf("the refused replacement: %v", result.err)
@@ -2547,6 +2573,16 @@ func smokeIntegrityModels(requests []smokeModelRequest) []string {
 	return out
 }
 
+// smokeIntegrityText 拼接一个请求里所有消息的正文：回执帧可能折在任意一条里。
+func smokeIntegrityText(messages []smokeModelMessage) string {
+	var out strings.Builder
+	for _, msg := range messages {
+		out.WriteString(msg.Content)
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
 // smokeIntegrityHasFact 报告链上是否有给定类型且正文含子串的事实。
 func smokeIntegrityHasFact(facts []event.Event, kind, want string) bool {
 	for _, evt := range facts {
@@ -2557,7 +2593,7 @@ func smokeIntegrityHasFact(facts []event.Event, kind, want string) bool {
 	return false
 }
 
-// smokeIntegrityWaitMeditationFact 等到目标会话链上出现一条冥想投递的外部输入事实。
+// smokeIntegrityWaitMeditationFact 等到目标会话链上出现一条 send 投递的外部输入事实。
 func smokeIntegrityWaitMeditationFact(t *testing.T, rig *smokeRig, chat string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -2566,7 +2602,7 @@ func smokeIntegrityWaitMeditationFact(t *testing.T, rig *smokeRig, chat string, 
 			if evt.Type != event.TypeExternalInput {
 				continue
 			}
-			if evt.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
+			if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 				continue
 			}
 			if !strings.Contains(evt.Message.Content, smokeReflectionMarker) {
@@ -2582,7 +2618,7 @@ func smokeIntegrityWaitMeditationFact(t *testing.T, rig *smokeRig, chat string, 
 	}
 }
 
-// smokeIntegrityWaitDelivered 等到目标会话链上出现一条带指定正文的冥想投递事实。
+// smokeIntegrityWaitDelivered 等到目标会话链上出现一条带指定正文的 send 投递事实。
 func smokeIntegrityWaitDelivered(t *testing.T, rig *smokeRig, chat, content string, timeout time.Duration) event.Event {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -2591,7 +2627,7 @@ func smokeIntegrityWaitDelivered(t *testing.T, rig *smokeRig, chat, content stri
 			if evt.Type != event.TypeExternalInput {
 				continue
 			}
-			if evt.Meta[event.MetaKeyTriggerSource] != meditation.LineageReflection {
+			if evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
 				continue
 			}
 			if strings.Contains(evt.Message.Content, content) {
@@ -3720,7 +3756,8 @@ func symptomAssertExecAuditFact(t *testing.T, fact event.Event, resource string,
 }
 
 // TestLocalSmokeSymptomNoSendTool 是症状直译锚 G-A：入口工具面无 send，正文恰一条。
-// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send，部署文档也不声明它；正文恰一条。
+// - 正锚 entry_face_has_no_send：整轮模型请求授予的工具名里没有 send；入口 agent 自己也不声明它；正文恰一条。
+// - 正锚 one_communication_tool：部署文档的工具面恰一个通信工具 send（D6 之后它是冥想 agent 唯一的写面）。
 // - 负锚 face_is_readable：同一请求的工具面确实被读到（委派工具在列），防"空列表"式假通过。
 // - 消费者锚 production_drive：走 rig.drive 的真实宿主入站路径，消息由替身通道记录。
 // 契约: docs/wiki/examples/wechat-bot-runtime.md#delivery-receipts
@@ -3730,8 +3767,11 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读取部署入口文档：%v", err)
 	}
-	if strings.Contains(string(deployment), "id: send") {
-		t.Fatalf("部署入口仍声明 send：tagent.yaml 含 %q", "id: send")
+	if got := strings.Count(string(deployment), "id: send"); got != 1 {
+		t.Fatalf("部署文档声明的通信工具 = %d 处 %q，want 恰好一处（冥想 agent 的 send）", got, "id: send")
+	}
+	if block := smokeAgentBlock(string(deployment), "tagent"); strings.Contains(block, "id: send") {
+		t.Fatalf("部署入口 agent tagent 仍声明 send，它的声明块 =\n%s", block)
 	}
 
 	rig, provider := symptomRig(t)
@@ -3771,9 +3811,35 @@ func TestLocalSmokeSymptomNoSendTool(t *testing.T) {
 		t.Fatalf("乱序注入后定位失败/取错：ok=%v located.model=%q located.text=%q，want 本轮请求 %q",
 			ok, located.Model, located.text(), turnReq.text())
 	}
-	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档无 send；普通回合恰一条投递 %q",
+	t.Logf("[symptom-ga] 正锚：入口工具面 %v 无 send、部署文档的工具面恰一处 send（入口自己不声明）；普通回合恰一条投递 %q",
 		turnReq.Tools, texts[0])
 	t.Logf("[symptom-ga] 负锚 locating_survives_out_of_order：向前插队两条干扰请求（他模型带本轮标记、本模型带他轮标记）后，仍按模型身份 %q + 标记 %q（非到达下标）定位到同一条请求", smokeEntryModel, marker)
+}
+
+// smokeAgentBlock 取出部署文档里某个 agent 自己的声明块：从它的键行到下一个
+// 同级键或顶层键之前。块内出现的工具声明就是该 agent 的工具面。
+func smokeAgentBlock(doc, agent string) string {
+	lines := strings.Split(doc, "\n")
+	start := -1
+	for i, line := range lines {
+		if line == "  "+agent+":" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	var out []string
+	for _, line := range lines[start:] {
+		switch {
+		case line == "" || strings.HasPrefix(line, "   ") || strings.HasPrefix(line, "  #"):
+			out = append(out, line)
+		case strings.HasPrefix(line, "  ") || !strings.HasPrefix(line, " "):
+			return strings.Join(out, "\n")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // smokeTurnRequest 定位某一轮的模型请求：模型身份 + 本轮标记。请求到达顺序不是

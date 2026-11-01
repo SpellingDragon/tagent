@@ -27,7 +27,7 @@ func TestDelegationObservation(t *testing.T) {
 	t.Run("a fresh admission and its settle write their lines", func(t *testing.T) {
 		observer := &delegationObserver{}
 		defer watchDelegationLog(t, observer)()
-		tasks := newInvariantShutdownTasks()
+		tasks := newDelegationTasksFace()
 		tasks.deliverFresh(task.AdmissionReceipt{CallID: "call-1", TaskID: "task-1", Accepted: true, Kind: task.AdmissionFresh})
 		ledger := NewDelegator(tasks, delegationBorrow{}, "inst-1")
 		if _, err := ledger.Delegate(ctx, observationDelegation("call-1")); err != nil {
@@ -47,7 +47,7 @@ func TestDelegationObservation(t *testing.T) {
 	t.Run("a withheld settle and a refused admission write their lines", func(t *testing.T) {
 		observer := &delegationObserver{}
 		defer watchDelegationLog(t, observer)()
-		tasks := newInvariantShutdownTasks()
+		tasks := newDelegationTasksFace()
 		tasks.deliverFresh(task.AdmissionReceipt{CallID: "call-1", TaskID: "task-1", Accepted: true, Kind: task.AdmissionFresh})
 		ledger := NewDelegator(tasks, delegationBorrow{}, "inst-1")
 		if _, err := ledger.Delegate(ctx, Delegation{}); err == nil {
@@ -80,7 +80,7 @@ func TestDelegationObservation(t *testing.T) {
 	t.Run("a failing logger blocks neither the admission nor the settle", func(t *testing.T) {
 		observer := &delegationObserver{panicsLeft: 2}
 		defer watchDelegationLog(t, observer)()
-		tasks := newInvariantShutdownTasks()
+		tasks := newDelegationTasksFace()
 		tasks.deliverFresh(task.AdmissionReceipt{CallID: "call-1", TaskID: "task-1", Accepted: true, Kind: task.AdmissionFresh})
 		ledger := NewDelegator(tasks, delegationBorrow{}, "inst-1")
 		if _, err := ledger.Delegate(ctx, observationDelegation("call-1")); err != nil {
@@ -103,7 +103,7 @@ func observationDelegation(callID string) Delegation {
 		InvocationID: "inv-1",
 		DecisionID:   "dec-1",
 		CallID:       callID,
-		Target:       event.Address{AgentID: "helper", SessionID: "session-helper"},
+		Sites:        DelegationSites{Target: event.Address{AgentID: "helper", SessionID: "session-helper"}},
 		Ref:          state.BindingRef{AgentID: "helper", InstanceID: "inst-1", Generation: 1},
 	}
 }
@@ -121,6 +121,62 @@ func (delegationBorrow) Borrow(context.Context, event.AgentID) (*state.BindingHa
 // BorrowDerived serves the handle a delegated request inherits.
 func (delegationBorrow) BorrowDerived(context.Context, state.BindingRef) (*state.BindingHandle, error) {
 	return &state.BindingHandle{}, nil
+}
+
+// delegationTasksFace is the task face the observation checks hand the ledger: it
+// answers the admission receipt it was made to report and the obligations one task
+// still holds, so the ledger's booking and its withheld settle are what the checks
+// read.
+type delegationTasksFace struct {
+	mu      sync.Mutex
+	open    map[event.TaskID]int
+	receipt task.AdmissionReceipt
+}
+
+// newDelegationTasksFace returns a task face owing nothing.
+func newDelegationTasksFace() *delegationTasksFace {
+	return &delegationTasksFace{open: map[event.TaskID]int{}}
+}
+
+// Admit answers the admission receipt the face was made to report.
+func (f *delegationTasksFace) Admit(context.Context, task.Spec) (task.AdmissionReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.receipt, nil
+}
+
+// Advance reports the transition committed.
+func (f *delegationTasksFace) Advance(context.Context, event.TaskID, task.Status, task.MutationID, []task.Envelope) (task.CommitResult, error) {
+	return task.CommitCommitted, nil
+}
+
+// Obligations reports the obligations the face still holds for one task.
+func (f *delegationTasksFace) Obligations(_ context.Context, taskID event.TaskID) (task.Obligations, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := f.open[taskID]
+	out := task.Obligations{Count: count}
+	for i := 0; i < count; i++ {
+		out.Open = append(out.Open, task.Obligation{Kind: task.ObligationAwaitingDelivery, TaskID: taskID})
+	}
+	return out, nil
+}
+
+// Flush offers nothing: the checks answer the settle through the obligation index.
+func (f *delegationTasksFace) Flush(context.Context, event.TaskID) error { return nil }
+
+// hold records the obligations one task still holds.
+func (f *delegationTasksFace) hold(taskID event.TaskID, count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.open[taskID] = count
+}
+
+// deliverFresh makes the face answer the receipt named from now on.
+func (f *delegationTasksFace) deliverFresh(receipt task.AdmissionReceipt) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.receipt = receipt
 }
 
 // delegationObserver is the framework logger the observation checks of this

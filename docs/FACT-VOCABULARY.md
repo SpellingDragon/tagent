@@ -30,6 +30,8 @@
 
 **触发源戳的归属**：`event.MetaKeyTriggerSource` 写入的戳名由产出它的机制包持有；宿主经 `InvokeRequest.TriggerSource` 自带的戳由 `assembly/run.go` 原样写入。戳只标记来源、不构成身份，因此不在上表新增族。
 
+**投递四键同理**：`delivery.target`／`delivery.identity`／`delivery.receipt`／`delivery.source` 是两族投递（agent 主动发送、框架结算通知）共用的元数据条目——投递身份只是去重键，承载它的事实本身就落在已有的核心事件族（`external_input`／`task_settled`），因此不登记新族；投递账目（`assembly/host_tools.go` 的 `DeliveryLedger`）是从这些事实投影出来的读面，不是第八族。
+
 | 戳 | 常量 | 归属包 |
 |---|---|---|
 | `meditation` | `LineageReflection` | `features/evolution/meditation`（观察面：自己分区＝自维护，他人分区＝旁路冥想） |

@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -143,39 +144,52 @@ MUTATIONS: Tuple[Mutation, ...] = (
             file="assembly/host.go",
             # Anchor migrated per the clearance ruling (G5/G6b follow-up turn
             # checking turn.Terminal): the call assigns the returned turn now.
-            # The injected defect is unchanged — the notice material re-enters
-            # the follow-up range as a second input fact beside its notice fact.
+            # Re-anchored again after the quiesce restructure moved the wake block
+            # of `fireNoticeTurn` out of its enclosing branch (04.2: intake gate →
+            # quiesce → stop consumers), so the statements stand one level in
+            # instead of two. The injected defect is unchanged — the notice
+            # material re-enters the follow-up range as a second input fact beside
+            # its notice fact.
             old=(
-                "\t\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
-                "\t\tif err != nil {\n"
-                "\t\t\treturn err\n"
-                "\t\t}\n"
-                "\t\tconsumer := consumers.Ensure(addr)\n"
+                "\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
+                "\tif err != nil {\n"
+                "\t\treturn err\n"
+                "\t}\n"
+                "\tconsumer := consumers.Ensure(addr)\n"
             ),
             new=(
-                "\t\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
-                "\t\tif err != nil {\n"
-                "\t\t\treturn err\n"
-                "\t\t}\n"
-                "\t\tif extra := strings.TrimSpace(fact.Message.Content); extra != \"\" {\n"
-                "\t\t\t_, _ = h.run.commitOnly(ctx, addr, event.Event{\n"
-                "\t\t\t\tType:         event.TypeExternalInput,\n"
-                "\t\t\t\tTimestamp:    time.Now(),\n"
-                "\t\t\t\tMessage:      model.Message{Role: model.RoleUser, Content: extra},\n"
-                "\t\t\t\tOwner:        addr,\n"
-                "\t\t\t\tSource:       addr,\n"
-                "\t\t\t\tTarget:       addr,\n"
-                "\t\t\t\tInvocationID: noticeInvocation(task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}),\n"
-                "\t\t\t})\n"
-                "\t\t}\n"
-                "\t\tconsumer := consumers.Ensure(addr)\n"
+                "\tkey, err := h.commitNoticeMaterial(ctx, addr, fact)\n"
+                "\tif err != nil {\n"
+                "\t\treturn err\n"
+                "\t}\n"
+                "\tif extra := strings.TrimSpace(fact.Message.Content); extra != \"\" {\n"
+                "\t\t_, _ = h.run.commitOnly(ctx, addr, event.Event{\n"
+                "\t\t\tType:         event.TypeExternalInput,\n"
+                "\t\t\tTimestamp:    time.Now(),\n"
+                "\t\t\tMessage:      model.Message{Role: model.RoleUser, Content: extra},\n"
+                "\t\t\tOwner:        addr,\n"
+                "\t\t\tSource:       addr,\n"
+                "\t\t\tTarget:       addr,\n"
+                "\t\t\tInvocationID: noticeInvocation(task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}),\n"
+                "\t\t})\n"
+                "\t}\n"
+                "\tconsumer := consumers.Ensure(addr)\n"
             ),
         ),
         test_package="./tests/integration/host",
         test_file="tests/integration/host/event_integrity_test.go",
         test_name="TestEventIntegrityTaskContinuation",
         test_selector="^TestEventIntegrityTaskContinuation$",
-        expect_assertion="new user-input facts carrying",
+        # The witness moved from the fact-count wording to the request wording
+        # after the quiesce restructure: the duplicate material now trips the
+        # consumer-side copy check on the follow-up request before the fact count
+        # is read, so two named assertions inside the anchored subtest kill this
+        # mutation and which one speaks first varies run to run. The literal is
+        # the static part of that copy check — a request carrying more than one
+        # copy of one notice material — and it was observed on every run of the
+        # three probed, where the two single-site literals each spoke on only
+        # some of them.
+        expect_assertion="user copies of",
     ),
     Mutation(
         id="MUT-EVID-03-busy-notice-drop",
@@ -370,35 +384,30 @@ MUTATIONS: Tuple[Mutation, ...] = (
         basis="CAND-02.2-wrong-target",
         evidence_kind="named_assertion",
         evidence_ref=(
-            "02.2 negative anchor TestEventIntegrityReflectionDelivery/"
-            "wrong_target_no_extra_write (existing named business assertion)"
+            "02.2 send 形态的负锚 TestSendCrossSessionGates/denies_out_of_whitelist "
+            "(existing named business assertion: the deliver_to white list names no "
+            "target outside it); 2026-11-01 D 方案重锚：旧锚 features/evolution/"
+            "meditation/deliver.go 已删，等价变异落到 assembly/host_tools.go 的白名单门"
         ),
         description=(
-            "Let a deliver_summary argument name a target outside deliver_to, "
-            "so the declaration no longer refuses the argument."
+            "Let a send call name a target outside the deliver_to white list, so the "
+            "declared white list no longer refuses the argument at its own gate."
         ),
         replacement=Replacement(
-            file="features/evolution/meditation/deliver.go",
+            file="assembly/host_tools.go",
             old=(
-                "\tfor key := range probe {\n"
-                "\t\tif key != \"content\" {\n"
-                "\t\t\tout = append(out, \"'\"+key+\"'\")\n"
-                "\t\t}\n"
+                "\tif !hostSendNames(p.plan.targets, string(addr.AgentID)) {\n"
+                "\t\treturn deliveryRefused, fmt.Sprintf(\"the deliver_to white list of %q names no %q, and a body delivered outside it would reach a session the reflection never declared\",\n"
+                "\t\t\tp.plan.agent, addr.AgentID)\n"
                 "\t}\n"
             ),
-            new=(
-                "\tfor key := range probe {\n"
-                "\t\tif key != \"content\" && key != \"target\" {\n"
-                "\t\t\tout = append(out, \"'\"+key+\"'\")\n"
-                "\t\t}\n"
-                "\t}\n"
-            ),
+            new="",
         ),
-        test_package="./tests/integration/host",
-        test_file="tests/integration/host/event_integrity_test.go",
-        test_name="TestEventIntegrityReflectionDelivery",
-        test_selector="^TestEventIntegrityReflectionDelivery$",
-        expect_assertion="want the named refusal of the target argument",
+        test_package="./tests/integration/execution",
+        test_file="tests/integration/execution/send_cross_session_gates_test.go",
+        test_name="TestSendCrossSessionGates",
+        test_selector="^TestSendCrossSessionGates$",
+        expect_assertion="want the white list refusal naming",
     ),
     Mutation(
         id="MUT-EVID-04-position-boundary",
@@ -874,13 +883,46 @@ def classify(result: RunResult, expect_assertion: str) -> Dict[str, object]:
     return {"verdict": NOT_KILLED, "reason": "assertion_not_matched", "assertion_hit": False}
 
 
+# CONTROL_RACE_WAIVERS mirrors the RACE_WAIVER_SIGNATURES table of
+# scripts/gates/race_check.sh (single source of upstream race rulings): a
+# control whose only failures are races whose top frames match a registered
+# waiver stays green for this gate exactly as the race gate already rules.
+CONTROL_RACE_WAIVERS = (
+    r'trpc-agent-go.*steer',
+    r'trpc-agent-go.*invocation',
+    r'trpc-agent-go/session.*inmemory',
+    r'trpc-agent-go.*session/session\.go',
+    r'trpc-mcp-go.*streamableHTTPClientTransport',
+    r'trpc-mcp-go.*streamable_client\.go',
+)
+
+
+def _race_waived(result: RunResult) -> bool:
+    text = result.raw_text or ""
+    text += "".join(str(ev.get("Output") or "") for ev in result.events)
+    if "WARNING: DATA RACE" not in text:
+        return False
+    frames = re.findall(
+        r"WARNING: DATA RACE.*?==================", text, re.S)
+    for frame in frames:
+        if not any(re.search(w, frame) for w in CONTROL_RACE_WAIVERS):
+            return False
+    return bool(frames)
+
+
 def classify_control(result: RunResult) -> Dict[str, object]:
-    """The unmutated control must run the selector and end green."""
+    """The unmutated control must run the selector and end green.
+
+    A race the race gate already waives (registered upstream signatures whose
+    frames are the whole race report) stays green here: the two gates share one
+    ruling table, so a control never flips on a waived upstream race."""
     if result.timed_out:
         return {"verdict": "red", "reason": "timeout", "exit_code": result.exit_code}
     if not _ran_test(result):
         return {"verdict": "red", "reason": "zero_match", "exit_code": result.exit_code}
     failures = _failing_tests(result)
+    if (result.exit_code != 0 or failures) and _race_waived(result):
+        return {"verdict": "green", "reason": "green_race_waived", "exit_code": result.exit_code}
     if result.exit_code != 0 or failures:
         return {"verdict": "red", "reason": "test_failed", "exit_code": result.exit_code,
                 "failing": failures}

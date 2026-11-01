@@ -18,6 +18,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -39,7 +40,7 @@ const batchApprovalToolName = "tagent:tool-call-batch"
 // - no_book_refuses_the_batch_whole：未接线审批面时 fail-closed 拒绝全部（措辞含 no approval channel is wired），绝不回退截断。
 // - uncapped_response_admits_every_call：上限为 0（关闭态）时同一响应全部受理且不登记任何审批。
 // - call_ids_stay_out_of_the_digest：同样调用换一套 call ID 重发 → 同一个 request digest、不同 request 身份（人读清单各自保留）。
-// - consumer_path_holds_the_batch_for_approval：消费路径同一道闸——批准后 200 条外发、200 条受理回执 + 批次回执。
+// - consumer_path_holds_the_batch_for_approval：消费路径同一道闸——批准后 200 条全部执行、200 条受理回执 + 批次回执。
 // 契约: docs/wiki/agent/execution-generations.md#turn-outcome
 func TestResponseCallCapFuse(t *testing.T) {
 	t.Run("approval_admits_the_whole_batch", func(t *testing.T) {
@@ -54,7 +55,7 @@ func TestResponseCallCapFuse(t *testing.T) {
 			Input:        []model.Message{{Role: model.RoleUser, Content: "run every rotation at once"}},
 		})
 		req := awaitBatchRequest(t, book, dir)
-		assertBatchSubject(t, req, 64, "call-cap")
+		assertBatchSubject(t, req, 64, "call-cap", "send")
 		filed := readRegisteredBatch(t, dir, req.ID)
 		assertBatchFile(t, filed)
 		decideBatch(t, book, req.ID, approval.ApprovalApproved)
@@ -282,7 +283,7 @@ func TestResponseCallCapFuse(t *testing.T) {
 		fuseLimits(t, agent.FuseLimits{CallCap: 64})
 		book, dir := approvalBook(t, 0)
 		provider := newIntakeProvider(t)
-		provider.firstAnswer = consumerStormAnswer()
+		provider.firstAnswer = consumerStormAnswer(provider)
 		sender := newIntakeSender()
 		host := intakeBoot(t, provider, sender)
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -294,17 +295,12 @@ func TestResponseCallCapFuse(t *testing.T) {
 			Input:        []model.Message{{Role: model.RoleUser, Content: "run every rotation at once"}},
 		})
 		req := awaitBatchRequest(t, book, dir)
-		assertBatchSubject(t, req, 64, "call-host")
+		assertBatchSubject(t, req, 64, "call-host", mcpgw.ToolNameMCPCall)
 		decideBatch(t, book, req.ID, approval.ApprovalApproved)
 		awaitAsync(t, errs)
-		sends := 0
-		for _, body := range sender.accepted() {
-			if strings.HasPrefix(body, "rotation ") {
-				sends++
-			}
-		}
-		if sends != responseStormCalls {
-			t.Fatalf("outbound sends of the approved batch = %d, want every call of it on the consumption path too", sends)
+		provider.shortcut.awaitExecutions(t, responseStormCalls)
+		if executed := provider.shortcut.executions(); executed != responseStormCalls {
+			t.Fatalf("executions of the approved batch = %d, want every call of it on the consumption path too", executed)
 		}
 		receipts, admissions, others := consumerStormReceipts(t, provider)
 		if receipts != responseStormCalls || admissions != responseStormCalls {
@@ -398,9 +394,11 @@ func decideBatch(t *testing.T, book *approval.ApprovalManager, id string, status
 	}
 }
 
-// assertBatchSubject pins the request one storm is parked as: the group it
-// names, the rule that held it and the summary head an approver reads first.
-func assertBatchSubject(t *testing.T, req *approval.ApprovalRequest, cap int, prefix string) {
+// assertBatchSubject pins the request one storm is parked as: the group it names,
+// the rule that held it and the summary head an approver reads first, which names
+// the tool the batch calls, its size, the cap that held it and the prompt it was
+// judged on.
+func assertBatchSubject(t *testing.T, req *approval.ApprovalRequest, cap int, prefix, tool string) {
 	t.Helper()
 	if req.ToolName != batchApprovalToolName {
 		t.Fatalf("approval subject tool = %q, want the batch group %q", req.ToolName, batchApprovalToolName)
@@ -411,7 +409,7 @@ func assertBatchSubject(t *testing.T, req *approval.ApprovalRequest, cap int, pr
 	if req.Status != approval.ApprovalPending {
 		t.Fatalf("approval status = %q, want the request parked until it is answered", req.Status)
 	}
-	for _, want := range []string{`"calls":200`, fmt.Sprintf(`"cap":%d`, cap), `"prompt_tokens"`, `"tool":"send"`} {
+	for _, want := range []string{`"calls":200`, fmt.Sprintf(`"cap":%d`, cap), `"prompt_tokens"`, `"tool":` + intakeQuoted(tool)} {
 		if !strings.Contains(req.ArgsPreview, want) {
 			t.Fatalf("approval preview = %q, want the summary head %s an approver reads", req.ArgsPreview, want)
 		}
@@ -530,13 +528,16 @@ func batchNoticeIn(messages []model.Message) string {
 }
 
 // consumerStormAnswer renders the scripted completion the host entry reads: one
-// response carrying the whole storm, so the cap is judged on the path a
-// deployment really runs rather than on the direct drive alone.
-func consumerStormAnswer() string {
+// response carrying the whole storm of the shortcut server's tool, so the cap is
+// judged on the path a deployment really runs rather than on the direct drive
+// alone. Every call names the non-communication tool of the in-process server, so
+// an approved call is an execution the check reads back.
+func consumerStormAnswer(provider *intakeProvider) string {
 	calls := make([]string, 0, responseStormCalls)
 	for at := 0; at < responseStormCalls; at++ {
-		arguments := intakeQuoted(fmt.Sprintf(`{"content":"rotation %d"}`, at))
-		calls = append(calls, fmt.Sprintf(`{"id":"call-host-%03d","type":"function","function":{"name":"send","arguments":%s}}`, at, arguments))
+		arguments := intakeQuoted(provider.shortcut.callArgs(fmt.Sprintf("rotation %d", at)))
+		calls = append(calls, fmt.Sprintf(`{"id":"call-host-%03d","type":"function","function":{"name":%s,"arguments":%s}}`,
+			at, intakeQuoted(mcpgw.ToolNameMCPCall), arguments))
 	}
 	return `{"id":"scripted-storm","object":"chat.completion","created":1699200000,"choices":[{"index":0,` +
 		`"message":{"role":"assistant","content":"calling","tool_calls":[` + strings.Join(calls, ",") + `]},` +

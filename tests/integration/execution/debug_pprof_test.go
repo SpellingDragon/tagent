@@ -105,7 +105,7 @@ func debugPprofBoot(t *testing.T, provider *intakeProvider, credential string) *
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", credential)
 	root := t.TempDir()
 	configPath := filepath.Join(root, "tagent.yaml")
-	if err := os.WriteFile(configPath, []byte(intakeHostDocument(root, provider.endpoint())), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(intakeHostDocument(root, provider.endpoint(), provider.anchor.url(), provider.shortcut.url())), 0o644); err != nil {
 		t.Fatalf("write the host document: %v", err)
 	}
 	host, err := assembly.Boot(configPath, assembly.WithSender(newIntakeSender()))

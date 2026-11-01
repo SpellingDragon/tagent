@@ -168,6 +168,20 @@ func wakeWaitFor(t *testing.T, what string, reached func() bool) {
 	}
 }
 
+// wakeAccountDriver opens one settle driver over the account a check assembled and
+// declares the one target the frozen routing names: the plugin dispatch reads the
+// target set a deployment declares, so the fixture declares the address it drives
+// instead of asking the gate to open.
+func wakeAccountDriver(
+	lookup func(context.Context, event.EventID) (event.Event, error),
+	wake assembly.SettleWake,
+	fire func(context.Context, event.Address, event.Event) error,
+) *assembly.SettleDriver {
+	driver := assembly.NewSettleDriver(lookup, func() assembly.SettleWake { return wake }, fire)
+	driver.DeclareScope(string(wakeAccountAddr.AgentID), string(wakeAccountAddr.AgentID))
+	return driver
+}
+
 // TestSettleWakeAccount pins the one-work-account semantics of the settle pump over the mailbox face.
 //   - one notification starts one turn however often the pump is woken
 //   - a stop keeps the unconsumed notice and the next process over the same durable account resumes the turn it owes
@@ -181,7 +195,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
-		driver := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, fire.fire)
+		driver := wakeAccountDriver(wakeAccountLookup(t), store, fire.fire)
 		defer driver.Stop()
 
 		for i := 0; i < 3; i++ {
@@ -212,7 +226,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
-		driver := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, fire.fire)
+		driver := wakeAccountDriver(wakeAccountLookup(t), store, fire.fire)
 
 		driver.Wake()
 		wakeWaitFor(t, "the first follow-up attempt", func() bool { return fire.count() == 1 })
@@ -225,7 +239,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		restored := wakeAccountLog(t, root)
 		resumed := state.NewMemoryStore(state.NewAuthority(), restored)
 		resumedFire := newWakeFire(nil)
-		next := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return resumed }, resumedFire.fire)
+		next := wakeAccountDriver(wakeAccountLookup(t), resumed, resumedFire.fire)
 		defer next.Stop()
 		next.Wake()
 		wakeWaitFor(t, "the resumed follow-up", func() bool { return resumedFire.count() == 1 })
@@ -246,7 +260,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		hold := make(chan struct{})
 		fire := newWakeFire(hold)
 		defer fire.releaseFire()
-		driver := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, fire.fire)
+		driver := wakeAccountDriver(wakeAccountLookup(t), store, fire.fire)
 		defer driver.Stop()
 
 		driver.Wake()
@@ -268,7 +282,7 @@ func TestSettleWakeAccount(t *testing.T) {
 		}
 
 		replay := newWakeFire(nil)
-		guard := assembly.NewSettleDriver(wakeAccountLookup(t), func() assembly.SettleWake { return store }, replay.fire)
+		guard := wakeAccountDriver(wakeAccountLookup(t), store, replay.fire)
 		defer guard.Stop()
 		guard.Wake()
 		time.Sleep(500 * time.Millisecond)

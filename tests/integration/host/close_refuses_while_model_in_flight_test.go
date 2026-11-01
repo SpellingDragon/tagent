@@ -3,7 +3,7 @@ package host
 import (
 	"context"
 	"errors"
-	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -41,17 +41,26 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		}()
 		provider.awaitRequest(t)
 		report, err := run.Close(ctx, agent.CloseRequest{Address: addr, Deadline: time.Now().Add(300 * time.Millisecond)})
-		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close beside the model in flight = (%+v, %v), want the named unsettled state instead of a clean drain", report, err)
+		if err != nil || report.Outcome != agent.CloseCut || report.Drained {
+			t.Fatalf("close beside the model in flight = (%+v, %v), want a cut close instead of a clean quiesce", report, err)
 		}
-		wantOne := agent.UnsettledObligation{TaskID: "inv-model-flight", Reason: "the producer has not confirmed its stop"}
+		wantOne := "this writer has not confirmed its stop: "
 		if len(report.Unsettled) != 2 {
 			t.Fatalf("unsettled = %+v, want the drive and the model production each named beside its unconfirmed stop", report.Unsettled)
 		}
+		named := make([]string, 0, len(report.Unsettled))
 		for _, entry := range report.Unsettled {
-			if !reflect.DeepEqual(entry, wantOne) {
-				t.Fatalf("unsettled entry = %+v, want the named production %v", entry, wantOne)
+			if entry.TaskID != "" {
+				t.Fatalf("unsettled entry = %+v, want the writer named beside no task: a model in flight is not a task", entry)
 			}
+			name, ok := strings.CutPrefix(entry.Reason, wantOne)
+			if !ok {
+				t.Fatalf("unsettled entry = %+v, want the unconfirmed writer named beside its reason", entry)
+			}
+			named = append(named, name)
+		}
+		if named[0] != "drive:inv-model-flight" || !strings.HasPrefix(named[1], "model:") {
+			t.Fatalf("writers named = %v, want the drive and the model production each named beside its own identity", named)
 		}
 		provider.unblock()
 		if err := <-driving; err != nil {
@@ -90,22 +99,22 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 			t.Fatal("the tool reported its end beside the cancellation, want the production still running")
 		}
 		report, err := run.Close(context.Background(), agent.CloseRequest{Address: addr, Deadline: time.Now().Add(300 * time.Millisecond)})
-		if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-			t.Fatalf("close beside the running tool = (%+v, %v), want the drain kept open by the production that never stopped", report, err)
+		if err != nil || report.Outcome != agent.CloseCut || report.Drained {
+			t.Fatalf("close beside the running tool = (%+v, %v), want a cut close kept open by the production that never stopped", report, err)
 		}
 		tasks := runTasks(t, run, context.Background(), addr)
 		if len(tasks) != 1 {
 			t.Fatalf("tasks beside the cancelled drive = %v, want the one admitted call", tasks)
 		}
-		want := agent.UnsettledObligation{TaskID: tasks[0], Reason: "the producer has not confirmed its stop"}
+		want := "this writer has not confirmed its stop: call:call-1"
 		found := false
 		for _, entry := range report.Unsettled {
-			if entry == want {
+			if entry.Reason == want {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("unsettled = %+v, want the tool production %v named beside its unconfirmed stop", report.Unsettled, want)
+			t.Fatalf("unsettled = %+v, want the tool production %q named beside its unconfirmed stop", report.Unsettled, want)
 		}
 		if got := tool.callCount(); got != 1 {
 			t.Fatalf("tool executions = %d, want the single production the close stood beside", got)
@@ -220,6 +229,47 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		}
 		if got := tool.callCount(); got != 1 {
 			t.Fatalf("tool executions = %d, want the single production the drain settled", got)
+		}
+	})
+
+	t.Run("writers_not_stopped_blocks_quiesce", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		run, provider, _ := newModelFlightRun(t, ctx)
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-writers-barrier"}
+		driving := make(chan error, 1)
+		go func() {
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
+				InvocationID: "inv-writers-barrier",
+				Address:      addr,
+				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
+			})
+			driving <- err
+		}()
+		provider.awaitRequest(t)
+		report, err := run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(200 * time.Millisecond)})
+		if err != nil || report.Drained || report.Outcome != agent.CloseCut {
+			t.Fatalf("close beside the unstopped writer = (%+v, %v), want a cut close: the barrier alone keeps the run open", report, err)
+		}
+		if read := run.Unsettled(ctx); !read.Resting() {
+			t.Fatalf("criterion = %+v, want it at rest so the writer barrier is what the close reads", read)
+		}
+		named := 0
+		for _, entry := range report.Unsettled {
+			if strings.HasPrefix(entry.Reason, "this writer has not confirmed its stop: ") {
+				named++
+			}
+		}
+		if named == 0 {
+			t.Fatalf("unsettled = %+v, want the writer that has not stopped named in the report", report.Unsettled)
+		}
+		provider.unblock()
+		if err := <-driving; err != nil {
+			t.Fatalf("invoke beside the released model: %v", err)
+		}
+		report, err = run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)})
+		if err != nil || !report.Drained {
+			t.Fatalf("close beside the stopped writers = (%+v, %v), want the quiesce reached once every writer stopped", report, err)
 		}
 	})
 }

@@ -1,10 +1,10 @@
 // 契约: docs/wiki/platform/platform-subsystems.md#composition-root
 //
-// The host-owned tools and ports: the outbound send tool the model calls, the
-// scheduled reflection plan and the port that commits its body to a session, and
-// the request shape an inbound channel posts to the task endpoint. Each one is a
-// face the host contributes to the assembly, so the host builds it here rather
-// than leaving the wiring to every deployment.
+// The host-owned tools and ports: the send tool the model calls across tasks and
+// sessions, the scheduled reflection plan and the port that commits its body to a
+// session, and the request shape an inbound channel posts to the task endpoint. Each
+// one is a face the host contributes to the assembly, so the host builds it here
+// rather than leaving the wiring to every deployment.
 package assembly
 
 import (
@@ -16,14 +16,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/document"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
-	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
@@ -32,64 +33,589 @@ import (
 // hostSendToolID is the declaration-side name of the outbound message tool.
 const hostSendToolID = "send"
 
+// hostSendTargetKey opens the frozen argument dialect of one send call (design D6):
+// a target object beside the body, and the three keys that object may carry. The
+// target names exactly one destination — a task, or an agent beside its session —
+// and every key below is the spelling the declaration and the refusal text share, so
+// a rename here is a rename of the contract the model reads.
+const (
+	// hostSendTargetKey is the one argument beside the body: the destination object.
+	hostSendTargetKey = "target"
+	// hostSendContentKey is the body argument.
+	hostSendContentKey = "content"
+	// hostSendTargetTaskKey names the task destination inside the target object.
+	hostSendTargetTaskKey = "task"
+	// hostSendTargetAgentKey names the agent of a session destination.
+	hostSendTargetAgentKey = "agent"
+	// hostSendTargetSessionKey names the session of a session destination.
+	hostSendTargetSessionKey = "session"
+)
+
+// hostSendReceiptOK opens the frozen receipt dialect of one send call (design D6): a
+// delivered body answers the bare ok, and a body that was not delivered opens with one
+// of the two prefixed receipts, so a caller reads the three states apart from the text
+// alone.
+const (
+	// hostSendReceiptOK is the whole receipt of a body the call delivered.
+	hostSendReceiptOK = "ok"
+	// hostSendDeniedPrefix opens a refusal receipt: nothing was delivered.
+	hostSendDeniedPrefix = "[send_denied] "
+	// hostSendHeldPrefix opens a hold receipt: the body waits for review.
+	hostSendHeldPrefix = "[send_held] "
+)
+
 // hostSendContentMax is the byte ceiling of one body the send tool delivers.
 const hostSendContentMax = 8 * 1024
 
-// hostSendLineage is the delivery lineage of a call that carries no governance
-// pass: the body originated in the send tool itself, so the line names the tool
-// rather than borrowing the user's line.
-const hostSendLineage = "send"
-
-// hostSendTool is the model-visible outbound face: one content argument handed
-// to the host's one delivery outlet, which rules it before any body leaves.
+// hostSendTool is the model-visible face of one body handed to one destination: a
+// task this run serves a round of, or the session of a peer agent. The tool carries
+// no channel of its own, because the body a turn delivers leaves through the turn
+// body alone (design DEL-1).
 type hostSendTool struct {
-	sender  MessageSender
-	deliver func(context.Context, plugin.Delivery) (deliveryOutcome, string)
+	// reentry is the task re-entry face the {task} destination dispatches to. A host
+	// that carries none refuses the call by name instead of delivering the body
+	// outbound, because the body names a task and no task can be reached that way.
+	reentry hostSendReentry
+	// session is the cross-session delivery face the {agent, session} destination
+	// dispatches to. A host that carries none refuses the call by name rather than
+	// falling back to the outbound channel, because the body names a peer session
+	// and the channel would answer a different question than the model asked.
+	session hostSendSession
 }
 
 var _ trpctool.CallableTool = (*hostSendTool)(nil)
 
-// hostSendArgs is the argument shape the model sees: the body, and nothing
-// else.
-type hostSendArgs struct {
-	Content string `json:"content"`
+// hostSendReentry is the task re-entry face one send call dispatches to: the task the
+// call names is re-entered with the body, and the outcome is reported in the same three
+// states every delivery reports through. The face is the seam between the tool and the
+// task state machine, so the tool itself holds no registry.
+type hostSendReentry interface {
+	// ReenterTask hands one body to the named task and reports the outcome of that
+	// re-entry beside the cause of a refusal or a hold.
+	ReenterTask(ctx context.Context, taskID event.TaskID, content string) (deliveryOutcome, string)
 }
 
-// Declaration implements tool.CallableTool.
+// hostSendReentryPort is the host's binding of the re-entry face one send call
+// dispatches to: the task table the named task is reactivated in, the delegation
+// ledger whose entry is moved to the round that reactivation opened, and the
+// continuation table the round itself is served from.
+//
+// The port is built before the run and bound after Assemble, so the tool every
+// agent carries reads the live scene the run holds instead of a copy taken at
+// construction. A port bound to no run refuses the call by name rather than
+// reporting a re-entry no task can answer.
+type hostSendReentryPort struct {
+	run *Run
+}
+
+var _ hostSendReentry = (*hostSendReentryPort)(nil)
+
+// Bind attaches the assembled run the port re-enters tasks through.
+func (p *hostSendReentryPort) Bind(run *Run) { p.run = run }
+
+// ReenterTask hands one body to the named task and reports the outcome of that
+// re-entry: a settled task of this host is reactivated into a new round, the
+// ledger entry of the task is moved to that round, and the round body is handed to
+// the delegated turn the task was first served in. The call is answered as
+// delivered once that round owns the input; the round itself runs beside the
+// receipt exactly as the round of a fresh admission does, so the turn that issued
+// the call keeps deciding while the task it re-entered runs.
+//
+// Only a task this host serves a round of is re-entered. An identity the task
+// table holds no record of, a task whose delegated round this host never served,
+// and every status design D7 refuses are each answered as a named refusal rather
+// than reactivated into a round nobody asked for.
+func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.TaskID, content string) (deliveryOutcome, string) {
+	if p.run == nil {
+		return deliveryRefused, "the host is not assembled"
+	}
+	if _, _, err := p.run.registry.Lookup(ctx, taskID); err != nil {
+		return deliveryRefused, fmt.Sprintf("the task table holds no record of %s, and a body names a task of this host", taskID)
+	}
+	if p.run.continuations == nil || !p.run.continuations.Served(taskID) {
+		return deliveryRefused, fmt.Sprintf("no delegated round of %s is served here: the task was never delegated, or the round it was served in already left", taskID)
+	}
+	round, err := p.run.registry.Reactivate(ctx, taskID)
+	if err != nil {
+		return deliveryRefused, hostReentryCause(err)
+	}
+	if err := p.run.delegations.ReopenRound(taskID, round); err != nil {
+		assemblyWarn("tagent: the re-entry of %s opened round %d beside no ledger entry: %v", taskID, round, err)
+		return deliveryRefused, hostReentryCause(err)
+	}
+	continuations := p.run.continuations
+	go func() {
+		if err := continuations.Reenter(context.WithoutCancel(ctx), taskID, content); err != nil {
+			assemblyWarn("tagent: the round %s was re-entered into ended beside: %v", taskID, err)
+		}
+	}()
+	return deliverySent, ""
+}
+
+// hostReentryCause renders the cause one refused re-entry is answered with: the
+// named refusal the task table or the delegation ledger reported, so the model
+// reads which status it named and what answers it instead.
+func hostReentryCause(err error) string {
+	switch {
+	case errors.Is(err, task.ErrReactivationFailed):
+		return "the task is failed: " + task.ErrReactivationFailed.Error()
+	case errors.Is(err, task.ErrReactivationCancelled):
+		return "the task is cancelled: " + task.ErrReactivationCancelled.Error()
+	case errors.Is(err, task.ErrRoundInFlight):
+		return "a round of the task is in flight, so the body waits for its terminal: " + task.ErrRoundInFlight.Error()
+	case errors.Is(err, agent.ErrDelegationNotSettled):
+		return "the delegation has not settled, so its next round is not open yet: " + agent.ErrDelegationNotSettled.Error()
+	default:
+		return err.Error()
+	}
+}
+
+// hostSendSession is the cross-session delivery face one send call dispatches to:
+// one body handed to the session the call names, judged by the four gates the
+// delivery face keeps and answered in the three states every delivery reports
+// through. The face is the seam between the tool and the live scene, so the tool
+// itself resolves no session and holds no white list.
+type hostSendSession interface {
+	// DeliverToSession hands one body to the session the call names and reports the
+	// outcome of that delivery beside the cause of a refusal.
+	DeliverToSession(ctx context.Context, agent, session, content string) (deliveryOutcome, string)
+}
+
+// hostSendSessionLineage is the trigger source one cross-session delivery stamps on
+// the fact it commits, so the target turn reads a body a peer sent rather than input
+// from its own user (design D8).
+const hostSendSessionLineage = "send"
+
+// hostSendSessionReceipt is the outcome one delivery identity answered, so a replay
+// of that identity answers the same text and writes nothing a second time.
+type hostSendSessionReceipt struct {
+	outcome deliveryOutcome
+	cause   string
+}
+
+// DeliverToSession hands one body to the session the call names: the four gates the
+// delivery face keeps judge the destination first, the body then commits into the
+// target chain under the call's own identity, and an idle target is driven through
+// one round while a busy one reads the fact at its own next decision boundary. The
+// sender is never blocked on the target's turn, so a busy session never deadlocks the
+// call that delivered to it.
+func (p *hostMeditationPort) DeliverToSession(ctx context.Context, agent, session, content string) (deliveryOutcome, string) {
+	if p.run == nil {
+		return deliveryRefused, "the host is not assembled"
+	}
+	frame, framed := task.CallFrameFrom(ctx)
+	if !framed {
+		return deliveryRefused, "the call carries no frame, so the delivery names no sender"
+	}
+	addr := event.Address{AgentID: event.AgentID(agent), SessionID: event.SessionID(session)}
+	if outcome, cause := p.gate(ctx, frame, addr); outcome != deliverySent {
+		return outcome, cause
+	}
+
+	key := hostSendSessionKey(frame, addr)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if receipt, seen := p.receipts[key]; seen {
+		return receipt.outcome, receipt.cause
+	}
+	receipt := p.deliver(ctx, frame, addr, content)
+	if p.receipts == nil {
+		p.receipts = make(map[string]hostSendSessionReceipt)
+	}
+	p.receipts[key] = receipt
+	return receipt.outcome, receipt.cause
+}
+
+// gate judges one session destination against the four gates the delivery face keeps,
+// in the order the delivery spec freezes: the deliver_to white list, the observed
+// face, the live binding of the named session and the liveness of its loop. Every gate
+// refuses by name, so the model reads which one turned the body away.
+// - The deliver_to white list is the one the document declared, so a host that declared none delivers nothing: an absent plan, a sender outside it and a target outside it are each refused.
+// - A destination outside the observed face is blind: the reflection cannot see what it writes there, so the delivery is refused instead of being guessed at.
+// - The named session is resolved against the sessions this run already bound, so establishing one nobody asked for is never this seam's answer.
+// - A host shutting down, and a site its store does not serve, are each refused by name instead of being established a second time.
+func (p *hostMeditationPort) gate(ctx context.Context, frame task.CallFrame, addr event.Address) (deliveryOutcome, string) {
+	if p.plan == nil {
+		return deliveryRefused, "this host declares no deliver_to white list, and a session destination is refused closed beside none"
+	}
+	if string(frame.Address.AgentID) != p.plan.agent {
+		return deliveryRefused, fmt.Sprintf("agent %q carries no cross-session delivery face: the white list this host declares belongs to %q",
+			frame.Address.AgentID, p.plan.agent)
+	}
+	if !hostSendNames(p.plan.targets, string(addr.AgentID)) {
+		return deliveryRefused, fmt.Sprintf("the deliver_to white list of %q names no %q, and a body delivered outside it would reach a session the reflection never declared",
+			p.plan.agent, addr.AgentID)
+	}
+	if !hostSendNames(p.plan.observed, string(addr.AgentID)) {
+		return deliveryRefused, fmt.Sprintf("the observed face of %q does not reach %q, so a body delivered there would be blind",
+			p.plan.agent, addr.AgentID)
+	}
+	if !addr.IsComplete() {
+		return deliveryRefused, "the target names an incomplete session address"
+	}
+	if !hostSendBound(p.run, addr) {
+		return deliveryRefused, fmt.Sprintf("no session %q is bound to agent %q", addr.SessionID, addr.AgentID)
+	}
+	if p.run.refusing() {
+		return deliveryRefused, "the host is shutting down, so no session is running"
+	}
+	if p.run.store != nil {
+		if _, err := p.run.store.Establish(ctx, addr, p.run.instance); err != nil {
+			return deliveryRefused, fmt.Sprintf("the session %q of agent %q is not running: %v", addr.SessionID, addr.AgentID, err)
+		}
+	}
+	return deliverySent, ""
+}
+
+// deliver commits one body into the target chain and owes the target a round: an idle
+// session is driven through one turn beside the receipt, and a busy one reads the fact
+// at its own next decision boundary because the drive already in flight owns the range.
+// - The fact identity is the delivery identity, so the same body re-presented under the same call identity lands no second fact: the commit answers the identity it already holds instead of writing beside it.
+func (p *hostMeditationPort) deliver(ctx context.Context, frame task.CallFrame, addr event.Address, content string) hostSendSessionReceipt {
+	loop := p.run.loop
+	if loop == nil {
+		return hostSendSessionReceipt{outcome: deliveryRefused, cause: "this host drives no loop, so the body would land beside no turn"}
+	}
+	deliveryKey := event.EventID(hostSendSessionKey(frame, addr))
+	evt := event.Event{
+		Type:         event.TypeExternalInput,
+		Timestamp:    time.Now(),
+		Key:          deliveryKey,
+		Meta:         hostDeliveryMeta(frame, addr, string(deliveryKey)),
+		Message:      model.Message{Role: model.RoleUser, Content: content},
+		Owner:        addr,
+		Source:       addr,
+		Target:       addr,
+		InvocationID: hostSendSessionInvocation(frame, addr),
+	}
+	busy := hostSendSessionBusy(p.run, addr)
+	key, err := p.run.commitOnly(ctx, addr, evt)
+	if err != nil {
+		return hostSendSessionReceipt{outcome: deliveryRefused,
+			cause: fmt.Sprintf("the session %q of agent %q did not take the body: %v", addr.SessionID, addr.AgentID, err)}
+	}
+	if busy {
+		return hostSendSessionReceipt{outcome: deliverySent}
+	}
+	evt.Key = key
+	instance := p.run.instance
+	go func() {
+		if _, err := loop.Drive(context.WithoutCancel(ctx), agent.Invocation{
+			InvocationID: evt.InvocationID,
+			Address:      addr,
+			Instance:     instance,
+			Ready:        []event.Event{evt},
+		}); err != nil {
+			assemblyWarn("tagent: the sent body %s of %s ended beside: %v", evt.InvocationID, addr.SessionID, err)
+		}
+	}()
+	return hostSendSessionReceipt{outcome: deliverySent}
+}
+
+// hostSendSessionBusy reports whether a model decision of the target session is in
+// flight, which is the one-slot gate the delivery reads: a busy target adopts the body
+// at its own boundary, and an idle target is driven through a round of its own.
+func hostSendSessionBusy(run *Run, addr event.Address) bool {
+	_, _, busy := run.ModelInFlight(addr, run.instance)
+	return busy
+}
+
+// hostSendBound reports whether this run already bound the named address, so a
+// destination nobody established is refused instead of being opened by the delivery.
+func hostSendBound(run *Run, addr event.Address) bool {
+	for _, live := range run.ActiveSessions(addr.AgentID) {
+		if live == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// hostSendSessionKey is the identity one delivery is deduplicated under: the call the
+// body came from beside the address it names, so a replay of the same call answers the
+// same receipt and a second body from another call still lands.
+func hostSendSessionKey(frame task.CallFrame, addr event.Address) string {
+	return string(frame.Identity.DedupKey()) + "\x00" + string(addr.AgentID) + "\x00" + string(addr.SessionID)
+}
+
+// hostSendSessionInvocation is the invocation identity one delivery commits and drives
+// under: derived from the call itself, so the same delivery always names the same range
+// and a replay never opens a second one.
+func hostSendSessionInvocation(frame task.CallFrame, addr event.Address) event.InvocationID {
+	return event.InvocationID(fmt.Sprintf("%s#sent-%s", addr.SessionID, frame.Identity.DedupKey()))
+}
+
+// hostSendNames reports whether one name appears in a resolved name list.
+func hostSendNames(names []string, name string) bool {
+	for _, held := range names {
+		if held == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DeliveryReceiptSent is the one receipt the delivery account records: the body
+// reached the chain of the target it named. It is the frozen word of the delivery
+// receipt entry, so both delivery families read the same receipt for a body that
+// landed and a receipt no fact states reads as this one.
+const DeliveryReceiptSent = "sent"
+
+// hostDeliveryMeta renders the delivery entries one committed delivery carries
+// (design D7): the target it reached, the identity it is deduplicated under, the
+// receipt it stands at and the source event it is filed under. The keys are the
+// frozen MetaKeyDelivery entries, so the account of one delivery is read from the
+// same four entries whichever route carried the body.
+// - The identity is the canonical identity of the committed fact, so a replayed delivery resolves against the fact it already landed instead of writing beside it.
+// - The source is the invocation of the call that issued the delivery, so every delivery of one turn is read back under the one event that caused them.
+func hostDeliveryMeta(frame task.CallFrame, addr event.Address, identity string) map[string]string {
+	return map[string]string{
+		event.MetaKeyTriggerSource:    hostSendSessionLineage,
+		event.MetaKeyDeliveryTarget:   hostDeliveryTarget(addr),
+		event.MetaKeyDeliveryIdentity: identity,
+		event.MetaKeyDeliveryReceipt:  DeliveryReceiptSent,
+		event.MetaKeyDeliverySource:   string(frame.Identity.InvocationID),
+	}
+}
+
+// hostDeliveryTarget renders one address as the value of a delivery entry: the
+// agent and the session it names, so an entry read back names both.
+func hostDeliveryTarget(addr event.Address) string {
+	return string(addr.AgentID) + "/" + string(addr.SessionID)
+}
+
+// DeliveryRecord is one single-target delivery of one run: the source event it is
+// filed under, the target it reached, the identity it is deduplicated under, the
+// receipt it stands at and the type of the fact that carried it. The fact type
+// keeps the two delivery families apart — an agent's own body is an external input
+// and a framework state change is a task settle — while every other field is read
+// through the same four entries for both.
+type DeliveryRecord struct {
+	// Source is the event the delivery is filed under.
+	Source event.EventID
+	// Target is the address the delivery reached.
+	Target event.Address
+	// Identity is the canonical identity the delivery is deduplicated under.
+	Identity string
+	// Receipt is the receipt the delivery stands at.
+	Receipt string
+	// FactType is the frozen type of the fact that carried the delivery.
+	FactType string
+}
+
+// Meta reports the four delivery entries of one record under the frozen keys, so
+// two records of different families are compared and consumed by the same
+// vocabulary instead of by the shape of the fact behind them.
+func (r DeliveryRecord) Meta() map[string]string {
+	return map[string]string{
+		event.MetaKeyDeliveryTarget:   hostDeliveryTarget(r.Target),
+		event.MetaKeyDeliveryIdentity: r.Identity,
+		event.MetaKeyDeliveryReceipt:  r.Receipt,
+		event.MetaKeyDeliverySource:   string(r.Source),
+	}
+}
+
+// DeliveryLedger is the delivery account of one assembled run (design D9): the
+// projections of the delivery facts the run committed, read back by source event
+// and by target. It holds no state of its own — the facts are the account, and the
+// tier the run keeps makes them durable — so a query never parses a body: the four
+// entries, the identity and the type of the fact are all it reads.
+type DeliveryLedger struct {
+	run *Run
+}
+
+// DeliveryLedger reports the delivery account of this run, or nil beside no run.
+func (r *Run) DeliveryLedger() *DeliveryLedger {
+	if r == nil {
+		return nil
+	}
+	return &DeliveryLedger{run: r}
+}
+
+// Records reports every delivery the run accounts for, ordered by source event,
+// then by target and identity, so two reads of one chain answer the same order.
+// One identity answers one record: a repeated delivery of the identity the chain
+// already holds lands no second fact and therefore no second record.
+func (l *DeliveryLedger) Records() []DeliveryRecord {
+	if l == nil || l.run == nil {
+		return nil
+	}
+	facts := l.run.hostDeliveryFacts()
+	records := make([]DeliveryRecord, 0, len(facts))
+	seen := make(map[string]struct{}, len(facts))
+	for _, fact := range facts {
+		record, held := hostDeliveryRecordOf(fact)
+		if !held {
+			continue
+		}
+		if _, repeated := seen[record.Identity]; repeated {
+			continue
+		}
+		seen[record.Identity] = struct{}{}
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].Source != records[j].Source {
+			return records[i].Source < records[j].Source
+		}
+		if records[i].Target.AgentID != records[j].Target.AgentID {
+			return records[i].Target.AgentID < records[j].Target.AgentID
+		}
+		if records[i].Target.SessionID != records[j].Target.SessionID {
+			return records[i].Target.SessionID < records[j].Target.SessionID
+		}
+		return records[i].Identity < records[j].Identity
+	})
+	return records
+}
+
+// BySource reports the deliveries one source event is accounted for: every target
+// the event reached, each beside its own identity and receipt.
+func (l *DeliveryLedger) BySource(source event.EventID) []DeliveryRecord {
+	var out []DeliveryRecord
+	for _, record := range l.Records() {
+		if record.Source == source {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+// ByTarget reports the deliveries one address received, whichever family carried
+// them.
+func (l *DeliveryLedger) ByTarget(addr event.Address) []DeliveryRecord {
+	var out []DeliveryRecord
+	for _, record := range l.Records() {
+		if record.Target == addr {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+// hostDeliveryFacts reports the facts this run holds, in commit order, as a copy
+// the caller owns.
+func (r *Run) hostDeliveryFacts() []event.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]event.Event, 0, len(r.factOrder))
+	for _, key := range r.factOrder {
+		evt, held := r.facts[key]
+		if !held {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// hostDeliveryRecordOf projects one committed fact into its delivery record and
+// reports whether the fact is a delivery at all.
+// - A fact stamped with a delivery identity is one, whichever family wrote it: the entries it carries are read back exactly as the committing path stated them.
+// - A task settle fact is one too: it is the fact a terminal notification lands as, its identity is the notification identity the follow-up turn drives from, and a fact committed before the delivery entries existed carries none of them, so its record states the receipt the landed fact is.
+// - Every other fact is no delivery: an agent output, a tool result and an attention fact are not bodies handed to a target.
+func hostDeliveryRecordOf(fact event.Event) (DeliveryRecord, bool) {
+	if identity := fact.Meta[event.MetaKeyDeliveryIdentity]; identity != "" {
+		receipt := fact.Meta[event.MetaKeyDeliveryReceipt]
+		if receipt == "" {
+			receipt = DeliveryReceiptSent
+		}
+		return DeliveryRecord{
+			Source:   event.EventID(fact.Meta[event.MetaKeyDeliverySource]),
+			Target:   fact.Target,
+			Identity: identity,
+			Receipt:  receipt,
+			FactType: fact.Type,
+		}, true
+	}
+	if fact.Type != event.TypeTaskSettled || noticeTaskIDOf(fact) == "" {
+		return DeliveryRecord{}, false
+	}
+	if !terminalSettleKinds[noticeKindOf(fact)] {
+		return DeliveryRecord{}, false
+	}
+	return DeliveryRecord{
+		Source:   fact.Key,
+		Target:   fact.Target,
+		Identity: string(fact.Key),
+		Receipt:  DeliveryReceiptSent,
+		FactType: fact.Type,
+	}, true
+}
+
+// hostSendArgs is the argument shape the model sees: the destination and the body, and
+// nothing else.
+type hostSendArgs struct {
+	Target  *hostSendTarget `json:"target"`
+	Content string          `json:"content"`
+}
+
+// hostSendTarget is the one destination a call names, as the object of mutually
+// exclusive subfields the declaration describes: the task to re-enter, or the agent
+// beside the session a body is delivered to. A target naming both, naming one of the
+// pair alone, or naming neither is refused by name.
+type hostSendTarget struct {
+	Task    string `json:"task"`
+	Agent   string `json:"agent"`
+	Session string `json:"session"`
+}
+
+// Declaration implements tool.CallableTool: the one body a call hands across a task
+// or a session boundary, and the destination argument that names which.
+//
+// The description promises the communication the tool is and no channel of its
+// own: the body reaches the destination the call names, and the outbound channel
+// stays with the turn body the host already delivers (design DEL-1). The schema states
+// the two required arguments the call is read against — the target object and the body
+// — so a shape the declaration does not describe is refused by name in Call.
 func (t *hostSendTool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
 		Name:        hostSendToolID,
-		Description: "Deliver one body to the user address of this call. The target comes from the call's session address; it is not an argument. A refusal returns a [send_denied] result text, and a body held for review returns a [send_held] result text; the turn continues either way.",
+		Description: "Deliver one body across tasks and sessions: name the destination in the target argument. A refusal answers a [send_denied] result text, and a body held for review answers a [send_held] result text; the turn continues either way.",
 		InputSchema: &trpctool.Schema{
 			Type: "object",
 			Properties: map[string]*trpctool.Schema{
-				"content": {Type: "string", Description: "The body to deliver, UTF-8, at most 8KiB"},
+				hostSendTargetKey: {
+					Type:        "object",
+					Description: "The one destination the body is handed to: the task to re-enter, or the agent beside the session that receives the body.",
+					Properties: map[string]*trpctool.Schema{
+						hostSendTargetTaskKey:    {Type: "string", Description: "The task to re-enter with the body."},
+						hostSendTargetAgentKey:   {Type: "string", Description: "The agent of a session destination."},
+						hostSendTargetSessionKey: {Type: "string", Description: "The session of a session destination."},
+					},
+				},
+				hostSendContentKey: {Type: "string", Description: "The body to deliver, UTF-8, at most 8KiB"},
 			},
-			Required: []string{"content"},
+			Required: []string{hostSendTargetKey, hostSendContentKey},
 		},
 	}
 }
 
-// Call implements tool.CallableTool: every refusal and delivery failure is
-// answered as result text, and an error is reserved for a malformed argument
-// shape. The body is handed to the host's one delivery outlet, so the same
-// ruler rules a cross-agent send and a turn body, and a hold is answered as a
-// hold: the receipt must never report a held body as delivered. A delivered
-// body is answered with the bare ok: the receipt is the credential that the
-// delivery happened, not a report to repeat, so it names no target session and
-// carries no wording the model could speak to the user.
+// Call implements tool.CallableTool: every refusal and every dispatch outcome is
+// answered as result text, and an error is reserved for a malformed argument shape.
+//
+// The call is read in the order design D6 freezes: the argument surface, then the one
+// destination it names, then the body. A body the host delivers answers the bare ok;
+// a refusal and a hold answer their own prefixed receipt. A destination this host
+// carries no face for is refused by name and never falls back to an outbound delivery:
+// the body named a task or a session, so sending it to the address of the call would
+// answer a different question than the model asked.
 func (t *hostSendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(jsonArgs, &probe); err != nil {
 		return nil, fmt.Errorf("send: malformed arguments: %w", err)
 	}
-	if unknown := hostUnknownFields(probe); len(unknown) > 0 {
+	if unknown := hostUnknownFields(probe, hostSendTargetKey, hostSendContentKey); len(unknown) > 0 {
 		return t.denied("the arguments name fields outside the declaration " + strings.Join(unknown, ", ") +
-			"; send accepts content only, and the target comes from the host"), nil
+			"; send accepts " + hostSendTargetKey + " and " + hostSendContentKey + " only"), nil
 	}
 	var args hostSendArgs
 	if err := json.Unmarshal(jsonArgs, &args); err != nil {
 		return nil, fmt.Errorf("send: malformed arguments: %w", err)
+	}
+	target, reason := hostSendTargetOf(probe[hostSendTargetKey])
+	if target == nil {
+		return t.denied(reason), nil
 	}
 	if args.Content == "" {
 		return t.denied("content is empty"), nil
@@ -97,74 +623,104 @@ func (t *hostSendTool) Call(ctx context.Context, jsonArgs []byte) (any, error) {
 	if len(args.Content) > hostSendContentMax {
 		return t.denied(fmt.Sprintf("content exceeds the 8KiB ceiling (%d bytes)", len(args.Content))), nil
 	}
-	if t.sender == nil {
-		return t.denied("the host carries no outbound message sender"), nil
+	return t.dispatch(ctx, target, args.Content), nil
+}
+
+// hostSendTargetOf resolves the one destination a call names and reports the reason it
+// was refused beside no target: an absent object, a key outside the three the object
+// declares, both destinations at once, one of the agent and session pair alone, and an
+// object naming no destination at all are each refused by name.
+func hostSendTargetOf(raw json.RawMessage) (*hostSendTarget, string) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, hostSendTargetMissing()
 	}
-	addr, ok := hostCallAddress(ctx)
-	if !ok {
-		return t.denied("this call carries no explicit session address"), nil
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, "the " + hostSendTargetKey + " is not the object the declaration describes"
 	}
-	if t.deliver == nil {
-		return t.denied("the host carries no delivery outlet"), nil
+	if unknown := hostUnknownFields(probe, hostSendTargetTaskKey, hostSendTargetAgentKey, hostSendTargetSessionKey); len(unknown) > 0 {
+		return nil, "the " + hostSendTargetKey + " names fields outside the declaration " + strings.Join(unknown, ", ") +
+			"; it accepts " + hostSendTargetTaskKey + ", " + hostSendTargetAgentKey + " and " + hostSendTargetSessionKey + " only"
 	}
-	outcome, cause := t.deliver(ctx, plugin.Delivery{
-		Content: args.Content,
-		Lineage: hostSendLineageOf(ctx),
-		Target:  addr,
-	})
+	var named hostSendTarget
+	if err := json.Unmarshal(raw, &named); err != nil {
+		return nil, "the " + hostSendTargetKey + " is not the object the declaration describes"
+	}
+	task := strings.TrimSpace(named.Task)
+	agent := strings.TrimSpace(named.Agent)
+	session := strings.TrimSpace(named.Session)
+	switch {
+	case task != "" && (agent != "" || session != ""):
+		return nil, "the " + hostSendTargetKey + " names a " + hostSendTargetTaskKey + " and a session at once, and a send names exactly one destination"
+	case task != "":
+		return &hostSendTarget{Task: task}, ""
+	case agent != "" && session != "":
+		return &hostSendTarget{Agent: agent, Session: session}, ""
+	case agent != "" || session != "":
+		return nil, "the " + hostSendTargetKey + " names only one of " + hostSendTargetAgentKey + " and " + hostSendTargetSessionKey +
+			", and a session destination names both"
+	}
+	return nil, hostSendTargetMissing()
+}
+
+// hostSendTargetMissing is the refusal of a call that names no destination, shared by the
+// absent object and the object carrying no value.
+func hostSendTargetMissing() string {
+	return "the arguments name no " + hostSendTargetKey + ": name the " + hostSendTargetTaskKey + " to re-enter, or the " +
+		hostSendTargetAgentKey + " and " + hostSendTargetSessionKey + " to deliver to"
+}
+
+// dispatch hands one body to the destination the call named and answers its receipt: a
+// task destination re-enters that task through the run's re-entry face, and a session
+// destination delivers into that peer session through the run's cross-session face.
+// A destination this host carries no face for is refused by name and never falls back
+// to the other face, because each one answers a different question.
+func (t *hostSendTool) dispatch(ctx context.Context, target *hostSendTarget, content string) string {
+	if target.Task != "" {
+		if t.reentry == nil {
+			return t.denied("this host carries no task re-entry face")
+		}
+		return t.receipt(t.reentry.ReenterTask(ctx, event.TaskID(target.Task), content))
+	}
+	if t.session == nil {
+		return t.denied("this host carries no cross-session delivery face")
+	}
+	return t.receipt(t.session.DeliverToSession(ctx, target.Agent, target.Session, content))
+}
+
+// receipt renders the three states one dispatch reports through.
+func (t *hostSendTool) receipt(outcome deliveryOutcome, cause string) string {
 	switch outcome {
 	case deliverySent:
-		return "ok", nil
+		return hostSendReceiptOK
 	case deliveryHeld:
-		return t.held(cause), nil
+		return t.held(cause)
 	default:
-		return t.denied(cause), nil
+		return t.denied(cause)
 	}
 }
 
 // denied renders one refusal as result text.
 func (t *hostSendTool) denied(reason string) string {
-	return "[send_denied] " + reason
+	return hostSendDeniedPrefix + reason
 }
 
 // held renders one hold as result text: the body is waiting for review, not
 // delivered, and the text must not read as a delivery receipt.
 func (t *hostSendTool) held(reason string) string {
-	return "[send_held] " + reason
+	return hostSendHeldPrefix + reason
 }
 
-// hostSendLineageOf reports the lineage a send call hands to the delivery
-// ruler: the governance pass of the running call when the dispatch stated one,
-// the trigger-source stamp of the running turn otherwise, and the send tool's
-// own line when the call runs beside neither.
-func hostSendLineageOf(ctx context.Context) string {
-	if pass, ok := plugin.CallPassFrom(ctx); ok {
-		if source := strings.TrimSpace(pass.TriggerSource); source != "" {
-			return source
-		}
+// hostUnknownFields names the argument fields outside the named declaration, sorted so
+// the text is reproducible.
+func hostUnknownFields(probe map[string]json.RawMessage, declared ...string) []string {
+	allowed := make(map[string]bool, len(declared))
+	for _, key := range declared {
+		allowed[key] = true
 	}
-	if lineage, ok := deliveryLineageFrom(ctx); ok {
-		return lineage
-	}
-	return hostSendLineage
-}
-
-// hostCallAddress reports the explicit invocation address the call frame
-// carries.
-func hostCallAddress(ctx context.Context) (event.Address, bool) {
-	frame, ok := task.CallFrameFrom(ctx)
-	if !ok || !frame.Address.IsComplete() {
-		return event.Address{}, false
-	}
-	return frame.Address, true
-}
-
-// hostUnknownFields names the argument fields outside the declaration, sorted
-// so the text is reproducible.
-func hostUnknownFields(probe map[string]json.RawMessage) []string {
 	var out []string
 	for key := range probe {
-		if key != "content" {
+		if !allowed[key] {
 			out = append(out, "'"+key+"'")
 		}
 	}
@@ -306,34 +862,34 @@ func hostSessionPrefix(entry string) string {
 	return label + ":" + strings.TrimSpace(entry) + ":"
 }
 
-// hostMeditationPort is the host's binding of the two faces a reflection turn
-// writes through: the cross-session sink a delivered summary commits into and
-// the live-session query it resolves its declared targets against.
+// hostMeditationPort is the host's binding of the two faces a reflection reads and
+// writes its delivery through: the live-session query it resolves its declared
+// deliver_to targets against, and the cross-session delivery face the one
+// communication tool dispatches a `{agent, session}` destination to.
 //
-// The port is built before the run and bound after Assemble, so the tool the
-// meditation session carries reads the live scene the run holds instead of a
-// copy made at construction. The meditation loop session is never a delivery
-// target: it is the observing session itself, not a binding of the agent.
+// The port is built before the run and bound after Assemble, so the tool every agent
+// carries and the reflection itself read the live scene the run holds instead of a
+// copy made at construction. The meditation loop session is never a delivery target:
+// it is the observing session itself, not a binding of the agent.
 type hostMeditationPort struct {
 	plan *hostMeditationPlan
 	run  *Run
+
+	// mu brackets one delivery: its four gates, the fact it commits and the drive it
+	// decides to owe are resolved while no other delivery interleaves, so two bodies
+	// aimed at one idle session never open two turns beside each other. It also guards
+	// receipts, the outcome one call identity already answered.
+	mu       sync.Mutex
+	receipts map[string]hostSendSessionReceipt
 }
 
 var (
-	_ meditation.EventSink    = (*hostMeditationPort)(nil)
 	_ meditation.SessionQuery = (*hostMeditationPort)(nil)
+	_ hostSendSession         = (*hostMeditationPort)(nil)
 )
 
-// Bind attaches the assembled run the port writes through.
+// Bind attaches the assembled run the port reads and delivers through.
 func (p *hostMeditationPort) Bind(run *Run) { p.run = run }
-
-// CommitToSession commits one delivered event into the chain of its address.
-func (p *hostMeditationPort) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
-	if p.run == nil {
-		return "", errors.New("tagent: the meditation port is bound to no run")
-	}
-	return p.run.CommitToSession(ctx, addr, evt)
-}
 
 // ActiveSessions reports the run's live bindings of one agent, without the
 // observing session of the reflection itself.

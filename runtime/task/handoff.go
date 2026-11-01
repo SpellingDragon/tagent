@@ -106,11 +106,11 @@ func handoffTargetOf(mutation MutationID) (HandoffTarget, bool) {
 
 // applyHandoff applies one explicit handoff to the task: the recorded link is
 // rebuilt beside the move, the future notifications freeze the new target and
-// target instance, and the delivery obligations of the notifications still awaiting delivery
-// are reclassified as handed-off while their frozen routing never moves, and
-// the ones already answered keep the target they froze. The same
-// application serves the live move and the fold of a stored handoff fact, so a
-// rebuilt task routes exactly as the run that recorded the handoff did.
+// target instance, and the delivery obligations of the notifications still
+// awaiting delivery are reclassified as handed-off while their frozen routing
+// never moves. The same application serves the live move and the fold of a stored
+// handoff fact, so a rebuilt task routes exactly as the run that recorded the
+// handoff did.
 func (t *memoryTask) applyHandoff(taskID event.TaskID, target HandoffTarget) {
 	previous := t.spec.Target
 	if t.handoff != nil {
@@ -127,7 +127,7 @@ func (t *memoryTask) applyHandoff(taskID event.TaskID, target HandoffTarget) {
 	t.handoff = &copied
 	for i := range t.obligations {
 		open := &t.obligations[i]
-		if open.obligation.Kind == ObligationAwaitingDelivery && !open.answered {
+		if open.obligation.Kind == ObligationAwaitingDelivery {
 			open.obligation.Kind = ObligationHandedOff
 		}
 	}

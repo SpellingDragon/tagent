@@ -548,10 +548,11 @@ func (r *Run) presetSubagent(ctx context.Context, agents map[event.AgentID]Nativ
 		builder.Skills = func(context.Context, []string) (skill.Repository, error) { return repository, nil }
 	}
 	return subagent.NewTool(subagent.ToolOptions{
-		Parent:     parent,
-		Builder:    builder,
-		Delegation: r.delegations,
-		Bindings:   r.bindings,
+		Parent:        parent,
+		Builder:       builder,
+		Delegation:    r.delegations,
+		Bindings:      r.bindings,
+		Continuations: r.continuations,
 	})
 }
 
@@ -651,34 +652,12 @@ func (g *admissionGate) Call(ctx context.Context, jsonArgs []byte) (any, error) 
 	return g.inner.Call(ctx, jsonArgs)
 }
 
-// toolProduction is the stop confirmation of one wrapped call's tool
-// production: the production runs on the detached execution the task wrapper
-// drives beside the admission and confirms its stop only when the tool really
-// returned. The detachment keeps the production running through the caller's
-// cancellation, so a cancellation is never read as a stop here.
-type toolProduction struct {
-	mu      sync.Mutex
-	stopped bool
-}
-
-// Stopped reports whether this tool production really stopped.
-func (p *toolProduction) Stopped() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stopped
-}
-
-// stop confirms the real stop of this tool production.
-func (p *toolProduction) stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopped = true
-}
-
-// toolProducer registers the production of one wrapped call beside the task
-// identity the call was admitted as: the registration happens where the
-// production actually runs, on the detached execution the task wrapper drives,
-// where the call frame of the admission still travels on the context.
+// toolProducer registers the production of one wrapped call beside the writer
+// ledger of the run: the registration happens where the production actually
+// runs, on the detached execution the task wrapper drives, where the call frame
+// of the admission still travels on the context. The registration names the
+// call, never a task identity: a call in flight is a writer of the run, and its
+// stop is the one the close waits for.
 type toolProducer struct {
 	run   *Run
 	inner trpctool.CallableTool
@@ -692,22 +671,31 @@ func (p *toolProducer) Declaration() *trpctool.Declaration {
 	return p.inner.Declaration()
 }
 
-// Call registers the tool production beside the task the call was admitted as,
-// runs the tool, and confirms the production's stop when the tool returned.
+// Call registers the tool production beside the call it runs, runs the tool, and
+// confirms the production's stop when the tool returned. The stop is confirmed
+// by the tool's own return alone: a cancelled request that leaves the detached
+// execution running is never read as one.
 func (p *toolProducer) Call(ctx context.Context, jsonArgs []byte) (any, error) {
-	production := &toolProduction{}
-	defer production.stop()
-	if frame, ok := task.CallFrameFrom(ctx); ok {
-		taskID, found := p.run.admission.Lookup(frame.Identity.DedupKey())
-		if !found {
-			taskID = event.TaskID(frame.Identity.InvocationID)
-		}
-		if taskID != "" {
-			p.run.shutdown.Track(taskID)
-			_ = p.run.shutdown.Watch(taskID, production.Stopped)
-		}
-	}
+	stop := p.run.writers.Begin(toolWriterName(ctx))
+	defer stop()
 	return p.inner.Call(ctx, jsonArgs)
+}
+
+// toolWriterName names one tool production by the call it runs: the call
+// identity the frame carries, the dedup key of the frame beside no call identity,
+// or the bare production name beside no frame at all.
+func toolWriterName(ctx context.Context) string {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return "call"
+	}
+	if frame.Identity.CallID != "" {
+		return "call:" + frame.Identity.CallID
+	}
+	if key := frame.Identity.DedupKey(); key != "" {
+		return "call:" + string(key)
+	}
+	return "call"
 }
 
 // policyRuling adapts one governance policy onto the approval face the task

@@ -215,7 +215,9 @@ func TestRiskRulesFlowFromDocument(t *testing.T) {
 
 // TestRiskRulesAbsentKeepsTheSendFace proves the declared table is the only source of the risk face:
 //   - a document beside no risk_rules boots and parks nothing
-//   - the declared send tool delivers its content, so the default grade holds no call
+//   - the declared send tool answers its call by name instead of reaching a hold, so the default grade holds no call
+//   - the body the call carried never reaches the outbound channel
+//   - a send hands its body to a destination it names, and a call naming none delivers nothing
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
 func TestRiskRulesAbsentKeepsTheSendFace(t *testing.T) {
@@ -249,14 +251,21 @@ func TestRiskRulesAbsentKeepsTheSendFace(t *testing.T) {
 	if pending := approvals.Pending(); len(pending) != 0 {
 		t.Fatalf("pending approvals = %+v, want no hold beside no declared rule", pending)
 	}
-	delivered := false
+	requests := provider.servedRequests()
+	if len(requests) != 2 {
+		t.Fatalf("model requests = %d, want the send decision beside the answer that read its receipt", len(requests))
+	}
+	receipt, ok := deliveryToolResult(requests[1], "call-1")
+	if !ok {
+		t.Fatalf("the second decision carried no result for the send call: %+v", requests[1].Messages)
+	}
+	if !strings.HasPrefix(receipt, "[send_denied] ") {
+		t.Fatalf("the send receipt = %q, want the named refusal of a call that names no destination: a hold must never read as a delivery either", receipt)
+	}
 	for _, body := range sender.bodies() {
 		if body == "hi" {
-			delivered = true
+			t.Fatalf("delivered bodies = %q, want no send body: a send hands its body to the destination it names", sender.bodies())
 		}
-	}
-	if !delivered {
-		t.Fatalf("delivered bodies = %q, want the declared send tool to deliver its content", sender.bodies())
 	}
 	if err := host.Close(ctx); err != nil {
 		t.Fatalf("close the host: %v", err)

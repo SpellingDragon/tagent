@@ -41,12 +41,13 @@ const (
 
 // MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
 // MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
-// MetaKeyNoticeKind, MetaKeyTaskID and the five MetaKeyAttention entries name
-// the frozen metadata keys: the event identity, its partition, its type and
-// summary, the trigger source, the settle trigger lineage, the bundle
-// attribution, the kind of the notification a notice fact reports, the task it
-// reports on, and the kind, target, lineage, validity and clearance word an
-// attention fact carries.
+// MetaKeyNoticeKind, MetaKeyTaskID, MetaKeyNoticeSource, the four
+// MetaKeyDelivery entries and the five MetaKeyAttention entries name the frozen
+// metadata keys: the event identity, its partition, its type and summary, the
+// trigger source, the settle trigger lineage, the bundle attribution, the kind of
+// the notification a notice fact reports, the task it reports on, the source one
+// notice message came from, the four entries that account one delivery, and the
+// kind, target, lineage, validity and clearance word an attention fact carries.
 const (
 	MetaKeyEventKey            = "event_key"
 	MetaKeyPartitionID         = "partition_id"
@@ -57,6 +58,31 @@ const (
 	MetaKeyBundleID            = "bundle_id"
 	MetaKeyNoticeKind          = "kind"
 	MetaKeyTaskID              = "task_id"
+
+	// MetaKeyNoticeSource names the source one notice message came from: the
+	// reincarnation notice, the system alert, a delivery receipt and the like.
+	// It is the per-message key the round-level trigger source is read beside —
+	// the input of one turn may mix both, so "where this message came from" and
+	// "who triggered this turn" are two entries and neither overwrites the
+	// other. A notice fact is queryable by source without reading its body.
+	MetaKeyNoticeSource = "notice_source"
+
+	// MetaKeyDeliveryTarget names the one address a delivery reached: the site whose
+	// chain took the body. Both delivery families stamp it, so the account of a
+	// delivery is read from the same entry whichever path carried it.
+	MetaKeyDeliveryTarget = "delivery.target"
+	// MetaKeyDeliveryIdentity names the identity one delivery is deduplicated
+	// under: the call frame of the sender for an agent's own body, the notification
+	// identity for a framework state change. A repeated delivery of one identity
+	// lands no second record.
+	MetaKeyDeliveryIdentity = "delivery.identity"
+	// MetaKeyDeliveryReceipt names the receipt a delivery stands at: the body
+	// reached the chain of the target.
+	MetaKeyDeliveryReceipt = "delivery.receipt"
+	// MetaKeyDeliverySource names the source event one delivery is filed under, so
+	// the deliveries of one source event are read as one account beside the
+	// identity of the delivery itself.
+	MetaKeyDeliverySource = "delivery.source"
 
 	// MetaKeyAttentionKind names the kind a question is asked under: approval,
 	// notice or summary, an absent entry reading as approval.
@@ -79,9 +105,38 @@ const (
 // business field.
 const MetaPrefix = "meta_"
 
+// NoticeMeta is the pair a notice fact states: the kind of the notification it
+// reports and the task it reports on. The two entries are read and written as
+// one block, so a fact either names the notification it carries or names none.
+type NoticeMeta struct {
+	// Kind is the kind of the notification a notice fact reports.
+	Kind string
+	// TaskID is the task a notice fact reports on.
+	TaskID string
+}
+
+// DeliveryMeta is the four entries that account one delivery: the address the
+// body reached, the identity the delivery is deduplicated under, the receipt it
+// stands at and the source event it is filed under. Both delivery families stamp
+// these same four entries, so one delivery is read as one block whichever route
+// carried the body.
+type DeliveryMeta struct {
+	// Target is the address a delivery reached.
+	Target string
+	// Identity is the identity one delivery is deduplicated under.
+	Identity string
+	// Receipt is the receipt a delivery stands at.
+	Receipt string
+	// Source is the source event one delivery is filed under.
+	Source string
+}
+
 // ParsedMeta is the structured form of one event metadata map: the frozen keys
 // declared above, the business entries carried by the pass-through prefix, and
-// every other entry kept verbatim.
+// every other entry kept verbatim. The notice pair and the four delivery entries
+// are each read as one block, so the metadata of one notice fact and the account
+// of one delivery are named by the concept they belong to rather than by a run
+// of sibling fields.
 type ParsedMeta struct {
 	// EventKey is the canonical event identity the entry names.
 	EventKey string
@@ -97,10 +152,11 @@ type ParsedMeta struct {
 	SettleTriggerSource string
 	// BundleID is the bundle attribution of the event.
 	BundleID string
-	// NoticeKind is the kind of the notification a notice fact reports.
-	NoticeKind string
-	// TaskID is the task a notice fact reports on.
-	TaskID string
+	// Notice is the notice-fact pair the fact states: the kind of the
+	// notification it reports and the task it reports on.
+	Notice NoticeMeta
+	// Delivery is the four entries that account one delivery the fact carried.
+	Delivery DeliveryMeta
 	// PassThrough holds every MetaPrefix entry verbatim: such an entry is
 	// forwarded as it stands and is never read as a frozen business field.
 	PassThrough map[string]string
@@ -135,9 +191,17 @@ func ParseEventMeta(meta map[string]string) ParsedMeta {
 		case MetaKeyBundleID:
 			parsed.BundleID = value
 		case MetaKeyNoticeKind:
-			parsed.NoticeKind = value
+			parsed.Notice.Kind = value
 		case MetaKeyTaskID:
-			parsed.TaskID = value
+			parsed.Notice.TaskID = value
+		case MetaKeyDeliveryTarget:
+			parsed.Delivery.Target = value
+		case MetaKeyDeliveryIdentity:
+			parsed.Delivery.Identity = value
+		case MetaKeyDeliveryReceipt:
+			parsed.Delivery.Receipt = value
+		case MetaKeyDeliverySource:
+			parsed.Delivery.Source = value
 		default:
 			if strings.HasPrefix(key, MetaPrefix) {
 				parsed.PassThrough[key] = value

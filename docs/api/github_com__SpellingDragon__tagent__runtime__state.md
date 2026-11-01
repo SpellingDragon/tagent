@@ -162,6 +162,11 @@ var (
 	// as the settled record, and the repeat is refused by name instead of
 	// answering the success the first consumption already recorded.
 	ErrClaimSettled = errors.New("state: the mailbox entry is already consumed")
+	// ErrDeliveryRefused reports a notification whose target refused the delivery
+	// beside the site that owns it, so the notification is answered: the refusal
+	// is the consumption result of that notification and the account keeps it as
+	// the feedback fact it is rather than retrying the same delivery.
+	ErrDeliveryRefused = errors.New("state: the target refused the delivery of the notification")
 )
 var (
 	// ErrIncompleteAddress reports an address that does not name both an agent
@@ -249,15 +254,6 @@ var (
     while a request is under way is never spliced into it, and the next request
     boundary reads the rewritten content anew.
 
-var (
-	// ErrSendTargetMissing reports an internal send that names no complete
-	// target address, so the delivery is refused rather than aimed at a default
-	// or at the most recent peer.
-	ErrSendTargetMissing = errors.New("state: the send names no explicit target")
-	// ErrDeliveryTargetNotRunning reports a delivery to a target whose loop is
-	// not running. Opening a loop for that target is never this seam's answer.
-	ErrDeliveryTargetNotRunning = errors.New("state: the delivery target is not running")
-)
 var ErrArchiveUnreadable = errors.New("state: archive checkpoint cannot be read")
     ErrArchiveUnreadable reports an archive root whose checkpoint cannot be read
     or decoded, so neither an import nor a rollback can classify anything under
@@ -758,18 +754,6 @@ type ConsumeReceipt struct {
     ConsumeReceipt is the third mailbox time point: the receipt recorded when
     one accepted input was fully consumed.
 
-type Delivery struct {
-	// Target is the address of the site the notification enters.
-	Target event.Address
-	// TargetInstance is the runtime instance serving that site.
-	TargetInstance event.InstanceID
-	// Notice is the notification the target mailbox accepts. Its stable
-	// identity is what a repeated delivery of the same send is recognized by.
-	Notice task.Notice
-}
-    Delivery is one internal send: the explicit target site one notification
-    enters.
-
 type Dimension string
     Dimension names one configuration dimension of a sub-agent.
 
@@ -861,6 +845,10 @@ func (d *DurableCommit) Records(ctx context.Context, taskID event.TaskID) ([]tas
     every later link carries its fact alone. A notification whose consumption
     receipt the log holds is left out of the outbox of its link, so a rebuild
     opens no delivery obligation for a notice already confirmed as consumed.
+
+func (d *DurableCommit) Rejections() []Rejection
+    Rejections reports every refusal the carrier holds, in the stable task,
+    round, kind and sequence order of the notifications they answer.
 
 func (d *DurableCommit) Revision(taskID event.TaskID) int64
     Revision returns the revision the task is at after the records stored for
@@ -1067,6 +1055,10 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
     every completed logical consumption behind its own sync barrier before the
     mailbox confirms the entry, and serves the attempt record of every follow-up
     turn beside it; a store beside none keeps both in its own bookkeeping alone.
+    The same account receives the feedback fact of every notification a
+    target refused, so a restart over the same log reads the refusals the
+    stopped process landed; a store beside none keeps its refusals in its own
+    bookkeeping alone.
 
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error
 
@@ -1136,6 +1128,19 @@ func (m *MemoryStore) RecordAttempt(ctx context.Context, notice task.Notice, att
     a second process reads the same attempt; a record the account already holds
     with the same content stages no second pair, and a write the account refused
     is reported instead of confirmed.
+
+func (m *MemoryStore) Refused(notice task.Notice) bool
+    Refused reports whether one notification already carries a refusal:
+    the refusal is that notification's consumption result, so the rest criterion
+    reads it instead of waiting on a delivery the target will never accept.
+
+func (m *MemoryStore) Rejections() []Rejection
+    Rejections reports the feedback fact of every notification a target refused,
+    across the durable account this store was opened over and the refusals of
+    this process, ordered by task, round, kind and sequence so the same account
+    always answers in the same order. A refusal names the notification it
+    answered, so a reader decides which notification is answered and which one
+    is still owed.
 
 func (m *MemoryStore) Release(ctx context.Context, addr event.Address, instance event.InstanceID, seq AcceptSeq) error
     Release returns one claimed input to the pending pool of the mailbox of
@@ -1514,32 +1519,25 @@ func (p *Publisher) RollbackConfig() (OrgPlan, bool)
     live objects and submits that candidate through Rollback; the source stays
     the same across consecutive rollbacks.
 
-type Refusal struct {
-	// Notice is the notification the refused delivery carried.
-	Notice task.Notice
-	// Target is the address the refused delivery named.
-	Target event.Address
-	// Category names the gate that refused the delivery.
-	Category RefusalCategory
-	// At is the time the delivery was refused.
-	At time.Time
+type Rejection struct {
+	Notice   task.Notice      `json:"notice"`
+	Target   event.Address    `json:"target"`
+	Instance event.InstanceID `json:"instance"`
+	Reason   string           `json:"reason"`
+	At       time.Time        `json:"at"`
 }
-    Refusal is one refused delivery in the sender's ledger: the notification it
-    carried, the target it named, the gate that refused it and the time of the
-    refusal, so the refusal is queryable by the target it named.
+    Rejection is the durable feedback fact of one notification a target refused:
+    the identity of the notification it answers, the routing the delivery was
+    offered to, and the reason the target gave. The record is the consumption
+    result of that notification, so a carrier opened over the same log reads the
+    refusal back and owes the notification no delivery a second time.
 
-type RefusalCategory string
-    RefusalCategory names the gate one delivery was refused at.
+func (r Rejection) Feedback() event.Event
+    Feedback reports the refusal as the feedback fact it is: an audit fact of
+    the target address, carrying the notification it answers beside the reason
+    in its metadata and no model payload in its message, so the fact enters no
+    model request.
 
-const (
-	// RefusalNotAuthorized is a target outside the sender's deliver_to
-	// whitelist.
-	RefusalNotAuthorized RefusalCategory = "not_authorized"
-	// RefusalUnknownTarget is a target no established site serves.
-	RefusalUnknownTarget RefusalCategory = "unknown_target"
-	// RefusalTargetNotRunning is a target whose loop is not running.
-	RefusalTargetNotRunning RefusalCategory = "target_not_running"
-)
 type RollbackItem struct {
 	// Name names the item: the task identity or the archive file it came from.
 	Name string
@@ -1598,61 +1596,6 @@ func (r *Router) Rollback(ctx context.Context, change Change, cand Candidate) (P
     full configuration as one more generation through the same gate and the
     same publication entry, and a rollback arriving through the file channel is
     refused like any other structural change.
-
-type RunningCheck func(addr event.Address, instance event.InstanceID) bool
-    RunningCheck reports whether the execution loop of one target site is
-    running.
-
-type SendFace struct {
-	// Has unexported fields.
-}
-
-    SendFace is the internal send seam of one sender: it delivers a notification
-    into an explicitly addressed mailbox after the permission, residency and
-    liveness gates, and keeps the ledger of the deliveries it refused.
-
-    The seam resolves no target of its own. A delivery naming no complete target
-    is refused, and a target outside the registered whitelist is refused beside
-    a ledger entry naming it.
-
-func NewSendFace(store *MemoryStore, options ...SendOption) *SendFace
-    NewSendFace returns the send seam of one sender over the given store.
-
-func (f *SendFace) Refusals() []Refusal
-    Refusals reports the deliveries this sender refused, in the order it refused
-    them.
-
-func (f *SendFace) Send(ctx context.Context, delivery Delivery) (SendReceipt, error)
-    Send delivers one notification into the explicit target it names. The gates
-    run in order — target named, whitelist, residency, liveness — and the first
-    one that refuses records a ledger entry and returns its named error.
-
-    A notification already accepted is answered with the entry it took and the
-    site the first acceptance chose: a repeat records no second fact and reopens
-    no gate.
-
-type SendOption func(*SendFace)
-    SendOption configures the send seam at construction.
-
-func WithDeliverTo(targets ...event.AgentID) SendOption
-    WithDeliverTo registers the sender's deliver_to whitelist: the agent names
-    it may deliver to. The whitelist starts empty, so a sender that registers
-    none refuses every target.
-
-func WithRunningCheck(check RunningCheck) SendOption
-    WithRunningCheck attaches the liveness check of the execution loops the
-    sender delivers to.
-
-type SendReceipt struct {
-	// AcceptSeq is the acceptance sequence of the mailbox entry the
-	// notification entered.
-	AcceptSeq AcceptSeq
-	// Duplicate reports that the notification was already accepted, so this
-	// delivery appended no second entry and kept the site the first acceptance
-	// recorded.
-	Duplicate bool
-}
-    SendReceipt is the outcome of one delivery that passed the gates.
 
 type Session struct {
 	// Address is the explicit address this site was established for.

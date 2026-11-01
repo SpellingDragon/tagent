@@ -18,8 +18,11 @@ package assembly
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
+	"github.com/SpellingDragon/tagent/api/config"
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/api/plugin"
@@ -117,6 +120,22 @@ func settleBarrierFrom(ctx context.Context) (settleBarrier, bool) {
 	return barrier, ok
 }
 
+// settleScope is the declared white list one settle dispatch reads: the party
+// whose declaration it is and the target agent names it froze. The white list is
+// the target set the host document declares for the plugin dispatch path, so the
+// dispatch and the cross-session send path are judged by one vocabulary: the
+// membership test of the delivery face's white list tier.
+//
+// A driver beside no scope refuses every dispatch, the way a host that declared
+// no deliver_to delivers nothing.
+type settleScope struct {
+	// declaring names the party whose declaration this scope is: the entry agent
+	// of the host document that froze the target set.
+	declaring string
+	// targets is the declared target agent names, in declaration order.
+	targets []string
+}
+
 // settleHandoff is the face one landed attempt is closed through: it registers
 // the delivery obligation of every body the landed turn generated, beside the
 // session address and the notification the turn answered. The mailbox entry is
@@ -190,6 +209,11 @@ type SettleDriver struct {
 	// without one, exactly as a run keeping no durable delivery account does.
 	handoff settleHandoff
 
+	// scope is the declared white list the plugin dispatch path reads; a driver
+	// wired beside none dispatches nothing, because a dispatch outside a
+	// declared target set would reach a session nobody authorized.
+	scope *settleScope
+
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 
@@ -247,6 +271,57 @@ func (d *SettleDriver) Port() plugin.Port {
 // work it woke is owed on the mailbox account, so a failed observation leaves the
 // follow-up turn owed and the account hands it to the next decision.
 func (d *SettleDriver) DrivesObligation() {}
+
+// DeclareScope declares the dispatch white list of this driver: the party the
+// declaration belongs to and the target agent names it froze. The table starts
+// absent, so a driver that never declares one refuses every dispatch; a
+// declaration that names no target refuses every dispatch too, exactly as an
+// empty deliver_to table does on the send face.
+//
+// The face is read by the pump, so the write takes the driver's own lock.
+func (d *SettleDriver) DeclareScope(declaring string, targets ...string) {
+	if d == nil {
+		return
+	}
+	declared := settleScope{declaring: declaring, targets: append([]string(nil), targets...)}
+	d.mu.Lock()
+	d.scope = &declared
+	d.mu.Unlock()
+}
+
+// scopeOf reports the declared dispatch white list of this driver and whether one
+// is declared at all.
+func (d *SettleDriver) scopeOf() (settleScope, bool) {
+	if d == nil {
+		return settleScope{}, false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.scope == nil || len(d.scope.targets) == 0 {
+		return settleScope{}, false
+	}
+	return *d.scope, true
+}
+
+// settleDispatchAllowed judges one plugin dispatch against the declared white
+// list of this driver: the membership test is the one the cross-session delivery
+// face keeps on its white list tier, so the two dispatch families are judged by
+// one rule instead of two. A dispatch outside the declared targets, and every
+// dispatch beside an undeclared or empty table, is refused by name.
+func (d *SettleDriver) settleDispatchAllowed(addr event.Address) (bool, string) {
+	declared, held := d.scopeOf()
+	if !held {
+		return false, "this settle driver declares no delivery target set, and a plugin dispatch is refused closed beside none"
+	}
+	if addr.AgentID == "" {
+		return false, fmt.Sprintf("the plugin dispatch names no target agent, and the target set declared by the host document of %q names no unnamed target", declared.declaring)
+	}
+	if !hostSendNames(declared.targets, string(addr.AgentID)) {
+		return false, fmt.Sprintf("the target set declared by the host document of %q names no %q, and a plugin dispatch outside it would reach a session no declaration named",
+			declared.declaring, addr.AgentID)
+	}
+	return true, ""
+}
 
 // setHandoff wires the delivery account one landed attempt is closed through:
 // the bodies the landed turn generated are registered there before the mailbox
@@ -445,6 +520,12 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 		}
 	}
 
+	if allowed, cause := d.settleDispatchAllowed(seat.Address); !allowed {
+		assemblyWarn("tagent: the plugin dispatch of %s is refused: %s", seat.Notice.FactKey(), cause)
+		d.releaseSeat(wake, seat)
+		return
+	}
+
 	fireCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(d.stopCtx, cancel)
@@ -473,6 +554,27 @@ func (d *SettleDriver) driveSeat(ctx context.Context, wake SettleWake, seat stat
 		assemblyWarn("tagent: the settle consumption of %s beside the finished turn reported: %v", seat.Notice.FactKey(), err)
 	}
 	assemblyDebug("tagent: settle entry consumed notice=%s", seat.Notice.FactKey())
+}
+
+// settleScopeOfDocument reports the target set one host's document declares for
+// the plugin dispatch path: every agent the document names is a session the
+// dispatch may reach, and a document that names no agent declares no target at
+// all. The dispatch reads that declaration instead of resolving targets of its
+// own, so a dispatch naming a session the document never declared is refused.
+func settleScopeOfDocument(decl *config.Declaration) (settleScope, bool) {
+	if decl == nil {
+		return settleScope{}, false
+	}
+	targets := make([]string, 0, len(decl.Agents))
+	for _, spec := range decl.Agents {
+		if id := strings.TrimSpace(spec.ID); id != "" {
+			targets = append(targets, id)
+		}
+	}
+	if len(targets) == 0 {
+		return settleScope{}, false
+	}
+	return settleScope{declaring: decl.Entry, targets: targets}, true
 }
 
 // releaseSeat hands one entry this drive claimed back to the pending pool, so

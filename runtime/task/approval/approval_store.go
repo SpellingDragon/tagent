@@ -154,6 +154,9 @@ func (a *ApprovalManager) DeliveryGaps() []DeliveryGap {
 // cannot be written to its file, or whose question the chain refuses, is reported
 // to the caller beside the request and the wait stands either way: a hold is
 // never turned into a denial by a store-side failure.
+// A caller that asks under an id of its own while a standing question already
+// holds the pair names that same question: its id resolves the same ruling, so
+// deciding by the id one minted never misses the question the gate filed first.
 func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs []byte, risk plugin.RiskLevel, rule, reason string) (*ApprovalRequest, error) {
 	if id == "" {
 		return nil, ErrApprovalIdentityMissing
@@ -168,8 +171,10 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 	}
 	facts := a.factsLocked(ctx)
 	if standing := a.standingLocked(facts, tool, digest, now.UnixMilli()); standing != nil {
+		a.evidence[id] = standing
+		snapshot := *standing
 		a.mu.Unlock()
-		return standing, nil
+		return &snapshot, nil
 	}
 	req := &ApprovalRequest{
 		ApprovalSubject: ApprovalSubject{

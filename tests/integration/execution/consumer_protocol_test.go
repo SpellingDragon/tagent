@@ -31,7 +31,7 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 			delivered = append(delivered, envelope)
 			return task.DeliveryAccepted, nil
 		}))
-	shutdown := agent.NewShutdown(&delegationFace{MemoryManager: manager, MemoryRegistry: registry})
+	shutdown := protocolCriterion{MemoryManager: manager, MemoryRegistry: registry}
 
 	receipt, err := shutdown.Admit(ctx, task.Spec{
 		CallID:       "call-c",
@@ -75,12 +75,9 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 		t.Fatalf("committed chain = %+v, want the settled fact carrying the frozen envelope", before)
 	}
 
-	report, err := shutdown.Close(ctx, agent.CloseRequest{
-		Address:  target,
-		Deadline: time.Now().Add(10 * time.Second),
-	})
+	report, err := protocolClose(ctx, shutdown, receipt.TaskID)
 	if err != nil || !report.Drained || len(report.Unsettled) != 0 {
-		t.Fatalf("close = (%+v, %v), want the drain beside the accepted delivery", report, err)
+		t.Fatalf("close = (%+v, %v), want the quiesce beside the accepted delivery", report, err)
 	}
 	if len(delivered) != 1 || delivered[0] != envelope {
 		t.Fatalf("delivered = %+v, want the envelope the outbox committed (%+v)", delivered, envelope)
@@ -100,4 +97,49 @@ func TestSecondWaveConsumersShareTheProtocol(t *testing.T) {
 	if settled, err := shutdown.Obligations(ctx, receipt.TaskID); err != nil || settled.Count != 0 {
 		t.Fatalf("obligations after the close = (%+v, %v), want the delivery settled", settled, err)
 	}
+}
+
+// protocolCriterion is the rest criterion this protocol case reads: the task face
+// its notifications settle through, beside the mailbox answer no notification of
+// the case stands in.
+type protocolCriterion struct {
+	*task.MemoryManager
+	*task.MemoryRegistry
+}
+
+// Unconsumed reports the notifications a mailbox accepted and nobody consumed;
+// this case settles its notifications through the manager alone.
+func (protocolCriterion) Unconsumed(context.Context) ([]task.UnsettledNotice, error) {
+	return nil, nil
+}
+
+// protocolClose offers the notifications the task still owes and evaluates the
+// rest criterion over the task face, exactly the two steps a production close
+// runs.
+func protocolClose(ctx context.Context, face protocolCriterion, taskID event.TaskID) (agent.DrainReport, error) {
+	if err := face.MemoryManager.Flush(ctx, taskID); err != nil {
+		return agent.DrainReport{}, err
+	}
+	read := task.ReadUnsettled(ctx, face, nil)
+	report := agent.DrainReport{Drained: read.Resting(), Unsettled: writerlessUnsettled(read)}
+	if !report.Drained {
+		return report, agent.ErrDrainUnsettled
+	}
+	return report, nil
+}
+
+// writerlessUnsettled renders the unsettled entries of a criterion read for a
+// case whose work opens no writer of its own.
+func writerlessUnsettled(read task.Unsettled) []agent.UnsettledObligation {
+	out := make([]agent.UnsettledObligation, 0, len(read.Work)+len(read.Notices))
+	if read.Unjudged != "" {
+		out = append(out, agent.UnsettledObligation{Reason: read.Unjudged})
+	}
+	for _, work := range read.Work {
+		out = append(out, agent.UnsettledObligation{TaskID: work.TaskID, Address: work.Address, Reason: "the task is not terminal"})
+	}
+	for _, notice := range read.Notices {
+		out = append(out, agent.UnsettledObligation{TaskID: notice.Notice.TaskID, Address: notice.Address, Reason: notice.Reason})
+	}
+	return out
 }

@@ -189,12 +189,19 @@ type Loop struct {
 	notices   NoticeFeed
 	present   PresentationSink
 	boundary  RequestFace
-	watch     func(taskID event.TaskID, stopped func() bool) error
+	// writers is the ledger the close of this agent reads the real stop of every
+	// production of this loop through; nil registers nothing.
+	writers   *Writers
 	final     FinalRoundPolicy
 	finals    map[event.AgentID]FinalRoundPolicy
 	losses    []RecordingLoss
 	consumers *Consumers
-	flight    map[event.Address]modelFlight
+	// resident is the set this loop mounted for itself: a run assembled beside no
+	// host still drives every delegated execution site on an instance of its own,
+	// and the set a host attaches later displaces and stops it, so one loop drives
+	// one set at a time.
+	resident *Consumers
+	flight   map[event.Address]modelFlight
 	// fuses holds the execution-side storm fuses this loop admits under: the
 	// per-response call cap and the long-context threshold a drive declares for
 	// itself replaces. A member at zero is its fuse off, so a loop beside no
@@ -233,7 +240,7 @@ func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.Instanc
 // - The drive reads its range's chain again at every decision boundary: input that landed in the range while a decision ran enters the next decision of that same range, and a decision that opened no obligation still ends the round while that input stands unread. The read starts behind the head the chain held when the drive began, so the material an earlier range already took is never this range's input.
 // - The transcript of this drive is committed beside the terminal answer of its last decision, so the next invocation of this session reads the range's history as it actually ended.
 // - The direct drive flies no resident loop, so the input a writer beside this drive committed past the range that last closed has no segment to land in: the drive adopts it as its opening material instead of losing it between the ended prefix and its own ready input.
-// - The whole drive is watched as one in-flight production beside its invocation identity — the queueing waits included — and confirms its stop only when the drive really ended.
+// - The whole drive is registered as one writer of the run's writer ledger — the queueing waits included — and confirms its stop only when the drive really ended.
 // - A progress notification of the range's own call commits as a fact of its chain and enters no round head: the report is audit and projection material, never input a decision speaks from.
 // - A terminal notification of the range's own call enters the round head as input material: a settle, a failure or a cancellation is what an unattended follow-up turn speaks from, and the progress reports beside it are skipped by their own category.
 // - A drive whose budget is spent runs one closing round and ends there: the closing round delivers what the range already produced, its transcript is committed the same way, and the obligation it opens is none.
@@ -247,10 +254,9 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 		consumerDebug("tagent: consumer drive end invocation=%s decisions=%d terminal=%s elapsed=%s failed=%t",
 			inv.InvocationID, len(turn.Decisions), turn.Terminal, time.Since(consumerStarted).Round(time.Microsecond), err != nil)
 	}()
-	production := &inFlightProducer{}
-	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
+	production := l.beginWriter("drive:" + string(inv.InvocationID))
 	defer l.sealCapture(ctx)
-	defer production.stop()
+	defer production()
 	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
 	l.markRangeHead(inv)
 	l.observeReady(ctx, inv)
@@ -937,58 +943,33 @@ func (l *Loop) sealCapture(ctx context.Context) {
 	}
 }
 
-// SetWatch attaches the registration the close of this agent confirms the real
-// stop of every in-flight production through: the whole drive of one invocation
-// and the model stream of each of its decisions, each registered beside the work
-// identity it runs behind, with the stop confirmation that work is polled
-// through. A nil registration keeps the loop registering nothing. The setter is
-// separate from the constructor so the declared construction shape of the loop
-// stays as it is.
+// SetWriters attaches the ledger the close of this agent reads the real stop of
+// every production of this loop through: the whole drive of one invocation and
+// the model stream of each of its decisions, each registered under the name of
+// the production itself. A nil ledger keeps the loop registering nothing. The
+// setter is separate from the constructor so the declared construction shape of
+// the loop stays as it is.
 //
+// A production of this loop is not a task: the model stream in flight holds no
+// task identity, so the registration names the production and mints no identity
+// the task account would have to carry.
 // The redline list (2 rules):
 // MUST register a production when it really starts and confirm its stop only when it really ended.
 // MUST NOT read a cancelled request, an emptied queue or an elapsed timeout as a stop.
-func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) error) {
+func (l *Loop) SetWriters(writers *Writers) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.watch = watch
+	l.writers = writers
 }
 
-// watchProducer registers one in-flight production behind the named work
-// identity through the attached face, or registers nothing while no face is
-// attached.
-func (l *Loop) watchProducer(taskID event.TaskID, stopped func() bool) {
+// beginWriter registers one production of this loop that is starting now and
+// answers the confirmation that closes its registration. A loop beside no
+// ledger answers a confirmation that reports nothing.
+func (l *Loop) beginWriter(name string) func() {
 	l.mu.Lock()
-	watch := l.watch
+	writers := l.writers
 	l.mu.Unlock()
-	if watch == nil {
-		return
-	}
-	_ = watch(taskID, stopped)
-}
-
-// inFlightProducer is the stop confirmation of one in-flight production of
-// this loop: the model stream one decision reduces, or the whole drive of one
-// invocation with the queueing waits it stands in. The production confirms its
-// stop only when the work really ended: a cancelled request is never read as
-// one.
-type inFlightProducer struct {
-	mu      sync.Mutex
-	stopped bool
-}
-
-// Stopped reports whether this production really stopped.
-func (p *inFlightProducer) Stopped() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stopped
-}
-
-// stop confirms the real stop of this production.
-func (p *inFlightProducer) stop() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.stopped = true
+	return writers.Begin(name)
 }
 
 // requestBoundary assembles the request-boundary material of one decision
@@ -1066,10 +1047,23 @@ func (l *Loop) SetPresentations(sink PresentationSink) {
 // decisions of, so a settled backflow wakes the loop of the address its range
 // runs at. A loop beside no consumers keeps its backflow parked in the intake,
 // exactly as before.
+//
+// A set this loop mounted for itself is displaced by the given one and stopped:
+// a displaced set that kept running would drive the addresses of its own copies
+// beside the set now attached, and two drivers of one address is the failure the
+// one-instance-per-address rule exists to forbid.
 func (l *Loop) SetConsumers(consumers *Consumers) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	displaced := l.resident
+	if displaced == consumers {
+		displaced = nil
+	}
+	l.resident = nil
 	l.consumers = consumers
+	l.mu.Unlock()
+	if displaced != nil {
+		displaced.Stop()
+	}
 }
 
 // consumersOf reports the attached consumption loops, or none.
@@ -1077,6 +1071,180 @@ func (l *Loop) consumersOf() *Consumers {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.consumers
+}
+
+// residentsOf reports the consumption loops this loop drives delegated turns on:
+// the set attached to it, or the set it mounts for itself when none is attached.
+//
+// The set mounted here is the loop's own, so a run assembled beside no host — the
+// assembled runtime an embedder or a test drives directly — still runs every
+// delegated execution site on the resident instance of that site instead of
+// answering no instance for it. The mount happens once per loop; the attached set
+// of a host displaces it through SetConsumers.
+func (l *Loop) residentsOf() *Consumers {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.consumers != nil {
+		return l.consumers
+	}
+	if l.resident == nil {
+		l.resident = NewConsumers(l, context.Background(), nil)
+	}
+	return l.resident
+}
+
+// StopResidents ends the consumption loops this loop mounted for itself: no
+// further instance mounts, and the segments those loops left flying stay on the
+// chain for a restart. The set a host attached is that host's to stop, so it is
+// left where it is here.
+func (l *Loop) StopResidents() {
+	l.mu.Lock()
+	resident := l.resident
+	l.resident = nil
+	if l.consumers == resident {
+		l.consumers = nil
+	}
+	l.mu.Unlock()
+	if resident != nil {
+		resident.Stop()
+	}
+}
+
+// DelegatedInput is what one delegated turn hands the resident instance of its
+// execution site: the site, the binding its decisions run on, the instruction it runs
+// under and the request it starts from.
+type DelegatedInput struct {
+	// Site is the execution address the delegated turn runs in.
+	Site event.Address
+	// Binding is the binding the decisions of that site run on: the assembled
+	// sub-agent's own material, never a generation held for a declared agent.
+	Binding state.AgentBinding
+	// Instruction is the instruction the turn runs under; empty declares none.
+	Instruction string
+	// Request is the input the turn starts from; empty starts it on the
+	// instruction alone.
+	Request string
+}
+
+// DelegatedAnswer is the outcome of one delegated round as its execution site reported
+// it: the body its last decision produced and the terminal it ended at.
+type DelegatedAnswer struct {
+	// Body is the assistant text the round ended on; empty when it produced none.
+	Body string
+	// Status is the terminal the delegated task reports.
+	Status task.Status
+	// Failure is the named cause a failed round ended at, empty otherwise.
+	Failure string
+}
+
+// ErrDelegatedSiteIncomplete reports a delegated turn whose execution site names no
+// complete agent session, so no resident instance could run it.
+var ErrDelegatedSiteIncomplete = errors.New("agent: the delegated site names no complete agent session")
+
+// ErrDelegatedInstanceUnavailable reports a delegated turn asked for while the loop
+// carries no set of resident instances, or while the set already stopped.
+var ErrDelegatedInstanceUnavailable = errors.New("agent: no resident instance is available for the delegated site")
+
+// SubmitDelegated hands one delegated turn to the resident instance of its execution
+// site and answers the segment that consumed it: the input commits at that site under
+// the delegation lineage, the instance mounted with the binding the turn runs on is
+// woken, and the round is the one that segment flies. The caller keeps the task face —
+// admission, settle and notice stay where they are — and reads only what the turn
+// produced.
+// - The input commits as the site's own external input before the wake, so the segment the wake opens reads it as its own material.
+// - The answer is the chain the segment closed on: a body that never committed is a failed round rather than a copy kept beside the chain.
+// - A cancelled wait reports the cancelled terminal beside no error, so a closing run settles what it already admitted instead of leaving it owed.
+func (l *Loop) SubmitDelegated(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error) {
+	if !in.Site.IsComplete() {
+		return DelegatedAnswer{}, ErrDelegatedSiteIncomplete
+	}
+	consumers := l.residentsOf()
+	if consumers == nil {
+		return DelegatedAnswer{}, ErrDelegatedInstanceUnavailable
+	}
+	consumer := consumers.mount(in.Site, &in.Binding)
+	if consumer == nil {
+		return DelegatedAnswer{}, ErrDelegatedInstanceUnavailable
+	}
+	keys, err := l.delegatedInputOf(ctx, in)
+	if err != nil {
+		return DelegatedAnswer{Status: task.StatusFailed, Failure: err.Error()}, err
+	}
+	consumer.Wake()
+	answer, waitErr := consumer.WaitAnswer(ctx, keys)
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return DelegatedAnswer{Status: task.StatusCancelled}, nil
+		}
+		return DelegatedAnswer{Status: task.StatusFailed, Failure: waitErr.Error()}, waitErr
+	}
+	status, failure := delegatedTerminalOf(answer)
+	return DelegatedAnswer{Body: l.lastOutputBody(in.Site), Status: status, Failure: failure}, nil
+}
+
+// delegatedInputOf commits the input of one delegated turn at its execution site and
+// reports the identities it committed under: the instruction first and the request
+// behind it, both as external input of that site under the delegation lineage, so the
+// segment the wake opens carries them in the order a request lays them out.
+func (l *Loop) delegatedInputOf(ctx context.Context, in DelegatedInput) ([]event.EventID, error) {
+	messages := make([]model.Message, 0, 2)
+	if instruction := strings.TrimSpace(in.Instruction); instruction != "" {
+		messages = append(messages, model.Message{Role: model.RoleSystem, Content: instruction})
+	}
+	if request := strings.TrimSpace(in.Request); request != "" {
+		messages = append(messages, model.Message{Role: model.RoleUser, Content: request})
+	}
+	keys := make([]event.EventID, 0, len(messages))
+	now := time.Now()
+	for _, msg := range messages {
+		key, err := l.commitFactKey(ctx, in.Site.AgentID, event.Event{
+			Type:       event.TypeExternalInput,
+			Timestamp:  now,
+			Message:    msg,
+			Owner:      in.Site,
+			Source:     in.Site,
+			Target:     in.Site,
+			InstanceID: l.instance,
+			Meta:       map[string]string{event.MetaKeyTriggerSource: event.LineageDelegation},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+
+// delegatedTerminalOf reports the terminal one closed segment answers with: the
+// reduction's own terminal when the segment ended on one, the named cause when it ended
+// beside an error, and the settled outcome only when neither stands.
+func delegatedTerminalOf(answer SegmentAnswer) (task.Status, string) {
+	switch {
+	case answer.Err != nil || answer.Turn.Terminal == model.KindFailed:
+		failure := answer.Turn.Failure
+		if failure == "" && answer.Err != nil {
+			failure = answer.Err.Error()
+		}
+		return task.StatusFailed, failure
+	case answer.Turn.Terminal == model.KindCancelled:
+		return task.StatusCancelled, answer.Turn.Failure
+	default:
+		return task.StatusSettled, ""
+	}
+}
+
+// lastOutputBody reports the assistant text the chain of one site ended on: the body of
+// the last output fact it committed, or none beside a chain that closed no segment.
+func (l *Loop) lastOutputBody(addr event.Address) string {
+	facts := l.sessionFacts(addr)
+	for at := len(facts) - 1; at >= 0; at-- {
+		if facts[at].Type == event.TypeAgentOutput {
+			return facts[at].Message.Content
+		}
+	}
+	return ""
 }
 
 // modelFlight is the model decision one address runs: the range it serves and
@@ -1155,6 +1323,22 @@ func (l *Loop) publish(presentation view.Presentation) {
 // - The fuses of one decision are read off the request as it stands before the dispatch: the usage of a response lands after the dispatch the fuses rule.
 // - The environment block the boundary rendered trails the request as its last message, behind the transcript and the closing instruction, so the dynamic material never enters the prefix.
 func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
+	return l.decideWith(ctx, inv, transcript, round, nil)
+}
+
+// decideOn runs one decision of an address whose material names the binding it decides
+// on: the execution site of a delegated turn decides on the binding the caller resolved
+// for it, and never on a generation a published declaration holds.
+func (l *Loop) decideOn(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound, bound *state.AgentBinding) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
+	return l.decideWith(ctx, inv, transcript, round, bound)
+}
+
+// decideWith is the one decision body both entries run: the handle is the named binding
+// when the material names one and the generation the borrowing face serves at this
+// moment otherwise. A decision on a named binding is captured by that binding's own
+// model beside the turn it serves, so the loop fixes no second view of the same calls
+// and records no second attempt.
+func (l *Loop) decideWith(ctx context.Context, inv Invocation, transcript []model.Message, round decisionRound, bound *state.AgentBinding) (Decision, model.Outcome, []model.Message, []admittedCall, error) {
 	if round.final {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, round.timeout)
@@ -1167,7 +1351,7 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	if err := l.occupy(ctx, inv, decisionID); err != nil {
 		return Decision{}, model.Outcome{}, nil, nil, err
 	}
-	handle, err := l.borrow.Borrow(ctx, inv.Address.AgentID)
+	handle, err := l.decisionHandle(ctx, inv, bound)
 	if err != nil {
 		_ = l.slots.Vacate(inv.Address, l.instance, inv.InvocationID)
 		return Decision{}, model.Outcome{}, nil, nil, err
@@ -1201,18 +1385,21 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 		messages = append(messages, model.Message{Role: model.RoleSystem, Content: boundary.DynamicSystem})
 	}
 	req := model.Request{Messages: messages, Tools: tools, ToolOrder: toolOrder}
-	l.fixCapture(ctx, decisionID, view, req)
+	if bound == nil {
+		l.fixCapture(ctx, decisionID, view, req)
+	}
 	ruling := l.rulingOf(messages)
 
-	production := &inFlightProducer{}
-	l.watchProducer(event.TaskID(inv.InvocationID), production.Stopped)
+	production := l.beginWriter("model:" + string(decisionID))
 	stream, entryErr := handle.Binding.Model.GenerateContent(ctx, &req)
 	if entryErr != nil {
 		stream = failedStream(entryErr)
 	}
 	outcome := model.ReduceChannel(ctx, stream, nil)
-	production.stop()
-	l.recordAttempt(ctx, inv, decisionID, attemptID, outcome)
+	production()
+	if bound == nil {
+		l.recordAttempt(ctx, inv, decisionID, attemptID, outcome)
+	}
 	consumerDebug("tagent: consumer decision invocation=%s decision=%s terminal=%s calls=%d closing=%t",
 		inv.InvocationID, decisionID, outcome.Kind, len(callsOf(outcome)), round.final)
 	if ruling.threshold > 0 && ruling.tokens > ruling.threshold {
@@ -1248,6 +1435,18 @@ func (l *Loop) decide(ctx context.Context, inv Invocation, transcript []model.Me
 	}
 	_ = handle.Release(ctx)
 	return decision, outcome, receipts, running, nil
+}
+
+// decisionHandle reports the binding handle one decision runs on: the binding the
+// material named for the address when it names one — held as it stands, for an address
+// no published generation serves — and the generation the borrowing face serves at this
+// moment otherwise.
+func (l *Loop) decisionHandle(ctx context.Context, inv Invocation, bound *state.AgentBinding) (*state.BindingHandle, error) {
+	if bound != nil {
+		named := *bound
+		return &state.BindingHandle{Binding: named}, nil
+	}
+	return l.borrow.Borrow(ctx, inv.Address.AgentID)
 }
 
 // dispatch admits every tool call of one decision through the task wrapper of

@@ -1034,11 +1034,6 @@ func presentedProjectionContent(entry replay.ProjectionEntry) string {
 	return entry.Content
 }
 
-// environmentTaskLines bounds how many open obligations one environment block
-// names: a run holding more reports the count it left out rather than growing
-// the request without bound.
-const environmentTaskLines = 16
-
 // environmentBlockGenerations counts the environment blocks the request boundary
 // has rendered in this process, so the block's rewrite frequency is a measured
 // face for a later throttle decision rather than an inference from the lines.
@@ -1049,9 +1044,9 @@ var environmentBlockGenerations atomic.Int64
 func EnvironmentBlockGenerations() int64 { return environmentBlockGenerations.Load() }
 
 // environmentBlockDebug renders one line of the environment-block face at DEBUG:
-// the trigger reason, the agent and the task count one generation named. One line
-// per generation keeps the rewrite frequency observable, and the line carries no
-// task text.
+// the trigger reason, the agent and the content version one generation named.
+// One line per generation keeps the rewrite frequency observable, and the line
+// carries no task text.
 //
 // The redline list (3 rules):
 // MUST stay a bypass: a failing logger is a missing line, never a failed assembly.
@@ -1078,9 +1073,8 @@ func environmentBlockDebug(format string, args ...any) {
 // follows, and no marker of our own is invented beside the adapter's framing.
 func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBoundary, promptVersion string) string {
 	spec := r.agentSpecOf(boundary.Agent)
-	open, omitted := r.openTaskLines(ctx)
 	environmentBlockGenerations.Add(1)
-	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s tasks=%d omitted=%d", boundary.Agent, len(open)+omitted, omitted)
+	environmentBlockDebug("tagent: environment block generated reason=request-boundary agent=%s", boundary.Agent)
 	var b strings.Builder
 	b.WriteString("## Environment\n")
 	fmt.Fprintf(&b, "- agent: %s\n", boundary.Agent)
@@ -1091,42 +1085,7 @@ func (r *Run) environmentBlock(ctx context.Context, boundary agent.RequestBounda
 	fmt.Fprintf(&b, "- skills: %s\n", listOrNone(narrowedSkillsOf(boundary.Binding)))
 	fmt.Fprintf(&b, "- mcp: %s\n", listOrNone(visibleMCPOf(spec, boundary.Binding)))
 	fmt.Fprintf(&b, "- prompt_version: %s\n", versionOrNone(promptVersion))
-	fmt.Fprintf(&b, "- tasks: %d open\n", len(open)+omitted)
-	if len(open) == 0 {
-		b.WriteString("  - (none)\n")
-	}
-	for _, line := range open {
-		fmt.Fprintf(&b, "  - %s\n", line)
-	}
-	if omitted > 0 {
-		fmt.Fprintf(&b, "  - (+%d more)\n", omitted)
-	}
 	return strings.TrimSuffix(b.String(), "\n")
-}
-
-// openTaskLines reports the obligations this run owes as the environment block
-// names them — the class each waits in beside the task it belongs to — in stable
-// order, bounded. The obligations left out are counted, and a task this run has
-// released contributes no line.
-func (r *Run) openTaskLines(ctx context.Context) ([]string, int) {
-	if r.commit == nil || r.manager == nil {
-		return nil, 0
-	}
-	var lines []string
-	for _, id := range r.commit.TaskIDs() {
-		open, err := r.manager.Obligations(ctx, id)
-		if err != nil {
-			continue
-		}
-		for _, obligation := range open.Open {
-			lines = append(lines, fmt.Sprintf("%s task=%s", obligation.Kind, obligation.TaskID))
-		}
-	}
-	sort.Strings(lines)
-	if len(lines) <= environmentTaskLines {
-		return lines, 0
-	}
-	return lines[:environmentTaskLines], len(lines) - environmentTaskLines
 }
 
 // toolNamesOf reports the tool names one binding's request carries, in the

@@ -127,6 +127,16 @@ var ErrAssemblyMissing = errors.New("subagent: no assembly was given")
 var ErrBindingsMissing = errors.New("call_subagent: no borrowing face is attached")
     ErrBindingsMissing reports a tool constructed with no borrowing face.
 
+var ErrContinuationBusy = errors.New("subagent: a round of that delegated task is in flight")
+    ErrContinuationBusy reports a re-entry that names a task whose round is
+    still running. One round of one task runs at a time, so a re-entry arriving
+    inside a round is refused by name rather than queued behind it.
+
+var ErrContinuationMissing = errors.New("subagent: no delegated turn of that task is served here")
+    ErrContinuationMissing reports a re-entry that names a task this tool serves
+    no round of: the task was never delegated here, or its continuation was
+    released.
+
 var ErrDelegationMissing = errors.New("call_subagent: no delegation face is attached")
     ErrDelegationMissing reports a tool constructed with no delegation face.
 
@@ -165,6 +175,11 @@ var ErrModelUnresolved = errors.New("subagent: the model reference resolved to n
 
 var ErrNameMissing = errors.New("the name is required")
     ErrNameMissing reports a definition that declares no name.
+
+var ErrPipelineMissing = errors.New("call_subagent: the delegation face carries no resident instance")
+    ErrPipelineMissing reports a delegated round asked for from a delegation
+    face that carries no resident-instance face: nothing would run the round the
+    call admitted.
 
 var ErrPresetNotWired = errors.New("preset: the declared tool carries no wiring")
     ErrPresetNotWired reports a declared preset the assembly carries no face
@@ -263,6 +278,22 @@ type Builder struct {
     Every resolver is injected: this package holds no model registry, no skill
     repository and no tool store of its own.
 
+func (b Builder) Bind(ctx context.Context, a *Assembly) (state.AgentBinding, error)
+    Bind resolves the live material one assembly binds a delegated turn to:
+    the model the assembly names, wrapped with the capture scope and the
+    declared sampling every request of that turn carries, beside the tools the
+    assembly declares and the skill and MCP faces it declares. The binding is
+    what the resident instance of the delegated execution site decides on,
+    so the turn runs on the sub-agent's own material rather than on a generation
+    a declared agent holds.
+
+    The declared skill repository and MCP tool sets ride the binding's tool-set
+    connection: a delegated turn assembles its own requests from the binding,
+    so the skill load tool fixes the body it read on the same resources the
+    request assembly publishes, and the tools of a resolved MCP server are
+    registered beside them. A declared face the builder holds no resolver for is
+    refused by name.
+
 func (b Builder) Build(ctx context.Context, a *Assembly) (trpcagent.Agent, error)
     Build returns the live agent one assembly describes: the model, the skill
     repository, the tools and the MCP tool sets the assembly names are resolved
@@ -274,6 +305,42 @@ func (b Builder) Serve(ctx context.Context, a *Assembly, turn Turn) (TurnResult,
     tRPC runner, reporting the assistant text the turn ended on. The runner
     owns the session append of the turn, so a turn that ends never waits on a
     completion no one signals.
+
+type Continuations struct {
+	// Has unexported fields.
+}
+    Continuations is the round-typed continuation point of the delegated turns
+    one tool serves: one entry per served task, holding the assembly, the
+    address and the delegation faces its next round runs and settles through.
+
+    A delegated task is served round by round. The first round runs beside the
+    admission, and a re-entry hands fresh input to the same task and serves
+    its next round on the assembly the first round ran, so the sub-agent
+    keeps its own declaration, prompt and tools across rounds instead of being
+    assembled again. Every round settles the same task, so the terminal of a
+    later round is a new notification of that task and never a task of its own.
+    A task no caller re-enters keeps the one-round contract it had before this
+    face existed: one round, one terminal, and nothing else changes.
+
+func NewContinuations() *Continuations
+    NewContinuations returns an empty continuation table. A tool given none
+    keeps the one-round contract and serves no second round.
+
+func (c *Continuations) Reenter(ctx context.Context, taskID event.TaskID, input string) error
+    Reenter hands fresh input to the named task and serves its next round on the
+    assembly its first round ran. The round settles through the same delegation
+    face the first round settled through, so its terminal belongs to the same
+    task and the re-entry never mints a task of its own. A task whose round is
+    still in flight is refused by name beside no round served, so two re-entries
+    of one task serve one round between them.
+
+func (c *Continuations) Release(taskID event.TaskID)
+    Release ends the continuation of one task: a released task is refused by a
+    later re-entry instead of being served a round nobody asked for.
+
+func (c *Continuations) Served(taskID event.TaskID) bool
+    Served reports whether this tool still serves the named task a round of its
+    own.
 
 type Definition struct {
 	// Name identifies the sub-agent; a definition without one is refused.
@@ -486,6 +553,11 @@ type ToolOptions struct {
 	// Bindings is the state owner's borrowing face: the initiating generation a
 	// delegated turn inherits is taken here when the call is issued.
 	Bindings state.Borrow
+	// Continuations is the round-typed continuation point the delegated turns of
+	// this tool park in, so a task re-entered after it settled is served its next
+	// round on the same assembly. Nil keeps the one-round contract: nothing is
+	// registered and no second round is served.
+	Continuations *Continuations
 }
     ToolOptions is what the composition root fixes when it registers the tool:
     the parent assembly inheritance reads, the builder the delegated turn runs

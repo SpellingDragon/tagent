@@ -104,6 +104,7 @@
 
 - **`tool/knowledge`**：三名 `skill_search`（短名单：名字＋描述）／`skill_load`（载入正文，并把正文发布到下一次请求的注入面）／`read_file`——后者由 `tool/file` 的工具集**只开读**构建（保存、替换、列举与两种搜索全关）；拿不到读工具即 `ErrFileToolMissing` 拒绝，**知识 agent 只读不写**。
 - **`tool/subagent`**：`call_subagent` 把一次子 agent 调用**作为任务受理**并回该受理的回执。`Delegation` 两红线：必须回受理回执、并把终结作为**同一任务**的 notice 报告；绝不为委派轮造私有可写历史，也绝不用 notice 身份替换它指向的事实。`Complete` 交回 `task.Notice`，`ResultDelegation`（可选扩展）把结算正文带进通知——**这正是 settle 通知回传给发起会话的落点**。
+  **委派有自己的会址**：`subAddressOf` 给这次调用铸 `<调用方会话>#sub:<原生调用号>`；受理回执先返回，委派回合紧接着在 serve 协程里跑——`Delegator.SetResident` 把 loop 交进来后，`Loop.SubmitDelegated` 用常驻实例集合把这一轮投到该会址的实例上，并由 serve 协程等这一轮闭合，所以发起方回合不被阻塞。子 agent 声明的 skills 与 MCP 由 `Builder.Bind` 解成绑定上的工具资源（`state.ToolResources`：skill 正文的请求边界定版 + MCP 工具集），连接随回合关闭（`closeFace`），不活过它服务的这一轮。
 - **受理回执单源**：模型可见的整份回执就是 `task.AdmissionReceiptText = "ok"`，经 `AdmissionReceipt` 的 `Text()`／`String()`／`MarshalJSON()` 三个渲染口输出同一份最小正文；task id（`task-<32 hex>` 随机铸造）、状态词、结算承诺**永不进模型**。
 
 ## 已知缺口与演进方向

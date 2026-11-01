@@ -1,0 +1,10 @@
+# 01 agent-instances 孙任务
+
+验证约定：`go test -run '^TestName$' -count=1` 逐字符；三锚冻结；红线测试为每叶必跑硬门；触碰导出面时 `bash scripts/gates/gen_godoc.sh --check`（5.7 自清）。
+
+- [x] 0.1 防护面（W0）：三条红线既有测试复跑绿（settle 恰好一次 `go test ./tests/integration/host -run '^TestSettleWake' -count=1`；occupancy 系 `go test ./runtime/agent -run '^TestLoopTurnInvariants$' -count=1`＋`go test ./tests/integration/state -run '^TestMailboxConsumption$' -count=1`【R29 空转修正：原冻结命令 `-run 'Occupy|Slot'` 零匹配，代偿两条具名测试覆盖更强，编排者裁定 2026-11-01】；白名单 fail-closed 系 `go test ./tests/integration/execution -run '^TestSendCrossSessionGates$' -count=1`）并立防护用例（红线语义被改动即红的守卫） —— 验证：三组全绿 + `TestInstancesRedlineGuard` 存在且绿（W0-A 凭据 /tmp/aid-W0A/，三变异咬证+race）
+- [x] 1.1 探针：非入口地址常驻化最小闭环——I1 红锚先立（`TestInstancesSymptomEveryAgentResident`：非入口 agent 会话无调用方阻塞等待被事件驱动跑完一轮，当前必红且红因命中"非入口地址走同步直驱"） —— 验证：`go test ./tests/integration/execution -run '^TestInstancesSymptomEveryAgentResident$' -count=1 -json` 红项含语义红因
+- [x] 1.2 常驻实例推广：`Consumers.Ensure` 泛化到全部 agent 地址（实例生命周期随 run 起停） —— 验证：`go test ./runtime/agent -run '^TestConsumersResidentEveryAddress$' -count=1`；负锚 `rejects_duplicate_instance_per_address`（每地址恰一实例）；消费者锚 `assembly.Boot` 真实入口
+- [x] 1.3 同步直驱退役（清除式）：删除 `lockAddressContext`/`driveLocked` 双路径，`Host.Invoke` 分流收敛为常驻实例单路径；伴生引用降级回卷 —— 验证：`go test ./assembly ./tests/integration/host -count=1` 全绿；`grep -c "lockAddressContext\|driveLocked" --include='*.go' -r .` 零残留或注释说明；红线三组零回退
+- [x] 1.4 委派管线化：`tool/subagent` serve 改为向 sub 实例投递输入+结果事件回流（task 受理/Notice 身份/settle 恰好一次不变） —— 验证：`go test ./tool/subagent ./tests/integration/execution -run 'Subagent|Delegat' -count=1`；负锚 `settle_fires_exactly_once`（红线复用）、`first_round_settle_unchanged`（W1-A2 交付：目标分离 site≠issuer、Notice 回流发起方、四负锚全绿；编排者落地 host.go 一行 SetResident 接线后生产装配面闭合，R1 红转绿 7.158s）
+- [x] 1.5 I1 转绿 + 竞态收尾：1.1 锚绿；`go test ./runtime/agent ./assembly ./tests/integration/execution -race -count=5 -run 'Instances|Consumers|Settle'` exit 0 —— 验证：同命令；红→绿双证据入报告（凭据=收窄 race 双批 exit 0 + assembly 全包 race -count=5 绿；`^TestSettleWake` 的 race 红经对照实验定性为既有时序窗问题（摘接线同红），登记外部）

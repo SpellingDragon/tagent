@@ -168,11 +168,11 @@ func TestLoopTurnInvariants(t *testing.T) {
 		}
 	})
 
-	t.Run("a production registered for a drive confirms its stop only after that drive ended", func(t *testing.T) {
+	t.Run("a drive in flight keeps its writer registered until that drive ended", func(t *testing.T) {
 		behaviour := &invariantLoopModel{gate: make(chan struct{})}
 		loop, _, _ := invariantLoop(t, behaviour)
-		watch := &invariantLoopWatch{}
-		loop.SetWatch(watch.register)
+		writers := NewWriters()
+		loop.SetWriters(writers)
 		done := make(chan invariantLoopResult, 1)
 		go func() {
 			turn, err := loop.Drive(ctx, Invocation{
@@ -187,14 +187,8 @@ func TestLoopTurnInvariants(t *testing.T) {
 			done <- invariantLoopResult{turn: turn, err: err}
 		}()
 		invariantAwait(t, func() bool { return behaviour.inFlightCount() == 1 })
-		registered := watch.list()
-		if len(registered) == 0 {
-			t.Fatal("a drive in flight registered no production")
-		}
-		for _, stopped := range registered {
-			if stopped() {
-				t.Fatal("a production still in flight confirmed its stop")
-			}
+		if stopped, open := writers.Stopped(); stopped || len(open) == 0 {
+			t.Fatalf("writers beside a drive in flight = (%v, %v), want the drive registered as one that has not stopped", stopped, open)
 		}
 		close(behaviour.gate)
 		select {
@@ -205,10 +199,8 @@ func TestLoopTurnInvariants(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the drive did not end after the model stream was let through")
 		}
-		for _, stopped := range watch.list() {
-			if !stopped() {
-				t.Fatal("a production of an ended drive never confirmed its stop")
-			}
+		if stopped, open := writers.Stopped(); !stopped {
+			t.Fatalf("writers left open after the drive ended = %v, want every writer stopped", open)
 		}
 	})
 
@@ -693,27 +685,6 @@ func (h *invariantLoopHistory) land(evt event.Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.facts[evt.Owner.SessionID] = append(h.facts[evt.Owner.SessionID], evt)
-}
-
-// invariantLoopWatch records the in-flight productions a drive registers.
-type invariantLoopWatch struct {
-	mu    sync.Mutex
-	stops []func() bool
-}
-
-// register records one production stop confirmation.
-func (w *invariantLoopWatch) register(_ event.TaskID, stopped func() bool) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.stops = append(w.stops, stopped)
-	return nil
-}
-
-// list reports the stop confirmations registered so far.
-func (w *invariantLoopWatch) list() []func() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return append([]func() bool(nil), w.stops...)
 }
 
 // invariantLoopView is the request view material one decision was admitted with.

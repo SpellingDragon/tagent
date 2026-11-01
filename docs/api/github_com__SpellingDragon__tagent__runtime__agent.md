@@ -66,6 +66,32 @@ const FinalRoundPlannerName = "final-round-planner"
 VARIABLES
 
 var (
+	// ErrShutdownRefused reports new input offered to an agent whose close has
+	// begun. The close refuses new input first and admits nothing beside the
+	// drain.
+	ErrShutdownRefused = errors.New("agent: the close of this agent refuses new input")
+	// ErrDrainUnsettled reports a close that ended with obligations still open.
+	// An honest close reports this named unsettled state beside the reasons of
+	// what stayed open instead of a clean end.
+	ErrDrainUnsettled = errors.New("agent: the close did not reach real termination")
+)
+    ErrShutdownRefused and ErrDrainUnsettled are the named refusals of the
+    close: each one names the case it refuses instead of answering a silent
+    default.
+
+var (
+	// ErrCloseTimeoutMissing reports a close request that names no timeout.
+	ErrCloseTimeoutMissing = errors.New("agent: the close names no timeout")
+	// ErrCloseTimeoutConflict reports a close request that names two timeouts
+	// that disagree.
+	ErrCloseTimeoutConflict = errors.New("agent: the close names two timeouts that disagree")
+)
+    ErrCloseTimeoutMissing reports a close that names no timeout, and
+    ErrCloseTimeoutConflict one that names two that disagree: an unbounded close
+    is refused by name instead of waiting forever, and two instants are refused
+    instead of one being preferred silently.
+
+var (
 	// ErrDelegationIdentityMissing reports a delegation that carries no complete
 	// call identity, so no later progress or terminal could ever associate with
 	// the call that issued it.
@@ -73,6 +99,10 @@ var (
 	// ErrDelegationAddressIncomplete reports a delegation whose target names no
 	// complete agent session. The ledger never selects a session of its own.
 	ErrDelegationAddressIncomplete = errors.New("agent: the delegation target names no complete agent session")
+	// ErrDelegationIssuerIncomplete reports a delegation whose issuer names no
+	// complete agent session, so no responsibility scope could receive its
+	// notifications.
+	ErrDelegationIssuerIncomplete = errors.New("agent: the delegation issuer names no complete agent session")
 	// ErrDelegationUnknown reports a task this ledger holds no delegation for.
 	ErrDelegationUnknown = errors.New("agent: the task is no delegation this ledger holds")
 	// ErrDelegationNotTerminal reports a completion that carries no terminal
@@ -86,6 +116,14 @@ var (
 	// ErrDelegationCommitRefused reports a settle the commit carrier did not
 	// store: the task moves nowhere and the ledger reports no terminal.
 	ErrDelegationCommitRefused = errors.New("agent: the delegation settle was not committed")
+	// ErrDelegationNotSettled reports a reopen of a delegation whose round has
+	// not settled: only a settled round is followed by another one of the same
+	// task, so a round still in flight is refused by name beside no second round.
+	ErrDelegationNotSettled = errors.New("agent: the delegation has not settled, so no next round follows it")
+	// ErrDelegationUnwired reports a delegated round asked for while this ledger
+	// carries no resident loop, so nothing exists to run the execution site it
+	// names.
+	ErrDelegationUnwired = errors.New("agent: the delegation ledger carries no resident loop")
 )
     ErrDelegationIdentityMissing, ErrDelegationAddressIncomplete,
     ErrDelegationUnknown, ErrDelegationNotTerminal, ErrDelegationTerminal,
@@ -93,24 +131,13 @@ var (
     refusals of the ledger: each one names the case it refuses instead of
     answering a silent default.
 
-var (
-	// ErrShutdownRefused reports new input offered to an agent whose close has
-	// begun. The close refuses new input first and admits nothing beside the
-	// drain.
-	ErrShutdownRefused = errors.New("agent: the close of this agent refuses new input")
-	// ErrDrainUnsettled reports a close that ended with obligations still open.
-	// An honest close reports this named unsettled state beside the reasons of
-	// what stayed open instead of a clean end.
-	ErrDrainUnsettled = errors.New("agent: the close did not reach real termination")
-	// ErrProducerIdentityMissing reports a producer watched under no task
-	// identity, so an unsettled report could never name the work it runs behind.
-	ErrProducerIdentityMissing = errors.New("agent: the producer is watched under no task identity")
-	// ErrProducerMissing reports a watch that names no producer.
-	ErrProducerMissing = errors.New("agent: the watch names no producer")
-)
-    ErrShutdownRefused, ErrDrainUnsettled, ErrProducerIdentityMissing and
-    ErrProducerMissing are the named refusals of the close: each one names the
-    case it refuses instead of answering a silent default.
+var ErrDelegatedInstanceUnavailable = errors.New("agent: no resident instance is available for the delegated site")
+    ErrDelegatedInstanceUnavailable reports a delegated turn asked for while the
+    loop carries no set of resident instances, or while the set already stopped.
+
+var ErrDelegatedSiteIncomplete = errors.New("agent: the delegated site names no complete agent session")
+    ErrDelegatedSiteIncomplete reports a delegated turn whose execution site
+    names no complete agent session, so no resident instance could run it.
 
 var ErrFactPipelineUnwired = errors.New("agent: no fact pipeline is attached to observe through")
     ErrFactPipelineUnwired reports a committed fact the loop could not observe
@@ -306,21 +333,53 @@ type Capture interface {
     capture failure reach the model decision, and MUST NOT make admission wait
     on a writer.
 
+type CloseOutcome int
+    CloseOutcome is the state one close ended in: at rest, out of budget with
+    work still on the chain, or unjudged.
+
+const (
+	// CloseUnreached is the zero value: the close never reached its criterion.
+	// A face that reports only whether an obligation settled leaves it unset.
+	CloseUnreached CloseOutcome = iota
+	// CloseQuiesced reports a run that reached rest: nothing it accepted is
+	// unfinished and no notification of it stands unconsumed.
+	CloseQuiesced
+	// CloseCut reports a close that spent its budget with work still on the
+	// chain. It is a normal return: the remaining work is on the chain and a
+	// restart resumes it, so an offline run that cannot settle still closes.
+	CloseCut
+	// CloseBroken reports a close that could not judge the run, because an
+	// account refused the read or its commit sequence never held.
+	CloseBroken
+)
+func (o CloseOutcome) String() string
+    String renders the outcome as the word a report prints.
+
 type CloseRequest struct {
 	// Address is the address being closed; new input to it is refused first.
 	Address event.Address
-	// Deadline is the instant after which the close reports the obligations it
-	// could not settle instead of waiting longer; a zero deadline waits without a
-	// deadline.
+	// Timeout is the instant the explicit timeout of this close fires: the close
+	// quiesces until that instant and reports what is still on the chain after
+	// it.
+	Timeout time.Time
+	// Deadline is the spelling Timeout carried before it was renamed. A request
+	// names the budget through either spelling and never through both at once.
 	Deadline time.Time
 }
     CloseRequest is one close of an agent: the address being closed and the
-    deadline the close may spend before it reports what is still open.
+    timeout that bounds the quiesce it runs.
 
-    A close refuses new input first and settles the obligations already
-    accepted, and it never reports a drain while a producer has not stopped:
-    a producer that answers that it has not stopped keeps the drain open until
-    real termination is confirmed or the deadline arrives.
+    A close stops injection first and quiesces to a fixed point, so it names the
+    instant its explicit timeout fires: an unbounded close could wait forever
+    beside work that never converges, and a close that returns while work is
+    still flying reads an elapsed wait as a settled run. A request naming no
+    timeout is refused by name rather than read as a wait without an end.
+
+func (req CloseRequest) Resolve() (time.Time, error)
+    Resolve reports the instant the timeout of this close fires: the one instant
+    the request names, and a named refusal when it names none or two that
+    disagree. Every face that runs a close reads its budget here, so the two
+    spellings stay one budget.
 
 type Consumer struct {
 	// Has unexported fields.
@@ -346,6 +405,35 @@ func (c *Consumer) AwaitTaskState(ctx context.Context, taskID event.TaskID) Task
 func (c *Consumer) Done() <-chan struct{}
     Done reports the channel that closes when the consumption loop ended.
 
+func (c *Consumer) Drive(keys ...event.EventID)
+    Drive names the facts that must drive the next pull of this address,
+    whatever the closed segments of the chain present them as: the notification
+    an entry still owes stands where the attempt that died left it, behind the
+    answer that attempt closed on, and no position of the chain can tell it
+    from material that closed segment already carried. The face that fires the
+    attempt answers the judgment on itself and names the fact here.
+
+    - A fact a segment of this process already pulled is never named: the
+    material is driven here already, and a second segment over it would answer
+    one notification twice. - The pull consumes the name it takes, so one name
+    drives one segment and a segment that closed beside a failure leaves the
+    next attempt free to name the fact again. - A name says the fact drives and
+    never what it carries: the material of a fact behind the last closed answer
+    stays the pull's judgment, so a fact the closed prefix already presents is
+    never read as two.
+
+func (c *Consumer) Resting() bool
+    Resting reports whether this loop stands between segments: no segment flies
+    and no wake waits to open one. The loop is the writer of its own address,
+    so a loop that rests writes nothing more at that site, and a close that
+    reads it resting reads a writer stopped rather than one merely paused.
+
+func (c *Consumer) SetProgress(pulse func())
+    SetProgress attaches the pulse this loop reports each movement through,
+    or detaches it beside nil. The pulse is a report, never a judgment: a close
+    reads it to re-read its criterion at the moment the account moved and keeps
+    its own reading as the answer.
+
 func (c *Consumer) TaskState(taskID event.TaskID) TaskState
     TaskState reports what became of the named task on this address. A task this
     address never admitted answers empty, which the notice-driven follow-up
@@ -364,13 +452,18 @@ func (c *Consumer) Wake()
 type Consumers struct {
 	// Has unexported fields.
 }
-    Consumers owns the resident consumption loops of a run: one per address an
-    entry wakes, each the only driver of the model decisions of its address.
-    The loops live as long as the context they were started under; a loop that
-    ended is never restarted in place, and the chain carries the position a
-    restart resumes from. Every closed segment hands its fresh answer to the
-    one delivery face of the set, so the answer of a segment no entry waits on
-    leaves through the same path the answer of a waited segment does.
+    Consumers owns the resident consumption loops of a run: exactly one per
+    complete agent address, each the only driver of the model decisions of its
+    address. The set is address-blind — an instance mounts at the first activity
+    of the address its material names, whether that address belongs to the entry
+    agent or to any other agent the run declared, and no address is guessed
+    from the entry the document names. The loops live as long as the context
+    they were started under; a loop that ended is never restarted in place,
+    the chain carries the position a restart resumes from, and a set stops
+    mounting instances once the run it belongs to stopped. Every closed segment
+    hands its fresh answer to the one delivery face of the set, so the answer
+    of a segment no entry waits on leaves through the same path the answer of a
+    waited segment does.
 
 func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Consumers
     NewConsumers assembles the consumption loops of one run over the loop that
@@ -379,14 +472,33 @@ func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Co
     in which case the answers stay on the chain.
 
 func (cs *Consumers) Ensure(addr event.Address) *Consumer
-    Ensure answers the consumption loop of one address, assembling and starting
-    it on first use: the loop resumes behind the last agent_output the chain
-    carries — the inputs past it are the material a restart still owes — and a
-    chain beside no agent_output at all resumes from its head, so an unanswered
-    input stays owed instead of vanishing behind a restart.
+    Ensure answers the resident instance of one address, assembling and
+    starting it on first use. The address is the one the material itself names,
+    so an instance mounts for every complete agent address the run drives,
+    never for the entry agent alone.
+
+    - Exactly one instance per address: the second Ensure of an address answers
+    the instance already mounted, so one address never runs two drivers of its
+    own decisions. - The lifecycle is the run's: an instance lives as long as
+    the context the set was built under, and a set that stopped mounts none, so
+    a call arriving beside a drained run answers no instance instead of starting
+    a driver beside the drain. - The loop resumes behind the last agent_output
+    the chain carries — the inputs past it are the material a restart still
+    owes — and a chain beside no agent_output at all resumes from its head,
+    so an unanswered input stays owed instead of vanishing behind a restart.
 
 func (cs *Consumers) Has(addr event.Address) bool
     Has reports whether one address carries a resident consumption loop.
+
+func (cs *Consumers) Resting() bool
+    Resting reports whether every loop this set mounted stands between segments,
+    so the set writes nothing more at any of its addresses. A set this host
+    mounts nothing on reports resting: nothing of it flies.
+
+func (cs *Consumers) SetProgress(pulse func())
+    SetProgress attaches the pulse every loop of this set reports its movement
+    through, the mounted ones included. The setter is separate from the
+    constructor so the declared construction shape of the set stays as it is.
 
 func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger string) context.Context)
     SetTurnContext attaches the decorator every decision of every segment these
@@ -397,7 +509,8 @@ func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger s
 
 func (cs *Consumers) Stop()
     Stop ends every consumption loop this set owns; the loops answer their done
-    channels and the segments they left flying stay on the chain for a restart.
+    channels, no further instance mounts for any address, and the segments the
+    ended loops left flying stay on the chain for a restart.
 
 func (cs *Consumers) Wake(addr event.Address)
     Wake signals the consumption loop of one address; an address beside no loop
@@ -426,6 +539,34 @@ type Decision struct {
     arrives after the terminal is kept as diagnostics only, so it dispatches no
     tool and never revives the terminal.
 
+type DelegatedAnswer struct {
+	// Body is the assistant text the round ended on; empty when it produced none.
+	Body string
+	// Status is the terminal the delegated task reports.
+	Status task.Status
+	// Failure is the named cause a failed round ended at, empty otherwise.
+	Failure string
+}
+    DelegatedAnswer is the outcome of one delegated round as its execution site
+    reported it: the body its last decision produced and the terminal it ended
+    at.
+
+type DelegatedInput struct {
+	// Site is the execution address the delegated turn runs in.
+	Site event.Address
+	// Binding is the binding the decisions of that site run on: the assembled
+	// sub-agent's own material, never a generation held for a declared agent.
+	Binding state.AgentBinding
+	// Instruction is the instruction the turn runs under; empty declares none.
+	Instruction string
+	// Request is the input the turn starts from; empty starts it on the
+	// instruction alone.
+	Request string
+}
+    DelegatedInput is what one delegated turn hands the resident instance of its
+    execution site: the site, the binding its decisions run on, the instruction
+    it runs under and the request it starts from.
+
 type Delegation struct {
 	// InvocationID is the invocation that issued the delegation.
 	InvocationID event.InvocationID
@@ -439,8 +580,9 @@ type Delegation struct {
 	// TaskID is the task the delegated call was admitted as, so its progress and
 	// terminal associate with the call that issued it.
 	TaskID event.TaskID
-	// Target is the agent session address the delegated turn runs in.
-	Target event.Address
+	// Sites names the execution site the delegated turn runs in and the
+	// responsibility scope its notifications return to.
+	Sites DelegationSites
 	// TriggerSource is the trigger-source stamp the admission record carries.
 	// The call_subagent tool stamps event.LineageDelegation, so a delegated call
 	// is recorded as traffic the agent manages for itself; an empty stamp
@@ -471,6 +613,24 @@ type Delegation struct {
     receipt. The delegated turn runs in the session the application selected
     explicitly, and a delegation never creates a private writable history of its
     own.
+
+type DelegationSites struct {
+	// Target is the execution site: the agent session address the delegated turn
+	// runs in, minted for the delegated turn itself rather than borrowed from the
+	// caller.
+	Target event.Address
+	// Issuer is the return site: the agent session address the delegated call was
+	// issued from, the responsibility scope its notifications return to. An empty
+	// issuer names the target itself, so a call running where it was issued
+	// returns there.
+	Issuer event.Address
+}
+    DelegationSites is the two places one delegated call names: the execution
+    site the delegated turn runs in and the responsibility scope its
+    notifications return to. The two addresses are read together or not at all
+    — a record that named one without the other could not tell a turn running
+    where it was issued from a turn running in a site of its own — so they are
+    one concept rather than two sibling fields.
 
 type DelegationTasks interface {
 	// Admit admits one delegated call as a task. A repeated admission of the same
@@ -534,6 +694,9 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
     Delegate admits one delegated call as a task and returns its admission
     receipt. The call identity and the application-selected target are required;
     the ledger neither invents a session nor accepts an incomplete target.
+    The execution site the call runs in and the responsibility scope it reports
+    back to are two places, so a call running in a site of its own still returns
+    its notifications to the invocation that issued it.
 
     The delivery reconciliation barrier of the call is booked before the call
     is spawned, and the initiating generation is pinned beside it: a fresh
@@ -569,6 +732,31 @@ func (d *Delegator) Reconcile(ctx context.Context, taskID event.TaskID) (task.St
     status the record stands at afterwards: the entry an earlier settle left
     pending lands here once every obligation has cleared.
 
+func (d *Delegator) ReopenRound(taskID event.TaskID, round int64) error
+    ReopenRound moves the ledger entry of one delegation to the round its task
+    was reactivated into, so a task re-entered out of its settled outcome is
+    served and settled as the next round of the same task instead of a second
+    terminal of the round already landed.
+
+    The round is the one the task state machine opened, taken from the
+    reactivation that opened it: the ledger never counts rounds of its own,
+    so the notification a re-entered round settles under keeps the identity
+    the task carries. Only a settled entry reopens; a round still in flight is
+    refused by name beside no second round, and the pre-registration the first
+    round withdrew is booked again because a round of the task is once more in
+    flight.
+
+func (d *Delegator) SetResident(loop *Loop)
+    SetResident attaches the loop whose resident instances run the delegated
+    turns this ledger admits. The setter is separate from the constructor so the
+    declared construction shape of the ledger stays as it is.
+
+func (d *Delegator) Submit(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error)
+    Submit hands one delegated round to the resident instance of its execution
+    site and answers the status it ended at beside the body it produced.
+    The round runs beside the receipt the admission already returned, so the
+    turn that issued the call never waits on it.
+
 func (d *Delegator) TurnBorrow(taskID event.TaskID) (state.Borrow, error)
     TurnBorrow returns the borrowing face the delegated turn of one admitted
     delegation runs under. Every borrow it opens resolves on the generation
@@ -582,16 +770,18 @@ func (d *Delegator) View(owner event.InvocationID) []Delegation
     association, the progress and the status the record stands at.
 
 type DrainReport struct {
+	// Outcome is the state the close ended in.
+	Outcome CloseOutcome
 	// Drained reports whether every accepted obligation reached real termination.
 	// It stays false while any producer has not confirmed its stop.
 	Drained bool
-	// Unsettled lists the obligations that were still open when the close
-	// reported, each with the reason it could not be settled.
+	// Unsettled lists the work that was still open when the close reported, each
+	// with the address it stands at and the reason it stayed open.
 	Unsettled []UnsettledObligation
 }
-    DrainReport is the outcome of one close: whether every accepted obligation
-    reached real termination, and the obligations that were still open when the
-    close reported.
+    DrainReport is the outcome of one close: the state the close ended in,
+    whether every accepted obligation reached real termination, and the work
+    that was still open when the close reported.
 
 type FactCommit func(evt event.Event) (event.EventID, error)
     FactCommit is the one commit face of the facts the loop produces: it stores
@@ -945,30 +1135,29 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
     - The settled result facts one decision paired are the stored input the
     next decision reduces. - The drive reads its range's chain again at every
     decision boundary: input that landed in the range while a decision ran
-    enters the next decision of that same range, and a decision that opened
-    no obligation still ends the round while that input stands unread.
-    The read starts behind the head the chain held when the drive began,
-    so the material an earlier range already took is never this range's input.
-    - The transcript of this drive is committed beside the terminal answer of
-    its last decision, so the next invocation of this session reads the range's
-    history as it actually ended. - The direct drive flies no resident loop,
-    so the input a writer beside this drive committed past the range that
-    last closed has no segment to land in: the drive adopts it as its opening
-    material instead of losing it between the ended prefix and its own ready
-    input. - The whole drive is watched as one in-flight production beside its
-    invocation identity — the queueing waits included — and confirms its stop
-    only when the drive really ended. - A progress notification of the range's
-    own call commits as a fact of its chain and enters no round head: the report
-    is audit and projection material, never input a decision speaks from.
-    - A terminal notification of the range's own call enters the round head as
-    input material: a settle, a failure or a cancellation is what an unattended
-    follow-up turn speaks from, and the progress reports beside it are skipped
-    by their own category. - A drive whose budget is spent runs one closing
-    round and ends there: the closing round delivers what the range already
-    produced, its transcript is committed the same way, and the obligation
-    it opens is none. - The drive is observed as one consumer run: its start
-    and its end are DEBUG lines carrying identities, counts and the terminal,
-    never transcript content.
+    enters the next decision of that same range, and a decision that opened no
+    obligation still ends the round while that input stands unread. The read
+    starts behind the head the chain held when the drive began, so the material
+    an earlier range already took is never this range's input. - The transcript
+    of this drive is committed beside the terminal answer of its last decision,
+    so the next invocation of this session reads the range's history as it
+    actually ended. - The direct drive flies no resident loop, so the input a
+    writer beside this drive committed past the range that last closed has no
+    segment to land in: the drive adopts it as its opening material instead
+    of losing it between the ended prefix and its own ready input. - The whole
+    drive is registered as one writer of the run's writer ledger — the queueing
+    waits included — and confirms its stop only when the drive really ended.
+    - A progress notification of the range's own call commits as a fact of its
+    chain and enters no round head: the report is audit and projection material,
+    never input a decision speaks from. - A terminal notification of the
+    range's own call enters the round head as input material: a settle, a
+    failure or a cancellation is what an unattended follow-up turn speaks from,
+    and the progress reports beside it are skipped by their own category.
+    - A drive whose budget is spent runs one closing round and ends there:
+    the closing round delivers what the range already produced, its transcript
+    is committed the same way, and the obligation it opens is none. - The drive
+    is observed as one consumer run: its start and its end are DEBUG lines
+    carrying identities, counts and the terminal, never transcript content.
 
 func (l *Loop) InFlightModel(addr event.Address) (event.InvocationID, event.DecisionID, bool)
     InFlightModel reports the model decision the consumption state of one
@@ -1015,6 +1204,11 @@ func (l *Loop) SetConsumers(consumers *Consumers)
     decisions of, so a settled backflow wakes the loop of the address its range
     runs at. A loop beside no consumers keeps its backflow parked in the intake,
     exactly as before.
+
+    A set this loop mounted for itself is displaced by the given one and
+    stopped: a displaced set that kept running would drive the addresses of its
+    own copies beside the set now attached, and two drivers of one address is
+    the failure the one-instance-per-address rule exists to forbid.
 
 func (l *Loop) SetFactCommit(commit FactCommit)
     SetFactCommit attaches the commit face the loop commits the facts it
@@ -1081,18 +1275,40 @@ func (l *Loop) SetResponseCallCap(cap int)
     a negative value leaves the cap off. The composition root that carries only
     this key wires it without assembling a second declaration.
 
-func (l *Loop) SetWatch(watch func(taskID event.TaskID, stopped func() bool) error)
-    SetWatch attaches the registration the close of this agent confirms the
-    real stop of every in-flight production through: the whole drive of one
-    invocation and the model stream of each of its decisions, each registered
-    beside the work identity it runs behind, with the stop confirmation that
-    work is polled through. A nil registration keeps the loop registering
+func (l *Loop) SetWriters(writers *Writers)
+    SetWriters attaches the ledger the close of this agent reads the real stop
+    of every production of this loop through: the whole drive of one invocation
+    and the model stream of each of its decisions, each registered under the
+    name of the production itself. A nil ledger keeps the loop registering
     nothing. The setter is separate from the constructor so the declared
     construction shape of the loop stays as it is.
 
-    The redline list (2 rules): MUST register a production when it really starts
-    and confirm its stop only when it really ended. MUST NOT read a cancelled
-    request, an emptied queue or an elapsed timeout as a stop.
+    A production of this loop is not a task: the model stream in flight holds
+    no task identity, so the registration names the production and mints no
+    identity the task account would have to carry. The redline list (2 rules):
+    MUST register a production when it really starts and confirm its stop only
+    when it really ended. MUST NOT read a cancelled request, an emptied queue or
+    an elapsed timeout as a stop.
+
+func (l *Loop) StopResidents()
+    StopResidents ends the consumption loops this loop mounted for itself:
+    no further instance mounts, and the segments those loops left flying stay
+    on the chain for a restart. The set a host attached is that host's to stop,
+    so it is left where it is here.
+
+func (l *Loop) SubmitDelegated(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error)
+    SubmitDelegated hands one delegated turn to the resident instance of its
+    execution site and answers the segment that consumed it: the input commits
+    at that site under the delegation lineage, the instance mounted with the
+    binding the turn runs on is woken, and the round is the one that segment
+    flies. The caller keeps the task face — admission, settle and notice stay
+    where they are — and reads only what the turn produced. - The input commits
+    as the site's own external input before the wake, so the segment the wake
+    opens reads it as its own material. - The answer is the chain the segment
+    closed on: a body that never committed is a failed round rather than a copy
+    kept beside the chain. - A cancelled wait reports the cancelled terminal
+    beside no error, so a closing run settles what it already admitted instead
+    of leaving it owed.
 
 type NoticeFeed interface {
 	// NoticeBoundary reports the position the ended material of the named chain
@@ -1149,16 +1365,18 @@ type Reconciler interface {
 	// booking closes only when its terminal really lands.
 	Pending() int
 }
-    Reconciler is the delegation ledger the close lands the terminals of
-    admitted calls through: a terminal whose obligations have cleared is
-    reported and the booking beside it closes, while an obligation still open
-    keeps the terminal withheld exactly as it does beside a live turn.
+    Reconciler is the delegation ledger a close lands the terminals of admitted
+    calls through: a terminal whose obligations have cleared is landed and the
+    booking beside it closes, while an obligation still open keeps the terminal
+    withheld exactly as it does beside a live turn. The close reads it as one
+    of its criteria, so a run is never reported at rest beside a terminal the
+    ledger still holds.
 
     The redline list (3 rules): MUST land a pending terminal only once the
     obligations of that call are cleared. MUST report every booking it still
-    holds, so a close never reports a drain beside an unlanded terminal. MUST
-    NOT hold a terminal past the obligations it waits on, and MUST NOT report
-    one before them.
+    holds, so a close never reports a rest beside an unlanded terminal. MUST NOT
+    hold a terminal past the obligations it waits on, and MUST NOT report one
+    before them.
 
 type RecordingLoss struct {
 	// Kind names the record kind the failed write belonged to: "episode",
@@ -1246,98 +1464,6 @@ type SegmentDelivery func(ctx context.Context, addr event.Address, answer Segmen
     no face delivers nothing and leaves every answer on the chain, which is the
     shape a loop driven by tests keeps.
 
-type Shutdown struct {
-	// Has unexported fields.
-}
-    Shutdown is one agent's close face: the gate new work is admitted through,
-    the ledger of the obligations that gate accepted, and the real stop
-    confirmations of the producers behind that work.
-
-    It fronts the task face the agent settles through as a DelegationTasks
-    of its own, so the delegation ledger admits through the gate and a close
-    refuses new input at the very point a new obligation would open. Everything
-    already accepted keeps its obligation until real settlement: the close
-    offers the notifications a task still owes beside their frozen routing,
-    lands the terminals whose obligations cleared, and polls the producers until
-    each one confirms its stop or the deadline arrives. The redline list (4
-    rules): MUST refuse new input at the gate before the first settlement pass
-    of the close. MUST settle an accepted obligation only by real settlement,
-    and report a drain only beside real termination. MUST NOT read a cancelled
-    request, an emptied queue or an elapsed timeout as a settled obligation.
-    MUST NOT report a clean drain beside an obligation or a production that
-    stayed open.
-
-func NewShutdown(face DelegationTasks) *Shutdown
-    NewShutdown returns the close face of one agent over the task face its work
-    is admitted and settled through. The returned face is the one the agent's
-    delegation ledger admits through, so the close can refuse new input at the
-    gate where new obligations are opened and settle exactly what it accepted.
-
-func (s *Shutdown) Admit(ctx context.Context, spec task.Spec) (task.AdmissionReceipt, error)
-    Admit admits one new call as a task and returns its admission receipt, or
-    refuses it by name once the close of this agent has begun. A fresh admission
-    is recorded beside the close face so its obligation stays in the drain until
-    real settlement; a dedup or a refusal added no obligation and settles none.
-
-func (s *Shutdown) Advance(ctx context.Context, taskID event.TaskID, to task.Status, mutation task.MutationID, outbox []task.Envelope) (task.CommitResult, error)
-    Advance moves one task to the next status beside its pending notifications.
-    A transition of work already accepted is settlement, so the gate never
-    refuses it.
-
-func (s *Shutdown) Close(ctx context.Context, req CloseRequest) (DrainReport, error)
-    Close refuses new input first, settles the obligations that were already
-    accepted, and reports whether the drain reached real termination.
-
-    The gate closes before the first settlement pass, so no new obligation opens
-    beside the drain. An accepted obligation is settled only by real settlement
-    — a notification its target explicitly accepted, a terminal that landed
-    beside a cleared booking — and every watched producer must confirm its stop.
-    A producer answering false has not stopped: the close keeps polling it
-    until the confirmation arrives or the deadline does, and a deadline that
-    arrives first returns the named unsettled state beside the reason of every
-    obligation that stayed open. A second close returns the first result and
-    runs no second settlement.
-
-func (s *Shutdown) Flush(ctx context.Context, taskID event.TaskID) error
-    Flush delivers the notifications of one task whose obligations are still
-    open, beside the routing each envelope froze. Only an acceptance the target
-    states explicitly clears one.
-
-func (s *Shutdown) Obligations(ctx context.Context, taskID event.TaskID) (task.Obligations, error)
-    Obligations reports the obligations the task face still holds for one task,
-    each classified by the wait it is in.
-
-func (s *Shutdown) SetReconciler(reconciler Reconciler)
-    SetReconciler attaches the delegation ledger the close lands the terminals
-    of admitted calls through. The setter is separate from the constructor
-    because the ledger admits through this very face: the face exists first and
-    the ledger is built on it.
-
-func (s *Shutdown) Track(taskID event.TaskID)
-    Track records one already admitted task beside the close face, so the drain
-    settles the obligations of that task and names them beside the deadline when
-    they stay open. A call admitted through the task face of the run is recorded
-    here at its admission exactly as a call admitted through this gate is, and
-    recording is no admission of its own: a task recorded twice is the one task.
-
-func (s *Shutdown) Watch(taskID event.TaskID, stopped func() bool) error
-    Watch registers one in-flight producer behind the named task's execution:
-    its real stop is one of the confirmations the close waits for, and a
-    producer that never confirms keeps the drain open beside the task it runs
-    behind. Several producers may stand behind one task and each confirms its
-    own stop.
-
-    The stopped answer is polled and only a true is taken as an end: a producer
-    answering false has not stopped, and neither a cancelled request nor an
-    emptied queue stands in for the confirmation. The producer answers for
-    itself alone, and the registration carries the identity of the work it runs
-    behind. The redline list (4 rules): MUST poll the stop confirmation until
-    it answers true or the deadline arrives. MUST refuse a registration that
-    names no work identity or carries no stop confirmation, by name. MUST NOT
-    take a cancelled request, an emptied queue or an elapsed timeout as a stop.
-    MUST NOT report a drain while any registered production has not confirmed
-    its stop.
-
 type TaskState string
     TaskState names what became of one settled result on this address:
     the flying segment still awaits it, a segment already paired it, or a closed
@@ -1374,10 +1500,60 @@ type Turn struct {
     order and the terminal its latest decision reduced to.
 
 type UnsettledObligation struct {
-	// TaskID is the task whose obligation stayed open.
+	// TaskID is the task the work belongs to, and empty for a notification no
+	// task identity of this run names.
 	TaskID event.TaskID
-	// Reason is the readable reason the obligation could not be settled.
+	// Address is the address the work stands at: the target a notification was
+	// never accepted at, or the site that accepted one nobody consumed.
+	Address event.Address
+	// Source is the address the work came from, so a report names both ends of
+	// the routing it could not settle.
+	Source event.Address
+	// FactKey is the stable identity of the notification, and empty for work
+	// that is not a notification.
+	FactKey string
+	// Reason is the readable reason the work could not be settled.
 	Reason string
 }
-    UnsettledObligation is one obligation a close could not settle, paired with
-    the reason it stayed open.
+    UnsettledObligation is one piece of work a close could not settle, paired
+    with the address it stands at and the reason it stayed open.
+
+func WriterObligations(names []string) []UnsettledObligation
+    WriterObligations renders the writers that have not confirmed their stop as
+    the report entries of one close: each one named by the production it runs
+    instead of by a task identity it never held.
+
+type Writers struct {
+	// Has unexported fields.
+}
+    Writers is the ledger of the writers one run started: the whole drive of
+    one invocation, the model stream of each of its decisions, and the tool
+    production of each admitted call. A close reads it as one of its criteria,
+    so a run writes nothing more only once every writer confirmed its stop,
+    and the ones that did not are named in the report beside the work they were
+    running. A writer is not a task: the model stream in flight holds no task
+    identity at all, so the ledger names the production itself rather than
+    minting an identity the task account would have to carry, and the stop is
+    confirmed by the production alone.
+
+    The redline list (3 rules): MUST register a writer when its work really
+    starts and confirm its stop only when that work really ended. MUST NOT read
+    a cancelled request, an emptied queue or an elapsed budget as a stop. MUST
+    NOT report a writer stopped for one whose confirmation still answers false.
+
+func NewWriters() *Writers
+    NewWriters returns an empty writer ledger.
+
+func (w *Writers) Begin(name string) func()
+    Begin registers one writer that is starting now and answers the confirmation
+    that closes its registration. The confirmation is idempotent and safe to
+    call from a defer: a second call reports the same stop and drops no other
+    writer. A ledger beside nil registers nothing and answers a confirmation
+    that reports nothing, so a loop or a run without a ledger keeps running
+    unregistered.
+
+func (w *Writers) Stopped() (bool, []string)
+    Stopped reports whether every registered writer confirmed its stop,
+    and names the ones that did not in registration order. A writer whose
+    registration is still open has not stopped: the work it runs began and its
+    end was never confirmed, whatever the state of the request that started it.

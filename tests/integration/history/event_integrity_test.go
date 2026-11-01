@@ -3262,6 +3262,13 @@ func writeRestartReport(t *testing.T, path string, report restartChildReport) {
 	}
 }
 
+// restartWorkStandingAtAccepted is the phrase the close report prints for the work
+// an accepted task still owes: the report names the status the machine holds with
+// the obligation vocabulary gone, so an accepted task awaiting its execution reads
+// as work standing at accepted. The phrase is pinned here, so a silent re-wording
+// of the report fails this consumer instead of passing unread.
+const restartWorkStandingAtAccepted = "the task stands at accepted"
+
 // restartAssertNothingCommitted proves an interruption before the settle commit
 // leaves the admitted task behind and only the admitted task: the restart
 // rebuilds it as accepted beside the awaited execution, reads no notification
@@ -3291,8 +3298,8 @@ func restartAssertNothingCommitted(t *testing.T, o restartOutcome) {
 	if o.Recover.Drain.Drained || len(o.Recover.Drain.Unsettled) != 1 {
 		t.Fatalf("the %s restart drain = %+v, want the admitted task's execution reported open", o.Phase, o.Recover.Drain)
 	}
-	if open := o.Recover.Drain.Unsettled[0]; !strings.Contains(open, taskID) || !strings.Contains(open, string(task.ObligationAwaitingTool)) {
-		t.Fatalf("the %s restart reports %q open, want the awaited execution of the task %s kept visible", o.Phase, open, taskID)
+	if open := o.Recover.Drain.Unsettled[0]; !strings.Contains(open, taskID) || !strings.Contains(open, restartWorkStandingAtAccepted) {
+		t.Fatalf("the %s restart reports %q open, want the awaited execution of the task %s kept visible at the status it stands in", o.Phase, open, taskID)
 	}
 }
 

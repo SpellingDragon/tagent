@@ -14,20 +14,45 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 
+// gateHeldCallAnswer is the first held send call of the gate scenes: it names the
+// one session destination the approved document's white list declares, so its digest
+// is the one the retry repeats and the ruling binds.
 // gateRetryCallAnswer is the retry of one held send call: the same arguments under
 // a fresh call identity, the shape a model issues when it retries a call it was
 // told to wait for.
-const gateRetryCallAnswer = `{"id":"scripted-tool-retry","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":"sending","tool_calls":[{"id":"call-1-retry","type":"function","function":{"name":"send","arguments":"{\"content\":\"hi\"}"}}]},"finish_reason":"tool_calls"}]}`
+const gateHeldCallAnswer = `{"id":"scripted-tool-first","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":"sending","tool_calls":[{"id":"call-1","type":"function","function":{"name":"send","arguments":"{\"target\":{\"agent\":\"user\",\"session\":\"session-attention-gate-approved\"},\"content\":\"hi\"}"}}]},"finish_reason":"tool_calls"}]}`
+const gateRetryCallAnswer = `{"id":"scripted-tool-retry","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":"sending","tool_calls":[{"id":"call-1-retry","type":"function","function":{"name":"send","arguments":"{\"target\":{\"agent\":\"user\",\"session\":\"session-attention-gate-approved\"},\"content\":\"hi\"}"}}]},"finish_reason":"tool_calls"}]}`
 
 // gateCriticalAgentBlock declares the one send tool every gate scene holds.
 const gateCriticalAgentBlock = "    model: model-a\n" +
 	"    tools:\n" +
 	"      - { kind: tool, id: send }\n"
+
+// gateApprovedAgentBlock declares the one send tool the approved scene holds beside
+// the one delivery white list its destination is judged against: the reflection
+// section names the agent's own partition, which is the face the observed gate
+// reads, so the destination the call names is a session the door lets through
+// instead of one it refuses beside no declared table.
+func gateApprovedAgentBlock(promptPath string) string {
+	return gateCriticalAgentBlock +
+		"    meditation:\n" +
+		"      enabled: true\n" +
+		"      interval: 1h\n" +
+		"      min_gap: 0s\n" +
+		"      prompt_file: " + promptPath + "\n" +
+		"      observed_namespaces: [user]\n" +
+		"      deliver_to: [user]\n"
+}
+
+// gateMeditationPrompt is the static reflection prompt the approved document
+// declares, so the boot reads one beside the white list above.
+const gateMeditationPrompt = "Reflect over the gate scene and deliver one body.\n"
 
 // gateCriticalTopBlock declares the critical grade the gate renders its hold at.
 const gateCriticalTopBlock = "governance:\n" +
@@ -50,7 +75,7 @@ func TestGateReadsAttentionRuling(t *testing.T) {
 		provider.answer = func(index int) string {
 			switch index {
 			case 0:
-				return scriptedToolCallAnswer
+				return gateHeldCallAnswer
 			case 2:
 				return gateRetryCallAnswer
 			default:
@@ -59,7 +84,10 @@ func TestGateReadsAttentionRuling(t *testing.T) {
 		}
 		root := t.TempDir()
 		configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-a")
-		writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), gateCriticalAgentBlock, gateCriticalTopBlock))
+		promptPath := filepath.Join(root, "meditation.md")
+		writeHostDocumentFile(t, promptPath, gateMeditationPrompt)
+		writeHostDocumentFile(t, configPath, wiringHostDocument(root, provider.endpoint(), gateApprovedAgentBlock(promptPath), gateCriticalTopBlock))
+		destination := event.Address{AgentID: "user", SessionID: "session-attention-gate-approved"}
 		approvals := approval.NewApprovalManager(root, time.Hour)
 		sender := &deliveryRecorder{}
 		host, err := assembly.Boot(configPath, assembly.WithSender(sender), assembly.WithApprovals(approvals))
@@ -76,9 +104,12 @@ func TestGateReadsAttentionRuling(t *testing.T) {
 			t.Fatalf("pending approvals = %+v, want the one question the critical call parked", pending)
 		}
 		held := pending[0]
+		if got := gateDeliveredBodies(host, destination, "hi"); got != 0 {
+			t.Fatalf("delivered bodies at %+v while the call waits = %d, want the held call to execute nothing", destination, got)
+		}
 		for _, body := range sender.bodies() {
 			if body == "hi" {
-				t.Fatalf("delivered bodies while the call waits = %q, want the held call to execute nothing", sender.bodies())
+				t.Fatalf("delivered channel bodies while the call waits = %q, want the held call to execute nothing", sender.bodies())
 			}
 		}
 		if seen := approvals.Lookup(held.ToolName, held.ArgsDigest); seen == nil || seen.Status != approval.ApprovalPending {
@@ -97,14 +128,8 @@ func TestGateReadsAttentionRuling(t *testing.T) {
 		if turn := invokeScriptedTurn(t, ctx, host, "session-attention-gate-approved"); turn.Terminal != model.KindCompleted {
 			t.Fatalf("retry turn terminal = %v, want the approved retry to close", turn.Terminal)
 		}
-		ran := false
-		for _, body := range sender.bodies() {
-			if body == "hi" {
-				ran = true
-			}
-		}
-		if !ran {
-			t.Fatalf("delivered bodies after the approval = %q, want the approved call to run", sender.bodies())
+		if got := gateDeliveredBodies(host, destination, "hi"); got != 1 {
+			t.Fatalf("delivered bodies at %+v after the approval = %d, want the approved retry to run exactly once", destination, got)
 		}
 		rebuilt := approval.NewApprovalManager(root, time.Hour)
 		restored := rebuilt.Lookup(held.ToolName, held.ArgsDigest)
@@ -263,6 +288,27 @@ func TestGateFailsClosedWithoutAttention(t *testing.T) {
 		}
 		closeAttentionGate(t, host)
 	})
+}
+
+// gateDeliveredBodies counts the bodies one delivery landed in the destination the
+// gate scene names, read off the destination chain the way a delivery stamps it:
+// the trigger source of the body, the destination it was handed to and the content
+// the call carried. A held call leaves the count at zero and an approved retry
+// leaves exactly one, so the scene reads the run of the call instead of a receipt.
+func gateDeliveredBodies(host *assembly.Host, addr event.Address, content string) int {
+	count := 0
+	for _, fact := range host.Run().SessionFacts(addr) {
+		if fact.Type != event.TypeExternalInput || fact.Meta[event.MetaKeyTriggerSource] != "send" {
+			continue
+		}
+		if fact.Meta[event.MetaKeyDeliveryTarget] != string(addr.AgentID)+"/"+string(addr.SessionID) {
+			continue
+		}
+		if fact.Message.Content == content {
+			count++
+		}
+	}
+	return count
 }
 
 // closeAttentionGate drains one gate scene under a bounded grace, so a wait the

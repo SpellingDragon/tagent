@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1223,3 +1225,47 @@ func TestExecTakeoverOrNamedReport(t *testing.T) {
 }
 
 var _ Executor = (*exitFrameExecutor)(nil)
+
+// TestExecutionFaceCarriesNoInjectionPath pins the one-way face of the execution resource as the single-injection-path rule reads it.
+// - the executor port starts, probes, captures and stops a resource, and carries no method that writes input into a live session
+// - the face granted to a model is the run tool and the release tool alone
+// - every declared parameter of that face is one the frozen set names, so no declaration grows an input-carrying parameter
+// - the tmux session of a resource is reached for its state and never written into: live input travels the one round re-entry the task registry keeps
+// 契约: docs/wiki/tool/tmux-action.md#quiet-vs-dead
+func TestExecutionFaceCarriesNoInjectionPath(t *testing.T) {
+	port := reflect.TypeOf((*Executor)(nil)).Elem()
+	var methods []string
+	for at := 0; at < port.NumMethod(); at++ {
+		methods = append(methods, port.Method(at).Name)
+	}
+	sort.Strings(methods)
+	frozen := []string{"Capture", "Probe", "Start", "Stop"}
+	if !reflect.DeepEqual(methods, frozen) {
+		t.Fatalf("methods of the executor port = %v, want %v", methods, frozen)
+	}
+
+	tools := NewPreset(nil, DefaultMonitorConfig)
+	var names []string
+	parameters := make([][]string, 0, len(tools))
+	for _, tool := range tools {
+		declaration := tool.Declaration()
+		names = append(names, declaration.Name)
+		declared := make([]string, 0, len(declaration.InputSchema.Properties))
+		for name := range declaration.InputSchema.Properties {
+			declared = append(declared, name)
+		}
+		sort.Strings(declared)
+		parameters = append(parameters, declared)
+	}
+	if want := []string{"exec_run", "exec_release"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("tools the execution face grants = %v, want %v", names, want)
+	}
+	frozenRun := []string{"args", "command", "dir", "kind", "monitor", "resource", "ttl"}
+	if !reflect.DeepEqual(parameters[0], frozenRun) {
+		t.Fatalf("parameters of %s = %v, want %v", names[0], parameters[0], frozenRun)
+	}
+	frozenRelease := []string{"kind", "resource"}
+	if !reflect.DeepEqual(parameters[1], frozenRelease) {
+		t.Fatalf("parameters of %s = %v, want %v", names[1], parameters[1], frozenRelease)
+	}
+}

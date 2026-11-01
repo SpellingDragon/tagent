@@ -42,8 +42,9 @@ type Delegation struct {
 	// TaskID is the task the delegated call was admitted as, so its progress and
 	// terminal associate with the call that issued it.
 	TaskID event.TaskID
-	// Target is the agent session address the delegated turn runs in.
-	Target event.Address
+	// Sites names the execution site the delegated turn runs in and the
+	// responsibility scope its notifications return to.
+	Sites DelegationSites
 	// TriggerSource is the trigger-source stamp the admission record carries.
 	// The call_subagent tool stamps event.LineageDelegation, so a delegated call
 	// is recorded as traffic the agent manages for itself; an empty stamp
@@ -62,40 +63,137 @@ type Delegation struct {
 	Progress []task.Notice
 }
 
+// DelegationSites is the two places one delegated call names: the execution site
+// the delegated turn runs in and the responsibility scope its notifications
+// return to. The two addresses are read together or not at all — a record that
+// named one without the other could not tell a turn running where it was issued
+// from a turn running in a site of its own — so they are one concept rather than
+// two sibling fields.
+type DelegationSites struct {
+	// Target is the execution site: the agent session address the delegated turn
+	// runs in, minted for the delegated turn itself rather than borrowed from the
+	// caller.
+	Target event.Address
+	// Issuer is the return site: the agent session address the delegated call was
+	// issued from, the responsibility scope its notifications return to. An empty
+	// issuer names the target itself, so a call running where it was issued
+	// returns there.
+	Issuer event.Address
+}
+
 // CloseRequest is one close of an agent: the address being closed and the
-// deadline the close may spend before it reports what is still open.
+// timeout that bounds the quiesce it runs.
 //
-// A close refuses new input first and settles the obligations already accepted,
-// and it never reports a drain while a producer has not stopped: a producer that
-// answers that it has not stopped keeps the drain open until real termination is
-// confirmed or the deadline arrives.
+// A close stops injection first and quiesces to a fixed point, so it names the
+// instant its explicit timeout fires: an unbounded close could wait forever
+// beside work that never converges, and a close that returns while work is
+// still flying reads an elapsed wait as a settled run. A request naming no
+// timeout is refused by name rather than read as a wait without an end.
 type CloseRequest struct {
 	// Address is the address being closed; new input to it is refused first.
 	Address event.Address
-	// Deadline is the instant after which the close reports the obligations it
-	// could not settle instead of waiting longer; a zero deadline waits without a
-	// deadline.
+	// Timeout is the instant the explicit timeout of this close fires: the close
+	// quiesces until that instant and reports what is still on the chain after
+	// it.
+	Timeout time.Time
+	// Deadline is the spelling Timeout carried before it was renamed. A request
+	// names the budget through either spelling and never through both at once.
 	Deadline time.Time
 }
 
-// DrainReport is the outcome of one close: whether every accepted obligation
-// reached real termination, and the obligations that were still open when the
-// close reported.
+// ErrCloseTimeoutMissing reports a close that names no timeout, and
+// ErrCloseTimeoutConflict one that names two that disagree: an unbounded close
+// is refused by name instead of waiting forever, and two instants are refused
+// instead of one being preferred silently.
+var (
+	// ErrCloseTimeoutMissing reports a close request that names no timeout.
+	ErrCloseTimeoutMissing = errors.New("agent: the close names no timeout")
+	// ErrCloseTimeoutConflict reports a close request that names two timeouts
+	// that disagree.
+	ErrCloseTimeoutConflict = errors.New("agent: the close names two timeouts that disagree")
+)
+
+// Resolve reports the instant the timeout of this close fires: the one instant
+// the request names, and a named refusal when it names none or two that
+// disagree. Every face that runs a close reads its budget here, so the two
+// spellings stay one budget.
+func (req CloseRequest) Resolve() (time.Time, error) {
+	switch {
+	case !req.Timeout.IsZero() && !req.Deadline.IsZero() && !req.Timeout.Equal(req.Deadline):
+		return time.Time{}, ErrCloseTimeoutConflict
+	case !req.Timeout.IsZero():
+		return req.Timeout, nil
+	case !req.Deadline.IsZero():
+		return req.Deadline, nil
+	default:
+		return time.Time{}, ErrCloseTimeoutMissing
+	}
+}
+
+// CloseOutcome is the state one close ended in: at rest, out of budget with
+// work still on the chain, or unjudged.
+type CloseOutcome int
+
+const (
+	// CloseUnreached is the zero value: the close never reached its criterion.
+	// A face that reports only whether an obligation settled leaves it unset.
+	CloseUnreached CloseOutcome = iota
+	// CloseQuiesced reports a run that reached rest: nothing it accepted is
+	// unfinished and no notification of it stands unconsumed.
+	CloseQuiesced
+	// CloseCut reports a close that spent its budget with work still on the
+	// chain. It is a normal return: the remaining work is on the chain and a
+	// restart resumes it, so an offline run that cannot settle still closes.
+	CloseCut
+	// CloseBroken reports a close that could not judge the run, because an
+	// account refused the read or its commit sequence never held.
+	CloseBroken
+)
+
+// String renders the outcome as the word a report prints.
+func (o CloseOutcome) String() string {
+	switch o {
+	case CloseQuiesced:
+		return "quiesced"
+	case CloseCut:
+		return "cut"
+	case CloseBroken:
+		return "broken"
+	default:
+		return "unreached"
+	}
+}
+
+// DrainReport is the outcome of one close: the state the close ended in,
+// whether every accepted obligation reached real termination, and the work that
+// was still open when the close reported.
 type DrainReport struct {
+	// Outcome is the state the close ended in.
+	Outcome CloseOutcome
 	// Drained reports whether every accepted obligation reached real termination.
 	// It stays false while any producer has not confirmed its stop.
 	Drained bool
-	// Unsettled lists the obligations that were still open when the close
-	// reported, each with the reason it could not be settled.
+	// Unsettled lists the work that was still open when the close reported, each
+	// with the address it stands at and the reason it stayed open.
 	Unsettled []UnsettledObligation
 }
 
-// UnsettledObligation is one obligation a close could not settle, paired with the
-// reason it stayed open.
+// UnsettledObligation is one piece of work a close could not settle, paired with
+// the address it stands at and the reason it stayed open.
 type UnsettledObligation struct {
-	// TaskID is the task whose obligation stayed open.
+	// TaskID is the task the work belongs to, and empty for a notification no
+	// task identity of this run names.
 	TaskID event.TaskID
-	// Reason is the readable reason the obligation could not be settled.
+	// Address is the address the work stands at: the target a notification was
+	// never accepted at, or the site that accepted one nobody consumed.
+	Address event.Address
+	// Source is the address the work came from, so a report names both ends of
+	// the routing it could not settle.
+	Source event.Address
+	// FactKey is the stable identity of the notification, and empty for work
+	// that is not a notification.
+	FactKey string
+	// Reason is the readable reason the work could not be settled.
 	Reason string
 }
 
@@ -138,6 +236,10 @@ var (
 	// ErrDelegationAddressIncomplete reports a delegation whose target names no
 	// complete agent session. The ledger never selects a session of its own.
 	ErrDelegationAddressIncomplete = errors.New("agent: the delegation target names no complete agent session")
+	// ErrDelegationIssuerIncomplete reports a delegation whose issuer names no
+	// complete agent session, so no responsibility scope could receive its
+	// notifications.
+	ErrDelegationIssuerIncomplete = errors.New("agent: the delegation issuer names no complete agent session")
 	// ErrDelegationUnknown reports a task this ledger holds no delegation for.
 	ErrDelegationUnknown = errors.New("agent: the task is no delegation this ledger holds")
 	// ErrDelegationNotTerminal reports a completion that carries no terminal
@@ -151,6 +253,14 @@ var (
 	// ErrDelegationCommitRefused reports a settle the commit carrier did not
 	// store: the task moves nowhere and the ledger reports no terminal.
 	ErrDelegationCommitRefused = errors.New("agent: the delegation settle was not committed")
+	// ErrDelegationNotSettled reports a reopen of a delegation whose round has
+	// not settled: only a settled round is followed by another one of the same
+	// task, so a round still in flight is refused by name beside no second round.
+	ErrDelegationNotSettled = errors.New("agent: the delegation has not settled, so no next round follows it")
+	// ErrDelegationUnwired reports a delegated round asked for while this ledger
+	// carries no resident loop, so nothing exists to run the execution site it
+	// names.
+	ErrDelegationUnwired = errors.New("agent: the delegation ledger carries no resident loop")
 )
 
 // noticeIdentity is the stable identity of one notification. A repeated
@@ -198,6 +308,10 @@ type Delegator struct {
 	instance event.InstanceID
 	entries  map[event.TaskID]*delegationEntry
 	open     int
+	// resident is the loop whose instances run the delegated turns this ledger
+	// admits. A ledger beside no resident loop admits and settles calls exactly
+	// as it does, and refuses a round it is asked to run by name.
+	resident *Loop
 }
 
 // NewDelegator returns an empty delegation ledger over the task face and the
@@ -213,7 +327,10 @@ func NewDelegator(tasks DelegationTasks, holder state.Borrow, instance event.Ins
 
 // Delegate admits one delegated call as a task and returns its admission
 // receipt. The call identity and the application-selected target are required;
-// the ledger neither invents a session nor accepts an incomplete target.
+// the ledger neither invents a session nor accepts an incomplete target. The
+// execution site the call runs in and the responsibility scope it reports back
+// to are two places, so a call running in a site of its own still returns its
+// notifications to the invocation that issued it.
 //
 // The delivery reconciliation barrier of the call is booked before the call is
 // spawned, and the initiating generation is pinned beside it: a fresh admission
@@ -224,20 +341,28 @@ func NewDelegator(tasks DelegationTasks, holder state.Borrow, instance event.Ins
 // - A dedup added no obligation: only this admission's pre-registration is withdrawn, and the obligations of the first admission stay untouched.
 func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.AdmissionReceipt, error) {
 	if req.InvocationID == "" || req.DecisionID == "" || req.CallID == "" {
-		delegateDebug("tagent: delegation refused result=unnamed call=%q agent=%q", req.CallID, req.Target.AgentID)
+		delegateDebug("tagent: delegation refused result=unnamed call=%q agent=%q", req.CallID, req.Sites.Target.AgentID)
 		return task.AdmissionReceipt{}, ErrDelegationIdentityMissing
 	}
-	if !req.Target.IsComplete() {
-		delegateDebug("tagent: delegation refused result=address call=%s agent=%s", req.CallID, req.Target.AgentID)
+	if !req.Sites.Target.IsComplete() {
+		delegateDebug("tagent: delegation refused result=address call=%s agent=%s", req.CallID, req.Sites.Target.AgentID)
 		return task.AdmissionReceipt{}, ErrDelegationAddressIncomplete
 	}
+	issuer := req.Sites.Issuer
+	if issuer.IsZero() {
+		issuer = req.Sites.Target
+	}
+	if !issuer.IsComplete() {
+		delegateDebug("tagent: delegation refused result=issuer call=%s agent=%s", req.CallID, issuer.AgentID)
+		return task.AdmissionReceipt{}, ErrDelegationIssuerIncomplete
+	}
 	pin, err := d.holder.BorrowDerived(ctx, state.BindingRef{
-		AgentID:    req.Target.AgentID,
+		AgentID:    issuer.AgentID,
 		InstanceID: req.Ref.InstanceID,
 		Generation: req.Ref.Generation,
 	})
 	if err != nil {
-		delegateDebug("tagent: delegation refused result=pin call=%s agent=%s err=%v", req.CallID, req.Target.AgentID, err)
+		delegateDebug("tagent: delegation refused result=pin call=%s agent=%s err=%v", req.CallID, issuer.AgentID, err)
 		return task.AdmissionReceipt{}, err
 	}
 	d.mu.Lock()
@@ -254,9 +379,9 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 		}.DedupKey() + ":delegate",
 		InvocationID:  req.InvocationID,
 		InstanceID:    d.instance,
-		Description:   fmt.Sprintf("delegate %s to %s", req.CallID, req.Target.AgentID),
-		Source:        req.Target,
-		Target:        req.Target,
+		Description:   fmt.Sprintf("delegate %s to %s", req.CallID, req.Sites.Target.AgentID),
+		Source:        issuer,
+		Target:        issuer,
 		TriggerSource: req.TriggerSource,
 		Execution:     executionSerialization,
 	})
@@ -264,19 +389,20 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 		d.withdrawBooking()
 		_ = pin.Release(ctx)
 		if err != nil {
-			delegateDebug("tagent: delegation refused result=admission call=%s agent=%s err=%v", req.CallID, req.Target.AgentID, err)
+			delegateDebug("tagent: delegation refused result=admission call=%s agent=%s err=%v", req.CallID, issuer.AgentID, err)
 			return receipt, err
 		}
-		delegateDebug("tagent: delegation refused result=admission call=%s agent=%s", req.CallID, req.Target.AgentID)
+		delegateDebug("tagent: delegation refused result=admission call=%s agent=%s", req.CallID, issuer.AgentID)
 		return receipt, ErrDelegationAdmissionRefused
 	}
 	if receipt.Kind != task.AdmissionFresh {
 		d.withdrawBooking()
 		_ = pin.Release(ctx)
-		delegateDebug("tagent: delegation admitted result=dedup task=%s agent=%s call=%s", receipt.TaskID, req.Target.AgentID, req.CallID)
+		delegateDebug("tagent: delegation admitted result=dedup task=%s agent=%s call=%s", receipt.TaskID, issuer.AgentID, req.CallID)
 		return receipt, nil
 	}
 	record := req
+	record.Sites.Issuer = issuer
 	record.TaskID = receipt.TaskID
 	record.Status = task.StatusAccepted
 	record.Progress = nil
@@ -291,8 +417,31 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 	}
 	d.mu.Unlock()
 	delegateDebug("tagent: delegation admitted result=fresh task=%s agent=%s call=%s invocation=%s",
-		receipt.TaskID, req.Target.AgentID, req.CallID, req.InvocationID)
+		receipt.TaskID, issuer.AgentID, req.CallID, req.InvocationID)
 	return receipt, nil
+}
+
+// SetResident attaches the loop whose resident instances run the delegated turns this
+// ledger admits. The setter is separate from the constructor so the declared
+// construction shape of the ledger stays as it is.
+func (d *Delegator) SetResident(loop *Loop) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.resident = loop
+}
+
+// Submit hands one delegated round to the resident instance of its execution site and
+// answers the status it ended at beside the body it produced. The round runs beside the
+// receipt the admission already returned, so the turn that issued the call never waits
+// on it.
+func (d *Delegator) Submit(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error) {
+	d.mu.Lock()
+	resident := d.resident
+	d.mu.Unlock()
+	if resident == nil {
+		return DelegatedAnswer{}, ErrDelegationUnwired
+	}
+	return resident.SubmitDelegated(ctx, in)
 }
 
 // Observe records one notification of an admitted delegation into the progress
@@ -404,8 +553,8 @@ func (d *Delegator) complete(ctx context.Context, taskID event.TaskID, status ta
 	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact, Text: settleNoticeTextOf(text)}
 	envelope := task.Envelope{
 		Notice:         notice,
-		Target:         entry.record.Target,
-		Source:         entry.record.Target,
+		Target:         entry.record.Sites.Issuer,
+		Source:         entry.record.Sites.Issuer,
 		TargetInstance: d.instance,
 	}
 	mutation := task.MutationID(fmt.Sprintf("settle:%s:%d", taskID, entry.round))
@@ -467,13 +616,47 @@ func (d *Delegator) Reconcile(ctx context.Context, taskID event.TaskID) (task.St
 	return entry.record.Status, nil
 }
 
+// ReopenRound moves the ledger entry of one delegation to the round its task was
+// reactivated into, so a task re-entered out of its settled outcome is served and
+// settled as the next round of the same task instead of a second terminal of the
+// round already landed.
+//
+// The round is the one the task state machine opened, taken from the reactivation
+// that opened it: the ledger never counts rounds of its own, so the notification a
+// re-entered round settles under keeps the identity the task carries. Only a
+// settled entry reopens; a round still in flight is refused by name beside no
+// second round, and the pre-registration the first round withdrew is booked again
+// because a round of the task is once more in flight.
+func (d *Delegator) ReopenRound(taskID event.TaskID, round int64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.entries[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrDelegationUnknown, taskID)
+	}
+	if !isTerminalStatus(entry.record.Status) {
+		return fmt.Errorf("%w: %s", ErrDelegationNotSettled, taskID)
+	}
+	entry.record.Status = task.StatusRunning
+	entry.round = round
+	entry.pending = task.StatusUnknown
+	entry.admitted = time.Now()
+	if !entry.booked {
+		entry.booked = true
+		d.open++
+	}
+	delegateDebug("tagent: delegation reopened task=%s round=%d", taskID, round)
+	return nil
+}
+
 // land reports the pending terminal of one delegation once its obligations are
 // cleared. While any obligation is still open the terminal stays withheld and
 // the record stands where it was; when none is left, the terminal is recorded,
 // the delivery reconciliation barrier is closed and the initiating generation
 // is released. The terminal that lands here is the one line the delegation face
 // writes at INFO, from the settle of the caller and from a later reconcile
-// alike: it carries the task, the agent and the elapsed life of the call.
+// alike: it carries the task, the agent that issued the call and the elapsed
+// life of the call.
 func (d *Delegator) land(ctx context.Context, taskID event.TaskID) error {
 	d.mu.Lock()
 	entry, ok := d.entries[taskID]
@@ -507,7 +690,7 @@ func (d *Delegator) land(ctx context.Context, taskID event.TaskID) error {
 		pin = entry.pin
 		entry.pin = nil
 	}
-	agentID := entry.record.Target.AgentID
+	agentID := entry.record.Sites.Issuer.AgentID
 	elapsed := time.Since(entry.admitted)
 	d.mu.Unlock()
 	if landed != task.StatusUnknown {

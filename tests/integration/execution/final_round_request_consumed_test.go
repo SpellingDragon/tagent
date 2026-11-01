@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/runtime/agent"
+	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
 )
 
 // finalRoundConsumedSession, finalRoundOtherSession and finalRoundProducedSession
@@ -35,6 +36,17 @@ const (
 	finalRoundRefusedCallID   = "call-final-round-refused"
 )
 
+// finalRoundWorkServer, finalRoundRefusedServer and finalRoundTool name the two
+// in-process MCP servers the calls of these anchors reach: the round that spends
+// the budget runs its call on the work server, and the call of the closing round —
+// the one the loop must admit nowhere — names the refused one, so the check reads
+// an execution the run made instead of a body some channel accepted.
+const (
+	finalRoundWorkServer    = "work"
+	finalRoundRefusedServer = "refused"
+	finalRoundTool          = "run"
+)
+
 // finalRoundRangeMeta, finalRoundReasonMeta, finalRoundRoundsMeta and
 // finalRoundElapsedMeta are the metadata keys a final round request states its
 // judgment under, as the durable chain spells them: the reader matches a request to
@@ -48,9 +60,10 @@ const (
 )
 
 // finalRoundHostDocument renders the host these anchors boot: the entry agent
-// keeps the declared send tool beside the closing round its document declares,
-// so one real decision runs under the budget the document states.
-func finalRoundHostDocument(root, endpoint, finalRound string) string {
+// keeps the MCP gateway the round's call runs through beside the closing round its
+// document declares, so one real decision runs under the budget the document states
+// and its call is a tool execution inside the host.
+func finalRoundHostDocument(root, endpoint, workURL, refusedURL, finalRound string) string {
 	var b strings.Builder
 	b.WriteString("entry: " + intakeEntryAgent + "\n")
 	b.WriteString("provider: local\n")
@@ -61,11 +74,14 @@ func finalRoundHostDocument(root, endpoint, finalRound string) string {
 	b.WriteString("  " + intakeEntryAgent + ":\n")
 	b.WriteString("    model: " + intakeEntryModel + "\n")
 	b.WriteString("    tools:\n")
-	b.WriteString("      - { kind: tool, id: send }\n")
+	b.WriteString("      - { kind: tool, id: mcp_call }\n")
 	if finalRound != "" {
 		b.WriteString("    final_round:\n")
 		b.WriteString(finalRound)
 	}
+	b.WriteString("mcp_servers:\n")
+	b.WriteString("  " + finalRoundWorkServer + ": { transport: streamable-http, url: " + intakeQuoted(workURL) + " }\n")
+	b.WriteString("  " + finalRoundRefusedServer + ": { transport: streamable-http, url: " + intakeQuoted(refusedURL) + " }\n")
 	b.WriteString("storage: { type: localfile, root: " + root + " }\n")
 	return b.String()
 }
@@ -122,17 +138,14 @@ func finalRoundLastUser(request intakeRequest) string {
 	return last
 }
 
-// finalRoundCopies counts the accepted bodies of one outbound face that carry
-// the named body, so an anchor reads a delivery apart from the answer body the
-// same face accepts when a turn ends.
-func finalRoundCopies(bodies []string, body string) int {
-	count := 0
-	for _, accepted := range bodies {
-		if accepted == body {
-			count++
-		}
-	}
-	return count
+// finalRoundBoot boots the host these anchors drive beside the two in-process
+// servers its document names, so every round below reaches a real tool execution.
+func finalRoundBoot(t *testing.T, provider *intakeProvider, sender assembly.MessageSender,
+	work, refused *intakeMCP, finalRound string) *assembly.Host {
+	t.Helper()
+	return intakeBootDocument(t, provider, sender, func(root, endpoint string) string {
+		return finalRoundHostDocument(root, endpoint, work.url(), refused.url(), finalRound)
+	})
 }
 
 // TestConsumptionLoopRunsTheClosingRoundTheChainNames is the discriminating red anchor of the consumption side.
@@ -149,11 +162,11 @@ func TestConsumptionLoopRunsTheClosingRoundTheChainNames(t *testing.T) {
 	defer cancel()
 
 	provider := newIntakeProvider(t)
-	provider.answers = map[int]string{0: intakeToolCallAnswer("send", finalRoundRefusedCallID, `{"content":`+intakeQuoted(finalRoundRefusedBody)+`}`)}
+	work := newIntakeMCP(t, finalRoundWorkServer, finalRoundTool, finalRoundWorkBody, false)
+	refused := newIntakeMCP(t, finalRoundRefusedServer, finalRoundTool, finalRoundRefusedBody, false)
+	provider.answers = map[int]string{0: intakeToolCallAnswer(mcpgw.ToolNameMCPCall, finalRoundRefusedCallID, refused.callArgs(finalRoundRefusedBody))}
 	sender := newIntakeSender()
-	host := intakeBootDocument(t, provider, sender, func(root, endpoint string) string {
-		return finalRoundHostDocument(root, endpoint, "      prompt: \""+finalRoundConsumedPrompt+"\"\n")
-	})
+	host := finalRoundBoot(t, provider, sender, work, refused, "      prompt: \""+finalRoundConsumedPrompt+"\"\n")
 	addr := event.Address{AgentID: intakeEntryAgent, SessionID: finalRoundConsumedSession}
 
 	rangeID := event.InvocationID(finalRoundConsumedSession + "#c1")
@@ -188,8 +201,8 @@ func TestConsumptionLoopRunsTheClosingRoundTheChainNames(t *testing.T) {
 		t.Fatalf("the closing request reads %q as its last user message, want the declared instruction %q",
 			last, finalRoundConsumedPrompt)
 	}
-	if bodies := sender.accepted(); len(bodies) != 0 {
-		t.Fatalf("the outbound face accepted %q, want nothing: the call of the closing round is refused, never dispatched", bodies)
+	if got := refused.executions(); got != 0 {
+		t.Fatalf("the call of the closing round ran %d time(s), want none: the closing round admits none of the calls it issues", got)
 	}
 	if facts := finalRoundRequestsOf(host.Run().SessionFacts(addr)); len(facts) != 1 || facts[0].Key != request.ID {
 		t.Fatalf("the chain carries %d request(s), want the one the loop read and no judgment of its own", len(facts))
@@ -200,7 +213,7 @@ func TestConsumptionLoopRunsTheClosingRoundTheChainNames(t *testing.T) {
 // TestConsumptionLoopIgnoresARequestOfAnotherRange is the negative anchor of the same reading: a request of another range closes nothing.
 //   - a request of a range this session never mints stands on the chain and closes nothing
 //   - the request names a range the turn never mints: the segment it opens mints #c1, so this judgment closes nothing of it
-//   - positive: the round that runs is the ordinary one, so the call it issues is dispatched and delivers
+//   - positive: the round that runs is the ordinary one, so the call it issues is dispatched and executes once
 //   - negative: no decision of the turn is a closing round, whatever request the chain carries
 //   - negative: no request reads the declared instruction, so the fact of another range never spoke
 //
@@ -210,11 +223,11 @@ func TestConsumptionLoopIgnoresARequestOfAnotherRange(t *testing.T) {
 	defer cancel()
 
 	provider := newIntakeProvider(t)
-	provider.answers = map[int]string{0: intakeToolCallAnswer("send", finalRoundWorkCallID, `{"content":`+intakeQuoted(finalRoundWorkBody)+`}`)}
+	work := newIntakeMCP(t, finalRoundWorkServer, finalRoundTool, finalRoundWorkBody, false)
+	refused := newIntakeMCP(t, finalRoundRefusedServer, finalRoundTool, finalRoundRefusedBody, false)
+	provider.answers = map[int]string{0: intakeToolCallAnswer(mcpgw.ToolNameMCPCall, finalRoundWorkCallID, work.callArgs(finalRoundWorkBody))}
 	sender := newIntakeSender()
-	host := intakeBootDocument(t, provider, sender, func(root, endpoint string) string {
-		return finalRoundHostDocument(root, endpoint, "      prompt: \""+finalRoundConsumedPrompt+"\"\n")
-	})
+	host := finalRoundBoot(t, provider, sender, work, refused, "      prompt: \""+finalRoundConsumedPrompt+"\"\n")
 	addr := event.Address{AgentID: intakeEntryAgent, SessionID: finalRoundOtherSession}
 
 	finalRoundFileRequest(t, ctx, host.Run(), addr, event.InvocationID(finalRoundOtherSession+"#c9"))
@@ -243,10 +256,10 @@ func TestConsumptionLoopIgnoresARequestOfAnotherRange(t *testing.T) {
 				request.Index, copies, intakeDescribe(requests))
 		}
 	}
-	if delivered := finalRoundCopies(sender.accepted(), finalRoundWorkBody); delivered != 1 {
-		t.Fatalf("the outbound face accepted the ordinary round's own call %d time(s), want the one the dispatched call delivered "+
-			"(%q): a request of another range closes no round, so the round runs as the policy declares",
-			delivered, sender.accepted())
+	work.awaitExecutions(t, 1)
+	if delivered := work.executions(); delivered != 1 {
+		t.Fatalf("the ordinary round's own call ran %d time(s), want the one the dispatched call executed: "+
+			"a request of another range closes no round, so the round runs as the policy declares", delivered)
 	}
 	t.Logf("[final-round 6] negative: the request of #c9 closed nothing of #c1, so the round ran as the policy declares")
 }
@@ -256,7 +269,7 @@ func TestConsumptionLoopIgnoresARequestOfAnotherRange(t *testing.T) {
 //   - positive: the turn reports the reason the filed request states, on the range the segment minted
 //   - positive: the closing round reads the declared instruction as the last user message of the second decision
 //   - positive: the chain carries exactly one request, and it names that range, that reason and the rounds it read
-//   - negative: the call the closing round issued executes nowhere, while the round before it delivered
+//   - negative: the call the closing round issued executes nowhere, while the round before it executed its own
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestConsumptionLoopReadsTheFiledBudgetRequest(t *testing.T) {
@@ -264,14 +277,14 @@ func TestConsumptionLoopReadsTheFiledBudgetRequest(t *testing.T) {
 	defer cancel()
 
 	provider := newIntakeProvider(t)
+	work := newIntakeMCP(t, finalRoundWorkServer, finalRoundTool, finalRoundWorkBody, false)
+	refused := newIntakeMCP(t, finalRoundRefusedServer, finalRoundTool, finalRoundRefusedBody, false)
 	provider.answers = map[int]string{
-		0: intakeToolCallAnswer("send", finalRoundWorkCallID, `{"content":`+intakeQuoted(finalRoundWorkBody)+`}`),
-		1: intakeToolCallAnswer("send", finalRoundRefusedCallID, `{"content":`+intakeQuoted(finalRoundRefusedBody)+`}`),
+		0: intakeToolCallAnswer(mcpgw.ToolNameMCPCall, finalRoundWorkCallID, work.callArgs(finalRoundWorkBody)),
+		1: intakeToolCallAnswer(mcpgw.ToolNameMCPCall, finalRoundRefusedCallID, refused.callArgs(finalRoundRefusedBody)),
 	}
 	sender := newIntakeSender()
-	host := intakeBootDocument(t, provider, sender, func(root, endpoint string) string {
-		return finalRoundHostDocument(root, endpoint, "      max_rounds: 1\n      prompt: \""+finalRoundConsumedPrompt+"\"\n")
-	})
+	host := finalRoundBoot(t, provider, sender, work, refused, "      max_rounds: 1\n      prompt: \""+finalRoundConsumedPrompt+"\"\n")
 	addr := event.Address{AgentID: intakeEntryAgent, SessionID: finalRoundProducedSession}
 
 	turn, err := host.Invoke(ctx, assembly.InvokeRequest{
@@ -298,10 +311,13 @@ func TestConsumptionLoopReadsTheFiledBudgetRequest(t *testing.T) {
 		t.Fatalf("the second decision reads %q as its last user message, want the declared instruction %q",
 			last, finalRoundConsumedPrompt)
 	}
-	bodies := sender.accepted()
-	if len(bodies) != 1 || bodies[0] != finalRoundWorkBody {
-		t.Fatalf("the outbound face accepted %q, want the budgeted round's own call %q alone: "+
-			"the closing round admits none of the calls it issues", bodies, finalRoundWorkBody)
+	work.awaitExecutions(t, 1)
+	if executed := work.executions(); executed != 1 {
+		t.Fatalf("the budgeted round's own call ran %d time(s), want the one execution %q alone: "+
+			"the closing round admits none of the calls it issues", executed, finalRoundWorkBody)
+	}
+	if executed := refused.executions(); executed != 0 {
+		t.Fatalf("the call of the closing round ran %d time(s), want none: the closing round admits none of the calls it issues", executed)
 	}
 	facts := finalRoundRequestsOf(host.Run().SessionFacts(addr))
 	if len(facts) != 1 {

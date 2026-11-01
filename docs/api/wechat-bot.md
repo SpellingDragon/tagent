@@ -16,6 +16,17 @@ wechat_notice.go 是两条一次性启动通知：保险链换装的转世通报
 
 VARIABLES
 
+var (
+	// ErrNoticeAddressIncomplete names the refusal of an admission that names no
+	// complete address: a notice no session is named for has no reader, and the
+	// pending queue the arrival order decided is the mechanism the fixed target
+	// deleted.
+	ErrNoticeAddressIncomplete = errors.New("wechat-bot: the notice names no complete address")
+
+	// ErrOpsWakeAddressMissing names the refusal to wake an ops target that is
+	// not a complete address.
+	ErrOpsWakeAddressMissing = errors.New("wechat-bot: the ops session is declared beside no complete address")
+)
 var ErrApprovalAmbiguous = errors.New("wechat-bot: the reply names more than one pending approval")
     ErrApprovalAmbiguous reports a ruling whose digest prefix names more than
     one pending request: an ambiguous ruling is refused instead of applied to a
@@ -169,11 +180,14 @@ func (r *SessionRouter) Target(addr event.Address) (string, bool)
     of resolving a most-recent chat of another session.
 
 type WechatAppConfig struct {
-	ConfigDir       string   `yaml:"config_dir" json:"config_dir"`
-	TokenFile       string   `yaml:"token_file" json:"token_file"`
-	ContextTokenDir string   `yaml:"context_token_dir" json:"context_token_dir"`
-	WorkspaceDir    string   `yaml:"workspace_dir" json:"workspace_dir"`
-	Approvers       []string `yaml:"approvers" json:"approvers,omitempty"`
+	ConfigDir       string `yaml:"config_dir" json:"config_dir"`
+	TokenFile       string `yaml:"token_file" json:"token_file"`
+	ContextTokenDir string `yaml:"context_token_dir" json:"context_token_dir"`
+	WorkspaceDir    string `yaml:"workspace_dir" json:"workspace_dir"`
+	// OpsSession declares the chat identity the two startup notices are delivered
+	// to; empty means this host's own ops session (see opsSessionAddress).
+	OpsSession string   `yaml:"ops_session" json:"ops_session,omitempty"`
+	Approvers  []string `yaml:"approvers" json:"approvers,omitempty"`
 }
     WechatAppConfig is the WeChat-specific application section of the document.
 

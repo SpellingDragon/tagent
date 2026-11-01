@@ -13,10 +13,6 @@ func ExampleDigest()
     ExampleDigest renders the summary of a face that holds more facts than the
     bound renders, so the count left out travels with the body.
 
-func ExampleEventSink()
-    ExampleEventSink commits one summary into the target session's chain and
-    reads back the identity the commit recorded.
-
 func ExampleObservedFacts()
     ExampleObservedFacts runs the conditional retrieval a reflection judgment
     runs: the newest references are hydrated one by one and the read stops at

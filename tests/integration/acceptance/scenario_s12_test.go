@@ -250,7 +250,76 @@ type scenarioSubagentRig struct {
 	bindings     *state.Bindings
 	ledger       *agent.Delegator
 	loop         *agent.Loop
+	chain        *scenarioSubagentChain
 	arrived      chan task.Envelope
+}
+
+// scenarioSubagentChain is the chain face the rig's loop commits through and reads back:
+// every fact as it committed, in commit order, so a delegated turn pulls the input its
+// site committed instead of arriving beside no material at all.
+type scenarioSubagentChain struct {
+	mu    sync.Mutex
+	count int
+	facts []event.Event
+}
+
+// commit keeps one fact as it stands, minting the identity of a fact that carries none.
+func (c *scenarioSubagentChain) commit(evt event.Event) (event.EventID, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if evt.Key == "" {
+		c.count++
+		evt.Key = event.EventID(fmt.Sprintf("fact-scenario-subagent-%d", c.count))
+	}
+	c.facts = append(c.facts, evt)
+	return evt.Key, nil
+}
+
+// SessionHistory reports the transcript one session accumulated: the rig reads its
+// material off the facts, so no separate transcript stands beside them.
+func (c *scenarioSubagentChain) SessionHistory(event.Address) []model.Message { return nil }
+
+// CommitHistory keeps the transcript one ended drive accumulated: the facts are the
+// material here, so nothing is appended a second time.
+func (c *scenarioSubagentChain) CommitHistory(event.Address, []model.Message) {}
+
+// SessionFacts reports the facts one agent session committed, in commit order.
+func (c *scenarioSubagentChain) SessionFacts(addr event.Address) []event.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]event.Event, 0, len(c.facts))
+	for _, evt := range c.facts {
+		if scenarioFactSessionOf(evt) != addr.SessionID {
+			continue
+		}
+		if addr.AgentID != "" && scenarioFactAgentOf(evt) != addr.AgentID {
+			continue
+		}
+		out = append(out, evt)
+	}
+	return out
+}
+
+// scenarioFactSessionOf reports the session one fact belongs to: the first address of the
+// fact that names one.
+func scenarioFactSessionOf(evt event.Event) event.SessionID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.SessionID != "" {
+			return addr.SessionID
+		}
+	}
+	return ""
+}
+
+// scenarioFactAgentOf reports the agent one fact belongs to: the first address of the
+// fact that names one.
+func scenarioFactAgentOf(evt event.Event) event.AgentID {
+	for _, addr := range []event.Address{evt.Owner, evt.Target, evt.Source} {
+		if addr.AgentID != "" {
+			return addr.AgentID
+		}
+	}
+	return ""
 }
 
 // scenarioDelegationFace is the task face the ledger settles its delegations
@@ -313,6 +382,11 @@ func (r *scenarioSubagentRig) hold(t *testing.T, provider model.Model, issuer ev
 		t.Fatalf("hold the state plan: %v", err)
 	}
 	r.loop = agent.NewLoop(r.bindings, state.NewOccupancy(), r.instance, nil)
+	r.chain = &scenarioSubagentChain{}
+	r.loop.SetFactCommit(r.chain.commit)
+	r.loop.SetHistory(r.chain)
+	r.ledger.SetResident(r.loop)
+	t.Cleanup(r.loop.StopResidents)
 }
 
 // accept reports the delivery-layer outcome of one notification beside the

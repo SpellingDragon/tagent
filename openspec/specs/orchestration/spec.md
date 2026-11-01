@@ -1,7 +1,9 @@
 # orchestration Specification
 
 ## Purpose
-TBD - created by archiving change simplify-prototype-event-pipeline. Update Purpose after archive.
+编排契约：防护启动门、波次解锁、契约守护与三级验收的可验收条款。
+
+归档溯源：`send-cross-task-session`、`agent-instances-and-delivery` 与 `attention-lifecycle` 的一级编排契约手工并入本条。
 ## Requirements
 ### Requirement: 隔离并发与新语义优先
 编排 SHALL 使用 runtime-rebuild 的新任务及依赖，不继承旧勾选或恢复已删除源码。派发原子 MUST 是就绪叶任务集合；同树并发须满足 W_A∩W_B、W_A∩R_B、W_B∩R_A 均为空，测试包全部源文件纳入读取闭包。波次只用于汇报，解锁以实际前置集成和设计闸成立为准，不等待整域。
@@ -324,4 +326,108 @@ D5 锚测试任一红 SHALL 视为对应不变量违例，阻断收口。
 
 - **WHEN** 完整回滚本变更复跑症状锚
 - **THEN** 两条直译测试 SHALL 红
+
+### Requirement: 最小可证伪路径先行
+
+W0 SHALL 在全量展开前完成症状锚 S2 的红→绿短测（从用户症状直通缺陷机制）；S2 未绿，W1 之外的实现单 MUST NOT 派发（R34 规模警戒：叶数>20）。
+
+#### Scenario: S2 先行
+
+- **WHEN** W0 结束
+- **THEN** `TestSendSymptomReentersAgentTask` 由红转绿的双证据入台账，且其红因命中"重入不可达"而非编译失败
+
+### Requirement: 波次解锁以依赖入 main 为准
+
+波次仅为汇报分组；子域 SHALL 按 design D2 外部依赖解锁，同文件簇（host_tools/host_document、wechat*.go）跨域改动 MUST 合单或串行。
+
+#### Scenario: 同文件簇不合单即冲突
+
+- **WHEN** 两单触碰集相交且未合单
+- **THEN** 编排者 MUST 拦截派发（触碰集=改写文件 ∪ 构建闭包 ∪ 验证读取包）
+
+### Requirement: 防护启动门
+
+G1 实现单派发前，settle 恰好一次、会话占位、白名单 fail-closed 三条红线的既有测试 SHALL 复跑绿且防护用例立起；W0 未完成，01 域实现单 MUST NOT 派发。改动期间任一红线测试红 SHALL 立即停线。
+
+#### Scenario: 红线先绿后改
+
+- **WHEN** W0 未收口而 01 域实现单就绪
+- **THEN** 编排者 MUST 拦截派发，直至防护面凭据入台账
+
+### Requirement: verify 三锚随任务行冻结
+
+每叶 SHALL 携带正锚（测试名与 -run 正则逐字符一致）、负锚（具名错误路径）、消费者锚（正式入口/真实路径）；验收面缩水 SHALL 重开该叶（R29）。
+
+#### Scenario: 空转拦截
+
+- **WHEN** 正锚零匹配或用例数为 0
+- **THEN** 该叶勾选无效
+
+### Requirement: 症状锚红转绿双证据
+
+变更完成 SHALL 携带 I1–I4 的红转绿双证据（完整回滚必红、修复后必绿）入 run notes；工程锚全绿而症状锚红时以症状为准。send-cross-task-session 的 S1–S3+N1–N6 九则直译锚同受本条约束（见 symptom-anchors）。
+
+#### Scenario: 回滚即红
+
+- **WHEN** 收尾 F3 执行
+- **THEN** 回滚树上四则症状锚全红且红因命中各自语义缺失
+
+### Requirement: 契约守护三层闭环
+
+主 `openspec/specs/` 与 `api/` 的改动 SHALL 限于 design D2 表声明的 delta；F1 diff 断言、合并规则硬拦、spec 场景映射三层齐备。settle 恰好一次与会话占位语义 MUST NOT 在本变更中放宽。
+
+#### Scenario: 越界契约改动被拦
+
+- **WHEN** 实现引入 D2 表外的主 spec 改动或放宽红线语义
+- **THEN** F1 断言失败或红线测试红并定位到文件
+
+### Requirement: 波后偏差评估与独立放行
+
+每波收尾 SHALL 派独立验证子代理对照原任务行验收面五面核查（R30）；修复批次后 SHALL 过独立只读审者拷问至 frontier 空（R35），放行证据取自提交树。
+
+#### Scenario: 追认缩水被拒
+
+- **WHEN** 勾选按缩水后验收面追认
+- **THEN** 偏差报告判"补差重开"，返工止于波内
+
+### Requirement: 启动门未过不得派发
+
+编排者在启动门核实通过前 MUST NOT 派发任何二级域实施单；门未过时的唯一动作是把门的状态写入 ORCHESTRATION.md 台账。
+
+启动门的裁定背景：attention 与 PR #33 并行推进、在同一分支汇合后一并合并；实施基线 = 含 PR #33 内容的合并线。
+
+#### Scenario: 门未过时派发被拒
+
+- **WHEN** ORCHESTRATION.md 台账中启动门仍为未过
+- **THEN** 任何二级域的实施派发 SHALL 不发生，且台账 SHALL 记录门的状态与核实命令
+
+### Requirement: 共享面由冻结方单写
+
+`api/event` 的类型与 meta 键 SHALL 由 01 域单写并在其入 next 后冻结；此后任何
+二级域对冻结文件的改动 MUST NOT 入链，除非编排者以新派发单显式解冻。
+
+#### Scenario: 冻结后的越界改动被拒
+
+- **WHEN** 01 域已入 next 且某 W2 派发单白名单不含 `api/event`
+- **THEN** 该域对 `api/event` 的任何改动 SHALL 不入链，违规单 SHALL 重开
+
+### Requirement: 波次解锁以入 next 为准
+
+波次 SHALL 仅作汇报分组；一个二级域的解锁条件 SHALL 是其全部前置域已合入
+next，MUST NOT 以"前置域本地绿"替代。
+
+#### Scenario: 前置仅本地绿不解锁
+
+- **WHEN** 01 域在派发分支上全绿但未合入 next
+- **THEN** 02 与 03 域的实施派发 SHALL 不开始
+
+### Requirement: 变更级 DoD 以两证与全量门为准
+
+变更级完成 SHALL 同时满足：两条症状锚红转绿各两证（回滚态必红、落地态必绿）、
+全量项目门 exit 0、`openspec archive` 完成；缺任一项 SHALL 视为未完成。
+
+#### Scenario: 缺红锚两证的完成主张被拒
+
+- **WHEN** 某症状锚只有落地态绿证而无回滚态红证
+- **THEN** F3 SHALL 不勾选，变更 MUST NOT 归档
 

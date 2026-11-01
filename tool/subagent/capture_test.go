@@ -51,6 +51,7 @@ func requireWorkerCallsEnterTrajectory(t *testing.T, provider workerProvider) {
 		Accepted: true,
 		Kind:     task.AdmissionFresh,
 	}}
+	attachResidentWorker(t, delegation)
 	tool := newWorkerTool(t, delegation, provider, capture)
 
 	out := callTool(t, tool, map[string]any{"agents_file": writeWorkerAgentsFile(t)})
@@ -131,6 +132,7 @@ func TestNoCaptureZeroRecords(t *testing.T) {
 		Accepted: true,
 		Kind:     task.AdmissionFresh,
 	}}
+	attachResidentWorker(t, delegation)
 	provider := &scriptedWorker{name: "model-worker"}
 	tool := newWorkerTool(t, delegation, provider, nil)
 

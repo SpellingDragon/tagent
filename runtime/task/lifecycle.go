@@ -47,8 +47,17 @@ var ErrResumeCancelled = errors.New("task: a cancelled task is resumed by relaun
 // change is reconciled before any repeat of it.
 var ErrCommitUncertain = errors.New("task: the commit outcome of this change is unknown")
 
-// RegistryOption configures an in-memory task registry at construction.
+// RegistryOption configures one in-memory task registry beyond its commit carrier
+// and admission face.
 type RegistryOption func(*MemoryRegistry)
+
+// WithActivity attaches the pulse the registry reports each time it applied a
+// committed fact: a close waiting on the rest criterion reads the pulse instead
+// of polling the account for the movement it already made. The pulse is a
+// report, never a judgment.
+func WithActivity(report func()) RegistryOption {
+	return func(r *MemoryRegistry) { r.activity = report }
+}
 
 // WithConcurrencyLimit caps how many tasks the registry holds non-terminal at once. An
 // admission past that limit is refused by name, and the tasks already admitted are kept.
@@ -56,21 +65,11 @@ func WithConcurrencyLimit(limit int) RegistryOption {
 	return func(r *MemoryRegistry) { r.limit = limit }
 }
 
-// obligationEntry pairs one open obligation with the delivery routing its
-// notification froze beside its delivery bookkeeping.
+// obligationEntry is one obligation the account still holds for a task: the
+// obligation itself and the routing its notification froze.
 type obligationEntry struct {
 	obligation Obligation
 	envelope   Envelope
-	// answered reports whether the target already refused this notification.
-	// The flag keeps its write authority because the answer it records has no
-	// fact carrier: the durable account stores the state of an obligation and
-	// never the words the target answered with, so no chain reads the refusal
-	// back. It also changes what the flush may do — a notification already
-	// answered is not offered again as though nothing had been said — so it is a
-	// decision input rather than a report. Recording the refusal in the account
-	// would be a new persistent surface, which the responsibility range of this
-	// change does not carry.
-	answered bool
 }
 
 // specDeclarer is the optional admission-material face a commit carrier may
@@ -120,7 +119,17 @@ type memoryTask struct {
 	admittedAt      time.Time
 	changedAt       time.Time
 	runSince        time.Time
-	reported        LogicalStatus
+	// ttlAnchor is the instant the task's time to live is counted from once a
+	// write-type re-entry moved it: the round the re-entry opened. It is a
+	// movement stamp like changedAt — reading it classifies the task and moves
+	// nothing — and a record whose anchor stands at its admission reads the same
+	// deadline it always did.
+	ttlAnchor time.Time
+	// reported is the verdict the detector read over the round the task is in, so it
+	// restarts where the round restarts: a suspected verdict read over the round before
+	// is never reported against the new one, and the new round is suspected only when
+	// its own threshold passes.
+	reported LogicalStatus
 }
 
 // MemoryRegistry is the in-memory task registry: it admits a task declaration, moves a
@@ -135,6 +144,10 @@ type MemoryRegistry struct {
 	limit     int
 	tasks     map[event.TaskID]*memoryTask
 	policy    Policy
+	now       func() time.Time
+	// activity is the pulse the registry reports each time it applied a
+	// committed fact; nil reports nothing.
+	activity func()
 }
 
 // The registry satisfies the task registry port.
@@ -150,6 +163,7 @@ func NewMemoryRegistry(carrier Commit, admission *MemoryAdmission, opts ...Regis
 		seq:       NewNoticeSequencer(),
 		tasks:     map[event.TaskID]*memoryTask{},
 		policy:    DefaultPolicy,
+		now:       time.Now,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -181,7 +195,7 @@ func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionRece
 	if r.limit > 0 && r.activeCountLocked() >= r.limit {
 		return AdmissionReceipt{CallID: spec.CallID, Accepted: false, Kind: AdmissionRejected}, ErrConcurrencyLimit
 	}
-	admitted := time.Now()
+	admitted := r.now()
 	taskID := mintTaskID()
 	entry := &memoryTask{
 		spec:       spec,
@@ -275,6 +289,13 @@ func (r *MemoryRegistry) Advance(ctx context.Context, taskID event.TaskID, to St
 // lifecycle under the same task identity. A round already in flight refuses the
 // declaration, and so does a cancelled task. A repeated declaration of the same input
 // returns the fact already stored and opens no second obligation.
+//
+// The channel belongs to the state machine and carries no model tool face: the resume
+// tool the model used to call is gone (design DEL-3, a tool member the model never
+// sees again). The send tool's re-entry of a task reaches this state machine through
+// Reactivate and the continuation table instead, so the input channel stays beneath
+// both without a declaration of its own. It carries an event identity rather than free
+// text, so a call naming no identity opens no round.
 func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input event.Event) (AdmissionReceipt, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -322,13 +343,15 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
 
 // applyCommitLocked submits one record to the commit carrier and applies the stored
 // fact to the task: its status and revision move, the mutation is remembered, and each
-// notification the record carries opens a delivery obligation.
+// notification the record carries opens a delivery obligation. The applied fact is
+// reported through the activity pulse once it is visible to every reader, so a close
+// waiting on the account re-reads it instead of polling for it.
 func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTask, record CommitRecord) (CommitResult, bool, error) {
 	result, err := r.carrier.Commit(ctx, record)
 	if result != CommitCommitted {
 		return result, false, err
 	}
-	entry.markMovement(record.Status, time.Now())
+	entry.markMovement(record.Status, r.now())
 	entry.status = record.Status
 	entry.revision = record.ExpectedRevision + 1
 	entry.mutations[record.MutationID] = record
@@ -338,7 +361,17 @@ func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTas
 			envelope:   envelope,
 		})
 	}
+	r.noteActivity()
 	return CommitCommitted, true, nil
+}
+
+// noteActivity reports one applied fact through the attached pulse, or nothing
+// while no pulse is attached. The caller holds the registry lock, so the pulse
+// is reported from the one writer that applied the fact.
+func (r *MemoryRegistry) noteActivity() {
+	if r.activity != nil {
+		r.activity()
+	}
 }
 
 // repeatOf reports the outcome of a mutation the task already stores and whether the

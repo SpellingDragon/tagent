@@ -22,10 +22,10 @@ import (
 )
 
 // TestSlowToolDoesNotBlockNewInput checks that a new user message reaches the model while a slow tool is still running.
-// - the first turn issues a tool call that parks inside the sender (the gated send face the intake anchor uses)
+// - the first turn issues the slow call, whose execution parks on the MCP tool the anchor holds
 // - a second message arrives at the same session while that call is blocked
-// - positive: the model serves a request that reads the second message before the gated call is released
-// - the parked call is released at the end, so both turns settle before the harness closes the host
+// - positive: the model serves a request that reads the second message before the parked call is released
+// - the parked call is released at the end, so the task it admitted settles before the harness closes the host
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
@@ -46,7 +46,7 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 			Input:        []model.Message{{Role: model.RoleUser, Content: intakeFirstBody}},
 		})
 	}()
-	sender.awaitParked(t)
+	provider.anchor.awaitParked(t)
 
 	secondDone := make(chan struct{})
 	go func() {
@@ -64,8 +64,8 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 		select {
 		case <-pollDeadline:
 			requests := provider.requests()
-			t.Fatalf("the model served %d request(s) in 5s while the send call was blocking; "+
-				"want a request that reads \"ping\" beside the send call still running",
+			t.Fatalf("the model served %d request(s) in 5s while the delegated call was blocking; "+
+				"want a request that reads \"ping\" beside the slow call still running",
 				len(requests))
 		case <-time.After(20 * time.Millisecond):
 		}
@@ -79,7 +79,7 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 		}
 	}
 
-	sender.release()
+	provider.anchor.release()
 	<-firstDone
 	<-secondDone
 }
@@ -87,7 +87,7 @@ func TestSlowToolDoesNotBlockNewInput(t *testing.T) {
 // TestCrossSourceBatching checks that two inputs from different invocations of one session enter the same model request.
 // - whichever input the loop of the address pulls first opens the segment, and the other joins the next request that segment serves
 // - positive: one request reads both inputs together, never one request per invocation
-// - the parked send call is released at the end, so the task it admitted settles before the harness closes the host
+// - the slow call of the first decision is released at the end, so the task it admitted settles before the harness closes the host
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestCrossSourceBatching(t *testing.T) {
@@ -120,7 +120,7 @@ func TestCrossSourceBatching(t *testing.T) {
 	}()
 	wg.Wait()
 
-	sender.release()
+	provider.anchor.release()
 
 	requests := provider.requests()
 	batched := false

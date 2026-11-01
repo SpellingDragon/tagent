@@ -13,9 +13,10 @@ import (
 // a material or a product read on its own, because no pass ever walks the
 // materials as a set: a port constant is the whole declaration.
 //
-// The redline list (2 rules):
+// The redline list (2 rules) and the one candidate note:
 // MUST serve one of the six declared ports; a name outside the set is refused rather than matched to a port.
 // MUST implement the narrow interface of the declared port.
+// - `route` (event->ownership: one committed event read as the decision over whom it belongs to) is the candidate for a seventh port, recorded as a note and holding no slot: no constant, no narrow interface and no dispatch beside the six, so a face declaring it is refused by name like any undeclared name. It opens only when the work-relation core it would decide on exists and a real consumer declares it; until then the table stays closed at six.
 type Port string
 
 const (

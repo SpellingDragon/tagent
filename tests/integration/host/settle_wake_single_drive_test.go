@@ -618,6 +618,7 @@ func driveScriptedSeat(t *testing.T, wake *settleDriveWake) int {
 		return nil
 	}
 	driver := assembly.NewSettleDriver(lookup, func() assembly.SettleWake { return wake }, fire)
+	driver.DeclareScope(string(wake.seat.Address.AgentID), string(wake.seat.Address.AgentID))
 	defer driver.Stop()
 	driver.Wake()
 	waitForSettle(t, "the settle pump to close the scripted seat", func() bool {

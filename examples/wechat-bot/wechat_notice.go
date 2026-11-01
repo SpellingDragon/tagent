@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/SpellingDragon/tagent/api/event"
 	tagentmodel "github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory"
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -36,9 +38,41 @@ const (
 	systemAlertConsumedSuffix = ".consumed"
 )
 
-// inboxInjector 是两条启动通知共用到的最小接口面：把一条通报交给宿主的内部收件箱。
+// inboxInjector is the minimal face the two startup notices share: admit one
+// notice in the host's internal inbox beside the marker file whose consumed
+// suffix the inbox writes when the turn that read the notice is confirmed.
 type inboxInjector interface {
-	InjectInternal(addr event.Address, source string, msg tagentmodel.Message)
+	AdmitNotice(addr event.Address, source string, msg tagentmodel.Message, marker, suffix string) (string, error)
+}
+
+// noticeWaker is the path that drives the fixed target once a notice is in its
+// inbox: the same host drive face a user delivery takes, so there is no second
+// wake path.
+type noticeWaker interface {
+	Wake(ctx context.Context, addr event.Address, source string) error
+}
+
+// noticeOps is the fixed target of the two startup notices: the ops session
+// address they wait for and the path that wakes it. A nil wake admits the notice
+// without driving a round: the record stays owed and the next turn of the
+// session reads it.
+type noticeOps struct {
+	address event.Address
+	wake    noticeWaker
+}
+
+// wakeOpsNotice drives the ops session once for the notice that just landed in
+// its inbox. The wake degrades, it never drops: the admission is already durable,
+// so a wake the host refuses leaves the notice owed for the next turn of the
+// session instead of losing it.
+func wakeOpsNotice(ctx context.Context, ops noticeOps, admitted, source string) {
+	if ops.wake == nil {
+		return
+	}
+	if err := ops.wake.Wake(ctx, ops.address, source); err != nil {
+		log.Warnf("[%s] the wake of the ops session %s failed: %v — the notice %s stays owed in the inbox",
+			source, ops.address.SessionID, err, admitted)
+	}
 }
 
 // detectReincarnation 判定本次启动是否为转世：只看换装标记是否存在且足够新鲜。标记由保险链在
@@ -77,6 +111,37 @@ func readNoticeMetadata(path string) map[string]string {
 // tailQuerier 只声明取尾事件真正用到的能力：完整存储与测试替身都无需实现一堆无关方法即可满足。
 type tailQuerier interface {
 	QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
+}
+
+// errSceneUnwired 是“本进程的 run 不观察任何存储层”的具名降级因：通报必须说出原因，
+// 而不是印一个空现场块。
+var errSceneUnwired = errors.New("wechat-bot: the assembled run observes no storage tier")
+
+// sceneFace 是现场块的读面：一次观察读（本进程 run 能看到的事实链尾部）。读面缺席时
+// 按名拒绝，故通报走具名降级而非空块。
+type sceneFace struct {
+	read func(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error)
+}
+
+func (s sceneFace) QueryEvents(ctx context.Context, opts memory.QueryOptions) ([]memory.EventReference, error) {
+	if s.read == nil {
+		return nil, errSceneUnwired
+	}
+	return s.read(ctx, opts)
+}
+
+// opsScene 是两条启动通知在生产装配里读的现场面：装配好那个 run 能看到的事实链尾部，
+// 永不为 nil。本进程旁的 run 不观察任何存储层时，拿到的仍是一个按名拒绝的读面，所以
+// “忘了接线”不可能静默地省掉现场块。
+func opsScene(host *assembly.Host) tailQuerier {
+	if host == nil {
+		return sceneFace{}
+	}
+	run := host.Run()
+	if run == nil {
+		return sceneFace{}
+	}
+	return sceneFace{read: run.ObservedEvents}
 }
 
 // fetchWALTail 按时间倒序取该 agent 最新的有限条事件；查询错误一律上抛以走显式降级。
@@ -171,10 +236,12 @@ func waitNoticeAppearance(noticePath string, maxWait, poll time.Duration) bool {
 	}
 }
 
-// maybeInjectReincarnationNotice 是一次性启动钩子：轮询标记、判新鲜、组装通报、注入、记消费。
-// tail 为事件尾查询面；nil 表示本进程未接事件存储，通报正文显式写出该降级。
-// 每一步都记日志，任何一步都不允许让机器人起不来。
-func maybeInjectReincarnationNotice(inj inboxInjector, tail tailQuerier, agentName, runDir string, noticeWait time.Duration) {
+// maybeInjectReincarnationNotice 是一次性启动钩子：轮询标记、判新鲜、组装通报、入箱、唤醒。
+// ops 是固定目标（预定会址 + 唤醒路）；tail 为事件尾查询面，nil 表示本进程未接事件存储，
+// 通报正文显式写出该降级。每一步都记日志，任何一步都不允许让机器人起不来。
+// - 已消费标记由读到通报的那一轮的确认写出，不在这里写：入箱时重命名它，进程在回合接手前死掉就把通报丢了。
+// - 通报已入箱且 ops 会址空闲时立刻驱动它那一轮，不等下一条用户消息把通报捎进来。
+func maybeInjectReincarnationNotice(inj inboxInjector, ops noticeOps, tail tailQuerier, agentName, runDir string, noticeWait time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		if exe, err := os.Executable(); err == nil {
 			runDir = filepath.Join(filepath.Dir(exe), runDir)
@@ -200,23 +267,23 @@ func maybeInjectReincarnationNotice(inj inboxInjector, tail tailQuerier, agentNa
 	}
 
 	text := buildNoticeText(meta, refs, walErr)
-	inj.InjectInternal(event.Address{}, "reincarnation", tagentmodel.Message{
+	id, err := inj.AdmitNotice(ops.address, "reincarnation", tagentmodel.Message{
 		Role:    tagentmodel.RoleUser,
 		Content: text,
-	})
-	log.Infof("[reincarnation] notice injected via reincarnation source (%d WAL events, meta=%v)", len(refs), meta != nil)
-
-	if err := os.Rename(noticePath, noticePath+noticeConsumedSuffix); err != nil {
-		log.Warnf("[reincarnation] consume-marker rename failed (re-notice on next boot): %v", err)
-	} else {
-		log.Infof("[reincarnation] NOTICE renamed → consumed marker")
+	}, noticePath, noticeConsumedSuffix)
+	if err != nil {
+		log.Errorf("[reincarnation] notice admission failed at %s: %v", noticePath, err)
+		return
 	}
+	log.Infof("[reincarnation] notice admitted as %s for the ops session %s via reincarnation source (%d WAL events, meta=%v); the consumed marker follows the confirmation", id, ops.address.SessionID, len(refs), meta != nil)
+	wakeOpsNotice(context.Background(), ops, id, "reincarnation")
 }
 
 // maybeConsumeSystemAlert is the one-shot startup hook: wait for the runtime to
-// settle, queue any pending restart failure for the first user turn, mark
-// consumed. Every step is logged; nothing here may crash the bot.
-func maybeConsumeSystemAlert(inj inboxInjector, runDir string, delay time.Duration) {
+// settle, admit any pending restart failure for the fixed target, wake it once and
+// leave the consumed marker to the confirmation. Every step is logged; nothing here
+// may crash the bot.
+func maybeConsumeSystemAlert(inj inboxInjector, ops noticeOps, runDir string, delay time.Duration) {
 	if !filepath.IsAbs(runDir) {
 		if exe, err := os.Executable(); err == nil {
 			runDir = filepath.Join(filepath.Dir(exe), runDir)
@@ -233,15 +300,14 @@ func maybeConsumeSystemAlert(inj inboxInjector, runDir string, delay time.Durati
 
 	text := fmt.Sprintf("[System Alert] Detected an unprocessed failure record for the previous generation's restart script (run/SYSTEM_ALERT):\n%s",
 		string(data))
-	inj.InjectInternal(event.Address{}, "system_alert", tagentmodel.Message{
+	id, err := inj.AdmitNotice(ops.address, "system_alert", tagentmodel.Message{
 		Role:    tagentmodel.RoleUser,
 		Content: text,
-	})
-	log.Infof("[system-alert] staged failure queued via system_alert source (%d bytes)", len(data))
-
-	if err := os.Rename(alertPath, alertPath+systemAlertConsumedSuffix); err != nil {
-		log.Warnf("[system-alert] consume-marker rename failed: %v", err)
-	} else {
-		log.Infof("[system-alert] SYSTEM_ALERT renamed -> consumed marker")
+	}, alertPath, systemAlertConsumedSuffix)
+	if err != nil {
+		log.Errorf("[system-alert] alert admission failed at %s: %v", alertPath, err)
+		return
 	}
+	log.Infof("[system-alert] staged failure admitted as %s for the ops session %s via system_alert source (%d bytes); the consumed marker follows the confirmation", id, ops.address.SessionID, len(data))
+	wakeOpsNotice(context.Background(), ops, id, "system_alert")
 }

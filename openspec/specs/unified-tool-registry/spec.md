@@ -156,3 +156,17 @@ tagent 工具体系 SHALL 遵循三阶段生命周期：(1) 实现层指定 — 
 
 - **WHEN** config 引用未注册的 `id`
 - **THEN** `ValidateToolAccess` 返回具名 error，构造失败，不静默降级为空工具
+
+### Requirement: 候选端口注记预留
+
+插件端口表 SHALL 可登记"候选端口"注记（候选名、一句话职责、准入条件、不占位声明）；注记 MUST NOT 改变恰六闭合契约（`validatePort` 仍拒绝第七个实际端口）。候选端口在其准入条件（工作关联核心机制成型）满足前 MUST NOT 被实现或注册。
+
+#### Scenario: 注记不占位
+
+- **WHEN** 端口表登记了 route 候选注记
+- **THEN** 注册第七个实际端口仍被 `validatePort` 具名拒绝
+
+#### Scenario: 候选未达准入不实现
+
+- **WHEN** 工作关联核心机制未成型
+- **THEN** route 端口无实现、无注册点（仅注记存在）

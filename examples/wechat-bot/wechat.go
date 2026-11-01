@@ -97,11 +97,14 @@ func slogLevel() slog.Level {
 
 // WechatAppConfig is the WeChat-specific application section of the document.
 type WechatAppConfig struct {
-	ConfigDir       string   `yaml:"config_dir" json:"config_dir"`
-	TokenFile       string   `yaml:"token_file" json:"token_file"`
-	ContextTokenDir string   `yaml:"context_token_dir" json:"context_token_dir"`
-	WorkspaceDir    string   `yaml:"workspace_dir" json:"workspace_dir"`
-	Approvers       []string `yaml:"approvers" json:"approvers,omitempty"`
+	ConfigDir       string `yaml:"config_dir" json:"config_dir"`
+	TokenFile       string `yaml:"token_file" json:"token_file"`
+	ContextTokenDir string `yaml:"context_token_dir" json:"context_token_dir"`
+	WorkspaceDir    string `yaml:"workspace_dir" json:"workspace_dir"`
+	// OpsSession declares the chat identity the two startup notices are delivered
+	// to; empty means this host's own ops session (see opsSessionAddress).
+	OpsSession string   `yaml:"ops_session" json:"ops_session,omitempty"`
+	Approvers  []string `yaml:"approvers" json:"approvers,omitempty"`
 }
 
 // EnsureDirs creates the directories the channel and the workspace need.
@@ -263,26 +266,63 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 	if err := h.router.Bind(addr, in.ChatID); err != nil {
 		return event.Address{}, err
 	}
+	return addr, h.drive(ctx, addr, "user", in)
+}
+
+// Wake drives the ops session once for the notices that already landed in its
+// inbox: no user input opens this round, so the notice is the whole material of
+// the turn. The address is the fixed target those notices were admitted for, and
+// the source is the one they were admitted from — an incomplete target is refused
+// by name instead of driving whichever session spoke last.
+func (h *hostRuntime) Wake(ctx context.Context, addr event.Address, source string) error {
+	if !addr.IsComplete() {
+		return fmt.Errorf("%w: %v", ErrOpsWakeAddressMissing, addr)
+	}
+	return h.drive(ctx, addr, source, inboundMessage{})
+}
+
+// drive hands one round of the named session to the host: the notices the session
+// still owes beside the text of the delivery that opened it. Every round this
+// runtime drives — a chat delivery and the wakeup of the ops session — leaves
+// through here, so the notices read under a round are confirmed by the same three
+// steps whichever arrival opened it, and there is no second wake path.
+// - A host that did not take the material leaves the notices admitted, so the next delivery reads them again instead of losing them beside a turn that never ran.
+// - A host that took the material confirms them: the records retire and the consumed markers are renamed.
+// - A failed terminal still took the material — the turn ran and read the notices — so only a host error leaves them owed.
+func (h *hostRuntime) drive(ctx context.Context, addr event.Address, source string, in inboundMessage) error {
 	input := h.intake(addr, in)
-	if len(input) == 0 {
-		return addr, nil
+	if len(input.msgs) == 0 {
+		return nil
 	}
 	if h.invoke == nil {
-		return addr, errors.New("wechat-bot: the host runtime is not bound")
+		h.inbox.Release(input.ids)
+		return errors.New("wechat-bot: the host runtime is not bound")
 	}
 	failed, err := h.invoke(ctx, assembly.InvokeRequest{
 		InvocationID:  h.router.NextInvocation(addr),
 		Address:       addr,
-		TriggerSource: "user",
-		Input:         input,
+		TriggerSource: source,
+		Input:         input.msgs,
+		InputMeta:     input.meta(),
 	})
 	if err != nil {
-		return addr, err
+		h.inbox.Release(input.ids)
+		return err
 	}
+	h.inbox.Confirm(input.ids)
 	if failed {
 		log.Debugf("[host] the turn of %s ended failed; the failure notice is delivered by the host", addr.SessionID)
 	}
-	return addr, nil
+	return nil
+}
+
+// intakeBatch is the material one delivery admits: the notices the session still
+// has to read beside the admissions they were read under, so the confirmation
+// after the turn names the records it retires.
+type intakeBatch struct {
+	msgs    []tagentmodel.Message
+	ids     []string
+	sources []string
 }
 
 // intake takes the material one delivery admits: the notices the session still
@@ -291,14 +331,34 @@ func (h *hostRuntime) Drive(ctx context.Context, in inboundMessage) (event.Addre
 // for each other. The turn is not held under that lock: the host orders the
 // drives of the session and takes a message that arrives beside a running turn
 // onto that turn's chain.
-func (h *hostRuntime) intake(addr event.Address, in inboundMessage) []tagentmodel.Message {
+func (h *hostRuntime) intake(addr event.Address, in inboundMessage) intakeBatch {
 	unlock := h.lockAddress(addr)
 	defer unlock()
-	input := h.inbox.Drain(addr)
-	if text := strings.TrimSpace(in.Text); text != "" {
-		input = append(input, tagentmodel.Message{Role: tagentmodel.RoleUser, Content: text})
+	msgs, ids := h.inbox.take(addr)
+	sources := make([]string, 0, len(ids)+1)
+	for _, id := range ids {
+		sources = append(sources, h.inbox.sourceOf(id))
 	}
-	return input
+	if text := strings.TrimSpace(in.Text); text != "" {
+		msgs = append(msgs, tagentmodel.Message{Role: tagentmodel.RoleUser, Content: text})
+		sources = append(sources, "")
+	}
+	return intakeBatch{msgs: msgs, ids: ids, sources: sources}
+}
+
+// meta names the source each message was admitted from, one entry per message
+// and in the same order, so a notice reads in the facts of its turn by the
+// source it came from while the round trigger source is left as declared. A
+// message the delivery itself carried names no source and stamps nothing.
+func (b intakeBatch) meta() []map[string]string {
+	meta := make([]map[string]string, len(b.msgs))
+	for i, source := range b.sources {
+		if i >= len(meta) || source == "" {
+			continue
+		}
+		meta[i] = map[string]string{event.MetaKeyNoticeSource: source}
+	}
+	return meta
 }
 
 // lockAddress serializes the intake of one session: the take of the notices it
@@ -310,49 +370,436 @@ func (h *hostRuntime) lockAddress(addr event.Address) func() {
 	return mu.Unlock
 }
 
-// internalInbox holds the internal notices a session has to read on its next turn.
+// noticeInboxDir is the directory under the configuration directory that keeps
+// the admitted notices: one file per admission, removed only when the turn that
+// read the notice is confirmed.
+const noticeInboxDir = "notice-inbox"
+
+// noticeRecordSuffix is the suffix of one durable admission record.
+const noticeRecordSuffix = ".json"
+
+var (
+	// ErrNoticeAddressIncomplete names the refusal of an admission that names no
+	// complete address: a notice no session is named for has no reader, and the
+	// pending queue the arrival order decided is the mechanism the fixed target
+	// deleted.
+	ErrNoticeAddressIncomplete = errors.New("wechat-bot: the notice names no complete address")
+
+	// ErrOpsWakeAddressMissing names the refusal to wake an ops target that is
+	// not a complete address.
+	ErrOpsWakeAddressMissing = errors.New("wechat-bot: the ops session is declared beside no complete address")
+)
+
+// internalInbox holds the internal notices a session has to read on its next
+// turn. Every notice is admitted as a durable record under a stable identity —
+// the source it came from, a digest of its body and the admission ordinal — so a
+// notice admitted before a stop is still in the inbox after the next start. The
+// three steps are separate: an admitted notice is not delivered, a delivered
+// notice is not consumed, and only the confirmation of the turn that read it
+// retires the record and writes the consumed marker. An admission is therefore
+// retryable: a redelivery answers the record already in the inbox instead of
+// opening a second one.
 type internalInbox struct {
 	mu      sync.Mutex
-	byAddr  map[event.Address][]tagentmodel.Message
-	pending []tagentmodel.Message
+	dir     string
+	records map[string]*noticeRecord
+	order   []string
+	byAddr  map[event.Address][]string
+	claimed map[string]bool
+	seq     int
+
+	// observe is the fault-injection seam one crash check reads at each durable
+	// step; production leaves it nil and pays one nil check per step.
+	observe func(step string)
 }
 
-func newInternalInbox() *internalInbox {
-	return &internalInbox{byAddr: map[event.Address][]tagentmodel.Message{}}
+// noticeRecord is one durable admission: the stable identity of a notice, its
+// body, the address it waits for and the marker file its confirmation retires.
+type noticeRecord struct {
+	ID      string           `json:"id"`
+	Source  string           `json:"source"`
+	Seq     int              `json:"seq"`
+	Role    tagentmodel.Role `json:"role,omitempty"`
+	Content string           `json:"content"`
+	Agent   string           `json:"agent,omitempty"`
+	Session string           `json:"session,omitempty"`
+	Marker  string           `json:"marker,omitempty"`
+	Suffix  string           `json:"suffix,omitempty"`
 }
 
-// InjectInternal queues one internal notice for the named address; an incomplete
-// address queues it for the first turn of any session.
-func (in *internalInbox) InjectInternal(addr event.Address, source string, msg tagentmodel.Message) {
-	if in == nil {
+// addressOf reports the address the record waits for. A record that names an
+// incomplete address is one a previous version admitted without a fixed target:
+// it is readable by no session and the load warns about it by name.
+func (rec *noticeRecord) addressOf() event.Address {
+	return event.Address{AgentID: event.AgentID(rec.Agent), SessionID: event.SessionID(rec.Session)}
+}
+
+// newInternalInbox opens the inbox under the named directory: the records a
+// previous process left behind are read back, and an empty directory keeps the
+// inbox in memory alone.
+func newInternalInbox(dir string) (*internalInbox, error) {
+	in := &internalInbox{
+		dir:     dir,
+		records: map[string]*noticeRecord{},
+		byAddr:  map[event.Address][]string{},
+		claimed: map[string]bool{},
+	}
+	if dir == "" {
+		return in, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("wechat-bot: prepare the notice inbox %s: %w", dir, err)
+	}
+	if err := in.load(); err != nil {
+		return nil, err
+	}
+	return in, nil
+}
+
+// load reads back the admissions a previous process left behind, in the order
+// their ordinals name, so the next start reads the notices the last one owed.
+func (in *internalInbox) load() error {
+	entries, err := os.ReadDir(in.dir)
+	if err != nil {
+		return fmt.Errorf("wechat-bot: read the notice inbox %s: %w", in.dir, err)
+	}
+	records := make([]*noticeRecord, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), noticeRecordSuffix) {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(in.dir, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("wechat-bot: read the notice record %s: %w", entry.Name(), err)
+		}
+		rec := &noticeRecord{}
+		if err := json.Unmarshal(raw, rec); err != nil {
+			return fmt.Errorf("wechat-bot: parse the notice record %s: %w", entry.Name(), err)
+		}
+		records = append(records, rec)
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].Seq < records[j].Seq })
+	for _, rec := range records {
+		in.index(rec)
+		if rec.Seq > in.seq {
+			in.seq = rec.Seq
+		}
+	}
+	return nil
+}
+
+// index files one admitted record in the order and the address queue it belongs
+// to. A record that names no complete address is filed in no queue: the pending
+// queue the arrival order decided was deleted with the fixed target, so such a
+// record is readable by no session and the warning names it instead.
+func (in *internalInbox) index(rec *noticeRecord) {
+	in.records[rec.ID] = rec
+	in.order = append(in.order, rec.ID)
+	addr := rec.addressOf()
+	if !addr.IsComplete() {
+		log.Warnf("[inbox] the record %s names no complete address; no session reads it", rec.ID)
 		return
+	}
+	in.byAddr[addr] = append(in.byAddr[addr], rec.ID)
+}
+
+// InjectInternal admits one internal notice for the named address without a
+// consumed marker. An address that is not complete is refused by name: a notice
+// no session is named for has no reader, and the pending queue the arrival order
+// decided is gone with the fixed target. A notice the inbox already holds under
+// the same identity is not admitted twice.
+func (in *internalInbox) InjectInternal(addr event.Address, source string, msg tagentmodel.Message) {
+	if _, err := in.AdmitNotice(addr, source, msg, "", ""); err != nil {
+		log.Errorf("[inbox] admit the %s notice for %s: %v", source, addr.SessionID, err)
+	}
+}
+
+// AdmitNotice admits one internal notice for the named address and names the
+// marker file whose consumed suffix is written when the notice is confirmed. The
+// address is the fixed target the notice waits for, so an address that is not
+// complete is refused by name instead of being admitted for whichever session
+// reads first. A redelivery answers the record already in the inbox — the same
+// marker for a startup notice, the same source beside the same body otherwise —
+// so a notice relanded after a stop opens no second record.
+func (in *internalInbox) AdmitNotice(addr event.Address, source string, msg tagentmodel.Message, marker, suffix string) (string, error) {
+	if in == nil {
+		return "", nil
+	}
+	if !addr.IsComplete() {
+		return "", fmt.Errorf("%w: the %s notice names %v", ErrNoticeAddressIncomplete, source, addr)
 	}
 	if msg.Role == "" {
 		msg.Role = tagentmodel.RoleUser
 	}
-	log.Debugf("[inbox] queue %s notice for %s", source, addr.SessionID)
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	if !addr.IsComplete() {
-		in.pending = append(in.pending, msg)
-		return
+	if id := in.find(source, msg.Content, marker); id != "" {
+		log.Infof("[inbox] the %s notice is already admitted as %s; no second record", source, id)
+		return id, nil
 	}
-	in.byAddr[addr] = append(in.byAddr[addr], msg)
+	rec := &noticeRecord{
+		ID:      fmt.Sprintf("%s-%s-%d", noticeSourceSlug(source), noticeDigest(msg.Content), in.seq+1),
+		Source:  source,
+		Seq:     in.seq + 1,
+		Role:    msg.Role,
+		Content: msg.Content,
+		Marker:  marker,
+		Suffix:  suffix,
+		Agent:   string(addr.AgentID),
+		Session: string(addr.SessionID),
+	}
+	if err := in.persist(rec); err != nil {
+		return "", err
+	}
+	in.seq = rec.Seq
+	in.index(rec)
+	log.Infof("[inbox] admitted the %s notice for %s as %s", source, addr.SessionID, rec.ID)
+	in.step("admitted")
+	return rec.ID, nil
 }
 
-// Drain returns the notices waiting for the named address beside the notices
-// waiting for any session, and records them as consumed.
-func (in *internalInbox) Drain(addr event.Address) []tagentmodel.Message {
-	if in == nil {
+// find answers the record a redelivery answers: the same marker in the inbox, or
+// the same source beside a body of the same digest.
+func (in *internalInbox) find(source, content, marker string) string {
+	if marker != "" {
+		for _, id := range in.order {
+			if rec := in.records[id]; rec != nil && rec.Marker == marker {
+				return id
+			}
+		}
+	}
+	digest := noticeDigest(content)
+	for _, id := range in.order {
+		rec := in.records[id]
+		if rec == nil || rec.Source != source {
+			continue
+		}
+		if noticeDigest(rec.Content) == digest {
+			return id
+		}
+	}
+	return ""
+}
+
+// persist lands one admission on disk; an inbox without a directory keeps the
+// record in memory alone. The record is written beside its final name and
+// renamed into place, so a stop mid-write leaves no half record to read back.
+func (in *internalInbox) persist(rec *noticeRecord) error {
+	if in.dir == "" {
 		return nil
+	}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("wechat-bot: encode the notice record %s: %w", rec.ID, err)
+	}
+	path := in.path(rec.ID)
+	if err := os.WriteFile(path+".tmp", body, 0o644); err != nil {
+		return fmt.Errorf("wechat-bot: write the notice record %s: %w", rec.ID, err)
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		return fmt.Errorf("wechat-bot: land the notice record %s: %w", rec.ID, err)
+	}
+	return nil
+}
+
+// path names the file one record is kept under.
+func (in *internalInbox) path(id string) string {
+	return filepath.Join(in.dir, id+noticeRecordSuffix)
+}
+
+// take returns the notices waiting for the named address as copies beside
+// the records they were read under, and marks them read by this turn. The
+// records stay admitted until Confirm retires them, so a stop between the read
+// and the confirmation leaves the notice to be read again by the next turn.
+func (in *internalInbox) take(addr event.Address) ([]tagentmodel.Message, []string) {
+	if in == nil {
+		return nil, nil
 	}
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	out := append([]tagentmodel.Message(nil), in.byAddr[addr]...)
-	delete(in.byAddr, addr)
-	out = append(out, in.pending...)
-	in.pending = nil
-	return out
+	var out []tagentmodel.Message
+	var ids []string
+	collect := func(id string) {
+		rec := in.records[id]
+		if rec == nil || in.claimed[id] {
+			return
+		}
+		role := rec.Role
+		if role == "" {
+			role = tagentmodel.RoleUser
+		}
+		out = append(out, tagentmodel.Message{Role: role, Content: rec.Content})
+		in.claimed[id] = true
+		ids = append(ids, id)
+	}
+	for _, id := range in.byAddr[addr] {
+		collect(id)
+	}
+	if len(ids) > 0 {
+		in.step("drained")
+	}
+	return out, ids
+}
+
+// sourceOf answers the source one admitted record names, so the material read
+// from it carries that source into the facts of its turn instead of reading as
+// one anonymous input beside the text of the delivery it came with.
+func (in *internalInbox) sourceOf(id string) string {
+	if in == nil {
+		return ""
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if rec := in.records[id]; rec != nil {
+		return rec.Source
+	}
+	return ""
+}
+
+// Drain returns the notices waiting for the named address as copies. It retires
+// nothing: the records stay admitted until Confirm, which is what keeps a notice
+// owed across a failed or stopped turn. An incomplete address names no session
+// and therefore reads nothing back.
+func (in *internalInbox) Drain(addr event.Address) []tagentmodel.Message {
+	msgs, _ := in.take(addr)
+	return msgs
+}
+
+// Release hands back the notices a turn read but never handed over to the host:
+// the records stay admitted and the next turn reads them again.
+func (in *internalInbox) Release(ids []string) {
+	if in == nil {
+		return
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for _, id := range ids {
+		delete(in.claimed, id)
+	}
+	if len(ids) > 0 {
+		in.step("released")
+	}
+}
+
+// Confirm retires the records the named notices were read under. The consumed
+// marker is renamed first and the record is removed only beside a marker that is
+// already gone: a rename that fails keeps the notice admitted for the next turn
+// instead of losing it, and a confirmation repeated after a stop retires the
+// record instead of reporting the rename twice.
+func (in *internalInbox) Confirm(ids []string) {
+	if in == nil {
+		return
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	for _, id := range ids {
+		delete(in.claimed, id)
+		rec := in.records[id]
+		if rec == nil {
+			continue
+		}
+		if !in.retireMarker(rec) {
+			continue
+		}
+		in.remove(rec)
+	}
+}
+
+// retireMarker renames the marker the notice was admitted for and reports
+// whether the record may retire: a marker an earlier confirmation already
+// renamed reads as done, because the consumed suffix is the only completion
+// word this inbox writes.
+func (in *internalInbox) retireMarker(rec *noticeRecord) bool {
+	if rec.Marker == "" || rec.Suffix == "" {
+		return true
+	}
+	if _, err := os.Stat(rec.Marker); err != nil {
+		if os.IsNotExist(err) {
+			return true
+		}
+		log.Warnf("[inbox] notice %s stays admitted: the marker %s is unreadable: %v", rec.ID, rec.Marker, err)
+		return false
+	}
+	consumed := rec.Marker + rec.Suffix
+	if err := os.Rename(rec.Marker, consumed); err != nil {
+		log.Warnf("[inbox] notice %s stays admitted: the consumed marker rename failed: %v", rec.ID, err)
+		return false
+	}
+	log.Infof("[inbox] notice %s renamed its marker → %s", rec.ID, consumed)
+	in.step("marker-renamed")
+	return true
+}
+
+// remove drops one confirmed record from the index and from the disk; a removal
+// the disk refuses is reported, and the record then reads back on the next start
+// rather than being lost.
+func (in *internalInbox) remove(rec *noticeRecord) {
+	delete(in.records, rec.ID)
+	delete(in.claimed, rec.ID)
+	for i, id := range in.order {
+		if id == rec.ID {
+			in.order = append(in.order[:i], in.order[i+1:]...)
+			break
+		}
+	}
+	addr := rec.addressOf()
+	if addr.IsComplete() {
+		in.byAddr[addr] = dropNoticeID(in.byAddr[addr], rec.ID)
+		if len(in.byAddr[addr]) == 0 {
+			delete(in.byAddr, addr)
+		}
+	}
+	if in.dir != "" {
+		if err := os.Remove(in.path(rec.ID)); err != nil && !os.IsNotExist(err) {
+			log.Warnf("[inbox] the confirmed record %s was not removed from %s: %v", rec.ID, in.dir, err)
+		}
+	}
+	log.Infof("[inbox] notice %s confirmed", rec.ID)
+	in.step("retired")
+}
+
+// step hands one durable step to the fault-injection seam; production runs with
+// no seam and reaches no branch here.
+func (in *internalInbox) step(name string) {
+	if in.observe != nil {
+		in.observe(name)
+	}
+}
+
+// dropNoticeID removes one identity from a queue and keeps the queue order.
+func dropNoticeID(ids []string, id string) []string {
+	for i, got := range ids {
+		if got == id {
+			return append(ids[:i], ids[i+1:]...)
+		}
+	}
+	return ids
+}
+
+// noticeDigest is the body digest of the identity: two notices of one source
+// with the same body answer the same identity and are admitted once.
+func noticeDigest(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// noticeSourceSlug keeps the source readable in the record name: every byte a
+// file name does not take becomes a dash.
+func noticeSourceSlug(source string) string {
+	slug := make([]byte, 0, len(source))
+	for i := 0; i < len(source); i++ {
+		c := source[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+			slug = append(slug, c)
+		default:
+			slug = append(slug, '-')
+		}
+	}
+	if len(slug) == 0 {
+		return "notice"
+	}
+	return string(slug)
 }
 
 // sendToolLineage 是主动通道回执的血统标注：与投递终态回执同族，落在门内——只留痕，不自达。
@@ -795,6 +1242,26 @@ func sessionPrefixOf(entry string) string {
 	return label + ":" + strings.TrimSpace(entry) + ":"
 }
 
+// opsSessionLabel is the session label of the host's own ops session: the fixed
+// target of the two startup notices when the document declares none.
+const opsSessionLabel = "ops"
+
+// opsSessionAddress reports the fixed target of the two startup notices: the chat
+// identity the document declares as its ops session, spelled by the one rule
+// every chat address of this host is spelled with — so a document that names one
+// of its chats as its ops session lands the notices in that chat — or this host's
+// own ops session when the document names none.
+func opsSessionAddress(entry, declared string) event.Address {
+	label := strings.TrimSpace(declared)
+	if label == "" {
+		label = opsSessionLabel
+	}
+	return event.Address{
+		AgentID:   event.AgentID(entry),
+		SessionID: event.SessionID(sessionPrefixOf(entry) + url.PathEscape(label)),
+	}
+}
+
 // newWechatBot builds the channel instance of this process: the file cursor and
 // token stores live beside the configured config directory.
 func newWechatBot(cfg WechatAppConfig) *wechat.Bot {
@@ -935,7 +1402,10 @@ func newWechatApp(cfg wechatConfig, gateway *approvalGateway) (*wechatApp, error
 	if err != nil {
 		return nil, err
 	}
-	inbox := newInternalInbox()
+	inbox, err := newInternalInbox(filepath.Join(cfg.App.Wechat.ConfigDir, noticeInboxDir))
+	if err != nil {
+		return nil, err
+	}
 	app := &wechatApp{cfg: cfg, bot: newWechatBot(cfg.App.Wechat), gateway: gateway}
 	app.host = &hostRuntime{
 		router: router,
@@ -957,6 +1427,18 @@ func (a *wechatApp) options() []assembly.HostOption {
 	return options
 }
 
+// noticeWiring reports the fixed target and the scene face of the two startup
+// notices: the ops session this document declares beside this host's own wake
+// path, and the tail of the fact chain the assembled run observes. It is the one
+// place that decision is made, so the notices can never start beside a nil scene
+// face or beside a second wake path.
+func (a *wechatApp) noticeWiring(host *assembly.Host) (noticeOps, tailQuerier) {
+	return noticeOps{
+		address: opsSessionAddress(a.cfg.Entry, a.cfg.App.Wechat.OpsSession),
+		wake:    a.host,
+	}, opsScene(host)
+}
+
 // bindWechat completes the application side once Boot assembled the runtime: the bot
 // logs in, the one outbound path and the inbound hooks are bound, and the
 // one-shot startup notices wait beside them.
@@ -975,8 +1457,9 @@ func (a *wechatApp) bindWechat(ctx context.Context, host *assembly.Host) error {
 	}
 	a.typing = bindChannel(a.host, a.bot, a.cfg.App.Wechat)
 	registerHandlers(a.host, a.bot, a.gateway, a.cfg.App.Wechat, a.typing)
-	go maybeInjectReincarnationNotice(a.host.inbox, nil, a.cfg.Entry, "run", noticeWaitMax)
-	go maybeConsumeSystemAlert(a.host.inbox, "run", 5*time.Second)
+	ops, scene := a.noticeWiring(host)
+	go maybeInjectReincarnationNotice(a.host.inbox, ops, scene, a.cfg.Entry, "run", noticeWaitMax)
+	go maybeConsumeSystemAlert(a.host.inbox, ops, "run", 5*time.Second)
 	return nil
 }
 

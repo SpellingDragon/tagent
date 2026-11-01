@@ -54,10 +54,72 @@ flock -n 9 || { log "FATAL: another restart/insurance holds the lock - abort (no
 if [ -f /tmp/tagent_restart.done ]; then log "marker present, skip (already restarted)"; exit 0; fi
 log "=== restart session start (target pid=$OLD_PID, shell $$) ==="
 
+# >>> health-probe-block（五态探测 R6/D12；tests/gates/test_health_probe_states.sh 逐字提取本区间断言）
+# 类别枚举：healthy(200) / auth_fail(401|403) / timeout(curl 28) / unavailable(拒连 curl 7 及其他)
+# 分支语义：healthy→继续；auth_fail→AUTH_FAIL 告警并中止判定（**不 kill、不重建、不回滚**）；
+#          unavailable|timeout→等待窗口内视为正常状态（进程可能仍在初始化）。
+# 注释口径与 healthz 鉴权契约一致（08/8.1 裁决，已实测对齐）：healthz 在
+# assembly/host_face.go 经与 /task 同一个 authorize 判定——配了 TAGENT_RL_AUTH_TOKEN
+# 就必须带 Bearer，未配则只放行回环对端；因此未带凭据的探针收到 401 +
+# WWW-Authenticate，落上面的 auth_fail 类别，绝不被读成健康。
+HEALTH_URL="http://127.0.0.1:$PORT/healthz"
+PROBE_WAIT_TRIES="${PROBE_WAIT_TRIES:-3}"
+PROBE_WAIT_INTERVAL="${PROBE_WAIT_INTERVAL:-2}"
+PROBE_MAX_TIME="${PROBE_MAX_TIME:-3}"
+PROBE_CODE=""
+PROBE_CLASS=""
+RL_TOKEN="${TAGENT_RL_AUTH_TOKEN:-}"
+AUTH_ARGS=()
+[ -n "$RL_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $RL_TOKEN")
+probe_classify(){ # $1=http_code $2=curl 退出码 → stdout 类别
+    case "$2" in
+        0)  case "$1" in
+                200)     echo healthy ;;
+                401|403) echo auth_fail ;;
+                *)       echo unavailable ;;
+            esac ;;
+        28) echo timeout ;;
+        *)  echo unavailable ;;
+    esac
+}
+probe_healthz(){ # 打一次探针：置 PROBE_CODE/PROBE_CLASS；返回 curl 退出码
+    local rc
+    PROBE_CODE=$(curl -s -o "${PROBE_OUT:-/dev/null}" -w '%{http_code}' \
+        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} -m "$PROBE_MAX_TIME" "$HEALTH_URL" 2>/dev/null)
+    rc=$?
+    PROBE_CLASS=$(probe_classify "$PROBE_CODE" "$rc")
+    return "$rc"
+}
+probe_guard(){ # 前置守卫：0=继续（healthy 或等待窗口走完）；3=AUTH_FAIL，调用方须立即 exit 3
+    local i
+    for i in $(seq 1 "$PROBE_WAIT_TRIES"); do
+        probe_healthz
+        if [ "$PROBE_CLASS" = "auth_fail" ]; then
+            log "AUTH_FAIL: healthz returned $PROBE_CODE — token missing/mismatch (TAGENT_RL_AUTH_TOKEN). NOT killing; manual fix required"
+            return 3
+        fi
+        if [ "$PROBE_CLASS" = "healthy" ]; then return 0; fi
+        log "probe: $PROBE_CLASS (http=$PROBE_CODE) — waiting window $i/$PROBE_WAIT_TRIES"
+        if [ "$i" -lt "$PROBE_WAIT_TRIES" ]; then sleep "$PROBE_WAIT_INTERVAL"; fi
+    done
+    log "probe: waiting window elapsed, still $PROBE_CLASS (http=$PROBE_CODE) — treat as unavailable"
+    return 0
+}
+# <<< health-probe-block
+
 # 0. preflight
 kill -0 "$OLD_PID" 2>/dev/null || { log "FATAL: pid $OLD_PID not alive, abort"; exit 1; }
 ss -tlnp 2>/dev/null | grep -q ":$PORT .*pid=$OLD_PID," || { log "FATAL: pid $OLD_PID does not hold :$PORT, abort"; exit 1; }
 log "preflight ok: pid alive and holds :$PORT"
+
+# 0b. 五态前置探测（R6 / D12）：鉴权失败绝不视作进程失效。401/403 在
+#     任何换装/杀进程动作之前中止；超时/拒连在等待窗口内视为正常；200 继续。
+probe_guard; PROBE_RC=$?
+if [ "$PROBE_RC" = 3 ]; then
+    log "=== restart session end (AUTH_FAIL) ==="
+    exit 3
+fi
+log "preflight probe: proceed (class=$PROBE_CLASS http=$PROBE_CODE)"
 
 # 1. env snapshot (contains secrets -> chmod 600, removed after success)
 tr '\0' '\n' < "/proc/$OLD_PID/environ" > "$SNAP" || { log "FATAL: env snapshot failed"; exit 1; }
@@ -155,24 +217,22 @@ echo "$NEW_PID" > "$PIDF"
 log "launched pid=$NEW_PID (env re-injected)"
 
 # 6. health check loop
-# hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧
-# rl.AuthTokenFromEnv 同源（env TAGENT_RL_AUTH_TOKEN）。401=AUTH_FAIL：
+# hardening-review-batch2 4.4：healthz 受 token 保护——探针与 Go 侧同源（assembly
+# 的 hostFaceTokenEnv 读 env TAGENT_RL_AUTH_TOKEN，host_face.go 的 healthz 经
+# authorize 判定）。401=AUTH_FAIL：
 # 告警且不误判新进程死亡（不 kill、不回滚），等人工/凭据修复。
-RL_TOKEN="${TAGENT_RL_AUTH_TOKEN:-}"
-AUTH_ARGS=()
-[ -n "$RL_TOKEN" ] && AUTH_ARGS=(-H "Authorization: Bearer $RL_TOKEN")
+# N5/D12：分类与分支统一走 health-probe-block（与前置探测同一套判定）。
+PROBE_OUT=/tmp/tagent_healthz.json
 for i in $(seq 1 90); do
     sleep 2
-    CODE=$(curl -s -o /tmp/tagent_healthz.json -w '%{http_code}' \
-        ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} --max-time 3 \
-        http://127.0.0.1:$PORT/healthz 2>/dev/null)
-    if [ "$CODE" = "401" ] || [ "$CODE" = "403" ]; then
-        log "AUTH_FAIL: healthz returned $CODE — token missing/mismatch (TAGENT_RL_AUTH_TOKEN). NOT killing; manual fix required"
+    probe_healthz
+    if [ "$PROBE_CLASS" = "auth_fail" ]; then
+        log "AUTH_FAIL: healthz returned $PROBE_CODE — token missing/mismatch (TAGENT_RL_AUTH_TOKEN). NOT killing; manual fix required"
         rm -f /tmp/tagent_restart.done
         log "=== restart session end (AUTH_FAIL) ==="
         exit 3
     fi
-    if [ "$CODE" = "200" ]; then
+    if [ "$PROBE_CLASS" = "healthy" ]; then
         LISTEN_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
         # 2026-09-12 00:23 lesson: healthz OK alone is a false positive - in the
         # script race the "RESTART OK" line credited a pid that was not the

@@ -23,7 +23,6 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/features/evolution/governance"
-	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 	tagentfile "github.com/SpellingDragon/tagent/tool/file"
@@ -257,7 +256,6 @@ func (d *hostDocument) toolRefs(id string) ([]config.ToolRef, error) {
 // the instances the host contributes beside the presets the core assembles.
 var hostToolIDs = append(append([]string{
 	hostSendToolID,
-	meditation.DeliverSummaryToolName,
 	recall.QueryToolName,
 	recall.GetToolName,
 	recall.RecentToolName,
@@ -316,46 +314,20 @@ func (d *hostDocument) modelName(id string) string {
 	return strings.TrimSpace(d.Model)
 }
 
-// declaresSendOutside reports whether an agent section other than except
-// declares the send tool. The meditation session never carries the host's
-// channel face, so its declaration neither needs nor demands a sender.
-func (d *hostDocument) declaresSendOutside(except string) bool {
-	for id := range d.Agents {
-		if except != "" && id == except {
-			continue
-		}
-		if d.declaresTool(id, hostSendToolID) {
-			return true
-		}
-	}
-	return false
-}
-
-// validateMeditationTools refuses a document that grants a meditation tool to
-// the wrong agent: deliver_summary belongs to the meditation session alone, and
-// the send tool is a host channel face the meditation session never carries.
+// validateMeditationTools refuses a document whose reflection would deliver through a
+// face it does not carry: an enabled reflection with a declared deliver_to white list
+// needs the one cross-session communication tool, because the delivery is the
+// reflection turn's own decision and no mechanism writes a body in its place. A
+// reflection declared beside no white list delivers nothing and is not judged here.
 func (d *hostDocument) validateMeditationTools(plan *hostMeditationPlan) error {
-	session := meditationAgentOf(plan)
-	for id := range d.Agents {
-		if d.declaresTool(id, meditation.DeliverSummaryToolName) && id != session {
-			return fmt.Errorf("%w: agent %q declares %q, which only the meditation session carries",
-				ErrHostMeditationToolMisplaced, id, meditation.DeliverSummaryToolName)
-		}
-		if id == session && d.declaresTool(id, hostSendToolID) {
-			return fmt.Errorf("%w: the meditation session %q declares %q",
-				ErrHostMeditationToolMisplaced, id, hostSendToolID)
-		}
+	if plan == nil || len(plan.targets) == 0 {
+		return nil
+	}
+	if !d.declaresTool(plan.agent, hostSendToolID) {
+		return fmt.Errorf("%w: the meditation session %q delivers to %d declared target(s) beside no %q tool, so no reflection turn could ever write one",
+			ErrHostMeditationToolMisplaced, plan.agent, len(plan.targets), hostSendToolID)
 	}
 	return nil
-}
-
-// meditationAgentOf reports the observing agent of one resolved plan, and an
-// empty name beside no plan.
-func meditationAgentOf(plan *hostMeditationPlan) string {
-	if plan == nil {
-		return ""
-	}
-	return plan.agent
 }
 
 // riskRules reads the declared risk table of the governance section: the
@@ -427,7 +399,7 @@ func (d *hostDocument) declaresTool(id, name string) bool {
 
 // nativeAgents constructs the live pieces every declared agent is assembled
 // with.
-func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, sender MessageSender, deliver hostDeliverFunc, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) (map[event.AgentID]NativeAgent, error) {
+func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, recallPort *RecallPort, _ *hostMeditationPlan, meditationPort *hostMeditationPort, reentryPort hostSendReentry) (map[event.AgentID]NativeAgent, error) {
 	decl, err := d.Declaration()
 	if err != nil {
 		return nil, err
@@ -438,7 +410,7 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, se
 		if err != nil {
 			return nil, err
 		}
-		tools, err := d.toolsFor(ctx, spec.ID, sender, deliver, recallPort, meditationPlan, meditationPort)
+		tools, err := d.toolsFor(ctx, spec.ID, recallPort, meditationPort, reentryPort)
 		if err != nil {
 			return nil, err
 		}
@@ -453,13 +425,12 @@ func (d *hostDocument) nativeAgents(ctx context.Context, client *http.Client, se
 // and original store are wired to the port itself (it forwards to the faces Bind
 // attaches) and the relation ledger comes from the port's read face, so
 // recall_trace walks the host's parent chain.
-func (d *hostDocument) toolsFor(ctx context.Context, id string, sender MessageSender, deliver hostDeliverFunc, recallPort *RecallPort, meditationPlan *hostMeditationPlan, meditationPort *hostMeditationPort) ([]trpctool.CallableTool, error) {
+// - One tool answers every task and peer-session destination, and every agent that declares it carries both dispatch faces — the meditation session included, because a reflection turn delivers its summary through this very tool (design D15 DEL-2).
+// - The delivery face itself refuses a sender the document's white list does not authorize, so a grant is never an authorization of its own.
+func (d *hostDocument) toolsFor(ctx context.Context, id string, recallPort *RecallPort, meditationPort *hostMeditationPort, reentryPort hostSendReentry) ([]trpctool.CallableTool, error) {
 	available := make(map[string]trpctool.CallableTool, len(hostToolIDs))
-	if id != meditationAgentOf(meditationPlan) && d.declaresTool(id, hostSendToolID) {
-		available[hostSendToolID] = &hostSendTool{sender: sender, deliver: deliver}
-	}
-	if id == meditationAgentOf(meditationPlan) && d.declaresTool(id, meditation.DeliverSummaryToolName) {
-		available[meditation.DeliverSummaryToolName] = meditation.NewDeliverSummaryTool(meditationPlan.targets, meditationPort, meditationPort)
+	if d.declaresTool(id, hostSendToolID) {
+		available[hostSendToolID] = &hostSendTool{reentry: reentryPort, session: meditationPort}
 	}
 	if d.declaresRecall(id) {
 		reads := recallPort.Reads()

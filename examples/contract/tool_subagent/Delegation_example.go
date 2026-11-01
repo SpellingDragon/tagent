@@ -68,7 +68,7 @@ func ExampleDelegation() {
 		DecisionID:   "decision-1",
 		CallID:       "call-1",
 		TaskID:       "task-1",
-		Target:       event.Address{AgentID: "researcher", SessionID: "session-2"},
+		Sites:        agent.DelegationSites{Target: event.Address{AgentID: "researcher", SessionID: "session-2"}},
 		Ref:          state.BindingRef{AgentID: "assistant", InstanceID: "instance-1", Generation: 3},
 		Status:       task.StatusAccepted,
 	}

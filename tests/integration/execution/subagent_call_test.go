@@ -157,6 +157,8 @@ type subagentCallRig struct {
 	tasks        *admissionFace
 	ledger       *agent.Delegator
 	loop         *agent.Loop
+	consumers    *agent.Consumers
+	facts        *delegatedFactLedger
 	arrived      chan task.Envelope
 }
 
@@ -224,8 +226,10 @@ func (r *subagentCallRig) newTool(t *testing.T, builder subagent.Builder) *subag
 	return tool
 }
 
-// start holds the generation the call borrows and builds the loop of the invoking
-// session over it.
+// start holds the generation the call borrows, builds the loop of the invoking session
+// over it and attaches the resident instances the delegated turns run on, so a call runs
+// its round on the instance of its own execution site rather than as a drive of the
+// goroutine that admitted it.
 func (r *subagentCallRig) start(t *testing.T, provider model.Model, tools []trpctool.Tool, issuer event.Address) {
 	t.Helper()
 	binding := state.AgentBinding{
@@ -244,6 +248,12 @@ func (r *subagentCallRig) start(t *testing.T, provider model.Model, tools []trpc
 		t.Fatalf("hold the state plan: %v", err)
 	}
 	r.loop = agent.NewLoop(r.bindings, state.NewOccupancy(), r.instance, nil)
+	r.facts = &delegatedFactLedger{}
+	r.loop.SetFactCommit(r.facts.commit)
+	r.loop.SetHistory(r.facts)
+	r.consumers = agent.NewConsumers(r.loop, context.Background(), nil)
+	r.loop.SetConsumers(r.consumers)
+	r.ledger.SetResident(r.loop)
 }
 
 // accept reports the delivery-layer outcome of one notification beside the routing its

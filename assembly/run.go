@@ -49,6 +49,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	tagentexec "github.com/SpellingDragon/tagent/tool/exec"
 	mcpgw "github.com/SpellingDragon/tagent/tool/mcp"
+	"github.com/SpellingDragon/tagent/tool/subagent"
 )
 
 // NativeAgent is what the embedding process contributes for one declared
@@ -99,6 +100,10 @@ type InvokeRequest struct {
 	TriggerSource string
 	// Input is the native input of the range, in the order the caller admits it.
 	Input []model.Message
+	// InputMeta carries the per-message metadata of Input, one entry per
+	// message in the same order; a nil entry stamps nothing, so a caller that
+	// names none behaves exactly as it did before the face existed.
+	InputMeta []map[string]string
 }
 
 // Run is the assembled runtime of the minimal entry: the shared faces, the
@@ -120,31 +125,45 @@ type InvokeRequest struct {
 // MUST NOT keep a second live copy of the scene inside the run.
 // MUST NOT admit new input past the gate the close already closed.
 type Run struct {
-	mu          sync.Mutex
-	instance    event.InstanceID
-	current     state.StatePlan
-	recovery    task.RestoreReport
-	bindings    *state.Bindings
-	publisher   *state.Publisher
-	occupancy   *state.Occupancy
-	authority   *state.Authority
-	store       *state.MemoryStore
-	inspector   state.Subject
-	admission   *task.MemoryAdmission
-	commit      *runCommit
-	registry    *task.MemoryRegistry
-	manager     *task.MemoryManager
-	shutdown    *agent.Shutdown
+	mu        sync.Mutex
+	instance  event.InstanceID
+	current   state.StatePlan
+	recovery  task.RestoreReport
+	bindings  *state.Bindings
+	publisher *state.Publisher
+	occupancy *state.Occupancy
+	authority *state.Authority
+	store     *state.MemoryStore
+	inspector state.Subject
+	admission *task.MemoryAdmission
+	commit    *runCommit
+	registry  *task.MemoryRegistry
+	manager   *task.MemoryManager
+	// writers is the ledger of the productions this run started — the drives, the
+	// model streams of their decisions and the tool productions of their calls —
+	// and the close reads it as the writer-stopped criterion of the run.
+	writers     *agent.Writers
 	delegations *agent.Delegator
-	watermark   meditation.WatermarkGate
-	projection  *query.Projection
-	retrieval   *retrievalSupply
-	tier        *ledger.Tier
-	observed    *memory.MemoryEventQuery
-	embedder    memory.Embedder
-	loop        *agent.Loop
-	sites       map[event.Address]bool
-	facts       map[event.EventID]event.Event
+	// progress pulses whenever the account behind this run moved: a fact
+	// committed, a notification consumed, a segment closed, a production stopped.
+	// The close waits on it instead of polling the criterion, so the wait is an
+	// event and the close's own budget its only clock.
+	progress chan struct{}
+
+	// continuations is the table of the delegated rounds this run serves again
+	// after a task of theirs settled and was reactivated: it is built beside the
+	// delegation ledger, because a re-entered round is a round of the same task
+	// the ledger admits and settles under.
+	continuations *subagent.Continuations
+	watermark     meditation.WatermarkGate
+	projection    *query.Projection
+	retrieval     *retrievalSupply
+	tier          *ledger.Tier
+	observed      *memory.MemoryEventQuery
+	embedder      memory.Embedder
+	loop          *agent.Loop
+	sites         map[event.Address]bool
+	facts         map[event.EventID]event.Event
 	// factOrder keeps the commit order of the live facts, so a read of one
 	// session's chain answers in the order that chain was written.
 	factOrder []event.EventID
@@ -273,6 +292,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 		occupancy:        state.NewOccupancy(),
 		inspector:        inspectorSubject,
 		admission:        task.NewMemoryAdmission(),
+		progress:         make(chan struct{}, 1),
 		sites:            map[event.Address]bool{},
 		facts:            map[event.EventID]event.Event{},
 		sessionFactCount: map[event.SessionID]int{},
@@ -346,15 +366,16 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	} else {
 		r.store = state.NewMemoryStore(r.authority)
 	}
-	r.registry = task.NewMemoryRegistry(r.commit, r.admission)
+	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress))
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
-	r.shutdown = agent.NewShutdown(closeFace{manager: r.manager, registry: r.registry})
-	r.delegations = agent.NewDelegator(r.shutdown, r.bindings, r.instance)
-	r.shutdown.SetReconciler(r.delegations)
+	r.writers = agent.NewWriters()
+	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
+	r.continuations = subagent.NewContinuations()
 	r.publisher = state.NewPublisher(r.bindings, publishContract, cfg.governance, &r.records)
 	r.loop = agent.NewLoop(r.publisher, r.occupancy, r.instance, r.resolveFact)
+	r.delegations.SetResident(r.loop)
 	r.loop.SetHistory(r)
-	r.loop.SetWatch(r.shutdown.Watch)
+	r.loop.SetWriters(r.writers)
 	r.loop.SetPresentations(r.takePresentation)
 	r.loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
 		return r.commitFactChecked(context.Background(), evt)
@@ -1049,11 +1070,9 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 }
 
 // CommitToSession commits one event into the fact chain of an explicit address,
-// under a fresh invocation identity when the caller states none. It is the
-// cross-session write face a reflection turn delivers a summary through: the
-// event keeps the address it names, the commit is observed through the target
-// agent's own published pipeline exactly as any other commit of this run, and
-// an address the run cannot establish is refused by name.
+// under a fresh invocation identity when the caller states none, and runs the
+// target agent's own published pipeline over the fact exactly as any other
+// commit of this run: an address the run cannot establish is refused by name.
 //
 // The commit is a write of this run, never a second store beside it: the fact
 // lands in the same live ledger, on the same durable log and in the same mapped
@@ -1061,7 +1080,11 @@ func (r *Run) InjectEvent(ctx context.Context, evt event.Event, invocationID eve
 // reads it like any other external input. The address block of the event is
 // backfilled, never overwritten: a source, target or owner the caller already
 // stamped is kept as the caller wrote it, and only an unstated stamp reads as
-// the target address of the commit.
+// the target address of the commit. The purposes it serves are these:
+//
+// - a task notification's material: the notice lands as the user message its address pulls, so the attention projection reads it as input rather than as a line beside it
+// - the audit facts of the host: an execution state, a refused delivery and a delivered failure notice each land as one feedback fact that carries no model payload
+// - the shared write seam of the full-duplex face: a send from one session to another and a reflection delivery both land their body through the commit-only segment below, which backfills the address block by this face's rule and leaves the observation to the target's own next boundary
 func (r *Run) CommitToSession(ctx context.Context, addr event.Address, evt event.Event) (event.EventID, error) {
 	key, err := r.commitOnly(ctx, addr, evt)
 	if err != nil {
@@ -1408,14 +1431,13 @@ func eventRecordOf(evt event.Event) (memory.EventRecord, bool) {
 	}, true
 }
 
-// inspectorSubject, projectionWindow and agentShutdownPollInterval are the
-// named constants of the assembly: the subject the diagnostic read face of the
-// run reads the state owner's sites under, how many recent readings the
-// projection keeps servable, and how often a close looks at real settlement.
+// inspectorSubject and projectionWindow are the named constants of the
+// assembly: the subject the diagnostic read face of the run reads the state
+// owner's sites under, and how many recent readings the projection keeps
+// servable.
 const (
-	inspectorSubject          = state.Subject("tagent-assembly-inspector")
-	projectionWindow          = 8
-	agentShutdownPollInterval = 2 * time.Millisecond
+	inspectorSubject = state.Subject("tagent-assembly-inspector")
+	projectionWindow = 8
 )
 
 // ErrMemoryDeclaration reports a memory declaration that cannot be merged into

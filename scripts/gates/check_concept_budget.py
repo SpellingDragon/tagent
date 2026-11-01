@@ -133,7 +133,6 @@ BASELINE = (
     ("struct-fields", "cli/host_face.go:ApprovalDecision", 8),
     ("struct-fields", "memory/event_body.go:EventBody", 20),  # 2026-10-26: full-fact fidelity (fidelity-and-recovery 2.2) names every field a restore needs; ratchet kept, count follows the declared design
     ("struct-fields", "memory/replay/projection.go:ChainFact", 7),
-    ("struct-fields", "memory/replay/projection.go:ProjectionEntry", 6),
     ("struct-fields", "memory/replay/projection.go:RebuildReport", 9),
     ("struct-fields", "memory/query_events.go:EventRecord", 7),
     ("struct-fields", "memory/query_events.go:QueryOptions", 9),
@@ -143,6 +142,9 @@ BASELINE = (
     ("struct-fields", "features/evolution/governance/denial.go:DenialRecord", 9),
     ("struct-fields", "features/evolution/governance/goal.go:Goal", 6),
     ("struct-fields", "memory/query/inventory.go:InventoryCounts", 6),
+    # assembly.InvokeRequest 6f：投递元数据随输入行（send 线 2026-11-01，InputMeta
+    # 与 Input 同生命周期），不拆块；可读性由字段块文档承担。
+    ("struct-fields", "assembly/run.go:InvokeRequest", 6),
     ("struct-fields", "memory/query/inventory.go:NoticeEntry", 9),
     ("struct-fields", "memory/query/inventory.go:SessionEntry", 6),
     ("struct-fields", "memory/query/snapshot.go:DetailState", 6),

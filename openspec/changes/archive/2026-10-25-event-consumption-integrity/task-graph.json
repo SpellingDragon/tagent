@@ -411,16 +411,16 @@
       "product": 29,
       "non_product": 13
     },
-    "parent_tests_total": 29,
-    "product_parent_tests_green": 28,
+    "parent_tests_total": 30,
+    "product_parent_tests_green": 29,
     "diagnostic_parent_tests": 1,
-    "named_green_subtests_current": 137,
-    "named_green_subtests_unique": 139,
+    "named_green_subtests_current": 134,
+    "named_green_subtests_unique": 134,
     "named_green_subtests_unique_key": "(parent, subtest_name)",
     "named_green_subtests_current_note": "按 (parent, subtest_name) 去重；计划回写④后 = 原 112 + 01.8 六 + 01.9 五 + 01.10a 六 + 01.10b 六 + 01.2/01.3 补差二；consumer 可引用 positive 同名 subtest，不重复加入 subtests[]；不是允许删项上限",
     "diagnostic_named_anchors": 4,
-    "named_anchors_after_all_fixes": 143,
-    "named_anchors_after_all_fixes_note": "29 父测试全部修复后 = 137 + 00.2 四锚；137/141 都是清单，不是允许删项上限",
+    "named_anchors_after_all_fixes": 138,
+    "named_anchors_after_all_fixes_note": "30 父测试全部修复后 = 134 + 00.2 四锚；138/142 都是清单，不是允许删项上限（02.2 重映射后由 143 降为 138：旧 9 锚失效，新登 6 锚）",
     "named_anchor_count_basis": "137/141 均为 (parent, subtest_name) 唯一键并集；consumer 可引用 positive 同名 subtest，不重复加入 subtests[]；CI 合同分别记录 roles 与引用，计数不是 raw role list 长度",
     "long_parent_anchors": 3,
     "long_matrix_runs_once": true,
@@ -480,7 +480,7 @@
     "named_green_subtests_current_source": "04.1 manifest 当前登记口径（不含 00.2 四个诊断锚）；计划回写④后登记 137 个绿具名子场景，其中 2 个补差锚由 pending_anchors 门控（已随既有实施波次落源码；回归缺失时重新按 pending 处理）；按 (parent, subtest_name) 去重，consumer 可引用 positive 同名 subtest 而不重复加入 subtests[]；137/141 是清单不是上限",
     "pending_anchors_gated": 2,
     "pending_anchors_note": "01.2/handover_before_confirmation 与 01.3/notice_input_without_projection 由 graph verification.pending_anchors 门控；两锚已随既有实施波次落入源码（checker 实测 pending 仅余 02.3 的 G4 hard_gate），回归缺失时重新按 pending 处理；补齐并过三锚+十轮后复勾",
-    "event_green_subtests": 139
+    "event_green_subtests": 134
   },
   "test_registry": [
     {
@@ -699,18 +699,35 @@
     {
       "id": "T02.2",
       "leaf": "02.2",
-      "parent": "TestEventIntegrityReflectionDelivery",
+      "parent": "TestEventIntegrityReflectionWhiteList",
       "module": ".",
       "dir": ".",
       "package": "./tests/integration/host",
       "file": "tests/integration/host/event_integrity_test.go",
-      "selector": "^TestEventIntegrityReflectionDelivery$",
+      "selector": "^TestEventIntegrityReflectionWhiteList$",
       "tags": [],
       "tier": "event-short",
       "repeat": "10x independent -count=1 -race",
       "state": "to_be_added",
-      "contract_id": "02.2/TestEventIntegrityReflectionDelivery",
+      "contract_id": "02.2/TestEventIntegrityReflectionWhiteList",
       "module_path": "github.com/SpellingDragon/tagent"
+    },
+    {
+      "id": "T02.2b",
+      "leaf": "02.2",
+      "parent": "TestSendDrivesTargetTurn",
+      "module": ".",
+      "dir": ".",
+      "package": "./tests/integration/host",
+      "file": "tests/integration/host/send_cross_session_delivery_test.go",
+      "selector": "^TestSendDrivesTargetTurn$",
+      "tags": [],
+      "tier": "event-short",
+      "repeat": "10x independent -count=1 -race",
+      "state": "to_be_added",
+      "contract_id": "02.2/TestSendDrivesTargetTurn",
+      "module_path": "github.com/SpellingDragon/tagent",
+      "note": "send 新形态的投递语义锚（2026-11-01 D 方案）：父测试名不带 TestEventIntegrity 前缀，故不进 checker 的源码发现集，selector 与子测试由本合同/登记表冻结并由 go test 十轮 + 04.4 变异门守护"
     },
     {
       "id": "T02.3",
@@ -866,19 +883,19 @@
     {
       "id": "T03.5",
       "leaf": "03.5",
-      "parent": "TestEventIntegrityReflectionDeliveryControl",
+      "parent": "TestEventIntegrityReflectionWhiteListControl",
       "module": "wechat-bot",
       "dir": "examples/wechat-bot",
       "package": ".",
       "file": "examples/wechat-bot/smoke_test.go",
-      "selector": "^TestEventIntegrityReflectionDeliveryControl$",
+      "selector": "^TestEventIntegrityReflectionWhiteListControl$",
       "tags": [
         "smoke"
       ],
       "tier": "event-short",
       "repeat": "10x independent -count=1 -race",
       "state": "to_be_added",
-      "contract_id": "03.5/TestEventIntegrityReflectionDeliveryControl",
+      "contract_id": "03.5/TestEventIntegrityReflectionWhiteListControl",
       "module_path": "wechat-bot"
     },
     {
@@ -980,7 +997,7 @@
       "status": "superseded",
       "superseded_by": [
         "03.4/TestEventIntegrityApprovalControl",
-        "03.5/TestEventIntegrityReflectionDeliveryControl",
+        "03.5/TestEventIntegrityReflectionWhiteListControl",
         "03.6/TestEventIntegrityFoldControl",
         "03.7/TestEventIntegrityReplacementControl",
         "03.8/TestEventIntegrityCaptureControl"
@@ -1460,7 +1477,7 @@
           "TestEventIntegrityFormalAssembly/formal_boot_delivers_turn"
         ],
         "negative": [
-          "TestEventIntegrityFormalAssembly/missing_sender_fails_closed"
+          "TestEventIntegrityFormalAssembly/boots_beside_no_sender"
         ],
         "consumer": [
           "TestEventIntegrityFormalAssembly/formal_boot_delivers_turn"
@@ -1863,13 +1880,15 @@
         "evolution/meditation/deliver.go"
       ],
       "tests": [
-        "T02.2"
+        "T02.2",
+        "T02.2b"
       ],
       "verification": {
         "kind": "go_test",
         "tier": "event-short",
         "commands": [
-          "go test ./tests/integration/host -run '^TestEventIntegrityReflectionDelivery$' -count=1 -race -json"
+          "go test ./tests/integration/host -run '^TestEventIntegrityReflectionWhiteList$' -count=1 -race -json",
+          "go test ./tests/integration/host -run '^TestSendDrivesTargetTurn$' -count=1 -race -json"
         ],
         "repeat": {
           "runs": 10,
@@ -1879,24 +1898,25 @@
           "forbid_count_flag": 10
         },
         "positive": [
-          "TestEventIntegrityReflectionDelivery/explicit_call_reaches_target_session",
-          "TestEventIntegrityReflectionDelivery/same_batch_yield_is_legal_success"
+          "TestEventIntegrityReflectionWhiteList/whitelist_grants_send_and_target_reads_it",
+          "TestSendDrivesTargetTurn/busy_target_never_blocks_the_sender"
         ],
         "negative": [
-          "TestEventIntegrityReflectionDelivery/zero_live_target_not_success",
-          "TestEventIntegrityReflectionDelivery/partial_commit_failure_not_success",
-          "TestEventIntegrityReflectionDelivery/wrong_target_no_extra_write",
-          "TestEventIntegrityReflectionDelivery/empty_whitelist_fail_closed",
-          "TestEventIntegrityReflectionDelivery/unknown_target_named_refusal",
-          "TestEventIntegrityReflectionDelivery/target_not_running_named_refusal",
-          "TestEventIntegrityReflectionDelivery/delivery_does_not_rearm_novelty",
-          "TestEventIntegrityReflectionDelivery/replay_identity"
+          "TestEventIntegrityReflectionWhiteList/empty_whitelist_fail_closed",
+          "TestEventIntegrityReflectionWhiteList/unknown_target_named_refusal",
+          "TestSendDrivesTargetTurn/duplicate_delivery_idempotent"
         ],
         "consumer": [
-          "TestEventIntegrityReflectionDelivery/boot_deliver_to_target_request"
+          "TestEventIntegrityReflectionWhiteList/whitelist_grants_send_and_target_reads_it",
+          "TestSendDrivesTargetTurn/delivery_drives_target_turn"
         ],
-        "consumer_note": "Boot -> toolsFor 授予 deliver_summary -> NewDeliverSummaryTool -> CommitToSession -> 目标会话下一次真实请求",
-        "hard_gate": "G2 replay 身份未验则本叶不勾选；不得以内容摘要/时间窗代替动作身份",
+        "consumer_note": "Boot -> toolsFor 授予 send（请求 tools 含 send）-> hostMeditationPort.DeliverToSession -> gate 四道门 -> CommitToSession -> 目标会话链恰 1 条投递事实 -> 目标下一轮真实请求读到正文",
+        "removed_anchors": {
+          "partial_commit_failure_not_success": "send 单目标逐次投递下多目标部分失败结构性不成立（2026-11-01 裁定），已从合同移除",
+          "delivery_does_not_rearm_novelty": "归 03.5 计：TestEventIntegrityReflectionWhiteListControl/negative 的 scenario_notes 已记“回流不重置目标新颖度”",
+          "explicit_call_reaches_target_session/same_batch_yield_is_legal_success/replay_identity/target_not_running_named_refusal/wrong_target_no_extra_write/zero_live_target_not_success/boot_deliver_to_target_request": "随 features/evolution/meditation/deliver.go 删除而失效的旧锚；由 whitelist_grants_send_and_target_reads_it（positive+consumer）与 02.2/TestSendDrivesTargetTurn 三条直接替换"
+        },
+        "hard_gate": "G2 replay 身份由 02.2/TestSendDrivesTargetTurn 的 duplicate_delivery_idempotent 守住；不得以内容摘要/时间窗代替动作身份",
         "evidence": "/tmp/event-consumption-integrity/02.2/run-1..10.json + exits.txt"
       },
       "status": "planned"
@@ -2388,7 +2408,7 @@
         "kind": "go_test",
         "tier": "event-short",
         "commands": [
-          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReflectionDeliveryControl$' -count=1 -race -json -timeout 30m"
+          "go -C examples/wechat-bot test -tags smoke . -run '^TestEventIntegrityReflectionWhiteListControl$' -count=1 -race -json -timeout 30m"
         ],
         "repeat": {
           "runs": 10,
@@ -2398,17 +2418,17 @@
           "forbid_count_flag": 10
         },
         "positive": [
-          "TestEventIntegrityReflectionDeliveryControl/positive"
+          "TestEventIntegrityReflectionWhiteListControl/positive"
         ],
         "negative": [
-          "TestEventIntegrityReflectionDeliveryControl/negative"
+          "TestEventIntegrityReflectionWhiteListControl/negative"
         ],
         "scenario_notes": {
           "positive": "回流落授权目标一次，下一次正式请求可见且只一次",
           "negative": "越权目标具名拒绝可读、拒绝后合法路径仍通、回流不重置目标新颖度（不重入新颖门）"
         },
         "consumer": [
-          "TestEventIntegrityReflectionDeliveryControl/consumer"
+          "TestEventIntegrityReflectionWhiteListControl/consumer"
         ],
         "consumer_note": "deliver_summary -> InjectReflection -> 目标下一次请求",
         "file_lock": "同一文件簇在任一时刻由单个 ready 叶持有，按 ready 队列仲裁；不写死任何固定叶序，不生成额外文件顺序边。",
@@ -2853,7 +2873,7 @@
         "commands": [
           "python3 -m unittest discover -s scripts -p 'test_run_runtime_scenarios.py'",
           "python3 -m unittest discover -s scripts -p 'test_check_runtime_evidence.py'",
-          "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --test-id 01.5/TestEventIntegrityFormalAssembly --test-id 01.6/TestEventIntegrityHostAdapters --test-id 01.7/TestEventIntegrityCLIAdapter --test-id 03.2/TestEventIntegrityIdentityMatrix --test-id 03.3/TestEventIntegrityDecisionFlowMatrix --test-id 03.4/TestEventIntegrityApprovalControl --test-id 03.5/TestEventIntegrityReflectionDeliveryControl --test-id 03.6/TestEventIntegrityFoldControl --test-id 03.7/TestEventIntegrityReplacementControl --test-id 03.8/TestEventIntegrityCaptureControl --test-id 03.9/TestEventIntegrityRestart --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short"
+          "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --test-id 01.5/TestEventIntegrityFormalAssembly --test-id 01.6/TestEventIntegrityHostAdapters --test-id 01.7/TestEventIntegrityCLIAdapter --test-id 03.2/TestEventIntegrityIdentityMatrix --test-id 03.3/TestEventIntegrityDecisionFlowMatrix --test-id 03.4/TestEventIntegrityApprovalControl --test-id 03.5/TestEventIntegrityReflectionWhiteListControl --test-id 03.6/TestEventIntegrityFoldControl --test-id 03.7/TestEventIntegrityReplacementControl --test-id 03.8/TestEventIntegrityCaptureControl --test-id 03.9/TestEventIntegrityRestart --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short"
         ],
         "positive": [
           "test_v2_contract_runs_each_module_with_tags_and_race",
@@ -2881,7 +2901,7 @@
             "03.2/TestEventIntegrityIdentityMatrix",
             "03.3/TestEventIntegrityDecisionFlowMatrix",
             "03.4/TestEventIntegrityApprovalControl",
-            "03.5/TestEventIntegrityReflectionDeliveryControl",
+            "03.5/TestEventIntegrityReflectionWhiteListControl",
             "03.6/TestEventIntegrityFoldControl",
             "03.7/TestEventIntegrityReplacementControl",
             "03.8/TestEventIntegrityCaptureControl",
@@ -2890,7 +2910,7 @@
           "repeat": 10,
           "requires": "real-short/repeat-1..10/evidence.json 十份、run-id 互异、全部 exit 0；checker 合成 fixture 不顶替"
         },
-        "production_acceptance_command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --test-id 01.5/TestEventIntegrityFormalAssembly --test-id 01.6/TestEventIntegrityHostAdapters --test-id 01.7/TestEventIntegrityCLIAdapter --test-id 03.2/TestEventIntegrityIdentityMatrix --test-id 03.3/TestEventIntegrityDecisionFlowMatrix --test-id 03.4/TestEventIntegrityApprovalControl --test-id 03.5/TestEventIntegrityReflectionDeliveryControl --test-id 03.6/TestEventIntegrityFoldControl --test-id 03.7/TestEventIntegrityReplacementControl --test-id 03.8/TestEventIntegrityCaptureControl --test-id 03.9/TestEventIntegrityRestart --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short",
+        "production_acceptance_command": "python3 scripts/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-short --test-id 01.5/TestEventIntegrityFormalAssembly --test-id 01.6/TestEventIntegrityHostAdapters --test-id 01.7/TestEventIntegrityCLIAdapter --test-id 03.2/TestEventIntegrityIdentityMatrix --test-id 03.3/TestEventIntegrityDecisionFlowMatrix --test-id 03.4/TestEventIntegrityApprovalControl --test-id 03.5/TestEventIntegrityReflectionWhiteListControl --test-id 03.6/TestEventIntegrityFoldControl --test-id 03.7/TestEventIntegrityReplacementControl --test-id 03.8/TestEventIntegrityCaptureControl --test-id 03.9/TestEventIntegrityRestart --repeat 10 --out ${TMPDIR:-/tmp}/event-consumption-integrity/04.2/real-short",
         "consumer": [
           "04.5/05.2 同一 checker 消费真实 short 证据"
         ],

@@ -51,7 +51,7 @@ var (
 		DecisionID:   "",
 		CallID:       "",
 		TaskID:       "",
-		Target:       event.Address{},
+		Sites:        DelegationSites{},
 		Ref:          state.BindingRef{},
 		Status:       task.StatusUnknown,
 		Progress:     []task.Notice{},
@@ -100,29 +100,22 @@ var (
 	_ func(*Delegator, event.TaskID) (state.Borrow, error) = (*Delegator).TurnBorrow
 )
 
-// The close face keeps its declared shape: the gate new input is refused at over
-// the task face it fronts, the setter of the ledger it lands terminals through,
-// the constructor beside it, the producer registration with its named refusals,
-// and the named unsettled state the close reports beside real settlement.
+// The writer ledger keeps its declared shape: the ledger of the productions a run
+// started, the registration that opens one and answers its confirmation, the read
+// a close takes of the stopped ones, and the report entries it renders them as. A
+// writer is named by the production it runs and never by a task identity: the
+// model stream in flight holds none.
 var (
-	_ DelegationTasks = (*Shutdown)(nil)
+	_ func() *Writers = NewWriters
 
-	_ func(DelegationTasks) *Shutdown = NewShutdown
+	_ func(*Writers, string) func() = (*Writers).Begin
 
-	_ func(*Shutdown, Reconciler) = (*Shutdown).SetReconciler
+	_ func(*Writers) (bool, []string) = (*Writers).Stopped
 
-	_ func(*Shutdown, event.TaskID, func() bool) error = (*Shutdown).Watch
-
-	_ func(*Shutdown, event.TaskID) = (*Shutdown).Track
-
-	_ func(*Shutdown, context.Context, CloseRequest) (DrainReport, error) = (*Shutdown).Close
-
-	_ Reconciler = (Reconciler)(nil)
+	_ func([]string) []UnsettledObligation = WriterObligations
 
 	_ error = ErrShutdownRefused
 	_ error = ErrDrainUnsettled
-	_ error = ErrProducerIdentityMissing
-	_ error = ErrProducerMissing
 )
 
 // The persistent event loop keeps its declared shape: the turn one drive
@@ -155,11 +148,11 @@ var (
 	// only, never the fact.
 	_ func(*Loop, PresentationSink) = (*Loop).SetPresentations
 
-	// The producer registration is attached through its own setter, so the
-	// declared construction shape above stays exactly as it is: the loop
-	// registers each in-flight production beside the work identity it runs
-	// behind and the close confirms its real stop through the predicate.
-	_ func(*Loop, func(event.TaskID, func() bool) error) = (*Loop).SetWatch
+	// The writer ledger is attached through its own setter, so the declared
+	// construction shape above stays exactly as it is: the loop registers each
+	// production it starts by that production's own name and the close reads the
+	// stopped ones through the ledger.
+	_ func(*Loop, *Writers) = (*Loop).SetWriters
 
 	// The watchdog budget is attached through its own setter, so the declared
 	// construction shape above stays exactly as it is: a zero policy keeps every

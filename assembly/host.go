@@ -46,16 +46,17 @@ import (
 // the host has no document to read, so no runtime is assembled.
 var ErrHostConfigMissing = errors.New("tagent: the host names no configuration path")
 
-// ErrHostSenderMissing reports a host that grants the send tool or admits an
-// invocation at the user address beside no outbound message sender: the turn
-// would produce output nothing can deliver, so the run is refused by name.
+// ErrHostSenderMissing reports a host that admits an invocation or a drive at
+// the user address beside no outbound message sender: the turn would produce
+// output nothing can deliver, so the run is refused by name. A document that
+// grants the send tool demands no sender, because a send reaches no channel.
 var ErrHostSenderMissing = errors.New("tagent: the host carries no outbound message sender")
 
 // ErrHostMeditationToolMisplaced reports a document that grants the
 // cross-session write tool outside the meditation session, or grants the send
 // tool to the meditation session itself: the summary tool belongs to the
-// reflection turn alone, and send is a host channel face a reflection session
-// never carries.
+// reflection turn alone, and the communication face a reflection session never
+// carries stays outside it.
 var ErrHostMeditationToolMisplaced = errors.New("tagent: a meditation tool is granted to the wrong agent")
 
 // ErrHostAddressMissing reports an invocation that names no complete session
@@ -184,9 +185,9 @@ type Host struct {
 	face       *hostFace
 	meditation *meditation.Driver
 	settle     *SettleDriver
-	// consumers owns the resident consumption loops of the run: one per user
-	// address an entry wakes, each the only driver of the model decisions of
-	// its address. It stays nil beside no assembled run loop.
+	// consumers owns the resident instances of the run: one per agent address
+	// its material names, each the only driver of the model decisions of its
+	// address. It stays nil beside no assembled run loop.
 	consumers *agent.Consumers
 	// execManager is the execution resource ledger the declared exec face
 	// acquires through; the host is the production consumer of its lifecycle:
@@ -217,26 +218,31 @@ type Host struct {
 	// second time.
 	noticeAccounts map[event.EventID]settleBarrier
 	invocations    uint64
-	closed         bool
-	closeErr       error
-
-	// gates holds the one-slot gate of each session address: a channel, never a
-	// mutex, so a cancelled follow-up leaves the wait instead of outliving the
-	// stop that cancelled it.
-	gates sync.Map
+	// closed reports that injection into this host has stopped: no external
+	// input is admitted past it.
+	closed bool
+	// halted reports that the host is past its quiesce: the consumers and the
+	// settle driver stop and no derived turn starts beside them.
+	halted bool
+	// closeReport is the state the last close ended in, kept so the caller that
+	// only receives an error still reads the per-address report behind it.
+	closeReport agent.DrainReport
+	closeErr    error
 }
 
 var (
-	_ func(string, ...HostOption) (*Host, error)                      = Boot
-	_ func(MessageSender) HostOption                                  = WithSender
-	_ func(plugin.DeliveryRuler) HostOption                           = WithDeliveryRuler
-	_ func(task.Approver) HostOption                                  = WithApprover
-	_ func(state.Governance) HostOption                               = WithGovernance
-	_ func(*Host, context.Context, InvokeRequest) (agent.Turn, error) = (*Host).Invoke
-	_ func(*Host, context.Context) error                              = (*Host).Close
-	_ func(*Host) *Run                                                = (*Host).Run
-	_ func(*Host) string                                              = (*Host).FaceAddr
-	_ func(*Host, context.Context) (hostReloadReport, error)          = (*Host).Reload
+	_ func(string, ...HostOption) (*Host, error)                                  = Boot
+	_ func(MessageSender) HostOption                                              = WithSender
+	_ func(plugin.DeliveryRuler) HostOption                                       = WithDeliveryRuler
+	_ func(task.Approver) HostOption                                              = WithApprover
+	_ func(state.Governance) HostOption                                           = WithGovernance
+	_ func(*Host, context.Context, InvokeRequest) (agent.Turn, error)             = (*Host).Invoke
+	_ func(*Host, context.Context) error                                          = (*Host).Close
+	_ func(*Host, context.Context, agent.CloseRequest) (agent.DrainReport, error) = (*Host).Quiesce
+	_ func(*Host) agent.DrainReport                                               = (*Host).CloseReport
+	_ func(*Host) *Run                                                            = (*Host).Run
+	_ func(*Host) string                                                          = (*Host).FaceAddr
+	_ func(*Host, context.Context) (hostReloadReport, error)                      = (*Host).Reload
 )
 
 // hostApprovalsDir is the directory under the storage root the boot-local
@@ -342,9 +348,6 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	if err := doc.validateMeditationTools(meditationPlan); err != nil {
 		return nil, err
 	}
-	if cfg.hostSender == nil && doc.declaresSendOutside(meditationAgentOf(meditationPlan)) {
-		return nil, fmt.Errorf("%w: the document grants the %q tool", ErrHostSenderMissing, hostSendToolID)
-	}
 	// The one outbound face of the document is wrapped before the tools are
 	// assembled, so the counter face and every delivery path read the same book.
 	var deliveryMeter *hostDeliveryMeter
@@ -363,19 +366,14 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	recallPort := NewRecallPort(embedder, relations)
 	ctx, cancel := context.WithCancel(context.Background())
 	meditationPort := &hostMeditationPort{plan: meditationPlan}
+	reentryPort := &hostSendReentryPort{}
 	client := &http.Client{Timeout: doc.requestTimeout()}
 	models := newHostModelBuilder(doc, client)
 	// host is assigned once the assembly returns; every face assembled before it
 	// reads the variable at call time instead of capturing a nil instance, because
 	// a call can only ever run beside a published host.
 	var host *Host
-	deliverSend := func(ctx context.Context, delivery plugin.Delivery) (deliveryOutcome, string) {
-		if host == nil {
-			return deliveryRefused, "the host is not assembled"
-		}
-		return host.deliverOne(ctx, host.sender, delivery)
-	}
-	natives, err := doc.nativeAgents(ctx, client, cfg.hostSender, deliverSend, recallPort, meditationPlan, meditationPort)
+	natives, err := doc.nativeAgents(ctx, client, recallPort, meditationPlan, meditationPort, reentryPort)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -485,10 +483,11 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 				return nil, fmt.Errorf("tagent: agent %q enables meditation beside no reflection anchor store", meditationPlan.agent)
 			}
 			reflection, err := meditation.NewReflection(meditation.ReflectionConfig{
-				Loop:    meditation.ReflectionLoop{Agent: meditationPlan.agent, Session: meditationPlan.session},
-				Face:    meditation.ReflectionFace{ObservedNamespaces: meditationPlan.observed, ReadNamespaces: meditationPlan.reads},
-				Cadence: meditation.ReflectionCadence{Interval: meditationPlan.interval, MinGap: meditationPlan.minGap},
-				Prompt:  meditationPlan.prompt,
+				Loop:     meditation.ReflectionLoop{Agent: meditationPlan.agent, Session: meditationPlan.session},
+				Face:     meditation.ReflectionFace{ObservedNamespaces: meditationPlan.observed, ReadNamespaces: meditationPlan.reads},
+				Cadence:  meditation.ReflectionCadence{Interval: meditationPlan.interval, MinGap: meditationPlan.minGap},
+				Prompt:   meditationPlan.prompt,
+				Delivery: meditation.ReflectionDelivery{Targets: meditationPlan.targets, Sessions: meditationPort},
 			}, gate, run.ObservationFacts(), run.ReflectionInput())
 			if err != nil {
 				return nil, err
@@ -514,6 +513,9 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		settleDriver.setHandoff(func(ctx context.Context, addr event.Address, notice task.Notice) error {
 			return host.handoffSettledBodies(ctx, addr, notice)
 		})
+		if scope, declared := settleScopeOfDocument(decl); declared {
+			settleDriver.DeclareScope(scope.declaring, scope.targets...)
+		}
 		instances = append(instances, settleDriver)
 		return instances, nil
 	}))
@@ -549,6 +551,7 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 	}
 	recallPort.Bind(run)
 	meditationPort.Bind(run)
+	reentryPort.Bind(run)
 	host = &Host{
 		ctx:               ctx,
 		cancel:            cancel,
@@ -573,13 +576,14 @@ func Boot(configPath string, opts ...HostOption) (*Host, error) {
 		cancel()
 		return nil, host.abortBoot(err)
 	}
-	host.consumers = agent.NewConsumers(run.loop, ctx, host.deliverClosedSegment)
-	host.consumers.SetTurnContext(func(decisionCtx context.Context, trigger string) context.Context {
-		return withDeliveryLineage(decisionCtx, deliveryLineageOf(trigger))
-	})
-	run.loop.SetConsumers(host.consumers)
+	host.consumers = host.consumersOf()
 	if settleDriver != nil {
-		settleDriver.Wake()
+		if err := host.run.restoreOwed(ctx); err != nil {
+			assemblyWarn("tagent: the restore of the durable account reported: %v", err)
+		}
+		if !host.run.Unsettled(ctx).Resting() {
+			settleDriver.Wake()
+		}
 	}
 	face, err := newHostFace(ctx, host, os.Getenv(hostFaceTokenEnv))
 	if err != nil {
@@ -715,7 +719,7 @@ func (h *Host) abortBoot(cause error) error {
 	closeCtx, cancel := context.WithTimeout(context.Background(), hostShutdownGrace)
 	defer cancel()
 	if h.run != nil {
-		_, _ = h.run.Close(closeCtx, agent.CloseRequest{})
+		_, _ = h.run.Close(closeCtx, agent.CloseRequest{Timeout: time.Now().Add(hostShutdownGrace)})
 		_ = h.run.CloseMCPServers()
 	}
 	_ = h.stopTelemetry(closeCtx)
@@ -737,16 +741,51 @@ func (h *Host) stopTelemetry(ctx context.Context) error {
 	return stop(stopCtx)
 }
 
-// Invoke drives one invocation through the assembled run. An invocation at the
-// user address of the entry agent delivers the fresh assistant output through
-// the message sender; every other address is driven headless.
+// consumersOf reports the resident instances this host drives its addresses
+// through, mounting the set over the assembled run on first use. Boot mounts it
+// beside the run it just assembled, and a host assembled straight over a run
+// mounts it at its first drive, so one host drives one path either way.
 //
-// A user message commits as a fact of its session and wakes the resident
-// consumption loop of its address: the loop pulls the message with whatever
-// else arrived, batches them into one model request, and the call answers with
-// the aggregated turn of the segment that consumed it — a second entry whose
-// message the same segment consumed answers the same turn. Every other address
-// drives a turn of its own through the run, exactly as before.
+// - The set lives as long as the context the host was booted under, and a host booted without one mounts a set that lives as long as its run: no instance outlives the run it drives.
+// - A host beside no assembled run answers none, and the call that needed one reports the closed host it is.
+func (h *Host) consumersOf() *agent.Consumers {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.consumers != nil {
+		return h.consumers
+	}
+	if h.run == nil || h.run.loop == nil {
+		return nil
+	}
+	base := h.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	consumers := agent.NewConsumers(h.run.loop, base, h.deliverClosedSegment)
+	consumers.SetProgress(h.run.noteProgress)
+	consumers.SetTurnContext(func(decisionCtx context.Context, trigger string) context.Context {
+		return withDeliveryLineage(decisionCtx, deliveryLineageOf(trigger))
+	})
+	h.run.loop.SetConsumers(consumers)
+	h.run.delegations.SetResident(h.run.loop)
+	h.consumers = consumers
+	return consumers
+}
+
+// Invoke drives one invocation through the resident instance of its address:
+// the input commits as the facts of its session, the instance of that address
+// pulls the message with whatever else arrived, batches them into one model
+// request, and the call answers with the aggregated turn of the segment that
+// consumed it — a second entry whose message the same segment consumed answers
+// the same turn. The segment identity the answer carries is the one the
+// instance minted, never the arrival identity the caller named: the address is
+// driven by its instance and by nothing beside it.
+//
+// An invocation at the user address of the entry agent delivers the fresh
+// assistant output through the message sender from the delivery face of that
+// instance, once per closed segment, so an entry that only waits on the segment
+// never delivers a body a second time. Every other declared agent's address is
+// driven headless: its answer stays on its own chain.
 func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	if h == nil || h.run == nil {
 		return agent.Turn{}, ErrHostClosed
@@ -762,7 +801,6 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	}
 	user := req.Address.AgentID == h.entry
 	sender := h.sender
-	consumers := h.consumers
 	h.mu.Unlock()
 	if user && sender == nil {
 		return agent.Turn{}, fmt.Errorf("%w: the turn runs at the user address of %q", ErrHostSenderMissing, h.entry)
@@ -770,31 +808,27 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 	if req.InvocationID == "" {
 		req.InvocationID = h.nextInvocation(req.Address)
 	}
-	if user && consumers != nil {
-		return h.invokeConsumed(ctx, req)
+	if h.consumersOf() == nil {
+		return agent.Turn{}, ErrHostClosed
 	}
-	unlock, err := h.lockAddressContext(ctx, req.Address)
-	if err != nil {
-		return agent.Turn{}, err
-	}
-	defer unlock()
-	return h.driveLocked(ctx, req)
+	return h.invokeConsumed(ctx, req)
 }
 
-// invokeConsumed lands the input of one user request as the facts of its
-// session, wakes the resident consumption loop of its address, and answers
-// with the aggregated turn of the segment that consumed them: the model
-// request the loop served read the message beside whatever else arrived. The
-// fresh bodies of the closing answer leave through the sender from the
-// consumer's own delivery face, once per closed segment, so an entry that only
-// waits on the segment never delivers a body a second time.
+// invokeConsumed lands the input of one request as the facts of its session,
+// wakes the resident instance of that address, and answers with the aggregated
+// turn of the segment that consumed them: the model request the instance served
+// read the message beside whatever else arrived. The fresh bodies of the closing
+// answer leave through the sender from the instance's own delivery face, once
+// per closed segment, so an entry that only waits on the segment never delivers
+// a body a second time.
 //
 // - An entry whose context ended while its segment still flies answers the abandoned turn it asked for: the caller reads a cancelled turn beside no error, exactly as the direct drive answers one, and the segment stays with the loop that still flies it.
+// - Only the user address of the entry agent is remembered here: the follow-up turn a terminal notice fires lands at the address a user speaks through, so a turn of another declared agent never renames the user session of the host.
 func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	now := time.Now()
 	keys := make([]event.EventID, 0, len(req.Input))
-	for _, msg := range req.Input {
-		evt := h.run.inputEventOf(req, msg, req.InvocationID, now)
+	for index, msg := range req.Input {
+		evt := h.run.inputEventOf(req, msg, index, req.InvocationID, now)
 		id, err := h.run.commitOnly(ctx, req.Address, evt)
 		if err != nil {
 			return agent.Turn{}, fmt.Errorf("tagent: the input of %s did not commit: %w", req.InvocationID, err)
@@ -803,7 +837,9 @@ func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Tur
 			keys = append(keys, id)
 		}
 	}
-	h.rememberUserAddress(req.Address)
+	if req.Address.AgentID == h.entry {
+		h.rememberUserAddress(req.Address)
+	}
 	consumer := h.consumers.Ensure(req.Address)
 	if consumer == nil {
 		return agent.Turn{}, ErrHostClosed
@@ -820,11 +856,11 @@ func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Tur
 }
 
 // deliverClosedSegment hands the fresh answer of one closed consumption segment
-// to the outbound face of its address: the assistant bodies the invocation of
-// that segment generated leave under the lineage the material that opened it
-// named, and the answer of a segment no entry waits on — the one
-// a settle notice drives into being — leaves by the very same path. A host
-// closed beside the closing segment delivers nothing, and the obligation stays
+// to the outbound face of the address the host speaks for: the assistant bodies
+// the invocation of that segment generated leave under the lineage the material
+// that opened it named, and the answer of a segment no entry waits on — the one
+// a settle notice drives into being — leaves by the very same path. A host that
+// stopped beside the closing segment delivers nothing, and the obligation stays
 // owed to the restart.
 //
 // The settle account of an entry whose notice material this segment consumed is
@@ -833,15 +869,20 @@ func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Tur
 // wait would leave the terminal of a landed turn unrecorded for as long as the
 // send runs. A stop inside the send is then answered by a restart that closes
 // the landed attempt instead of driving the notice a second time.
+//
+// - Only a segment of the entry address delivers: the outbound face belongs to the user session of the entry agent, so the answer another declared agent's segment lands stays on that agent's own chain.
 func (h *Host) deliverClosedSegment(ctx context.Context, addr event.Address, answer agent.SegmentAnswer) {
 	h.mu.Lock()
-	closed := h.closed
+	halted := h.halted
 	sender := h.sender
 	h.mu.Unlock()
-	if closed {
+	if halted {
 		return
 	}
 	h.settleConsumedNotices(ctx, answer)
+	if addr.AgentID != h.entry {
+		return
+	}
 	h.deliverFresh(ctx, addr, sender, deliveryLineageOf(answer.Trigger), answer.Turn)
 }
 
@@ -903,51 +944,6 @@ func (h *Host) takeNoticeAccounts(consumed []event.EventID) []settleBarrier {
 	return held
 }
 
-// driveLocked drives one invocation whose session gate the caller already
-// holds, so a user turn and an unattended follow-up turn of the same address
-// never run beside each other. The delivery of a user turn reads the assistant
-// bodies its own range committed, anchored on the identity of the invocation
-// rather than on a position of the chain read at the gate: the chain is held to
-// its hot window, so a position names other material once the window moves. The
-// token stays held until this method returns, so the settle account and the
-// delivery read the chain without a neighbour committing beside them.
-//
-// A follow-up drive carries the barrier of the settle account it answers on, and
-// the barrier is closed right after the terminal fact of the drive landed: the
-// terminal the turn ended on is recorded, a completed turn writes its
-// consumption receipt there, and only then is the answer delivered. So the
-// receipt never lags the delivery it confirms by a whole turn, and a stop
-// between the two leaves a landed attempt the next process closes with its
-// receipt instead of driving a second turn.
-func (h *Host) driveLocked(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
-	h.mu.Lock()
-	if h.closed {
-		h.mu.Unlock()
-		return agent.Turn{}, ErrHostClosed
-	}
-	user := req.Address.AgentID == h.entry
-	sender := h.sender
-	h.mu.Unlock()
-	if user {
-		h.rememberUserAddress(req.Address)
-	}
-	lineage := deliveryLineageOf(req.TriggerSource)
-	ctx = withDeliveryLineage(ctx, lineage)
-	turn, err := h.run.Invoke(ctx, req)
-	if err != nil {
-		assemblyWarn("tagent: the invocation %s of %s ended by error: %v", req.InvocationID, req.Address.SessionID, err)
-		return turn, err
-	}
-	if err := h.settleTerminal(ctx, turn); err != nil {
-		assemblyWarn("tagent: the invocation %s of %s left its settle account open: %v", req.InvocationID, req.Address.SessionID, err)
-		return turn, err
-	}
-	if user {
-		h.deliverFresh(ctx, req.Address, sender, lineage, turn)
-	}
-	return turn, nil
-}
-
 // settleTerminal closes the settle account of one follow-up drive beside the
 // terminal fact it just landed: the terminal the turn ended on is recorded as
 // the attempt of the notification that fired it, a turn that completed registers
@@ -988,32 +984,27 @@ func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) error {
 	return nil
 }
 
-// fireNoticeTurn drives one unattended follow-up turn at the user address a
-// terminal settle belongs to. The turn carries no input: the notice fact this
-// method commits under the follow-up's own invocation is the material the drive
-// reads at its head, because a range reads the notifications of its own
-// identity prefix. The turn is stamped "task" and holds the same address gate a
-// user turn holds, so the two never run beside each other.
+// fireNoticeTurn drives one unattended follow-up turn at the address a terminal
+// settle belongs to. The turn carries no input: the notice fact this method
+// commits under the follow-up's own identity is the material the turn reads at
+// its head, because a range reads the notifications of its own identity prefix.
+// The turn is stamped "task", so the driver that fired this turn never fires on
+// its output.
 //
-// The invocation is the notification's own four-part identity rather than a
-// minted counter: the same notification always drives the same range, so a
-// second attempt commits the same notice fact and is answered as the fact the
-// chain already holds — the transcript carries the instruction once, however
-// many processes try the notification. The fact it commits is a feedback fact,
-// never a terminal settle with a settle lineage, so the driver that fired this
-// turn never fires on its output. The assistant body the turn produces is
-// delivered through the message sender by the ordinary drive path, exactly as a
-// user turn's output is, and the entry the turn drove is closed beside its
-// terminal fact by the barrier the driver stamped on the context. Only a turn
-// that really delivered its answer closes the mailbox entry it drove from: a
-// stopped or failed turn reports the incomplete delivery by name, so the entry
-// stays owed for the next wake instead of a receipt recording a turn nobody
-// read.
+// The material commits as the fact it is and the wake hands it to the resident
+// instance of the address, which is the only driver of the decisions of that
+// address: no follow-up turn runs beside a segment that instance may already
+// fly, whether an entry waits on that segment or a notification alone drove it
+// into being. The answer leaves through the delivery face of the instance, the
+// path a user turn's answer leaves by, and only a turn that really delivered its
+// answer closes the mailbox entry it drove from: a stopped or failed turn
+// reports the incomplete delivery by name, so the entry stays owed for the next
+// wake instead of a receipt recording a turn nobody read.
 //
-// - An address a resident consumption loop owns is driven by that loop alone: the notice material commits as the fact it is and the wake hands it to the next pull of the loop, so no follow-up turn runs beside the segment the loop may already fly. The entry the notification was accepted on is settled beside the turn the loop lands, exactly as a direct drive settles it: the entry waits for the segment that consumed the material, the landed terminal is recorded as its attempt, and only then is the consumption receipt written — an entry is never closed beside a turn that never ran. The answer leaves through the delivery face of the consumer, which is the same path a user turn's answer leaves by.
-//
-// - The segment that consumes the material answers the entry only after its own delivery, so the account of the entry is registered here, under the key the material lands as and before the commit: the delivery face of the consumer closes it beside the segment that consumed that key, and a segment that closed without reading the material leaves the account owed for the wake.
-// - A settled result the flying segment still awaits is harvested by that segment's own next decision (the account settles through settleConsumedNotices), so the notice turn drives only a task already paired or never admitted.
+// - The material lands under the key the notification's own four-part identity derives, so a second attempt commits the same fact and is answered as the fact the chain already holds: the transcript carries the instruction once, however many processes try the notification.
+// - The key is named to the instance before the wake, because the attempt that died left the material behind the answer it closed on: the pull of a restarted process reads that position as material a closed segment already carried, and the account of the entry is what says this fact still drives.
+// - An entry whose task the flying segment already paired is answered here without a second turn: that segment settles the entry through its own delivery.
+// - The segment that consumes the material answers this call only after its own delivery, so the settle account of the entry is registered here, under the key the material lands as and before the commit: the delivery face of the instance closes it beside the segment that consumed that key, and a segment that closed without reading the material leaves the account owed for the wake.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {
 		return ErrHostClosed
@@ -1022,75 +1013,52 @@ func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact even
 		return fmt.Errorf("%w: agent=%q session=%q", ErrHostAddressMissing, addr.AgentID, addr.SessionID)
 	}
 	h.mu.Lock()
-	closed := h.closed
-	consumers := h.consumers
+	halted := h.halted
 	h.mu.Unlock()
-	if closed {
+	if halted {
 		return ErrHostClosed
 	}
-	if consumers.Has(addr) {
-		if barrier, held := settleBarrierFrom(ctx); held {
-			_, _, key := noticeMaterialOf(ctx, fact)
-			defer h.holdNoticeAccount(key, barrier)()
-		}
-		if consumer := consumers.Ensure(addr); consumer != nil {
-			settleWait, settleCancel := context.WithTimeout(ctx, hostSettleWindow)
-			state := consumer.AwaitTaskState(settleWait, noticeTaskIDOf(fact))
-			settleCancel()
-			if state == agent.TaskConsumed {
-				return nil
-			}
-			if state == agent.TaskAwaited {
-				assemblyWarn("tagent: the segment of %s still awaits the settled task %s; the notice turn drives beside it",
-					addr.SessionID, noticeTaskIDOf(fact))
-			}
-		}
-		key, err := h.commitNoticeMaterial(ctx, addr, fact)
-		if err != nil {
-			return err
-		}
-		consumer := consumers.Ensure(addr)
-		if consumer == nil {
-			return ErrHostClosed
-		}
-		consumer.Wake()
-		answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
-		if err != nil {
-			return err
-		}
-		if err := h.settleTerminal(ctx, answer.Turn); err != nil {
-			assemblyWarn("tagent: the notice invocation %s of %s left its settle account open: %v",
-				answer.Turn.InvocationID, addr.SessionID, err)
-			return err
-		}
-		if answer.Turn.Terminal != model.KindCompleted {
-			return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, answer.Turn.InvocationID, answer.Turn.Terminal)
-		}
-		return nil
+	consumers := h.consumersOf()
+	if consumers == nil {
+		return ErrHostClosed
 	}
-	unlock, err := h.lockAddressContext(ctx, addr)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	if _, err := h.commitNoticeMaterial(ctx, addr, fact); err != nil {
-		return err
-	}
-	identified := task.Notice{TaskID: noticeTaskIDOf(fact), Kind: noticeKindOf(fact), Event: fact.Key}
 	if barrier, held := settleBarrierFrom(ctx); held {
-		identified = barrier.notice
+		_, _, key := noticeMaterialOf(ctx, fact)
+		defer h.holdNoticeAccount(key, barrier)()
 	}
-	invocationID := noticeInvocation(identified)
-	turn, err := h.driveLocked(ctx, InvokeRequest{
-		InvocationID:  invocationID,
-		Address:       addr,
-		TriggerSource: "task",
-	})
+	if consumer := consumers.Ensure(addr); consumer != nil {
+		settleWait, settleCancel := context.WithTimeout(ctx, hostSettleWindow)
+		taken := consumer.AwaitTaskState(settleWait, noticeTaskIDOf(fact))
+		settleCancel()
+		if taken == agent.TaskConsumed {
+			return nil
+		}
+		if taken == agent.TaskAwaited {
+			assemblyWarn("tagent: the segment of %s still awaits the settled task %s; the notice turn drives beside it",
+				addr.SessionID, noticeTaskIDOf(fact))
+		}
+	}
+	key, err := h.commitNoticeMaterial(ctx, addr, fact)
 	if err != nil {
 		return err
 	}
-	if turn.Terminal != model.KindCompleted {
-		return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, invocationID, turn.Terminal)
+	consumer := consumers.Ensure(addr)
+	if consumer == nil {
+		return ErrHostClosed
+	}
+	consumer.Drive(key)
+	consumer.Wake()
+	answer, err := consumer.WaitAnswer(ctx, []event.EventID{key})
+	if err != nil {
+		return err
+	}
+	if err := h.settleTerminal(ctx, answer.Turn); err != nil {
+		assemblyWarn("tagent: the notice invocation %s of %s left its settle account open: %v",
+			answer.Turn.InvocationID, addr.SessionID, err)
+		return err
+	}
+	if answer.Turn.Terminal != model.KindCompleted {
+		return fmt.Errorf("%w: %s ended as %s", ErrNoticeTurnIncomplete, answer.Turn.InvocationID, answer.Turn.Terminal)
 	}
 	return nil
 }
@@ -1220,22 +1188,116 @@ func (h *Host) observeExecState(evt tagentexec.StateEvent) {
 	}()
 }
 
-// Close stops the endpoints and the reflection driver, drains the run and
-// closes the MCP servers. A repeated close reports the first result and runs no
-// second drain.
+// Quiesce stops injection into this host and runs it to its fixed point: no
+// external input is admitted, the work the run already accepted converges, the
+// derived turns those accepted obligations owe keep running, and no consumption
+// stays unconfirmed. The consumers and the settle driver stay mounted for the
+// whole quiesce, because the derived work is driven through them.
+//
+// A host that reached rest answers Quiesced; one that spent its timeout with
+// work still on the chain answers Cut, which is a normal return because the
+// remaining work is on the chain and a restart resumes it; and one whose
+// criterion could not be read answers Broken.
+// The redline list (3 rules):
+// MUST refuse external input before the first read of the rest criterion.
+// MUST admit the derived turns an accepted obligation owes for the whole quiesce.
+// MUST NOT report a run at rest while a consumer still flies or a writer has not stopped.
+func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error) {
+	if h == nil || h.run == nil {
+		return agent.DrainReport{}, ErrHostClosed
+	}
+	timeout, err := req.Resolve()
+	if err != nil {
+		return agent.DrainReport{Outcome: agent.CloseBroken}, err
+	}
+	h.mu.Lock()
+	h.closed = true
+	h.mu.Unlock()
+	timer := time.NewTimer(time.Until(timeout))
+	defer timer.Stop()
+	woken := ""
+	for {
+		read := h.run.Unsettled(ctx)
+		stopped, writers := h.run.writers.Stopped()
+		landing := h.run.landingOwed()
+		if read.Resting() && h.consumersOf().Resting() && stopped && !landing {
+			return agent.DrainReport{Outcome: agent.CloseQuiesced, Drained: true}, nil
+		}
+		if ctx.Err() != nil || !time.Now().Before(timeout) {
+			report := agent.DrainReport{
+				Outcome:   agent.CloseCut,
+				Unsettled: mergeUnsettled(h.run.unsettledObligations(read), agent.WriterObligations(writers), landingObligations(landing)),
+			}
+			if read.Unjudged != "" {
+				report.Outcome = agent.CloseBroken
+			}
+			return report, nil
+		}
+		if digest := settleDigest(read); digest != woken {
+			woken = digest
+			if h.settle != nil {
+				h.settle.Wake()
+			}
+			h.run.wakeOwedDrivers()
+		}
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		case <-h.run.Progress():
+		}
+	}
+}
+
+// Rejections reports the feedback fact of every notification a target refused,
+// as the state account of this host holds it: the notification each refusal
+// answers beside the routing it was offered to and the reason the target gave. A
+// refusal is a consumption result, so it is the diagnostic face of what the
+// account already answered rather than a second criterion of the close.
+func (h *Host) Rejections() []state.Rejection {
+	if h == nil || h.run == nil {
+		return nil
+	}
+	return h.run.Rejections()
+}
+
+// CloseReport reports the state the last close of this host ended in, beside the
+// work it could not settle.
+func (h *Host) CloseReport() agent.DrainReport {
+	if h == nil {
+		return agent.DrainReport{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closeReport
+}
+
+// Close stops injection into this host, quiesces the run it drives and only then
+// stops the consumers, the settle driver and the facilities behind them. One
+// deadline bounds the quiesce and the run close behind it, so a cancelled caller
+// never abandons the run close half-way. A repeated close reports the first
+// result and runs no second quiesce; a close that follows a bare quiesce still
+// stops the facilities that quiesce left running.
 func (h *Host) Close(ctx context.Context) error {
 	if h == nil {
 		return nil
 	}
 	h.mu.Lock()
-	if h.closed {
+	if h.halted {
 		err := h.closeErr
 		h.mu.Unlock()
 		return err
 	}
-	h.closed = true
 	h.mu.Unlock()
 	var first error
+	deadline := time.Now().Add(hostShutdownGrace)
+	report, quiesceErr := h.Quiesce(ctx, agent.CloseRequest{Timeout: deadline})
+	if quiesceErr != nil {
+		first = quiesceErr
+	}
+	h.mu.Lock()
+	h.halted = true
+	h.closeReport = report
+	h.mu.Unlock()
 	if h.consumers != nil {
 		h.consumers.Stop()
 	}
@@ -1246,29 +1308,32 @@ func (h *Host) Close(ctx context.Context) error {
 		h.meditation.Stop()
 	}
 	if h.face != nil {
-		if err := h.face.stop(ctx); err != nil {
+		if err := h.face.stop(ctx); err != nil && first == nil {
 			first = err
 		}
 	}
 	if h.execManager != nil {
-		for _, report := range h.execManager.Close(ctx) {
-			if report.Evidence.Released {
+		for _, execReport := range h.execManager.Close(ctx) {
+			if execReport.Evidence.Released {
 				continue
 			}
-			assemblyWarn("tagent: the execution resource %s stays held after close: %s", report.Key, report.Evidence.Reason)
+			assemblyWarn("tagent: the execution resource %s stays held after close: %s", execReport.Key, execReport.Evidence.Reason)
 		}
 	}
 	h.execWG.Wait()
-	report, err := h.run.Close(ctx, agent.CloseRequest{})
+	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), hostShutdownGrace)
+	defer closeCancel()
+	runReport, err := h.run.Close(closeCtx, agent.CloseRequest{Timeout: deadline})
 	if err != nil {
 		if sealErr := h.sealCapture(ctx); sealErr != nil {
-			assemblyWarn("tagent: the trajectory seal after a failed drain reported: %v", sealErr)
+			assemblyWarn("tagent: the trajectory seal after a failed quiesce reported: %v", sealErr)
 		}
 		h.finishClose(first, err)
 		return err
 	}
-	if !report.Drained {
-		assemblyWarn("tagent: the host close reported %d unsettled obligation(s)", len(report.Unsettled))
+	h.setCloseReport(report, runReport)
+	if report.Outcome == agent.CloseCut {
+		assemblyWarn("tagent: the host close was cut with %d unsettled item(s) on the chain", len(report.Unsettled))
 	}
 	if err := h.run.CloseMCPServers(); err != nil && first == nil {
 		first = err
@@ -1281,6 +1346,36 @@ func (h *Host) Close(ctx context.Context) error {
 	}
 	h.finishClose(first, nil)
 	return first
+}
+
+// setCloseReport folds the report of the run's own close into the one the host
+// quiesce reported: the two name the work of one close, so the state is the
+// worse of the two and the per-address list is their union.
+func (h *Host) setCloseReport(quiesced, run agent.DrainReport) {
+	merged := quiesced
+	if outcomeRank(run.Outcome) > outcomeRank(merged.Outcome) {
+		merged.Outcome = run.Outcome
+	}
+	merged.Drained = merged.Drained && run.Drained
+	merged.Unsettled = mergeUnsettled(merged.Unsettled, run.Unsettled)
+	h.mu.Lock()
+	h.closeReport = merged
+	h.mu.Unlock()
+}
+
+// outcomeRank orders the close states by how far they are from a run at rest, so
+// a fold of two reports answers the worse one.
+func outcomeRank(outcome agent.CloseOutcome) int {
+	switch outcome {
+	case agent.CloseQuiesced:
+		return 0
+	case agent.CloseCut:
+		return 1
+	case agent.CloseBroken:
+		return 2
+	default:
+		return 3
+	}
 }
 
 // sealCapture seals the run-wide trajectory once the run drained: the sink's
@@ -1394,39 +1489,4 @@ func (h *Host) injectAddress(label string) event.Address {
 	entry := h.entry
 	h.mu.Unlock()
 	return event.Address{AgentID: entry, SessionID: event.SessionID(b.String())}
-}
-
-// addressGate is the one-slot gate that serializes the drives of one session:
-// the token is held by the drive in flight, and a waiter parks on the channel
-// instead of a mutex, so a cancelled follow-up leaves the wait.
-type addressGate struct {
-	token chan struct{}
-}
-
-// gateOf reports the one-slot gate of one session address.
-func (h *Host) gateOf(addr event.Address) *addressGate {
-	value, _ := h.gates.LoadOrStore(addr, &addressGate{token: make(chan struct{}, 1)})
-	return value.(*addressGate)
-}
-
-// lockAddress serializes the drives of one session.
-func (h *Host) lockAddress(addr event.Address) func() {
-	unlock, err := h.lockAddressContext(context.Background(), addr)
-	if err != nil {
-		return func() {}
-	}
-	return unlock
-}
-
-// lockAddressContext serializes the drives of one session and leaves the wait
-// when the caller's context ends: the stop of the settle driver cancels the
-// follow-up waiting here, so a close never hangs on a gate a user turn holds.
-func (h *Host) lockAddressContext(ctx context.Context, addr event.Address) (func(), error) {
-	gate := h.gateOf(addr)
-	select {
-	case gate.token <- struct{}{}:
-		return func() { <-gate.token }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }

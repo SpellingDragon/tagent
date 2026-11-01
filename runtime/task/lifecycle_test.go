@@ -3,9 +3,10 @@ package task
 import (
 	"context"
 	"errors"
-	"testing"
-
 	"github.com/SpellingDragon/tagent/api/event"
+	"strings"
+	"testing"
+	"time"
 )
 
 // invariantTaskAddress is the explicit address the invariants' tasks are declared from and delivered to.
@@ -275,4 +276,120 @@ func invariantObligationCount(t *testing.T, manager *MemoryManager, taskID event
 		t.Fatalf("read the obligations of %s: %v", taskID, err)
 	}
 	return held.Count
+}
+
+// TestReentryRefusalAndStaleSignals pins the refusal face of a re-entry and the round-local life of the detector's verdict.
+// - a round still in flight refuses the re-entry by name and leaves the task as it stands
+// - a round reported as suspected is still a round in flight: the observation never opens a re-entry of its own
+// - the named refusals guide the caller to the way out (wait for the terminal, relaunch or re-spawn)
+// - the verdict the detector read over the round before is not carried into the new round
+// - the new round is classified by its own silence, so its suspicion is its own and arrives only when its own threshold passes
+// 契约: docs/wiki/agent/task-lifecycle.md#detach-suppression
+func TestReentryRefusalAndStaleSignals(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rejects_inflight_reentry", func(t *testing.T) {
+		registry, carrier := invariantRegistry(t)
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		stored := len(carrier.Facts(taskID))
+		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrRoundInFlight) {
+			t.Fatalf("re-entering a task whose round is in flight = %v, want %v", err, ErrRoundInFlight)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusRunning {
+			t.Fatalf("status after the refused re-entry = (%v, %v), want the round already running", status, err)
+		}
+		if got := len(carrier.Facts(taskID)); got != stored {
+			t.Fatalf("facts after the refused re-entry = %d, want the stored ones alone", got)
+		}
+		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+			t.Fatalf("settle the round = (%v, %v), want a committed change", result, err)
+		}
+		if round, err := registry.Reactivate(ctx, taskID); err != nil || round != 2 {
+			t.Fatalf("re-entering the task once its round settled = (%d, %v), want the second round", round, err)
+		}
+	})
+
+	t.Run("a suspected round is still a round in flight", func(t *testing.T) {
+		registry := logicalRegistry(logicalThresholds).registry
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		probe := time.Now().Add(logicalThresholds.SuspectAfter + logicalMargin)
+		if got, err := registry.Logical(ctx, taskID, probe); err != nil || got != LogicalSuspect {
+			t.Fatalf("logical status of the silent round = (%q, %v), want %q", got, err, LogicalSuspect)
+		}
+		if _, err := registry.Reactivate(ctx, taskID); !errors.Is(err, ErrRoundInFlight) {
+			t.Fatalf("re-entering a suspected round = %v, want %v", err, ErrRoundInFlight)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusRunning {
+			t.Fatalf("status after the refused re-entry = (%v, %v), want the round the observation never moved", status, err)
+		}
+	})
+
+	t.Run("the named refusals guide the caller", func(t *testing.T) {
+		for _, one := range []struct {
+			err     error
+			guides  string
+			subject string
+		}{
+			{ErrReactivationFailed, "relaunch", "a failed task"},
+			{ErrReactivationCancelled, "re-spawn", "a cancelled task"},
+			{ErrRoundInFlight, "in flight", "a round under way"},
+		} {
+			if !strings.Contains(one.err.Error(), one.guides) {
+				t.Fatalf("the refusal of %s = %q, want it to name %q", one.subject, one.err.Error(), one.guides)
+			}
+		}
+	})
+
+	t.Run("stale_signal_ignored", func(t *testing.T) {
+		registry := logicalRegistry(logicalThresholds).registry
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		probe := time.Now().Add(logicalThresholds.SuspectAfter + logicalMargin)
+		if changes := registry.Watch(ctx, probe); len(changes) != 1 || changes[0].To != LogicalSuspect {
+			t.Fatalf("changes the old round was reported under = %+v, want the one suspected verdict", changes)
+		}
+		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+			t.Fatalf("settle the round = (%v, %v), want a committed change", result, err)
+		}
+		if _, err := registry.Reactivate(ctx, taskID); err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		if changes := registry.Watch(ctx, time.Now()); len(changes) != 0 {
+			t.Fatalf("changes the new round was reported under = %+v, want none: the old round's verdict belongs to the round it was read over", changes)
+		}
+		if got, err := registry.Logical(ctx, taskID, time.Now()); err != nil || got != LogicalActive {
+			t.Fatalf("logical status of the new round = (%q, %v), want %q", got, err, LogicalActive)
+		}
+	})
+
+	t.Run("the new round is classified by its own silence", func(t *testing.T) {
+		registry := logicalRegistry(logicalThresholds).registry
+		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
+		if result, err := registry.Advance(ctx, taskID, StatusRunning, "running", nil); err != nil || result != CommitCommitted {
+			t.Fatalf("move the task under way = (%v, %v), want a committed change", result, err)
+		}
+		if changes := registry.Watch(ctx, time.Now().Add(logicalThresholds.SuspectAfter+logicalMargin)); len(changes) != 1 {
+			t.Fatalf("changes the old round was reported under = %+v, want the one suspected verdict", changes)
+		}
+		if result, err := registry.Advance(ctx, taskID, StatusSettled, "settled", []Envelope{invariantEnvelope(taskID, NoticeSettled, 0)}); err != nil || result != CommitCommitted {
+			t.Fatalf("settle the round = (%v, %v), want a committed change", result, err)
+		}
+		if _, err := registry.Reactivate(ctx, taskID); err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		if changes := registry.Watch(ctx, time.Now()); len(changes) != 0 {
+			t.Fatalf("changes at the opening of the new round = %+v, want none", changes)
+		}
+		if changes := registry.Watch(ctx, time.Now().Add(logicalThresholds.SuspectAfter+logicalMargin)); len(changes) != 1 || changes[0].To != LogicalSuspect {
+			t.Fatalf("changes the new round reached on its own = %+v, want the one suspected verdict of the new round", changes)
+		}
+	})
 }

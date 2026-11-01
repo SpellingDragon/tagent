@@ -51,6 +51,8 @@ assistant 输出 → 作为事实提交（提交失败=回合失败）
 → 渠道送达；失败自动转为持久补投义务（重启后仍欠）
 ```
 
+同一段路上有**两族投递**：agent 自己发的正文（`send`，落 `external_input`）与框架的结算/终态通知（落 `task_settled`）。两族事实类型分立，却盖同一套四键（`delivery.target`/`delivery.identity`/`delivery.receipt`/`delivery.source`），因此"一个源事件到达了哪些目标、各自什么回执"只有一种读法：`Run.DeliveryLedger()`。（[reliability/durable-delivery.md](reliability/durable-delivery.md#lineage-visibility)）
+
 ## 6. 异步任务：受理与结算分离，mailbox 是唯一唤醒账
 
 受理立即返回**最小回执**（`{callID taskID accepted kind}`——只是"收到了"）。结算旅程：
@@ -66,9 +68,11 @@ assistant 输出 → 作为事实提交（提交失败=回合失败）
 
 跨重启恰好再驱动一次（真进程 SIGKILL 测试钉住）。
 
+**委派走同一条账，不是另一个调用层**：一次 sub-agent 调用给这次委派铸一个专属会址（`<调用方会话>#sub:<原生调用号>`），会址有自己的常驻消费实例；发起方的回合照常继续，结果以结算通知回流发起方的责任范围、恰驱动它一次。于是 main 与 sub 之间是**事件管线**（数据编排），不是调用-阻塞关系。（[agent/agent-architecture.md](agent/agent-architecture.md)）
+
 ## 7. 冥想：事件驱动，没有定时器
 
-冥想（features/evolution/meditation/driver.go）是纯观察者：观察到"有交互在等"的新事实、且距上次反思过了节奏下限、且上次反思已被消费——才起一个独立反思回合。产出作为新输入推主循环；跨会话写入只经 `deliver_summary` 工具（模型显式决策，机制绝不静默代笔）。**没有新事件，就永远不触发。**
+冥想（features/evolution/meditation/driver.go）是纯观察者：观察到"有交互在等"的新事实、且距上次反思过了节奏下限、且上次反思已被消费——才起一个独立反思回合。产出作为新输入推主循环；跨会话写入只经 `send` 工具（`target` 写 `{"agent", "session"}`，模型显式决策，机制绝不静默代笔）。**没有新事件，就永远不触发。**
 
 ## 8. 消费面就是流处理器
 

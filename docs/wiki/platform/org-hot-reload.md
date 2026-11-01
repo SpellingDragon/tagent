@@ -104,17 +104,17 @@ flowchart TD
 <a id="close-drain"></a>
 ## 八、关闭必须覆盖排空期间落位的义务
 
-`agent.Shutdown.Close`：先立 `refusing`（此后新输入 `ErrShutdownRefused`），再轮询真实结算，最后交 `DrainReport{Drained, Unsettled}` 或 `ErrDrainUnsettled`。登记面（`Track`）覆盖"经 task face 受理的调用"，所以排空期间落位的义务同样被结算——同一任务登记两次仍是同一个任务。
+关闭分两段：先 `Host.Quiesce` 关 intake 闸门（外部新输入被具名拒绝，关闭期内由已受理义务派生的回合仍受受理）并**静止到不动点**，再由 `Host.Close` 停消费者与设施。不动点由同源判据 `Unsettled()` 求值——关闭、重启、报告读同一处。出口三态：`Quiesced`（自然收束）／`Cut`（预算到点，余量在链上由重启续上，**正常返回**）／`Broken`（不可判，告警）；`Cut`/`Broken` 的 `DrainReport.Unsettled` 逐地址报出未消费通知与未终态工作。
 
 宿主关闭次序（次序即契约）：
 
 | 序 | 动作 | 为什么在这个位置 |
 |---|---|---|
-| 1 | 结算驱动 `Stop` | 先停会自己发起回合的那一面 |
-| 2 | 反思调度 `Stop` | 再停周期性的自省 |
+| 1 | `Quiesce`（关 intake 闸门 + 静止到不动点） | 先拒绝新输入再等已受理的收敛；静止期派生回合仍受受理 |
+| 2 | 消费循环 / 结算驱动 / 反思调度 `Stop` | 不动点已判，会自己发起回合的面才依次停 |
 | 3 | HTTP face `stop` | 不再接新请求，不再有新 reload |
-| 4 | 执行资源 `Close` | 归还进程内执行槽；未释放的具名告警 |
-| 5 | `Run.Close`（排空） | 等真实结算；排空失败也必须继续收尾 |
+| 4 | 执行资源 `Close` + 等收尾 | 归还进程内执行槽；未释放的具名告警 |
+| 5 | `Run.Close` | 排空之后再关运行；失败也必须继续收尾 |
 | 6 | `CloseMCPServers` | **共享资源最后**：仍被借用的服务器不在中途拆除 |
 | 7 | `sealCapture` | 排空之后再封轨迹，一次账户覆盖整次运行 |
 | 8 | `stopTelemetry` | 观测最后退出，前面的失败仍然可见 |

@@ -403,10 +403,11 @@ func closeIntegrityHost(t *testing.T, ctx context.Context, host *assembly.Host) 
 }
 
 // runIntegrityPositive drives one declared multi-decision script over the boot
-// assembly: the input reaches the entry, the send tool answers through the
-// recording sender, the tool result drives the second decision, and the final
-// answer closes the turn. Every model step is parked, so the check reads the
-// outbound actions the drive produced before it lets the decision continue.
+// assembly: the input reaches the entry, each send tool answers its caller with a
+// receipt, the tool result drives the next decision, and the final answer closes
+// the turn and is the one body the sender sees. Every model step is parked, so
+// the check reads the outbound face the drive produced before it lets the
+// decision continue.
 func runIntegrityPositive(t *testing.T) {
 	t.Helper()
 	const (
@@ -419,11 +420,9 @@ func runIntegrityPositive(t *testing.T) {
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry asks for the first note", requestTail(input)).
 		answers(settleToolCallAnswer("send", "call-note-1", `{"content":"the first note"}`)).
-		delivers(firstNote).
 		park()
 	script.expect("model-entry", "the entry asks for the second note", requestCarriesToolResult("call-note-1")).
 		answers(settleToolCallAnswer("send", "call-note-2", `{"content":"the second note"}`)).
-		delivers(secondNote).
 		park()
 	script.expect("model-entry", "the entry ends on its final answer", requestCarriesToolResult("call-note-2")).
 		answers(scriptedAnswerOf(settled)).
@@ -455,14 +454,14 @@ func runIntegrityPositive(t *testing.T) {
 	script.release(steps[0])
 
 	script.await(t, steps[1])
-	if actions := sender.actions(); len(actions) != 1 || actions[0].body != firstNote {
-		t.Fatalf("outbound actions beside the first tool result = %+v, want the first note alone", actions)
+	if actions := sender.actions(); len(actions) != 0 {
+		t.Fatalf("outbound actions beside the first tool result = %+v, want none: a send answers its caller and reaches no channel", actions)
 	}
 	script.release(steps[1])
 
 	script.await(t, steps[2])
-	if actions := sender.actions(); len(actions) != 2 || actions[1].body != secondNote {
-		t.Fatalf("outbound actions beside the second tool result = %+v, want both notes and no final answer yet", actions)
+	if actions := sender.actions(); len(actions) != 0 {
+		t.Fatalf("outbound actions beside the second tool result = %+v, want none until the turn body is delivered", actions)
 	}
 	script.release(steps[2])
 
@@ -489,7 +488,7 @@ func runIntegrityPositive(t *testing.T) {
 	}
 
 	actions := sender.actions()
-	want := []string{firstNote, secondNote, settled}
+	want := []string{settled}
 	if len(actions) != len(want) {
 		t.Fatalf("outbound actions = %+v, want the %d actions the script declares", actions, len(want))
 	}
@@ -525,8 +524,7 @@ func checkIntegrityUnexpectedRequestFails(t *testing.T) {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the only declared decision", requestTail("one request only")).
-		answers(settleToolCallAnswer("send", "call-only", `{"content":"only note"}`)).
-		delivers("only note")
+		answers(settleToolCallAnswer("send", "call-only", `{"content":"only note"}`))
 	provider.decide = script.decide
 	sender := newRecordingSender()
 	host := bootIntegrityHost(t, provider, sender)
@@ -544,11 +542,11 @@ func checkIntegrityUnexpectedRequestFails(t *testing.T) {
 		t.Fatalf("model requests = %d, want the declared decision beside the refused one", len(requests))
 	}
 	bodies := sender.bodies()
-	if len(bodies) != 2 || bodies[0] != "only note" {
-		t.Fatalf("delivered bodies = %q, want the declared action beside the raw failure notice", bodies)
+	if len(bodies) != 1 {
+		t.Fatalf("delivered bodies = %q, want the raw failure notice alone: a send reaches no channel", bodies)
 	}
-	if !strings.Contains(bodies[1], "unexpected") || !strings.Contains(bodies[1], "400") {
-		t.Fatalf("failure notice = %q, want the raw refusal of the unexpected request", bodies[1])
+	if !strings.Contains(bodies[0], "unexpected") || !strings.Contains(bodies[0], "400") {
+		t.Fatalf("failure notice = %q, want the raw refusal of the unexpected request", bodies[0])
 	}
 	violations := script.audit()
 	if got := integrityViolationsOf(violations, integrityUnexpected); len(got) != 1 {
@@ -607,19 +605,17 @@ func checkIntegrityMissingStepFails(t *testing.T) {
 
 // checkIntegrityDuplicateStepFails drives a step that answers with another send
 // call, so the same request shape reaches the script a second time: the repeat
-// must fail as a duplicate step, and the repeated action must be readable on
-// the outbound face.
+// must fail as a duplicate step, and the body the failed turn delivers must be
+// readable on the outbound face.
 func checkIntegrityDuplicateStepFails(t *testing.T) {
 	t.Helper()
 	const note = "the same note"
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry asks for the note", requestTail("send the same note twice")).
-		answers(settleToolCallAnswer("send", "call-dup-1", `{"content":"the same note"}`)).
-		delivers(note)
+		answers(settleToolCallAnswer("send", "call-dup-1", `{"content":"the same note"}`))
 	script.expect("model-entry", "the entry asks for the same note again", requestCarriesToolResult("call-dup-1")).
-		answers(settleToolCallAnswer("send", "call-dup-2", `{"content":"the same note"}`)).
-		delivers(note)
+		answers(settleToolCallAnswer("send", "call-dup-2", `{"content":"the same note"}`))
 	provider.decide = script.decide
 	sender := newRecordingSender()
 	host := bootIntegrityHost(t, provider, sender)
@@ -648,18 +644,18 @@ func checkIntegrityDuplicateStepFails(t *testing.T) {
 		t.Fatalf("violations = %v, want no missing step beside the duplicate step", violations)
 	}
 	bodies := sender.bodies()
-	if len(bodies) != 3 || bodies[0] != note || bodies[1] != note {
-		t.Fatalf("delivered bodies = %q, want the repeated action readable twice beside the raw failure notice", bodies)
+	if len(bodies) != 1 {
+		t.Fatalf("delivered bodies = %q, want the raw failure notice alone: a send reaches no channel", bodies)
 	}
-	if !strings.Contains(bodies[2], "duplicate") || !strings.Contains(bodies[2], "400") {
-		t.Fatalf("failure notice = %q, want the raw refusal of the duplicate step", bodies[2])
+	if !strings.Contains(bodies[0], "duplicate") || !strings.Contains(bodies[0], "400") {
+		t.Fatalf("failure notice = %q, want the raw refusal of the duplicate step", bodies[0])
 	}
 }
 
 // runIntegrityConsumer drives the boot assembly the way the product is entered:
 // one Host.Invoke turn at the entry address beside one turn at a declared
-// second agent. The sender is gated, so the check reads the send tool parked on
-// the outbound face before the model continues, and then maps every request the
+// second agent. The sender is gated, so the check reads the turn body parked on
+// the outbound face after the model settled it, and then maps every request the
 // provider served back to its declared identity and every action back to the
 // step that caused it.
 func runIntegrityConsumer(t *testing.T) {
@@ -674,8 +670,7 @@ func runIntegrityConsumer(t *testing.T) {
 	provider := newScriptedProvider(t)
 	script := newIntegrityScript()
 	script.expect("model-entry", "the entry sends its note", requestTail(entryInput)).
-		answers(settleToolCallAnswer("send", "call-entry-note", `{"content":"the entry note"}`)).
-		delivers(entryNote)
+		answers(settleToolCallAnswer("send", "call-entry-note", `{"content":"the entry note"}`))
 	script.expect("model-entry", "the entry ends on its final answer", requestCarriesToolResult("call-entry-note")).
 		answers(scriptedAnswerOf(entryFinal)).
 		delivers(entryFinal)
@@ -704,13 +699,13 @@ func runIntegrityConsumer(t *testing.T) {
 		driven <- integrityOutcome{turn: turn, err: err}
 	}()
 
-	gate.wait(t, "the entry note")
-	if requests := provider.servedRequests(); len(requests) != 1 {
-		t.Fatalf("model requests beside the parked tool = %d, want the one decision that issued it", len(requests))
+	gate.wait(t, entryFinal)
+	if requests := provider.servedRequests(); len(requests) != 2 {
+		t.Fatalf("model requests beside the parked turn body = %d, want the two entry decisions that produced it", len(requests))
 	}
 	actions := sender.actions()
-	if len(actions) != 1 || actions[0].body != entryNote || actions[0].target != addr || actions[0].confirmed() {
-		t.Fatalf("parked action = %+v, want the entry note addressed to %+v and still unconfirmed", actions, addr)
+	if len(actions) != 1 || actions[0].body != entryFinal || actions[0].target != addr || actions[0].confirmed() {
+		t.Fatalf("parked action = %+v, want the entry answer addressed to %+v and still unconfirmed", actions, addr)
 	}
 	gate.releaseAll()
 
@@ -752,10 +747,10 @@ func runIntegrityConsumer(t *testing.T) {
 	if declared := script.actionBodies(); !reflect.DeepEqual(declared, sender.bodies()) {
 		t.Fatalf("declared action bodies = %q, want the recorded %q", declared, sender.bodies())
 	}
-	if len(actions) != 2 {
-		t.Fatalf("outbound actions = %+v, want the two actions the entry steps declare beside none of the worker", actions)
+	if len(actions) != 1 {
+		t.Fatalf("outbound actions = %+v, want the one turn body the entry steps deliver beside none of the worker", actions)
 	}
-	for index, want := range []string{entryNote, entryFinal} {
+	for index, want := range []string{entryFinal} {
 		if actions[index].body != want || actions[index].target != addr || !actions[index].confirmed() {
 			t.Fatalf("action %d = %+v, want %q addressed to %+v and confirmed", index+1, actions[index], want, addr)
 		}

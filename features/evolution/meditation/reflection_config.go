@@ -1,9 +1,40 @@
 package meditation
 
-import "time"
+import (
+	"time"
+
+	"github.com/SpellingDragon/tagent/api/event"
+)
 
 // 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
 //
+// SessionQuery is the live-binding face of the runtime: the sessions currently bound
+// to one agent.
+//
+// 红线清单（2 条）：
+// MUST answer the complete addresses of the sessions actually bound to the agent.
+// MUST NOT invent a session or report an address the run has not established.
+type SessionQuery interface {
+	// ActiveSessions returns the complete addresses of the sessions bound to
+	// agentID, in a deterministic order.
+	ActiveSessions(agentID event.AgentID) []event.Address
+}
+
+// ReflectionDelivery is the delivery face one reflection turn reads its send calls
+// off: the declared deliver_to targets and the live-binding face each of them
+// resolves against.
+//
+// The reflection renders the sessions a target currently binds into the input it
+// injects, so the turn reads the exact agent and session pair a send call names
+// instead of guessing one. The delivery itself stays the turn's own decision: this
+// face only states where a body could go.
+type ReflectionDelivery struct {
+	// Targets are the declared deliver_to agent names, in declaration order.
+	Targets []string
+	// Sessions resolves the live sessions one target binds.
+	Sessions SessionQuery
+}
+
 // ReflectionLoop is the loop session one reflection reflects into: the observing
 // agent's own identity and namespace, and the session its input is injected into.
 type ReflectionLoop struct {
@@ -40,7 +71,8 @@ type ReflectionCadence struct {
 
 // ReflectionConfig is the assembly input of one reflecting agent's loop: the loop
 // session it reflects into, the face it observes and the bounds it reads it under,
-// its cadence and the static prompt its input carries.
+// its cadence, the static prompt its input carries and the delivery face its turn
+// reads send calls off.
 //
 // The prompt is text the reflection renders without spending a model call.
 type ReflectionConfig struct {
@@ -52,4 +84,7 @@ type ReflectionConfig struct {
 	Cadence ReflectionCadence
 	// Prompt is the static reflection prompt carried beside the digest.
 	Prompt string
+	// Delivery is the declared delivery face, whose live sessions are rendered
+	// into the input of every fired reflection.
+	Delivery ReflectionDelivery
 }

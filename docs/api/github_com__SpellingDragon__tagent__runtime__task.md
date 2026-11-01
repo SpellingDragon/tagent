@@ -53,6 +53,17 @@ commit and scheduling behaviour runs behind those ports in this package:
 the registry owns the life of a task, the manager owns its obligations, and the
 commit carrier records the transitions.
 
+This file holds the one criterion that answers whether a run is at rest: the
+work it accepted and has not finished, beside the notifications no consumption
+confirmed. The close, the restart and the report read this criterion and no
+other, so the two accounts of a run — the task chain and the consumption ledger
+— are judged once.
+
+The criterion is a read: it moves no status, clears no obligation and delivers
+nothing. Every set it unions is read through the account that owns it,
+and the commit sequence of that account fences the read so the sets belong to
+one instant.
+
 CONSTANTS
 
 const (
@@ -213,6 +224,19 @@ var ErrNoOwnerBinding = errors.New("task: no owner binding is attached to this r
 var ErrNoResultRecorder = errors.New("task: no result recorder is attached to this wrapper")
     ErrNoResultRecorder reports a wrapped call that could not record its result,
     because no recorder is attached to the wrapper.
+
+var ErrReactivationCancelled = errors.New("task: a cancelled task is re-entered by re-spawn under a fresh identity")
+    ErrReactivationCancelled reports a reactivation refused for a cancelled
+    task. A cancelled task is re-entered by re-spawning it under a fresh
+    identity: the cancellation is the caller's own decision, and re-entering the
+    same task in place would answer it with a round nobody asked for.
+
+var ErrReactivationFailed = errors.New("task: a failed task is re-entered by relaunch under a fresh identity")
+
+    ErrReactivationFailed reports a reactivation refused for a failed task.
+    A failed task is re-entered by relaunching it under a fresh identity:
+    its terminal fact is kept, and re-entering the same task in place would
+    overwrite an outcome the chain already holds.
 
 var ErrResumeCancelled = errors.New("task: a cancelled task is resumed by relaunch or re-spawn")
     ErrResumeCancelled reports a resume refused for a cancelled task.
@@ -942,12 +966,14 @@ func (m *MemoryManager) CloseInstance(ctx context.Context, instance event.Instan
 func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error
     Flush delivers the notifications of a task whose obligations are still open,
     each beside the routing its envelope froze, and retries the ones no target
-    has answered yet — including the ones a handoff moved beside the task. Only
-    an acceptance the target states explicitly clears an obligation; a refusal
-    keeps the obligation and records the reason beside that notification.
-    A notification whose frozen receiving instance is closed is retained by
-    name as ErrInstanceClosed: it is neither dropped nor delivered into a later
-    instance that reuses the address.
+    has answered yet — including the ones a handoff moved beside the task.
+    Only an acceptance the target states explicitly clears an obligation.
+    A refusal is a consumption result of its notification, carried by the
+    feedback fact the state account records: the obligation ends with it, so no
+    flush offers a refused notification again, and the reason stays beside the
+    notification on the diagnostic face. A notification whose frozen receiving
+    instance is closed is retained by name as ErrInstanceClosed: it is neither
+    dropped nor delivered into a later instance that reuses the address.
 
 func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target HandoffTarget) error
     Handoff moves a task's future notifications to the target address and the
@@ -973,6 +999,12 @@ func (m *MemoryManager) Obligations(ctx context.Context, taskID event.TaskID) (O
     Obligations reports the obligations the manager still holds for a task,
     each entry classified by the wait it is in beside the task and notification
     it points at.
+
+func (m *MemoryManager) Owed(ctx context.Context) ([]UnsettledNotice, error)
+    Owed reports the notifications the tasks of this manager still owe
+    a delivery for, read from the obligation index it keeps per task: a
+    notification a target explicitly accepted is settled, and one whose delivery
+    is still open is owed whatever the transport did with it.
 
 func (m *MemoryManager) RecordStop(ctx context.Context, evidence StopEvidence) error
     RecordStop records the executor's stop evidence beside one task. A report
@@ -1049,6 +1081,21 @@ func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.Task
     read would answer differently for a live task and for the task restored from
     its own chain. The chain-wide read is the one both faces agree on.
 
+func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (int64, error)
+    Reactivate re-enters a settled task as a new execution round and reports the
+    round it opened. The task keeps its identity: the round that opens is the
+    next one of the same task, so the notification its settlement carries is a
+    new identity rather than a repeat of the round before it.
+
+    Only a settled task is re-entered. A failed or a cancelled task holds a
+    terminal outcome that re-entering in place would overwrite, so each is
+    refused by name beside the relaunch or re-spawn that answers it; a task
+    whose round is still in flight is refused by name beside the round already
+    running. The transition is committed on the commit port with the revision
+    it applies to, so two reactivations racing on one task commit one round:
+    the first moves the task out of its settled status and the second is refused
+    by name.
+
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error)
     Register admits one task declaration and returns its admission receipt.
     A repeated admission of the same dedup key reports the task of the
@@ -1084,6 +1131,20 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
     flight refuses the declaration, and so does a cancelled task. A repeated
     declaration of the same input returns the fact already stored and opens no
     second obligation.
+
+    The channel belongs to the state machine and carries no model tool face:
+    the resume tool the model used to call is gone (design DEL-3, a tool member
+    the model never sees again). The send tool's re-entry of a task reaches
+    this state machine through Reactivate and the continuation table instead,
+    so the input channel stays beneath both without a declaration of its own.
+    It carries an event identity rather than free text, so a call naming no
+    identity opens no round.
+
+func (r *MemoryRegistry) Unfinished(ctx context.Context) ([]UnsettledWork, error)
+    Unfinished reports the work this registry holds with no terminal, read from
+    the index it keeps per task identity: a task that reached a terminal fact is
+    finished, and a task whose status is not determinable stays listed because
+    its outcome was never read.
 
 func (r *MemoryRegistry) Watch(ctx context.Context, at time.Time) []LogicalChange
     Watch identifies the logical status changes of every task the registry holds
@@ -1322,7 +1383,22 @@ type Registry interface {
     is cancelled.
 
 type RegistryOption func(*MemoryRegistry)
-    RegistryOption configures an in-memory task registry at construction.
+    RegistryOption configures one in-memory task registry beyond its commit
+    carrier and admission face.
+
+func WithActivity(report func()) RegistryOption
+    WithActivity attaches the pulse the registry reports each time it applied
+    a committed fact: a close waiting on the rest criterion reads the pulse
+    instead of polling the account for the movement it already made. The pulse
+    is a report, never a judgment.
+
+func WithClock(now func() time.Time) RegistryOption
+    WithClock sets the time source the admission and movement stamps of a task
+    are read from. A registry built beside no clock stamps its tasks with the
+    wall clock, so an unwired deployment behaves exactly as it did before this
+    seam existed; the source is injectable because a task's time to live is
+    a guarantee about instants, and a guarantee about instants is checked by
+    moving them rather than by waiting for them.
 
 func WithConcurrencyLimit(limit int) RegistryOption
     WithConcurrencyLimit caps how many tasks the registry holds non-terminal at
@@ -1519,6 +1595,93 @@ type UncertainProbe func(CommitRecord) bool
     UncertainProbe reports whether one commit attempt is observed as uncertain:
     the storage outcome of that attempt is unknown and is reconciled before any
     repeat.
+
+type Unsettled struct {
+	// Seq is the commit sequence the sets were read at.
+	Seq uint64
+	// Work lists the accepted work with no terminal, in task identity order.
+	Work []UnsettledWork
+	// Notices lists the notifications no consumption confirmed, in identity
+	// order.
+	Notices []UnsettledNotice
+	// Unjudged is the named reason the criterion was not judged, and empty when
+	// it was.
+	Unjudged string
+}
+    Unsettled is one evaluation of the rest criterion: the unsettled work,
+    the unconsumed notices, and the commit sequence the two sets were read at.
+
+    Unjudged is the named reason the criterion could not be read: an account
+    that refused the read, or a commit sequence that moved under every attempt,
+    leaves the run unjudged rather than rested.
+
+func ReadUnsettled(ctx context.Context, source UnsettledSource, fence UnsettledFence) Unsettled
+    ReadUnsettled evaluates the rest criterion under the commit sequence fence:
+    the sequence is read before the sets and again after them, and only a
+    sequence that held answers the sets as one snapshot of the account.
+    A sequence that moved is re-read, and one that never holds leaves the run
+    unjudged by name. A read beside no fence evaluates the sets once, for an
+    account whose own reads are already one snapshot.
+
+func (u Unsettled) Resting() bool
+    Resting reports whether a run is at rest: nothing it accepted is unfinished
+    and no notification of it stands unconsumed. A criterion that could not be
+    read is never at rest.
+
+type UnsettledFence func(ctx context.Context) uint64
+    UnsettledFence reports the commit sequence of the account a read stands at,
+    so the sets of one evaluation belong to one instant. A nil fence reads the
+    sets once and answers them as the account stands.
+
+type UnsettledNotice struct {
+	// Notice is the stable identity of the notification.
+	Notice Notice
+	// Address is the address the notification belongs to: the target of a notice
+	// a task still owes, or the site that accepted it into a mailbox.
+	Address event.Address
+	// Instance is the runtime instance that holds that address.
+	Instance event.InstanceID
+	// Source is the address the notification came from.
+	Source event.Address
+	// Reason is the readable reason the notification stands unconsumed.
+	Reason string
+}
+    UnsettledNotice is one notification no consumption confirmed: a notification
+    the task still owes a delivery for, or one accepted into a mailbox that was
+    never consumed.
+
+type UnsettledSource interface {
+	// Unfinished reports the tasks accepted and not terminal.
+	Unfinished(ctx context.Context) ([]UnsettledWork, error)
+	// Owed reports the notifications a task still owes a delivery for.
+	Owed(ctx context.Context) ([]UnsettledNotice, error)
+	// Unconsumed reports the notifications a mailbox accepted and no consumption
+	// confirmed.
+	Unconsumed(ctx context.Context) ([]UnsettledNotice, error)
+}
+    UnsettledSource is the authoritative account the rest criterion reads:
+    the task chain that answers the work it holds and the notifications it still
+    owes, and the mailbox that answers the notifications it accepted and nobody
+    consumed.
+
+    The redline list (3 rules): MUST answer each set from the account that owns
+    it, never from a copy kept beside it. MUST answer a set without a second
+    ledger of its own: the commit sequence that fences a read is handed to
+    ReadUnsettled by the account, not held here. MUST NOT answer a set from an
+    in-process shadow ledger the chain cannot compute back.
+
+type UnsettledWork struct {
+	// TaskID is the task the work runs under.
+	TaskID event.TaskID
+	// Status is the status the machine holds for it.
+	Status Status
+	// Owner is the invocation the work was admitted under.
+	Owner event.InvocationID
+	// Address is the address the work's notifications return to.
+	Address event.Address
+}
+    UnsettledWork is one accepted task that has not reached a terminal: the work
+    a run still owes an outcome for.
 
 type WrapOption func(*Wrapper)
     WrapOption configures a registration wrapper at construction.

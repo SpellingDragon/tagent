@@ -329,8 +329,8 @@ func TestWorkEndClearsNothingOnFailedDrain(t *testing.T) {
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer closeCancel()
 	report, err := host.Run().Close(closeCtx, agent.CloseRequest{Deadline: time.Now().Add(3 * time.Second)})
-	if !errors.Is(err, agent.ErrDrainUnsettled) || report.Drained {
-		t.Fatalf("close beside the parked model = (%+v, %v), want the drain reported unsettled", report, err)
+	if err != nil || report.Outcome != agent.CloseCut || report.Drained {
+		t.Fatalf("close beside the parked model = (%+v, %v), want the close cut with the work still on the chain", report, err)
 	}
 
 	kept := attentionOfKind(attentionDetails(t, ctx, host, addr), task.AttentionKindApproval)

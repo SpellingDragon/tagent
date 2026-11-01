@@ -5,7 +5,7 @@
 ## 30 秒看懂
 
 - **问题**：长会话 Agent 上下文膨胀、崩溃失忆、外部副作用重复、结果发送途中崩溃永久漏送。
-- **做法**：事件链唯一事实源；每会话一个常驻消费循环（慢工具不挡新消息、同会话合批、一问一答即闭合）；三龄段折叠（判定/执行各成事实）＋ `[evt_key]` 票据；tmux 重启重挂；**先交接后销账**的交付义务（崩溃后已生成结果必达，容忍恰一次重投）；责任统一在 task（受理/结算/清偿），执行细节留给适配器；事件完整性门禁。
+- **做法**：事件链唯一事实源；每 agent 地址一个常驻消费实例（慢工具不挡新消息、同会话合批、一问一答即闭合）；三龄段折叠（判定/执行各成事实）＋ `[evt_key]` 票据；tmux 重启重挂；**先交接后销账**的交付义务（崩溃后已生成结果必达，容忍恰一次重投）；责任统一在 task（受理/结算/清偿），执行细节留给适配器；事件完整性门禁。
 
 一分钟版本（问题、架构图、三个关键机制、测试证据、边界）见 [docs/PROJECT.md](docs/PROJECT.md)；十分钟机制导览见 [docs/wiki/mechanism-tour.md](docs/wiki/mechanism-tour.md)。
 
@@ -63,7 +63,7 @@ flowchart TB
 
     CHAIN --> PIPE
     MED -->|"水位成熟"| REFLECT["反思回合<br/>独立会话"]
-    REFLECT -->|"deliver_summary<br/>模型显式决策"| CHAIN
+    REFLECT -->|"send 跨会话<br/>模型显式决策"| CHAIN
     LEASE -->|"replacement 事实"| SWAP["lease 换版本<br/>在途请求不换"]
     FOLD -->|"compress.request"| CRC
     CRC -->|"compress.product"| PROJ[("投影折叠<br/>中段/老段")]
@@ -87,7 +87,7 @@ flowchart TB
 
 ### 消费循环与事件驱动
 
-消费不是一个入口一次驱动，而是一个地址一个常驻循环：每个 `(agent, session)` 地址一条消费 goroutine（`runtime/agent/consumer.go` 的 `Consumer.run`），等唤醒 → 拉取已到达的事件 → 按事件类型分派 → 有驱动事件时调用一次模型 → 回到拉取。入口只提交事实并唤醒它——`Host.Invoke` 的用户地址走 `invokeConsumed`（提交输入事实 → `Wake` → 等消费了自己输入的那一段闭合），通知/结算走 `fireNoticeTurn` 的消费分支（`commitNoticeMaterial` → `Wake` → 等段 → settle 记账）。直驱路径（`Loop.Drive` + `awaitSettled`）保留给 `Run.Invoke`、`Run.InjectEvent`（冥想注入）与测试。
+消费不是一个入口一次驱动，而是一个地址一个常驻实例：每个 `(agent, session)` 地址一条消费 goroutine（`runtime/agent/consumer.go` 的 `Consumers.Ensure`），等唤醒 → 拉取已到达的事件 → 按事件类型分派 → 有驱动事件时调用一次模型 → 回到拉取。实例面按材料自报的完整地址装配，入口 agent 之外也挂——委派的会址 `<调用方会话>#sub:<原生调用号>` 就靠它得到自己的驱动者；同一地址重复 Ensure 回已挂的实例，一个地址绝不跑两个驱动者。入口只有一条路径：`Host.Invoke` 提交输入事实 → `Ensure` → `Wake` → `WaitAnswer`（`invokeConsumed`），通知/结算走 `fireNoticeTurn` 的消费分支（`commitNoticeMaterial` → `Wake` → 等段 → settle 记账）。直驱路径（`Loop.Drive` + `awaitSettled`，多轮同步等齐再返回）只留给 `Run.Invoke`、`Run.InjectEvent`（冥想注入）、一次投递落到空闲目标的那一轮与测试。
 
 三种边界分开：**批次**是这一轮拉到了哪些事件；**模型请求**是模型这一次实际看到了哪些上下文；**turn 是段**——哪些已完成的输入、过程与结论组成一个可折叠段。一个段可跨多个批次与多个模型请求，一个工具任务可跨多个段。
 
@@ -111,6 +111,8 @@ flowchart LR
 ```
 
 段的范围身份是 `<session>#cN`，跨工具结果与新输入续轮：已到的结果由 `harvest` 非阻塞配成观察，没到的不等。投递统一走段闭合的回调（`SegmentDelivery` → `assembly/host.go` `deliverClosedSegment` → `deliverFresh`），无论这段是用户入口还是通知驱动出来的——一条回答只出一次。重启不另起驱动者：从链上最后一条 `agent_output` 定位恢复位置（`lastOutputOf`）。
+
+委派也走这条链：一次 sub-agent 调用铸自己的会址 `<调用方会话>#sub:<原生调用号>`，会址有自己的常驻实例，发起方回合照常继续，结果以 settle 通知回流发起方的责任范围。
 
 ## 会话上下文：滚动边界＋三龄段折叠
 
@@ -168,7 +170,8 @@ task 层只回答四个问题——接受了什么工作？谁负责推进到明
 | **语义召回** | embedding 混合检索＋按 key 回捞＋血统追踪 | `memory.engine:` 段 |
 | **治理审批** | 调用门（风险分级/审批 Hold/TTL）＋发布门 | `governance:` 段，critical 恒审批 |
 | **投递审核** | 发送插件唯一出口，投递前交审核（内容/血统/目标）；hold 批准补投、拒绝留审计 | DeliveryRuler，默认 allow |
-| **委派** | 声明面子 agent＋`call_subagent` 运行时组装＋settle 通知回合回传结果（受理回执=裸 `ok`） | agent 引用＋显式源 |
+| **投递账目** | 两族投递（agent 主动 send 落 `external_input`、框架结算落 `task_settled`）事实类型分立、却盖同一套四键（`delivery.target`/`identity`/`receipt`/`source`）；`Run.DeliveryLedger()` 按源事件／目标／投递身份回读，一条身份一条记录 | 无（内置读面） |
+| **委派** | 声明面子 agent＋`call_subagent` 运行时组装；执行在 sub 专属会址的常驻实例上（发起方不阻塞，main–sub 是事件管线），skills/MCP 经绑定回流；settle 通知回合把结果回传发起方（受理回执=裸 `ok`） | agent 引用＋显式源 |
 | **per-agent 调优** | 思考开关/强度/温度/看门狗轮数各自独立 | 各 agent 段内声明 |
 | **命令执行** | tmux Executor＋三态监控；中间态仅落审计事实（`exec-state:`），不进模型 | `{ kind: tool, id: exec }` |
 | **审批闭环** | critical 自动 Hold→登记审批簿→微信下发→批准放行；声明式风险规则 | `governance.risk_rules` |

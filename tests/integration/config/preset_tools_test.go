@@ -101,7 +101,7 @@ func TestPresetToolsAssemble(t *testing.T) {
 		t.Fatalf("assemble the preset declaration: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := run.Close(context.Background(), agent.CloseRequest{}); err != nil {
+		if _, err := run.Close(context.Background(), agent.CloseRequest{Timeout: time.Now().Add(200 * time.Millisecond)}); err != nil {
 			t.Errorf("Close: %v", err)
 		}
 	})

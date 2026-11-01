@@ -73,8 +73,10 @@ type MemoryStore struct {
 	deliveries   map[event.TaskID]task.HandoffTarget
 	accepted     map[noticeKey]acceptedNotice
 	attempts     map[noticeKey]SettleAttempt
+	refusals     map[noticeKey]Rejection
 	consumptions durableConsumption
 	attemptsLog  attemptRecorder
+	rejections   rejectionRecorder
 }
 
 // MemoryStore satisfies the Store face.
@@ -86,6 +88,9 @@ var _ Store = (*MemoryStore)(nil)
 // every completed logical consumption behind its own sync barrier before the
 // mailbox confirms the entry, and serves the attempt record of every follow-up
 // turn beside it; a store beside none keeps both in its own bookkeeping alone.
+// The same account receives the feedback fact of every notification a target
+// refused, so a restart over the same log reads the refusals the stopped process
+// landed; a store beside none keeps its refusals in its own bookkeeping alone.
 func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *MemoryStore {
 	store := &MemoryStore{
 		authority:  authority,
@@ -94,10 +99,12 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
 		deliveries: map[event.TaskID]task.HandoffTarget{},
 		accepted:   map[noticeKey]acceptedNotice{},
 		attempts:   map[noticeKey]SettleAttempt{},
+		refusals:   map[noticeKey]Rejection{},
 	}
 	if len(consumptions) > 0 && consumptions[0] != nil {
 		store.consumptions = consumptions[0]
 		store.attemptsLog = consumptions[0]
+		store.rejections = consumptions[0]
 	}
 	return store
 }
@@ -220,6 +227,66 @@ type WorkSeat struct {
 	Notice task.Notice
 	// Claim is the claim state the entry stands at.
 	Claim ClaimState
+}
+
+// Rejections reports the feedback fact of every notification a target refused,
+// across the durable account this store was opened over and the refusals of this
+// process, ordered by task, round, kind and sequence so the same account always
+// answers in the same order. A refusal names the notification it answered, so a
+// reader decides which notification is answered and which one is still owed.
+func (m *MemoryStore) Rejections() []Rejection {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	held := make(map[noticeKey]Rejection, len(m.refusals))
+	for key, rejection := range m.refusals {
+		held[key] = rejection
+	}
+	m.mu.Unlock()
+	if m.rejections != nil {
+		for _, rejection := range m.rejections.refusals() {
+			held[noticeKeyOf(rejection.Notice)] = rejection
+		}
+	}
+	refusals := make([]Rejection, 0, len(held))
+	for _, rejection := range held {
+		refusals = append(refusals, rejection)
+	}
+	sort.Slice(refusals, func(i, j int) bool {
+		left, right := refusals[i].Notice, refusals[j].Notice
+		if left.TaskID != right.TaskID {
+			return left.TaskID < right.TaskID
+		}
+		if left.Round != right.Round {
+			return left.Round < right.Round
+		}
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		return left.Seq < right.Seq
+	})
+	return refusals
+}
+
+// Refused reports whether one notification already carries a refusal: the
+// refusal is that notification's consumption result, so the rest criterion reads
+// it instead of waiting on a delivery the target will never accept.
+func (m *MemoryStore) Refused(notice task.Notice) bool {
+	if m == nil || notice.TaskID == "" {
+		return false
+	}
+	m.mu.Lock()
+	_, held := m.refusals[noticeKeyOf(notice)]
+	m.mu.Unlock()
+	if held {
+		return true
+	}
+	if m.rejections == nil {
+		return false
+	}
+	_, held = m.rejections.refusalOf(notice)
+	return held
 }
 
 // Unconsumed reports every mailbox entry whose consumption has not completed,

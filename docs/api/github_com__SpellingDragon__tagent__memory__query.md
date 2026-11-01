@@ -94,6 +94,14 @@ var DetailRetired = DetailState{NoticePhase: NoticePhaseConsumed}
     invocation keeps its own decision reading, so the two are never collapsed
     into one shared label.
 
+var ErrAttentionUnwired = errors.New("query: the inventory source carries no attention read face")
+
+    ErrAttentionUnwired and the attention dimension beside it: the dimension
+    is projected from an attention read face the port may wire beside its three
+    readings, and a port that wires none answers the dimension by name instead
+    of as an empty presence. The dimension itself keeps no state: every question
+    it lists is read from the owner that holds it at read time.
+
 var ErrSourceUnreadable = errors.New("query: an inventory source could not be read")
     ErrSourceUnreadable reports an inventory read whose source could not be
     read, so the dimension it feeds cannot be answered. It is the class every
@@ -181,6 +189,49 @@ type AgentState struct {
     AgentState is the agent reading of one detail state: the three readings of
     one agent beside each other. They overlap on purpose and are never added
     together into one "running" number.
+
+type AttentionPhase string
+    AttentionPhase is the phase one attention question stands in, read off the
+    attention facts of its kind: a question nobody answered or cleared and whose
+    validity has not run out is in the question phase, and a question whose
+    validity ran out is in the expired phase. The vocabulary names the reading
+    the owner reports; the projection adds no phase of its own and computes no
+    total across phases.
+
+    The answered and cleared phases name the two closings the attention chain
+    records for a question. A question closed by one of them leaves the presence
+    the read face answers at read time, so the projection reports that closing
+    as the identity leaving the snapshot and as the delete increment of Follow
+    rather than as one more entry carrying the closed phase.
+
+const (
+	// AttentionPhaseQuestion names a question still awaiting an answer.
+	AttentionPhaseQuestion AttentionPhase = "question"
+	// AttentionPhaseAnswered names a question an answer closed.
+	AttentionPhaseAnswered AttentionPhase = "answered"
+	// AttentionPhaseExpired names a question whose validity ran out.
+	AttentionPhaseExpired AttentionPhase = "expired"
+	// AttentionPhaseCleared names a question a work-end clearance closed.
+	AttentionPhaseCleared AttentionPhase = "cleared"
+)
+type AttentionReading interface {
+	// AttentionQuestions reads every attention question still present at read
+	// time: the questions no answer and no clearance closed and whose validity
+	// has not run out, in whatever order the owners answer them.
+	AttentionQuestions(ctx context.Context) ([]task.AttentionQuestion, error)
+}
+    AttentionReading is the optional read face an assembly may wire beside the
+    three readings of the port: the attention questions the owners still hold as
+    questions at read time, each in the typed form the attention chain answers
+    it in — the kind it was asked under, the target it was put to, the lineage
+    it came from and the validity it was filed under. It is optional on purpose:
+    the six dimensions of the inventory keep answering from the three readings
+    alone, and a port that wires no attention face refuses the attention
+    dimension by name instead of answering an empty presence.
+
+    红线清单（4 条）： MUST 每次调用从持有该问题的 owner 现读，逐项如实返回或具名失败 MUST 以提问时的
+    kind、target、lineage 作为身份原样返回，不合成第二个身份 MUST NOT 在本题面补造 question 或 clearance
+    事实：notice 与 summary 的在场是读时推导 MUST NOT 记录、缓存或自行过期任何问题：过期与清除由持有该事实的读面判定
 
 type AuthorizationScope struct {
 	// Agents lists the agent identities the scope covers.
@@ -298,6 +349,8 @@ type DetailState struct {
 	// Holder carries the registration of a lease object as its holder signed
 	// it, the release reference included.
 	Holder state.LeaseRef
+
+	// Has unexported fields.
 }
     DetailState is the state of one object as the projection reads it.
     The reading is per kind and carries every real reading of that kind instead
@@ -306,11 +359,17 @@ type DetailState struct {
     independent readings one agent may carry all at once — a session reads as
     its mailbox readings, an invocation reads as the decision currently holding
     its execution slot, a task reads as its own task status, a notice reads as
-    its delivery phase and a lease reads as the registration its holder signed.
-    Only the fields belonging to the kind of the object carry a reading;
-    every other field stays zero and is never read as a second vocabulary for
-    that kind. The states are kept apart and never collapse into one aggregate
-    "running" reading.
+    its delivery phase, a lease reads as the registration its holder signed and
+    an attention reads as the phase the question stands in. Only the fields
+    belonging to the kind of the object carry a reading; every other field stays
+    zero and is never read as a second vocabulary for that kind. The states are
+    kept apart and never collapse into one aggregate "running" reading.
+
+func (s DetailState) AttentionPhase() AttentionPhase
+    AttentionPhase answers the phase the attention object of this detail stands
+    in at the revision the detail was read at. A detail of another kind answers
+    the empty phase, so a reader telling one phase from another reads the phase
+    itself and never the presence of an entry.
 
 type Gap struct {
 	// From is the first missing revision of the range.
@@ -384,6 +443,13 @@ func (inv *Inventory) Agents(ctx context.Context) ([]AgentEntry, error)
     identity with its three readings kept apart. An unreadable source refuses
     the dimension by name instead of answering an empty one.
 
+func (inv *Inventory) Attention(ctx context.Context) ([]task.AttentionQuestion, error)
+    Attention reads the attention dimension alone and returns the questions
+    the read face still holds as questions at read time, in the stable identity
+    order of the dimension. A port that wires no attention face refuses the
+    dimension beside ErrAttentionUnwired instead of answering an empty presence
+    that would read as "nothing is waiting".
+
 func (inv *Inventory) Invocations(ctx context.Context) ([]InvocationEntry, error)
     Invocations reads the invocation dimension alone and returns one entry
     per responsibility range beside its active decision. An unreadable source
@@ -445,6 +511,11 @@ type InventoryView struct {
 
 func (v InventoryView) Agents() []AgentEntry
     Agents returns a copy of the agent detail of this view.
+
+func (v InventoryView) Attention() []task.AttentionQuestion
+    Attention returns a copy of the attention detail of this view: the questions
+    the read face still held as questions at the reading, each in the typed form
+    its owner answered in.
 
 func (v InventoryView) Counts() InventoryCounts
     Counts derives the per-dimension readings of this view from its own detail
@@ -588,6 +659,10 @@ const (
 	ObjectNotice ObjectKind = "notice"
 	// ObjectLease is a resource lease object.
 	ObjectLease ObjectKind = "lease"
+	// ObjectAttention is an attention object: one question the owners still
+	// hold as a question at read time, read through the attention read face
+	// beside the three readings of the port.
+	ObjectAttention ObjectKind = "attention"
 )
 type ObjectRef struct {
 	// Kind names the kind of object the reference describes.
@@ -607,6 +682,8 @@ type ObjectRef struct {
 	Notice task.Notice
 	// Lease names a resource lease object; it is empty for another kind.
 	Lease state.LeaseRef
+
+	// Has unexported fields.
 }
     ObjectRef names one object of the projection without carrying its detail:
     the kind of object it is together with the identity that names it.
@@ -622,6 +699,8 @@ type ObjectRef struct {
       - an invocation is named by InvocationID, a task by TaskID, a lease by
         Lease.Kind and Lease.Key
       - a notice is named by the TaskID, Round, Kind and Seq of Notice
+      - an attention is named by the Kind, Target and Lineage of Attention;
+        the validity it was filed under is content beside that identity
       - every other field of a reference is content beside that identity and
         takes no part in equality
       - two agent references that differ only in SessionID name one agent,
@@ -630,6 +709,14 @@ type ObjectRef struct {
         by field: a key of the whole struct splits one object into several
       - the stable identity order of a reading sorts by this identity, kinds
         first and then the identity fields of the kind (see DetailSource.Order)
+
+func (r ObjectRef) AttentionQuestion() task.AttentionQuestion
+    AttentionQuestion answers the attention object this reference names: the
+    question exactly as the owner that holds it answers it, so a reader telling
+    one attention object from another reads the kind it was asked under, the
+    target it was put to and the lineage it came from, and never the identity
+    of another kind's object. A reference that names no attention object answers
+    the zero question.
 
 type ObligationProgress struct {
 	// Obligation is the blocked obligation as its owner reports it.

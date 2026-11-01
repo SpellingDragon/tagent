@@ -14,6 +14,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/plugin"
 	"github.com/SpellingDragon/tagent/assembly"
 	"github.com/SpellingDragon/tagent/memory/query"
+	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/runtime/task/approval"
 )
 
@@ -156,4 +157,93 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 				detail.Ref.Notice.TaskID, detail.State.NoticePhase)
 		}
 	}
+}
+
+// TestAttentionNoticeQuestionClearsOnWorkEnd pins the notice question leaving the attention presence once the work ends.
+//
+// - the delegated task settles and its notification stands on the chain unconsumed
+// - the attention dimension reports that notification as one notice question before the close
+// - the close drains the work, and the same read reports no notice question afterwards
+// - the assertion reads the ObjectAttention dimension, not the ObjectNotice phase the merge line drains
+//
+// 契约: docs/wiki/agent/event-flow.md#projection-lifecycle
+func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
+	host, addr := bootUnconsumedNoticeScene(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	before := attentionOfKind(attentionDetails(t, ctx, host, addr), task.AttentionKindNotice)
+	if len(before) != 1 {
+		t.Fatalf("notice questions before the close = %d, want the one unconsumed notification the chain holds", len(before))
+	}
+	if phase := before[0].State.AttentionPhase(); phase != query.AttentionPhaseQuestion {
+		t.Fatalf("notice question phase before the close = %q, want the question phase", phase)
+	}
+
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	if err := host.Close(closeCtx); err != nil {
+		t.Fatalf("drain the work to its end: %v", err)
+	}
+
+	after := attentionOfKind(attentionDetails(t, ctx, host, addr), task.AttentionKindNotice)
+	if len(after) != 0 {
+		t.Fatalf("notice questions after the drained close = %d, want none: a question the work ended on is gone from the attention presence", len(after))
+	}
+}
+
+// bootUnconsumedNoticeScene boots the one delegated scene the notice anchors read: an
+// entry agent delegating to a worker through the public boot, one turn that settles
+// the delegated task, and a wait for the notification material to stand on the chain
+// with nobody consuming it. It answers the host and the entry address the anchors
+// read, so a scene is opened the way a deployment opens it instead of by hand.
+func bootUnconsumedNoticeScene(t *testing.T) (*assembly.Host, event.Address) {
+	t.Helper()
+	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
+	t.Setenv("TAGENT_HTTP_PORT", "0")
+	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
+
+	provider := newScriptedProvider(t)
+	provider.answer = func(index int) string {
+		switch index {
+		case 0:
+			return wakeDelegate("call-attention-worker", "compute the anchor total")
+		case 1:
+			return scriptedAnswerOf("the settled worker reports the anchor body")
+		case 2:
+			return scriptedAnswerOf("the entry closed over its delegation")
+		default:
+			return scriptedRefusalAnswer("the follow-up model call refused")
+		}
+	}
+	root := t.TempDir()
+	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
+	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry",
+		"  user:\n"+
+			"    model: model-entry\n"+
+			"    max_tokens: 32000\n"+
+			"    tools:\n"+
+			"      - { kind: agent, agent: worker }\n"+
+			"  worker:\n"+
+			"    model: model-entry\n"))
+	sender := &deliveryRecorder{}
+	host, err := assembly.Boot(configPath, assembly.WithSender(sender))
+	if err != nil {
+		t.Fatalf("boot the host: %v", err)
+	}
+	invokeCtx, invokeCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer invokeCancel()
+	addr := event.Address{AgentID: "user", SessionID: "session-attention-work-end"}
+	if turn := invokeScriptedTurn(t, invokeCtx, host, string(addr.SessionID)); turn.Terminal != model.KindCompleted {
+		t.Fatalf("the entry turn terminal = %v, want the turn to close after its delegation", turn.Terminal)
+	}
+	waitForSettle(t, "the notice material to land on the chain", func() bool {
+		for _, fact := range host.Run().SessionFacts(addr) {
+			if fact.Type == event.TypeFeedback && fact.Meta[event.MetaKeyTriggerSource] == "task" {
+				return true
+			}
+		}
+		return false
+	})
+	return host, addr
 }
