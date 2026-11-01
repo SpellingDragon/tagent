@@ -300,20 +300,31 @@ func (a *ApprovalManager) AttentionPresence(ctx context.Context) []task.Attentio
 // oldest first, for an approval entry to display and answer. The set is the
 // presence the attention chain holds, so the waiting face and a presence read
 // name the same questions.
+// - The evidence map is keyed by the identity each caller asked under, and a
+// second registration of one standing pair aliases the one request it read back,
+// so the map can name one approval identity twice. Presence is a set of
+// questions, so the read reports each approval identity once: a repeated
+// registration widens the alias, never the waiting set, and two requests stay two
+// entries because their identities differ.
 func (a *ApprovalManager) Pending() []*ApprovalRequest {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	ctx := context.Background()
 	facts := a.factsLocked(ctx)
 	now := a.now().UnixMilli()
+	seen := make(map[string]struct{}, len(a.evidence))
 	out := make([]*ApprovalRequest, 0, len(a.evidence))
 	for _, held := range a.evidence {
+		if _, reported := seen[held.ID]; reported {
+			continue
+		}
 		if held.ExpiresMs > 0 && now >= held.ExpiresMs {
 			continue
 		}
 		if !facts.present(held.ToolName, held.ArgsDigest, held.ID) {
 			continue
 		}
+		seen[held.ID] = struct{}{}
 		snapshot := *held
 		snapshot.Status = ApprovalPending
 		snapshot.DecidedBy = ""

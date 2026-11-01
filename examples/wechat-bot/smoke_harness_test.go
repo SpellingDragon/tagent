@@ -266,6 +266,23 @@ func smokeApprovalDocument(c *smokeConfig) string {
 	return patched
 }
 
+// smokeApprovalSendDocument 只给默认文档加一条 critical 风险规则，不给入口重新
+// 声明 send：D6 之后 send 是冥想 agent 唯一的通信工具，跨会话投递面属于声明
+// meditation 的 agent，入口以自己名义投递会被具名拒绝。风险规则按工具名分级、
+// 不分 agent，所以这一条恰好扣留冥想自己发出的投递，审批练刀因此由冥想面发起。
+func smokeApprovalSendDocument(c *smokeConfig) string {
+	base := *c
+	base.Doc = nil
+	document := base.document()
+	ttl := "  approval_ttl_minutes: 30\n"
+	patched := strings.Replace(document, ttl,
+		ttl+"  risk_rules:\n    - { tool: send, level: critical }\n", 1)
+	if !strings.Contains(patched, "risk_rules") {
+		panic("smoke: the rendered document carries no governance block to declare the risk rule in")
+	}
+	return patched
+}
+
 // smokeModelRequest 是脚本模型收到的一次请求：模型名、它读到的消息与它被授予的
 // 工具面（工具名）。
 type smokeModelRequest struct {

@@ -169,8 +169,14 @@ func (a *ApprovalManager) Lookup(tool, argsDigest string) *ApprovalRequest
 func (a *ApprovalManager) Pending() []*ApprovalRequest
     Pending reports the requests still awaiting a ruling and within their
     validity, oldest first, for an approval entry to display and answer.
-    The set is the presence the attention chain holds, so the waiting face and a
-    presence read name the same questions.
+    The set is the presence the attention chain holds, so the waiting face and
+    a presence read name the same questions. - The evidence map is keyed by the
+    identity each caller asked under, and a second registration of one standing
+    pair aliases the one request it read back, so the map can name one approval
+    identity twice. Presence is a set of questions, so the read reports each
+    approval identity once: a repeated registration widens the alias, never the
+    waiting set, and two requests stay two entries because their identities
+    differ.
 
 func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs []byte, risk plugin.RiskLevel, rule, reason string) (*ApprovalRequest, error)
     Request registers one pending approval request under the approval identity

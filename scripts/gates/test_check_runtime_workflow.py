@@ -247,6 +247,7 @@ class WorkflowTest(unittest.TestCase):
 
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 PREFLIGHT = REPO / "scripts" / "gates" / "preflight.sh"
+RACE_SCRIPT = REPO / "scripts" / "gates" / "race_check.sh"
 
 EVENT_CONTRACT = "golden/runtime/event_integrity_scenarios.json"
 EVENT_PRODUCER_JOBS = ("event-integrity-short",
@@ -632,6 +633,32 @@ def assert_race_covers_affected_packages(workflow):
         raise AssertionError(
             "race package set is missing {}: the set is mapped from every modified "
             "product package and formal test package, not just host/history".format(missing))
+
+
+# The no-Go-files skip is pinned as script text because it is a behaviour of the
+# gate ci.yml calls, not of the workflow itself: the declared set opens with `.`,
+# the module root carries no Go files (the composition root is its own directory),
+# and `go test -race .` answers `[setup failed]` beside "no Go files", which the
+# classifier can only report as a plain failure. The needles keep the skip exactly
+# as narrow as the fix made it — the exact go list answer is skipped, a misspelt
+# package still fails the job, and a set that keeps no package is refused rather
+# than passing vacuously.
+RACE_SKIP_NEEDLES = (
+    'if out=$(go list "$pattern" 2>&1); then',
+    '[[ "$out" == *"no Go files in "* ]]',
+    'the directory carries no Go files',
+    'no package in the declared set carries Go files',
+)
+
+
+def assert_race_skip_is_narrow(script):
+    for needle in RACE_SKIP_NEEDLES:
+        if needle not in script:
+            raise AssertionError(
+                "race_check.sh no longer skips the no-Go-files entry ({!r} is gone): "
+                "ci.yml declares `.` in the race set, so the whole job would fail with "
+                "`[setup failed]`, and a blanket skip would hide a misspelt package's "
+                "failure or pass a set that proves nothing".format(needle))
 
 
 def assert_soak_command(workflow):
@@ -1060,6 +1087,27 @@ class CiWorkflowTest(unittest.TestCase):
                                 "./tests/integration/history/..."]))
         with self.assertRaises(AssertionError):
             assert_race_covers_affected_packages(mutated)
+
+    def test_race_script_skips_the_no_go_files_root_entry(self):
+        assert_race_skip_is_narrow(RACE_SCRIPT.read_text(encoding="utf-8"))
+        # `.` stays declared in the workflow set; the script turns that entry into a
+        # printed skip instead of a red job, so the detection surface is unchanged.
+        self.assertIn(".", RACE_PACKAGES)
+
+    def test_negative_control_widening_or_dropping_the_skip_turns_check_red(self):
+        script = RACE_SCRIPT.read_text(encoding="utf-8")
+        for needle in RACE_SKIP_NEEDLES:
+            with self.subTest(needle=needle):
+                mutated = script.replace(needle, "true")
+                self.assertNotEqual(mutated, script)
+                with self.assertRaises(AssertionError):
+                    assert_race_skip_is_narrow(mutated)
+        # Dropping the no-Go-files answer entirely is the original CI bug: the root
+        # entry must be skippABLE, so its disappearance has to turn this red too.
+        dropped = script.replace('no Go files in ', 'none')
+        self.assertNotEqual(dropped, script)
+        with self.assertRaises(AssertionError):
+            assert_race_skip_is_narrow(dropped)
 
     def test_negative_control_preflight_opt_in_long_turns_check_red(self):
         guarded = self.preflight.replace(

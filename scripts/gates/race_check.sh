@@ -8,6 +8,10 @@
 #     command itself failed (the old script scanned for race text only and
 #     printed "OK" for `race_check.sh ./no-such-package`).
 #   - "no DATA RACE text" alone is NOT success.
+#   - A declared pattern that expands to no Go package is skipped with a printed
+#     note, because the module root carries no Go files; any OTHER go list failure
+#     stays red, and a set left with no Go package at all is refused rather than
+#     passing vacuously.
 #   - Upstream-race waivers apply ONLY when ALL of: the run failed; every
 #     DATA RACE report's top offending frame is inside a registered upstream
 #     module (trpc-agent-go, trpc-mcp-go); the frame matches the registered
@@ -124,6 +128,38 @@ if [ -n "${RACE_CHECK_CLASSIFY_ONLY:-}" ]; then
 	race_check_classify "${RACE_CHECK_FAKE_EXIT:-1}"
 	exit $?
 fi
+
+# race_keep_packages drops the patterns that expand to no Go package and keeps the
+# rest, in the declared order. The root-module entry of the ci.yml set is the case
+# this exists for: the module root itself carries no Go files (the composition root
+# is its own directory), and `go test -race .` answers `[setup failed]` beside
+# "no Go files", which the classifier could only report as a plain failure. The
+# skip is NARROWER than "go list failed": only the exact no-Go-files answer is
+# skipped, so a misspelt or missing package still turns the gate red, and a set
+# that keeps no package at all is refused instead of passing vacuously.
+race_keep_packages() {
+	local pattern out
+	local kept=()
+	for pattern in "$@"; do
+		if out=$(go list "$pattern" 2>&1); then
+			kept+=("$pattern")
+			continue
+		fi
+		if [[ "$out" == *"no Go files in "* ]]; then
+			echo "race_check: skip $pattern (the directory carries no Go files)" >&2
+			continue
+		fi
+		echo "race_check: FAIL — go list $pattern: $out" >&2
+		return 1
+	done
+	if [ ${#kept[@]} -eq 0 ]; then
+		echo "race_check: FAIL — no package in the declared set carries Go files, so the gate would prove nothing" >&2
+		return 1
+	fi
+	pkgs=("${kept[@]}")
+}
+
+race_keep_packages "${pkgs[@]}" || exit 1
 
 # -p 1 keeps PACKAGE binaries from running at the same time: the tmux-backed
 # suites share the machine's default tmux server, and their setup harvests orphan

@@ -1128,18 +1128,25 @@ func bootSmokeIntegrityHost(t *testing.T, interval, minGap string) *smokeIntegri
 	return bootSmokeIntegrityHostOver(t, interval, minGap, nil)
 }
 
-// bootSmokeApprovalHost 装配审批类场景的宿主：文档重新声明入口的 send 并把它
-// 标成 critical，审批通道（tool+digest/TTL/重试执行）因此有一个 critical 工具
-// 来练。演练的验收面是“扣留 -> 裁决 -> 重试恰执行一次”：风险规则按工具名
-// 分级、不分 agent，所以这份夹具只能给不走投递的场景用。
-func bootSmokeApprovalHost(t *testing.T, interval, minGap string) *smokeIntegrityHost {
+// bootSmokeApprovalHost 装配审批类场景的宿主：文档只把 send 标成 critical，不给
+// 入口声明 send——跨会话投递面属于声明 meditation 的冥想 agent（D6），所以这次
+// 练刀由冥想面自己发出，入口一次都不发跨会话 send 调用。冥想面的响应由 relay
+// 接管，交付次数因此由场景放行，而不是看节奏碰运气。
+func bootSmokeApprovalHost(t *testing.T, interval, minGap string, relay *smokeApprovalRelay) *smokeIntegrityHost {
 	t.Helper()
-	return bootSmokeIntegrityHostOver(t, interval, minGap, smokeApprovalDocument)
+	return bootSmokeIntegrityHostScripted(t, interval, minGap, smokeApprovalSendDocument, relay.script)
 }
 
 // bootSmokeIntegrityHostOver 装配一段场景的宿主：doc 决定这份文档是否额外
 // 声明审批夹具（nil = 默认文档）。
 func bootSmokeIntegrityHostOver(t *testing.T, interval, minGap string, doc func(*smokeConfig) string) *smokeIntegrityHost {
+	t.Helper()
+	return bootSmokeIntegrityHostScripted(t, interval, minGap, doc, nil)
+}
+
+// bootSmokeIntegrityHostScripted 在文档之外再接管冥想面的脚本：审批场景的冥想
+// 只在场景放行时投递，交付次数因此可断言。
+func bootSmokeIntegrityHostScripted(t *testing.T, interval, minGap string, doc func(*smokeConfig) string, script func(http.ResponseWriter, int, string, []smokeModelMessage) bool) *smokeIntegrityHost {
 	t.Helper()
 	logs := installSmokeLog(t)
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
@@ -1149,6 +1156,9 @@ func bootSmokeIntegrityHostOver(t *testing.T, interval, minGap string, doc func(
 		cfg.MeditationMinGap = minGap
 	}
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	if script != nil {
+		provider.hook = script
+	}
 	cfg.Endpoint = provider.endpoint()
 	cfg.write(t)
 	rig := bootSmokeRig(t, cfg, provider)
@@ -1163,25 +1173,167 @@ func (h *smokeIntegrityHost) close(t *testing.T) {
 	}
 }
 
-// smokeIntegrityApprovalPositive 判定审批门：critical 调用被扣留，批准只记录裁决，
-// 重试才执行一次，正文只归审批会话。
+// smokeApprovalRelay 是审批场景的冥想脚本：每放行一次，它就发出同一份固定正文的
+// 一次 send 调用。
+//   - 正文逐字节固定：审批绑定参数摘要，重试必须重放同一摘要才叫“补投”；
+//   - 投递次数由场景放行：节奏开到 1ms，多出来的反思只记录、不投递，交付次数
+//     因此可断言为恰一次，而不是看节奏碰运气。
+type smokeApprovalRelay struct {
+	mu     sync.Mutex
+	body   string
+	budget int
+	sent   int
+}
+
+// arm 放行接下来一次反思的投递：正文换成 body，预算为 1。
+func (r *smokeApprovalRelay) arm(body string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.body, r.budget = body, 1
+}
+
+// sends 报告冥想面已经发出的 send 调用次数。
+func (r *smokeApprovalRelay) sends() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sent
+}
+
+// smokeApprovalRelayCall 渲染第 n 次投递的调用标识：回执按这个 id 配对。
+func smokeApprovalRelayCall(n int) string {
+	return fmt.Sprintf("call-reflect-approval-%d", n)
+}
+
+// script 是冥想面的 provider 钩子：读到工具交代就收尾，有预算就投递固定正文，
+// 没有预算就只记录一次反思。
+func (r *smokeApprovalRelay) script(w http.ResponseWriter, _ int, modelName string, messages []smokeModelMessage) bool {
+	if modelName != smokeReflectModel {
+		return false
+	}
+	if smokeEndedWithTool(messages) {
+		fmt.Fprint(w, smokeAnswerBody("reflection recorded"))
+		return true
+	}
+	r.mu.Lock()
+	body, budget := r.body, r.budget
+	if budget <= 0 {
+		r.mu.Unlock()
+		fmt.Fprint(w, smokeAnswerBody("reflection recorded"))
+		return true
+	}
+	r.budget--
+	r.sent++
+	call := smokeApprovalRelayCall(r.sent)
+	r.mu.Unlock()
+	agent, session := smokeReflectionTarget(messages)
+	fmt.Fprint(w, smokeToolCallBody(call, sendToolID,
+		fmt.Sprintf(`{"target":{"agent":%q,"session":%q},"content":%q}`, agent, session, body)))
+	return true
+}
+
+// smokeApprovalWaitSends 等到冥想面发出第 want 次投递。
+func smokeApprovalWaitSends(t *testing.T, relay *smokeApprovalRelay, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for relay.sends() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("the meditation face issued %d send call(s) within %s, want %d", relay.sends(), timeout, want)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// smokeApprovalReceipt 报告冥想面在给定调用下读到的工具结果；读不到返回空串。
+func smokeApprovalReceipt(provider *smokeProvider, callID string) string {
+	for _, req := range provider.recorded() {
+		if req.Model != smokeReflectModel {
+			continue
+		}
+		for _, msg := range req.Messages {
+			if msg.Role == string(tagentmodel.RoleTool) && msg.ToolCallID == callID {
+				return msg.Content
+			}
+		}
+	}
+	return ""
+}
+
+// smokeApprovalWaitReceipt 等到给定调用被工具结果配对，交回那段正文。
+func smokeApprovalWaitReceipt(t *testing.T, provider *smokeProvider, callID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if receipt := smokeApprovalReceipt(provider, callID); receipt != "" {
+			return receipt
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no tool result answered %s within %s\nreflect requests:\n%s",
+				callID, timeout, smokeRequestDetail(provider, smokeReflectModel))
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// smokeApprovalDelivered 报告目标会话链上带给定正文的投递事实条数（trigger=send）。
+func smokeApprovalDelivered(rig *smokeRig, chat, body string) int {
+	count := 0
+	for _, evt := range rig.sessionFacts(chat) {
+		if evt.Type != event.TypeExternalInput || evt.Meta[event.MetaKeyTriggerSource] != smokeSendLineage {
+			continue
+		}
+		if strings.Contains(evt.Message.Content, body) {
+			count++
+		}
+	}
+	return count
+}
+
+// smokeApprovalShortTTLDocument 把审批夹具（只给 send 一个 critical 分级）的有效
+// 期改到最小分钟值：过期裁决/重试仍被扣留只能由 tool+digest 的审批登记表达，
+// 投递挂起没有 TTL 与摘要，故这个场景保留在审批通道上。
+func smokeApprovalShortTTLDocument(c *smokeConfig) string {
+	base := *c
+	base.Doc = smokeApprovalSendDocument
+	document := base.document()
+	patched := strings.Replace(document, "approval_ttl_minutes: 30",
+		fmt.Sprintf("approval_ttl_minutes: %d", smokeErrorsTTLMinutes), 1)
+	if patched == document {
+		panic("smoke: the rendered document carries no approval validity to shorten")
+	}
+	return patched
+}
+
+// smokeIntegrityApprovalPositive 判定审批门：冥想面的 critical 投递被扣留，批准只
+// 记录裁决，重试同一份正文才落地一次，正文只归目标会话。
 func smokeIntegrityApprovalPositive(t *testing.T) {
-	host := bootSmokeApprovalHost(t, "1h", "")
+	relay := &smokeApprovalRelay{}
+	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
+	body := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
-	rig.drive(chat, smokeIntegrityApprovalTurn+" smoke approval request")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalTurn, 60*time.Second)
+	relay.arm(body)
+	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
+	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
+	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
+	held := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(1), 120*time.Second)
+	if held == smokeSendCredential || !strings.Contains(held, "parked awaiting approval") {
+		t.Fatalf("the held delivery read back %q, want the wait and never the delivered credential", held)
+	}
 	pending := rig.pendingApproval(30 * time.Second)
+	if pending.ToolName != sendToolID || pending.RiskLevel != plugin.RiskCritical {
+		t.Fatalf("the parked request = tool %q risk %q, want the critical send", pending.ToolName, pending.RiskLevel)
+	}
 	digest := shortDigest(pending.ArgsDigest)
 	announce := rig.waitText(smokeApproverChat, digest, 30*time.Second)
 	if !strings.Contains(announce.Body, "审批请求") {
 		t.Fatalf("the approval announcement = %q, want the request text carrying %s", announce.Body, digest)
 	}
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker); got != 0 {
-		t.Fatalf("the held call delivered its body %d time(s) before the ruling, want none", got)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the held body landed %d time(s), want none: a hold executes nothing", got)
 	}
+
 	entryBefore := smokeRequestsFor(provider, smokeEntryModel)
 	handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
 	if err != nil || !handled || !strings.Contains(reply, "approved") {
@@ -1197,11 +1349,23 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 	if got := smokeRequestsFor(provider, smokeEntryModel); got != entryBefore {
 		t.Fatalf("the ruling drove %d entry request(s), want none: a ruling records the decision, the retry performs the call", got-entryBefore)
 	}
-	rig.postTask(smokeIntegrityApprovalTurn + " smoke retry")
-	rig.waitText(chat, "approved-done "+smokeIntegrityApprovalTurn, 120*time.Second)
-	rig.waitText(chat, smokeApprovalMarker+" "+smokeIntegrityApprovalTurn, 120*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalTurn); got != 1 {
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the ruling delivered the body %d time(s), want none", got)
+	}
+
+	relay.arm(body)
+	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
+	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
+	if settled := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(2), 120*time.Second); settled != smokeSendCredential {
+		t.Fatalf("the approved retry read back %q, want the bare %q credential", settled, smokeSendCredential)
+	}
+	smokeIntegrityWaitDelivered(t, rig, chat, body, 120*time.Second)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 1 {
 		t.Fatalf("the approved body was delivered %d time(s), want exactly one", got)
+	}
+	if got := relay.sends(); got != 2 {
+		t.Fatalf("the meditation face issued %d send call(s), want the held call and its one retry", got)
 	}
 	if got := smokeErrorsTextCount(rig, smokeApproverChat, smokeApprovalMarker); got != 0 {
 		t.Fatalf("the approved body reached the approver chat %d time(s), want none", got)
@@ -1210,19 +1374,23 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 	if len(bound) != 1 || bound[0] != rig.addressOf(chat) {
 		t.Fatalf("bound addresses after the approval = %+v, want only %+v", bound, rig.addressOf(chat))
 	}
-	t.Logf("[integrity-approval-positive] %s held -> approved -> executed once on %s", smokeIntegrityApprovalTurn, chat)
+	t.Logf("[integrity-approval-positive] the meditation face sent %s, the gate held it, the ruling released the same arguments once on %s",
+		smokeIntegrityApprovalTurn, chat)
 }
 
 // smokeIntegrityApprovalNegative 判定裁决不驱动执行：批准只记录裁决；改参后的
 // 重试不得沿用旧批准，必须重新扣留；审批人会话不收到任何执行正文。
 func smokeIntegrityApprovalNegative(t *testing.T) {
-	host := bootSmokeApprovalHost(t, "1h", "")
-	defer host.close(t)
+	relay := &smokeApprovalRelay{}
+	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
+	approvedBody := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
-	rig.drive(chat, smokeIntegrityApprovalTurn+" smoke approval request")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalTurn, 60*time.Second)
+	relay.arm(approvedBody)
+	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
+	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
+	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
@@ -1238,20 +1406,32 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 	if got := len(rig.gateway.Manager().Pending()); got != 0 {
 		t.Fatalf("pending requests after the ruling = %d, want none", got)
 	}
+	if got := smokeApprovalDelivered(rig, chat, approvedBody); got != 0 {
+		t.Fatalf("the ruling delivered the body %d time(s), want none: a ruling records the decision, the retry performs the call", got)
+	}
 
-	rig.postTask(smokeIntegrityApprovalTurn + " smoke retry")
-	rig.waitText(chat, "approved-done "+smokeIntegrityApprovalTurn, 120*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalTurn); got != 1 {
+	relay.arm(approvedBody)
+	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
+	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
+	smokeIntegrityWaitDelivered(t, rig, chat, approvedBody, 120*time.Second)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, approvedBody); got != 1 {
 		t.Fatalf("the approved body was delivered %d time(s), want exactly one", got)
 	}
 
-	rig.postTask(smokeIntegrityApprovalChanged + " smoke retry")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalChanged, 120*time.Second)
+	changedBody := smokeApprovalMarker + " " + smokeIntegrityApprovalChanged
+	relay.arm(changedBody)
+	rig.postTask(smokeIntegrityApprovalChanged + " plain question")
+	smokeApprovalWaitSends(t, relay, 3, 120*time.Second)
+	changedHeld := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(3), 120*time.Second)
+	if changedHeld == smokeSendCredential || !strings.Contains(changedHeld, "parked awaiting approval") {
+		t.Fatalf("the changed retry read back %q, want a fresh wait and never the delivered credential", changedHeld)
+	}
 	changed := rig.pendingApproval(30 * time.Second)
 	if changed.ArgsDigest == pending.ArgsDigest {
 		t.Fatalf("the changed retry reused the approved digest %s, want a new held identity", shortDigest(pending.ArgsDigest))
 	}
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalChanged); got != 0 {
+	if got := smokeApprovalDelivered(rig, chat, changedBody); got != 0 {
 		t.Fatalf("the changed retry executed %d time(s) on the old approval, want none", got)
 	}
 	if pendingNow := rig.gateway.Manager().Pending(); len(pendingNow) != 1 || pendingNow[0].Status != approval.ApprovalPending {
@@ -1274,7 +1454,7 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 	if err != nil || !handled || !strings.Contains(reply, "denied") {
 		t.Fatalf("the denial ruling = (%t, %q, %v), want the denied receipt", handled, reply, err)
 	}
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityApprovalChanged); got != 0 {
+	if got := smokeApprovalDelivered(rig, chat, changedBody); got != 0 {
 		t.Fatalf("the denied ruling executed the call %d time(s), want none", got)
 	}
 	if got := len(rig.gateway.Manager().Pending()); got != 0 {
@@ -1297,10 +1477,13 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 // 拒绝，重试同一调用仍被扣留——过期裁决不得沿用旧批准放行。
 func smokeIntegrityApprovalExpired(t *testing.T) {
 	logs := installSmokeLog(t)
+	relay := &smokeApprovalRelay{}
 	cfg := newSmokeConfig(t, "http://127.0.0.1:1/v1")
-	cfg.MeditationInterval = "1h"
-	cfg.Doc = smokeErrorsShortTTLDocument
+	cfg.MeditationInterval = "1ms"
+	cfg.MeditationMinGap = "0s"
+	cfg.Doc = smokeApprovalShortTTLDocument
 	provider := newSmokeProvider(t, filepath.Join(cfg.WorkspaceDir, smokeFileMarker))
+	provider.hook = relay.script
 	cfg.Endpoint = provider.endpoint()
 	cfg.write(t)
 
@@ -1326,9 +1509,12 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 		}
 	}()
 	chat := smokeChats[2]
+	body := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
-	rig.drive(chat, smokeIntegrityApprovalTurn+" smoke approval request")
-	rig.waitText(chat, "hold-ack "+smokeIntegrityApprovalTurn, 60*time.Second)
+	relay.arm(body)
+	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
+	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
+	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
@@ -1341,13 +1527,16 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 		t.Fatalf("late ruling = %v, want ErrApprovalExpired", err)
 	}
 
-	rig.postTask(smokeIntegrityApprovalTurn + " smoke retry")
-	smokeErrorsWaitTextCount(t, rig, chat, "hold-ack "+smokeIntegrityApprovalTurn, 2, 60*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker); got != 0 {
-		t.Fatalf("the expired ruling executed the call %d time(s), want none", got)
+	relay.arm(body)
+	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
+	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
+	retried := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(2), 120*time.Second)
+	if retried == smokeSendCredential || !strings.Contains(retried, "parked awaiting approval") {
+		t.Fatalf("the expired retry read back %q, want a wait that claims no delivery", retried)
 	}
-	if got := smokeErrorsTextCount(rig, chat, "approved-done "+smokeIntegrityApprovalTurn); got != 0 {
-		t.Fatalf("the expired ruling reported %d approved result(s), want none", got)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the expired ruling executed the call %d time(s), want none", got)
 	}
 	if got := len(rig.gateway.Manager().Pending()); got != 0 {
 		t.Fatalf("pending requests after the expired retry = %d, want the expired request still naming the digest", got)
@@ -1366,10 +1555,12 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 // registerHandlers -> HTTP /task。无会话时注入面拒绝且不驱动模型；首次渠道入站
 // 被准入并驱动一轮；审批经渠道裁决、经 /task 重试执行一次；随后注入面读一轮。
 func smokeIntegrityApprovalConsumer(t *testing.T) {
-	host := bootSmokeApprovalHost(t, "5s", "")
+	relay := &smokeApprovalRelay{}
+	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
 	chat := smokeChats[0]
+	body := smokeApprovalMarker + " " + smokeIntegrityConsumerOpening
 
 	if rig.app.cfg.Entry != smokeSessionTag {
 		t.Fatalf("the loaded entry = %q, want %q", rig.app.cfg.Entry, smokeSessionTag)
@@ -1395,11 +1586,13 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 		t.Fatalf("the refused injection drove %d model request(s), want none", got)
 	}
 
+	relay.arm(body)
 	if err := rig.channel.emit(context.Background(),
-		textMessage(chat, smokeIntegrityConsumerOpening+" smoke approval request")); err != nil {
+		textMessage(chat, smokeIntegrityConsumerOpening+" plain question")); err != nil {
 		t.Fatalf("emit the first inbound message: %v", err)
 	}
-	rig.waitText(chat, "hold-ack "+smokeIntegrityConsumerOpening, 120*time.Second)
+	rig.waitText(chat, "answer "+smokeIntegrityConsumerOpening, 120*time.Second)
+	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
 	wantAddr := rig.addressOf(chat)
 	if target, ok := rig.app.host.router.Target(wantAddr); !ok || target != chat {
 		t.Fatalf("router target of %+v = (%q, %t), want %q", wantAddr, target, ok, chat)
@@ -1411,13 +1604,19 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
+		t.Fatalf("the held body landed %d time(s) through the formal entry, want none", got)
+	}
 	handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
 	if err != nil || !handled || !strings.Contains(reply, "approved") {
 		t.Fatalf("the channel ruling = (%t, %q, %v), want the approved ruling", handled, reply, err)
 	}
-	rig.postTask(smokeIntegrityConsumerOpening + " smoke retry")
-	rig.waitText(chat, "approved-done "+smokeIntegrityConsumerOpening, 120*time.Second)
-	if got := smokeErrorsTextCount(rig, chat, smokeApprovalMarker+" "+smokeIntegrityConsumerOpening); got != 1 {
+	relay.arm(body)
+	rig.postTask(smokeIntegrityConsumerOpening + " plain question")
+	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
+	smokeIntegrityWaitDelivered(t, rig, chat, body, 120*time.Second)
+	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
+	if got := smokeApprovalDelivered(rig, chat, body); got != 1 {
 		t.Fatalf("the approved body was delivered %d time(s) through the formal entry, want exactly one", got)
 	}
 
@@ -1427,7 +1626,7 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	if got := provider.count(); got <= before {
 		t.Fatalf("the injected turn drove no model request")
 	}
-	t.Logf("[integrity-approval-consumer] config->Boot->bind->registerHandlers->/task: rejected before admission, admitted %s, approved and executed once, read %s",
+	t.Logf("[integrity-approval-consumer] config->Boot->bind->registerHandlers->/task: rejected before admission, admitted %s, the meditation face's critical send held then released once, read %s",
 		chat, smokeIntegrityConsumerRead)
 }
 

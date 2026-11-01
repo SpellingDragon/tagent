@@ -26,6 +26,7 @@ const testApprovalApprover = "the-test-approver"
 // TestApprovalManagerReadsAttention pins presence and ruling as the attention facts.
 // - a registration files one approval question, and registering the same arguments again reads that identity back
 // - the waiting face reports exactly the questions the attention face still holds, and none once one is answered
+// - a repeated registration widens the alias of one request, never the waiting set: presence is a set of questions, so one approval identity is one entry
 // - the status a lookup reports is the answer its question carries, never a state kept beside the chain
 //
 // 契约: docs/wiki/agent/governance-enforcement.md#approval-channel
@@ -59,6 +60,9 @@ func TestApprovalManagerReadsAttention(t *testing.T) {
 	}
 	if filed := questionKeysOf(t, manager); len(filed) != 1 {
 		t.Fatalf("approval questions on the chain = %d, want one for the one standing wait", len(filed))
+	}
+	if got := manager.Pending(); len(got) != 1 || got[0].ID != first.ID {
+		t.Fatalf("waiting face after the repeated registration = %+v, want the one standing question %s reported once", got, first.ID)
 	}
 
 	if _, err := manager.Decide(first.ID, ApprovalApproved, testApprovalApprover); err != nil {

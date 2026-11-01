@@ -3,9 +3,11 @@
 # (resident-readiness-plan 1.2/1.3).
 #
 # Cases 1–13 exercise the classifier via RACE_CHECK_CLASSIFY_ONLY (fast,
-# deterministic, no real go test); cases 14–15 are real end-to-end runs
+# deterministic, no real go test); cases 14–17 are real end-to-end runs
 # (legal package → OK; illegal package → non-zero — the old script's
-# false-green scenario). Run: bash scripts/gates/test_race_check.sh  (all pass → 0)
+# false-green scenario; the no-Go-files root entry → skipped beside a real
+# package, and a set left with no Go package → refused).
+# Run: bash scripts/gates/test_race_check.sh  (all pass → 0)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/race_check.sh"
@@ -116,6 +118,33 @@ if [ "$rc" -ne 0 ]; then
 	echo "PASS: real run illegal package fails (old false-green fixed)"
 else
 	echo "FAIL: real run illegal package exited 0 — false green persists"
+	FAILS=$((FAILS + 1))
+fi
+
+# Case 16 pins the no-Go-files skip: the module root (`.`) expands to no Go
+# package, and before the skip existed `go test -race .` failed the whole job with
+# `[setup failed]`. The declared entry stays in the set and is skipped by name;
+# case 17 refuses a set that keeps no Go package at all, so the skip can never
+# empty the gate; case 15 (illegal package) keeps proving a misspelt package is
+# NOT skipped.
+out=$(bash "$SCRIPT" . ./api/event 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'skip \. (' <<<"$out" && grep -q "OK" <<<"$out"; then
+	echo "PASS: real run skips the root module beside a real package"
+else
+	echo "FAIL: real run with the root module — exit=$rc"
+	echo "$out" | tail -5 | sed 's/^/    /'
+	FAILS=$((FAILS + 1))
+fi
+
+# 17. REAL end-to-end: a set that keeps no Go package must be refused, not green.
+out=$(bash "$SCRIPT" . 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ] && grep -q "no package in the declared set carries Go files" <<<"$out"; then
+	echo "PASS: real run refuses a set with no Go package"
+else
+	echo "FAIL: real run with only the root module — exit=$rc"
+	echo "$out" | tail -5 | sed 's/^/    /'
 	FAILS=$((FAILS + 1))
 fi
 
