@@ -3687,9 +3687,10 @@ func smokeLongHostChild(t *testing.T) {
 	if err := rig.close(); err != nil {
 		report.CloseErr = err.Error()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	drainBudget := time.Now().Add(60 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), drainBudget)
 	defer cancel()
-	drain, drainErr := rig.host.Run().Close(ctx, agent.CloseRequest{})
+	drain, drainErr := rig.host.Run().Close(ctx, agent.CloseRequest{Timeout: drainBudget})
 	report.Drain = &smokeLongDrainReport{Drained: drain.Drained}
 	for _, item := range drain.Unsettled {
 		report.Drain.Unsettled = append(report.Drain.Unsettled, fmt.Sprintf("task=%s reason=%s", item.TaskID, item.Reason))

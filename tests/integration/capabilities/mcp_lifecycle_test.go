@@ -513,9 +513,20 @@ type mcpFake struct {
 }
 
 // newMCPFake starts one in-process MCP server and stops it with the test.
+//
+// The server runs the stateless JSON transport on purpose: a session-issuing server
+// makes the client transport keep a GET SSE stream beside its requests, and every
+// POST that answers as an event stream writes the transport's last event id, so
+// trpc-mcp-go v0.0.10 races one request against another over both fields (LEDGER
+// 红色耦合台账 U5). Nothing these checks read is a session identity or a resumable
+// stream — listing, discovery, guided calls and the reconnect of a killed listener
+// all hold the same — so the fixture pins the stateless JSON shape the upstream
+// examples recommend and the race detector sees the protocol the checks are about
+// instead of the upstream defect.
 func newMCPFake(t *testing.T, name string) *mcpFake {
 	t.Helper()
-	srv := tmcp.NewServer(name, "0.0.1-test")
+	srv := tmcp.NewServer(name, "0.0.1-test", tmcp.WithStatelessMode(true),
+		tmcp.WithPostSSEEnabled(false), tmcp.WithGetSSEEnabled(false))
 	ts := httptest.NewServer(srv.Handler())
 	fake := &mcpFake{name: name, srv: srv, ts: ts, url: ts.URL + srv.Path(), calls: map[string]int{}}
 	t.Cleanup(fake.kill)

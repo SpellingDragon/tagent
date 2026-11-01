@@ -854,10 +854,21 @@ type intakeMCP struct {
 // the test. A parked server holds the first call until the anchor releases it; one that
 // is not parked answers every call at once. Both answer the material the call carried,
 // so a settled call hands the decision that reads it its own body back.
+//
+// The server runs the stateless JSON transport on purpose: a session-issuing server
+// makes the client transport keep a GET SSE stream beside its requests, and every POST
+// that answers as an event stream writes the transport's last event id, so trpc-mcp-go
+// v0.0.10 races one request against another over both fields (LEDGER 红色耦合台账 U5).
+// What these anchors read is the intake of call results — a parked handler beside a
+// fast one — never a session identity or a resumable stream, so the fixture pins the
+// stateless JSON shape the upstream examples recommend and the race detector sees the
+// intake these checks are about instead of the upstream defect.
 func newIntakeMCP(t *testing.T, name, tool, answer string, park bool) *intakeMCP {
 	t.Helper()
 	server := &intakeMCP{name: name, tool: tool, answer: answer, park: park,
-		srv: tmcp.NewServer(name, "0.0.1-test"), parked: make(chan struct{}), freed: make(chan struct{})}
+		srv: tmcp.NewServer(name, "0.0.1-test", tmcp.WithStatelessMode(true),
+			tmcp.WithPostSSEEnabled(false), tmcp.WithGetSSEEnabled(false)),
+		parked: make(chan struct{}), freed: make(chan struct{})}
 	server.srv.RegisterTool(
 		tmcp.NewTool(tool, tmcp.WithDescription("the non-communication slow path of the intake anchors")),
 		server.handle,
