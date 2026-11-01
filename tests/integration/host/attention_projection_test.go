@@ -190,6 +190,15 @@ func TestNoticeExpiryLeavesAttention(t *testing.T) {
 		}
 	}
 	before := noticePhases(t, ctx, host, addr)
+	waitForSettle(t, "the notice phases to hold still", func() bool {
+		next := noticePhases(t, ctx, host, addr)
+		held := len(next) == len(before)
+		for at := 0; held && at < len(next); at++ {
+			held = next[at] == before[at]
+		}
+		before = next
+		return held
+	})
 
 	restore := assembly.SetAttentionClock(func() time.Time { return time.Now().Add(time.Hour) })
 	defer restore()
