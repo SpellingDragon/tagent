@@ -175,10 +175,11 @@ func TestNoticeExpiryLeavesAttention(t *testing.T) {
 		t.Fatalf("the settled notification reached no follow-up turn: %v", ctx.Err())
 	}
 
-	presence := attentionOfKind(attentionDetails(t, ctx, host, addr), task.AttentionKindNotice)
-	if len(presence) == 0 {
-		t.Fatal("the unconsumed notification stands in no attention presence, want the question the held follow-up turn leaves")
-	}
+	var presence []query.Detail
+	waitForSettle(t, "the unconsumed notification to stand in the attention presence as the question the held follow-up turn leaves", func() bool {
+		presence = attentionOfKind(attentionDetails(t, ctx, host, addr), task.AttentionKindNotice)
+		return len(presence) > 0
+	})
 	for _, detail := range presence {
 		question := detail.Ref.AttentionQuestion()
 		if question.ExpiresMs == 0 {
