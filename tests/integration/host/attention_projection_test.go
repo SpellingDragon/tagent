@@ -132,13 +132,15 @@ func TestNoticeExpiryLeavesAttention(t *testing.T) {
 	var released sync.Once
 	unblock := func() { released.Do(func() { close(release) }) }
 	defer unblock()
+
+	const workerBody = "the settled worker reports the expiry body"
 	provider := newScriptedProvider(t)
 	provider.decide = func(request scriptedRequest) (string, error) {
-		switch request.Index {
-		case 0:
+		switch {
+		case !scriptedCarriesAgentTool(request, "worker"):
+			return scriptedAnswerOf(workerBody), nil
+		case !scriptedDelegatedTo(request, "worker"):
 			return wakeDelegate("call-attention-notice-expiry", "compute the expiry total"), nil
-		case 1:
-			return scriptedAnswerOf("the settled worker reports the expiry body"), nil
 		}
 		select {
 		case arrived <- struct{}{}:

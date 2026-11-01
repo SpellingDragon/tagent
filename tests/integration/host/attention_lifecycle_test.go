@@ -95,17 +95,21 @@ func TestAttentionClearsNoticeOnWorkEnd(t *testing.T) {
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 
+	const (
+		workerBody = "the settled worker reports the anchor body"
+		entryBody  = "the entry closed over its delegation"
+	)
 	provider := newScriptedProvider(t)
-	provider.answer = func(index int) string {
-		switch index {
-		case 0:
-			return wakeDelegate("call-attention-worker", "compute the anchor total")
-		case 1:
-			return scriptedAnswerOf("the settled worker reports the anchor body")
-		case 2:
-			return scriptedAnswerOf("the entry closed over its delegation")
+	provider.decide = func(request scriptedRequest) (string, error) {
+		switch {
+		case !scriptedCarriesAgentTool(request, "worker"):
+			return scriptedAnswerOf(workerBody), nil
+		case settleDriveReadsMaterial(request, workerBody):
+			return scriptedAnswerOf("the follow-up carried the settlement to the user"), nil
+		case scriptedDelegatedTo(request, "worker"):
+			return scriptedAnswerOf(entryBody), nil
 		default:
-			return scriptedRefusalAnswer("the follow-up model call refused")
+			return wakeDelegate("call-attention-worker", "compute the anchor total"), nil
 		}
 	}
 	root := t.TempDir()
@@ -197,23 +201,31 @@ func TestAttentionNoticeQuestionClearsOnWorkEnd(t *testing.T) {
 // the delegated task, and a wait for the notification material to stand on the chain
 // with nobody consuming it. It answers the host and the entry address the anchors
 // read, so a scene is opened the way a deployment opens it instead of by hand.
+//
+// The script answers by invocation rather than by call ordinal, and it refuses the
+// follow-up that reads the settlement on purpose: this scene is the one nobody
+// consumed, so the notification stays on the chain for the case to read.
 func bootUnconsumedNoticeScene(t *testing.T) (*assembly.Host, event.Address) {
 	t.Helper()
 	t.Setenv("TAGENT_TEST_API_KEY", "test-key")
 	t.Setenv("TAGENT_HTTP_PORT", "0")
 	t.Setenv("TAGENT_RL_AUTH_TOKEN", "")
 
+	const (
+		workerBody = "the settled worker reports the anchor body"
+		entryBody  = "the entry closed over its delegation"
+	)
 	provider := newScriptedProvider(t)
-	provider.answer = func(index int) string {
-		switch index {
-		case 0:
-			return wakeDelegate("call-attention-worker", "compute the anchor total")
-		case 1:
-			return scriptedAnswerOf("the settled worker reports the anchor body")
-		case 2:
-			return scriptedAnswerOf("the entry closed over its delegation")
+	provider.decide = func(request scriptedRequest) (string, error) {
+		switch {
+		case !scriptedCarriesAgentTool(request, "worker"):
+			return scriptedAnswerOf(workerBody), nil
+		case settleDriveReadsMaterial(request, workerBody):
+			return scriptedRefusalAnswer("the follow-up model call refused"), nil
+		case scriptedDelegatedTo(request, "worker"):
+			return scriptedAnswerOf(entryBody), nil
 		default:
-			return scriptedRefusalAnswer("the follow-up model call refused")
+			return wakeDelegate("call-attention-worker", "compute the anchor total"), nil
 		}
 	}
 	root := t.TempDir()

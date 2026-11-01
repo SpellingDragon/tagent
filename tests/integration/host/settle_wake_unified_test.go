@@ -7,6 +7,7 @@ package host
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -307,7 +308,10 @@ func runWakeRestartResume(t *testing.T) {
 // a landed notice takes — read by the segment still flying beside its own
 // delegation, or read by a range the notice opens after that segment closed —
 // both hold one attempt per session: the check counts the decisions that read
-// each session's settlement and the resumed answers that reach the user.
+// each session's settlement and the resumed answers that reach the user. The
+// entry decides its delegation from the input its own invocation was handed, so
+// the continuation of one session's turn never decides the delegation of the
+// other's.
 func runWakeStopRetains(t *testing.T) {
 	wakeEnv(t)
 
@@ -322,28 +326,24 @@ func runWakeStopRetains(t *testing.T) {
 	workerSeenB := make(chan struct{})
 	releaseWorkerA := make(chan struct{})
 	releaseWorkerB := make(chan struct{})
+	var workerSeenOnceA, workerSeenOnceB sync.Once
 	holdFollowUp := make(chan struct{})
 	followUpStarted := make(chan struct{})
 	var releaseOnce sync.Once
 	var mu sync.Mutex
-	entryCalls, workerCalls := 0, 0
+	entryCalls := 0
 	followUpsA, followUpsB := 0, 0
 	provider.decide = func(request scriptedRequest) (string, error) {
-		if request.Model == "model-worker" {
-			mu.Lock()
-			workerCalls++
-			worker := workerCalls
-			mu.Unlock()
-			switch worker {
-			case 1:
-				close(workerSeenA)
+		delegatesFirst := strings.Contains(scriptedInvocationInput(request), "first total")
+		if !scriptedCarriesAgentTool(request, "worker") {
+			if delegatesFirst {
+				workerSeenOnceA.Do(func() { close(workerSeenA) })
 				<-releaseWorkerA
 				return scriptedAnswerOf(workerBodyA), nil
-			default:
-				close(workerSeenB)
-				<-releaseWorkerB
-				return scriptedAnswerOf(workerBodyB), nil
 			}
+			workerSeenOnceB.Do(func() { close(workerSeenB) })
+			<-releaseWorkerB
+			return scriptedAnswerOf(workerBodyB), nil
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -360,10 +360,10 @@ func runWakeStopRetains(t *testing.T) {
 			return scriptedAnswerOf(followUpAnswer), nil
 		}
 		entryCalls++
-		switch entryCalls {
-		case 1:
-			return wakeDelegate("call-a", "the first total"), nil
-		case 2:
+		if !scriptedDelegatedTo(request, "worker") {
+			if delegatesFirst {
+				return wakeDelegate("call-a", "the first total"), nil
+			}
 			return wakeDelegate("call-b", "the second total"), nil
 		}
 		return scriptedAnswerOf(entryAnswer), nil

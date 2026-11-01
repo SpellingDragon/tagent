@@ -180,6 +180,50 @@ func scriptedContent(raw json.RawMessage) string {
 	return strings.Join(texts, "")
 }
 
+// scriptedCarriesAgentTool reports whether the invocation that made the request
+// declares the named agent tool. The entry invocation carries its delegations as
+// tools and the delegated agent's own invocation carries none, so the tool
+// surface names the invocation a decision answers instead of the position its
+// call arrived at: the delegated turn may reach the provider before the entry's
+// own follow-up does, and both still read the answer their invocation scripts.
+func scriptedCarriesAgentTool(request scriptedRequest, agent string) bool {
+	for _, tool := range request.Tools {
+		if tool == agent {
+			return true
+		}
+	}
+	return false
+}
+
+// scriptedDelegatedTo reports whether the transcript the request carries already
+// holds the assistant decision that called the named agent. The decision before
+// that call decides the delegation and the decision after it closes over the
+// result, so the transcript names the step the same way however many calls the
+// invocation has made.
+func scriptedDelegatedTo(request scriptedRequest, agent string) bool {
+	for _, message := range request.Messages {
+		for _, call := range message.ToolCalls {
+			if call.Name == agent {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scriptedInvocationInput reads the input the invocation was handed: the first
+// user message the transcript carries. Two invocations beside one another over
+// one provider are told apart by what each was asked, so a decision answers the
+// invocation it belongs to instead of the ordinal its call arrived at.
+func scriptedInvocationInput(request scriptedRequest) string {
+	for _, message := range request.Messages {
+		if message.Role == "user" {
+			return message.Content
+		}
+	}
+	return ""
+}
+
 // scriptedRefusalAnswer renders the refusal the endpoint answers a request its
 // script never declared, so the drive fails instead of reading a default
 // terminal answer.
