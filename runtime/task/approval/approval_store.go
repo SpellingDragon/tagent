@@ -173,6 +173,8 @@ func (a *ApprovalManager) Request(ctx context.Context, id, tool string, jsonArgs
 	if standing := a.standingLocked(facts, tool, digest, now.UnixMilli()); standing != nil {
 		a.evidence[id] = standing
 		snapshot := *standing
+		snapshot.Status = ApprovalPending
+		snapshot.DecidedBy = ""
 		a.mu.Unlock()
 		return &snapshot, nil
 	}
@@ -334,7 +336,10 @@ func (a *ApprovalManager) factsLocked(ctx context.Context) approvalFacts {
 // standingLocked reports the request one (tool, arguments) pair is already
 // standing under: a question the chain still holds as a question, within its
 // validity. A repeated registration reads that request back instead of filing a
-// second question over the same arguments.
+// second question over the same arguments, and it reads the one record back: the
+// identity it asks under names the same ruling, so a ruling taken through either
+// identity leaves both reading the approver the answer carries instead of the
+// copy the second registration happened to take.
 func (a *ApprovalManager) standingLocked(facts approvalFacts, tool, argsDigest string, nowMs int64) *ApprovalRequest {
 	for _, held := range a.evidence {
 		if held.ToolName != tool || held.ArgsDigest != argsDigest {
@@ -346,10 +351,7 @@ func (a *ApprovalManager) standingLocked(facts approvalFacts, tool, argsDigest s
 		if !facts.present(tool, argsDigest, held.ID) {
 			continue
 		}
-		snapshot := *held
-		snapshot.Status = ApprovalPending
-		snapshot.DecidedBy = ""
-		return &snapshot
+		return held
 	}
 	return nil
 }
