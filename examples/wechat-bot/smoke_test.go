@@ -1553,7 +1553,8 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 
 // smokeIntegrityApprovalConsumer 只走正式入口：配置 -> Boot -> 渠道绑定 ->
 // registerHandlers -> HTTP /task。无会话时注入面拒绝且不驱动模型；首次渠道入站
-// 被准入并驱动一轮；审批经渠道裁决、经 /task 重试执行一次；随后注入面读一轮。
+// 被准入并驱动一轮；审批经渠道裁决（裁决前 relay 已带 body，被扣住的正是首次投递）、
+// 经 /task 重试执行一次；随后注入面读一轮。
 func smokeIntegrityApprovalConsumer(t *testing.T) {
 	relay := &smokeApprovalRelay{}
 	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
@@ -1607,7 +1608,7 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
 		t.Fatalf("the held body landed %d time(s) through the formal entry, want none", got)
 	}
-	relay.arm(body) // the first send is the one the critical rule holds
+	relay.arm(body)
 	handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
 	if err != nil || !handled || !strings.Contains(reply, "approved") {
 		t.Fatalf("the channel ruling = (%t, %q, %v), want the approved ruling", handled, reply, err)
