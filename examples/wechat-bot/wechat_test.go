@@ -977,18 +977,34 @@ func TestEventIntegrityApprovalWeChat(t *testing.T) {
 		}
 	})
 
+	sharedPrefixArgs := func(t *testing.T, width int) (first, second []byte, prefix string) {
+		t.Helper()
+		seen := make(map[string][]byte, 512)
+		for at := 0; at < 4096; at++ {
+			args := []byte(fmt.Sprintf(`{"cmd":"rm","round":%d}`, at))
+			digest := approval.ArgsDigest(args)
+			if held, ok := seen[digest[:width]]; ok {
+				return held, args, digest[:width]
+			}
+			seen[digest[:width]] = args
+		}
+		t.Fatalf("no two argument bodies share a %d-character digest prefix", width)
+		return nil, nil, ""
+	}
+
 	t.Run("ambiguous_prefix_refused", func(t *testing.T) {
 		dir := t.TempDir()
 		gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: dir}, []string{"boss"})
 		gateway.SetSender(&mockOutbound{})
 
-		args := []byte(`{"cmd":"rm"}`)
-		for _, id := range []string{"req-twin-1", "req-twin-2"} {
+		heldArgs, twinArgs, prefix := sharedPrefixArgs(t, minApprovalPrefix)
+		for at, args := range [][]byte{heldArgs, twinArgs} {
+			id := fmt.Sprintf("req-twin-%d", at+1)
 			if _, err := gateway.Manager().Request(ctx, id, "exec", args, plugin.RiskCritical, "critical", "held"); err != nil {
 				t.Fatalf("register %s: %v", id, err)
 			}
 		}
-		handled, reply, err := gateway.Resolve("boss", "approve "+shortDigest(approval.ArgsDigest(args)))
+		handled, reply, err := gateway.Resolve("boss", "approve "+prefix)
 		if !handled || !errors.Is(err, ErrApprovalAmbiguous) {
 			t.Fatalf("an ambiguous prefix = (%v,%v), want ErrApprovalAmbiguous", handled, err)
 		}
