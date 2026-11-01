@@ -1607,6 +1607,7 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	if got := smokeApprovalDelivered(rig, chat, body); got != 0 {
 		t.Fatalf("the held body landed %d time(s) through the formal entry, want none", got)
 	}
+	relay.arm(body) // the first send is the one the critical rule holds
 	handled, reply, err := rig.gateway.Resolve(smokeApproverChat, "approve "+digest)
 	if err != nil || !handled || !strings.Contains(reply, "approved") {
 		t.Fatalf("the channel ruling = (%t, %q, %v), want the approved ruling", handled, reply, err)
