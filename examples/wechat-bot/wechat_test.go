@@ -763,6 +763,7 @@ func sharedDigestPrefixArgs(t *testing.T, width int) (first, second []byte, pref
 //
 //   - The announcement fans out to every configured approver.
 //   - A gateway beside no approver records a visible delivery gap and stays answerable.
+//   - A repeated registration aliases its own request, so an approver's prefix still names one candidate.
 func TestApprovalGateway(t *testing.T) {
 	ctx := context.Background()
 	gateway := newApprovalGateway(governanceEntry{Enabled: true, Dir: t.TempDir()}, []string{"boss"})
@@ -785,6 +786,9 @@ func TestApprovalGateway(t *testing.T) {
 			t.Fatalf("register %s: %v", id, err)
 		}
 	}
+	if _, err := manager.Request(ctx, "req-unique-again", "exec", []byte(`{"cmd":"ls"}`), plugin.RiskCritical, "critical", "held critical call"); err != nil {
+		t.Fatalf("register the held call a second time: %v", err)
+	}
 
 	if handled, _, err := gateway.Resolve("stranger", "approve "+held.ArgsDigest[:6]); !handled || !errors.Is(err, ErrApprovalNotApprover) {
 		t.Fatalf("a ruling outside the whitelist = (%v,%v), want ErrApprovalNotApprover", handled, err)
@@ -799,7 +803,7 @@ func TestApprovalGateway(t *testing.T) {
 		t.Fatalf("an ambiguous digest = (%v,%v), want ErrApprovalAmbiguous", handled, err)
 	}
 	if got := len(manager.Pending()); got != 3 {
-		t.Fatalf("pending after refusals = %d, want the three standing questions untouched", got)
+		t.Fatalf("pending after refusals = %d, want the three standing questions untouched: a second registration of the held call aliases its request, never the waiting set", got)
 	}
 
 	handled, reply, err := gateway.Resolve("boss", "approve "+held.ArgsDigest[:8])
