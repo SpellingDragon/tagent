@@ -1123,6 +1123,12 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice)
     the cancellation of the caller that delivered it, because observation is a
     bypass.
 
+    - The settled delivery wakes the loop of the range's address in the set that
+    drives that range: the set a host attached, or the set this loop mounted
+    for itself, so the result of a nested call reaches the segment that issued
+    it in a run assembled beside no host. A loop that drives neither keeps its
+    backflow parked in the intake.
+
 func (l *Loop) CommitFactFor(ctx context.Context, agentID event.AgentID, evt event.Event) (event.EventID, error)
     CommitFactFor commits one fact on behalf of the named agent and runs the
     After pass of that fact, and reports the identity the fact committed under.
@@ -1212,8 +1218,9 @@ func (l *Loop) SetCapture(capture Capture)
 func (l *Loop) SetConsumers(consumers *Consumers)
     SetConsumers attaches the resident consumption loops this loop drives the
     decisions of, so a settled backflow wakes the loop of the address its range
-    runs at. A loop beside no consumers keeps its backflow parked in the intake,
-    exactly as before.
+    runs at. A loop beside no attached set wakes the set it mounted for itself
+    instead (see residentsOf), and only a loop that mounted none of its own
+    keeps its backflow parked in the intake, exactly as before.
 
     A set this loop mounted for itself is displaced by the given one and
     stopped: a displaced set that kept running would drive the addresses of its

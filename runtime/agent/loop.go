@@ -452,6 +452,11 @@ func consumerWarn(format string, args ...any) {
 // on, so the delivery boundary of a call is observed as the fact it is; the
 // After pass of that fact runs beside the notification rather than under the
 // cancellation of the caller that delivered it, because observation is a bypass.
+//
+// - The settled delivery wakes the loop of the range's address in the set that drives
+// that range: the set a host attached, or the set this loop mounted for itself, so the
+// result of a nested call reaches the segment that issued it in a run assembled beside
+// no host. A loop that drives neither keeps its backflow parked in the intake.
 func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	switch notice.Kind {
 	case task.NoticeProgress:
@@ -470,7 +475,7 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	in := l.intakeFor(invocationID)
 	l.commitSettled(context.Background(), invocationID, in.rangeAddress(), notice)
 	in.deliver(notice.TaskID, delivered{msg: msg, fact: notice.Event})
-	if consumers := l.consumersOf(); consumers != nil {
+	if consumers := l.drivingSet(); consumers != nil {
 		consumers.Wake(in.rangeAddress())
 	}
 }
@@ -1049,8 +1054,9 @@ func (l *Loop) SetPresentations(sink PresentationSink) {
 
 // SetConsumers attaches the resident consumption loops this loop drives the
 // decisions of, so a settled backflow wakes the loop of the address its range
-// runs at. A loop beside no consumers keeps its backflow parked in the intake,
-// exactly as before.
+// runs at. A loop beside no attached set wakes the set it mounted for itself
+// instead (see residentsOf), and only a loop that mounted none of its own keeps
+// its backflow parked in the intake, exactly as before.
 //
 // A set this loop mounted for itself is displaced by the given one and stopped:
 // a displaced set that kept running would drive the addresses of its own copies
@@ -1070,11 +1076,17 @@ func (l *Loop) SetConsumers(consumers *Consumers) {
 	}
 }
 
-// consumersOf reports the attached consumption loops, or none.
-func (l *Loop) consumersOf() *Consumers {
+// drivingSet reports the consumption loops that drive the addresses of this loop's
+// ranges: the set a host attached, or the set this loop mounted for itself, and none
+// beside a loop that runs neither. The read mounts nothing — a settled backflow wakes
+// the set that already drives its range and never starts one of its own to wake.
+func (l *Loop) drivingSet() *Consumers {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.consumers
+	if l.consumers != nil {
+		return l.consumers
+	}
+	return l.resident
 }
 
 // residentsOf reports the consumption loops this loop drives delegated turns on:
@@ -1084,7 +1096,9 @@ func (l *Loop) consumersOf() *Consumers {
 // assembled runtime an embedder or a test drives directly — still runs every
 // delegated execution site on the resident instance of that site instead of
 // answering no instance for it. The mount happens once per loop; the attached set
-// of a host displaces it through SetConsumers.
+// of a host displaces it through SetConsumers. The set mounted here is also the one
+// a settled backflow wakes (see drivingSet), so the result of a nested call reaches
+// the delegated segment that issued it.
 func (l *Loop) residentsOf() *Consumers {
 	l.mu.Lock()
 	defer l.mu.Unlock()

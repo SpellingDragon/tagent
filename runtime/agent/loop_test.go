@@ -17,6 +17,7 @@ import (
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 // invariantLoopAddress is the session address the invariants' drives run in.
@@ -1449,4 +1450,195 @@ func (l *quietNoticeLedger) deliveries() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.attempts)
+}
+
+// backflowNestedSite is the delegated execution site a nested call runs in: the
+// address whose resident instance issues a call of its own.
+var backflowNestedSite = event.Address{AgentID: "agent-nested", SessionID: "session-nested"}
+
+// backflowNestedNeighbour is the declared address beside the delegated site: the
+// wake of one range stays on its own address and never drives the neighbour.
+var backflowNestedNeighbour = event.Address{AgentID: "agent-nested", SessionID: "session-neighbour"}
+
+// backflowNestedAnswer is the body the delegated turn closes on.
+const backflowNestedAnswer = "the body the nested call produced"
+
+// backflowNestedTask is the task the nested call is admitted as.
+const backflowNestedTask = event.TaskID("task-nested")
+
+// backflowNestedBudget bounds the delegated turn itself: the wait the calling entry
+// spends on the segment that consumed its input.
+const backflowNestedBudget = 2 * time.Second
+
+// backflowNestedWindow bounds the checks' own waits, wider than the delegated turn's
+// budget so a wake that never came is read as the terminal the wait fell back on
+// instead of as the check hanging.
+const backflowNestedWindow = 5 * backflowNestedBudget
+
+// TestBackflowWakesSelfRegisteredResidents pins the wake a settled call leaves beside no host.
+// - backflow_wakes_self_registered_residents: a settled notification wakes the loop the loop mounted for itself
+// - the delegated turn answers the settled terminal beside the body its own chain ended on, never a cancelled one
+// - the set that mounted the instance keeps one instance for the address, and the result lands on that chain alone
+// - a loop beside no set at all mounts none: its backflow stays parked in the intake
+func TestBackflowWakesSelfRegisteredResidents(t *testing.T) {
+	t.Run("backflow_wakes_self_registered_residents", func(t *testing.T) {
+		tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
+		script := newClosingRoundScript(
+			closingRoundStep{calls: []model.ToolCall{closingRoundCall("call-nested", backflowNestedCallToolName)}},
+			closingRoundStep{answer: backflowNestedAnswer},
+		)
+		loop, history := newBackflowNestedLoop(t, script, tool)
+		binding := state.AgentBinding{Model: script, Tools: []trpctool.Tool{tool}, PromptSource: state.PromptSource{Version: "v1"}}
+
+		ctx, cancel := context.WithTimeout(context.Background(), backflowNestedBudget)
+		defer cancel()
+		type submission struct {
+			answer DelegatedAnswer
+			err    error
+		}
+		submitted := make(chan submission, 1)
+		go func() {
+			answer, err := loop.SubmitDelegated(ctx, DelegatedInput{
+				Site:        backflowNestedSite,
+				Binding:     binding,
+				Instruction: "run the delegated turn",
+				Request:     "write the nested answer",
+			})
+			submitted <- submission{answer: answer, err: err}
+		}()
+
+		resident := loop.residentsOf().Ensure(backflowNestedSite)
+		if resident == nil {
+			t.Fatalf("the set the loop mounted for itself holds no instance of %s", backflowNestedSite.SessionID)
+		}
+		invariantAwait(t, func() bool { return resident.TaskState(backflowNestedTask) == TaskAwaited })
+		close(tool.settle)
+		select {
+		case <-tool.backflowed:
+		case <-time.After(backflowNestedWindow):
+			t.Fatal("the settled notification never reached the loop")
+		}
+
+		select {
+		case got := <-submitted:
+			if got.err != nil {
+				t.Fatalf("the delegated turn ended beside %v, want the settled answer of its own chain", got.err)
+			}
+			if got.answer.Status != task.StatusSettled {
+				t.Fatalf("the delegated turn ended as status %d, want the settled status %d (the cancelled status is %d): a result that woke no resident loop leaves the segment to a cancellation",
+					got.answer.Status, task.StatusSettled, task.StatusCancelled)
+			}
+			if got.answer.Body != backflowNestedAnswer {
+				t.Fatalf("the body of the delegated turn = %q, want %q", got.answer.Body, backflowNestedAnswer)
+			}
+		case <-time.After(backflowNestedWindow):
+			t.Fatal("the delegated turn never answered: the settled result woke no resident loop")
+		}
+
+		if again := loop.residentsOf().Ensure(backflowNestedSite); again != resident {
+			t.Fatalf("the instance of %s = %p, want the one instance %p the address runs on", backflowNestedSite.SessionID, again, resident)
+		}
+		if outputs := backflowNestedOutputs(history, backflowNestedSite); len(outputs) != 1 || outputs[0].Message.Content != backflowNestedAnswer {
+			t.Fatalf("agent_output facts of %s = %+v, want the one answer the delegated turn closed on", backflowNestedSite.SessionID, outputs)
+		}
+		if outputs := backflowNestedOutputs(history, backflowNestedNeighbour); len(outputs) != 0 {
+			t.Fatalf("agent_output facts of %s = %+v, want the result on the range that issued the call alone", backflowNestedNeighbour.SessionID, outputs)
+		}
+	})
+
+	t.Run("a_loop_beside_no_consumers_mounts_nothing", func(t *testing.T) {
+		tool := &backflowNestedCallTool{settle: make(chan struct{}), backflowed: make(chan struct{})}
+		script := newClosingRoundScript(closingRoundStep{answer: backflowNestedAnswer})
+		loop, _ := newBackflowNestedLoop(t, script, tool)
+
+		loop.Backflow("invocation-idle", task.Notice{TaskID: "task-idle", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "fact-idle"})
+
+		loop.mu.Lock()
+		consumers, resident := loop.consumers, loop.resident
+		loop.mu.Unlock()
+		if consumers != nil || resident != nil {
+			t.Fatalf("sets beside a settled backflow = (attached %v, mounted %v), want none: the wake mounts no set of its own", consumers != nil, resident != nil)
+		}
+		in := loop.intakeFor("invocation-idle")
+		if item, ok := in.await(context.Background(), "task-idle"); !ok || item.fact != "fact-idle" {
+			t.Fatalf("parked result = (%+v, %v), want the settled result kept in the intake", item, ok)
+		}
+	})
+}
+
+// backflowNestedCallToolName is the name the scripted round calls.
+const backflowNestedCallToolName = "nested_call"
+
+// backflowNestedCallTool is the tool one round of the delegated site calls: it admits
+// the call as a task and hands that task's settled notification to the loop's own
+// backflow path, which is the delivery a task pipeline makes from outside the loop.
+type backflowNestedCallTool struct {
+	loop *Loop
+	// settle lets the check fire the settled notification of the admitted task.
+	settle chan struct{}
+	// backflowed closes once the notification reached the loop.
+	backflowed chan struct{}
+}
+
+var _ trpctool.CallableTool = (*backflowNestedCallTool)(nil)
+
+// Declaration names the tool the scripted round calls.
+func (t *backflowNestedCallTool) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: backflowNestedCallToolName, Description: "admits one nested call as a task"}
+}
+
+// Call admits the call and delivers its settled notification once the check fires it.
+func (t *backflowNestedCallTool) Call(ctx context.Context, _ []byte) (any, error) {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return nil, errors.New("agent: the nested call carries no frame")
+	}
+	go func() {
+		<-t.settle
+		t.loop.Backflow(frame.Identity.InvocationID, task.Notice{
+			TaskID: backflowNestedTask,
+			Round:  1,
+			Kind:   task.NoticeSettled,
+			Seq:    0,
+			Event:  "fact-nested-settled",
+		})
+		close(t.backflowed)
+	}()
+	return task.AdmissionReceipt{CallID: frame.Identity.CallID, TaskID: backflowNestedTask, Accepted: true, Kind: task.AdmissionFresh}, nil
+}
+
+// newBackflowNestedLoop assembles one loop beside no host: no consumption set is
+// attached through SetConsumers, so the delegated site's resident instance belongs to
+// the set the loop mounts for itself, which is the shape an embedder or a test drives
+// the assembled runtime in.
+func newBackflowNestedLoop(t *testing.T, m model.Model, tool *backflowNestedCallTool) (*Loop, *invariantLoopHistory) {
+	t.Helper()
+	loop := NewLoop(state.NewBindings(), state.NewOccupancy(), "instance-a", nil)
+	history := newInvariantLoopHistory()
+	var mu sync.Mutex
+	seq := 0
+	loop.SetHistory(history)
+	loop.SetFactCommit(func(evt event.Event) (event.EventID, error) {
+		mu.Lock()
+		seq++
+		key := event.EventID(fmt.Sprintf("%s#fact-%d", evt.Owner.SessionID, seq))
+		mu.Unlock()
+		evt.Key = key
+		history.land(evt)
+		return key, nil
+	})
+	tool.loop = loop
+	t.Cleanup(loop.StopResidents)
+	return loop, history
+}
+
+// backflowNestedOutputs reports the agent_output facts one address's chain carries.
+func backflowNestedOutputs(history *invariantLoopHistory, addr event.Address) []event.Event {
+	var out []event.Event
+	for _, evt := range history.SessionFacts(addr) {
+		if evt.Type == event.TypeAgentOutput {
+			out = append(out, evt)
+		}
+	}
+	return out
 }
