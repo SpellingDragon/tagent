@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/features/rl"
@@ -134,10 +135,25 @@ func TestScenario09CaptureFidelityAndSeal(t *testing.T) {
 	if admission, err := crashSink.Record(ctx, recorded); err != nil || !admission.Admitted {
 		t.Fatalf("record the crashing attempt = (%+v, %v), want one admitted record", admission, err)
 	}
+	awaitCaptureDrain(t, crashSink)
 	crashManifest, _ := rl.ReadCaptureSeal(crashDir)
 	observations["crash_without_seal_claims_complete"] = crashManifest.Sealed && !crashManifest.Partial
 
 	observations["tokenizer_capability"] = "absent"
 
 	EmitScenarioRecord(t, scenario, refs, observations)
+}
+
+// awaitCaptureDrain waits until the writer of the crashing capture has accounted the
+// record it admitted, so the fixture is neither read nor removed beside a write still
+// landing: the observer of a crash reads a capture whose admitted line is on disk.
+func awaitCaptureDrain(t *testing.T, sink *rl.CaptureSink) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for inFlight := sink.Ledger().InFlight; inFlight > 0; inFlight = sink.Ledger().InFlight {
+		if time.Now().After(deadline) {
+			t.Fatalf("the crashing capture still holds %d record(s) in flight, want the line it admitted written", inFlight)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
