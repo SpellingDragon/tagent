@@ -189,6 +189,10 @@ type Loop struct {
 	notices   NoticeFeed
 	present   PresentationSink
 	boundary  RequestFace
+	// shown is the read face a resident consumption loop judges a driving
+	// fact's material by: the facts the request boundary of a session already
+	// presents, so a pull carries exactly the material no request has read yet.
+	shown PresentedFace
 	// writers is the ledger the close of this agent reads the real stop of every
 	// production of this loop through; nil registers nothing.
 	writers   *Writers
@@ -1994,6 +1998,25 @@ type HistoryFace interface {
 	SessionFacts(addr event.Address) []event.Event
 }
 
+// PresentedFace answers the facts of one session whose own text the request
+// boundary of that session already presents: the entries the replayed
+// projection still holds in full ahead of the boundary its ended material
+// reaches. It is the read the resident consumption loop judges the material of
+// a driving fact by, so the two halves of one presentation — the request prefix
+// and the segment transcript — never read one fact twice and never drop it
+// between them.
+//
+// The redline list (2 rules):
+// MUST report a fact whose text the prefix carries at its own key, never a fact
+// the prefix presents only as a summary, a ticket or a product.
+// MUST NOT report a fact the boundary leaves behind, whatever the chain holds
+// after it.
+type PresentedFace interface {
+	// SessionPresented reports the facts of the named session whose text the
+	// request prefix of that session presents, keyed by fact identity.
+	SessionPresented(addr event.Address) map[event.EventID]bool
+}
+
 // SetHistory attaches the session transcript face this loop reads the shared
 // session history from and commits one ended drive's transcript back to. The
 // setter is separate from the constructor so the declared construction shape of
@@ -2002,6 +2025,16 @@ func (l *Loop) SetHistory(face HistoryFace) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.history = face
+}
+
+// SetPresentedFace attaches the request-boundary presentation read this loop
+// judges the material of a pull by. A nil face keeps the judgment on the chain
+// itself: a loop beside no request face assembles no prefix, so every driving
+// fact past the last closed answer is material of its own.
+func (l *Loop) SetPresentedFace(face PresentedFace) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.shown = face
 }
 
 // sessionHistory reports the transcript the named session accumulated across
@@ -2028,6 +2061,19 @@ func (l *Loop) sessionFacts(addr event.Address) []event.Event {
 		return nil
 	}
 	return face.SessionFacts(addr)
+}
+
+// sessionPresented reports the facts of the named session whose text the request
+// prefix presents, and whether a face answered at all: a loop beside no face
+// assembles no prefix, and the caller keeps its own boundary.
+func (l *Loop) sessionPresented(addr event.Address) (map[event.EventID]bool, bool) {
+	l.mu.Lock()
+	face := l.shown
+	l.mu.Unlock()
+	if face == nil {
+		return nil, false
+	}
+	return face.SessionPresented(addr), true
 }
 
 // commitTranscript appends the transcript one ended drive accumulated to the

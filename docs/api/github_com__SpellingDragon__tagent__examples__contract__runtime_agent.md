@@ -58,6 +58,13 @@ func ExampleHistoryFace()
 func ExampleNoticeFeed()
     ExampleNoticeFeed demonstrates the incremental notice read from the chain.
 
+func ExamplePresentedFace()
+    ExamplePresentedFace reads the presentation of one session chain back:
+    the input the prefix carries in full is reported, so a resident consumption
+    loop leaves it to the prefix instead of carrying it a second time, while the
+    input the fold replaced with a summary is not reported and therefore stays
+    the material of the segment that reads it.
+
 func ExampleReconciler()
     ExampleReconciler books one admitted call, lands its terminal and reports
     that no booking stays open once the landing ran.

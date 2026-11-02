@@ -318,10 +318,17 @@ func (c *Consumer) flyingSegment() *segment {
 // pulledEvents splits one pull of the session chain into the facts that drive
 // the loop and the material those facts carry: an input an entry committed and
 // a notification an unattended follow-up lands are driving facts wherever they
-// stand, while the material they carry belongs to the segment only past the
-// last agent_output the chain holds — everything that closed segment already
-// presents as the prefix of a request, so a driving fact behind that boundary
-// drives without carrying: presenting it twice would read one fact as two.
+// stand, while the material they carry belongs to the segment only while the
+// request prefix presents none of it — a fact the prefix carries is already
+// read by every request of this range, so presenting it again would read one
+// fact as two, and a fact the prefix leaves out (behind the ended boundary of
+// its chain, or replaced there by a summary, a ticket or a fold product) carries
+// wherever it stands: the segment that pulled before it landed commits its
+// answer after, so a boundary read off the chain alone would leave the body of
+// that input behind an answer no request ever read.
+// A loop beside no presentation face assembles no prefix and keeps the chain's
+// own boundary: the material of a pull is what stands past the last
+// agent_output the chain holds.
 // The cursor is the identity of the last fact the chain held at the read, so a
 // fold rewrite that hides it re-reads the chain head — the read set keeps each
 // fact once by its own identity. A fact the face that fires an owed attempt
@@ -331,7 +338,8 @@ func (c *Consumer) flyingSegment() *segment {
 type pulledEvents struct {
 	// driving lists every driving fact the pull took, carrying or not.
 	driving []event.Event
-	// material lists the driving facts whose material the segment carries.
+	// material lists the driving facts whose body the segment carries: the ones
+	// the request prefix presents nowhere.
 	material []event.Event
 	// chain is the session chain the pull read, as the chain face answered it:
 	// the very facts a judgment of this boundary is read from, so the drive reads
@@ -352,6 +360,7 @@ func (c *Consumer) pullDriving() pulledEvents {
 			lastOutput = at
 		}
 	}
+	shown, byPrefix := c.loop.sessionPresented(c.addr)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.seeded {
@@ -381,7 +390,11 @@ func (c *Consumer) pullDriving() pulledEvents {
 		c.read[evt.Key] = true
 		c.taken[evt.Key] = true
 		pull.driving = append(pull.driving, evt)
-		if at > lastOutput {
+		carries := at > lastOutput
+		if byPrefix {
+			carries = !shown[evt.Key]
+		}
+		if carries {
 			pull.material = append(pull.material, evt)
 		}
 	}

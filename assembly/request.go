@@ -259,6 +259,58 @@ func (h replayEntry) endedPrefix() int {
 	return h.projection.Len()
 }
 
+// SessionPresented reports the facts of one session chain whose own text the
+// request prefix of that session presents: the entries the registered
+// projection still holds ahead of the boundary its ended material reaches, kept
+// to the ones the assembly presents at their own text rather than at the ticket,
+// the summary or the product a tight budget or a fold leaves in their place.
+//
+// The resident consumption loop judges the material of a pull by this read, so
+// the request prefix and the segment transcript present one fact between them
+// exactly once: a fact the prefix carries is left out of the transcript, and a
+// fact the prefix carries nowhere — behind the boundary, or consumed by a fold
+// before any decision read it — is carried by the segment that drives it. The
+// read is the assembly the request itself runs, never a second judgment of the
+// same material. A session this run registered no sequence for answers nothing,
+// because no prefix is assembled for it and no fact is presented there.
+func (r *Run) SessionPresented(addr event.Address) map[event.EventID]bool {
+	if addr.SessionID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	_, held, carried := r.replaySlotLocked(addr)
+	r.mu.Unlock()
+	if !carried || held.projection == nil {
+		return nil
+	}
+	entries := held.projection.Entries()
+	prefix := held.endedPrefix()
+	if prefix > len(entries) {
+		prefix = len(entries)
+	}
+	text := make(map[event.EventID]string, prefix)
+	for at := 0; at < prefix; at++ {
+		if key := entries[at].Key; key != "" {
+			text[key] = entries[at].Content
+		}
+	}
+	if len(text) == 0 {
+		return nil
+	}
+	views, err := held.projection.AssembleBudgetPrefix(context.Background(),
+		projectionBudget(held.projection, held.window, prefix), prefix)
+	if err != nil {
+		return nil
+	}
+	presented := make(map[event.EventID]bool, len(views))
+	for _, view := range views {
+		if full, held := text[view.Key]; held && full == view.Content {
+			presented[view.Key] = true
+		}
+	}
+	return presented
+}
+
 // AttachReplay registers the replayed projection of one session chain on this
 // assembly: every request of that session carries the chain's window assembly
 // in front of its transcript, mapped under the frozen event-type→role table.

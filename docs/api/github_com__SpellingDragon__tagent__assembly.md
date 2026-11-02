@@ -1503,6 +1503,24 @@ func (r *Run) SessionHistory(addr event.Address) []model.Message
     not a durability record while the sequence is replayed from the durable fact
     chain.
 
+func (r *Run) SessionPresented(addr event.Address) map[event.EventID]bool
+    SessionPresented reports the facts of one session chain whose own text
+    the request prefix of that session presents: the entries the registered
+    projection still holds ahead of the boundary its ended material reaches,
+    kept to the ones the assembly presents at their own text rather than at the
+    ticket, the summary or the product a tight budget or a fold leaves in their
+    place.
+
+    The resident consumption loop judges the material of a pull by this read,
+    so the request prefix and the segment transcript present one fact between
+    them exactly once: a fact the prefix carries is left out of the transcript,
+    and a fact the prefix carries nowhere — behind the boundary, or consumed
+    by a fold before any decision read it — is carried by the segment that
+    drives it. The read is the assembly the request itself runs, never a second
+    judgment of the same material. A session this run registered no sequence
+    for answers nothing, because no prefix is assembled for it and no fact is
+    presented there.
+
 func (r *Run) Unsettled(ctx context.Context) task.Unsettled
     Unsettled reports the rest criterion of this run: the work it accepted
     and has not finished beside the notifications no consumption confirmed.

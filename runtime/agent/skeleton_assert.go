@@ -142,6 +142,12 @@ var (
 	// session's history across the invocations that ended on it.
 	_ func(*Loop, HistoryFace) = (*Loop).SetHistory
 
+	// The request-boundary presentation read is attached through its own setter
+	// for the same reason: the resident consumption loop judges the material of
+	// a pull by the very prefix a request assembles, so one fact is never
+	// presented twice across the prefix and the transcript.
+	_ func(*Loop, PresentedFace) = (*Loop).SetPresentedFace
+
 	// The After pass presentation is handed to the attached sink through its own
 	// setter, so the declared construction shape above stays exactly as it is:
 	// the pass runs once per committed fact and a nil sink drops the presentation

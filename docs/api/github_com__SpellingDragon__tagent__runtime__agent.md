@@ -1273,6 +1273,12 @@ func (l *Loop) SetPresentations(sink PresentationSink)
     is separate from the constructor so the declared construction shape of the
     loop stays as it is.
 
+func (l *Loop) SetPresentedFace(face PresentedFace)
+    SetPresentedFace attaches the request-boundary presentation read this loop
+    judges the material of a pull by. A nil face keeps the judgment on the chain
+    itself: a loop beside no request face assembles no prefix, so every driving
+    fact past the last closed answer is material of its own.
+
 func (l *Loop) SetRequestFace(face RequestFace)
     SetRequestFace attaches the request-boundary face this loop assembles each
     decision's request prefix through: the fixed file contents, the loaded
@@ -1366,6 +1372,24 @@ type PresentationSink func(presentation view.Presentation)
     observers left. The sink is the read-out face the presentation is handed to
     — the inspection face of the run — while the loop keeps the committed fact
     itself and never retracts it for anything this presentation carries.
+
+type PresentedFace interface {
+	// SessionPresented reports the facts of the named session whose text the
+	// request prefix of that session presents, keyed by fact identity.
+	SessionPresented(addr event.Address) map[event.EventID]bool
+}
+    PresentedFace answers the facts of one session whose own text the request
+    boundary of that session already presents: the entries the replayed
+    projection still holds in full ahead of the boundary its ended material
+    reaches. It is the read the resident consumption loop judges the material
+    of a driving fact by, so the two halves of one presentation — the request
+    prefix and the segment transcript — never read one fact twice and never drop
+    it between them.
+
+    The redline list (2 rules): MUST report a fact whose text the prefix
+    carries at its own key, never a fact the prefix presents only as a summary,
+    a ticket or a product. MUST NOT report a fact the boundary leaves behind,
+    whatever the chain holds after it.
 
 type Reconciler interface {
 	// Reconcile attempts the landing of one admitted call's terminal again and

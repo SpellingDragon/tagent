@@ -2776,6 +2776,28 @@ func smokeIntegrityRequestsForLastUser(provider *smokeProvider, model, marker st
 	return out
 }
 
+// smokeIntegrityRequestsCarryingWhole 报告逐字节带着整份大正文的模型请求。投影降级
+// 一份材料时只留前 120 字符的摘要与 128 字节的票据预览，所以整份正文出现即证明这
+// 一轮的原文真被某次请求完整读到。按“最后一条用户消息”读同一条事实做不到这点：落
+// 在大正文之后的外部投递（如反思综述的投递）会成为那一条，同一次完整读取在末条消息
+// 上就消失了。
+func smokeIntegrityRequestsCarryingWhole(provider *smokeProvider, model, marker string) []smokeModelRequest {
+	body := smokeIntegrityBulk(marker)
+	out := make([]smokeModelRequest, 0, 2)
+	for _, req := range provider.recorded() {
+		if model != "" && req.Model != model {
+			continue
+		}
+		for _, msg := range req.Messages {
+			if strings.Contains(msg.Content, body) {
+				out = append(out, req)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // smokeIntegrityModels 渲染一组请求的模型名，供版本漂移失败时对照。
 func smokeIntegrityModels(requests []smokeModelRequest) []string {
 	out := make([]string, 0, len(requests))
@@ -2899,9 +2921,10 @@ func smokeIntegrityAssertFold(t *testing.T, rig *smokeRig, provider *smokeProvid
 			len(replay.RenderProjection(entries)), smokeEntryDigest(entries))
 	}
 
-	late := smokeIntegrityRequestsForLastUser(provider, smokeEntryModel, smokeIntegrityFoldLateTurn)
+	late := smokeIntegrityRequestsCarryingWhole(provider, smokeEntryModel, smokeIntegrityFoldLateTurn)
 	if len(late) != 1 {
-		t.Fatalf("the late fold turn drove %d entry request(s), want one", len(late))
+		t.Fatalf("the late fold turn reached %d entry request(s) with its whole body, want one\nentry requests:\n%s\ncarrying the marker:\n%s",
+			len(late), smokeRequestDetail(provider, smokeEntryModel), smokeRequestsContaining(provider, smokeIntegrityFoldLateTurn))
 	}
 	wantRendered := "external_input: " + smokeIntegrityFoldEarlyTurn
 	if !strings.Contains(late[0].text(), "history summary:") || !strings.Contains(late[0].text(), wantRendered) {
