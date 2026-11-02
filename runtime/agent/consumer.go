@@ -112,8 +112,15 @@ type Consumer struct {
 	// seeded reports whether the first pull of this loop has already marked
 	// the driving facts the boot found inside closed segments as read; a loop
 	// that boots over no chain holds nothing to seed.
-	seeded   bool
-	flying   *segment
+	seeded bool
+	flying *segment
+	// busy reports that this loop stands inside a consumption pass: a pull is
+	// being read, or a segment is being opened. A close that reads the loop as
+	// resting reads a writer stopped, and a loop that stands between a pull and
+	// the segment it opens still writes — the pull marks its facts read and the
+	// segment commits the answer — so the window between them is a writer at
+	// work, never a loop at rest.
+	busy     bool
 	segCount int
 	// answers indexes the closed answers by the key of every input the closing
 	// segment consumed, so an entry that starts waiting after its segment closed
@@ -269,6 +276,8 @@ func (c *Consumer) Drive(keys ...event.EventID) {
 // closed segment hands the address to the next pull, and a pull that reports
 // no driving event returns the loop to its wait.
 func (c *Consumer) consume(ctx context.Context) {
+	c.setBusy(true)
+	defer c.setBusy(false)
 	for {
 		select {
 		case <-ctx.Done():
@@ -288,10 +297,13 @@ func (c *Consumer) consume(ctx context.Context) {
 	}
 }
 
-// Resting reports whether this loop stands between segments: no segment flies and
-// no wake waits to open one. The loop is the writer of its own address, so a loop
-// that rests writes nothing more at that site, and a close that reads it resting
-// reads a writer stopped rather than one merely paused.
+// Resting reports whether this loop stands between segments: no segment flies, no
+// consumption pass is running, and no wake waits to open one. The loop is the
+// writer of its own address, so a loop that rests writes nothing more at that
+// site, and a close that reads it resting reads a writer stopped rather than one
+// merely paused. A pass between its pull and the segment it opens is in that
+// window, so the pass itself is what rests the loop, never the arrival of a
+// segment to fly.
 // - The first clause is the whole judgment of a dead loop: a loop whose run ended
 // leaves the segment it flew closed (see abandonSegment), so an ended loop beside a
 // segment still flying answers not resting here instead of reading its shutdown as
@@ -300,10 +312,22 @@ func (c *Consumer) Resting() bool {
 	if c == nil {
 		return true
 	}
-	if c.flyingSegment() != nil {
+	c.mu.Lock()
+	busy, flying := c.busy, c.flying
+	c.mu.Unlock()
+	if busy || flying != nil {
 		return false
 	}
 	return len(c.wake) == 0
+}
+
+// setBusy records whether this loop stands inside a consumption pass, so a read
+// of Resting beside it answers a writer at work rather than a loop between
+// segments.
+func (c *Consumer) setBusy(busy bool) {
+	c.mu.Lock()
+	c.busy = busy
+	c.mu.Unlock()
 }
 
 // TaskState names what became of one settled result on this address: a flying
@@ -403,12 +427,7 @@ func (c *Consumer) pullDriving() pulledEvents {
 	if len(facts) == 0 {
 		return pulledEvents{}
 	}
-	lastOutput := -1
-	for at, evt := range facts {
-		if evt.Type == event.TypeAgentOutput {
-			lastOutput = at
-		}
-	}
+	lastOutput := lastAnswerIndex(facts)
 	shown, byPrefix := c.loop.sessionPresented(c.addr)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -449,6 +468,42 @@ func (c *Consumer) pullDriving() pulledEvents {
 	}
 	c.cursor = facts[len(facts)-1].Key
 	return pull
+}
+
+// lastAnswerIndex reports the position of the last agent_output fact one session
+// chain holds: the boundary "the round the chain last answered" is read from, and
+// the one place that boundary is computed, so a pull, a boot and the rest
+// criterion of a run all measure it the same way.
+func lastAnswerIndex(facts []event.Event) int {
+	last := -1
+	for at, evt := range facts {
+		if evt.Type == event.TypeAgentOutput {
+			last = at
+		}
+	}
+	return last
+}
+
+// PendingInputs reports the driving facts one session chain holds with no round
+// answered for them: the facts that start a range and stand past the last
+// agent_output the chain committed, in commit order. It is the consumption
+// position of a chain read back from the chain itself, never from a ledger kept
+// beside it: the answer a round closes on is the one boundary the chain records,
+// so an input the chain committed and no answer closed on is still owed a drive.
+//
+// - A chain beside no agent_output is one range in flight from its head, so every driving fact it holds is pending.
+// - A fact that starts no range belongs to the range that committed it and is pending never, since its range's answer is what closes it.
+func PendingInputs(facts []event.Event) []event.Event {
+	last := lastAnswerIndex(facts)
+	pending := make([]event.Event, 0, len(facts))
+	for at := last + 1; at < len(facts); at++ {
+		evt := facts[at]
+		if evt.Key == "" || !startsRange(evt) {
+			continue
+		}
+		pending = append(pending, evt)
+	}
+	return pending
 }
 
 // seedAnsweredLocked marks the driving facts one boot finds inside a closed

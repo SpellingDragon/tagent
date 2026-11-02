@@ -173,6 +173,12 @@ type Run struct {
 	// plugins holds the run-level instances every agent generation carries.
 	plugins []plugin.Instance
 	factSeq uint64
+	// movement is the one sequence the accounts of this run advance whenever they
+	// are written, and the rest criterion is fenced by: the task chain, the
+	// delivery obligations, the mailbox and the session chains all report their
+	// writes to it, so a judgment that spans them belongs to one instant instead
+	// of as many instants as it has accounts.
+	movement *task.Movement
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
 	landing sync.Mutex
@@ -361,12 +367,14 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	} else {
 		r.commit = &runCommit{inner: task.NewMemoryCommit(nil), held: map[event.TaskID]bool{}}
 	}
+	r.movement = task.NewMovement()
 	if durable != nil {
 		r.store = state.NewMemoryStore(r.authority, durable)
 	} else {
 		r.store = state.NewMemoryStore(r.authority)
 	}
-	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress), task.WithTerminalTTL(cfg.terminalTTL()))
+	r.store.SetMovement(r.movement)
+	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress), task.WithTerminalTTL(cfg.terminalTTL()), task.WithMovement(r.movement))
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
 	r.writers = agent.NewWriters()
 	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)

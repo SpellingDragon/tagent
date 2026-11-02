@@ -87,12 +87,17 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 	if r.retrieval != nil {
 		defer r.retrieval.close()
 	}
+	judge := context.WithoutCancel(ctx)
 	read := r.quiesce(ctx, timeout)
+	cut := r.cutApprovalWaits(judge, read)
+	if len(cut) > 0 {
+		read = r.Unsettled(judge)
+	}
 	stopped, writers := r.writers.Stopped()
 	landing := r.landingOwed()
-	drained := read.Resting() && stopped && !landing
+	drained := len(cut) == 0 && read.Resting() && stopped && !landing
 	report := agent.DrainReport{
-		Unsettled: mergeUnsettled(r.unsettledObligations(read), agent.WriterObligations(writers), landingObligations(landing)),
+		Unsettled: mergeUnsettled(cut, r.unsettledObligations(read), agent.WriterObligations(writers), landingObligations(landing)),
 		Drained:   drained,
 		Outcome:   closeOutcome(read, drained),
 	}
@@ -171,7 +176,9 @@ func brokenCloseReason(read task.Unsettled) error {
 // progress pulse of the run and returns when its own budget arrives, so the wait
 // is an event and never a fixed-interval poll. A run that reached rest is
 // answered at once, and a run that spent its budget is answered as it stands.
+// - The criterion is read beside a context that does not carry the caller's cancellation: a cancelled close is out of budget and answers Cut where the run stands, never Broken.
 func (r *Run) quiesce(ctx context.Context, timeout time.Time) task.Unsettled {
+	judge := context.WithoutCancel(ctx)
 	var budget <-chan time.Time
 	if !timeout.IsZero() {
 		timer := time.NewTimer(time.Until(timeout))
@@ -180,7 +187,7 @@ func (r *Run) quiesce(ctx context.Context, timeout time.Time) task.Unsettled {
 	}
 	woken := ""
 	for {
-		read := r.Unsettled(ctx)
+		read := r.Unsettled(judge)
 		stopped, _ := r.writers.Stopped()
 		if read.Resting() && stopped && !r.landingOwed() {
 			return read
@@ -195,13 +202,54 @@ func (r *Run) quiesce(ctx context.Context, timeout time.Time) task.Unsettled {
 		}
 		select {
 		case <-ctx.Done():
-			return r.Unsettled(ctx)
+			return r.Unsettled(judge)
 		case <-budget:
-			return r.Unsettled(ctx)
+			return r.Unsettled(judge)
 		case <-r.Progress():
 		}
 	}
 }
+
+// cutApprovalWaits cancels the tasks one close leaves waiting on an approval no
+// restart can rejoin, and answers the items the close itself landed for them. A
+// hold waits on an approval this process holds in memory alone: the task names an
+// approval identity and a digest, never the call and its arguments, so a restart
+// that reads the task back cannot rejoin the wait nor put it to a decision, and a
+// task left in the wait is work no later process can finish. The close therefore
+// cancels it and lands the fact, so the account ends the wait in a state a
+// restart reads as an outcome instead of reopening a wait nobody can settle.
+//
+// - Only a run that did not reach rest is judged: a quiesce that reached rest leaves no wait behind, so an approval still open is only cut beside work that stayed open.
+// - The mutation identity is derived from the task, so a cancelled task that was already cut is answered as the fact the chain holds instead of a second cancel.
+// - The item is reported beside the run's own, naming the task and the address, so the cancel is never a silent edit of the account.
+func (r *Run) cutApprovalWaits(ctx context.Context, read task.Unsettled) []agent.UnsettledObligation {
+	if read.Unjudged != "" {
+		return nil
+	}
+	face := closeFace{manager: r.manager, registry: r.registry}
+	var cut []agent.UnsettledObligation
+	for _, work := range read.Work {
+		if work.Status != task.StatusAwaitingApproval {
+			continue
+		}
+		mutation := task.MutationID("cut-approval:" + string(work.TaskID))
+		if _, err := face.Advance(ctx, work.TaskID, task.StatusCancelled, mutation, nil); err != nil {
+			assemblyWarn("tagent: the approval wait of task %s was not cancelled beside the close: %v", work.TaskID, err)
+			continue
+		}
+		assemblyWarn("tagent: the close cancelled task %s, whose approval wait no restart can rejoin", work.TaskID)
+		cut = append(cut, agent.UnsettledObligation{
+			TaskID:  work.TaskID,
+			Address: work.Address,
+			Reason:  reasonApprovalCut,
+		})
+	}
+	return cut
+}
+
+// reasonApprovalCut names the outcome of a task whose approval wait the close
+// ended because no restart can rejoin that wait.
+const reasonApprovalCut = "the approval this task waited on cannot be rejoined by a restart, so the close cancelled it"
 
 // budgetSpent reports whether the budget the close may spend has already
 // arrived. A zero budget waits without one.
@@ -242,6 +290,9 @@ func settleDigest(read task.Unsettled) string {
 	for _, notice := range read.Notices {
 		digest.WriteString("notice:" + notice.Notice.FactKey() + ";")
 	}
+	for _, input := range read.Inputs {
+		digest.WriteString("input:" + string(input.Event) + ";")
+	}
 	return digest.String()
 }
 
@@ -253,12 +304,16 @@ func (r *Run) Unsettled(ctx context.Context) task.Unsettled {
 	return task.ReadUnsettled(ctx, runUnsettled{run: r}, r.fence)
 }
 
-// fence reports the commit sequence this run stands at, so the sets of one
-// evaluation of the criterion belong to one instant of the account.
+// fence reports the movement of this run, so the sets of one evaluation of the
+// criterion belong to one instant of every account the criterion reads. The
+// sequence is advanced at the write point of each account — the task chain and
+// its obligations, the mailbox, the session chains — so a judgment that unions
+// them is fenced over the accounts that actually hold them, and not over one
+// account's own sequence read as if the others moved with it. A read that spans
+// a write is re-read; a sequence that never holds under a read is answered
+// unjudged rather than as sets of different instants.
 func (r *Run) fence(context.Context) uint64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.factSeq
+	return r.movement.Read()
 }
 
 // Rejections reports the feedback fact of every notification a target refused,
@@ -274,8 +329,9 @@ func (r *Run) Rejections() []state.Rejection {
 }
 
 // runUnsettled is the rest criterion source of one run: the chain the registry
-// holds, the notifications the manager still owes, and the mailbox the store
-// accepted and nobody consumed.
+// holds, the notifications no consumption confirmed beside the mailbox the store
+// accepted, and the input rounds the session chains of the run hold with no
+// answer.
 type runUnsettled struct {
 	run *Run
 }
@@ -285,12 +341,16 @@ func (s runUnsettled) Unfinished(ctx context.Context) ([]task.UnsettledWork, err
 	return s.run.registry.Unfinished(ctx)
 }
 
-// Owed reports the notifications the tasks of this run still owe a delivery for,
-// leaving out the ones a target already refused. A refusal is the consumption
-// result of its notification and the account keeps it as the feedback fact it is,
-// so the rest criterion reads that fact instead of waiting on a delivery no
-// target will ever accept.
-func (s runUnsettled) Owed(ctx context.Context) ([]task.UnsettledNotice, error) {
+// Unconsumed reports the notifications no consumption confirmed, from the two
+// accounts this run owns: the notifications its tasks still owe a delivery for,
+// leaving out the ones a target already refused, and the ones a mailbox accepted
+// and nobody consumed. A refusal is the consumption result of its notification and
+// the account keeps it as the feedback fact it is, so the rest criterion reads
+// that fact instead of waiting on a delivery no target will ever accept.
+func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	owed, err := s.run.manager.Owed(ctx)
 	if err != nil {
 		return nil, err
@@ -298,28 +358,14 @@ func (s runUnsettled) Owed(ctx context.Context) ([]task.UnsettledNotice, error) 
 	if s.run.store == nil {
 		return owed, nil
 	}
-	kept := make([]task.UnsettledNotice, 0, len(owed))
+	unconsumed := make([]task.UnsettledNotice, 0, len(owed))
 	for _, notice := range owed {
 		if s.run.store.Refused(notice.Notice) {
 			continue
 		}
-		kept = append(kept, notice)
+		unconsumed = append(unconsumed, notice)
 	}
-	return kept, nil
-}
-
-// Unconsumed reports the notifications the mailbox of this run accepted and no
-// consumption confirmed.
-func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if s.run.store == nil {
-		return nil, nil
-	}
-	seats := s.run.store.Unconsumed()
-	unconsumed := make([]task.UnsettledNotice, 0, len(seats))
-	for _, seat := range seats {
+	for _, seat := range s.run.store.Unconsumed() {
 		unconsumed = append(unconsumed, task.UnsettledNotice{
 			Notice:   seat.Notice,
 			Address:  seat.Address,
@@ -330,6 +376,43 @@ func (s runUnsettled) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, e
 	return unconsumed, nil
 }
 
+// Unanswered reports the input rounds the session chains of this run hold with no
+// answer: every driving fact the chain committed that stands past the round its
+// last answer closed. The position is read back from the chain itself, so an
+// input this process accepted and never drove is owed a drive rather than lost
+// beside a cursor kept in memory — and a restart over the same chain reads the
+// very same rounds, because the boundary is the one fact the chain records.
+func (s runUnsettled) Unanswered(ctx context.Context) ([]task.UnsettledInput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var unanswered []task.UnsettledInput
+	for _, addr := range s.run.ActiveSessions("") {
+		pending := agent.PendingInputs(s.run.SessionFacts(addr))
+		if len(pending) == 0 {
+			continue
+		}
+		var instance event.InstanceID
+		if s.run.store != nil {
+			instance = s.run.store.InstanceOf(addr)
+		}
+		for _, evt := range pending {
+			unanswered = append(unanswered, task.UnsettledInput{
+				Address:  addr,
+				Instance: instance,
+				Event:    evt.Key,
+				Source:   evt.Source,
+				Reason:   reasonInputUnanswered,
+			})
+		}
+	}
+	return unanswered, nil
+}
+
+// reasonInputUnanswered names the wait an input round stands in while the chain
+// holds it and no answer closed it.
+const reasonInputUnanswered = "the session chain holds this input round with no answer"
+
 // reasonMailboxUnconsumed names the wait a notification stands in while it sits
 // in a mailbox entry no consumption confirmed.
 const reasonMailboxUnconsumed = "the mailbox holds this notification unconsumed"
@@ -338,7 +421,7 @@ const reasonMailboxUnconsumed = "the mailbox holds this notification unconsumed"
 // one close: every piece of unfinished work and every unconsumed notification
 // beside the address it stands at and the reason it stayed open.
 func (r *Run) unsettledObligations(read task.Unsettled) []agent.UnsettledObligation {
-	out := make([]agent.UnsettledObligation, 0, len(read.Work)+len(read.Notices))
+	out := make([]agent.UnsettledObligation, 0, len(read.Work)+len(read.Notices)+len(read.Inputs))
 	if read.Unjudged != "" {
 		out = append(out, agent.UnsettledObligation{Reason: read.Unjudged})
 	}
@@ -356,6 +439,14 @@ func (r *Run) unsettledObligations(read task.Unsettled) []agent.UnsettledObligat
 			Source:  notice.Source,
 			FactKey: notice.Notice.FactKey(),
 			Reason:  notice.Reason,
+		})
+	}
+	for _, input := range read.Inputs {
+		out = append(out, agent.UnsettledObligation{
+			Address: input.Address,
+			Source:  input.Source,
+			FactKey: string(input.Event),
+			Reason:  input.Reason,
 		})
 	}
 	return out
@@ -382,22 +473,23 @@ func statusWordOf(status task.Status) string {
 	}
 }
 
-// mergeUnsettled unions two reports of the work one close could not settle: a
-// notification stands under one stable identity and is listed once, while work
-// that names no identity beside it keeps every entry its producers reported, so
-// one task held by two producers is reported twice.
+// mergeUnsettled unions the per-address items one close reports, each item once:
+// one address, task and reason name one piece of unsettled work however many
+// faces of the close saw it, so a report answers the work that stands open and
+// never one entry per face that noticed it. The reason is part of the identity: a
+// task that stands open for two different waits is two items, and one face that
+// named a wait another did not is the one that has to be read.
 func mergeUnsettled(sets ...[]agent.UnsettledObligation) []agent.UnsettledObligation {
 	merged := make([]agent.UnsettledObligation, 0, len(sets[0]))
 	seen := make(map[string]bool, len(sets[0]))
 	for _, set := range sets {
 		for _, entry := range set {
-			if entry.FactKey != "" {
-				key := string(entry.TaskID) + "\x00" + entry.FactKey
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
+			key := string(entry.Address.AgentID) + "\x00" + string(entry.Address.SessionID) + "\x00" +
+				string(entry.TaskID) + "\x00" + entry.Reason
+			if seen[key] {
+				continue
 			}
+			seen[key] = true
 			merged = append(merged, entry)
 		}
 	}

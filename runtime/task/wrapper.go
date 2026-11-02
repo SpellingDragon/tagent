@@ -327,10 +327,13 @@ func (r *MemoryRegistry) roundOf(taskID event.TaskID) int64 {
 }
 
 // acceptDelivery clears the delivery obligation of one notification the target
-// answered with acceptance, mirroring the accepted path of a flush.
+// answered with acceptance, mirroring the accepted path of a flush, and advances
+// the sequence the rest criterion is fenced by: the obligation this write drops
+// is one of the sets a judgment reads.
 func (m *MemoryManager) acceptDelivery(notice Notice) {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
+	defer m.registry.movement.Advance()
 	entry, ok := m.registry.tasks[notice.TaskID]
 	if !ok {
 		return

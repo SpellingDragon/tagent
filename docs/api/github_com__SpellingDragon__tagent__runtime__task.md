@@ -32,6 +32,18 @@ exactly as it stands.
 
 红线: 逻辑状态=纯观测：只标记，不改状态机、不自动处置（不 kill 不中断）——处置走 Governor 策略面。
 
+This file holds the one sequence a run is judged at: every account the rest
+criterion reads advances it whenever it is written, so an evaluation that spans
+the task chain, the delivery obligations, the mailbox and the session chains
+belongs to one instant of all of them.
+
+The sequence is one counter, never a lock: the accounts it fences are written
+under their own locks and in their own order, so a judgment that held them all
+at once would order two of those locks against each other. A counter moves no
+lock and makes no reader wait for a writer: a read that spans a write sees the
+sequence move and is re-read, and a read that never holds is answered unjudged
+rather than as a snapshot of instants that never stood together.
+
 This file holds the progress read of a task. Progress is a fact a running task
 reports, not a state it is moved to: the report travels as a NoticeProgress in
 the outbox of the fact that carries it, so the committed chain already answers
@@ -988,6 +1000,10 @@ func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error
     instance is closed is retained by name as ErrInstanceClosed: it is neither
     dropped nor delivered into a later instance that reuses the address.
 
+    A notification no target accepted stays owed, and the reason it could not
+    be accepted is recorded beside it, so a report names why a delivery waits
+    instead of only that it waits.
+
 func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target HandoffTarget) error
     Handoff moves a task's future notifications to the target address and the
     target instance, keeping the source and target instances distinct, and
@@ -1207,6 +1223,35 @@ func (r *MemoryRegistry) Watch(ctx context.Context, at time.Time) []LogicalChang
     reported once: a task already reported under a logical status is reported
     again only when that status moves. The report reads the silence of the tasks
     it covers and moves no status, revision or obligation of any of them.
+
+type Movement struct {
+	// Has unexported fields.
+}
+    Movement is the one sequence the rest criterion is fenced by: the accounts
+    of a run advance it whenever they are written, and the criterion reads it
+    before and after the sets it unions. Two equal reads name the one instant
+    those sets belong to; a sequence that moved under a read names a judgment no
+    set can be reported at.
+
+    The redline list (3 rules): MUST be advanced by every writer of a set the
+    rest criterion reads, at the write point itself. MUST NOT be advanced by a
+    reader: a read moves no account and so moves no sequence. MUST NOT stand for
+    an account of its own — it names movement, never the content a set answers
+    with.
+
+func NewMovement() *Movement
+    NewMovement returns the sequence of one run at its first position.
+
+func (m *Movement) Advance()
+    Advance records one write of an account the rest criterion reads.
+    It is called at the write point, beside the account that moved, so a reader
+    that reads the sequence before and after the sets sees every write standing
+    between them.
+
+func (m *Movement) Read() uint64
+    Read reports the position the accounts of this run stand at. A sequence
+    attached to no run reads zero, which every read of one instant equals:
+    an account that keeps no sequence is judged by its own snapshot alone.
 
 type MutationID string
 
@@ -1460,6 +1505,14 @@ func WithConcurrencyLimit(limit int) RegistryOption
     once. An admission past that limit is refused by name, and the tasks already
     admitted are kept.
 
+func WithMovement(movement *Movement) RegistryOption
+    WithMovement attaches the one sequence the rest criterion is fenced by.
+    The registry advances it at every write of the account it owns — an applied
+    fact and a flush that moved an obligation alike — so a judgment that unions
+    this account with the mailbox and the session chains belongs to one instant
+    of all of them. A registry beside no sequence advances nothing, and its
+    account stands at the first position of a run that keeps none.
+
 func WithPolicy(policy Policy) RegistryOption
     WithPolicy sets the threshold set every task of the registry is read under.
     A registry built beside no policy reads its tasks under DefaultPolicy.
@@ -1667,12 +1720,16 @@ type Unsettled struct {
 	// Notices lists the notifications no consumption confirmed, in identity
 	// order.
 	Notices []UnsettledNotice
+	// Inputs lists the input rounds the session chains hold with no answer, in
+	// address and commit order.
+	Inputs []UnsettledInput
 	// Unjudged is the named reason the criterion was not judged, and empty when
 	// it was.
 	Unjudged string
 }
     Unsettled is one evaluation of the rest criterion: the unsettled work,
-    the unconsumed notices, and the commit sequence the two sets were read at.
+    the unconsumed notices, the input rounds no answer closed, and the commit
+    sequence the sets were read at.
 
     Unjudged is the named reason the criterion could not be read: an account
     that refused the read, or a commit sequence that moved under every attempt,
@@ -1687,14 +1744,31 @@ func ReadUnsettled(ctx context.Context, source UnsettledSource, fence UnsettledF
     account whose own reads are already one snapshot.
 
 func (u Unsettled) Resting() bool
-    Resting reports whether a run is at rest: nothing it accepted is unfinished
-    and no notification of it stands unconsumed. A criterion that could not be
-    read is never at rest.
+    Resting reports whether a run is at rest: nothing it accepted is unfinished,
+    no notification of it stands unconsumed, and no input round it holds stands
+    unanswered. A criterion that could not be read is never at rest.
 
 type UnsettledFence func(ctx context.Context) uint64
     UnsettledFence reports the commit sequence of the account a read stands at,
     so the sets of one evaluation belong to one instant. A nil fence reads the
     sets once and answers them as the account stands.
+
+type UnsettledInput struct {
+	// Address is the address of the site the input was committed at.
+	Address event.Address
+	// Instance is the runtime instance that owns that site.
+	Instance event.InstanceID
+	// Event is the identity of the driving fact the round opened on.
+	Event event.EventID
+	// Source is the address the input came from.
+	Source event.Address
+	// Reason is the readable reason the round stands unanswered.
+	Reason string
+}
+    UnsettledInput is one input round a session chain holds with no answer: a
+    driving fact the chain committed whose round no answer closed yet. It is the
+    fourth account of the criterion: the work a run accepted as input and has
+    not consumed, read off the chain rather than off a ledger kept beside it.
 
 type UnsettledNotice struct {
 	// Notice is the stable identity of the notification.
@@ -1716,16 +1790,20 @@ type UnsettledNotice struct {
 type UnsettledSource interface {
 	// Unfinished reports the tasks accepted and not terminal.
 	Unfinished(ctx context.Context) ([]UnsettledWork, error)
-	// Owed reports the notifications a task still owes a delivery for.
-	Owed(ctx context.Context) ([]UnsettledNotice, error)
-	// Unconsumed reports the notifications a mailbox accepted and no consumption
-	// confirmed.
+	// Unconsumed reports the notifications no consumption confirmed, from the two
+	// accounts that own them: the notifications a task still owes a delivery for
+	// and the ones a mailbox accepted and nobody consumed. One notification may
+	// stand in both, and the criterion states it once.
 	Unconsumed(ctx context.Context) ([]UnsettledNotice, error)
+	// Unanswered reports the input rounds a session chain holds with no answer:
+	// the driving facts that stand past the round the chain last answered.
+	Unanswered(ctx context.Context) ([]UnsettledInput, error)
 }
     UnsettledSource is the authoritative account the rest criterion reads:
-    the task chain that answers the work it holds and the notifications it still
-    owes, and the mailbox that answers the notifications it accepted and nobody
-    consumed.
+    the task chain that answers the work it holds, the consumption ledger that
+    answers the notifications no consumption confirmed — those a task still owes
+    a delivery for and those a mailbox accepted with nobody consuming them — and
+    the session chains that answer the input rounds they hold with no answer.
 
     The redline list (3 rules): MUST answer each set from the account that owns
     it, never from a copy kept beside it. MUST answer a set without a second

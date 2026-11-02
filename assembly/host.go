@@ -877,10 +877,10 @@ func (h *Host) deliverClosedSegment(ctx context.Context, addr event.Address, ans
 	halted := h.halted
 	sender := h.sender
 	h.mu.Unlock()
+	h.settleConsumedNotices(ctx, answer)
 	if halted {
 		return
 	}
-	h.settleConsumedNotices(ctx, answer)
 	if addr.AgentID != h.entry {
 		return
 	}
@@ -1200,10 +1200,11 @@ func (h *Host) observeExecState(evt tagentexec.StateEvent) {
 // work still on the chain answers Cut, which is a normal return because the
 // remaining work is on the chain and a restart resumes it; and one whose
 // criterion could not be read answers Broken.
-// The redline list (3 rules):
+// The redline list (4 rules):
 // MUST refuse external input before the first read of the rest criterion.
 // MUST admit the derived turns an accepted obligation owes for the whole quiesce.
 // MUST NOT report a run at rest while a consumer still flies or a writer has not stopped.
+// MUST answer a cancelled caller as Cut where the run stands: the criterion is read beside a context that does not carry the caller's cancellation.
 func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error) {
 	if h == nil || h.run == nil {
 		return agent.DrainReport{}, ErrHostClosed
@@ -1218,8 +1219,9 @@ func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.Drain
 	timer := time.NewTimer(time.Until(timeout))
 	defer timer.Stop()
 	woken := ""
+	judge := context.WithoutCancel(ctx)
 	for {
-		read := h.run.Unsettled(ctx)
+		read := h.run.Unsettled(judge)
 		stopped, writers := h.run.writers.Stopped()
 		landing := h.run.landingOwed()
 		if read.Resting() && h.consumersOf().Resting() && stopped && !landing {
@@ -1232,6 +1234,8 @@ func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.Drain
 			}
 			if read.Unjudged != "" {
 				report.Outcome = agent.CloseBroken
+				assemblyWarn("tagent: the quiesce could not judge the run: %s", read.Unjudged)
+				return report, brokenCloseReason(read)
 			}
 			return report, nil
 		}
@@ -1283,7 +1287,10 @@ func (h *Host) CloseReport() agent.DrainReport {
 // before the close reads its stop, never after the close returned. A repeated
 // close reports the first result and runs no second quiesce; a close that
 // follows a bare quiesce still stops the facilities that quiesce left running.
-func (h *Host) Close(ctx context.Context) error {
+// - Every facility behind the run is torn down however the close ended: a close that could not judge the run still stops its servers, seals the trajectory, stops telemetry and releases the execution face, and a broken judgment is what a repeated close reports.
+// - The producers stop before the host declares itself halted: only past their join does a closed host refuse a delivery, so what a stopping producer hands in is settled instead of dropped.
+// - The report of the run close is folded in whichever way that close ended, so the two faces of one close never disagree.
+func (h *Host) Close(ctx context.Context) (first error) {
 	if h == nil {
 		return nil
 	}
@@ -1294,22 +1301,34 @@ func (h *Host) Close(ctx context.Context) error {
 		return err
 	}
 	h.mu.Unlock()
-	var first error
+	var fatal error
+	defer func() {
+		if err := h.run.CloseMCPServers(); err != nil && first == nil {
+			first = err
+		}
+		if err := h.sealCapture(ctx); err != nil && first == nil {
+			first = err
+		}
+		if err := h.stopTelemetry(ctx); err != nil && first == nil {
+			first = err
+		}
+		h.finishClose(first, fatal)
+	}()
 	deadline := time.Now().Add(hostShutdownGrace)
 	report, quiesceErr := h.Quiesce(ctx, agent.CloseRequest{Timeout: deadline})
 	if quiesceErr != nil {
 		first = quiesceErr
 	}
-	h.mu.Lock()
-	h.halted = true
-	h.closeReport = report
-	h.mu.Unlock()
 	if h.consumers != nil {
 		h.consumers.Stop()
 	}
 	if h.settle != nil {
 		h.settle.Stop()
 	}
+	h.mu.Lock()
+	h.halted = true
+	h.closeReport = report
+	h.mu.Unlock()
 	if h.meditation != nil {
 		h.meditation.Stop()
 	}
@@ -1330,27 +1349,18 @@ func (h *Host) Close(ctx context.Context) error {
 	closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), hostShutdownGrace)
 	defer closeCancel()
 	runReport, err := h.run.Close(closeCtx, agent.CloseRequest{Timeout: deadline})
-	if err != nil {
-		if sealErr := h.sealCapture(ctx); sealErr != nil {
-			assemblyWarn("tagent: the trajectory seal after a failed quiesce reported: %v", sealErr)
-		}
-		h.finishClose(first, err)
-		return err
-	}
 	h.setCloseReport(report, runReport)
+	if err != nil {
+		assemblyWarn("tagent: the close of the run could not judge it: %v", err)
+		fatal = err
+		if first == nil {
+			first = err
+		}
+		return first
+	}
 	if report.Outcome == agent.CloseCut {
 		assemblyWarn("tagent: the host close was cut with %d unsettled item(s) on the chain", len(report.Unsettled))
 	}
-	if err := h.run.CloseMCPServers(); err != nil && first == nil {
-		first = err
-	}
-	if err := h.sealCapture(ctx); err != nil && first == nil {
-		first = err
-	}
-	if err := h.stopTelemetry(ctx); err != nil && first == nil {
-		first = err
-	}
-	h.finishClose(first, nil)
 	return first
 }
 

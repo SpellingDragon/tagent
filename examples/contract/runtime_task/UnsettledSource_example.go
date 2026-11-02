@@ -7,13 +7,15 @@ import (
 )
 
 // unsettledAccount is the canonical rest account: it answers the work it holds
-// with no terminal, the notifications it still owes a delivery for and the
-// notifications a mailbox accepted with nobody consuming them, each from the
-// index that owns it, beside the commit sequence it stands at.
+// with no terminal, the notifications no consumption confirmed — those still owed
+// a delivery and those a mailbox accepted with nobody consuming them — and the
+// input rounds a session chain holds with no answer, each from the index that
+// owns it, beside the commit sequence it stands at.
 type unsettledAccount struct {
 	work       []task.UnsettledWork
 	owed       []task.UnsettledNotice
 	unconsumed []task.UnsettledNotice
+	unanswered []task.UnsettledInput
 	seq        uint64
 }
 
@@ -22,16 +24,20 @@ func (a *unsettledAccount) Unfinished(context.Context) ([]task.UnsettledWork, er
 	return a.work, nil
 }
 
-// Owed reports the notifications the tasks of this account still owe a delivery
-// for.
-func (a *unsettledAccount) Owed(context.Context) ([]task.UnsettledNotice, error) {
-	return a.owed, nil
+// Unconsumed reports the notifications no consumption confirmed, from the two
+// accounts of this one: those still owed a delivery and those a mailbox accepted
+// with nobody consuming them.
+func (a *unsettledAccount) Unconsumed(context.Context) ([]task.UnsettledNotice, error) {
+	out := make([]task.UnsettledNotice, 0, len(a.owed)+len(a.unconsumed))
+	out = append(out, a.owed...)
+	out = append(out, a.unconsumed...)
+	return out, nil
 }
 
-// Unconsumed reports the notifications a mailbox accepted and no consumption
-// confirmed.
-func (a *unsettledAccount) Unconsumed(context.Context) ([]task.UnsettledNotice, error) {
-	return a.unconsumed, nil
+// Unanswered reports the input rounds a session chain holds with no answer: the
+// driving facts that stand past the round the chain last answered.
+func (a *unsettledAccount) Unanswered(context.Context) ([]task.UnsettledInput, error) {
+	return a.unanswered, nil
 }
 
 var _ task.UnsettledSource = (*unsettledAccount)(nil)
@@ -54,6 +60,11 @@ func ExampleUnsettledSource() {
 	account.work = []task.UnsettledWork{{TaskID: "task-1", Status: task.StatusRunning}}
 	read := task.ReadUnsettled(ctx, account, account.at)
 	if read.Resting() || len(read.Work) != 1 {
+		return
+	}
+	account.work = nil
+	account.unanswered = []task.UnsettledInput{{Event: "input-1"}}
+	if task.ReadUnsettled(ctx, account, account.at).Resting() {
 		return
 	}
 }

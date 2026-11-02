@@ -107,9 +107,15 @@ type protocolCriterion struct {
 	*task.MemoryRegistry
 }
 
-// Unconsumed reports the notifications a mailbox accepted and nobody consumed;
-// this case settles its notifications through the manager alone.
-func (protocolCriterion) Unconsumed(context.Context) ([]task.UnsettledNotice, error) {
+// Unconsumed reports the notifications no consumption confirmed; this case
+// settles its notifications through the manager alone.
+func (c protocolCriterion) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
+	return c.MemoryManager.Owed(ctx)
+}
+
+// Unanswered reports the input rounds a session chain holds with no answer; this
+// case drives its ranges through the manager alone.
+func (protocolCriterion) Unanswered(context.Context) ([]task.UnsettledInput, error) {
 	return nil, nil
 }
 

@@ -81,6 +81,16 @@ func WithTerminalTTL(ttl time.Duration) RegistryOption {
 	return func(r *MemoryRegistry) { r.terminalTTL = ttl }
 }
 
+// WithMovement attaches the one sequence the rest criterion is fenced by. The
+// registry advances it at every write of the account it owns — an applied fact
+// and a flush that moved an obligation alike — so a judgment that unions this
+// account with the mailbox and the session chains belongs to one instant of all
+// of them. A registry beside no sequence advances nothing, and its account stands
+// at the first position of a run that keeps none.
+func WithMovement(movement *Movement) RegistryOption {
+	return func(r *MemoryRegistry) { r.movement = movement }
+}
+
 // obligationEntry is one obligation the account still holds for a task: the
 // obligation itself and the routing its notification froze.
 type obligationEntry struct {
@@ -167,6 +177,10 @@ type MemoryRegistry struct {
 	// activity is the pulse the registry reports each time it applied a
 	// committed fact; nil reports nothing.
 	activity func()
+	// movement is the sequence the rest criterion is fenced by: every write of
+	// this account advances it, so a judgment that spans several accounts is
+	// read at one instant of them all. A nil movement advances nothing.
+	movement *Movement
 }
 
 // The registry satisfies the task registry port.
@@ -386,9 +400,11 @@ func (r *MemoryRegistry) applyCommitLocked(ctx context.Context, entry *memoryTas
 }
 
 // noteActivity reports one applied fact through the attached pulse, or nothing
-// while no pulse is attached. The caller holds the registry lock, so the pulse
-// is reported from the one writer that applied the fact.
+// while no pulse is attached, and advances the sequence the rest criterion is
+// fenced by. The caller holds the registry lock, so both the pulse and the
+// movement are reported from the one writer that applied the fact.
 func (r *MemoryRegistry) noteActivity() {
+	r.movement.Advance()
 	if r.activity != nil {
 		r.activity()
 	}

@@ -824,7 +824,7 @@ func (h *Host) ApproveDelivery(ctx context.Context, id string) error
     account did not — a restart delivers the body once more, which is the one
     extra copy an unconfirmed receipt tolerates.
 
-func (h *Host) Close(ctx context.Context) error
+func (h *Host) Close(ctx context.Context) (first error)
     Close stops injection into this host, quiesces the run it drives and only
     then stops the consumers, the settle driver and the facilities behind them.
     One deadline bounds the quiesce and the run close behind it, so a cancelled
@@ -835,7 +835,15 @@ func (h *Host) Close(ctx context.Context) error
     still unwinds is landed by that loop before the close reads its stop,
     never after the close returned. A repeated close reports the first result
     and runs no second quiesce; a close that follows a bare quiesce still stops
-    the facilities that quiesce left running.
+    the facilities that quiesce left running. - Every facility behind the run
+    is torn down however the close ended: a close that could not judge the run
+    still stops its servers, seals the trajectory, stops telemetry and releases
+    the execution face, and a broken judgment is what a repeated close reports.
+    - The producers stop before the host declares itself halted: only past their
+    join does a closed host refuse a delivery, so what a stopping producer hands
+    in is settled instead of dropped. - The report of the run close is folded
+    in whichever way that close ended, so the two faces of one close never
+    disagree.
 
 func (h *Host) CloseReport() agent.DrainReport
     CloseReport reports the state the last close of this host ended in, beside
@@ -878,11 +886,13 @@ func (h *Host) Quiesce(ctx context.Context, req agent.CloseRequest) (agent.Drain
     A host that reached rest answers Quiesced; one that spent its timeout with
     work still on the chain answers Cut, which is a normal return because the
     remaining work is on the chain and a restart resumes it; and one whose
-    criterion could not be read answers Broken. The redline list (3 rules):
+    criterion could not be read answers Broken. The redline list (4 rules):
     MUST refuse external input before the first read of the rest criterion. MUST
     admit the derived turns an accepted obligation owes for the whole quiesce.
     MUST NOT report a run at rest while a consumer still flies or a writer has
-    not stopped.
+    not stopped. MUST answer a cancelled caller as Cut where the run stands:
+    the criterion is read beside a context that does not carry the caller's
+    cancellation.
 
 func (h *Host) RefuseDelivery(ctx context.Context, id string) error
     RefuseDelivery discards one held body: nothing is delivered, the hold is

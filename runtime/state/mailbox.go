@@ -84,6 +84,13 @@ type noticeKey struct {
 // that produced it. Acceptance is idempotent by the notification's stable
 // identity, so a replayed delivery records no second fact and keeps the target
 // the first acceptance recorded.
+//
+// A route the mailbox cannot open is not a refusal: an address this run never
+// established, or an instance another one replaced, names routing the delivery
+// could not reach at all, so the notification stands undelivered for the next
+// attempt instead of being recorded as an answer its target never gave. A target
+// that closed its session did answer: the site refused the input, and that
+// refusal is the feedback fact the criterion reads.
 func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -97,7 +104,10 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
 	target := siteKey{addr: route.Target, instance: route.TargetInstance}
 	held, err := m.openTarget(target)
 	if err != nil {
-		return m.refuse(ctx, notice, target, err)
+		if errors.Is(err, ErrSessionClosed) {
+			return m.refuse(ctx, notice, target, err)
+		}
+		return err
 	}
 	m.appendEntry(ctx, held, notice, target)
 	return nil
@@ -109,6 +119,7 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
 // reported as answered beside that fact. A refusal the account does not confirm
 // reports the write failure instead, so a caller never reads a notification as
 // answered on an unconfirmed write and keeps it owed for the next flush.
+// - The refusal is the consumption result of its notification, so it advances the movement sequence a judgment is fenced by.
 //
 // 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
 func (m *MemoryStore) refuse(ctx context.Context, notice task.Notice, target siteKey, cause error) error {
@@ -126,6 +137,7 @@ func (m *MemoryStore) refuse(ctx context.Context, notice task.Notice, target sit
 			return fmt.Errorf("state: the refusal of %s left no fact: %w", notice.FactKey(), err)
 		}
 	}
+	m.moved()
 	return fmt.Errorf("%w: %w", ErrDeliveryRefused, cause)
 }
 
@@ -174,6 +186,7 @@ func (m *MemoryStore) appendEntry(ctx context.Context, held *site, notice task.N
 		Receipt:      ConsumeReceipt{},
 	})
 	m.accepted[noticeKeyOf(notice)] = acceptedNotice{notice: notice, site: target, seq: seq}
+	m.moved()
 	return seq
 }
 
@@ -285,6 +298,7 @@ func (m *MemoryStore) Consume(ctx context.Context, addr event.Address, instance 
 		}
 		held.session.Consumed++
 	}
+	m.moved()
 	return nil
 }
 

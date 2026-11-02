@@ -92,7 +92,7 @@ func TestUnsettledSingleSource(t *testing.T) {
 		if got := source.attempts; got != 2 {
 			t.Fatalf("attempts of the read = %d, want the read repeated until its sequence held", got)
 		}
-		source = &scriptedUnsettled{registry: registry, manager: NewMemoryManager(registry, nil), moves: unsettledFenceAttempts * 2}
+		source = &scriptedUnsettled{registry: registry, manager: NewMemoryManager(registry, nil), moves: unsettledFenceAttempts * 4}
 		read = ReadUnsettled(ctx, source, source.CommitSeq)
 		if read.Unjudged != reasonCommitMovedUnderRead {
 			t.Fatalf("criterion over a sequence that never held = %+v, want the named unjudged reason", read)
@@ -143,8 +143,12 @@ type scriptedUnsettled struct {
 	manager  *MemoryManager
 	// mailbox is the account the unconsumed set is read from.
 	mailbox []UnsettledNotice
+	// pending is the account the unanswered input rounds are read from.
+	pending []UnsettledInput
 	// moves is how many set reads the sequence moves under, so the fence sees the
-	// account move under that many attempts.
+	// account move under that many attempts. The case that never holds sets it
+	// past one move per moving set of every attempt (three), so no attempt of the
+	// three it takes finds the sequence settled.
 	moves int
 	// refuse is the refusal the unfinished read reports.
 	refuse error
@@ -183,13 +187,22 @@ func (s *scriptedUnsettled) Unfinished(ctx context.Context) ([]UnsettledWork, er
 	return work, err
 }
 
-// Owed reports the notifications the manager still owes a delivery for.
-func (s *scriptedUnsettled) Owed(ctx context.Context) ([]UnsettledNotice, error) {
-	return s.manager.Owed(ctx)
+// Unconsumed reports the notifications no consumption confirmed, from the task
+// face the case drives and the mailbox it scripts.
+func (s *scriptedUnsettled) Unconsumed(ctx context.Context) ([]UnsettledNotice, error) {
+	s.moveSeq()
+	owed, err := s.manager.Owed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]UnsettledNotice, 0, len(owed)+len(s.mailbox))
+	out = append(out, owed...)
+	out = append(out, s.mailbox...)
+	return out, nil
 }
 
-// Unconsumed reports the mailbox the case scripts.
-func (s *scriptedUnsettled) Unconsumed(context.Context) ([]UnsettledNotice, error) {
+// Unanswered reports the input rounds the case scripts.
+func (s *scriptedUnsettled) Unanswered(context.Context) ([]UnsettledInput, error) {
 	s.moveSeq()
-	return s.mailbox, nil
+	return s.pending, nil
 }

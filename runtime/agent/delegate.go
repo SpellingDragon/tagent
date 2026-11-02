@@ -190,8 +190,9 @@ type UnsettledObligation struct {
 	// Source is the address the work came from, so a report names both ends of
 	// the routing it could not settle.
 	Source event.Address
-	// FactKey is the stable identity of the notification, and empty for work
-	// that is not a notification.
+	// FactKey is the stable identity of the fact one item stands on: the
+	// notification a delivery waits on, or the driving fact of an input round no
+	// answer closed, and empty for work that stands on no single fact.
 	FactKey string
 	// Reason is the readable reason the work could not be settled.
 	Reason string

@@ -53,6 +53,7 @@ const (
 // - The commit is the one ledger write of a fact of this run: the recorded call result, the ready input of a range, the assistant output of a drive, the settled delivery and the compression judgment all land here.
 // - A committed fact is never withheld from a reader and never rolled back for what an observation of it reports.
 // - A committed fact enters the mapped sequence of its own session chain right after it lands, so every consumption of that chain assembles the sequence the commits recorded.
+// - A committed fact advances the movement sequence the rest criterion is fenced by, because a committed fact is an input round a consumer may still owe.
 //
 // The failure is the caller's to observe, never a line this entry writes and
 // swallows: the identity is empty beside a commit that did not land, a caller
@@ -96,6 +97,7 @@ func (r *Run) commitFactChecked(ctx context.Context, evt event.Event) (event.Eve
 		}
 	}
 	r.mu.Unlock()
+	r.movement.Advance()
 	if !mapped {
 		return evt.Key, nil
 	}

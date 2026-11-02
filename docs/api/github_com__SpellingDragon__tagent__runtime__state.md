@@ -1072,6 +1072,13 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
     notification's stable identity, so a replayed delivery records no second
     fact and keeps the target the first acceptance recorded.
 
+    A route the mailbox cannot open is not a refusal: an address this run never
+    established, or an instance another one replaced, names routing the delivery
+    could not reach at all, so the notification stands undelivered for the
+    next attempt instead of being recorded as an answer its target never gave.
+    A target that closed its session did answer: the site refused the input,
+    and that refusal is the feedback fact the criterion reads.
+
 func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error)
     Attempt reports the attempt record of one notification and whether
     this mailbox holds one at all: the record of the one follow-up turn the
@@ -1107,6 +1114,13 @@ func (m *MemoryStore) Establish(ctx context.Context, addr event.Address, instanc
     instance that held it, so input aimed at the retired instance is refused
     while the obligations already accepted there stay readable. The pair already
     serving the address returns its own bookkeeping.
+
+func (m *MemoryStore) InstanceOf(addr event.Address) event.InstanceID
+    InstanceOf reports the runtime instance that currently serves one address,
+    and the empty identity beside an address this store never established.
+    A report of a site reads it to name the reader's own instance beside the
+    address, so the instance a judgment names is the one that owns the site now
+    rather than the one a caller remembered.
 
 func (m *MemoryStore) Publish(ctx context.Context, plan StatePlan) (Publication, error)
     Publish implements Store.Publish and reports that the memory store carries
@@ -1160,6 +1174,14 @@ func (m *MemoryStore) RestoreOwed(ctx context.Context) error
     site it opens beside a frozen instance never takes the address over from the
     instance currently serving it. A mailbox beside no durable account restores
     nothing, because nothing outside the process owes it work.
+
+func (m *MemoryStore) SetMovement(movement *task.Movement)
+    SetMovement attaches the one sequence the rest criterion is fenced by:
+    the store advances it at every write of the mailbox account it owns — an
+    accepted entry, a completed consumption, a refusal the criterion reads as an
+    answer — so a judgment that unions this account with the task chain and the
+    session chains belongs to one instant of all of them. A store opened beside
+    no sequence advances nothing.
 
 func (m *MemoryStore) Site(ctx context.Context, subject Subject, addr event.Address, instance event.InstanceID) (*Session, error)
     Site returns a copy of the bookkeeping one established site holds, for the

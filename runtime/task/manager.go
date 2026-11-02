@@ -142,6 +142,10 @@ func (m *MemoryManager) Handoff(ctx context.Context, taskID event.TaskID, target
 // reason stays beside the notification on the diagnostic face. A notification whose
 // frozen receiving instance is closed is retained by name as ErrInstanceClosed: it is
 // neither dropped nor delivered into a later instance that reuses the address.
+//
+// A notification no target accepted stays owed, and the reason it could not be
+// accepted is recorded beside it, so a report names why a delivery waits instead
+// of only that it waits.
 func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error {
 	m.registry.mu.Lock()
 	defer m.registry.mu.Unlock()
@@ -179,6 +183,9 @@ func (m *MemoryManager) Flush(ctx context.Context, taskID event.TaskID) error {
 			entry.recordBlocked(held.obligation.Notice, err)
 			continue
 		default:
+			if err != nil {
+				entry.recordBlocked(held.obligation.Notice, err)
+			}
 			open = append(open, held)
 		}
 	}

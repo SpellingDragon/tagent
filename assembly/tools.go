@@ -46,14 +46,20 @@ import (
 // settle-lineage meta key and is the only fact family that does, so a wrapped
 // tool's own settle, which the live invocation reads through its backflow,
 // never fires a second turn.
+//
+// - Only a target that refused the notification is a rejection: the refusal is the consumption result of its notification, and the ledger keeps it as the feedback fact it is.
+// - A route the mailbox cannot open — an address this run never established, an instance another one replaced — is not a refusal by anyone: the notification stands undelivered, answers pending, and the reason is recorded beside it for the next attempt.
 func (r *Run) deliver(ctx context.Context, envelope task.Envelope) (task.DeliveryAcceptance, error) {
 	if err := r.store.TrackDelivery(ctx, envelope.Notice.TaskID, task.HandoffTarget{
 		Target:         envelope.Target,
 		TargetInstance: envelope.TargetInstance,
 	}); err != nil {
-		return task.DeliveryRejected, err
+		return task.DeliveryPending, err
 	}
 	if err := r.store.AcceptNotice(ctx, envelope.Notice); err != nil {
+		if errors.Is(err, state.ErrDeliveryRefused) {
+			return task.DeliveryRejected, err
+		}
 		return task.DeliveryPending, err
 	}
 	r.observeSettleDelivery(ctx, envelope)

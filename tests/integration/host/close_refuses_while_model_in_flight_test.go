@@ -47,21 +47,29 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 			t.Fatalf("close beside the model in flight = (%+v, %v), want a cut close instead of a clean quiesce", report, err)
 		}
 		wantOne := "this writer has not confirmed its stop: "
-		if len(report.Unsettled) != 2 {
-			t.Fatalf("unsettled = %+v, want the drive and the model production each named beside its unconfirmed stop", report.Unsettled)
+		if len(report.Unsettled) != 3 {
+			t.Fatalf("unsettled = %+v, want the drive and the model production each named beside its unconfirmed stop, beside the input round the drive holds with no answer", report.Unsettled)
 		}
-		named := make([]string, 0, len(report.Unsettled))
+		named := make([]string, 0, 2)
+		rounds := 0
 		for _, entry := range report.Unsettled {
+			name, writer := strings.CutPrefix(entry.Reason, wantOne)
+			if !writer {
+				if entry.FactKey == "" || entry.Address != addr {
+					t.Fatalf("unsettled entry = %+v, want the unanswered input round of %v named beside the writers", entry, addr)
+				}
+				rounds++
+				continue
+			}
 			if entry.TaskID != "" {
 				t.Fatalf("unsettled entry = %+v, want the writer named beside no task: a model in flight is not a task", entry)
 			}
-			name, ok := strings.CutPrefix(entry.Reason, wantOne)
-			if !ok {
-				t.Fatalf("unsettled entry = %+v, want the unconfirmed writer named beside its reason", entry)
-			}
 			named = append(named, name)
 		}
-		if named[0] != "drive:inv-model-flight" || !strings.HasPrefix(named[1], "model:") {
+		if rounds != 1 {
+			t.Fatalf("unsettled = %+v, want the one input round the driving turn committed and no answer closed", report.Unsettled)
+		}
+		if len(named) != 2 || named[0] != "drive:inv-model-flight" || !strings.HasPrefix(named[1], "model:") {
 			t.Fatalf("writers named = %v, want the drive and the model production each named beside its own identity", named)
 		}
 		provider.unblock()
@@ -253,8 +261,9 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		if err != nil || report.Drained || report.Outcome != agent.CloseCut {
 			t.Fatalf("close beside the unstopped writer = (%+v, %v), want a cut close: the barrier alone keeps the run open", report, err)
 		}
-		if read := run.Unsettled(ctx); !read.Resting() {
-			t.Fatalf("criterion = %+v, want it at rest so the writer barrier is what the close reads", read)
+		read := run.Unsettled(ctx)
+		if len(read.Work) != 0 || len(read.Notices) != 0 || len(read.Inputs) != 1 || read.Inputs[0].Address != addr {
+			t.Fatalf("criterion = %+v, want the one input round the drive holds with no answer beside no other work, so the writer barrier is what else keeps the close open", read)
 		}
 		named := 0
 		for _, entry := range report.Unsettled {

@@ -54,10 +54,17 @@ func newScenarioTaskFace(manager *task.MemoryManager, registry *task.MemoryRegis
 	return &scenarioTaskFace{MemoryManager: manager, MemoryRegistry: registry}
 }
 
-// Unconsumed reports the notifications the mailbox of this drive accepted and
-// nobody consumed. The scenario settles its notifications through the manager
-// alone, so no mailbox answer stands beside the task face.
-func (f *scenarioTaskFace) Unconsumed(context.Context) ([]task.UnsettledNotice, error) {
+// Unconsumed reports the notifications no consumption confirmed. The scenario
+// settles its notifications through the manager, so the task face answers every
+// one of them and no mailbox answer stands beside it.
+func (f *scenarioTaskFace) Unconsumed(ctx context.Context) ([]task.UnsettledNotice, error) {
+	return f.MemoryManager.Owed(ctx)
+}
+
+// Unanswered reports the input rounds a session chain holds with no answer. This
+// scenario drives its ranges through the task face, so no chain answer stands
+// unanswered beside it.
+func (f *scenarioTaskFace) Unanswered(context.Context) ([]task.UnsettledInput, error) {
 	return nil, nil
 }
 

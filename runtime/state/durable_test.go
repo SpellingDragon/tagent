@@ -369,6 +369,102 @@ func TestMailboxSnapshotInvariants(t *testing.T) {
 	})
 }
 
+// TestMovementCoversTheMailbox pins the one sequence the rest criterion is fenced by against the mailbox this store writes.
+// - an accepted entry, a completed consumption and the refusal a closed target answers each advance it
+// - a fence read from one account's own sequence stands still while the mailbox moves, and a close judges instants that never stood together
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestMovementCoversTheMailbox(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("an accepted entry advances the sequence", func(t *testing.T) {
+		movement := task.NewMovement()
+		store := invariantStore(t)
+		store.SetMovement(movement)
+		at := movement.Read()
+		if err := store.AcceptNotice(ctx, invariantNotice("task-1", 1)); err != nil {
+			t.Fatalf("accept the delivered notification: %v", err)
+		}
+		if got := movement.Read(); got == at {
+			t.Fatalf("the sequence stood at %d after an accepted entry, want the write of the mailbox to advance it", got)
+		}
+	})
+
+	t.Run("a completed consumption advances the sequence", func(t *testing.T) {
+		movement := task.NewMovement()
+		store := invariantStore(t)
+		store.SetMovement(movement)
+		if err := store.AcceptNotice(ctx, invariantNotice("task-1", 1)); err != nil {
+			t.Fatalf("accept the delivered notification: %v", err)
+		}
+		if err := store.Claim(ctx, invariantAddress, "instance-a", 1); err != nil {
+			t.Fatalf("claim the accepted entry: %v", err)
+		}
+		at := movement.Read()
+		if err := store.Consume(ctx, invariantAddress, "instance-a", 1); err != nil {
+			t.Fatalf("consume the claimed entry: %v", err)
+		}
+		if got := movement.Read(); got == at {
+			t.Fatalf("the sequence stood at %d after a completed consumption, want the write of the mailbox to advance it", got)
+		}
+	})
+
+	t.Run("a refused delivery advances the sequence", func(t *testing.T) {
+		movement := task.NewMovement()
+		store := invariantStore(t)
+		store.SetMovement(movement)
+		if err := store.CloseSession(ctx, invariantAddress); err != nil {
+			t.Fatalf("close the session of the delivery target: %v", err)
+		}
+		at := movement.Read()
+		err := store.AcceptNotice(ctx, invariantNotice("task-1", 1))
+		if !errors.Is(err, ErrDeliveryRefused) {
+			t.Fatalf("acceptance at a closed target = %v, want the named refusal %v", err, ErrDeliveryRefused)
+		}
+		if got := movement.Read(); got == at {
+			t.Fatalf("the sequence stood at %d after a refusal, want the write of the mailbox to advance it", got)
+		}
+	})
+}
+
+// TestRoutingIsNotARefusal pins that a route the mailbox cannot open names routing and never an answer its target gave.
+// - an unestablished address and a retired instance answer as themselves, and no rejection is recorded for a notification nobody refused
+// - a routing failure wrapped as a refusal writes a feedback fact the target never authored
+// 契约: docs/wiki/reliability/durable-delivery.md#envelope-states
+func TestRoutingIsNotARefusal(t *testing.T) {
+	ctx := context.Background()
+	store := invariantStore(t)
+
+	unrouted := invariantNotice("task-1", 1)
+	if err := store.TrackDelivery(ctx, "task-1", task.HandoffTarget{
+		Target:         invariantAddress,
+		TargetInstance: "instance-retired",
+	}); err != nil {
+		t.Fatalf("register the delivery route: %v", err)
+	}
+	if err := store.AcceptNotice(ctx, unrouted); err == nil {
+		t.Fatal("acceptance at an instance this store never established = nil, want the named routing failure")
+	}
+	if got := store.Rejections(); len(got) != 0 {
+		t.Fatalf("rejections after a routing failure = %+v, want none: nobody refused the notification", got)
+	}
+	if store.Refused(unrouted) {
+		t.Fatal("the notification stands recorded as refused, want it still owed: a routing failure is not an answer")
+	}
+	if err := store.TrackDelivery(ctx, "task-1", task.HandoffTarget{
+		Target:         event.Address{AgentID: "agent-never", SessionID: "session-never"},
+		TargetInstance: "instance-a",
+	}); err != nil {
+		t.Fatalf("reroute the delivery: %v", err)
+	}
+	err := store.AcceptNotice(ctx, invariantNotice("task-1", 2))
+	if err == nil || errors.Is(err, ErrDeliveryRefused) {
+		t.Fatalf("acceptance at an address this run never established = %v, want a routing failure that is not a refusal", err)
+	}
+	if !errors.Is(err, ErrUnknownTarget) {
+		t.Fatalf("acceptance at an unestablished address = %v, want %v", err, ErrUnknownTarget)
+	}
+}
+
 // invariantReader is the subject reads are granted for in these invariants.
 const invariantReader Subject = "reader-a"
 

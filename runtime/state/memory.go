@@ -77,6 +77,11 @@ type MemoryStore struct {
 	consumptions durableConsumption
 	attemptsLog  attemptRecorder
 	rejections   rejectionRecorder
+	// movement is the sequence the rest criterion is fenced by: every write of
+	// the mailbox account this store owns advances it, so a judgment that unions
+	// this account with the task chain and the session chains belongs to one
+	// instant of all of them. A nil movement advances nothing.
+	movement *task.Movement
 }
 
 // MemoryStore satisfies the Store face.
@@ -107,6 +112,36 @@ func NewMemoryStore(authority *Authority, consumptions ...*DurableCommit) *Memor
 		store.rejections = consumptions[0]
 	}
 	return store
+}
+
+// SetMovement attaches the one sequence the rest criterion is fenced by: the
+// store advances it at every write of the mailbox account it owns — an accepted
+// entry, a completed consumption, a refusal the criterion reads as an answer — so
+// a judgment that unions this account with the task chain and the session chains
+// belongs to one instant of all of them. A store opened beside no sequence
+// advances nothing.
+func (m *MemoryStore) SetMovement(movement *task.Movement) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.movement = movement
+}
+
+// moved records one write of the mailbox account this store owns. The caller
+// holds the store lock, so the movement is reported from the one writer that
+// moved the entry.
+func (m *MemoryStore) moved() {
+	m.movement.Advance()
+}
+
+// InstanceOf reports the runtime instance that currently serves one address, and
+// the empty identity beside an address this store never established. A report of
+// a site reads it to name the reader's own instance beside the address, so the
+// instance a judgment names is the one that owns the site now rather than the one
+// a caller remembered.
+func (m *MemoryStore) InstanceOf(addr event.Address) event.InstanceID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.current[addr]
 }
 
 // Establish implements Store.Establish. One explicit address and instance names

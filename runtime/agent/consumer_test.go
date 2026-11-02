@@ -1195,3 +1195,93 @@ func TestTheConsumersTurnIsAWriterOfTheRun(t *testing.T) {
 		t.Fatalf("the ledger still names the writers %v after every loop returned, want every registration closed", names)
 	}
 }
+
+// TestPendingInputsReadsTheChainBack pins that the input rounds a chain still owes a drive are read off the chain itself.
+// - every driving fact past the last agent_output the chain committed is a round with no answer
+// - a consumption position kept in memory alone answers no round for a restarted process
+// 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
+func TestPendingInputsReadsTheChainBack(t *testing.T) {
+	t.Run("a chain beside no answer drives every input round it holds", func(t *testing.T) {
+		facts := []event.Event{drivingInput("input-1"), drivingNotice("notice-1")}
+		if got := keysOf(PendingInputs(facts)); len(got) != 2 || got[0] != "input-1" || got[1] != "notice-1" {
+			t.Fatalf("pending inputs = %v, want both rounds the chain opened at its head", got)
+		}
+	})
+
+	t.Run("an input past the last answer is a round with no answer", func(t *testing.T) {
+		facts := []event.Event{drivingInput("input-1"), answerOf("answer-1"), drivingInput("input-2")}
+		if got := keysOf(PendingInputs(facts)); len(got) != 1 || got[0] != "input-2" {
+			t.Fatalf("pending inputs = %v, want only the round the answer did not close", got)
+		}
+	})
+
+	t.Run("an answer that closes the round leaves nothing pending", func(t *testing.T) {
+		facts := []event.Event{drivingInput("input-1"), answerOf("answer-1")}
+		if got := keysOf(PendingInputs(facts)); len(got) != 0 {
+			t.Fatalf("pending inputs = %v, want none: the answer closed the round", got)
+		}
+	})
+
+	t.Run("a fact that starts no range is pending never", func(t *testing.T) {
+		facts := []event.Event{answerOf("answer-1"), reasoningOf("reasoning-1"), noticeOf("notice-material")}
+		if got := keysOf(PendingInputs(facts)); len(got) != 0 {
+			t.Fatalf("pending inputs = %v, want none: these facts belong to the round that committed them", got)
+		}
+	})
+}
+
+// TestRestingCoversThePassBeforeTheSegment pins that a loop between its pull and the segment it opens is a writer at work.
+func TestRestingCoversThePassBeforeTheSegment(t *testing.T) {
+	consumer := &Consumer{wake: make(chan struct{}, 1)}
+	if !consumer.Resting() {
+		t.Fatal("a loop between segments with no wake waiting = not resting, want it resting")
+	}
+	consumer.setBusy(true)
+	if consumer.Resting() {
+		t.Fatal("a loop inside a consumption pass = resting, want a writer at work")
+	}
+	consumer.setBusy(false)
+	if !consumer.Resting() {
+		t.Fatal("a loop that left its consumption pass = not resting, want it resting again")
+	}
+}
+
+// drivingInput is one entry input fact, which starts a range.
+func drivingInput(key string) event.Event {
+	return event.Event{Key: event.EventID(key), Type: event.TypeExternalInput}
+}
+
+// drivingNotice is one notification fact an unattended follow-up commits as the
+// material its drive reads at the head, which starts a range too.
+func drivingNotice(key string) event.Event {
+	return event.Event{
+		Key:  event.EventID(key),
+		Type: event.TypeFeedback,
+		Meta: map[string]string{event.MetaKeyTriggerSource: "task"},
+	}
+}
+
+// noticeOf is a notice fact a running call admits, which belongs to the range in
+// flight and never opens one.
+func noticeOf(key string) event.Event {
+	return event.Event{Key: event.EventID(key), Type: event.TypeFeedback}
+}
+
+// answerOf is one agent_output fact: the boundary a round closes on.
+func answerOf(key string) event.Event {
+	return event.Event{Key: event.EventID(key), Type: event.TypeAgentOutput}
+}
+
+// reasoningOf is one thinking-plan fact of a round in flight, which starts no range.
+func reasoningOf(key string) event.Event {
+	return event.Event{Key: event.EventID(key), Type: event.TypeThinkingPlan}
+}
+
+// keysOf reports the identities of one set of events in the order given.
+func keysOf(events []event.Event) []string {
+	out := make([]string, 0, len(events))
+	for _, evt := range events {
+		out = append(out, string(evt.Key))
+	}
+	return out
+}

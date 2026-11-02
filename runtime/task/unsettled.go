@@ -49,8 +49,26 @@ type UnsettledNotice struct {
 	Reason string
 }
 
+// UnsettledInput is one input round a session chain holds with no answer: a
+// driving fact the chain committed whose round no answer closed yet. It is the
+// fourth account of the criterion: the work a run accepted as input and has not
+// consumed, read off the chain rather than off a ledger kept beside it.
+type UnsettledInput struct {
+	// Address is the address of the site the input was committed at.
+	Address event.Address
+	// Instance is the runtime instance that owns that site.
+	Instance event.InstanceID
+	// Event is the identity of the driving fact the round opened on.
+	Event event.EventID
+	// Source is the address the input came from.
+	Source event.Address
+	// Reason is the readable reason the round stands unanswered.
+	Reason string
+}
+
 // Unsettled is one evaluation of the rest criterion: the unsettled work, the
-// unconsumed notices, and the commit sequence the two sets were read at.
+// unconsumed notices, the input rounds no answer closed, and the commit
+// sequence the sets were read at.
 //
 // Unjudged is the named reason the criterion could not be read: an account that
 // refused the read, or a commit sequence that moved under every attempt, leaves
@@ -63,22 +81,26 @@ type Unsettled struct {
 	// Notices lists the notifications no consumption confirmed, in identity
 	// order.
 	Notices []UnsettledNotice
+	// Inputs lists the input rounds the session chains hold with no answer, in
+	// address and commit order.
+	Inputs []UnsettledInput
 	// Unjudged is the named reason the criterion was not judged, and empty when
 	// it was.
 	Unjudged string
 }
 
-// Resting reports whether a run is at rest: nothing it accepted is unfinished and
-// no notification of it stands unconsumed. A criterion that could not be read is
-// never at rest.
+// Resting reports whether a run is at rest: nothing it accepted is unfinished, no
+// notification of it stands unconsumed, and no input round it holds stands
+// unanswered. A criterion that could not be read is never at rest.
 func (u Unsettled) Resting() bool {
-	return u.Unjudged == "" && len(u.Work) == 0 && len(u.Notices) == 0
+	return u.Unjudged == "" && len(u.Work) == 0 && len(u.Notices) == 0 && len(u.Inputs) == 0
 }
 
 // UnsettledSource is the authoritative account the rest criterion reads: the
-// task chain that answers the work it holds and the notifications it still owes,
-// and the mailbox that answers the notifications it accepted and nobody
-// consumed.
+// task chain that answers the work it holds, the consumption ledger that answers
+// the notifications no consumption confirmed — those a task still owes a
+// delivery for and those a mailbox accepted with nobody consuming them — and the
+// session chains that answer the input rounds they hold with no answer.
 //
 // The redline list (3 rules):
 // MUST answer each set from the account that owns it, never from a copy kept beside it.
@@ -87,11 +109,14 @@ func (u Unsettled) Resting() bool {
 type UnsettledSource interface {
 	// Unfinished reports the tasks accepted and not terminal.
 	Unfinished(ctx context.Context) ([]UnsettledWork, error)
-	// Owed reports the notifications a task still owes a delivery for.
-	Owed(ctx context.Context) ([]UnsettledNotice, error)
-	// Unconsumed reports the notifications a mailbox accepted and no consumption
-	// confirmed.
+	// Unconsumed reports the notifications no consumption confirmed, from the two
+	// accounts that own them: the notifications a task still owes a delivery for
+	// and the ones a mailbox accepted and nobody consumed. One notification may
+	// stand in both, and the criterion states it once.
 	Unconsumed(ctx context.Context) ([]UnsettledNotice, error)
+	// Unanswered reports the input rounds a session chain holds with no answer:
+	// the driving facts that stand past the round the chain last answered.
+	Unanswered(ctx context.Context) ([]UnsettledInput, error)
 }
 
 // UnsettledFence reports the commit sequence of the account a read stands at, so
@@ -136,14 +161,10 @@ func ReadUnsettled(ctx context.Context, source UnsettledSource, fence UnsettledF
 	return last
 }
 
-// readSets reads the three sets of one evaluation at the sequence the caller read
+// readSets reads every set of one evaluation at the sequence the caller read
 // before them.
 func readSets(ctx context.Context, source UnsettledSource, seq uint64) (Unsettled, error) {
 	work, err := source.Unfinished(ctx)
-	if err != nil {
-		return Unsettled{}, err
-	}
-	owed, err := source.Owed(ctx)
 	if err != nil {
 		return Unsettled{}, err
 	}
@@ -151,7 +172,11 @@ func readSets(ctx context.Context, source UnsettledSource, seq uint64) (Unsettle
 	if err != nil {
 		return Unsettled{}, err
 	}
-	return Unsettled{Seq: seq, Work: work, Notices: mergeNotices(owed, unconsumed)}, nil
+	inputs, err := source.Unanswered(ctx)
+	if err != nil {
+		return Unsettled{}, err
+	}
+	return Unsettled{Seq: seq, Work: work, Notices: mergeNotices(unconsumed), Inputs: inputs}, nil
 }
 
 // reasonCommitMovedUnderRead is the named reason a criterion answers when the
