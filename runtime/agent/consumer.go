@@ -187,9 +187,6 @@ func (c *Consumer) run(ctx context.Context) {
 		}
 		release := c.beginProduction()
 		c.consume(ctx)
-		// A consume that returned beside a cancelled context left the segment it flies
-		// behind: the loop closes it here, before its own stop is confirmed, so the
-		// writer registration covers that closure too.
 		cancelled := ctx.Err() != nil
 		if cancelled {
 			c.abandonSegment()
@@ -688,16 +685,9 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 // so no segment outlives the loop that drove it and no entry waiting on one
 // blocks on a driver that already returned.
 //
-// - The abandoned answer is a cancellation by name: the entries waiting on the
-// segment read the named cause instead of the result that never arrived.
-// - It writes nothing: the transcript the segment accumulated is not committed and
-// no output fact lands, because the input that segment read stays owed on the chain
-// for the restart, and a committed transcript beside an uncommitted input would read
-// one fact as two.
-// - It hands nothing to the delivery face: no turn was committed, so no entry's
-// settle account closes behind an answer nobody produced. The results it paired are
-// read as orphaned exactly as the ones still awaited, so the notice of each drives
-// the follow-up that settles it.
+// - The abandoned answer is a cancellation by name: the entries waiting on the segment read the named cause instead of the result that never arrived.
+// - It writes nothing: the transcript the segment accumulated is not committed and no output fact lands, because the input that segment read stays owed on the chain for the restart, and a committed transcript beside an uncommitted input would read one fact as two.
+// - It hands nothing to the delivery face: no turn was committed, so no entry's settle account closes behind an answer nobody produced. The results it paired are read as orphaned exactly as the ones still awaited, so the notice of each drives the follow-up that settles it.
 func (c *Consumer) abandonSegment() {
 	seg := c.flyingSegment()
 	if seg == nil {
@@ -725,6 +715,8 @@ func (c *Consumer) abandonSegment() {
 // waiting on them read it, and the tasks the segment admitted but never paired are
 // read as orphaned. A segment that committed nothing (committed false) answers its
 // waiters and the book, and leaves the delivery face beside it.
+//
+// - A committed answer beside no delivery face leaves the paired results awaited: the pairing a segment takes before it closes never answers consumed by itself.
 func (c *Consumer) settleSegment(ctx context.Context, seg *segment, answer SegmentAnswer, committed bool) {
 	if committed && c.deliver != nil {
 		c.deliver(ctx, c.addr, answer)
@@ -736,8 +728,6 @@ func (c *Consumer) settleSegment(ctx context.Context, seg *segment, answer Segme
 			c.awaited.Store(taskID, TaskOrphaned)
 		}
 	}
-	// A committed answer beside no delivery face leaves the paired results awaited:
-	// the pairing a segment takes before it closes never answers consumed by itself.
 	for taskID := range seg.pending {
 		c.awaited.Store(taskID, TaskOrphaned)
 	}
@@ -1131,7 +1121,10 @@ func (cs *Consumers) Resting() bool {
 // them returned: the loops answer their done channels, the segment a loop still
 // flew is closed by that loop — the answer of it reached to the entries waiting on
 // it and its calls read as orphaned — and no further instance mounts for any
-// address. The segments the ended loops left flying stay on the chain for a restart.
+// address. The segments the ended loops left flying stay on the chain for a restart,
+// and the instances they mounted leave the registry of their loop once they really
+// ended, so the address that mounts next is a new driver instead of the dead one this
+// set stopped behind.
 //
 // The join is the stop itself, not a courtesy beside it: a loop is the writer of
 // its own address, so a set that returned while a loop still unwound a segment
@@ -1156,9 +1149,6 @@ func (cs *Consumers) Stop() {
 	for _, consumer := range loops {
 		<-consumer.done
 	}
-	// The instances this set mounted leave the loop's registry once they really
-	// ended, so the address that mounts next is a new driver instead of the dead
-	// one this set stopped behind.
 	cs.loop.forgetInstancesOf(cs)
 }
 

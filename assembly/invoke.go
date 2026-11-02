@@ -69,7 +69,7 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 // session side closes after the quiesce, so the mailbox bookkeeping an in-flight
 // tool result still lands through stays open exactly as long as the quiesce may
 // need it. A repeated close returns the first result and runs no second quiesce.
-// The redline list (4 rules):
+// The redline list (5 rules):
 // MUST judge the timeout of the close before any side effect it would take, so a close naming none is refused with the run untouched.
 // MUST refuse new input before the first quiesce of the close.
 // MUST stop the resident consumption loops the loop mounted for itself before the first read of the rest criterion, so a segment those loops still fly is closed and joined before the run is judged.
@@ -83,10 +83,6 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 	r.mu.Lock()
 	r.closing = true
 	r.mu.Unlock()
-	// The resident loops this run mounted for itself are stopped first: a segment
-	// they still fly writes the chain of its address, and a close that read the
-	// criterion beside it would answer a run at rest over writes that landed after
-	// the answer. The stop joins, so the segments are closed before the first read.
 	r.loop.StopResidents()
 	if r.retrieval != nil {
 		defer r.retrieval.close()

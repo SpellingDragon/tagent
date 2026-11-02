@@ -1163,15 +1163,10 @@ func (l *Loop) StopResidents() {
 // through the given set when this loop carries none: the registry of this loop, not
 // the map of a set, is what answers "one instance per address".
 //
-// - An address this loop already drives answers the instance it carries, whatever set
-// asks: a second set never starts a second driver of the same decisions.
-// - A loop that already drives its addresses through one set mounts through that set
-// alone: a second set answers no instance instead of opening a driver the close of
-// this loop would not stop, and never takes an instance another set already mounted.
-// - A loop beside no driving set mounts through whichever set asks first, exactly as a
-// set assembled over a loop by a test or an embedder always could.
-// - The chain is read for the cursor of a fresh instance outside the registry lock, so
-// the mount never reads the chain under the lock it answers the registry by.
+// - An address this loop already drives answers the instance it carries, whatever set asks: a second set never starts a second driver of the same decisions.
+// - A loop that already drives its addresses through one set mounts through that set alone: a second set answers no instance instead of opening a driver the close of this loop would not stop, and never takes an instance another set already mounted.
+// - A loop beside no driving set mounts through whichever set asks first, exactly as a set assembled over a loop by a test or an embedder always could.
+// - The chain is read for the cursor of a fresh instance outside the registry lock, so the mount never reads the chain under the lock it answers the registry by.
 func (l *Loop) instanceFor(addr event.Address, cs *Consumers) *Consumer {
 	l.mu.Lock()
 	if instance, held := l.instances[addr]; held {
@@ -1329,9 +1324,6 @@ func (l *Loop) submitDelegated(ctx context.Context, in DelegatedInput, started f
 		report(err)
 		return DelegatedAnswer{Status: task.StatusFailed, Failure: err.Error()}, err
 	}
-	// The round's input is in the chain of its site, so the turn has started: a receipt
-	// answered from here stands for a body that arrived, and the wake below opens the
-	// segment that reads it.
 	report(nil)
 	consumer.Wake()
 	answer, waitErr := consumer.WaitAnswer(ctx, keys)
@@ -1345,7 +1337,7 @@ func (l *Loop) submitDelegated(ctx context.Context, in DelegatedInput, started f
 	return DelegatedAnswer{Body: answer.Body, Status: status, Failure: failure}, nil
 }
 
-// delegatedStart reports the first commit of one delegated round, at most once: the input's
+// delegationStart reports the first commit of one delegated round, at most once: the input's
 // commit is the one report a started round makes, and every early refusal reports the cause
 // it never started for. The callback is read at most once because a round that reports its
 // start and then fails reports the start, never a second, later answer to the same question.

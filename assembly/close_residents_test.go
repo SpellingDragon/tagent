@@ -52,11 +52,11 @@ func (a *closeResidentsAdmit) Call(ctx context.Context, _ []byte) (any, error) {
 	}, nil
 }
 
-// TestCloseStopsTheResidentsTheRunMounted pins the stop the close of a run owes
-// the resident loops it mounted for itself:
-// - negative: the close never returns beside a segment a resident loop still flies, because a run at rest over a segment that lands its turn afterwards is the answer the close exists not to give
-// - positive: the stop reaches the segment the loop left flying — the delegated round waiting on it answers the cancelled terminal instead of hanging — and the run reports the drained it really reached
-// - nothing lands on the chain of the site after the close returned, so a restart reading that chain reads no turn the close wrote behind its own answer
+// TestCloseStopsTheResidentsTheRunMounted pins the stop the close of a run owes the resident loops it mounted:
+// - negative: the close never returns beside a segment a resident loop still flies, because a run at rest over a segment that lands afterwards is refused
+// - positive: the stop reaches the segment the loop left flying, so the delegated round waiting on it answers the cancelled terminal instead of hanging
+// - the run reports the drained it really reached, and no turn lands on the chain of the site after that answer
+// - a restart reading that chain reads the input it still owes and no turn the close wrote behind its own answer
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
 func TestCloseStopsTheResidentsTheRunMounted(t *testing.T) {
@@ -104,9 +104,6 @@ func TestCloseStopsTheResidentsTheRunMounted(t *testing.T) {
 		t.Fatalf("establish the site of the delegated round: %v", err)
 	}
 
-	// The round is driven on the resident instance of its site, which the loop
-	// mounts for itself: this run is assembled beside no host, exactly as an
-	// embedder drives it.
 	submitted := make(chan agent.DelegatedAnswer, 1)
 	go func() {
 		answer, submitErr := run.delegations.Submit(ctx, agent.DelegatedInput{
@@ -143,8 +140,6 @@ func TestCloseStopsTheResidentsTheRunMounted(t *testing.T) {
 		t.Fatal("the close returned beside a resident loop it never stopped: the delegated round still waits on a segment nobody closes")
 	}
 
-	// Nothing lands after the close answered: a restart reading the chain of the
-	// site reads the input it still owes and no turn written behind the answer.
 	settled := run.SessionFacts(site)
 	time.Sleep(200 * time.Millisecond)
 	if after := run.SessionFacts(site); len(after) != len(settled) {

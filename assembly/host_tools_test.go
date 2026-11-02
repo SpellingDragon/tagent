@@ -267,9 +267,6 @@ func TestSendTargetResolution(t *testing.T) {
 			want    string
 		}{
 			{"sent", deliverySent, "", hostSendReceiptOK},
-			// A hold is not a state of this dialect: the word retired with the third state, so an
-			// outcome that is not a delivery renders as the named refusal and never as a receipt a
-			// reader could take for a delivery.
 			{"held", deliveryHeld, "parked for review", hostSendDeniedPrefix + "parked for review"},
 			{"refused", deliveryRefused, "the task is not settled", hostSendDeniedPrefix + "the task is not settled"},
 		}
