@@ -240,7 +240,11 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error
     a model call, and a user turn never waits for it. A failed read is reported
     and never rolls the commit back, and a stamp outside the host-facing
     vocabulary leaves the timer untouched, so an agent's own reflection never
-    reflects again.
+    reflects again. Every accepted commit is answered: one that lands while a
+    pass is in flight is retained for the evaluation that settles it, and one
+    that lands inside the rhythm floor opens the episode on the window the floor
+    opens, so the floor postpones the pass that answers it and never drops the
+    commit.
 
 func (d *Driver) Port() plugin.Port
     Port reports the consumption the driver serves: one committed fact in, one

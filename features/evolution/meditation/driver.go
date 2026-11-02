@@ -120,6 +120,10 @@ func (d *Driver) SetObserver(observer func(TickOutcome)) {
 // model call, and a user turn never waits for it. A failed read is reported and
 // never rolls the commit back, and a stamp outside the host-facing vocabulary
 // leaves the timer untouched, so an agent's own reflection never reflects again.
+// Every accepted commit is answered: one that lands while a pass is in flight is
+// retained for the evaluation that settles it, and one that lands inside the
+// rhythm floor opens the episode on the window the floor opens, so the floor
+// postpones the pass that answers it and never drops the commit.
 func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error {
 	if d == nil || d.reflection == nil || !d.live() {
 		return nil
@@ -147,9 +151,15 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error {
 		d.mu.Unlock()
 		return nil
 	}
-	if d.interval > 0 && !d.lastFired.IsZero() && now.Sub(d.lastFired) < d.interval {
-		d.mu.Unlock()
-		return nil
+	if d.interval > 0 && !d.lastFired.IsZero() {
+		if elapsed := now.Sub(d.lastFired); elapsed < d.interval {
+			d.firing = true
+			d.wg.Add(1)
+			d.mu.Unlock()
+
+			go d.fireAfter(ctx, d.interval-elapsed)
+			return nil
+		}
 	}
 	d.firing = true
 	d.wg.Add(1)
@@ -165,6 +175,15 @@ func (d *Driver) ObserveCommit(ctx context.Context, id event.EventID) error {
 // commit; the episode outlives the committing turn but not the driver: a stop
 // cancels it, and Stop waits for it to return.
 func (d *Driver) fire(ctx context.Context) {
+	d.fireAfter(ctx, 0)
+}
+
+// fireAfter runs the episode fire runs, opening its first pass on the window the
+// rhythm floor left closed: the commit that opened the episode is evaluated once
+// that window opens, and an observation landing meanwhile stays retained beside
+// it, so a floor postpones a pass and never swallows the commit behind it. A stop
+// cancels the wait, which is the same cancellation every later pass honours.
+func (d *Driver) fireAfter(ctx context.Context, wait time.Duration) {
 	defer d.wg.Done()
 	defer func() {
 		d.mu.Lock()
@@ -186,19 +205,19 @@ func (d *Driver) fire(ctx context.Context) {
 	defer stop()
 
 	for {
+		if wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			}
+		}
 		d.pass(ctx)
-		wait, again := d.rearm()
+		var again bool
+		wait, again = d.rearm()
 		if !again {
-			return
-		}
-		if wait <= 0 {
-			continue
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
 			return
 		}
 	}
