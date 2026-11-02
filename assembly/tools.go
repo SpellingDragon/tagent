@@ -628,8 +628,28 @@ func (r *Run) wrap(tool trpctool.CallableTool) trpctool.Tool {
 	} else if approve == nil && r.enforcement == governance.EnforcementStrict {
 		approve = denyWithoutApprover
 	}
-	return &admissionGate{run: r, inner: task.Wrap(r.manager, &toolProducer{run: r, inner: tool},
-		task.WithResultRecorder(r.record), task.WithMailbox(r.sink), task.WithApprover(approve))}
+	return &admissionGate{run: r, inner: r.wrappedTool(tool, approve)}
+}
+
+// wrappedTool builds the registration wrapper of one native callable tool and
+// files its waiting table beside the waits of this run, so the close reads the
+// holds of this process as the waits a ruling can still rejoin.
+func (r *Run) wrappedTool(tool trpctool.CallableTool, approve task.Approver) *task.Wrapper {
+	wrapped := task.Wrap(r.manager, &toolProducer{run: r, inner: tool},
+		task.WithResultRecorder(r.record), task.WithMailbox(r.sink), task.WithApprover(approve))
+	r.hold(wrapped.Holds())
+	return wrapped
+}
+
+// hold files one waiting table of the approval channel this run parks calls
+// through, so the cut of a close reads every hold of the process.
+func (r *Run) hold(book *task.HoldBook) {
+	if book == nil {
+		return
+	}
+	r.mu.Lock()
+	r.holds = append(r.holds, book)
+	r.mu.Unlock()
 }
 
 // admissionGate is the refusal gate one registered tool's calls pass through

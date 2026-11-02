@@ -179,6 +179,11 @@ type Run struct {
 	// writes to it, so a judgment that spans them belongs to one instant instead
 	// of as many instants as it has accounts.
 	movement *task.Movement
+	// holds is the waiting table of every approval channel this run parks a call
+	// through: the one account of the waits a ruling of this process can still
+	// resume, since a hold lives in memory alone and a wait restored from the
+	// chain carries none.
+	holds []*task.HoldBook
 	// landing serializes the sequence slot of one partition beside the segment
 	// commit that takes it, so two facts committed at once never claim one slot.
 	landing sync.Mutex

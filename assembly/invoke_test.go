@@ -37,15 +37,45 @@ func TestRunFenceReadsTheRunSequence(t *testing.T) {
 // TestCutApprovalWaitsLandsTheCancel pins that an approval wait no restart can rejoin is ended by name instead of being left as a wait.
 // - the task lands cancelled with a fact, so the criterion stops listing it
 // - a hold is memory of this process alone, so a wait left standing is work no later process can finish
+// - a wait one of this process's holds still carries is left standing, because a ruling here resumes it
 // 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 func TestCutApprovalWaitsLandsTheCancel(t *testing.T) {
 	ctx := context.Background()
 	registry := task.NewMemoryRegistry(task.NewMemoryCommit(nil), task.NewMemoryAdmission())
+	receipt := parkedApprovalTask(t, ctx, registry, "call-approval", "inv-approval")
+	held := parkedApprovalTask(t, ctx, registry, "call-approval-held", "inv-approval-held")
+
 	run := &Run{registry: registry}
+	book := task.NewHoldBook()
+	book.Record(task.Hold{TaskID: held, Reason: "a call waiting for a ruling", ApprovalID: "approval-held"})
+	run.hold(book)
+
+	cut := run.cutApprovalWaits(ctx, task.Unsettled{Work: []task.UnsettledWork{
+		{TaskID: receipt, Status: task.StatusAwaitingApproval, Address: criterionAddress},
+		{TaskID: held, Status: task.StatusAwaitingApproval, Address: criterionAddress},
+	}})
+	if len(cut) != 1 || cut[0].TaskID != receipt || cut[0].Reason != reasonApprovalCut {
+		t.Fatalf("cancelled approval waits = %+v, want the waiting task no hold carries named beside the reason it was cut", cut)
+	}
+	if _, status, err := registry.Lookup(ctx, receipt); err != nil || status != task.StatusCancelled {
+		t.Fatalf("the task after the close = (%v, %v), want it cancelled as the fact the chain holds", status, err)
+	}
+	if _, status, err := registry.Lookup(ctx, held); err != nil || status != task.StatusAwaitingApproval {
+		t.Fatalf("the task a live hold waits on = (%v, %v), want the wait a ruling here can still resume", status, err)
+	}
+	if unfinished, err := registry.Unfinished(ctx); err != nil || len(unfinished) != 1 || unfinished[0].TaskID != held {
+		t.Fatalf("unfinished work after the close = (%+v, %v), want the held wait alone", unfinished, err)
+	}
+}
+
+// parkedApprovalTask admits one task into the registry given and moves it to the
+// approval wait every case of the cut reads, so the cases read one account.
+func parkedApprovalTask(t *testing.T, ctx context.Context, registry *task.MemoryRegistry, callID, invocation string) event.TaskID {
+	t.Helper()
 	receipt, err := registry.Register(ctx, task.Spec{
-		CallID:       "call-approval",
-		DedupKey:     "dedup-approval",
-		InvocationID: "inv-approval",
+		CallID:       callID,
+		DedupKey:     task.DedupKey("dedup-" + callID),
+		InvocationID: event.InvocationID(invocation),
 		InstanceID:   "instance-a",
 		Description:  "one call that waits for approval",
 		Source:       criterionAddress,
@@ -65,22 +95,7 @@ func TestCutApprovalWaitsLandsTheCancel(t *testing.T) {
 			t.Fatalf("move the task to %v = (%v, %v), want a committed change", step.to, result, err)
 		}
 	}
-
-	read := task.Unsettled{Work: []task.UnsettledWork{{
-		TaskID:  receipt.TaskID,
-		Status:  task.StatusAwaitingApproval,
-		Address: criterionAddress,
-	}}}
-	cut := run.cutApprovalWaits(ctx, read)
-	if len(cut) != 1 || cut[0].TaskID != receipt.TaskID || cut[0].Reason != reasonApprovalCut {
-		t.Fatalf("cancelled approval waits = %+v, want the waiting task named beside the reason it was cut", cut)
-	}
-	if _, status, err := registry.Lookup(ctx, receipt.TaskID); err != nil || status != task.StatusCancelled {
-		t.Fatalf("the task after the close = (%v, %v), want it cancelled as the fact the chain holds", status, err)
-	}
-	if unfinished, err := registry.Unfinished(ctx); err != nil || len(unfinished) != 0 {
-		t.Fatalf("unfinished work after the close = (%+v, %v), want the cancelled task to owe nothing", unfinished, err)
-	}
+	return receipt.TaskID
 }
 
 // TestDeliverAnswersRejectionAndRoutingApart pins that a target which refused a notification is a rejection and a route the mailbox cannot open is not.

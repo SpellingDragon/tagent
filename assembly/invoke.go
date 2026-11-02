@@ -213,13 +213,14 @@ func (r *Run) quiesce(ctx context.Context, timeout time.Time) task.Unsettled {
 // cutApprovalWaits cancels the tasks one close leaves waiting on an approval no
 // restart can rejoin, and answers the items the close itself landed for them. A
 // hold waits on an approval this process holds in memory alone: the task names an
-// approval identity and a digest, never the call and its arguments, so a restart
-// that reads the task back cannot rejoin the wait nor put it to a decision, and a
-// task left in the wait is work no later process can finish. The close therefore
-// cancels it and lands the fact, so the account ends the wait in a state a
-// restart reads as an outcome instead of reopening a wait nobody can settle.
+// approval identity and a digest, never the call and its arguments, so a wait none
+// of this process's holds carries is a wait no restart can rejoin nor put to a
+// decision, and a task left in it is work no later process can finish. The close
+// therefore cancels it and lands the fact, so the account ends the wait in a state
+// a restart reads as an outcome instead of reopening a wait nobody can settle.
 //
 // - Only a run that did not reach rest is judged: a quiesce that reached rest leaves no wait behind, so an approval still open is only cut beside work that stayed open.
+// - A wait one of this process's holds still carries is left standing: a ruling here can resume it, so the close reports it and the question keeps its place in the presence.
 // - The mutation identity is derived from the task, so a cancelled task that was already cut is answered as the fact the chain holds instead of a second cancel.
 // - The item is reported beside the run's own, naming the task and the address, so the cancel is never a silent edit of the account.
 func (r *Run) cutApprovalWaits(ctx context.Context, read task.Unsettled) []agent.UnsettledObligation {
@@ -230,6 +231,9 @@ func (r *Run) cutApprovalWaits(ctx context.Context, read task.Unsettled) []agent
 	var cut []agent.UnsettledObligation
 	for _, work := range read.Work {
 		if work.Status != task.StatusAwaitingApproval {
+			continue
+		}
+		if r.waitsOn(work.TaskID) {
 			continue
 		}
 		mutation := task.MutationID("cut-approval:" + string(work.TaskID))
@@ -245,6 +249,22 @@ func (r *Run) cutApprovalWaits(ctx context.Context, read task.Unsettled) []agent
 		})
 	}
 	return cut
+}
+
+// waitsOn reports whether a hold of this process still waits on the task named.
+// A wait a hold carries is one a ruling can resume in this process, so the close
+// leaves it standing for that ruling; a wait no hold carries is a wait only the
+// chain states, and no ruling of this process or the next can resume it.
+func (r *Run) waitsOn(taskID event.TaskID) bool {
+	r.mu.Lock()
+	books := append([]*task.HoldBook(nil), r.holds...)
+	r.mu.Unlock()
+	for _, book := range books {
+		if _, waiting := book.Waiting(taskID); waiting {
+			return true
+		}
+	}
+	return false
 }
 
 // reasonApprovalCut names the outcome of a task whose approval wait the close
