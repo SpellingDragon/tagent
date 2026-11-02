@@ -173,6 +173,13 @@ var ErrRequestChainSessionRequired = errors.New("agent: projected request assemb
     names no session: assembling one would join every user of the partition into
     one transcript.
 
+var ErrSegmentCancelled = errors.New("agent: the consumption loop ended before it answered the segment")
+    ErrSegmentCancelled reports a wait that the end of the consumption loop
+    answers instead of a segment: the loop that would have consumed the named
+    inputs stopped, so the inputs stay owed on the chain for a restart and the
+    entry reads the named cancellation instead of blocking on a driver that
+    already returned.
+
 FUNCTIONS
 
 func NoticeFactKey(invocationID event.InvocationID, notice task.Notice) event.EventID
@@ -429,6 +436,10 @@ func (c *Consumer) Resting() bool
     and no wake waits to open one. The loop is the writer of its own address,
     so a loop that rests writes nothing more at that site, and a close that
     reads it resting reads a writer stopped rather than one merely paused.
+    - The first clause is the whole judgment of a dead loop: a loop whose run
+    ended leaves the segment it flew closed (see abandonSegment), so an ended
+    loop beside a segment still flying answers not resting here instead of
+    reading its shutdown as rest.
 
 func (c *Consumer) SetProgress(pulse func())
     SetProgress attaches the pulse this loop reports each movement through,
@@ -444,8 +455,11 @@ func (c *Consumer) TaskState(taskID event.TaskID) TaskState
 func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (SegmentAnswer, error)
     WaitAnswer waits for the segment that consumed any of the named input keys
     and answers its aggregated turn. An input the flying segment already took
-    answers when that segment closes; an input no segment took yet answers when
-    the next pull drives one.
+    answers when that segment closes; an input no segment took yet answers
+    when the next pull drives one. An input whose segment closed before this
+    wait began is found by its own key, so a late entry reads the answer of the
+    segment that consumed it rather than the answer of a segment that closed
+    beside it. A wait the end of the loop meets answers ErrSegmentCancelled.
 
 func (c *Consumer) Wake()
     Wake signals the loop that events may have arrived: the signal merges,
@@ -479,15 +493,18 @@ func (cs *Consumers) Ensure(addr event.Address) *Consumer
     so an instance mounts for every complete agent address the run drives,
     never for the entry agent alone.
 
-    - Exactly one instance per address: the second Ensure of an address answers
-    the instance already mounted, so one address never runs two drivers of its
-    own decisions. - The lifecycle is the run's: an instance lives as long as
-    the context the set was built under, and a set that stopped mounts none, so
-    a call arriving beside a drained run answers no instance instead of starting
-    a driver beside the drain. - The loop resumes behind the last agent_output
-    the chain carries — the inputs past it are the material a restart still
-    owes — and a chain beside no agent_output at all resumes from its head,
-    so an unanswered input stays owed instead of vanishing behind a restart.
+    - Exactly one instance per address: the instance belongs to the loop, not to
+    the set. A second Ensure of an address — from this set or from any other set
+    mounted over the same loop — answers the instance the loop already carries,
+    so one address never runs two drivers of its own decisions, however many
+    sets were mounted. - The lifecycle is the run's: an instance lives as long
+    as the context the set was built under, and a set that stopped mounts none,
+    so a call arriving beside a drained run answers no instance instead of
+    starting a driver beside the drain. - The loop resumes behind the last
+    agent_output the chain carries — the inputs past it are the material a
+    restart still owes — and a chain beside no agent_output at all resumes from
+    its head, so an unanswered input stays owed instead of vanishing behind a
+    restart.
 
 func (cs *Consumers) Has(addr event.Address) bool
     Has reports whether one address carries a resident consumption loop.
@@ -512,9 +529,12 @@ func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger s
 func (cs *Consumers) Stop()
     Stop ends every consumption loop this set owns and answers only once each
     of them returned: the loops answer their done channels, the segment a loop
-    still flew is closed by that loop — its commit included — and no further
-    instance mounts for any address. The segments the ended loops left flying
-    stay on the chain for a restart.
+    still flew is closed by that loop — the answer of it reached to the entries
+    waiting on it and its calls read as orphaned — and no further instance
+    mounts for any address. The segments the ended loops left flying stay on the
+    chain for a restart, and the instances they mounted leave the registry of
+    their loop once they really ended, so the address that mounts next is a new
+    driver instead of the dead one this set stopped behind.
 
     The join is the stop itself, not a courtesy beside it: a loop is the writer
     of its own address, so a set that returned while a loop still unwound a
@@ -782,6 +802,12 @@ func (d *Delegator) Submit(ctx context.Context, in DelegatedInput) (DelegatedAns
     site and answers the status it ended at beside the body it produced.
     The round runs beside the receipt the admission already returned, so the
     turn that issued the call never waits on it.
+
+func (d *Delegator) SubmitBeside(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error)
+    SubmitBeside hands one delegated round over exactly as Submit does,
+    and reports the round's first commit to started: the caller that answers a
+    delivery receipt hands the body over here, so the receipt it returns is the
+    delivery rather than the acceptance of a round that may yet fail to land it.
 
 func (d *Delegator) TurnBorrow(taskID event.TaskID) (state.Borrow, error)
     TurnBorrow returns the borrowing face the delegated turn of one admitted
@@ -1235,13 +1261,16 @@ func (l *Loop) SetConsumers(consumers *Consumers)
     SetConsumers attaches the resident consumption loops this loop drives the
     decisions of, so a settled backflow wakes the loop of the address its range
     runs at. A loop beside no attached set wakes the set it mounted for itself
-    instead (see residentsOf), and only a loop that mounted none of its own
-    keeps its backflow parked in the intake, exactly as before.
+    instead (see residentOf), and only a loop that mounted none of its own keeps
+    its backflow parked in the intake, exactly as before.
 
     A set this loop mounted for itself is displaced by the given one and
-    stopped: a displaced set that kept running would drive the addresses of its
-    own copies beside the set now attached, and two drivers of one address is
-    the failure the one-instance-per-address rule exists to forbid.
+    stopped: a displaced set that kept running would drive the addresses
+    of its own copies beside the set now attached, and two drivers of one
+    address is the failure the one-instance-per-address rule exists to forbid.
+    The displaced set is stopped before the attached one becomes the driver,
+    and its instances leave the registry with it, so the attach never stands
+    between two drivers of one address.
 
 func (l *Loop) SetFactCommit(commit FactCommit)
     SetFactCommit attaches the commit face the loop commits the facts it
@@ -1331,8 +1360,9 @@ func (l *Loop) SetWriters(writers *Writers)
 
 func (l *Loop) StopResidents()
     StopResidents ends the consumption loops this loop mounted for itself:
-    no further instance mounts, and the segments those loops left flying stay
-    on the chain for a restart. The set a host attached is that host's to stop,
+    no further instance mounts, the segment each of them still flew is closed by
+    that loop before it returns, and the segments those loops left on the chain
+    stay there for a restart. The set a host attached is that host's to stop,
     so it is left where it is here.
 
 func (l *Loop) SubmitDelegated(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error)
@@ -1343,11 +1373,34 @@ func (l *Loop) SubmitDelegated(ctx context.Context, in DelegatedInput) (Delegate
     flies. The caller keeps the task face — admission, settle and notice stay
     where they are — and reads only what the turn produced. - The input commits
     as the site's own external input before the wake, so the segment the wake
-    opens reads it as its own material. - The answer is the chain the segment
-    closed on: a body that never committed is a failed round rather than a copy
-    kept beside the chain. - A cancelled wait reports the cancelled terminal
-    beside no error, so a closing run settles what it already admitted instead
-    of leaving it owed.
+    reads as its own material. - The answer is the chain the segment closed on:
+    a body that never committed is a failed round rather than a copy kept
+    beside the chain. - The body is the one the closing decision of that
+    segment produced, never whatever the chain of the site ended at meanwhile:
+    a second segment that closed beside this wait has no body of its own to
+    lend. - A cancelled wait reports the cancelled terminal beside no error, so
+    a closing run settles what it already admitted instead of leaving it owed.
+    A wait the end of the loop answers is the same cancellation: the segment
+    stays owed on the chain for the restart, and the round reports the terminal
+    it really reached.
+
+func (l *Loop) SubmitDelegatedBeside(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error)
+    SubmitDelegatedBeside hands one delegated turn to the resident instance
+    of its site exactly as SubmitDelegated does, and reports the round's first
+    commit beside it: the callback hears nil once the input has landed at
+    the site, and the named cause of a turn that never landed. A caller that
+    answers a delivery receipt uses it to answer only for a body that arrived,
+    instead of answering before the input reached the chain the receipt claims.
+
+    The report is the input's commit and nothing else: a round that lands its
+    input and then fails still reported nil, because the body did arrive and
+    what became of the round is its own terminal's to report.
+
+func (l *Loop) WakeAddress(addr event.Address)
+    WakeAddress signals the resident instance of one address that events arrived
+    for it: the face that lands a body beside a target it judged busy wakes that
+    target, so a round that closed between that judgment and the landing still
+    reads the body at its next pull.
 
 type NoticeFeed interface {
 	// NoticeBoundary reports the position the ended material of the named chain
@@ -1507,12 +1560,17 @@ type SegmentAnswer struct {
 	Err      error
 	Trigger  string
 	Consumed []event.EventID
+	// Body is the assistant text the closing decision of this segment produced,
+	// or none beside a segment that produced no text or committed no turn.
+	Body string
 }
     SegmentAnswer is the closed-segment answer one waiting entry reads:
     the aggregated turn, the named cause of a failed segment, the trigger-source
     stamp the segment opened on, which names the lineage its answer leaves
-    under, and the keys of the inputs the segment consumed, so a face that
-    delivers the answer knows which entries that segment answered.
+    under, the keys of the inputs the segment consumed, so a face that delivers
+    the answer knows which entries that segment answered, and the body its last
+    decision produced, so the entry reads the answer of the segment it waited on
+    rather than whatever the chain ended at meanwhile.
 
 type SegmentDelivery func(ctx context.Context, addr event.Address, answer SegmentAnswer)
     SegmentDelivery is the face the host hands one closed segment's fresh

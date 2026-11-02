@@ -91,3 +91,20 @@ func (m *MemoryAdmission) Lookup(key DedupKey) (event.TaskID, bool) {
 	taskID, ok := m.tasks[key]
 	return taskID, ok
 }
+
+// forget drops every dedup key registered for one task, so a dedup key whose record the
+// registry pruned is admitted fresh instead of resolving to a task that is gone. The keys
+// are read by the value they resolve to: one record is registered under the keys of the
+// call that admitted it, and nothing else points at it.
+func (m *MemoryAdmission) forget(taskID event.TaskID) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, registered := range m.tasks {
+		if registered == taskID {
+			delete(m.tasks, key)
+		}
+	}
+}

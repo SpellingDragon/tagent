@@ -55,6 +55,8 @@ const (
 	deliveryTwoRequest       = "delivery ledger: hand the note to the one peer session"
 	deliveryTwoInvocation    = "inv-delivery-ledger-two"
 	deliveryTwoBody          = "delivery ledger: the note one send carried"
+	deliveryDoubleRequest    = "delivery ledger: hand two notes to the one peer session"
+	deliveryDoubleInvocation = "inv-delivery-ledger-double"
 	deliveryTurnDone         = "delivery ledger: the turn is done"
 	deliveryToolSend         = "send"
 	deliveryToolSubagentTool = "call_subagent"
@@ -65,6 +67,13 @@ var deliveryPeerSessions = []string{
 	"session-delivery-peer-one",
 	"session-delivery-peer-two",
 	"session-delivery-peer-three",
+}
+
+// deliveryDoubleBodies are the two bodies one decision hands to the same peer session beside each
+// other, so the double delivery of one idle target is read from what the run really carries.
+var deliveryDoubleBodies = []string{
+	"delivery ledger: the first of two notes one decision hands",
+	"delivery ledger: the second of two notes one decision hands",
 }
 
 // deliveryWindow bounds every wait of the delivery anchors, so a run that commits no
@@ -487,6 +496,9 @@ func (p *deliveryProvider) answer(_ int, request intakeRequest) string {
 		}
 		return intakeFinalAnswer(deliveryPeerAnswer)
 	}
+	if deliveryCarries(request, deliveryDoubleRequest) && p.claim("double") {
+		return deliveryToolCallsAnswer(deliveryDoubleCalls())
+	}
 	if deliveryCarries(request, deliveryMultiRequest) && p.claim("multi") {
 		return deliveryToolCallsAnswer(deliveryMultiCalls())
 	}
@@ -506,6 +518,19 @@ func deliveryMultiCalls() [][3]string {
 		callID := fmt.Sprintf("call-delivery-multi-%d", at)
 		arguments := `{"target":{"agent":` + intakeQuoted(deliveryPeerAgent) + `,"session":` + intakeQuoted(session) +
 			`},"content":` + intakeQuoted(deliveryMultiBody) + `}`
+		calls = append(calls, [3]string{deliveryToolSend, callID, arguments})
+	}
+	return calls
+}
+
+// deliveryDoubleCalls renders the two calls one decision hands to the same idle peer session:
+// each carries its own body under its own call identity, so the two deliveries land as two facts.
+func deliveryDoubleCalls() [][3]string {
+	calls := make([][3]string, 0, len(deliveryDoubleBodies))
+	for at, body := range deliveryDoubleBodies {
+		callID := fmt.Sprintf("call-delivery-double-%d", at)
+		arguments := `{"target":{"agent":` + intakeQuoted(deliveryPeerAgent) + `,"session":` + intakeQuoted(deliveryPeerSessions[0]) +
+			`},"content":` + intakeQuoted(body) + `}`
 		calls = append(calls, [3]string{deliveryToolSend, callID, arguments})
 	}
 	return calls
@@ -658,4 +683,77 @@ func deliveryBoot(t *testing.T, provider *deliveryProvider) *assembly.Host {
 		}
 	})
 	return host
+}
+
+// TestSendSymptomDoubleDeliveryToOneSession drives the two deliveries one decision hands to the same idle peer session.
+// - positive: both calls answer the bare ok, so both bodies reached the session their calls named
+// - positive: the peer chain holds one delivered fact per body, so neither body is dropped behind the other
+// - positive: the peer turn reads both bodies, whether the second arrived inside the round the first opened or at its own boundary
+// - negative: the account lists the two deliveries under one target, each with its own identity, and none twice
+// - consumer: the calls reach the runtime as one Host.Invoke over a host booted from a real document
+//
+// 契约: docs/wiki/reliability/durable-delivery.md#lineage-visibility
+func TestSendSymptomDoubleDeliveryToOneSession(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	provider := newDeliveryProvider()
+	host := deliveryBoot(t, provider)
+	peer := event.Address{AgentID: deliveryPeerAgent, SessionID: event.SessionID(deliveryPeerSessions[0])}
+	deliveryBind(t, ctx, host, peer)
+
+	meditate := event.Address{AgentID: deliveryMeditatorAgent, SessionID: deliveryMeditationSession}
+	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
+		InvocationID: deliveryDoubleInvocation,
+		Address:      meditate,
+		Input:        []model.Message{{Role: model.RoleUser, Content: deliveryDoubleRequest}},
+	}); err != nil {
+		t.Fatalf("invoke the reflecting turn that hands two notes to one session: %v", err)
+	}
+	deliveryAwaitReceipts(t, provider, len(deliveryDoubleBodies))
+
+	for _, body := range deliveryDoubleBodies {
+		if got := len(deliveryFactsCarrying(host, peer, body)); got != 1 {
+			t.Fatalf("delivered facts carrying %q = %d, want the one body its call carried", body, got)
+		}
+		if deliveryAwaitPeerBody(provider, body) == 0 {
+			t.Fatalf("the peer turn never read %q, so the body landed beside no turn:\n%s",
+				body, deliveryDescribeRequests(provider.requests()))
+		}
+	}
+
+	records := host.Run().DeliveryLedger().ByTarget(peer)
+	if len(records) != len(deliveryDoubleBodies) {
+		t.Fatalf("deliveries the account lists for %q = %d, want one per body (%d):\n%s",
+			peer.SessionID, len(records), len(deliveryDoubleBodies), deliveryDescribe(records))
+	}
+	identities := map[string]bool{}
+	for _, record := range records {
+		if record.Receipt != assembly.DeliveryReceiptSent {
+			t.Fatalf("receipt of the delivery to %q = %q, want %q", peer.SessionID, record.Receipt, assembly.DeliveryReceiptSent)
+		}
+		if identities[record.Identity] {
+			t.Fatalf("identity %q of the delivery to %q is listed twice, want one record per body:\n%s",
+				record.Identity, peer.SessionID, deliveryDescribe(records))
+		}
+		identities[record.Identity] = true
+	}
+}
+
+// deliveryAwaitPeerBody waits until one request of the peer turn carries the named body and reports
+// how many did: the second body lands inside the round the first opened or at the next boundary, so
+// the check waits on what the turn really read instead of on an arrival order it cannot pin.
+func deliveryAwaitPeerBody(provider *deliveryProvider, body string) int {
+	deadline := time.Now().Add(deliveryWindow)
+	for {
+		counted := 0
+		for _, request := range provider.requests() {
+			if request.Model == deliveryPeerModel && deliveryCarries(request, body) {
+				counted++
+			}
+		}
+		if counted > 0 || !time.Now().Before(deadline) {
+			return counted
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

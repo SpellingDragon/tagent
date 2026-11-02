@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -106,6 +107,117 @@ func observationDelegation(callID string) Delegation {
 		Sites:        DelegationSites{Target: event.Address{AgentID: "helper", SessionID: "session-helper"}},
 		Ref:          state.BindingRef{AgentID: "helper", InstanceID: "inst-1", Generation: 1},
 	}
+}
+
+// TestDelegationRoundReopen pins the reopening one re-entered round takes and the withdrawal of a round nothing served.
+// - a settled delegation reopens onto the round the task machine opened, and the round is booked again so its terminal is awaited
+// - an unknown delegation and a delegation that has not settled are each refused by name, and the precheck answers the same two cases without moving the entry
+// - a reopened round nothing served is withdrawn back to the terminal it reopened from, so the ledger reads the outcome it stood at
+// - a withdrawal of a round the ledger is not holding moves nothing
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestDelegationRoundReopen(t *testing.T) {
+	t.Run("a_settled_delegation_reopens_onto_the_next_round", func(t *testing.T) {
+		ledger := delegationSettled(t)
+		if err := ledger.CanReopenRound("task-1"); err != nil {
+			t.Fatalf("precheck of the settled delegation = %v, want the round it may open", err)
+		}
+		if err := ledger.ReopenRound("task-1", 7); err != nil {
+			t.Fatalf("reopen the settled delegation = %v, want the round it opened", err)
+		}
+		status, round, pending, held := delegationRoundOf(ledger, "task-1")
+		if !held || status != task.StatusRunning || round != 7 || pending != task.StatusUnknown {
+			t.Fatalf("entry after the reopen = (status=%v round=%d pending=%v held=%v), want the round 7 in flight awaiting its terminal",
+				status, round, pending, held)
+		}
+		if got := ledger.Pending(); got != 1 {
+			t.Fatalf("pending delegations after the reopen = %d, want the one round it awaited", got)
+		}
+	})
+
+	t.Run("refuses_an_unknown_and_an_unsettled_delegation", func(t *testing.T) {
+		ledger := delegationSettled(t)
+		if err := ledger.CanReopenRound("task-nowhere"); !errors.Is(err, ErrDelegationUnknown) {
+			t.Fatalf("precheck of an unknown delegation = %v, want %v", err, ErrDelegationUnknown)
+		}
+		if err := ledger.ReopenRound("task-nowhere", 7); !errors.Is(err, ErrDelegationUnknown) {
+			t.Fatalf("reopen of an unknown delegation = %v, want %v", err, ErrDelegationUnknown)
+		}
+		if err := ledger.ReopenRound("task-1", 7); err != nil {
+			t.Fatalf("reopen the settled delegation = %v", err)
+		}
+		if err := ledger.CanReopenRound("task-1"); !errors.Is(err, ErrDelegationNotSettled) {
+			t.Fatalf("precheck of the reopened delegation = %v, want %v", err, ErrDelegationNotSettled)
+		}
+		if err := ledger.ReopenRound("task-1", 8); !errors.Is(err, ErrDelegationNotSettled) {
+			t.Fatalf("second reopen of one delegation = %v, want %v", err, ErrDelegationNotSettled)
+		}
+		if _, round, _, _ := delegationRoundOf(ledger, "task-1"); round != 7 {
+			t.Fatalf("round of the refused second reopen = %d, want the one round it holds 7", round)
+		}
+	})
+
+	t.Run("a_round_nothing_served_is_withdrawn", func(t *testing.T) {
+		ledger := delegationSettled(t)
+		if err := ledger.ReopenRound("task-1", 7); err != nil {
+			t.Fatalf("reopen the settled delegation = %v", err)
+		}
+		ledger.AbandonRound("task-1", 7)
+		status, _, pending, _ := delegationRoundOf(ledger, "task-1")
+		if status != task.StatusSettled || pending != task.StatusUnknown {
+			t.Fatalf("entry after the withdrawal = (status=%v pending=%v), want the terminal it reopened from and no pending settle", status, pending)
+		}
+		if got := ledger.Pending(); got != 0 {
+			t.Fatalf("pending delegations after the withdrawal = %d, want none: the booking of the withdrawn round is given back", got)
+		}
+		if err := ledger.CanReopenRound("task-1"); err != nil {
+			t.Fatalf("precheck after the withdrawal = %v, want the delegation that may be reopened again", err)
+		}
+	})
+
+	t.Run("withdrawing_another_round_moves_nothing", func(t *testing.T) {
+		ledger := delegationSettled(t)
+		if err := ledger.ReopenRound("task-1", 7); err != nil {
+			t.Fatalf("reopen the settled delegation = %v", err)
+		}
+		ledger.AbandonRound("task-1", 6)
+		ledger.AbandonRound("task-nowhere", 7)
+		status, round, _, _ := delegationRoundOf(ledger, "task-1")
+		if status != task.StatusRunning || round != 7 {
+			t.Fatalf("entry after a withdrawal of another round = (status=%v round=%d), want the round 7 it still holds", status, round)
+		}
+	})
+}
+
+// delegationSettled returns a ledger holding one delegation that settled, so the rehearsal starts
+// from the terminal a re-entry reopens a task out of.
+func delegationSettled(t *testing.T) *Delegator {
+	t.Helper()
+	ctx := context.Background()
+	tasks := newDelegationTasksFace()
+	tasks.deliverFresh(task.AdmissionReceipt{CallID: "call-1", TaskID: "task-1", Accepted: true, Kind: task.AdmissionFresh})
+	ledger := NewDelegator(tasks, delegationBorrow{}, "inst-1")
+	if _, err := ledger.Delegate(ctx, observationDelegation("call-1")); err != nil {
+		t.Fatalf("admit the delegation: %v", err)
+	}
+	if _, err := ledger.Complete(ctx, "task-1", task.StatusSettled, "fact-1"); err != nil {
+		t.Fatalf("settle the delegation: %v", err)
+	}
+	if got := ledger.Pending(); got != 0 {
+		t.Fatalf("pending delegations of the settled one = %d, want none", got)
+	}
+	return ledger
+}
+
+// delegationRoundOf reports the status, the round and the pending terminal one entry holds, so a
+// check reads the bookkeeping the reopen and the withdrawal move.
+func delegationRoundOf(ledger *Delegator, taskID event.TaskID) (task.Status, int64, task.Status, bool) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	entry, ok := ledger.entries[taskID]
+	if !ok {
+		return task.StatusUnknown, 0, task.StatusUnknown, false
+	}
+	return entry.record.Status, entry.round, entry.pending, true
 }
 
 // delegationBorrow is the borrowing face of the observation checks: it serves one

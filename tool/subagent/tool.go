@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/agent"
@@ -80,6 +81,17 @@ type delegatedPipeline interface {
 	// Submit hands one round to the resident instance of its execution site and
 	// reports the terminal it ended at beside the body it produced.
 	Submit(ctx context.Context, in agent.DelegatedInput) (agent.DelegatedAnswer, error)
+}
+
+// startedPipeline is the optional extension of the delegated pipeline that reports the first
+// commit of a round before the round ends: the pipeline hears its own input land, so a caller
+// that answers a delivery receipt answers it for a body that arrived instead of for a round it
+// merely handed over. A pipeline that does not carry the extension is read through Submit
+// alone, and the caller's receipt is then answered when the round ends instead.
+type startedPipeline interface {
+	// SubmitBeside hands one round to the resident instance of its execution site and
+	// reports the round's first commit to started.
+	SubmitBeside(ctx context.Context, in agent.DelegatedInput, started func(error)) (agent.DelegatedAnswer, error)
 }
 
 // ToolOptions is what the composition root fixes when it registers the tool: the parent
@@ -325,7 +337,7 @@ func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID even
 	if d.continuations != nil {
 		d.continuations.register(taskID, d, builder, assembly, site)
 	}
-	status, body := d.runRound(ctx, builder, assembly, site, input, envelope)
+	status, body := d.runRound(ctx, builder, assembly, site, input, envelope, nil)
 	_ = d.completeDelegation(ctx, taskID, status, body)
 	if d.continuations != nil {
 		d.continuations.idle(taskID)
@@ -339,32 +351,61 @@ func (d delegationFaces) serve(ctx context.Context, builder Builder, taskID even
 //
 // A round that cannot run reports the cause it could not run for as its body, so the
 // settle notice of the task names what refused it instead of carrying an empty failure a
-// reader would have to attribute on its own.
-func (d delegationFaces) runRound(ctx context.Context, builder Builder, assembly *Assembly, site event.Address, input string, envelope *agent.HandoffEnvelope) (task.Status, string) {
+// reader would have to attribute on its own. started hears the round's first commit when the
+// caller handed one over and the cause a round never reached that commit for: the pipeline
+// that reports its own start is read through its extension, and one that does not is read
+// through Submit alone and reports the start when the round returns. Every path reports
+// exactly once, so the caller waiting on the report is never left waiting on a round that
+// already failed.
+func (d delegationFaces) runRound(ctx context.Context, builder Builder, assembly *Assembly, site event.Address, input string, envelope *agent.HandoffEnvelope, started func(error)) (task.Status, string) {
+	report := roundStart(started)
 	pipeline, ok := d.delegation.(delegatedPipeline)
 	if !ok {
+		report(ErrPipelineMissing)
 		return task.StatusFailed, ErrPipelineMissing.Error()
 	}
 	bound, err := builder.Bind(ctx, assembly)
 	if err != nil {
+		report(err)
 		return task.StatusFailed, named(err)
 	}
 	defer closeFace(bound.Set)
 	turn := Turn{UserID: string(site.AgentID), SessionID: string(site.SessionID), Input: input, Handoff: envelope}
-	answer, err := pipeline.Submit(ctx, agent.DelegatedInput{
+	in := agent.DelegatedInput{
 		Site:        site,
 		Binding:     bound,
 		Instruction: assembly.Instruction,
 		Request:     turn.request(ctx, builder.Facts, builder.RefBudget),
-	})
+	}
+	var answer agent.DelegatedAnswer
+	if beside, carries := d.delegation.(startedPipeline); carries && started != nil {
+		answer, err = beside.SubmitBeside(ctx, in, report)
+	} else {
+		answer, err = pipeline.Submit(ctx, in)
+	}
 	builder.sealCapture(ctx)
 	if err != nil {
+		report(err)
 		return task.StatusFailed, named(err)
 	}
+	report(nil)
 	if answer.Status == task.StatusFailed && answer.Failure != "" {
 		return answer.Status, answer.Failure
 	}
 	return answer.Status, answer.Body
+}
+
+// roundStart reports one round's first commit at most once, and reports nothing for a caller
+// that reads only the round's terminal. The once is what keeps the two reports of a round —
+// the pipeline's own start and this face's answer — from being two answers to one question.
+func roundStart(started func(error)) func(error) {
+	if started == nil {
+		return func(error) {}
+	}
+	var once sync.Once
+	return func(err error) {
+		once.Do(func() { started(err) })
+	}
 }
 
 // completeDelegation reports the terminal of one delegated round beside the body it

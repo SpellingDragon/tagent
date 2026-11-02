@@ -126,7 +126,7 @@ func (c *Continuations) Reenter(ctx context.Context, taskID event.TaskID, input 
 	if err := c.Claim(taskID); err != nil {
 		return err
 	}
-	return c.Serve(ctx, taskID, input)
+	return c.Serve(ctx, taskID, input, nil)
 }
 
 // Claim takes the one round slot of the named task before any round is served for
@@ -172,11 +172,14 @@ func (c *Continuations) Abandon(taskID event.TaskID) {
 // input one earlier round still owes ahead of the input handed here, and releases
 // the slot when the round ends.
 //
-// A round that ends without recording its terminal leaves the whole input owed
-// instead of dropping it: the body was accepted by the re-entry that claimed the
-// round, so it stays owed to the next round of the same task rather than leaving
-// the caller's receipt standing for a body nothing carried.
-func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input string) error {
+// The answer is the body's delivery and not its acceptance: Serve returns once the body is in
+// the round that carries it — the round's own input landed at its execution site — so a caller
+// that answers a delivery receipt from this return answers it for a body that arrived. The
+// rest of the round runs beside the call, and after hears how it ended: nil once its terminal
+// was recorded, the cause when it was not, so the caller puts back what nothing served and a
+// body the receipt accepted is never dropped. A round that never reaches its input returns the
+// cause it did not, and no receipt should stand for it.
+func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input string, after func(error)) error {
 	if c == nil {
 		return fmt.Errorf("%w: %s", ErrContinuationMissing, taskID)
 	}
@@ -194,18 +197,79 @@ func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input st
 	entry.owed = nil
 	c.mu.Unlock()
 
-	status, body := entry.faces.runRound(ctx, entry.builder, entry.assembly, entry.addr, joinOwed(owed, input), nil)
+	started := make(chan error, 1)
+	go c.fly(context.WithoutCancel(ctx), entry, taskID, owed, input, func(err error) { started <- err }, after)
+	return <-started
+}
+
+// fly runs one round of a served task beside the call that handed the body over: the start is
+// reported as soon as the round's own input landed, so the caller's receipt answers for the
+// body instead of for a goroutine, and the terminal is recorded beside it.
+//
+// A round that never lands its input settles nothing: there is no round of the task to record a
+// terminal for, so the body stays owed and the caller that reads the reported cause puts the
+// task back. Only a round whose input landed is settled, beside a nil or a failed outcome — a
+// round that landed the body owes the terminal of the task it belongs to. The round holds the
+// one slot of its task for its whole life, and the defer below is what
+// always gives it back: a round that ends beside an unrecorded terminal leaves the whole input
+// owed instead of dropping it, and a round that panics does the same — the slot is idle and the
+// body is owed again before the panic is recovered, so a task whose round died is re-entrant
+// rather than holding a slot no turn will ever release. The recovered round is reported as a
+// failure, never as a round that started and settled.
+func (c *Continuations) fly(ctx context.Context, entry *continuation, taskID event.TaskID, owed []string, input string, start, after func(error)) {
+	landed := make(chan error, 1)
+	var once sync.Once
+	report := func(err error) {
+		once.Do(func() {
+			landed <- err
+			start(err)
+		})
+	}
+	settled := false
+	defer func() {
+		c.mu.Lock()
+		entry.running = false
+		if !settled {
+			entry.owed = append(append(make([]string, 0, len(owed)+1), owed...), input)
+		}
+		c.mu.Unlock()
+		failure := recover()
+		if failure == nil {
+			return
+		}
+		err := fmt.Errorf("subagent: the next round of %s ended beside a panic: %v", taskID, failure)
+		report(err)
+		announce(after, err)
+	}()
+	status, body := entry.faces.runRound(ctx, entry.builder, entry.assembly, entry.addr, joinOwed(owed, input), nil, report)
+	if !continuationLanded(landed) {
+		return
+	}
 	err := entry.faces.completeDelegation(ctx, taskID, status, body)
-	c.mu.Lock()
-	entry.running = false
-	if err != nil {
-		entry.owed = append(append(make([]string, 0, len(owed)+1), owed...), input)
+	if err == nil {
+		settled = true
 	}
-	c.mu.Unlock()
-	if err != nil {
-		return fmt.Errorf("subagent: the next round of %s settled beside: %w", taskID, err)
+	announce(after, err)
+}
+
+// continuationLanded reports whether the round of one continuation landed its own input: the
+// report is read from the channel the round answers once, so a round that was never reported as
+// started is told apart from a round that started and a round that started beside a cause.
+func continuationLanded(report chan error) bool {
+	select {
+	case err := <-report:
+		return err == nil
+	default:
+		return false
 	}
-	return nil
+}
+
+// announce tells the caller that handed a body over how its round ended, if it asked: the
+// cause of a round whose terminal was not recorded, and nil for one that settled.
+func announce(after func(error), err error) {
+	if after != nil {
+		after(err)
+	}
 }
 
 // joinOwed renders the input one round reads: the bodies an earlier round left owed,

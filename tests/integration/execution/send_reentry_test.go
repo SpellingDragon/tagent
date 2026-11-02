@@ -132,6 +132,7 @@ func TestSendReentersAgentTask(t *testing.T) {
 		if terminals := reentryTerminalCount(host.Run().SessionFacts(addr), failed); terminals != 1 {
 			t.Fatalf("terminal notifications of the failed task = %d, want the one it settled under: a refused re-entry opens no round", terminals)
 		}
+		reentryAssertRefusalFiled(t, host, failed, addr)
 	})
 
 	t.Run("denies_unknown_task", func(t *testing.T) {
@@ -145,7 +146,52 @@ func TestSendReentersAgentTask(t *testing.T) {
 		if !strings.Contains(refused, reentryNowhereTask) {
 			t.Fatalf("the refusal of an unknown task = %q, want it to name the identity it refused", refused)
 		}
+		reentryAssertRefusalFiled(t, host, event.TaskID(reentryNowhereTask), addr)
 	})
+}
+
+// reentryRefusalStage is the stage of the frozen denial vocabulary a re-entry of a task is filed
+// under: the task table refusing the identity the call named.
+const reentryRefusalStage = "task"
+
+// reentryAssertRefusalFiled reads the refusal of one re-entry back from the delivery account of the
+// run: the sentence the model was answered with is not the account, so a body that reached no round
+// is a record the run keeps and a reader queries afterwards.
+func reentryAssertRefusalFiled(t *testing.T, host *assembly.Host, taskID event.TaskID, addr event.Address) {
+	t.Helper()
+	refusals := host.Run().DeliveryLedger().Refusals()
+	for _, refusal := range refusals {
+		if refusal.Receipt != assembly.DeliveryReceiptDenied {
+			continue
+		}
+		if !strings.HasSuffix(refusal.Identity, "\x00"+string(taskID)) {
+			continue
+		}
+		if refusal.Target != addr {
+			t.Fatalf("target of the refusal of %s = %+v, want the session that asked for it %+v", taskID, refusal.Target, addr)
+		}
+		if refusal.Category != reentryRefusalStage {
+			t.Fatalf("stage of the refusal of %s = %q, want %q", taskID, refusal.Category, reentryRefusalStage)
+		}
+		return
+	}
+	t.Fatalf("the account files no refusal of %s, so the refused body lives only in the text the model read: %s",
+		taskID, reentryDescribeRefusals(refusals))
+}
+
+// reentryDescribeRefusals renders the refusals one account answers as one line each, so a failed read
+// names what the account holds instead of the record that was missing.
+func reentryDescribeRefusals(refusals []assembly.DeliveryRefusal) string {
+	if len(refusals) == 0 {
+		return "[]"
+	}
+	lines := make([]string, 0, len(refusals))
+	for _, refusal := range refusals {
+		lines = append(lines, fmt.Sprintf("%s -> %s/%s identity=%q receipt=%s category=%s",
+			refusal.Source, refusal.Target.AgentID, refusal.Target.SessionID,
+			refusal.Identity, refusal.Receipt, refusal.Category))
+	}
+	return strings.Join(lines, "; ")
 }
 
 // reentryProvider is the OpenAI-compatible endpoint the anchor boots against: it scripts

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/state"
 	"github.com/SpellingDragon/tagent/runtime/task"
 
@@ -122,7 +123,7 @@ func TestSubagentServesSecondRound(t *testing.T) {
 
 // newContinuationTool returns the call_subagent tool over the delegation stand-in, the
 // model stand-in its builder resolves and the continuation table the test re-enters.
-func newContinuationTool(t *testing.T, delegation *stubDelegation, provider trpcmodel.Model, continuations *Continuations) *Tool {
+func newContinuationTool(t *testing.T, delegation Delegation, provider trpcmodel.Model, continuations *Continuations) *Tool {
 	t.Helper()
 	bindings := state.NewBindings()
 	holdBinding(t, bindings, event.Address{AgentID: "agent-caller", SessionID: "session-caller"})
@@ -144,7 +145,7 @@ func newContinuationTool(t *testing.T, delegation *stubDelegation, provider trpc
 // awaitCompletions waits until the delegation stand-in reported the named number of
 // terminals: the rounds run beside the admission, so a check waits on the face they
 // report through.
-func awaitCompletions(t *testing.T, delegation *stubDelegation, want int) {
+func awaitCompletions(t *testing.T, delegation interface{ completions() int }, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -249,7 +250,7 @@ func TestSubagentClaimsOneRoundBeforeServing(t *testing.T) {
 
 	t.Run("refuses_a_round_no_caller_claimed", func(t *testing.T) {
 		_, _, continuations, taskID := continuationServedTask(t)
-		if err := continuations.Serve(context.Background(), taskID, "review it again"); !errors.Is(err, ErrContinuationUnclaimed) {
+		if err := continuations.Serve(context.Background(), taskID, "review it again", nil); !errors.Is(err, ErrContinuationUnclaimed) {
 			t.Fatalf("serve of a round no caller claimed = %v, want %v", err, ErrContinuationUnclaimed)
 		}
 	})
@@ -263,8 +264,17 @@ func TestSubagentClaimsOneRoundBeforeServing(t *testing.T) {
 		if err := continuations.Claim(taskID); err != nil {
 			t.Fatalf("claim the round of the served task = %v", err)
 		}
-		if err := continuations.Serve(context.Background(), taskID, "review it again"); err == nil {
-			t.Fatal("serve of a round whose terminal the ledger refused reported no cause")
+		ended := make(chan error, 1)
+		if err := continuations.Serve(context.Background(), taskID, "review it again", func(err error) { ended <- err }); err != nil {
+			t.Fatalf("serve the round that lands its input = %v, want the receipt of a body its round carries", err)
+		}
+		select {
+		case err := <-ended:
+			if err == nil {
+				t.Fatal("the round whose terminal the ledger refused reported a settled round")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the round whose terminal the ledger refused never reported how it ended")
 		}
 
 		delegation.mu.Lock()
@@ -273,7 +283,7 @@ func TestSubagentClaimsOneRoundBeforeServing(t *testing.T) {
 		if err := continuations.Claim(taskID); err != nil {
 			t.Fatalf("claim the round after the failed one = %v, want the slot given back", err)
 		}
-		if err := continuations.Serve(context.Background(), taskID, "review the last change"); err != nil {
+		if err := continuations.Serve(context.Background(), taskID, "review the last change", nil); err != nil {
 			t.Fatalf("serve the round after the failed one = %v", err)
 		}
 
@@ -315,4 +325,212 @@ func continuationServedTask(t *testing.T) (*stubDelegation, *serveModel, *Contin
 	}
 	awaitCompletions(t, delegation, 1)
 	return delegation, provider, continuations, receipt.TaskID
+}
+
+// TestSubagentAnswersTheReceiptOfItsRound pins what the receipt of a re-entry stands for.
+// - negative (receipt_before_the_round_lands): nothing is answered before the round it opened landed its own input
+// - positive: the receipt is answered once that input landed, while the round it opened is still running
+// - negative (receipt_of_a_round_that_never_landed): a round that never landed its input answers its cause, records no terminal, and keeps the body owed
+// - negative (panic_gives_the_round_back): a round that dies beside a panic reports the cause, gives the slot back and keeps the whole input owed
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestSubagentAnswersTheReceiptOfItsRound(t *testing.T) {
+	t.Run("receipt_waits_for_the_rounds_input", func(t *testing.T) {
+		delegation := &besideDelegation{
+			stubDelegation: stubDelegation{receipt: task.AdmissionReceipt{
+				CallID:   "call-beside",
+				TaskID:   "task-serve-beside",
+				Accepted: true,
+				Kind:     task.AdmissionFresh,
+			}},
+			mayLand:   make(chan struct{}),
+			mayAnswer: make(chan struct{}),
+		}
+		continuations := NewContinuations()
+		tool := newContinuationTool(t, delegation, &serveModel{name: "model-caller", answer: "review recorded"}, continuations)
+		if _, ok := callTool(t, tool, map[string]any{"name": "reviewer", "prompt": "review the change"}).(task.AdmissionReceipt); !ok {
+			t.Fatal("call the tool of the served task, want the admission receipt")
+		}
+		awaitCompletions(t, delegation, 1)
+
+		answered := make(chan error, 1)
+		go func() {
+			answered <- continuations.Reenter(context.Background(), "task-serve-beside", "review it again")
+		}()
+		select {
+		case err := <-answered:
+			t.Fatalf("the re-entry answered %v before the round it opened landed its input", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		close(delegation.mayLand)
+		select {
+		case err := <-answered:
+			if err != nil {
+				t.Fatalf("the re-entry answered %v beside the round whose input landed, want the receipt of a body that arrived", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the re-entry never answered beside the round whose input landed")
+		}
+
+		close(delegation.mayAnswer)
+		awaitCompletions(t, delegation, 2)
+	})
+
+	t.Run("receipt_of_a_round_that_never_landed", func(t *testing.T) {
+		cause := errors.New("the site never took the input of the round")
+		delegation := &besideDelegation{
+			stubDelegation: stubDelegation{receipt: task.AdmissionReceipt{
+				CallID:   "call-unlanded",
+				TaskID:   "task-serve-unlanded",
+				Accepted: true,
+				Kind:     task.AdmissionFresh,
+			}},
+			landErr: cause,
+		}
+		continuations := NewContinuations()
+		tool := newContinuationTool(t, delegation, &serveModel{name: "model-caller", answer: "review recorded"}, continuations)
+		if _, ok := callTool(t, tool, map[string]any{"name": "reviewer", "prompt": "review the change"}).(task.AdmissionReceipt); !ok {
+			t.Fatal("call the tool of the served task, want the admission receipt")
+		}
+		awaitCompletions(t, delegation, 1)
+
+		if err := continuations.Reenter(context.Background(), "task-serve-unlanded", "review it again"); !errors.Is(err, cause) {
+			t.Fatalf("re-entry of a round that never landed its input = %v, want the cause the site reported", err)
+		}
+		if got := delegation.completions(); got != 1 {
+			t.Fatalf("terminals recorded = %d, want the first round alone: a round whose input never landed has no terminal to record", got)
+		}
+
+		continuationIdle(t, continuations, "task-serve-unlanded")
+		delegation.fixLandErr(nil)
+		if err := continuations.Reenter(context.Background(), "task-serve-unlanded", "review the last change"); err != nil {
+			t.Fatalf("re-entry after the round that never landed = %v, want the round the body is still owed to", err)
+		}
+		awaitCompletions(t, delegation, 2)
+		requests := delegation.roundRequests()
+		if len(requests) != 3 {
+			t.Fatalf("rounds the stand-in served = %d, want the first round beside the refused one and the round after it", len(requests))
+		}
+		last := requests[len(requests)-1]
+		if !strings.Contains(last, "review it again") || !strings.Contains(last, "review the last change") {
+			t.Fatalf("the round after the refused one was handed %q, want the body that never landed ahead of the body it carried", last)
+		}
+	})
+
+	t.Run("panic_gives_the_round_back", func(t *testing.T) {
+		_, _, continuations, taskID := continuationServedTask(t)
+		continuations.mu.Lock()
+		entry := continuations.served[taskID]
+		entry.faces.delegation = &panicDelegation{}
+		continuations.mu.Unlock()
+
+		if err := continuations.Claim(taskID); err != nil {
+			t.Fatalf("claim the round of the served task = %v", err)
+		}
+		ended := make(chan error, 1)
+		err := continuations.Serve(context.Background(), taskID, "review it again", func(err error) { ended <- err })
+		if err == nil || !strings.Contains(err.Error(), "panic") {
+			t.Fatalf("serve of a round that died = %v, want the cause the panic left", err)
+		}
+		select {
+		case err := <-ended:
+			if err == nil {
+				t.Fatal("the round that died beside a panic reported a settled round")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the round that died beside a panic never reported how it ended")
+		}
+
+		continuations.mu.Lock()
+		running, owed := entry.running, append([]string(nil), entry.owed...)
+		continuations.mu.Unlock()
+		if running {
+			t.Fatal("the round that died beside a panic still holds the slot of its task")
+		}
+		if len(owed) != 1 || !strings.Contains(owed[0], "review it again") {
+			t.Fatalf("input left owed = %v, want the body the died round was handed", owed)
+		}
+		if err := continuations.Claim(taskID); err != nil {
+			t.Fatalf("claim after the round that died beside a panic = %v, want the slot given back", err)
+		}
+		continuations.Abandon(taskID)
+	})
+}
+
+// besideDelegation is the delegation stand-in whose round lands its input on the anchor's word:
+// the round parks before the commit and again before its answer, so the receipt of a re-entry is
+// read at both ends of the one fact it stands for. A round fixed with a landErr never lands its
+// input at all.
+type besideDelegation struct {
+	stubDelegation
+	mayLand   chan struct{}
+	mayAnswer chan struct{}
+	landErr   error
+}
+
+// SubmitBeside records the round it is handed, parks on the anchor's word, reports the commit
+// of the round and answers the terminal the round reached.
+func (s *besideDelegation) SubmitBeside(_ context.Context, in agent.DelegatedInput, started func(error)) (agent.DelegatedAnswer, error) {
+	s.mu.Lock()
+	s.rounds = append(s.rounds, in)
+	landErr := s.landErr
+	s.mu.Unlock()
+	if s.mayLand != nil {
+		<-s.mayLand
+	}
+	if landErr != nil {
+		started(landErr)
+		return agent.DelegatedAnswer{Status: task.StatusFailed, Failure: landErr.Error()}, landErr
+	}
+	started(nil)
+	if s.mayAnswer != nil {
+		<-s.mayAnswer
+	}
+	return agent.DelegatedAnswer{Status: task.StatusSettled, Body: "review recorded"}, nil
+}
+
+// fixLandErr fixes whether the rounds of this stand-in land their input.
+func (s *besideDelegation) fixLandErr(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.landErr = err
+}
+
+// roundRequests reports the input each round was handed, in round order.
+func (s *besideDelegation) roundRequests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.rounds))
+	for _, round := range s.rounds {
+		out = append(out, round.Request)
+	}
+	return out
+}
+
+// panicDelegation is the delegation stand-in whose round dies inside the pipeline it runs on:
+// the panic is what an instance failing in the middle of a turn raises, and the continuation
+// table is what has to survive it.
+type panicDelegation struct{ stubDelegation }
+
+// Submit panics, so the round it would have decided leaves nothing behind.
+func (s *panicDelegation) Submit(context.Context, agent.DelegatedInput) (agent.DelegatedAnswer, error) {
+	panic("the delegated round died")
+}
+
+// continuationIdle waits until the one round of a served task left its slot, so the next
+// re-entry is read against a table that already gave the round back.
+func continuationIdle(t *testing.T, continuations *Continuations, taskID event.TaskID) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		continuations.mu.Lock()
+		entry := continuations.served[taskID]
+		idle := entry == nil || !entry.running
+		continuations.mu.Unlock()
+		if idle {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("the round of %s never gave its slot back", taskID)
 }

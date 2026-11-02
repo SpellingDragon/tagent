@@ -811,6 +811,165 @@ func TestReentrantSendOrdersItsCommits(t *testing.T) {
 	})
 }
 
+// TestReentrantSendFilesARoundItCouldNotPutBack pins the one failure the compensation cannot cover (F5).
+// - negative (reenter_rollback_failure_files_a_broken_fact): a round the task was not put back from is filed as a broken attempt, queryable from the account
+// - the broken attempt is filed beside the stage that could not put it back, under the identity the call and the task share
+// - negative (reenter_rollback_answered_files_no_broken_fact): a round that was put back files no broken record
+// - a refused attempt is no delivery: the broken record leaves the per-target account of the deliveries alone
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestReentrantSendFilesARoundItCouldNotPutBack(t *testing.T) {
+	addr := event.Address{AgentID: "sender", SessionID: "session-send-rollback"}
+	frame := task.CallFrame{
+		Identity: task.CallIdentity{
+			InstanceID:   "instance-send-rollback",
+			InvocationID: "invocation-send-rollback",
+			DecisionID:   "decision-send-rollback",
+			CallID:       "call-send-rollback",
+		},
+		Address: addr,
+	}
+	ctx := task.WithCallFrame(context.Background(), frame)
+	taskID := event.TaskID("task-send-rollback")
+	identity := string(frame.Identity.DedupKey()) + "\x00" + string(taskID)
+
+	t.Run("rollback_failure_files_a_broken_fact", func(t *testing.T) {
+		run := refusalAccount(addr)
+		tasks := &reentryTasksStub{round: 4, rollbackErr: errReentryRollbackRefused}
+		port := &hostSendReentryPort{
+			run:           run,
+			tasks:         tasks,
+			ledger:        &reentryLedgerStub{},
+			continuations: &reentryContinuationsStub{serveErr: errReentryRoundNeverLanded},
+		}
+
+		outcome, cause := port.ReenterTask(ctx, taskID, "review it again")
+		if outcome == deliverySent {
+			t.Fatalf("re-entry of a task that was not put back = %q (%q), want a refusal: the body reached no round", outcome, cause)
+		}
+		if !strings.Contains(cause, errReentryRoundNeverLanded.Error()) {
+			t.Fatalf("refusal = %q, want it to carry the cause the round reported", cause)
+		}
+		if got := tasks.rolledBackRounds(); len(got) != 1 || got[0] != 4 {
+			t.Fatalf("rounds the port put back = %v, want the one round it opened", got)
+		}
+
+		broken, held := reentryRefusalOf(run, DeliveryReceiptBroken, hostDenialRollback)
+		if !held {
+			t.Fatalf("refusals the account files = %s, want the one broken attempt of the round nothing could put back:\n%s",
+				refusalDescribe(run.DeliveryLedger().Refusals()), refusalDescribe(run.DeliveryLedger().Refusals()))
+		}
+		if broken.Identity != identity {
+			t.Fatalf("identity of the broken attempt = %q, want the one the call and the task share %q", broken.Identity, identity)
+		}
+		if broken.Target != addr {
+			t.Fatalf("target of the broken attempt = %+v, want the one the call named %+v", broken.Target, addr)
+		}
+		if broken.Source != event.EventID(frame.Identity.InvocationID) {
+			t.Fatalf("source of the broken attempt = %q, want the responsibility range it belongs to %q", broken.Source, frame.Identity.InvocationID)
+		}
+		if _, ok := reentryRefusalOf(run, DeliveryReceiptDenied, hostDenialStart); !ok {
+			t.Fatalf("refusals the account files = %s, want the ordinary refusal of the same call beside the broken one",
+				refusalDescribe(run.DeliveryLedger().Refusals()))
+		}
+		if got := run.DeliveryLedger().Records(); len(got) != 0 {
+			t.Fatalf("deliveries the account lists = %d, want none: an attempt the account turned away reached no target:\n%s",
+				len(got), ledgerDescribe(got))
+		}
+	})
+
+	t.Run("rollback_answered_files_no_broken_fact", func(t *testing.T) {
+		run := refusalAccount(addr)
+		tasks := &reentryTasksStub{round: 5}
+		port := &hostSendReentryPort{
+			run:           run,
+			tasks:         tasks,
+			ledger:        &reentryLedgerStub{},
+			continuations: &reentryContinuationsStub{serveErr: errReentryRoundNeverLanded},
+		}
+
+		if outcome, cause := port.ReenterTask(ctx, taskID, "review it again"); outcome == deliverySent {
+			t.Fatalf("re-entry of a task whose round never landed = %q (%q), want the refusal the round reported", outcome, cause)
+		}
+		if _, held := reentryRefusalOf(run, DeliveryReceiptBroken, hostDenialRollback); held {
+			t.Fatalf("refusals the account files = %s, want none broken: the round was put back",
+				refusalDescribe(run.DeliveryLedger().Refusals()))
+		}
+		if _, ok := reentryRefusalOf(run, DeliveryReceiptDenied, hostDenialStart); !ok {
+			t.Fatalf("refusals the account files = %s, want the refused attempt beside the put-back round",
+				refusalDescribe(run.DeliveryLedger().Refusals()))
+		}
+	})
+}
+
+// errReentryRollbackRefused is the cause the task stand-in refuses the compensation with: the round
+// a re-entry opened could not be put back.
+var errReentryRollbackRefused = fmt.Errorf("the reactivation of the round is not the one the task holds")
+
+// errReentryRoundNeverLanded is the cause the continuation stand-in answers with: the round it was
+// asked to serve never reached its input, so the receipt of the body is a refusal.
+var errReentryRoundNeverLanded = fmt.Errorf("the round never reached its input")
+
+// refusalAccount returns the account the refusal anchors file into: the address is already established,
+// so a refusal fact commits without an assembly, and the account holds no other fact.
+func refusalAccount(addr event.Address) *Run {
+	return &Run{
+		instance:         "instance-send-account",
+		sites:            map[event.Address]bool{addr: true},
+		facts:            map[event.EventID]event.Event{},
+		sessionFactCount: map[event.SessionID]int{},
+	}
+}
+
+// reentryTasksStub is the task-table stand-in the compensation anchors read: the round a reactivation
+// opens, the rounds it was asked to put back and the failure it puts them back with.
+type reentryTasksStub struct {
+	round       int64
+	rollbackErr error
+	rolledBack  []int64
+}
+
+// Reentrant reports the task admit to a new round, as the settled one the anchors start from is.
+func (s *reentryTasksStub) Reentrant(context.Context, event.TaskID) error { return nil }
+
+// Reactivate reports the round the re-entry opened.
+func (s *reentryTasksStub) Reactivate(context.Context, event.TaskID) (int64, error) {
+	return s.round, nil
+}
+
+// RollbackReactivation records the round it was asked to put back and answers the failure it is
+// fixed with, or puts it back when no failure is fixed.
+func (s *reentryTasksStub) RollbackReactivation(_ context.Context, _ event.TaskID, round int64) error {
+	s.rolledBack = append(s.rolledBack, round)
+	return s.rollbackErr
+}
+
+// rolledBackRounds reports the rounds the port put back, in call order.
+func (s *reentryTasksStub) rolledBackRounds() []int64 { return append([]int64(nil), s.rolledBack...) }
+
+// reentryRefusalOf reports the one refusal the account files at the named receipt and stage.
+func reentryRefusalOf(run *Run, receipt, category string) (DeliveryRefusal, bool) {
+	for _, refusal := range run.DeliveryLedger().Refusals() {
+		if refusal.Receipt == receipt && refusal.Category == category {
+			return refusal, true
+		}
+	}
+	return DeliveryRefusal{}, false
+}
+
+// refusalDescribe renders the refusals one account answers as one line each, so a failed read names
+// what the account holds instead of the receipt that was missing.
+func refusalDescribe(refusals []DeliveryRefusal) string {
+	if len(refusals) == 0 {
+		return "  []"
+	}
+	lines := make([]string, 0, len(refusals))
+	for _, refusal := range refusals {
+		lines = append(lines, "  "+string(refusal.Source)+" -> "+string(refusal.Target.AgentID)+"/"+string(refusal.Target.SessionID)+
+			" identity="+refusal.Identity+" receipt="+refusal.Receipt+" category="+refusal.Category)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // errReentryNoLedgerEntry is the cause the ledger stand-in refuses the reopen with: a
 // delegation ledger that holds no entry for the task it is asked to move.
 var errReentryNoLedgerEntry = fmt.Errorf("agent: %w", errReentryUnknownDelegation)
@@ -913,6 +1072,7 @@ type reentryContinuationsStub struct {
 	claimed   int
 	abandoned int
 	served    []string
+	afters    []func(error)
 	serveErr  error
 }
 
@@ -936,12 +1096,28 @@ func (s *reentryContinuationsStub) Abandon(event.TaskID) {
 	s.abandoned++
 }
 
-// Serve records the body the round carried and answers the failure it is fixed with.
-func (s *reentryContinuationsStub) Serve(_ context.Context, _ event.TaskID, input string) error {
+// Serve records the body the round carried, records the report the port handed over and
+// answers the failure it is fixed with. The stand-in serves the body the moment it returns, so
+// the receipt the port answers with is the one of a body its round already carries.
+func (s *reentryContinuationsStub) Serve(_ context.Context, _ event.TaskID, input string, after func(error)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.served = append(s.served, input)
+	if after != nil {
+		s.afters = append(s.afters, after)
+	}
 	return s.serveErr
+}
+
+// endRound reports how the round the stub served ended, so an anchor reads the port's answer to a
+// round that landed the body and then failed to record its terminal.
+func (s *reentryContinuationsStub) endRound(err error) {
+	s.mu.Lock()
+	afters := append([]func(error){}, s.afters...)
+	s.mu.Unlock()
+	for _, after := range afters {
+		after(err)
+	}
 }
 
 // claims reports how many claims the port made, refused ones included.

@@ -365,15 +365,19 @@ func (c *Continuations) Release(taskID event.TaskID)
     Release ends the continuation of one task: a released task is refused by a
     later re-entry instead of being served a round nobody asked for.
 
-func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input string) error
+func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input string, after func(error)) error
     Serve serves the next round of a task this caller already claimed, reading
     the input one earlier round still owes ahead of the input handed here,
     and releases the slot when the round ends.
 
-    A round that ends without recording its terminal leaves the whole input owed
-    instead of dropping it: the body was accepted by the re-entry that claimed
-    the round, so it stays owed to the next round of the same task rather than
-    leaving the caller's receipt standing for a body nothing carried.
+    The answer is the body's delivery and not its acceptance: Serve returns once
+    the body is in the round that carries it — the round's own input landed at
+    its execution site — so a caller that answers a delivery receipt from this
+    return answers it for a body that arrived. The rest of the round runs beside
+    the call, and after hears how it ended: nil once its terminal was recorded,
+    the cause when it was not, so the caller puts back what nothing served and
+    a body the receipt accepted is never dropped. A round that never reaches its
+    input returns the cause it did not, and no receipt should stand for it.
 
 func (c *Continuations) Served(taskID event.TaskID) bool
     Served reports whether this tool still serves the named task a round of its

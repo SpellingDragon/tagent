@@ -132,6 +132,60 @@ func TestSendCrossSessionGates(t *testing.T) {
 	})
 }
 
+// TestSendCrossSessionSenderFace pins whose face a cross-session delivery reaches: the one agent that declared the deliver_to white list, and nobody else.
+// - positive: the declaring agent's call to a bound and idle session answers the bare ok, and the body lands in that chain
+// - negative (non_meditation_sender_denied): an ordinary agent's call to the same destination is refused by name, and the body reaches nothing
+// - the refusal names the agent the white list belongs to, so the model reads who may deliver
+// 契约: docs/wiki/agent/agent-architecture.md#meditation-curator
+func TestSendCrossSessionSenderFace(t *testing.T) {
+	t.Run("delivers_beside_the_declaring_sender", func(t *testing.T) {
+		scene := newGateScene(t, gateSendCall("call-gate-declared-sender",
+			`{"target":{"agent":`+intakeQuoted(gateEntryAgent)+`,"session":`+intakeQuoted(gateSession)+`},"content":`+intakeQuoted(gateBody)+`}`))
+		scene.invokeMeditation(t)
+		receipt := scene.awaitReceipt(t, "call-gate-declared-sender")
+		if receipt != symptomReceiptOK {
+			t.Fatalf("receipt of the declaring agent's call = %q, want the bare %q of a delivered body:\n%s",
+				receipt, symptomReceiptOK, symptomDescribe(scene.provider.requests()))
+		}
+		scene.awaitDelivered(t)
+	})
+
+	t.Run("non_meditation_sender_denied", func(t *testing.T) {
+		scene := newGateSceneSentBy(t, gateSendCall("call-gate-ordinary-sender",
+			`{"target":{"agent":`+intakeQuoted(gateEntryAgent)+`,"session":`+intakeQuoted(gateSession)+`},"content":`+intakeQuoted(gateBody)+`}`), gateEntryModel)
+		receipt := scene.awaitReceipt(t, "call-gate-ordinary-sender")
+		gateAssertDenied(t, receipt, "call-gate-ordinary-sender")
+		if !strings.Contains(receipt, `carries no cross-session delivery face`) || !strings.Contains(receipt, gateMeditatorAgent) {
+			t.Fatalf("receipt = %q, want the refusal naming the agent the white list belongs to %q", receipt, gateMeditatorAgent)
+		}
+		scene.refuteDelivered(t)
+		t.Run("the_refusal_is_filed_in_the_account", func(t *testing.T) {
+			refusals := scene.host.Run().DeliveryLedger().Refusals()
+			for _, refusal := range refusals {
+				if refusal.Receipt == assembly.DeliveryReceiptDenied && refusal.Target == scene.entry {
+					return
+				}
+			}
+			t.Fatalf("refusals the account files = %s, want the one the gate turned away", gateDescribeRefusals(refusals))
+		})
+	})
+}
+
+// gateDescribeRefusals renders the refusals one account answers, so a failed read names what the run
+// really filed instead of the record that was missing.
+func gateDescribeRefusals(refusals []assembly.DeliveryRefusal) string {
+	if len(refusals) == 0 {
+		return "[]"
+	}
+	lines := make([]string, 0, len(refusals))
+	for _, refusal := range refusals {
+		lines = append(lines, fmt.Sprintf("%s -> %s/%s identity=%q receipt=%s category=%s",
+			refusal.Source, refusal.Target.AgentID, refusal.Target.SessionID,
+			refusal.Identity, refusal.Receipt, refusal.Category))
+	}
+	return strings.Join(lines, "; ")
+}
+
 // gateAssertDenied states that one receipt is the named refusal of the call it
 // answers and never the bare ok of a delivery.
 func gateAssertDenied(t *testing.T, receipt, callID string) {
@@ -165,9 +219,17 @@ type gateScene struct {
 // newGateScene boots the host of the four-gate anchor, binds the entry session
 // and answers the scene the checks read.
 func newGateScene(t *testing.T, call string) *gateScene {
+	return newGateSceneSentBy(t, call, gateMeditatorModel)
+}
+
+// newGateSceneSentBy boots the same host beside the model whose first decision issues the send
+// call, so a check reads a call the declaring agent issued and a call an ordinary agent issued
+// through one scene.
+func newGateSceneSentBy(t *testing.T, call, senderModel string) *gateScene {
 	t.Helper()
 	provider := newGateProvider(t)
 	provider.call = call
+	provider.callModel = senderModel
 	sender := &symptomSender{}
 	host := gateBoot(t, provider, sender)
 	scene := &gateScene{
@@ -225,6 +287,12 @@ func (s *gateScene) invokeMeditation(t *testing.T) {
 // awaitMeditationReceipt waits for the result text the reflecting turn read beside
 // one call.
 func (s *gateScene) awaitMeditationReceipt(t *testing.T, callID string) string {
+	return s.awaitReceipt(t, callID)
+}
+
+// awaitReceipt waits for the result text any turn read beside one call: the receipt is in the
+// request the next decision of that turn carries, whichever agent issued the call.
+func (s *gateScene) awaitReceipt(t *testing.T, callID string) string {
 	t.Helper()
 	deadline := time.Now().Add(gateWindow)
 	for {
@@ -254,6 +322,24 @@ func (s *gateScene) refuteDelivered(t *testing.T) {
 	}
 }
 
+// awaitDelivered waits until the target chain holds the delivered body, so the check states the
+// walk the delivery owes beside the receipt it already answered.
+func (s *gateScene) awaitDelivered(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(gateWindow)
+	for {
+		for _, fact := range s.host.Run().SessionFacts(s.entry) {
+			if strings.Contains(fact.Message.Content, gateBody) {
+				return
+			}
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the target chain holds no delivered body within %s, want the one the ok receipt answered for", gateWindow)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // gateProvider is the OpenAI-compatible endpoint the four-gate anchor boots
 // against: the entry turn answers a plain terminal, and the reflecting turn issues
 // the one send call the subtest names.
@@ -264,6 +350,9 @@ type gateProvider struct {
 	bodies []map[string]json.RawMessage
 
 	call string
+	// callModel is the model whose first decision issues the send call, so a scene reads a call
+	// issued by the declaring agent and a call issued by an ordinary agent alike.
+	callModel string
 	// hold parks the reflecting decision until the anchor releases it, so a check
 	// reads the gate beside a model production that is in flight.
 	hold    chan struct{}
@@ -330,14 +419,15 @@ func (p *gateProvider) serve(w http.ResponseWriter, r *http.Request) {
 	p.bodies = append(p.bodies, body)
 	hold := p.hold
 	call := p.call
+	callModel := p.callModel
 	claimed := p.claimed
-	if modelName == gateMeditatorModel {
+	if modelName == callModel && callModel != "" {
 		p.claimed = true
 	}
 	p.mu.Unlock()
 
 	payload := intakeFinalAnswer(gateDone)
-	if modelName == gateMeditatorModel && !claimed {
+	if modelName == callModel && !claimed {
 		if hold != nil {
 			select {
 			case p.parked <- struct{}{}:
@@ -411,6 +501,8 @@ func gateHostDocument(root, endpoint string) string {
 	b.WriteString("agents:\n")
 	b.WriteString("  " + gateEntryAgent + ":\n")
 	b.WriteString("    model: " + gateEntryModel + "\n")
+	b.WriteString("    tools:\n")
+	b.WriteString("      - { kind: tool, id: " + gateToolSend + " }\n")
 	b.WriteString("  " + gateMeditatorAgent + ":\n")
 	b.WriteString("    model: " + gateMeditatorModel + "\n")
 	b.WriteString("    tools:\n")

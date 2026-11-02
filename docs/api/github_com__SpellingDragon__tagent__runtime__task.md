@@ -109,6 +109,14 @@ const AdmissionReceiptText = "ok"
     the state word and the settlement promise never travel to the model — an
     admission is the system's own confirmation, never speaking material.
 
+const DefaultTerminalTTL = 2 * time.Hour
+    DefaultTerminalTTL is how long a registry keeps the record of a task after
+    the terminal outcome it holds, once its run applies the terminal TTL:
+    the task_terminal_ttl of the declaration vocabulary, read as the bound of
+    the in-memory account rather than of the fact chain. The record is a live
+    read of a task, never the fact of it — every fact stays on the chain — so a
+    record pruned here costs a re-entry its target, not the history of the task.
+
 VARIABLES
 
 var DefaultPolicy = Policy{
@@ -1086,6 +1094,20 @@ func (r *MemoryRegistry) ProgressReported(ctx context.Context, taskID event.Task
     read would answer differently for a live task and for the task restored from
     its own chain. The chain-wide read is the one both faces agree on.
 
+func (r *MemoryRegistry) PruneTerminal(at time.Time) int
+    PruneTerminal drops the records whose task reached a terminal outcome at
+    least the terminal TTL of this registry before at, and reports how many
+    it dropped. The sweep is the one place a record leaves the registry, so a
+    re-entry naming a pruned task answers ErrTaskNotFound instead of opening a
+    round of a state nobody kept.
+
+    The sweep reads the movement stamp that placed the task at its terminal,
+    so a task that was re-entered after it settled counts from the terminal of
+    the round it ended in. A non-terminal task is never dropped however long
+    it stands: a round in flight is the one state a sweep must not silently
+    withdraw, and a task stuck in one is what the broken-round account reports
+    instead.
+
 func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (int64, error)
     Reactivate re-enters a settled task as a new execution round and reports the
     round it opened. The task keeps its identity: the round that opens is the
@@ -1441,6 +1463,14 @@ func WithConcurrencyLimit(limit int) RegistryOption
 func WithPolicy(policy Policy) RegistryOption
     WithPolicy sets the threshold set every task of the registry is read under.
     A registry built beside no policy reads its tasks under DefaultPolicy.
+
+func WithTerminalTTL(ttl time.Duration) RegistryOption
+    WithTerminalTTL bounds how long the record of a terminal task is kept.
+    A record whose task reached a terminal outcome at least that long before
+    a sweep reads is dropped, and a call naming it answers ErrTaskNotFound —
+    the refusal the send face renders as a task this host holds no record of.
+    A zero TTL keeps every record the registry ever admitted, so a registry
+    built beside none behaves exactly as it did before the bound existed.
 
 type RestoreOutcome struct {
 	// TaskID is the task the outcome is about.

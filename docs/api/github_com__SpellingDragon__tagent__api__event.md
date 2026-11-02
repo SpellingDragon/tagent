@@ -128,6 +128,11 @@ const (
 	// the deliveries of one source event are read as one account beside the
 	// identity of the delivery itself.
 	MetaKeyDeliverySource = "delivery.source"
+	// MetaKeyDeliveryDenial names the category one refused delivery was turned away
+	// under: the gate that refused it, or the stage of the round that never landed
+	// it. A receipt that stands at delivery or at a sent body carries no category,
+	// so the entry is read as the reason word of a refusal and of nothing else.
+	MetaKeyDeliveryDenial = "delivery.denial"
 
 	// MetaKeyAttentionKind names the kind a question is asked under: approval,
 	// notice or summary, an absent entry reading as approval.
@@ -146,12 +151,12 @@ const (
 )
     MetaKeyEventKey, MetaKeyPartitionID, MetaKeyEventType, MetaKeyEventSummary,
     MetaKeyTriggerSource, MetaKeySettleTriggerSource, MetaKeyBundleID,
-    MetaKeyNoticeKind, MetaKeyTaskID, MetaKeyNoticeSource, the four
+    MetaKeyNoticeKind, MetaKeyTaskID, MetaKeyNoticeSource, the five
     MetaKeyDelivery entries and the five MetaKeyAttention entries name the
     frozen metadata keys: the event identity, its partition, its type and
     summary, the trigger source, the settle trigger lineage, the bundle
     attribution, the kind of the notification a notice fact reports, the task it
-    reports on, the source one notice message came from, the four entries that
+    reports on, the source one notice message came from, the five entries that
     account one delivery, and the kind, target, lineage, validity and clearance
     word an attention fact carries.
 
@@ -300,12 +305,17 @@ type DeliveryMeta struct {
 	Receipt string
 	// Source is the source event one delivery is filed under.
 	Source string
+	// Denial is the category one refused delivery was turned away under, empty for
+	// a delivery that landed.
+	Denial string
 }
-    DeliveryMeta is the four entries that account one delivery: the address
-    the body reached, the identity the delivery is deduplicated under, the
-    receipt it stands at and the source event it is filed under. Both delivery
-    families stamp these same four entries, so one delivery is read as one block
-    whichever route carried the body.
+    DeliveryMeta is the entries that account one delivery: the address the
+    body reached, the identity the delivery is deduplicated under, the receipt
+    it stands at, the source event it is filed under and, for an attempt that
+    reached nothing, the stage that turned it away. Both delivery families stamp
+    the same landed entries, so one delivery is read as one block whichever
+    route carried the body, and a refusal reads through the same block beside
+    the one extra entry.
 
 type EpisodeID string
     EpisodeID identifies an application level episode and its causal lineage;
@@ -534,7 +544,7 @@ type ParsedMeta struct {
 	// Notice is the notice-fact pair the fact states: the kind of the
 	// notification it reports and the task it reports on.
 	Notice NoticeMeta
-	// Delivery is the four entries that account one delivery the fact carried.
+	// Delivery is the five entries that account one delivery the fact carried.
 	Delivery DeliveryMeta
 	// PassThrough holds every MetaPrefix entry verbatim: such an entry is
 	// forwarded as it stands and is never read as a frozen business field.
@@ -545,7 +555,7 @@ type ParsedMeta struct {
 }
     ParsedMeta is the structured form of one event metadata map: the frozen keys
     declared above, the business entries carried by the pass-through prefix,
-    and every other entry kept verbatim. The notice pair and the four delivery
+    and every other entry kept verbatim. The notice pair and the delivery
     entries are each read as one block, so the metadata of one notice fact and
     the account of one delivery are named by the concept they belong to rather
     than by a run of sibling fields.

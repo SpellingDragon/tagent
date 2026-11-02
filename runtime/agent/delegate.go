@@ -448,6 +448,23 @@ func (d *Delegator) Submit(ctx context.Context, in DelegatedInput) (DelegatedAns
 	return resident.SubmitDelegated(ctx, in)
 }
 
+// SubmitBeside hands one delegated round over exactly as Submit does, and reports the round's
+// first commit to started: the caller that answers a delivery receipt hands the body over
+// here, so the receipt it returns is the delivery rather than the acceptance of a round that
+// may yet fail to land it.
+func (d *Delegator) SubmitBeside(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error) {
+	d.mu.Lock()
+	resident := d.resident
+	d.mu.Unlock()
+	if resident == nil {
+		if started != nil {
+			started(ErrDelegationUnwired)
+		}
+		return DelegatedAnswer{}, ErrDelegationUnwired
+	}
+	return resident.SubmitDelegatedBeside(ctx, in, started)
+}
+
 // Observe records one notification of an admitted delegation into the progress
 // of the call it belongs to. A repeated delivery under the same stable identity
 // records no second fact, and a terminal notification waits for the task's

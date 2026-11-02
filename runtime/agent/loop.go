@@ -491,6 +491,18 @@ func (l *Loop) Backflow(invocationID event.InvocationID, notice task.Notice) {
 	}
 }
 
+// WakeAddress signals the resident instance of one address that events arrived for it: the
+// face that lands a body beside a target it judged busy wakes that target, so a round that
+// closed between that judgment and the landing still reads the body at its next pull.
+func (l *Loop) WakeAddress(addr event.Address) {
+	if l == nil {
+		return
+	}
+	if consumers := l.drivingSet(); consumers != nil {
+		consumers.Wake(addr)
+	}
+}
+
 // commitProgressFact commits one progress notification as a notice fact of the
 // range that issued the call, and parks nothing beside it: the fact is the audit
 // and projection record of the report, and a progress report is never input

@@ -366,7 +366,7 @@ func Assemble(ctx context.Context, decl *config.Declaration, agents map[event.Ag
 	} else {
 		r.store = state.NewMemoryStore(r.authority)
 	}
-	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress))
+	r.registry = task.NewMemoryRegistry(r.commit, r.admission, task.WithActivity(r.noteProgress), task.WithTerminalTTL(cfg.terminalTTL()))
 	r.manager = task.NewMemoryManager(r.registry, nil, task.WithEnvelopeDeliverer(r.deliver))
 	r.writers = agent.NewWriters()
 	r.delegations = agent.NewDelegator(closeGate{run: r, face: closeFace{manager: r.manager, registry: r.registry}}, r.bindings, r.instance)
@@ -821,12 +821,39 @@ type assemblyConfig struct {
 	leases map[event.AgentID]leaseState
 	// capture is the trajectory capture the assembly attaches to the loop.
 	capture rl.Capture
+	// taskTerminalTTL is how long a task record outlives the terminal outcome it holds,
+	// read as task_terminal_ttl: an assembly that names none keeps DefaultTerminalTTL, and
+	// a negative one keeps every record the run ever admitted.
+	taskTerminalTTL time.Duration
 }
 
 // Option configures the formal assembly at construction. It is the assembly
 // name of the host option: one config struct, so the manual and the host entry
 // accept the same constructors.
 type Option = HostOption
+
+// WithTaskTerminalTTL sets how long a task record outlives the terminal outcome it holds: the
+// record of a settled, failed or cancelled task older than this is dropped beside the next
+// admission, so this run's account of tasks is bounded by it. A call naming a pruned task is
+// refused by name, and every fact of that task stays on the chain — the bound is the live
+// account, never the history. The zero value keeps task.DefaultTerminalTTL, and a negative
+// one keeps every record for the life of the run.
+func WithTaskTerminalTTL(ttl time.Duration) Option {
+	return func(c *assemblyConfig) { c.taskTerminalTTL = ttl }
+}
+
+// terminalTTL reports the bound this assembly builds its task table under.
+func (c *assemblyConfig) terminalTTL() time.Duration {
+	switch {
+	case c == nil:
+		return task.DefaultTerminalTTL
+	case c.taskTerminalTTL < 0:
+		return 0
+	case c.taskTerminalTTL == 0:
+		return task.DefaultTerminalTTL
+	}
+	return c.taskTerminalTTL
+}
 
 // WithGovernance attaches the governance every publication of this assembly is
 // decided under. The formal assembly carries no stand-in governance: an

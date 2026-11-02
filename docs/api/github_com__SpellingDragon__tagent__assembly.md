@@ -137,6 +137,23 @@ durable fact chain instead of restoring a body snapshot kept beside the facts.
 
 CONSTANTS
 
+const (
+	// DeliveryReceiptDenied is the receipt of an attempt that reached no target.
+	DeliveryReceiptDenied = "denied"
+	// DeliveryReceiptBroken is the receipt of an attempt whose round could not be withdrawn.
+	DeliveryReceiptBroken = "broken"
+)
+    DeliveryReceiptDenied and DeliveryReceiptBroken are the two receipts an
+    attempt that reached nothing stands at: denied for a delivery the face
+    turned away — a gate, a task table or a round that never landed the body —
+    and broken for one whose round was opened and then could not be put back,
+    so the account of the attempt is the only place that failure survives.
+
+    Both are receipts of an account, never result text: the model reads the
+    two-state dialect of the send face, and the record is what makes the refusal
+    queryable afterwards rather than living only in the sentence the caller was
+    answered with.
+
 const AgeFoldPluginName = "age-fold"
     AgeFoldPluginName is the stable name the age fold plugin instance answers.
 
@@ -144,10 +161,11 @@ const CompressionConsumerName = "compress-consumer"
     CompressionConsumerName is the stable name the compression consumer answers.
 
 const DeliveryReceiptSent = "sent"
-    DeliveryReceiptSent is the one receipt the delivery account records:
-    the body reached the chain of the target it named. It is the frozen word of
-    the delivery receipt entry, so both delivery families read the same receipt
-    for a body that landed and a receipt no fact states reads as this one.
+    DeliveryReceiptSent is the one receipt a body that reached its target stands
+    at: the body landed in the chain of the destination it named. It is the
+    frozen word of the delivery receipt entry, so both delivery families read
+    the same receipt for a body that landed and a receipt no fact states reads
+    as this one.
 
 const DiagnosticSwitchEnv = "TAGENT_DIAGNOSTICS"
     DiagnosticSwitchEnv names the environment variable the host reads the
@@ -522,6 +540,13 @@ func (l *DeliveryLedger) Records() []DeliveryRecord
     identity the chain already holds lands no second fact and therefore no
     second record.
 
+func (l *DeliveryLedger) Refusals() []DeliveryRefusal
+    Refusals reports every attempt the run turned away, ordered by source event,
+    then target, then identity and category, so two reads of one chain answer
+    the same order. The attempts are read from the same account as the landings,
+    so a refusal is queryable after the fact rather than only from the sentence
+    the caller was answered with.
+
 type DeliveryRecord struct {
 	// Source is the event the delivery is filed under.
 	Source event.EventID
@@ -545,6 +570,24 @@ func (r DeliveryRecord) Meta() map[string]string
     Meta reports the four delivery entries of one record under the frozen keys,
     so two records of different families are compared and consumed by the same
     vocabulary instead of by the shape of the fact behind them.
+
+type DeliveryRefusal struct {
+	// Source is the event the attempt is filed under.
+	Source event.EventID
+	// Target is the address the call named, which the body never reached.
+	Target event.Address
+	// Identity is the identity the attempt is deduplicated under.
+	Identity string
+	// Receipt is the receipt the attempt stands at: denied, or broken for a round that
+	// could not be put back.
+	Receipt string
+	// Category is the stage that turned the body away.
+	Category string
+}
+    DeliveryRefusal is one attempt the delivery face turned away: the source
+    event it is filed under, the target the call named, the identity it is
+    deduplicated under, the receipt it stands at and the stage that turned the
+    body away.
 
 type DiagnosticFace struct {
 	// Subsystem names the face this reading belongs to.
@@ -1103,6 +1146,15 @@ func WithStorage(cfg ledger.StorageConfig) Option
     An assembly beside no storage keeps its facts in memory and restores
     nothing.
 
+func WithTaskTerminalTTL(ttl time.Duration) Option
+    WithTaskTerminalTTL sets how long a task record outlives the terminal
+    outcome it holds: the record of a settled, failed or cancelled task older
+    than this is dropped beside the next admission, so this run's account of
+    tasks is bounded by it. A call naming a pruned task is refused by name,
+    and every fact of that task stays on the chain — the bound is the live
+    account, never the history. The zero value keeps task.DefaultTerminalTTL,
+    and a negative one keeps every record for the life of the run.
+
 func WithTelemetry(observer plugin.Observer) Option
     WithTelemetry attaches the post-commit observation face this assembly
     observes every committed fact through: the fact is read back from the
@@ -1227,12 +1279,14 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
     The session side closes after the quiesce, so the mailbox bookkeeping an
     in-flight tool result still lands through stays open exactly as long as
     the quiesce may need it. A repeated close returns the first result and
-    runs no second quiesce. The redline list (4 rules): MUST judge the timeout
+    runs no second quiesce. The redline list (5 rules): MUST judge the timeout
     of the close before any side effect it would take, so a close naming none
     is refused with the run untouched. MUST refuse new input before the first
-    quiesce of the close. MUST judge the run by the one rest criterion, never by
-    an emptied queue or an elapsed wait. MUST NOT report a run at rest while a
-    writer has not stopped.
+    quiesce of the close. MUST stop the resident consumption loops the loop
+    mounted for itself before the first read of the rest criterion, so a segment
+    those loops still fly is closed and joined before the run is judged. MUST
+    judge the run by the one rest criterion, never by an emptied queue or an
+    elapsed wait. MUST NOT report a run at rest while a writer has not stopped.
 
 func (r *Run) CloseMCPServers() error
     CloseMCPServers releases every MCP server the live registry holds: the close

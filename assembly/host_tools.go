@@ -24,6 +24,7 @@ import (
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/features/evolution/meditation"
 	"github.com/SpellingDragon/tagent/memory"
+	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
 	"github.com/SpellingDragon/tagent/tool/subagent"
@@ -91,8 +92,8 @@ type hostSendTool struct {
 var _ trpctool.CallableTool = (*hostSendTool)(nil)
 
 // hostSendReentry is the task re-entry face one send call dispatches to: the task the
-// call names is re-entered with the body, and the outcome is reported in the same three
-// states every delivery reports through. The face is the seam between the tool and the
+// call names is re-entered with the body, and the outcome is reported in the same two
+// receipts every delivery reports through. The face is the seam between the tool and the
 // task state machine, so the tool itself holds no registry.
 type hostSendReentry interface {
 	// ReenterTask hands one body to the named task and reports the outcome of that
@@ -110,6 +111,7 @@ type hostSendReentry interface {
 // construction. A port bound to no run refuses the call by name rather than
 // reporting a re-entry no task can answer.
 type hostSendReentryPort struct {
+	run           *Run
 	tasks         hostReentryTasks
 	ledger        hostReentryLedger
 	continuations hostReentryContinuations
@@ -157,16 +159,18 @@ type hostReentryContinuations interface {
 	Claim(taskID event.TaskID) error
 	// Abandon gives a claimed slot back without serving a round for it.
 	Abandon(taskID event.TaskID)
-	// Serve serves the next round of the claimed task with the body.
-	Serve(ctx context.Context, taskID event.TaskID, input string) error
+	// Serve serves the next round of the claimed task with the body, answers once the
+	// body is in that round, and reports how the round itself ended to after.
+	Serve(ctx context.Context, taskID event.TaskID, input string, after func(error)) error
 }
 
 // Bind attaches the assembled run the port re-enters tasks through.
 func (p *hostSendReentryPort) Bind(run *Run) {
-	p.tasks, p.ledger, p.continuations = nil, nil, nil
+	p.run, p.tasks, p.ledger, p.continuations = nil, nil, nil, nil
 	if run == nil {
 		return
 	}
+	p.run = run
 	if run.registry != nil {
 		p.tasks = run.registry
 	}
@@ -181,17 +185,20 @@ func (p *hostSendReentryPort) Bind(run *Run) {
 // ReenterTask hands one body to the named task and reports the outcome of that
 // re-entry: a settled task of this host is reactivated into a new round, the
 // ledger entry of the task is moved to that round, and the round body is handed to
-// the delegated turn the task was first served in. The call is answered as
-// delivered once that round owns the input; the round itself runs beside the
-// receipt exactly as the round of a fresh admission does, so the turn that issued
-// the call keeps deciding while the task it re-entered runs.
+// the delegated turn the task was first served in.
 //
-// Every read the round depends on is settled before the first mutation, and the one
-// round that will carry the body is in this call's hand before it answers:
+// The answer is the delivery and not the acceptance: ok is returned only once the round
+// serving the body has landed its own input, so a caller that reads ok reads a body that
+// arrived. A round that never reaches its input is refused by name here, and the attempt is
+// filed in the account of the call beside the refusal, so a body that reached nothing is a
+// queryable refusal rather than a sentence with nothing behind it. Every read the round
+// depends on is settled before the first mutation, and the one round that will carry the
+// body is in this call's hand before it answers:
 // - The settled status design D7 admits and the terminal ledger entry the reopen needs are both read first, so a refusal moves nothing at all.
 // - The claim is what makes the receipt true. Without it the call could answer "ok" for a body a second re-entry also took, or for a round that never opened, and the body would be lost behind a receipt that said otherwise.
 // - The round is opened last, and the round a later step refuses is read against the one step that still had to race: the round is put back rather than leaving the task in flight with no turn to serve it.
-// - A round that ends without recording its terminal puts the task and the ledger back and leaves the body owed to the next round, so a body the receipt accepted is never dropped.
+// - The receipt waits for the round's first commit: a body handed to a round that never landed it is refused here, and the cause is filed with it.
+// - A round that lands the body and then ends without recording its terminal puts the task and the ledger back and leaves the body owed to the next round, so a body the receipt accepted is never dropped.
 // - Only a task this host serves a round of is re-entered: an identity the table holds no record of, a task whose delegated round this host never served, and every status design D7 refuses are each answered as a named refusal rather than reactivated into a round nobody asked for.
 func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.TaskID, content string) (deliveryOutcome, string) {
 	if p.tasks == nil || p.ledger == nil {
@@ -199,33 +206,86 @@ func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.Task
 	}
 	continuations := p.continuations
 	if continuations == nil {
-		return deliveryRefused, hostReentryCause(taskID, subagent.ErrContinuationMissing)
+		return p.refuseReentry(ctx, taskID, hostDenialClaim, subagent.ErrContinuationMissing)
 	}
 	if err := p.tasks.Reentrant(ctx, taskID); err != nil {
-		return deliveryRefused, hostReentryCause(taskID, err)
+		return p.refuseReentry(ctx, taskID, hostDenialTask, err)
 	}
 	if err := p.ledger.CanReopenRound(taskID); err != nil {
-		return deliveryRefused, hostReentryCause(taskID, err)
+		return p.refuseReentry(ctx, taskID, hostDenialDelegation, err)
 	}
 	if err := continuations.Claim(taskID); err != nil {
-		return deliveryRefused, hostReentryCause(taskID, err)
+		return p.refuseReentry(ctx, taskID, hostDenialClaim, err)
 	}
 	round, err := p.tasks.Reactivate(ctx, taskID)
 	if err != nil {
 		continuations.Abandon(taskID)
-		return deliveryRefused, hostReentryCause(taskID, err)
+		return p.refuseReentry(ctx, taskID, hostDenialTask, err)
 	}
 	if err := p.ledger.ReopenRound(taskID, round); err != nil {
 		continuations.Abandon(taskID)
 		p.unwindReentry(ctx, taskID, round, err)
-		return deliveryRefused, hostReentryCause(taskID, err)
+		return p.refuseReentry(ctx, taskID, hostDenialDelegation, err)
 	}
-	go func() {
-		if err := continuations.Serve(context.WithoutCancel(ctx), taskID, content); err != nil {
-			p.unwindReentry(ctx, taskID, round, err)
+	if err := continuations.Serve(ctx, taskID, content, func(roundErr error) {
+		if roundErr != nil {
+			p.roundFailed(context.WithoutCancel(ctx), taskID, round, roundErr)
 		}
-	}()
+	}); err != nil {
+		p.unwindReentry(ctx, taskID, round, err)
+		return p.refuseReentry(ctx, taskID, hostDenialStart, err)
+	}
 	return deliverySent, ""
+}
+
+// refuseReentry answers one refused re-entry and files the attempt: the model reads the named
+// cause, and the account of the call holds the refusal under the stage that turned it away. A
+// call carrying no frame names no session to file the attempt in, so the refusal is answered
+// alone rather than invented into a chain of its own.
+func (p *hostSendReentryPort) refuseReentry(ctx context.Context, taskID event.TaskID, category string, err error) (deliveryOutcome, string) {
+	cause := hostReentryCause(taskID, err)
+	p.refuse(ctx, taskID, category, cause)
+	return deliveryRefused, cause
+}
+
+// refuse files one refused re-entry in the account of the session that asked for it, under the
+// identity the call and the task share: the attempt names the task it named and the stage that
+// turned it away, so a retry files one record and a different stage files its own.
+func (p *hostSendReentryPort) refuse(ctx context.Context, taskID event.TaskID, category, cause string) {
+	p.fileRefusal(ctx, taskID, DeliveryReceiptDenied, category, cause)
+}
+
+// breakReentry files the one re-entry whose compensation failed, under its own receipt: a round the
+// task was not put back from is not a body that was turned away and reached nothing, it is a task left
+// in a round no turn serves. The two read apart in the account, so an operator querying the broken
+// attempts never reads them as ordinary refusals.
+func (p *hostSendReentryPort) breakReentry(ctx context.Context, taskID event.TaskID, category, cause string) {
+	p.fileRefusal(ctx, taskID, DeliveryReceiptBroken, category, cause)
+}
+
+// fileRefusal lands one attempt of one re-entry in the account at the receipt and the stage it stands
+// at. A call carrying no frame names no session to file the attempt in, so the record is left to the
+// cause the caller is answered with rather than invented into a chain of its own.
+func (p *hostSendReentryPort) fileRefusal(ctx context.Context, taskID event.TaskID, receipt, category, cause string) {
+	run := p.run
+	if run == nil {
+		return
+	}
+	frame, framed := task.CallFrameFrom(ctx)
+	if !framed {
+		return
+	}
+	identity := string(frame.Identity.DedupKey()) + "\x00" + string(taskID)
+	run.recordRefusal(ctx, frame, taskID, frame.Address, identity, receipt, category, cause)
+}
+
+// roundFailed puts back a round that landed its input and then ended without recording its
+// terminal: the task returns to the outcome it was re-entered from, the ledger entry returns to
+// the terminal it reopened from, and the attempt is filed as a denied delivery under the stage
+// that failed, so the sender's account says what became of the body it was told had arrived.
+func (p *hostSendReentryPort) roundFailed(ctx context.Context, taskID event.TaskID, round int64, cause error) {
+	p.unwindReentry(ctx, taskID, round, cause)
+	p.refuse(ctx, taskID, hostDenialRound, cause.Error())
 }
 
 // unwindReentry puts a round nothing served back: the task returns to the settled
@@ -233,10 +293,18 @@ func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.Task
 // terminal it reopened from, and the cause is reported rather than left in the log
 // of a body the caller was told had been taken. The body itself stays owed to the
 // next round of the task, so the re-entry loses the round and never the input.
+//
+// A task that cannot be put back is the one failure the compensation cannot cover: the round stays
+// open with no turn to serve it, so the account files the attempt as broken and the assembly reports
+// it at ERROR — a task stuck in a round nobody serves is a warning an operator has to see, not a line
+// in a debug stream. Nothing reaps it: the terminal TTL reclaims tasks that reached a terminal outcome,
+// and a task left in a round it was not put back from reached none, so it refuses every re-entry of
+// the round it is stuck in until the task table itself is reset.
 func (p *hostSendReentryPort) unwindReentry(ctx context.Context, taskID event.TaskID, round int64, cause error) {
 	ctx = context.WithoutCancel(ctx)
 	if err := p.tasks.RollbackReactivation(ctx, taskID, round); err != nil {
-		assemblyWarn("tagent: the round %d of %s was opened and never served, and the task was not put back: %v", round, taskID, err)
+		p.breakReentry(ctx, taskID, hostDenialRollback, err.Error())
+		assemblyError("tagent: the round %d of %s was opened and never served, and the task was not put back: %v; the task stays in a round no turn serves and refuses every re-entry of it until the task table is reset", round, taskID, err)
 	}
 	p.ledger.AbandonRound(taskID, round)
 	assemblyWarn("tagent: the round %d of %s was withdrawn beside: %v; the body it was handed stays owed to the next re-entry of the task", round, taskID, cause)
@@ -266,7 +334,7 @@ func hostReentryCause(taskID event.TaskID, err error) string {
 
 // hostSendSession is the cross-session delivery face one send call dispatches to:
 // one body handed to the session the call names, judged by the four gates the
-// delivery face keeps and answered in the three states every delivery reports
+// delivery face keeps and answered in the two receipts every delivery reports
 // through. The face is the seam between the tool and the live scene, so the tool
 // itself resolves no session and holds no white list.
 type hostSendSession interface {
@@ -303,6 +371,7 @@ func (p *hostMeditationPort) DeliverToSession(ctx context.Context, agent, sessio
 	}
 	addr := event.Address{AgentID: event.AgentID(agent), SessionID: event.SessionID(session)}
 	if outcome, cause := p.gate(ctx, frame, addr); outcome != deliverySent {
+		p.refuseDelivery(ctx, frame, addr, hostDenialGate, cause)
 		return outcome, cause
 	}
 
@@ -365,10 +434,13 @@ func (p *hostMeditationPort) gate(ctx context.Context, frame task.CallFrame, add
 // session is driven through one turn beside the receipt, and a busy one reads the fact
 // at its own next decision boundary because the drive already in flight owns the range.
 // - The fact identity is the delivery identity, so the same body re-presented under the same call identity lands no second fact: the commit answers the identity it already holds instead of writing beside it.
+// - A busy target is woken for the body it just took: a round that closed between the busy read and the commit owns no range any more, and a body landed beside a loop that rests would wait for an event nobody sends.
 func (p *hostMeditationPort) deliver(ctx context.Context, frame task.CallFrame, addr event.Address, content string) hostSendSessionReceipt {
 	loop := p.run.loop
 	if loop == nil {
-		return hostSendSessionReceipt{outcome: deliveryRefused, cause: "this host drives no loop, so the body would land beside no turn"}
+		cause := "this host drives no loop, so the body would land beside no turn"
+		p.refuseDelivery(ctx, frame, addr, hostDenialRoute, cause)
+		return hostSendSessionReceipt{outcome: deliveryRefused, cause: cause}
 	}
 	deliveryKey := event.EventID(hostSendSessionKey(frame, addr))
 	evt := event.Event{
@@ -385,10 +457,12 @@ func (p *hostMeditationPort) deliver(ctx context.Context, frame task.CallFrame, 
 	busy := hostSendSessionBusy(p.run, addr)
 	key, err := p.run.commitOnly(ctx, addr, evt)
 	if err != nil {
-		return hostSendSessionReceipt{outcome: deliveryRefused,
-			cause: fmt.Sprintf("the session %q of agent %q did not take the body: %v", addr.SessionID, addr.AgentID, err)}
+		cause := fmt.Sprintf("the session %q of agent %q did not take the body: %v", addr.SessionID, addr.AgentID, err)
+		p.refuseDelivery(ctx, frame, addr, hostDenialCommit, cause)
+		return hostSendSessionReceipt{outcome: deliveryRefused, cause: cause}
 	}
 	if busy {
+		p.run.loop.WakeAddress(addr)
 		return hostSendSessionReceipt{outcome: deliverySent}
 	}
 	evt.Key = key
@@ -449,11 +523,50 @@ func hostSendNames(names []string, name string) bool {
 	return false
 }
 
-// DeliveryReceiptSent is the one receipt the delivery account records: the body
-// reached the chain of the target it named. It is the frozen word of the delivery
-// receipt entry, so both delivery families read the same receipt for a body that
-// landed and a receipt no fact states reads as this one.
+// DeliveryReceiptSent is the one receipt a body that reached its target stands at: the body
+// landed in the chain of the destination it named. It is the frozen word of the delivery
+// receipt entry, so both delivery families read the same receipt for a body that landed and a
+// receipt no fact states reads as this one.
 const DeliveryReceiptSent = "sent"
+
+// DeliveryReceiptDenied and DeliveryReceiptBroken are the two receipts an attempt that reached
+// nothing stands at: denied for a delivery the face turned away — a gate, a task table or a
+// round that never landed the body — and broken for one whose round was opened and then could
+// not be put back, so the account of the attempt is the only place that failure survives.
+//
+// Both are receipts of an account, never result text: the model reads the two-state dialect of
+// the send face, and the record is what makes the refusal queryable afterwards rather than
+// living only in the sentence the caller was answered with.
+const (
+	// DeliveryReceiptDenied is the receipt of an attempt that reached no target.
+	DeliveryReceiptDenied = "denied"
+	// DeliveryReceiptBroken is the receipt of an attempt whose round could not be withdrawn.
+	DeliveryReceiptBroken = "broken"
+)
+
+// hostDenialGate names the four-gate judgement of a cross-session destination; the categories
+// beside it name every other stage that turns a body away, so a reader of the account tells a
+// gate refusal from a round that never landed.
+const (
+	// hostDenialGate is the four-gate judgement of a cross-session destination.
+	hostDenialGate = "gate"
+	// hostDenialRoute is a destination this run drives no loop of.
+	hostDenialRoute = "route"
+	// hostDenialCommit is the commit of a body into the target chain.
+	hostDenialCommit = "commit"
+	// hostDenialTask is the task table refusing a re-entry.
+	hostDenialTask = "task"
+	// hostDenialDelegation is the delegation ledger refusing the reopen of a round.
+	hostDenialDelegation = "delegation"
+	// hostDenialClaim is the continuation table refusing the claim of a round.
+	hostDenialClaim = "claim"
+	// hostDenialStart is a round that never landed the input it was handed.
+	hostDenialStart = "start"
+	// hostDenialRound is a round that landed the body and then failed to record its terminal.
+	hostDenialRound = "round"
+	// hostDenialRollback is a round nothing served that could not be put back.
+	hostDenialRollback = "rollback"
+)
 
 // hostDeliveryMeta renders the delivery entries one committed delivery carries
 // (design D7): the target it reached, the identity it is deduplicated under, the
@@ -476,6 +589,61 @@ func hostDeliveryMeta(frame task.CallFrame, addr event.Address, identity string)
 // agent and the session it names, so an entry read back names both.
 func hostDeliveryTarget(addr event.Address) string {
 	return string(addr.AgentID) + "/" + string(addr.SessionID)
+}
+
+// hostDeliveryRefusalMeta renders the delivery entries of one attempt that reached nothing: the
+// target the call named, the identity the attempt is filed under, the receipt it stands at, the
+// source event it belongs to and the stage that turned it away, with the cause kept as the
+// one-line summary of the fact so a reader of the account reads what was refused it. The keys
+// are the frozen MetaKeyDelivery entries, so an attempt and a landing are read by the same
+// vocabulary.
+func hostDeliveryRefusalMeta(frame task.CallFrame, target event.Address, identity, receipt, category, cause string) map[string]string {
+	meta := map[string]string{
+		event.MetaKeyTriggerSource:    hostSendSessionLineage,
+		event.MetaKeyDeliveryTarget:   hostDeliveryTarget(target),
+		event.MetaKeyDeliveryIdentity: identity,
+		event.MetaKeyDeliveryReceipt:  receipt,
+		event.MetaKeyDeliverySource:   string(frame.Identity.InvocationID),
+		event.MetaKeyDeliveryDenial:   category,
+	}
+	if cause != "" {
+		meta[event.MetaKeyEventSummary] = cause
+	}
+	return meta
+}
+
+// recordRefusal lands one refused attempt in the account of the session that asked for it: a body
+// that reached nothing is still an attempt the account reads back, by the source event it belongs
+// to and by the target it named, so a refusal is queryable afterwards instead of living only in
+// the text the caller was answered with.
+//
+// The fact carries no model payload: it is an audit fact of the host, and a fact with no content
+// enters no mapped sequence, so the chain of the sender reads the account without its transcript
+// ever learning of it. An identity the account already holds is not written beside itself, so a
+// retry of the same refused attempt files one record.
+func (r *Run) recordRefusal(ctx context.Context, frame task.CallFrame, taskID event.TaskID, target event.Address, identity, receipt, category, cause string) {
+	if r == nil {
+		return
+	}
+	key := event.EventID(identity + "#" + receipt + ":" + category)
+	if _, err := r.commitOnly(context.WithoutCancel(ctx), frame.Address, event.Event{
+		Type:      event.TypeFeedback,
+		Timestamp: time.Now(),
+		Key:       key,
+		TaskID:    taskID,
+		Target:    target,
+		Meta:      hostDeliveryRefusalMeta(frame, target, identity, receipt, category, cause),
+	}); err != nil {
+		assemblyError("tagent: the refused delivery %s is not in the account err=%v", identity, err)
+	}
+}
+
+// refuseDelivery files one refused session delivery in the account of the session that asked for
+// it, under the identity the call and the destination share: a body that reached no session is
+// still an attempt the account reads back, so a reader tells the refusal of one destination from
+// the refusal of another and a replay of the same call files one record.
+func (p *hostMeditationPort) refuseDelivery(ctx context.Context, frame task.CallFrame, addr event.Address, category, cause string) {
+	p.run.recordRefusal(ctx, frame, "", addr, hostSendSessionKey(frame, addr), DeliveryReceiptDenied, category, cause)
 }
 
 // DeliveryRecord is one single-target delivery of one run: the source event it is
@@ -587,9 +755,90 @@ func (l *DeliveryLedger) ByTarget(addr event.Address) []DeliveryRecord {
 	return out
 }
 
-// hostDeliveryFacts reports the facts this run holds, in commit order, as a copy
-// the caller owns.
+// DeliveryRefusal is one attempt the delivery face turned away: the source event it is filed
+// under, the target the call named, the identity it is deduplicated under, the receipt it stands
+// at and the stage that turned the body away.
+type DeliveryRefusal struct {
+	// Source is the event the attempt is filed under.
+	Source event.EventID
+	// Target is the address the call named, which the body never reached.
+	Target event.Address
+	// Identity is the identity the attempt is deduplicated under.
+	Identity string
+	// Receipt is the receipt the attempt stands at: denied, or broken for a round that
+	// could not be put back.
+	Receipt string
+	// Category is the stage that turned the body away.
+	Category string
+}
+
+// Refusals reports every attempt the run turned away, ordered by source event, then target,
+// then identity and category, so two reads of one chain answer the same order. The attempts
+// are read from the same account as the landings, so a refusal is queryable after the fact
+// rather than only from the sentence the caller was answered with.
+func (l *DeliveryLedger) Refusals() []DeliveryRefusal {
+	if l == nil || l.run == nil {
+		return nil
+	}
+	facts := l.run.hostDeliveryFacts()
+	refusals := make([]DeliveryRefusal, 0, len(facts))
+	seen := make(map[string]struct{}, len(facts))
+	for _, fact := range facts {
+		receipt := fact.Meta[event.MetaKeyDeliveryReceipt]
+		if receipt != DeliveryReceiptDenied && receipt != DeliveryReceiptBroken {
+			continue
+		}
+		identity := fact.Meta[event.MetaKeyDeliveryIdentity]
+		category := fact.Meta[event.MetaKeyDeliveryDenial]
+		dedup := identity + "\x00" + receipt + "\x00" + category
+		if _, repeated := seen[dedup]; repeated {
+			continue
+		}
+		seen[dedup] = struct{}{}
+		refusals = append(refusals, DeliveryRefusal{
+			Source:   event.EventID(fact.Meta[event.MetaKeyDeliverySource]),
+			Target:   fact.Target,
+			Identity: identity,
+			Receipt:  receipt,
+			Category: category,
+		})
+	}
+	sort.Slice(refusals, func(i, j int) bool {
+		if refusals[i].Source != refusals[j].Source {
+			return refusals[i].Source < refusals[j].Source
+		}
+		if refusals[i].Target.AgentID != refusals[j].Target.AgentID {
+			return refusals[i].Target.AgentID < refusals[j].Target.AgentID
+		}
+		if refusals[i].Target.SessionID != refusals[j].Target.SessionID {
+			return refusals[i].Target.SessionID < refusals[j].Target.SessionID
+		}
+		if refusals[i].Identity != refusals[j].Identity {
+			return refusals[i].Identity < refusals[j].Identity
+		}
+		return refusals[i].Category < refusals[j].Category
+	})
+	return refusals
+}
+
+// hostDeliveryFacts reports every fact this run accounts for, in the order the storage tier
+// published it.
+//
+// The durable chain is the account: the live ledger is a hot window over it (facts.go,
+// factWindow), so a reader that answered from the window alone would lose the delivery of a
+// long chain — the very fact this account exists to keep. The window is read only beside no
+// storage tier at all, which is the run that keeps its facts in memory alone.
 func (r *Run) hostDeliveryFacts() []event.Event {
+	r.mu.Lock()
+	tier := r.tier
+	r.mu.Unlock()
+	if tier != nil && tier.Segments != nil {
+		stored, err := tier.Segments.Events(context.Background())
+		if err == nil {
+			return hostDeliveryEventsOf(stored)
+		}
+		assemblyWarn("tagent: the delivery account of this run reads its live window beside an unreadable durable chain err=%v", err)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]event.Event, 0, len(r.factOrder))
@@ -603,9 +852,33 @@ func (r *Run) hostDeliveryFacts() []event.Event {
 	return out
 }
 
+// hostDeliveryEventsOf decodes the stored records of the durable chain into the facts the
+// delivery account projects: the type, the target, the metadata and the identity of each
+// committed fact, which is every field a delivery record reads. A body this build cannot decode
+// is skipped: an account that refused to answer beside one unreadable record would hide the
+// deliveries it can still read.
+func hostDeliveryEventsOf(stored []ledger.StoredEvent) []event.Event {
+	out := make([]event.Event, 0, len(stored))
+	for _, record := range stored {
+		body, err := memory.DecodeEventBody(record.Body)
+		if err != nil {
+			assemblyWarn("tagent: the committed record %s is not read as a delivery err=%v", record.Key, err)
+			continue
+		}
+		out = append(out, event.Event{
+			Key:    body.Key,
+			Type:   body.Type,
+			Target: body.Target,
+			Meta:   body.Meta,
+		})
+	}
+	return out
+}
+
 // hostDeliveryRecordOf projects one committed fact into its delivery record and
 // reports whether the fact is a delivery at all.
 // - A fact stamped with a delivery identity is one, whichever family wrote it: the entries it carries are read back exactly as the committing path stated them.
+// - A fact whose receipt stands at a refusal is no delivery: an attempt the face turned away reached no target, so it is read by the refusal account (Refusals) and never counted as a body some target received.
 // - A task settle fact is one too: it is the fact a terminal notification lands as, its identity is the notification identity the follow-up turn drives from, and a fact committed before the delivery entries existed carries none of them, so its record states the receipt the landed fact is.
 // - Every other fact is no delivery: an agent output, a tool result and an attention fact are not bodies handed to a target.
 func hostDeliveryRecordOf(fact event.Event) (DeliveryRecord, bool) {
@@ -613,6 +886,9 @@ func hostDeliveryRecordOf(fact event.Event) (DeliveryRecord, bool) {
 		receipt := fact.Meta[event.MetaKeyDeliveryReceipt]
 		if receipt == "" {
 			receipt = DeliveryReceiptSent
+		}
+		if receipt != DeliveryReceiptSent {
+			return DeliveryRecord{}, false
 		}
 		return DeliveryRecord{
 			Source:   event.EventID(fact.Meta[event.MetaKeyDeliverySource]),
