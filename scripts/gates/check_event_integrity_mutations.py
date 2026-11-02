@@ -537,6 +537,14 @@ MUTATIONS: Tuple[Mutation, ...] = (
                 old="\tboundary := held.endedPrefix()\n",
                 new="\tboundary := held.ended\n",
             ),
+            # The presentation read resolves its prefix from the same position:
+            # the mutant keeps the position here too, so the read compiles and
+            # stays wrong in the same way as the boundary it follows.
+            Replacement(
+                file="assembly/request.go",
+                old="\tprefix := held.endedPrefix()\n",
+                new="\tprefix := held.ended\n",
+            ),
         ),
         test_package="./tests/integration/history",
         test_file="tests/integration/history/event_integrity_test.go",

@@ -340,7 +340,7 @@ class MutationGateTest(unittest.TestCase):
     def test_patch_set_is_applied_and_restored_as_one(self):
         mutation = [item for item in gate.MUTATIONS
                     if item.id == "MUT-EVID-04-position-boundary"][0]
-        self.assertEqual(len(mutation.patch_set()), 7)
+        self.assertEqual(len(mutation.patch_set()), 8)
         files = {replacement.file for replacement in mutation.patch_set()}
         self.assertEqual(files, {"assembly/request.go", "assembly/facts.go"})
 
