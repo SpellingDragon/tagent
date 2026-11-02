@@ -2074,9 +2074,10 @@ func smokeIntegrityFoldNegative(t *testing.T) {
 	if len(restart) != 1 {
 		t.Fatalf("the restarted turn drove %d entry request(s), want one", len(restart))
 	}
+	earlyBody := smokeIntegrityBulk(smokeIntegrityFoldEarlyTurn)
 	for _, msg := range restart[0].Messages {
-		if strings.Contains(msg.Content, smokeIntegrityFoldEarlyTurn) && !strings.Contains(msg.Content, "history summary:") {
-			t.Fatalf("the restarted turn presented the pre-restart material %q outside the summary: %q",
+		if strings.Contains(msg.Content, earlyBody) && !strings.Contains(msg.Content, "history summary:") {
+			t.Fatalf("the restarted turn presented the pre-restart body %q outside the summary: %q",
 				smokeIntegrityFoldEarlyTurn, msg.Content)
 		}
 	}
@@ -2776,26 +2777,41 @@ func smokeIntegrityRequestsForLastUser(provider *smokeProvider, model, marker st
 	return out
 }
 
-// smokeIntegrityRequestsCarryingWhole 报告逐字节带着整份大正文的模型请求。投影降级
-// 一份材料时只留前 120 字符的摘要与 128 字节的票据预览，所以整份正文出现即证明这
-// 一轮的原文真被某次请求完整读到。按“最后一条用户消息”读同一条事实做不到这点：落
-// 在大正文之后的外部投递（如反思综述的投递）会成为那一条，同一次完整读取在末条消息
-// 上就消失了。
+// smokeIntegrityRequestsCarryingWhole 报告在整份大正文被作答之前读到它的模型请求。
+// 投影降级一份材料时只留前 120 字符的摘要与 128 字节的票据预览，所以整份正文出现
+// 即证明这条输入的原文真被某次请求完整读到。按“最后一条用户消息”读同一条事实做不到
+// 这点：落在大正文之后的外部投递（如反思综述的投递）会成为那一条，同一次完整读取
+// 在末条消息上就消失了。
+//
+// - 只数这张正文被作答之前的请求：一个 segment 的后续轮、以及后续轮次读历史前缀，都会让同一张正文再次出现，而那些轮已经读过它的答案；同一段材料被两路驱动时两路各自都有开轮请求，两边都会计到。
 func smokeIntegrityRequestsCarryingWhole(provider *smokeProvider, model, marker string) []smokeModelRequest {
 	body := smokeIntegrityBulk(marker)
+	answer := "answer " + marker
 	out := make([]smokeModelRequest, 0, 2)
 	for _, req := range provider.recorded() {
 		if model != "" && req.Model != model {
 			continue
 		}
-		for _, msg := range req.Messages {
-			if strings.Contains(msg.Content, body) {
-				out = append(out, req)
-				break
-			}
+		if smokeIntegrityReadsWhole(req.Messages, body, answer) {
+			out = append(out, req)
 		}
 	}
 	return out
+}
+
+// smokeIntegrityReadsWhole 报告一次请求是否在整份正文被作答之前读到它：整份正文逐
+// 字节出现，且请求里还没有这张正文的答案。
+func smokeIntegrityReadsWhole(messages []smokeModelMessage, body, answer string) bool {
+	found := false
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, body) {
+			found = true
+		}
+		if strings.Contains(msg.Content, answer) {
+			return false
+		}
+	}
+	return found
 }
 
 // smokeIntegrityModels 渲染一组请求的模型名，供版本漂移失败时对照。
