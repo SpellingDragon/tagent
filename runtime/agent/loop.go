@@ -179,9 +179,14 @@ type Loop struct {
 	instance event.InstanceID
 	facts    FactResolver
 
-	mu        sync.Mutex
-	seq       uint64
-	intakes   map[event.InvocationID]*intake
+	mu      sync.Mutex
+	seq     uint64
+	intakes map[event.InvocationID]*intake
+	// ended names the ranges whose intake this loop may recycle, oldest first: a
+	// range mints its intake once and a resident run mints one range per segment, so
+	// the bookkeeping of the least recently ended range leaves the map once
+	// intakeWindow ended ranges stand in it.
+	ended     []event.InvocationID
 	history   HistoryFace
 	capture   Capture
 	commit    FactCommit
@@ -200,12 +205,16 @@ type Loop struct {
 	finals    map[event.AgentID]FinalRoundPolicy
 	losses    []RecordingLoss
 	consumers *Consumers
-	// resident is the set this loop mounted for itself: a run assembled beside no
+	// residentLoops is the set this loop mounted for itself: a run assembled beside no
 	// host still drives every delegated execution site on an instance of its own,
 	// and the set a host attaches later displaces and stops it, so one loop drives
 	// one set at a time.
-	resident *Consumers
-	flight   map[event.Address]modelFlight
+	residentLoops *Consumers
+	// instances names the one consumption instance of each address this loop drives,
+	// whoever mounted it. Uniqueness is read here rather than from a set's own map, so
+	// a loop that carries two sets still drives one instance per address.
+	instances map[event.Address]*Consumer
+	flight    map[event.Address]modelFlight
 	// fuses holds the execution-side storm fuses this loop admits under: the
 	// per-response call cap and the long-context threshold a drive declares for
 	// itself replaces. A member at zero is its fuse off, so a loop beside no
@@ -222,14 +231,15 @@ type Loop struct {
 // result fact into the native tool message it carries.
 func NewLoop(borrow state.Borrow, slots *state.Occupancy, instance event.InstanceID, facts FactResolver) *Loop {
 	return &Loop{
-		borrow:   borrow,
-		slots:    slots,
-		instance: instance,
-		facts:    facts,
-		intakes:  map[event.InvocationID]*intake{},
-		flight:   map[event.Address]modelFlight{},
-		fuses:    DefaultFuseLimits(),
-		book:     DefaultApprovalBook(),
+		borrow:    borrow,
+		slots:     slots,
+		instance:  instance,
+		facts:     facts,
+		intakes:   map[event.InvocationID]*intake{},
+		instances: map[event.Address]*Consumer{},
+		flight:    map[event.Address]modelFlight{},
+		fuses:     DefaultFuseLimits(),
+		book:      DefaultApprovalBook(),
 	}
 }
 
@@ -261,6 +271,7 @@ func (l *Loop) Drive(ctx context.Context, inv Invocation) (turn Turn, err error)
 	production := l.beginWriter("drive:" + string(inv.InvocationID))
 	defer l.sealCapture(ctx)
 	defer production()
+	defer l.retireIntake(inv.InvocationID)
 	l.intakeFor(inv.InvocationID).setAddress(inv.Address)
 	l.markRangeHead(inv)
 	l.observeReady(ctx, inv)
@@ -1055,25 +1066,31 @@ func (l *Loop) SetPresentations(sink PresentationSink) {
 // SetConsumers attaches the resident consumption loops this loop drives the
 // decisions of, so a settled backflow wakes the loop of the address its range
 // runs at. A loop beside no attached set wakes the set it mounted for itself
-// instead (see residentsOf), and only a loop that mounted none of its own keeps
+// instead (see residentOf), and only a loop that mounted none of its own keeps
 // its backflow parked in the intake, exactly as before.
 //
 // A set this loop mounted for itself is displaced by the given one and stopped:
 // a displaced set that kept running would drive the addresses of its own copies
 // beside the set now attached, and two drivers of one address is the failure the
-// one-instance-per-address rule exists to forbid.
+// one-instance-per-address rule exists to forbid. The displaced set is stopped
+// before the attached one becomes the driver, and its instances leave the
+// registry with it, so the attach never stands between two drivers of one
+// address.
 func (l *Loop) SetConsumers(consumers *Consumers) {
 	l.mu.Lock()
-	displaced := l.resident
+	displaced := l.residentLoops
 	if displaced == consumers {
 		displaced = nil
 	}
-	l.resident = nil
-	l.consumers = consumers
+	l.residentLoops = nil
+	l.consumers = nil
 	l.mu.Unlock()
 	if displaced != nil {
 		displaced.Stop()
 	}
+	l.mu.Lock()
+	l.consumers = consumers
+	l.mu.Unlock()
 }
 
 // drivingSet reports the consumption loops that drive the addresses of this loop's
@@ -1083,13 +1100,19 @@ func (l *Loop) SetConsumers(consumers *Consumers) {
 func (l *Loop) drivingSet() *Consumers {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.drivingSetLocked()
+}
+
+// drivingSetLocked reports the set that drives this loop's addresses under the lock
+// the mount and the attach take.
+func (l *Loop) drivingSetLocked() *Consumers {
 	if l.consumers != nil {
 		return l.consumers
 	}
-	return l.resident
+	return l.residentLoops
 }
 
-// residentsOf reports the consumption loops this loop drives delegated turns on:
+// residentOf reports the consumption loops this loop drives delegated turns on:
 // the set attached to it, or the set it mounts for itself when none is attached.
 //
 // The set mounted here is the loop's own, so a run assembled beside no host — the
@@ -1099,26 +1122,34 @@ func (l *Loop) drivingSet() *Consumers {
 // of a host displaces it through SetConsumers. The set mounted here is also the one
 // a settled backflow wakes (see drivingSet), so the result of a nested call reaches
 // the delegated segment that issued it.
-func (l *Loop) residentsOf() *Consumers {
+func (l *Loop) residentOf() *Consumers {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.residentLocked()
+}
+
+// residentLocked reports the set this loop drives its resident addresses through,
+// mounting its own beside no attached one, under the lock the mount and the attach
+// take.
+func (l *Loop) residentLocked() *Consumers {
 	if l.consumers != nil {
 		return l.consumers
 	}
-	if l.resident == nil {
-		l.resident = NewConsumers(l, context.Background(), nil)
+	if l.residentLoops == nil {
+		l.residentLoops = NewConsumers(l, context.Background(), nil)
 	}
-	return l.resident
+	return l.residentLoops
 }
 
 // StopResidents ends the consumption loops this loop mounted for itself: no
-// further instance mounts, and the segments those loops left flying stay on the
-// chain for a restart. The set a host attached is that host's to stop, so it is
-// left where it is here.
+// further instance mounts, the segment each of them still flew is closed by that
+// loop before it returns, and the segments those loops left on the chain stay there
+// for a restart. The set a host attached is that host's to stop, so it is left
+// where it is here.
 func (l *Loop) StopResidents() {
 	l.mu.Lock()
-	resident := l.resident
-	l.resident = nil
+	resident := l.residentLoops
+	l.residentLoops = nil
 	if l.consumers == resident {
 		l.consumers = nil
 	}
@@ -1126,6 +1157,90 @@ func (l *Loop) StopResidents() {
 	if resident != nil {
 		resident.Stop()
 	}
+}
+
+// instanceFor answers the one consumption instance of one address, mounting it
+// through the given set when this loop carries none: the registry of this loop, not
+// the map of a set, is what answers "one instance per address".
+//
+// - An address this loop already drives answers the instance it carries, whatever set
+// asks: a second set never starts a second driver of the same decisions.
+// - A loop that already drives its addresses through one set mounts through that set
+// alone: a second set answers no instance instead of opening a driver the close of
+// this loop would not stop, and never takes an instance another set already mounted.
+// - A loop beside no driving set mounts through whichever set asks first, exactly as a
+// set assembled over a loop by a test or an embedder always could.
+// - The chain is read for the cursor of a fresh instance outside the registry lock, so
+// the mount never reads the chain under the lock it answers the registry by.
+func (l *Loop) instanceFor(addr event.Address, cs *Consumers) *Consumer {
+	l.mu.Lock()
+	if instance, held := l.instances[addr]; held {
+		l.mu.Unlock()
+		return instance
+	}
+	if cs == nil || !l.mayMountLocked(cs) {
+		l.mu.Unlock()
+		return nil
+	}
+	l.mu.Unlock()
+	cursor := lastOutputOf(l.sessionFacts(addr))
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if instance, held := l.instances[addr]; held {
+		return instance
+	}
+	instance := cs.mountLocked(l, addr, cursor)
+	if instance == nil {
+		return nil
+	}
+	l.instances[addr] = instance
+	return instance
+}
+
+// mayMountLocked reports whether the named set may mount an address of this loop: the
+// set that drives the loop may, and so may any set beside a loop that drives none.
+func (l *Loop) mayMountLocked(cs *Consumers) bool {
+	driving := l.drivingSetLocked()
+	return driving == nil || driving == cs
+}
+
+// forgetInstance drops one ended instance from the registry and from the set that
+// mounted it, so the address that mounts next is a new driver instead of the dead
+// one this loop left behind.
+func (l *Loop) forgetInstance(c *Consumer) {
+	if c == nil {
+		return
+	}
+	l.mu.Lock()
+	if held, ok := l.instances[c.addr]; ok && held == c {
+		delete(l.instances, c.addr)
+	}
+	l.mu.Unlock()
+	c.set.forget(c)
+}
+
+// forgetInstancesOf drops every instance the named set mounted: the stop of a set
+// answers no address of its own, so the registry never names a driver that ended.
+func (l *Loop) forgetInstancesOf(cs *Consumers) {
+	if cs == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for addr, instance := range l.instances {
+		if instance.set == cs {
+			delete(l.instances, addr)
+		}
+	}
+}
+
+// drivesAddress reports whether one address carries a consumption instance this loop
+// drives, whoever mounted it.
+func (l *Loop) drivesAddress(addr event.Address) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, held := l.instances[addr]
+	return held
 }
 
 // DelegatedInput is what one delegated turn hands the resident instance of its
@@ -1169,35 +1284,79 @@ var ErrDelegatedInstanceUnavailable = errors.New("agent: no resident instance is
 // woken, and the round is the one that segment flies. The caller keeps the task face —
 // admission, settle and notice stay where they are — and reads only what the turn
 // produced.
-// - The input commits as the site's own external input before the wake, so the segment the wake opens reads it as its own material.
+// - The input commits as the site's own external input before the wake, so the segment the wake reads as its own material.
 // - The answer is the chain the segment closed on: a body that never committed is a failed round rather than a copy kept beside the chain.
-// - A cancelled wait reports the cancelled terminal beside no error, so a closing run settles what it already admitted instead of leaving it owed.
+// - The body is the one the closing decision of that segment produced, never whatever the chain of the site ended at meanwhile: a second segment that closed beside this wait has no body of its own to lend.
+// - A cancelled wait reports the cancelled terminal beside no error, so a closing run settles what it already admitted instead of leaving it owed. A wait the end of the loop answers is the same cancellation: the segment stays owed on the chain for the restart, and the round reports the terminal it really reached.
 func (l *Loop) SubmitDelegated(ctx context.Context, in DelegatedInput) (DelegatedAnswer, error) {
+	return l.submitDelegated(ctx, in, nil)
+}
+
+// SubmitDelegatedBeside hands one delegated turn to the resident instance of its site
+// exactly as SubmitDelegated does, and reports the round's first commit beside it: the callback
+// hears nil once the input has landed at the site, and the named cause of a turn that never
+// landed. A caller that answers a delivery receipt uses it to answer only for a body that
+// arrived, instead of answering before the input reached the chain the receipt claims.
+//
+// The report is the input's commit and nothing else: a round that lands its input and then
+// fails still reported nil, because the body did arrive and what became of the round is its
+// own terminal's to report.
+func (l *Loop) SubmitDelegatedBeside(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error) {
+	return l.submitDelegated(ctx, in, started)
+}
+
+// submitDelegated is the one body of a delegated turn: the caller that reads only the answer
+// and the caller that also has to hear the first commit share it, so a turn reports the same
+// input, the same wake and the same terminal whichever way it was handed over.
+func (l *Loop) submitDelegated(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error) {
+	report := delegationStart(started)
 	if !in.Site.IsComplete() {
+		report(ErrDelegatedSiteIncomplete)
 		return DelegatedAnswer{}, ErrDelegatedSiteIncomplete
 	}
-	consumers := l.residentsOf()
+	consumers := l.residentOf()
 	if consumers == nil {
+		report(ErrDelegatedInstanceUnavailable)
 		return DelegatedAnswer{}, ErrDelegatedInstanceUnavailable
 	}
 	consumer := consumers.mount(in.Site, &in.Binding)
 	if consumer == nil {
+		report(ErrDelegatedInstanceUnavailable)
 		return DelegatedAnswer{}, ErrDelegatedInstanceUnavailable
 	}
 	keys, err := l.delegatedInputOf(ctx, in)
 	if err != nil {
+		report(err)
 		return DelegatedAnswer{Status: task.StatusFailed, Failure: err.Error()}, err
 	}
+	// The round's input is in the chain of its site, so the turn has started: a receipt
+	// answered from here stands for a body that arrived, and the wake below opens the
+	// segment that reads it.
+	report(nil)
 	consumer.Wake()
 	answer, waitErr := consumer.WaitAnswer(ctx, keys)
 	if waitErr != nil {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || errors.Is(waitErr, ErrSegmentCancelled) {
 			return DelegatedAnswer{Status: task.StatusCancelled}, nil
 		}
 		return DelegatedAnswer{Status: task.StatusFailed, Failure: waitErr.Error()}, waitErr
 	}
 	status, failure := delegatedTerminalOf(answer)
-	return DelegatedAnswer{Body: l.lastOutputBody(in.Site), Status: status, Failure: failure}, nil
+	return DelegatedAnswer{Body: answer.Body, Status: status, Failure: failure}, nil
+}
+
+// delegatedStart reports the first commit of one delegated round, at most once: the input's
+// commit is the one report a started round makes, and every early refusal reports the cause
+// it never started for. The callback is read at most once because a round that reports its
+// start and then fails reports the start, never a second, later answer to the same question.
+func delegationStart(started func(error)) func(error) {
+	if started == nil {
+		return func(error) {}
+	}
+	var once sync.Once
+	return func(err error) {
+		once.Do(func() { started(err) })
+	}
 }
 
 // delegatedInputOf commits the input of one delegated turn at its execution site and
@@ -1251,18 +1410,6 @@ func delegatedTerminalOf(answer SegmentAnswer) (task.Status, string) {
 	default:
 		return task.StatusSettled, ""
 	}
-}
-
-// lastOutputBody reports the assistant text the chain of one site ended on: the body of
-// the last output fact it committed, or none beside a chain that closed no segment.
-func (l *Loop) lastOutputBody(addr event.Address) string {
-	facts := l.sessionFacts(addr)
-	for at := len(facts) - 1; at >= 0; at-- {
-		if facts[at].Type == event.TypeAgentOutput {
-			return facts[at].Message.Content
-		}
-	}
-	return ""
 }
 
 // modelFlight is the model decision one address runs: the range it serves and
@@ -1576,8 +1723,20 @@ func (l *Loop) nextDecisionID(inv Invocation) event.DecisionID {
 	return event.DecisionID(fmt.Sprintf("decision-%s-%d", inv.InvocationID, l.seq))
 }
 
+// intakeWindow bounds how many ended ranges keep their backflow bookkeeping in this
+// loop: a range is minted per drive and per consumption segment, so a resident run
+// mints one per segment, and the bookkeeping of the least recently ended range leaves
+// the map once this many ended ranges stand in it. A range that has not ended is never
+// recycled, so a drive in flight keeps the read set it accumulated.
+const intakeWindow = 4096
+
 // intakeFor returns the backflow intake of one invocation, creating it on first
 // use.
+//
+// - A range that ended long enough ago mints an empty intake again: the address it ran
+// at is not kept beside the recycled entry, so a notification landing after that many
+// further ranges of the session commits no notice fact and is reported by its task
+// account alone.
 func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -1587,6 +1746,28 @@ func (l *Loop) intakeFor(invocationID event.InvocationID) *intake {
 		l.intakes[invocationID] = in
 	}
 	return in
+}
+
+// retireIntake records that one range ended, so the window may recycle its
+// bookkeeping: the settled cache, the waits and the read/observed sets of the range
+// are read by nothing once the range ended, and a resident run mints a range per
+// segment.
+func (l *Loop) retireIntake(invocationID event.InvocationID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.retireIntakeLocked(invocationID)
+}
+
+// retireIntakeLocked appends one ended range to the recycle order and drops the
+// least recently ended ranges past the window. The read is taken under the lock the
+// creation of every intake takes, so a recycled entry is never one a drive reopens.
+func (l *Loop) retireIntakeLocked(invocationID event.InvocationID) {
+	l.ended = append(l.ended, invocationID)
+	for len(l.ended) > intakeWindow {
+		oldest := l.ended[0]
+		l.ended = l.ended[1:]
+		delete(l.intakes, oldest)
+	}
 }
 
 // intake is one invocation's backflow intake: the address its range runs at,

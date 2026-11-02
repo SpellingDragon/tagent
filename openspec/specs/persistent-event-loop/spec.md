@@ -3,6 +3,9 @@
 ## Purpose
 
 持久事件循环:一个常驻 goroutine 反应式地 drain 事件邮箱、合并为一条消息、调用 `RunFlow` 执行一个 turn,并将 `task_settled` 等一等事件作为新 turn 的触发源。循环在 `Flow.Run` 返回时不退出,仅在显式 `StopLoop`(loopCtx 取消)时退出。
+
+> **superseded（2026-11-02 核验）**：本规范描述的「事件邮箱 drain + `FrameworkFlowAdapter.RunFlow`」常驻循环已退役。现实现是每地址一个常驻消费实例（`runtime/agent.Loop` + `Consumer`）：输入与通知是会话事件链上的事实，实例拉取驱动事实、闭合消费段、由 `WaitAnswer` 把该段的答案交回等待者。本规范保留为历史记录，其中的 `StopLoop`/mailbox/`RunFlow`/`AgentLoop` 名称不再对应实现；现行契约见 `openspec/specs/consumer-loop-convergence/spec.md` 与 `docs/wiki/agent/event-flow.md`。
+
 ## Requirements
 ### Requirement: Loop goroutine 持续运行不退出
 

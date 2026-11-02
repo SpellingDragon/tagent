@@ -32,18 +32,6 @@ type admittedCall struct {
 	taskID event.TaskID
 }
 
-// segmentResult is the answer one closed segment leaves for the entries that
-// wait on the inputs it consumed: the keys of those inputs, the aggregated
-// turn, and the named cause of a segment that closed beside a failure.
-type segmentResult struct {
-	consumed []event.EventID
-	turn     Turn
-	err      error
-	// trigger is the trigger-source stamp of the material that opened the
-	// segment, so the fresh bodies leave under the lineage the entry named.
-	trigger string
-}
-
 // segment is one in-flight consumption segment of an address: the range
 // identity the segment mints, the transcript it accumulated past the session
 // history it opened on, the decisions it ran, and the calls it admitted whose
@@ -126,16 +114,39 @@ type Consumer struct {
 	// that boots over no chain holds nothing to seed.
 	seeded   bool
 	flying   *segment
-	results  []segmentResult
 	segCount int
-	notify   chan struct{}
+	// answers indexes the closed answers by the key of every input the closing
+	// segment consumed, so an entry that starts waiting after its segment closed
+	// reads that answer by key instead of scanning a window of recent segments.
+	// order names the retained answers by the age they closed at, so the window
+	// evicts the oldest answer whole.
+	answers map[event.EventID]*closedAnswer
+	order   []*closedAnswer
+	// set is the consumption set this instance was mounted by: the instance is
+	// forgotten from that set and from the loop's registry when its loop ends.
+	set    *Consumers
+	notify chan struct{}
 }
 
-// segmentWindow bounds how many closed results stay readable for the entries
-// still waiting on them: an input is consumed by the segment that pulled it,
-// and a late reader finds that segment unless segmentWindow segments closed
-// beside the same input first.
-const segmentWindow = 16
+// answerWindow bounds how many closed answers stay readable by their input
+// keys: an input is consumed by the segment that pulled it, and a late reader
+// finds that answer unless answerWindow further segments closed on the same
+// address first. The count is of answers rather than of inputs, so a segment
+// that consumed a batch evicts one entry and not one per input.
+const answerWindow = 256
+
+// answerTTL bounds how long one closed answer stays readable by its input keys:
+// an entry that was admitted long before it waits reads the answer of a segment
+// that closed inside this window, and a wait that starts past it is answered by
+// the segment that consumes the input next rather than by a stale answer.
+const answerTTL = 5 * time.Minute
+
+// closedAnswer is one closed segment's answer as the entries waiting on its
+// inputs read it, beside the moment it closed.
+type closedAnswer struct {
+	answer SegmentAnswer
+	at     time.Time
+}
 
 // newConsumer assembles the consumption loop of one address over the loop that
 // drives its decisions.
@@ -149,25 +160,54 @@ func newConsumer(addr event.Address, loop *Loop, deliver SegmentDelivery) *Consu
 		read:    map[event.EventID]bool{},
 		taken:   map[event.EventID]bool{},
 		named:   map[event.EventID]bool{},
+		answers: map[event.EventID]*closedAnswer{},
 		notify:  make(chan struct{}),
 	}
 }
 
 // run is the resident loop: wait for a wake, consume everything that arrived,
-// wait again. A cancelled context ends the loop; the segments it left flying
-// are recovered by the restart from the chain, never by a second driver beside
-// this one.
+// wait again. A cancelled context ends the loop, and the segment it still flies
+// is closed by this loop before it returns (see abandonSegment): the closure
+// this stop promises is the loop's own, so a set that joins on this loop's done
+// channel reads a segment that really ended rather than one left flying.
+//
+// The turn of work between one wake and the next wait is registered as one
+// writer of the run's writer ledger, so the close of the run reads a loop that
+// still consumes as a writer that has not stopped — the flying segment it would
+// write beside included — instead of as an address at rest.
 func (c *Consumer) run(ctx context.Context) {
 	defer close(c.done)
+	defer c.loop.forgetInstance(c)
 	for {
 		select {
 		case <-ctx.Done():
+			c.abandonSegment()
 			return
 		case <-c.wake:
 		}
+		release := c.beginProduction()
 		c.consume(ctx)
+		// A consume that returned beside a cancelled context left the segment it flies
+		// behind: the loop closes it here, before its own stop is confirmed, so the
+		// writer registration covers that closure too.
+		cancelled := ctx.Err() != nil
+		if cancelled {
+			c.abandonSegment()
+		}
+		release()
+		if cancelled {
+			return
+		}
 		c.noteProgress()
 	}
+}
+
+// beginProduction registers one turn of this loop's work — the segment it flies
+// and the pull that opens one — as a writer of the run it belongs to, and
+// answers the confirmation that closes the registration when the loop returns
+// to its wait. A loop beside no writer ledger registers nothing.
+func (c *Consumer) beginProduction() func() {
+	return c.loop.beginWriter("consumer:" + string(c.addr.AgentID) + "/" + string(c.addr.SessionID))
 }
 
 // SetProgress attaches the pulse this loop reports each movement through, or
@@ -255,6 +295,10 @@ func (c *Consumer) consume(ctx context.Context) {
 // no wake waits to open one. The loop is the writer of its own address, so a loop
 // that rests writes nothing more at that site, and a close that reads it resting
 // reads a writer stopped rather than one merely paused.
+// - The first clause is the whole judgment of a dead loop: a loop whose run ended
+// leaves the segment it flew closed (see abandonSegment), so an ended loop beside a
+// segment still flying answers not resting here instead of reading its shutdown as
+// rest.
 func (c *Consumer) Resting() bool {
 	if c == nil {
 		return true
@@ -627,29 +671,120 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 		turn.Terminal = model.KindFailed
 		turn.Failure = strings.TrimSpace(cause.Error())
 	}
-	answer := SegmentAnswer{Turn: turn, Err: cause, Trigger: seg.trigger, Consumed: append([]event.EventID(nil), seg.consumed...)}
-	if c.deliver != nil {
+	answer := SegmentAnswer{
+		Turn:     turn,
+		Err:      cause,
+		Trigger:  seg.trigger,
+		Consumed: append([]event.EventID(nil), seg.consumed...),
+		Body:     assistantOf(outcome).Content,
+	}
+	c.settleSegment(ctx, seg, answer, true)
+	consumerDebug("tagent: consumer segment close invocation=%s decisions=%d terminal=%s consumed=%d",
+		seg.inv.InvocationID, len(turn.Decisions), turn.Terminal, len(seg.consumed))
+}
+
+// abandonSegment closes the segment this loop still flies when the loop itself is
+// cancelled: the stop of the address is answered by closing what it left flying,
+// so no segment outlives the loop that drove it and no entry waiting on one
+// blocks on a driver that already returned.
+//
+// - The abandoned answer is a cancellation by name: the entries waiting on the
+// segment read the named cause instead of the result that never arrived.
+// - It writes nothing: the transcript the segment accumulated is not committed and
+// no output fact lands, because the input that segment read stays owed on the chain
+// for the restart, and a committed transcript beside an uncommitted input would read
+// one fact as two.
+// - It hands nothing to the delivery face: no turn was committed, so no entry's
+// settle account closes behind an answer nobody produced. The results it paired are
+// read as orphaned exactly as the ones still awaited, so the notice of each drives
+// the follow-up that settles it.
+func (c *Consumer) abandonSegment() {
+	seg := c.flyingSegment()
+	if seg == nil {
+		return
+	}
+	answer := SegmentAnswer{
+		Turn: Turn{
+			InvocationID: seg.inv.InvocationID,
+			Decisions:    seg.decisions,
+			Terminal:     model.KindCancelled,
+			Failure:      ErrSegmentCancelled.Error(),
+		},
+		Err:      ErrSegmentCancelled,
+		Trigger:  seg.trigger,
+		Consumed: append([]event.EventID(nil), seg.consumed...),
+	}
+	c.settleSegment(context.Background(), seg, answer, false)
+	consumerDebug("tagent: consumer segment abandoned invocation=%s decisions=%d consumed=%d",
+		seg.inv.InvocationID, len(seg.decisions), len(seg.consumed))
+}
+
+// settleSegment lands the one answer of a closed segment and hands the address back
+// to the next pull: a committed answer leaves through the delivery face of the
+// address, the closed answer is indexed by the inputs it consumed so the entries
+// waiting on them read it, and the tasks the segment admitted but never paired are
+// read as orphaned. A segment that committed nothing (committed false) answers its
+// waiters and the book, and leaves the delivery face beside it.
+func (c *Consumer) settleSegment(ctx context.Context, seg *segment, answer SegmentAnswer, committed bool) {
+	if committed && c.deliver != nil {
 		c.deliver(ctx, c.addr, answer)
 		for _, taskID := range seg.paired {
 			c.awaited.Store(taskID, TaskConsumed)
 		}
+	} else if !committed {
+		for _, taskID := range seg.paired {
+			c.awaited.Store(taskID, TaskOrphaned)
+		}
 	}
+	// A committed answer beside no delivery face leaves the paired results awaited:
+	// the pairing a segment takes before it closes never answers consumed by itself.
 	for taskID := range seg.pending {
 		c.awaited.Store(taskID, TaskOrphaned)
 	}
 	c.mu.Lock()
 	c.flying = nil
-	c.results = append(c.results, segmentResult{consumed: seg.consumed, turn: turn, err: cause, trigger: seg.trigger})
-	if len(c.results) > segmentWindow {
-		c.results = c.results[len(c.results)-segmentWindow:]
-	}
+	c.indexAnswerLocked(answer)
 	notify := c.notify
 	c.notify = make(chan struct{})
 	c.mu.Unlock()
 	close(notify)
+	c.loop.retireIntake(seg.inv.InvocationID)
 	c.noteProgress()
-	consumerDebug("tagent: consumer segment close invocation=%s decisions=%d terminal=%s consumed=%d",
-		seg.inv.InvocationID, len(turn.Decisions), turn.Terminal, len(seg.consumed))
+}
+
+// indexAnswerLocked records one closed answer by the key of every input its segment
+// consumed and evicts the answers that no wait may read any more: the window keeps
+// the most recent answerWindow answers whole, and an answer older than answerTTL is
+// dropped by the read that finds it.
+func (c *Consumer) indexAnswerLocked(answer SegmentAnswer) {
+	closed := &closedAnswer{answer: answer, at: time.Now()}
+	for _, key := range answer.Consumed {
+		if key == "" {
+			continue
+		}
+		c.answers[key] = closed
+	}
+	c.order = append(c.order, closed)
+	for len(c.order) > answerWindow {
+		c.forgetAnswerLocked(c.order[0])
+	}
+}
+
+// forgetAnswerLocked drops one retained answer from the index and from the order the
+// window evicts by. A key that a later segment consumed keeps the answer of that
+// later segment: only the keys that still name this answer are removed.
+func (c *Consumer) forgetAnswerLocked(closed *closedAnswer) {
+	for _, key := range closed.answer.Consumed {
+		if held, ok := c.answers[key]; ok && held == closed {
+			delete(c.answers, key)
+		}
+	}
+	for at, held := range c.order {
+		if held == closed {
+			c.order = append(c.order[:at], c.order[at+1:]...)
+			break
+		}
+	}
 }
 
 // harvest pairs the results that arrived for the calls this segment admitted:
@@ -706,41 +841,82 @@ type SegmentDelivery func(ctx context.Context, addr event.Address, answer Segmen
 // SegmentAnswer is the closed-segment answer one waiting entry reads: the
 // aggregated turn, the named cause of a failed segment, the trigger-source
 // stamp the segment opened on, which names the lineage its answer leaves
-// under, and the keys of the inputs the segment consumed, so a face that
-// delivers the answer knows which entries that segment answered.
+// under, the keys of the inputs the segment consumed, so a face that
+// delivers the answer knows which entries that segment answered, and the body
+// its last decision produced, so the entry reads the answer of the segment it
+// waited on rather than whatever the chain ended at meanwhile.
 type SegmentAnswer struct {
 	Turn     Turn
 	Err      error
 	Trigger  string
 	Consumed []event.EventID
+	// Body is the assistant text the closing decision of this segment produced,
+	// or none beside a segment that produced no text or committed no turn.
+	Body string
 }
+
+// ErrSegmentCancelled reports a wait that the end of the consumption loop answers
+// instead of a segment: the loop that would have consumed the named inputs stopped,
+// so the inputs stay owed on the chain for a restart and the entry reads the named
+// cancellation instead of blocking on a driver that already returned.
+var ErrSegmentCancelled = errors.New("agent: the consumption loop ended before it answered the segment")
 
 // WaitAnswer waits for the segment that consumed any of the named input keys
 // and answers its aggregated turn. An input the flying segment already took
 // answers when that segment closes; an input no segment took yet answers when
-// the next pull drives one.
+// the next pull drives one. An input whose segment closed before this wait
+// began is found by its own key, so a late entry reads the answer of the
+// segment that consumed it rather than the answer of a segment that closed
+// beside it. A wait the end of the loop meets answers ErrSegmentCancelled.
 func (c *Consumer) WaitAnswer(ctx context.Context, keys []event.EventID) (SegmentAnswer, error) {
+	if c == nil {
+		return SegmentAnswer{}, ErrSegmentCancelled
+	}
 	for {
-		c.mu.Lock()
-		for _, res := range c.results {
-			for _, key := range keys {
-				for _, consumed := range res.consumed {
-					if consumed == key {
-						answer := SegmentAnswer{Turn: res.turn, Err: res.err, Trigger: res.trigger, Consumed: append([]event.EventID(nil), res.consumed...)}
-						c.mu.Unlock()
-						return answer, res.err
-					}
-				}
-			}
+		if answer, ok := c.answerFor(keys); ok {
+			return answer, answer.Err
 		}
+		c.mu.Lock()
 		notify := c.notify
 		c.mu.Unlock()
 		select {
 		case <-notify:
+		case <-c.done:
+			if answer, ok := c.answerFor(keys); ok {
+				return answer, answer.Err
+			}
+			return SegmentAnswer{}, ErrSegmentCancelled
 		case <-ctx.Done():
 			return SegmentAnswer{}, ctx.Err()
 		}
 	}
+}
+
+// answerFor reports the closed answer of the newest segment that consumed any of the
+// named keys, and whether one stands readable at all: an answer past answerTTL names
+// a segment no entry may still be waiting on, and is dropped by the read that finds
+// it rather than answered.
+func (c *Consumer) answerFor(keys []event.EventID) (SegmentAnswer, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var newest *closedAnswer
+	for _, key := range keys {
+		closed, held := c.answers[key]
+		if !held {
+			continue
+		}
+		if time.Since(closed.at) > answerTTL {
+			c.forgetAnswerLocked(closed)
+			continue
+		}
+		if newest == nil || closed.at.After(newest.at) {
+			newest = closed
+		}
+	}
+	if newest == nil {
+		return SegmentAnswer{}, false
+	}
+	return newest.answer, true
 }
 
 // Done reports the channel that closes when the consumption loop ended.
@@ -821,30 +997,17 @@ func NewConsumers(loop *Loop, base context.Context, deliver SegmentDelivery) *Co
 // instance mounts for every complete agent address the run drives, never for the
 // entry agent alone.
 //
-// - Exactly one instance per address: the second Ensure of an address answers the instance already mounted, so one address never runs two drivers of its own decisions.
+// - Exactly one instance per address: the instance belongs to the loop, not to the
+// set. A second Ensure of an address — from this set or from any other set mounted
+// over the same loop — answers the instance the loop already carries, so one address
+// never runs two drivers of its own decisions, however many sets were mounted.
 // - The lifecycle is the run's: an instance lives as long as the context the set was built under, and a set that stopped mounts none, so a call arriving beside a drained run answers no instance instead of starting a driver beside the drain.
 // - The loop resumes behind the last agent_output the chain carries — the inputs past it are the material a restart still owes — and a chain beside no agent_output at all resumes from its head, so an unanswered input stays owed instead of vanishing behind a restart.
 func (cs *Consumers) Ensure(addr event.Address) *Consumer {
 	if cs == nil || !addr.IsComplete() {
 		return nil
 	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	if cs.stopped {
-		return nil
-	}
-	if consumer, ok := cs.live[addr]; ok {
-		return consumer
-	}
-	consumer := newConsumer(addr, cs.loop, cs.deliver)
-	consumer.turnContext = cs.turnContext
-	consumer.progress = cs.progress
-	consumer.cursor = lastOutputOf(cs.loop.sessionFacts(addr))
-	ctx, cancel := context.WithCancel(cs.base)
-	consumer.cancel = cancel
-	cs.live[addr] = consumer
-	go consumer.run(ctx)
-	return consumer
+	return cs.loop.instanceFor(addr, cs)
 }
 
 // lastOutputOf reports the identity of the last agent_output fact one chain
@@ -856,6 +1019,45 @@ func lastOutputOf(facts []event.Event) event.EventID {
 		}
 	}
 	return ""
+}
+
+// mountLocked assembles and starts the instance one address of one loop runs on, and
+// answers none beside a set that stopped. The caller holds the registry lock of the
+// loop, so the instance it answers is the one the loop records for that address; the
+// cursor is the chain position the caller read outside that lock.
+func (cs *Consumers) mountLocked(l *Loop, addr event.Address, cursor event.EventID) *Consumer {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.stopped {
+		return nil
+	}
+	if consumer, held := cs.live[addr]; held {
+		return consumer
+	}
+	consumer := newConsumer(addr, l, cs.deliver)
+	consumer.set = cs
+	consumer.turnContext = cs.turnContext
+	consumer.progress = cs.progress
+	consumer.cursor = cursor
+	ctx, cancel := context.WithCancel(cs.base)
+	consumer.cancel = cancel
+	cs.live[addr] = consumer
+	go consumer.run(ctx)
+	return consumer
+}
+
+// forget drops one ended instance from this set's live view, so a set that stopped
+// answers resting instead of naming a driver that already returned. A set beside nil
+// drops nothing.
+func (cs *Consumers) forget(consumer *Consumer) {
+	if cs == nil || consumer == nil {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if held, ok := cs.live[consumer.addr]; ok && held == consumer {
+		delete(cs.live, consumer.addr)
+	}
 }
 
 // binding reports the binding this address decides on, or nil while its material names
@@ -898,13 +1100,10 @@ func (cs *Consumers) Wake(addr event.Address) {
 
 // Has reports whether one address carries a resident consumption loop.
 func (cs *Consumers) Has(addr event.Address) bool {
-	if cs == nil {
+	if cs == nil || cs.loop == nil {
 		return false
 	}
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	_, ok := cs.live[addr]
-	return ok
+	return cs.loop.drivesAddress(addr)
 }
 
 // Resting reports whether every loop this set mounted stands between segments,
@@ -930,9 +1129,9 @@ func (cs *Consumers) Resting() bool {
 
 // Stop ends every consumption loop this set owns and answers only once each of
 // them returned: the loops answer their done channels, the segment a loop still
-// flew is closed by that loop — its commit included — and no further instance
-// mounts for any address. The segments the ended loops left flying stay on the
-// chain for a restart.
+// flew is closed by that loop — the answer of it reached to the entries waiting on
+// it and its calls read as orphaned — and no further instance mounts for any
+// address. The segments the ended loops left flying stay on the chain for a restart.
 //
 // The join is the stop itself, not a courtesy beside it: a loop is the writer of
 // its own address, so a set that returned while a loop still unwound a segment
@@ -957,6 +1156,10 @@ func (cs *Consumers) Stop() {
 	for _, consumer := range loops {
 		<-consumer.done
 	}
+	// The instances this set mounted leave the loop's registry once they really
+	// ended, so the address that mounts next is a new driver instead of the dead
+	// one this set stopped behind.
+	cs.loop.forgetInstancesOf(cs)
 }
 
 // ErrShutdownRefused and ErrDrainUnsettled are the named refusals of the close:

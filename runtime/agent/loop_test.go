@@ -1507,7 +1507,7 @@ func TestBackflowWakesSelfRegisteredResidents(t *testing.T) {
 			submitted <- submission{answer: answer, err: err}
 		}()
 
-		resident := loop.residentsOf().Ensure(backflowNestedSite)
+		resident := loop.residentOf().Ensure(backflowNestedSite)
 		if resident == nil {
 			t.Fatalf("the set the loop mounted for itself holds no instance of %s", backflowNestedSite.SessionID)
 		}
@@ -1535,7 +1535,7 @@ func TestBackflowWakesSelfRegisteredResidents(t *testing.T) {
 			t.Fatal("the delegated turn never answered: the settled result woke no resident loop")
 		}
 
-		if again := loop.residentsOf().Ensure(backflowNestedSite); again != resident {
+		if again := loop.residentOf().Ensure(backflowNestedSite); again != resident {
 			t.Fatalf("the instance of %s = %p, want the one instance %p the address runs on", backflowNestedSite.SessionID, again, resident)
 		}
 		if outputs := backflowNestedOutputs(history, backflowNestedSite); len(outputs) != 1 || outputs[0].Message.Content != backflowNestedAnswer {
@@ -1554,7 +1554,7 @@ func TestBackflowWakesSelfRegisteredResidents(t *testing.T) {
 		loop.Backflow("invocation-idle", task.Notice{TaskID: "task-idle", Round: 1, Kind: task.NoticeSettled, Seq: 0, Event: "fact-idle"})
 
 		loop.mu.Lock()
-		consumers, resident := loop.consumers, loop.resident
+		consumers, resident := loop.consumers, loop.residentLoops
 		loop.mu.Unlock()
 		if consumers != nil || resident != nil {
 			t.Fatalf("sets beside a settled backflow = (attached %v, mounted %v), want none: the wake mounts no set of its own", consumers != nil, resident != nil)

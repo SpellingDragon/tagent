@@ -557,10 +557,10 @@ func TestConsumerWritesConsumptionBesideDelivery(t *testing.T) {
 		consumer.Wake()
 		admit.awaitAdmission(t)
 
-		if read := consumer.TaskState(receiptTask); read != TaskAwaited {
-			t.Fatalf("the admitted task reads %q beside the flying segment, want %q: no settled result stands there yet",
-				read, TaskAwaited)
-		}
+		// The admission receipt reaches the model before the loop records the task it
+		// admitted as awaited, so the check waits for that record instead of reading
+		// the book at the instant the tool answered.
+		rig.awaitState(t, consumer, TaskAwaited)
 
 		rig.loop.Backflow(event.InvocationID(string(addr.SessionID)+"#c1"), task.Notice{
 			TaskID: receiptTask,

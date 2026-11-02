@@ -823,6 +823,7 @@ func (h *Host) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error
 // a body a second time.
 //
 // - An entry whose context ended while its segment still flies answers the abandoned turn it asked for: the caller reads a cancelled turn beside no error, exactly as the direct drive answers one, and the segment stays with the loop that still flies it.
+// - An entry whose loop ended beside its input answers the same cancelled turn by name: the loop that would have consumed the input stopped, so the input stays owed on the chain and the entry reads the cancellation instead of a segment that will never close.
 // - Only the user address of the entry agent is remembered here: the follow-up turn a terminal notice fires lands at the address a user speaks through, so a turn of another declared agent never renames the user session of the host.
 func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Turn, error) {
 	now := time.Now()
@@ -847,7 +848,7 @@ func (h *Host) invokeConsumed(ctx context.Context, req InvokeRequest) (agent.Tur
 	consumer.Wake()
 	answer, err := consumer.WaitAnswer(ctx, keys)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, agent.ErrSegmentCancelled) {
 			return agent.Turn{InvocationID: req.InvocationID, Terminal: model.KindCancelled}, nil
 		}
 		return answer.Turn, err
