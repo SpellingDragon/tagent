@@ -304,7 +304,7 @@ PREFLIGHT_EVENT_STEPS = (
      ["--contract " + EVENT_CONTRACT, "--scope event-short", "--repeat 10"]),
     ("event integrity long",
      ["--scope event-long", '--seed "$seed"', '--window "$window"',
-      "--repeat 1", "--timeout 1200"]),
+      "--repeat 1", "--timeout 10800"]),
     ("event integrity mutations",
      ["check_event_integrity_mutations.py", "--all", "--json"]),
 )
@@ -395,14 +395,17 @@ def assert_event_producer_jobs(workflow):
     long_job = jobs["event-integrity-long"]
     long_step = step_with(long_job, "--scope event-long")
     long_run = long_step.get("run") or ""
-    # --timeout bounds ONE go test process, cold compile included: the
-    # 256-window shard measured 3086s end to end in a local -race run (seed 1),
-    # because the 256-token window makes every request assemble its history
-    # under the smallest budget the matrix names. 5400s bounds that shard at
-    # 1.75x and must fit inside the 120m job cap; the 32768-window shards still
-    # measure 787-1111s (run 41216521132).
+    # --timeout bounds ONE go test process, cold compile included. The 256-token
+    # window makes the age fold due on every turn (its threshold is 307 bytes,
+    # smaller than one turn's material), so that shard files a compress request
+    # and a compress product beside every turn and rewrites the ledger shard on
+    # every commit. Run 41406032474 sampled it at 108 of 121 host generations in
+    # 5251s (seed 42) and 5153s (seed 7); per-generation cost grows with the
+    # chain, so the 13 generations left project to ~7400s. 10800s bounds that
+    # shard at ~1.46x and must fit inside the 240m job cap; the 32768-window
+    # shards measure 1410-1680s on the same run.
     for needle in ('--seed "$SEED"', '--window "$WINDOW"', "--repeat 1",
-                   "--timeout 5400",
+                   "--timeout 10800",
                    '--out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"'):
         if needle not in long_run:
             raise AssertionError(
@@ -414,10 +417,11 @@ def assert_event_producer_jobs(workflow):
     long_env = long_step.get("env") or {}
     if long_env.get("SEED") != "${{ matrix.seed }}" or long_env.get("WINDOW") != "${{ matrix.window }}":
         raise AssertionError("matrix values must reach the long command via env")
-    if long_job.get("timeout-minutes") != 120:
+    if long_job.get("timeout-minutes") != 240:
         raise AssertionError(
             "event-integrity-long timeout-minutes must be the measured budget "
-            "(256-window shard 3086s local, 5400s --timeout, 120m job cap)")
+            "(256-window shard ~7400s projected from run 41406032474, 10800s "
+            "--timeout, 240m job cap)")
     assert_single_artifact_upload(
         "event-integrity-long", long_job,
         "event-integrity-long-seed-${{ matrix.seed }}-window-${{ matrix.window }}",

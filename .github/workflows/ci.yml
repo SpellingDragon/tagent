@@ -232,14 +232,25 @@ jobs:
   event-integrity-long:
     runs-on: ubuntu-latest
     # 03.11 measured all six shards end to end at 533-878s before the resident
-    # consumption loops landed. The 32768-token shards still measure 787-1111s
-    # (run 41216521132), but the 256-token window assembles every request's
-    # history under the smallest budget the matrix names, and that shard now
-    # measures 3086s end to end in a local -race run (seed 1, window 256): 2400s
-    # killed it mid-shard and the 45m job cap left no room either. --timeout 5400
-    # bounds one shard at 1.75x the measurement, and timeout-minutes 120 (7200s)
-    # leaves ~1800s for checkout, toolchain setup, tmux install and the upload.
-    timeout-minutes: 120
+    # consumption loops landed. The 32768-token shards still pass comfortably
+    # (1340-1600s of test time on run 41406032474). The 256-token window is the
+    # slowest shard by construction, not by accident: its fold threshold is 256
+    # tokens x 4 chars/token x 0.3 = 307 bytes, which is less than the material of
+    # one turn, so the age fold is due on every turn and files a compress request
+    # and a compress product beside it (measured on the production Drive path over
+    # 300 turns: 3.99 committed facts per turn at window 256 against 2.02 at
+    # window 32768), and every commit rewrites the ledger's shard snapshot. On run
+    # 41406032474 that shard reached host generation 108 of 121 in 5153.1s (seed
+    # 7) and 5251.0s (seed 42) before failing on the delegation assertion fixed in
+    # bc506fbb; seed 1 was killed at the 5400s bound and wrote no evidence at all.
+    # Per-generation cost grows with the chain, so the 13 generations left project
+    # to ~7400s end to end. --timeout 10800 bounds one shard at ~1.46x that
+    # projection, and timeout-minutes 240 (14400s) leaves 3600s for checkout,
+    # toolchain setup, tmux install and the upload. The 5400s this replaces was
+    # calibrated on a 3086s local -race run x 1.75, which assumed a runner costs
+    # what the measuring workstation costs; a shard the bound kills uploads no
+    # evidence, so the bound has to leave the shard room to write its record.
+    timeout-minutes: 240
     strategy:
       # A red shard must not cancel the other five: every combination keeps
       # its own evidence.
@@ -263,14 +274,14 @@ jobs:
       # shards add up to 7200 inputs / 720 restarts, and a single shard is never
       # written as 7200/720. --repeat 1 keeps one independent process per
       # combination. --timeout bounds ONE go test process, cold build included:
-      # the 256-window shard measured 3086s in a local -race run, so 5400s
-      # (1.75x) replaces the 2400s calibrated when the 32768 shards were the
-      # slowest (787-1111s on run 41216521132).
+      # the 256-window shard projects to ~7400s from the 108-generation sample on
+      # run 41406032474, so 10800s (~1.46x) replaces the 5400s calibrated on a
+      # 3086s local run x 1.75.
       - name: Event integrity long (one 1200-input/120-restart shard)
         env:
           SEED: ${{ matrix.seed }}
           WINDOW: ${{ matrix.window }}
-        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 5400 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
+        run: python3 scripts/scenarios/run_runtime_scenarios.py --contract golden/runtime/event_integrity_scenarios.json --scope event-long --seed "$SEED" --window "$WINDOW" --repeat 1 --timeout 10800 --out "$RUNNER_TEMP/event-long/seed-$SEED-window-$WINDOW"
       - name: Upload event-long shard evidence
         if: always()
         uses: actions/upload-artifact@v4
