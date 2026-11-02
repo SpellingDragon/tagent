@@ -115,6 +115,28 @@ func TestUnsettledSingleSource(t *testing.T) {
 		}
 	})
 
+	t.Run("an input round the chain holds with no answer keeps the run from rest", func(t *testing.T) {
+		registry, _ := invariantRegistry(t)
+		source := &scriptedUnsettled{
+			registry: registry,
+			manager:  NewMemoryManager(registry, nil),
+			pending: []UnsettledInput{{
+				Address:  invariantTaskAddress,
+				Instance: "instance-a",
+				Event:    "4-abcd",
+				Source:   invariantTaskAddress,
+				Reason:   "the session chain holds this input round with no answer",
+			}},
+		}
+		read := ReadUnsettled(ctx, source, source.CommitSeq)
+		if len(read.Inputs) != 1 || read.Inputs[0].Event != "4-abcd" {
+			t.Fatalf("unanswered input rounds = %+v, want the round the chain holds listed beside its driving fact", read.Inputs)
+		}
+		if read.Resting() {
+			t.Fatalf("criterion over an unanswered input round = %+v, want the run kept from rest", read)
+		}
+	})
+
 	t.Run("no_second_criterion", func(t *testing.T) {
 		registry, _ := invariantRegistry(t)
 		taskID := invariantRegister(t, registry, "call-1", "dedup-1")
