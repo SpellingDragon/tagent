@@ -11,7 +11,7 @@
 
 #### 1. send 职责重定义：跨 task、会话通信，不再出网
 
-- **内容**：`send` 的唯一职责是跨 task、会话通信。参数面收敛为 `target` 对象（二选一：`{"task": …}` 重入/续行 task，或 `{"agent": …, "session": …}` 投递同级会话）+ `content`（上限 8KiB，超限具名拒绝）；Declaration 只承诺这两类寻址，不再承诺“送达本次调用的用户会址”。回执三态不变：成功裸 `ok`、拒绝 `[send_denied] <reason>`、hold `[send_held] <reason>`；error 只留给参数形状非法。
+- **内容**：`send` 的唯一职责是跨 task、会话通信。参数面收敛为 `target` 对象（二选一：`{"task": …}` 重入/续行 task，或 `{"agent": …, "session": …}` 投递同级会话）+ `content`（上限 8KiB，超限具名拒绝）；Declaration 只承诺这两类寻址，不再承诺“送达本次调用的用户会址”。回执两态：成功裸 `ok`（语义是送达——任务形态待该轮首个 commit 落地、会话形态待入链，拒绝即 `[send_denied] <reason>`，拒收也落一条 delivery 事实）；治理挂起不在 send 方言内，走受理回执的 `task.HoldReceipt` 形状；error 只留给参数形状非法。
 - **影响范围**：任一 agent 的模型工具面；教模型“用 send 说话到渠道”的部署提示、skill 与自动化；`assembly/host_tools.go` 的 send 声明、参数解析与分派面。
 - **触发条件**：模型调 `send`；参数面仍按旧的单参数形态（只给 `content`）调用——缺 `target` 现以 `[send_denied]` 拒绝，不再默认投给本次调用的用户会址；部署提示仍把 send 说成对用户说话的通路。
 - **自查方法**：`go test ./assembly -run '^TestSendDeclarationRewrite$' -count=1`（负锚子测 `declaration_has_no_channel_wording`：声明出现“user address”/“deliver to the user”即红）与 `go test ./assembly -run '^TestSendTargetResolution$' -count=1`（负锚：双目标同现 / 皆缺 / 未知字段逐个具名拒绝）；工具面观察 `send` 的入参只有 `target`+`content`。

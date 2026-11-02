@@ -53,16 +53,20 @@ const (
 )
 
 // hostSendReceiptOK opens the frozen receipt dialect of one send call (design D6): a
-// delivered body answers the bare ok, and a body that was not delivered opens with one
-// of the two prefixed receipts, so a caller reads the three states apart from the text
-// alone.
+// delivered body answers the bare ok, and every body that was not delivered opens with
+// the refusal prefix, so a caller reads the two states apart from the text alone.
+//
+// The dialect carries two states because only two are reachable: a body handed to a task
+// is answered after the round's own input has landed, a body handed to a peer session is
+// answered after its fact committed, and nothing the send face can reach leaves the body
+// waiting. The governance hold is not a third state of this dialect — it is the admission
+// receipt's own shape (task.HoldReceipt), rendered before the tool runs, so a model that
+// reads a held call never reads a send receipt at all.
 const (
 	// hostSendReceiptOK is the whole receipt of a body the call delivered.
 	hostSendReceiptOK = "ok"
 	// hostSendDeniedPrefix opens a refusal receipt: nothing was delivered.
 	hostSendDeniedPrefix = "[send_denied] "
-	// hostSendHeldPrefix opens a hold receipt: the body waits for review.
-	hostSendHeldPrefix = "[send_held] "
 )
 
 // hostSendContentMax is the byte ceiling of one body the send tool delivers.
@@ -92,7 +96,7 @@ var _ trpctool.CallableTool = (*hostSendTool)(nil)
 // task state machine, so the tool itself holds no registry.
 type hostSendReentry interface {
 	// ReenterTask hands one body to the named task and reports the outcome of that
-	// re-entry beside the cause of a refusal or a hold.
+	// re-entry beside the cause of a refusal.
 	ReenterTask(ctx context.Context, taskID event.TaskID, content string) (deliveryOutcome, string)
 }
 
@@ -661,7 +665,7 @@ type hostSendTarget struct {
 func (t *hostSendTool) Declaration() *trpctool.Declaration {
 	return &trpctool.Declaration{
 		Name:        hostSendToolID,
-		Description: "Deliver one body across tasks and sessions: name the destination in the target argument. A refusal answers a [send_denied] result text, and a body held for review answers a [send_held] result text; the turn continues either way.",
+		Description: "Deliver one body across tasks and sessions: name the destination in the target argument. The bare ok says the body reached that destination, and a [send_denied] result text names why it did not; the turn continues either way.",
 		InputSchema: &trpctool.Schema{
 			Type: "object",
 			Properties: map[string]*trpctool.Schema{
@@ -685,8 +689,9 @@ func (t *hostSendTool) Declaration() *trpctool.Declaration {
 // answered as result text, and an error is reserved for a malformed argument shape.
 //
 // The call is read in the order design D6 freezes: the argument surface, then the one
-// destination it names, then the body. A body the host delivers answers the bare ok;
-// a refusal and a hold answer their own prefixed receipt. A destination this host
+// destination it names, then the body. A body the host delivered answers the bare ok, and
+// every body that reached nothing answers the named refusal — the two states are the whole
+// dialect, because a call this face can reach never leaves a body waiting. A destination this host
 // carries no face for is refused by name and never falls back to an outbound delivery:
 // the body named a task or a session, so sending it to the address of the call would
 // answer a different question than the model asked.
@@ -778,27 +783,21 @@ func (t *hostSendTool) dispatch(ctx context.Context, target *hostSendTarget, con
 	return t.receipt(t.session.DeliverToSession(ctx, target.Agent, target.Session, content))
 }
 
-// receipt renders the three states one dispatch reports through.
+// receipt renders the two states one dispatch reports through: a delivered body answers
+// the bare ok, and one that reached no target answers the named refusal. An outcome this
+// dialect cannot render — a body still waiting on a review — is answered as the refusal it
+// is, because a receipt that read as a delivery for a body nothing delivered would be the
+// one lie the dialect exists to prevent.
 func (t *hostSendTool) receipt(outcome deliveryOutcome, cause string) string {
-	switch outcome {
-	case deliverySent:
+	if outcome == deliverySent {
 		return hostSendReceiptOK
-	case deliveryHeld:
-		return t.held(cause)
-	default:
-		return t.denied(cause)
 	}
+	return t.denied(cause)
 }
 
 // denied renders one refusal as result text.
 func (t *hostSendTool) denied(reason string) string {
 	return hostSendDeniedPrefix + reason
-}
-
-// held renders one hold as result text: the body is waiting for review, not
-// delivered, and the text must not read as a delivery receipt.
-func (t *hostSendTool) held(reason string) string {
-	return hostSendHeldPrefix + reason
 }
 
 // hostUnknownFields names the argument fields outside the named declaration, sorted so

@@ -111,7 +111,7 @@
 
 ### Requirement: 治理可挂起
 
-risk_rules SHALL 可对 send 跨会话形态配 critical：hold 时回执 `[send_held]`（不得报为送达），批准后恰补投一次，拒绝则丢弃并留审计。
+risk_rules SHALL 可对 send 跨会话形态配 critical：挂起以受理回执的 `task.HoldReceipt` 形状回给模型（send 回执方言不含挂起态，不得报为送达），批准后恰补投一次，拒绝则丢弃并留审计。
 
 #### Scenario: hold 批准补投
 

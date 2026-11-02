@@ -45,14 +45,14 @@ agent 的模型工具面 SHALL 恰有一个通信工具 `send`；其 Declaration
 - **WHEN** content 超 8KiB
 - **THEN** 具名拒绝，无发送发生
 
-### Requirement: 回执三态
+### Requirement: 回执两态
 
-成功 SHALL 回裸 `ok`（凭据非报告，不含目标身份、无可转述措辞）；拒绝 SHALL 回 `[send_denied] <reason>`；审核 hold SHALL 回 `[send_held] <reason>`（不得报为已送达）；error SHALL 仅保留给参数形状非法（JSON 不可解析）。
+成功 SHALL 回裸 `ok`（凭据非报告，不含目标身份、无可转述措辞）——且 SHALL 只在正文确已送达后给出：任务形态待该轮首个 commit 落地，会话形态待正文入链；未送达 SHALL 回 `[send_denied] <reason>`；error SHALL 仅保留给参数形状非法（JSON 不可解析）。
 
 #### Scenario: hold 不冒充送达
 
 - **WHEN** 治理规则把一次 send 挂起
-- **THEN** 回执为 `[send_held]`，模型与用户均不得读到送达回执
+- **THEN** 模型读到的是受理回执的 `task.HoldReceipt` 形状，send 方言只答 `ok` 或 `[send_denied]`，送达回执不出现
 
 ### Requirement: 出网不由 send 承担
 

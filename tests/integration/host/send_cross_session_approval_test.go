@@ -107,13 +107,13 @@ func newSendApproveScene(t *testing.T) (*hostDriveScene, *approval.ApprovalManag
 //
 // The hold is rendered by the admission wrapper before the tool runs, so the text the
 // model reads is the runtime's own wait, paired with its call under the tool role. The
-// check states that the receipt claims no delivery in either dialect: neither the bare
-// ok of a delivered body nor the [send_held] result text the send face answers a body
-// it parks itself.
+// check states that the receipt claims no delivery in either shape: neither the bare ok of
+// a delivered body nor a refusal of the send dialect, because a held call never reached the
+// tool that answers in that dialect at all.
 func (s *hostDriveScene) awaitHeldSend(t *testing.T, callID string, approvals *approval.ApprovalManager) *approval.ApprovalRequest {
 	t.Helper()
 	receipt := s.awaitToolResult(t, callID)
-	if receipt == hostDriveReceiptOK || strings.HasPrefix(receipt, hostSendHeldPrefixProbe) {
+	if receipt == hostDriveReceiptOK || strings.HasPrefix(receipt, hostDriveDeniedProbe) {
 		t.Fatalf("the held send read back %q, want a wait that claims no delivery:\n%s", receipt, s.describe())
 	}
 	if !strings.Contains(receipt, "parked awaiting approval") {
@@ -150,8 +150,8 @@ func (s *hostDriveScene) awaitToolResult(t *testing.T, callID string) string {
 	}
 }
 
-// hostSendHeldPrefixProbe is the hold prefix of the send receipt dialect as the anchor
-// reads it back from the model-visible text. It is written here because the prefix is a
-// private constant of the assembly package, and a check of the receipt dialect has to
-// name the text it refuses.
-const hostSendHeldPrefixProbe = "[send_held] "
+// hostDriveDeniedProbe is the refusal prefix of the send receipt dialect as the anchor reads
+// it back from the model-visible text. It is written here because the prefix is a private
+// constant of the assembly package, and a check of the receipt dialect has to name the text
+// it refuses. The dialect carries two states, so this is the only negative probe it needs.
+const hostDriveDeniedProbe = "[send_denied] "

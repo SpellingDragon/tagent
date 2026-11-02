@@ -243,9 +243,6 @@ func TestDeliveryReviewSend(t *testing.T) {
 		if !scriptedSawContent(provider, "[send_denied] ") {
 			t.Fatal("the send call read back no named denial, want the refusal of a call that names no destination")
 		}
-		if scriptedSawContent(provider, "[send_held] ") {
-			t.Fatal("the send call read back a held receipt; a hold is never a delivery, and a send made none to hold")
-		}
 
 		held := host.HeldDeliveries()
 		if len(held) != 1 {

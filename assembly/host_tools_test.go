@@ -151,12 +151,10 @@ func TestSendTargetConstants(t *testing.T) {
 	receipts := map[string]string{
 		"hostSendReceiptOK":    hostSendReceiptOK,
 		"hostSendDeniedPrefix": hostSendDeniedPrefix,
-		"hostSendHeldPrefix":   hostSendHeldPrefix,
 	}
 	wantReceipts := map[string]string{
 		"hostSendReceiptOK":    "ok",
 		"hostSendDeniedPrefix": "[send_denied] ",
-		"hostSendHeldPrefix":   "[send_held] ",
 	}
 	if drift := sendDialectDrift(wantReceipts, receipts); len(drift) > 0 {
 		t.Fatalf("receipts drift from design D6 = %v", drift)
@@ -188,6 +186,57 @@ func TestSendTargetConstants(t *testing.T) {
 			t.Fatal("a receipt renamed beside design D6 is reported as no drift")
 		}
 	})
+
+	t.Run("held_word_never_returns", func(t *testing.T) {
+		scanHeldWordAbsent(t)
+	})
+}
+
+// heldReceiptWord is the retired third receipt of the send dialect: the word a body held for
+// review used to be answered with, kept here as the one spelling a scan refuses. The spelling
+// is assembled from two pieces so this anchor does not report itself.
+const heldReceiptWord = "[send_" + "held] "
+
+// scanHeldWordAbsent refuses any return of the retired hold receipt: the word is read over the
+// product packages, the anchors that drive them and the specs that promise them, so a
+// reintroduction of the third state is red wherever it is written and not only in the
+// constant this package holds. Two scopes stay outside the scan on purpose: the archived
+// changes keep what the dialect was, and rewriting them would falsify the history they
+// record, and the deployment examples are prose of their own that the spec face does not
+// own.
+func scanHeldWordAbsent(t *testing.T) {
+	t.Helper()
+	roots := []string{"assembly", "tool", "runtime", "tests", filepath.Join("openspec", "specs")}
+	root := ".."
+	for _, scope := range roots {
+		base := filepath.Join(root, scope)
+		err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				if name := entry.Name(); name == ".git" || name == "node_modules" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil || info.Size() > 2<<20 {
+				return nil
+			}
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil
+			}
+			if strings.Contains(string(body), heldReceiptWord) {
+				t.Errorf("%s carries the retired hold receipt %q: the send dialect answers two states, and a body waiting on a review is held by the admission receipt beside this tool", path, heldReceiptWord)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("scan %s: %v", base, err)
+		}
+	}
 }
 
 // TestSendTargetResolution pins the destination surface of one send call: the one destination a call names.
@@ -218,7 +267,10 @@ func TestSendTargetResolution(t *testing.T) {
 			want    string
 		}{
 			{"sent", deliverySent, "", hostSendReceiptOK},
-			{"held", deliveryHeld, "parked for review", hostSendHeldPrefix + "parked for review"},
+			// A hold is not a state of this dialect: the word retired with the third state, so an
+			// outcome that is not a delivery renders as the named refusal and never as a receipt a
+			// reader could take for a delivery.
+			{"held", deliveryHeld, "parked for review", hostSendDeniedPrefix + "parked for review"},
 			{"refused", deliveryRefused, "the task is not settled", hostSendDeniedPrefix + "the task is not settled"},
 		}
 		for _, one := range cases {
