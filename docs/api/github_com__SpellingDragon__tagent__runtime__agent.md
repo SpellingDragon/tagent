@@ -819,6 +819,12 @@ func (d *Delegator) Submit(ctx context.Context, in DelegatedInput) (DelegatedAns
     The round runs beside the receipt the admission already returned, so the
     turn that issued the call never waits on it.
 
+func (d *Delegator) SubmitBeside(ctx context.Context, in DelegatedInput, started func(error)) (DelegatedAnswer, error)
+    SubmitBeside hands one delegated round over exactly as Submit does,
+    and reports the round's first commit to started: the caller that answers a
+    delivery receipt hands the body over here, so the receipt it returns is the
+    delivery rather than the acceptance of a round that may yet fail to land it.
+
 func (d *Delegator) TurnBorrow(taskID event.TaskID) (state.Borrow, error)
     TurnBorrow returns the borrowing face the delegated turn of one admitted
     delegation runs under. Every borrow it opens resolves on the generation
@@ -1405,6 +1411,12 @@ func (l *Loop) SubmitDelegatedBeside(ctx context.Context, in DelegatedInput, sta
     The report is the input's commit and nothing else: a round that lands its
     input and then fails still reported nil, because the body did arrive and
     what became of the round is its own terminal's to report.
+
+func (l *Loop) WakeAddress(addr event.Address)
+    WakeAddress signals the resident instance of one address that events arrived
+    for it: the face that lands a body beside a target it judged busy wakes that
+    target, so a round that closed between that judgment and the landing still
+    reads the body at its next pull.
 
 type NoticeFeed interface {
 	// NoticeBoundary reports the position the ended material of the named chain
