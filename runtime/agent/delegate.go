@@ -405,7 +405,6 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 		delegateDebug("tagent: delegation admitted result=dedup task=%s agent=%s call=%s", receipt.TaskID, issuer.AgentID, req.CallID)
 		return receipt, nil
 	}
-	fmt.Printf("DEBUG delegate admitted task=%q inv=%q call=%q target=%v issuer=%v\n", receipt.TaskID, req.InvocationID, req.CallID, req.Sites.Target, issuer)
 	record := req
 	record.Sites.Issuer = issuer
 	record.TaskID = receipt.TaskID
@@ -555,7 +554,6 @@ func (d *Delegator) complete(ctx context.Context, taskID event.TaskID, status ta
 		delegateDebug("tagent: delegation refused result=terminal task=%s status=%s", taskID, delegationStatusName(standing))
 		return task.Notice{}, fmt.Errorf("%w: %s", ErrDelegationTerminal, taskID)
 	}
-	fmt.Printf("DEBUG complete task=%q inv=%q kind=%v\n", taskID, entry.record.InvocationID, kind)
 	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact, Text: settleNoticeTextOf(text)}
 	envelope := task.Envelope{
 		Notice:         notice,
