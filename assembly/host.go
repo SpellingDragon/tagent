@@ -1003,7 +1003,8 @@ func (h *Host) settleTerminal(ctx context.Context, turn agent.Turn) error {
 //
 // - The material lands under the key the notification's own four-part identity derives, so a second attempt commits the same fact and is answered as the fact the chain already holds: the transcript carries the instruction once, however many processes try the notification.
 // - The key is named to the instance before the wake, because the attempt that died left the material behind the answer it closed on: the pull of a restarted process reads that position as material a closed segment already carried, and the account of the entry is what says this fact still drives.
-// - An entry whose task the flying segment already paired is answered here without a second turn: that segment settles the entry through its own delivery.
+// - An entry whose task the flying segment already paired is answered here without a second turn: that segment settles the entry through its own delivery, and the consumed state this reads is the one the segment writes inside that delivery, so a segment that paired the result and has not delivered yet leaves the task awaited and this call waits for the delivery instead of closing the entry on a pairing alone.
+// - A wait the settle window ends answers the state as it stands, so a segment still flying past the window leaves the notice turn driving beside it and the warning names the task.
 // - The segment that consumes the material answers this call only after its own delivery, so the settle account of the entry is registered here, under the key the material lands as and before the commit: the delivery face of the instance closes it beside the segment that consumed that key, and a segment that closed without reading the material leaves the account owed for the wake.
 func (h *Host) fireNoticeTurn(ctx context.Context, addr event.Address, fact event.Event) error {
 	if h == nil || h.run == nil {

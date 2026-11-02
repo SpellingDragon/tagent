@@ -2,6 +2,7 @@ package agentexample
 
 import (
 	"context"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
@@ -44,7 +45,9 @@ func (singleDecision) Close(context.Context, agent.CloseRequest) (agent.DrainRep
 var _ agent.Agent = singleDecision{}
 
 // ExampleAgent drives one invocation through the three faces of its execution: the
-// decision entry, the delegation it admits and the close that ends it.
+// decision entry, the delegation it admits and the close that ends it. The close names
+// the instant its budget fires, because a request naming none is refused by name before
+// the close takes any step.
 //
 // 契约: docs/wiki/agent/agent-architecture.md#module-position
 func ExampleAgent() {
@@ -67,7 +70,7 @@ func ExampleAgent() {
 	if err != nil {
 		return
 	}
-	report, err := face.Close(ctx, agent.CloseRequest{Address: inv.Address})
+	report, err := face.Close(ctx, agent.CloseRequest{Address: inv.Address, Timeout: time.Now().Add(30 * time.Second)})
 	if err != nil {
 		return
 	}

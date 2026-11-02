@@ -20,6 +20,8 @@ FUNCTIONS
 func ExampleAgent()
     ExampleAgent drives one invocation through the three faces of its execution:
     the decision entry, the delegation it admits and the close that ends it.
+    The close names the instant its budget fires, because a request naming none
+    is refused by name before the close takes any step.
 
 func ExampleApprovalBook()
     ExampleApprovalBook wires the loop's batch fuse onto a real approval

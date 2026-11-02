@@ -397,10 +397,12 @@ type Consumer struct {
 
 func (c *Consumer) AwaitTaskState(ctx context.Context, taskID event.TaskID) TaskState
     AwaitTaskState waits until the named task stops being awaited by a flying
-    segment and answers the settled state: the segment either pairs the result
-    (consumed) or closes beside it (orphaned). A wait the context ends answers
-    the state as it stands, so the caller decides over a named moment instead of
-    guessing across the window between admission and the segment's close.
+    segment and answers the settled state: the segment either delivers the
+    answer that pairs the result (consumed) or closes beside it (orphaned). The
+    pairing a segment takes before it closes never answers consumed by itself,
+    so the wait spans the whole window between admission and delivery. A wait
+    the context ends answers the state as it stands, so the caller decides over
+    a named moment instead of guessing across that window.
 
 func (c *Consumer) Done() <-chan struct{}
     Done reports the channel that closes when the consumption loop ended.
@@ -1520,15 +1522,17 @@ type SegmentDelivery func(ctx context.Context, addr event.Address, answer Segmen
     shape a loop driven by tests keeps.
 
 type TaskState string
-    TaskState names what became of one settled result on this address:
-    the flying segment still awaits it, a segment already paired it, or a closed
-    segment left it unpaired. The notice-driven follow-up reads the state to
-    know whether any consumer already took the result.
+    TaskState names what became of one settled result on this address: a flying
+    segment still awaits it, a segment delivered the answer that paired it,
+    or a closed segment left it unpaired. The notice-driven follow-up reads the
+    state to know whether any consumer already took the result.
 
 const (
-	// TaskAwaited: the flying segment admitted the task and has not paired it.
+	// TaskAwaited: the flying segment admitted the task and its delivery that
+	// pairs it has not landed yet.
 	TaskAwaited TaskState = "awaited"
-	// TaskConsumed: a segment paired the result already.
+	// TaskConsumed: a segment paired the result and delivered the answer of it.
+	// The pairing alone never answers this state.
 	TaskConsumed TaskState = "consumed"
 	// TaskOrphaned: the segment that admitted the task closed without pairing it.
 	TaskOrphaned TaskState = "orphaned"

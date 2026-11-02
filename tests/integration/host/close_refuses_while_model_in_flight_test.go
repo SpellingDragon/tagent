@@ -23,6 +23,8 @@ import (
 // - a cancelled request is never read as a stopped producer while the tool still runs
 // - a producer answering false keeps the drain open and only its real stop lets the close report one
 // - the close refuses new input before the drain empties and keeps refusing it afterwards
+// - a close naming no budget or two that disagree is refused by name beside a broken report that read nothing
+// - the run a refused close stood beside keeps its production flying, admits new input and still takes a work-ending close
 // 契约: docs/wiki/agent/execution-generations.md#lifecycle-convergence
 func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 	t.Run("a model in flight holds no task at all and is still named beside its unconfirmed stop", func(t *testing.T) {
@@ -270,6 +272,65 @@ func TestCloseRefusesWhileModelInFlight(t *testing.T) {
 		report, err = run.Close(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)})
 		if err != nil || !report.Drained {
 			t.Fatalf("close beside the stopped writers = (%+v, %v), want the quiesce reached once every writer stopped", report, err)
+		}
+	})
+
+	t.Run("close_missing_timeout_refused_before_side_effects", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		run, _, tool := newSlowToolRun(t, ctx)
+		addr := event.Address{AgentID: "agent-a", SessionID: "session-close-refused"}
+		driving := make(chan error, 1)
+		go func() {
+			_, err := run.Invoke(ctx, assembly.InvokeRequest{
+				InvocationID: "inv-close-refused",
+				Address:      addr,
+				Input:        []model.Message{{Role: model.RoleUser, Content: "hello"}},
+			})
+			driving <- err
+		}()
+		tool.awaitCall(t)
+
+		report, err := run.Close(ctx, agent.CloseRequest{Address: addr})
+		if !errors.Is(err, agent.ErrCloseTimeoutMissing) {
+			t.Fatalf("close naming no timeout = %v, want the named refusal %v", err, agent.ErrCloseTimeoutMissing)
+		}
+		if report.Outcome != agent.CloseBroken || report.Drained || len(report.Unsettled) != 0 {
+			t.Fatalf("report beside the refused close = %+v, want a broken report that read no obligation", report)
+		}
+		if tool.finished() {
+			t.Fatal("the tool confirmed its stop beside the refused close, want the production untouched")
+		}
+
+		report, err = run.Close(ctx, agent.CloseRequest{
+			Address:  addr,
+			Timeout:  time.Now().Add(time.Second),
+			Deadline: time.Now().Add(2 * time.Second),
+		})
+		if !errors.Is(err, agent.ErrCloseTimeoutConflict) {
+			t.Fatalf("close naming two disagreeing timeouts = %v, want the named refusal %v", err, agent.ErrCloseTimeoutConflict)
+		}
+		if report.Outcome != agent.CloseBroken || report.Drained || len(report.Unsettled) != 0 {
+			t.Fatalf("report beside the conflicting close = %+v, want a broken report that read no obligation", report)
+		}
+
+		tool.unblock()
+		if err := <-driving; err != nil {
+			t.Fatalf("invoke the refused close stood beside = %v, want the drive untouched", err)
+		}
+		if !tool.finished() {
+			t.Fatal("the drive ended before the released production returned, want the production really run out")
+		}
+		if _, err := run.Invoke(ctx, assembly.InvokeRequest{
+			InvocationID: "inv-beside-refusal",
+			Address:      addr,
+			Input:        []model.Message{{Role: model.RoleUser, Content: "after the refusal"}},
+		}); err != nil {
+			t.Fatalf("invoke beside the refused close = %v, want the run still admitting input", err)
+		}
+		report, err = run.Close(ctx, agent.CloseRequest{Address: addr, Timeout: time.Now().Add(10 * time.Second)})
+		if err != nil || !report.Drained || report.Outcome != agent.CloseQuiesced {
+			t.Fatalf("close beside the run the refusals stood beside = (%+v, %v), want the quiesce the refusals left reachable", report, err)
 		}
 	})
 }

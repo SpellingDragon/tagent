@@ -61,20 +61,24 @@ func (r *Run) Invoke(ctx context.Context, req InvokeRequest) (agent.Turn, error)
 	return r.loop.Drive(ctx, inv)
 }
 
-// Close closes the runtime's own side for the named session address: new input is
-// refused first, the run quiesces to its fixed point, and only then do the
-// producers behind it stop and the session side close. The close reports one of
-// three states: a run at rest, a run that spent its budget with work still on
-// the chain, or a run it could not judge. The session side closes after the
-// quiesce, so the mailbox bookkeeping an in-flight tool result still lands
-// through stays open exactly as long as the quiesce may need it. A repeated
-// close returns the first result and runs no second quiesce.
-// The redline list (3 rules):
+// Close closes the runtime's own side for the named session address: the request
+// is judged first, new input is refused next, the run quiesces to its fixed
+// point, and only then do the producers behind it stop and the session side
+// close. The close reports one of three states: a run at rest, a run that spent
+// its budget with work still on the chain, or a run it could not judge. The
+// session side closes after the quiesce, so the mailbox bookkeeping an in-flight
+// tool result still lands through stays open exactly as long as the quiesce may
+// need it. A repeated close returns the first result and runs no second quiesce.
+// The redline list (4 rules):
+// MUST judge the timeout of the close before any side effect it would take, so a close naming none is refused with the run untouched.
 // MUST refuse new input before the first quiesce of the close.
 // MUST judge the run by the one rest criterion, never by an emptied queue or an elapsed wait.
 // MUST NOT report a run at rest while a writer has not stopped.
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error) {
 	timeout, timeoutErr := req.Resolve()
+	if timeoutErr != nil {
+		return agent.DrainReport{Outcome: agent.CloseBroken}, timeoutErr
+	}
 	r.mu.Lock()
 	r.closing = true
 	r.mu.Unlock()
@@ -88,7 +92,7 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 	report := agent.DrainReport{
 		Unsettled: mergeUnsettled(r.unsettledObligations(read), agent.WriterObligations(writers), landingObligations(landing)),
 		Drained:   drained,
-		Outcome:   closeOutcome(read, drained, timeoutErr),
+		Outcome:   closeOutcome(read, drained),
 	}
 	if req.Address.IsComplete() {
 		if closeErr := r.store.CloseSession(ctx, req.Address); closeErr != nil && !errors.Is(closeErr, state.ErrUnknownTarget) {
@@ -96,7 +100,7 @@ func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainRep
 		}
 	}
 	if report.Outcome == agent.CloseBroken {
-		return report, brokenCloseReason(read, timeoutErr)
+		return report, brokenCloseReason(read)
 	}
 	return report, nil
 }
@@ -148,12 +152,9 @@ func (r *Run) restoreOwed(ctx context.Context) error {
 	return r.store.RestoreOwed(ctx)
 }
 
-// brokenCloseReason names why one close could not judge the run: the timeout the
-// request never named, or the criterion that could not be read.
-func brokenCloseReason(read task.Unsettled, timeoutErr error) error {
-	if timeoutErr != nil {
-		return timeoutErr
-	}
+// brokenCloseReason names why one close could not judge the run: the criterion
+// that could not be read.
+func brokenCloseReason(read task.Unsettled) error {
 	return fmt.Errorf("%w: %s", agent.ErrDrainUnsettled, read.Unjudged)
 }
 
@@ -419,11 +420,9 @@ func mergeUnsettled(sets ...[]agent.UnsettledObligation) []agent.UnsettledObliga
 
 // closeOutcome names the state one close ended in: a run at rest is quiesced, a
 // run whose criterion answered outstanding work is cut, and a run whose
-// criterion could not be read beside a usable budget is broken.
-func closeOutcome(read task.Unsettled, drained bool, timeoutErr error) agent.CloseOutcome {
+// criterion could not be read is broken.
+func closeOutcome(read task.Unsettled, drained bool) agent.CloseOutcome {
 	switch {
-	case timeoutErr != nil:
-		return agent.CloseBroken
 	case read.Unjudged != "":
 		return agent.CloseBroken
 	case read.Resting() && drained:

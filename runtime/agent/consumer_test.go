@@ -12,6 +12,9 @@ import (
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	"github.com/SpellingDragon/tagent/runtime/task"
+
+	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 const (
@@ -509,4 +512,384 @@ func (r *residentInstanceRig) instances() int {
 	r.consumers.mu.Lock()
 	defer r.consumers.mu.Unlock()
 	return len(r.consumers.live)
+}
+
+const (
+	// receiptEntryAgent is the agent the receipt checks drive.
+	receiptEntryAgent = "agent-a"
+	// receiptSession is the session its address runs in.
+	receiptSession = "session-receipt"
+	// receiptAdmitName is the native tool that admits one call as a task.
+	receiptAdmitName = "admit"
+	// receiptCallID is the native call that admits the task.
+	receiptCallID = "call-admit"
+	// receiptTask is the task the admission answers with, and therefore the
+	// identity the settle notice names.
+	receiptTask = event.TaskID("task-receipt")
+	// receiptInput is the material the check lands on the address.
+	receiptInput = "run the admitted call"
+	// receiptAnswer is the body the segment answers the settled result with.
+	receiptAnswer = "the answer the waiting entry is closed on"
+)
+
+// TestConsumerWritesConsumptionBesideDelivery pins when one settled result is read as consumed.
+// - negative: a segment that paired the settled result of a task and has not delivered yet leaves the task awaited, so nothing may write the receipt of its entry
+// - negative: the delivery face reads the task awaited at the moment it is handed the answer, so the receipt never precedes the delivery that closes it
+// - positive: the consumption is written beside that delivery, and the entry the notice drove is closed on a turn that really delivered
+// - the paired result is the observation of its call in the next decision, so the pairing the check holds is the one the segment really took
+//
+// 契约: docs/wiki/agent/event-flow.md#e2e-turn-sequence
+func TestConsumerWritesConsumptionBesideDelivery(t *testing.T) {
+	t.Run("notice_receipt_waits_for_segment_delivery", func(t *testing.T) {
+		behaviour := newReceiptScript(
+			receiptStep{calls: []model.ToolCall{receiptCall(receiptCallID, receiptAdmitName)}},
+			receiptStep{park: true, answer: receiptAnswer},
+		)
+		admit := &receiptAdmit{taskID: receiptTask, admitted: make(chan struct{}, 1)}
+		rig := newReceiptRig(t, behaviour, []trpctool.Tool{admit})
+		addr := receiptAddress()
+		rig.landInput(addr, receiptInput)
+		consumer := rig.consumers.Ensure(addr)
+		if consumer == nil {
+			t.Fatalf("the instance of %s/%s = nil, want one instance to drive the material", addr.AgentID, addr.SessionID)
+		}
+		rig.read(consumer)
+		consumer.Wake()
+		admit.awaitAdmission(t)
+
+		if read := consumer.TaskState(receiptTask); read != TaskAwaited {
+			t.Fatalf("the admitted task reads %q beside the flying segment, want %q: no settled result stands there yet",
+				read, TaskAwaited)
+		}
+
+		rig.loop.Backflow(event.InvocationID(string(addr.SessionID)+"#c1"), task.Notice{
+			TaskID: receiptTask,
+			Kind:   task.NoticeSettled,
+			Event:  event.EventID("fact-receipt"),
+		})
+		consumer.Wake()
+		behaviour.awaitRound(t, 2, "the decision the paired result drove")
+
+		paired := behaviour.requestRound(1)
+		if !receiptObservation(paired, receiptCallID) {
+			t.Fatalf("the decision after the settled result carries no observation of %q: %+v", receiptCallID, paired)
+		}
+		if read := consumer.TaskState(receiptTask); read != TaskAwaited {
+			t.Fatalf("the settled result of %s reads %q beside the segment that paired it and has not delivered, want %q",
+				receiptTask, read, TaskAwaited)
+		}
+		rig.expectNoAnswer(t, "the entry was closed beside a segment that had not delivered")
+
+		behaviour.release()
+		answer := rig.awaitAnswer(t, addr)
+		if answer.Err != nil || answer.Turn.Terminal != model.KindCompleted {
+			t.Fatalf("the segment of %s closed = (%+v, %v), want one completed turn", addr.SessionID, answer, answer.Err)
+		}
+		if at := rig.stateAtDelivery(); at != TaskAwaited {
+			t.Fatalf("the task read %q beside the delivery face, want %q: a receipt written before the answer left closes an entry nobody read",
+				at, TaskAwaited)
+		}
+		rig.awaitState(t, consumer, TaskConsumed)
+	})
+}
+
+// receiptObservation reports whether one request carries the observation of the
+// named native call, which is the result its pairing produced.
+func receiptObservation(messages []model.Message, callID string) bool {
+	for _, message := range messages {
+		if message.Role == model.RoleTool && message.ToolID == callID {
+			return true
+		}
+	}
+	return false
+}
+
+// receiptStep is one scripted answer of the receipt model: the tool calls or the
+// body it streams, and whether it parks until the check releases it.
+type receiptStep struct {
+	calls  []model.ToolCall
+	answer string
+	park   bool
+}
+
+// receiptScript is the model of the receipt checks: it hands the scripted steps
+// in order, reports every request it took and parks the steps that say so.
+type receiptScript struct {
+	mu       sync.Mutex
+	steps    []receiptStep
+	requests [][]model.Message
+	arrived  chan struct{}
+	gate     chan struct{}
+	once     sync.Once
+}
+
+// newReceiptScript returns a model answering with the scripted steps in order.
+func newReceiptScript(steps ...receiptStep) *receiptScript {
+	return &receiptScript{
+		steps:   steps,
+		arrived: make(chan struct{}, 8),
+		gate:    make(chan struct{}),
+	}
+}
+
+// GenerateContent records the request, parks a parked step until the check
+// releases it and streams the answer of its step.
+func (m *receiptScript) GenerateContent(ctx context.Context, req *model.Request) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	m.requests = append(m.requests, append([]model.Message(nil), req.Messages...))
+	step := receiptStep{}
+	if len(m.steps) > 0 {
+		step = m.steps[0]
+		m.steps = m.steps[1:]
+	}
+	m.mu.Unlock()
+	select {
+	case m.arrived <- struct{}{}:
+	default:
+	}
+	if step.park {
+		select {
+		case <-m.gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	message := model.Message{Role: model.RoleAssistant, Content: step.answer}
+	if len(step.calls) > 0 {
+		message = model.Message{Role: model.RoleAssistant, ToolCalls: step.calls}
+	}
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{Choices: []model.Choice{{Message: message}}, Done: true}
+	close(ch)
+	return ch, nil
+}
+
+// Info reports the model descriptor.
+func (m *receiptScript) Info() model.Info { return model.Info{Name: "receipt-model"} }
+
+// awaitRound waits until the model took the named number of requests.
+func (m *receiptScript) awaitRound(t *testing.T, want int, what string) {
+	t.Helper()
+	deadline := time.After(20 * time.Second)
+	for {
+		m.mu.Lock()
+		got := len(m.requests)
+		m.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-m.arrived:
+		case <-deadline:
+			t.Fatalf("the model took %d requests, want the %d of %s", got, want, what)
+		}
+	}
+}
+
+// requestRound reports the messages of the request at the given zero-based
+// position.
+func (m *receiptScript) requestRound(index int) []model.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if index >= len(m.requests) {
+		return nil
+	}
+	return m.requests[index]
+}
+
+// release lets every parked request go on.
+func (m *receiptScript) release() { m.once.Do(func() { close(m.gate) }) }
+
+// receiptAdmit admits one native call as the task it names, the way an
+// asynchronous tool answers its admission receipt.
+type receiptAdmit struct {
+	mu       sync.Mutex
+	taskID   event.TaskID
+	calls    int
+	admitted chan struct{}
+}
+
+// Declaration returns the declaration of the admitting tool.
+func (a *receiptAdmit) Declaration() *trpctool.Declaration {
+	return &trpctool.Declaration{Name: receiptAdmitName}
+}
+
+// Call answers the admission receipt of the call it is handed.
+func (a *receiptAdmit) Call(ctx context.Context, _ []byte) (any, error) {
+	frame, ok := task.CallFrameFrom(ctx)
+	if !ok {
+		return nil, task.ErrCallFrameMissing
+	}
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	select {
+	case a.admitted <- struct{}{}:
+	default:
+	}
+	return task.AdmissionReceipt{CallID: frame.Identity.CallID, TaskID: a.taskID, Accepted: true, Kind: task.AdmissionFresh}, nil
+}
+
+// awaitAdmission waits until the tool admitted its call.
+func (a *receiptAdmit) awaitAdmission(t *testing.T) {
+	t.Helper()
+	select {
+	case <-a.admitted:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the admitting tool received no call, want the decision to reach its admission")
+	}
+}
+
+// receiptCall builds one native tool call of a scripted assistant message.
+func receiptCall(id, name string) model.ToolCall {
+	return model.ToolCall{
+		ID:       id,
+		Type:     "function",
+		Function: model.FunctionDefinitionParam{Name: name, Arguments: []byte(`{}`)},
+	}
+}
+
+// receiptRig is one run's consumption set over a single declared agent, with the
+// task state read beside the delivery face of every closed segment.
+type receiptRig struct {
+	loop      *Loop
+	history   *invariantLoopHistory
+	consumers *Consumers
+	answers   chan SegmentAnswer
+	mu        sync.Mutex
+	seq       int
+	consumer  *Consumer
+	atDeliver TaskState
+}
+
+// newReceiptRig assembles the consumption set of one run over the model and the
+// native tools a check hands it.
+func newReceiptRig(t *testing.T, behaviour model.Model, tools []trpctool.Tool) *receiptRig {
+	t.Helper()
+	declaration := &config.Declaration{
+		Entry:  receiptEntryAgent,
+		Agents: []config.AgentSpec{{ID: receiptEntryAgent}},
+	}
+	plan, err := state.NewStatePlan(
+		state.OrgPlan{Declaration: declaration, Fingerprint: "fp-receipt"},
+		map[event.AgentID]state.AgentBinding{
+			receiptEntryAgent: {Model: behaviour, Tools: tools, PromptSource: state.PromptSource{Version: "v1"}},
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("build the binding plan of the receipt run: %v", err)
+	}
+	bindings := state.NewBindings()
+	if err := bindings.Hold(plan); err != nil {
+		t.Fatalf("hold the binding generation of the receipt run: %v", err)
+	}
+	history := newInvariantLoopHistory()
+	loop := NewLoop(bindings, state.NewOccupancy(), "instance-receipt", nil)
+	loop.SetHistory(history)
+	rig := &receiptRig{loop: loop, history: history, answers: make(chan SegmentAnswer, 8)}
+	loop.SetFactCommit(rig.commit)
+	rig.consumers = NewConsumers(loop, context.Background(), rig.deliver)
+	t.Cleanup(rig.consumers.Stop)
+	return rig
+}
+
+// read records the instance the delivery face reads the task state of.
+func (r *receiptRig) read(consumer *Consumer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.consumer = consumer
+}
+
+// commit lands one fact the loop produced in the chain of its own session and
+// answers the identity it landed under.
+func (r *receiptRig) commit(evt event.Event) (event.EventID, error) {
+	key := event.EventID(r.mint(evt.Owner))
+	evt.Key = key
+	r.history.land(evt)
+	return key, nil
+}
+
+// landInput commits one external input on the named address, the way a producer
+// outside the instance lands material before the instance mounts.
+func (r *receiptRig) landInput(addr event.Address, content string) event.EventID {
+	key := event.EventID(r.mint(addr))
+	r.history.land(event.Event{
+		Key:       key,
+		Type:      event.TypeExternalInput,
+		Timestamp: time.Now(),
+		Message:   model.Message{Role: model.RoleUser, Content: content},
+		Owner:     addr,
+		Source:    addr,
+		Target:    addr,
+	})
+	return key
+}
+
+// mint answers one fresh fact identity of the named address.
+func (r *receiptRig) mint(addr event.Address) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.seq++
+	return fmt.Sprintf("%s#receipt-fact-%d", addr.SessionID, r.seq)
+}
+
+// deliver reads the task state beside the delivery face and records the answer.
+func (r *receiptRig) deliver(_ context.Context, _ event.Address, answer SegmentAnswer) {
+	r.mu.Lock()
+	if r.consumer != nil {
+		r.atDeliver = r.consumer.TaskState(receiptTask)
+	}
+	r.mu.Unlock()
+	r.answers <- answer
+}
+
+// stateAtDelivery reports the task state the delivery face read.
+func (r *receiptRig) stateAtDelivery() TaskState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.atDeliver
+}
+
+// expectNoAnswer reports that no segment closed inside the quiet window.
+func (r *receiptRig) expectNoAnswer(t *testing.T, gap string) {
+	t.Helper()
+	select {
+	case answer := <-r.answers:
+		t.Fatalf("%s: the segment of %s closed beside %q", gap, answer.Turn.InvocationID, answer.Turn.Terminal)
+	case <-time.After(250 * time.Millisecond):
+	}
+}
+
+// awaitAnswer waits for the closed segment of the named address.
+func (r *receiptRig) awaitAnswer(t *testing.T, addr event.Address) SegmentAnswer {
+	t.Helper()
+	select {
+	case answer := <-r.answers:
+		return answer
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the instance of %s/%s closed no segment", addr.AgentID, addr.SessionID)
+		return SegmentAnswer{}
+	}
+}
+
+// awaitState waits until the named task reads the state the check expects.
+func (r *receiptRig) awaitState(t *testing.T, consumer *Consumer, want TaskState) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if got := consumer.TaskState(receiptTask); got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the settled result of %s reads %q, want %q beside the delivered answer",
+				receiptTask, consumer.TaskState(receiptTask), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// receiptAddress reports the address the receipt run drives.
+func receiptAddress() event.Address {
+	return event.Address{AgentID: receiptEntryAgent, SessionID: receiptSession}
 }

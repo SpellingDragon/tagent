@@ -1219,17 +1219,20 @@ func (r *Run) AttachReplay(chain agent.RequestChain, window FoldWindow, projecti
     attachScopedReplay, so they never cross agents that share a session id.
 
 func (r *Run) Close(ctx context.Context, req agent.CloseRequest) (agent.DrainReport, error)
-    Close closes the runtime's own side for the named session address: new input
-    is refused first, the run quiesces to its fixed point, and only then do the
-    producers behind it stop and the session side close. The close reports one
-    of three states: a run at rest, a run that spent its budget with work still
-    on the chain, or a run it could not judge. The session side closes after the
-    quiesce, so the mailbox bookkeeping an in-flight tool result still lands
-    through stays open exactly as long as the quiesce may need it. A repeated
-    close returns the first result and runs no second quiesce. The redline list
-    (3 rules): MUST refuse new input before the first quiesce of the close. MUST
-    judge the run by the one rest criterion, never by an emptied queue or an
-    elapsed wait. MUST NOT report a run at rest while a writer has not stopped.
+    Close closes the runtime's own side for the named session address: the
+    request is judged first, new input is refused next, the run quiesces to its
+    fixed point, and only then do the producers behind it stop and the session
+    side close. The close reports one of three states: a run at rest, a run that
+    spent its budget with work still on the chain, or a run it could not judge.
+    The session side closes after the quiesce, so the mailbox bookkeeping an
+    in-flight tool result still lands through stays open exactly as long as
+    the quiesce may need it. A repeated close returns the first result and
+    runs no second quiesce. The redline list (4 rules): MUST judge the timeout
+    of the close before any side effect it would take, so a close naming none
+    is refused with the run untouched. MUST refuse new input before the first
+    quiesce of the close. MUST judge the run by the one rest criterion, never by
+    an emptied queue or an elapsed wait. MUST NOT report a run at rest while a
+    writer has not stopped.
 
 func (r *Run) CloseMCPServers() error
     CloseMCPServers releases every MCP server the live registry holds: the close

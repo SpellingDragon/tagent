@@ -63,10 +63,14 @@ type segment struct {
 	decisions  []Decision
 	consumed   []event.EventID
 	pending    map[event.TaskID]admittedCall
-	pipeline   *plugin.Pipeline
-	started    time.Time
-	rounds     int
-	dirty      bool
+	// paired names the tasks whose settled result this segment took: the
+	// consumption of each is written beside the delivery of this segment, never
+	// beside the pairing alone.
+	paired   []event.TaskID
+	pipeline *plugin.Pipeline
+	started  time.Time
+	rounds   int
+	dirty    bool
 	// trigger is the trigger-source stamp of the material the segment opened
 	// on: the lineage its closing answer leaves under.
 	trigger string
@@ -261,26 +265,30 @@ func (c *Consumer) Resting() bool {
 	return len(c.wake) == 0
 }
 
-// TaskState names what became of one settled result on this address: the
-// flying segment still awaits it, a segment already paired it, or a closed
-// segment left it unpaired. The notice-driven follow-up reads the state to know
-// whether any consumer already took the result.
+// TaskState names what became of one settled result on this address: a flying
+// segment still awaits it, a segment delivered the answer that paired it, or a
+// closed segment left it unpaired. The notice-driven follow-up reads the state to
+// know whether any consumer already took the result.
 type TaskState string
 
 const (
-	// TaskAwaited: the flying segment admitted the task and has not paired it.
+	// TaskAwaited: the flying segment admitted the task and its delivery that
+	// pairs it has not landed yet.
 	TaskAwaited TaskState = "awaited"
-	// TaskConsumed: a segment paired the result already.
+	// TaskConsumed: a segment paired the result and delivered the answer of it.
+	// The pairing alone never answers this state.
 	TaskConsumed TaskState = "consumed"
 	// TaskOrphaned: the segment that admitted the task closed without pairing it.
 	TaskOrphaned TaskState = "orphaned"
 )
 
 // AwaitTaskState waits until the named task stops being awaited by a flying
-// segment and answers the settled state: the segment either pairs the result
-// (consumed) or closes beside it (orphaned). A wait the context ends answers
-// the state as it stands, so the caller decides over a named moment instead of
-// guessing across the window between admission and the segment's close.
+// segment and answers the settled state: the segment either delivers the answer
+// that pairs the result (consumed) or closes beside it (orphaned). The pairing a
+// segment takes before it closes never answers consumed by itself, so the wait
+// spans the whole window between admission and delivery. A wait the context ends
+// answers the state as it stands, so the caller decides over a named moment
+// instead of guessing across that window.
 func (c *Consumer) AwaitTaskState(ctx context.Context, taskID event.TaskID) TaskState {
 	for {
 		switch state := c.TaskState(taskID); state {
@@ -495,7 +503,7 @@ func drivingTrigger(events []event.Event) string {
 // - The receipts alone drive the next round only when no call is running: a decision whose every call was refused owes the model the refusal it reads, so it decides again at once, while a decision with calls in flight parks — each settlement and each input that lands wakes the loop, and the next decision reads the result beside whatever else arrived.
 // - The closing round admits none of the calls it issued: the receipts it leaves are the refusals the model reads, and no further round may read them, so the segment closes on the closing round exactly as the direct drive ends on the one it ran.
 func (c *Consumer) driveSegment(ctx context.Context, seg *segment) bool {
-	harvested := seg.harvest(ctx, c.loop, &c.awaited)
+	harvested := seg.harvest(ctx, c.loop)
 	if len(harvested) > 0 {
 		seg.transcript = append(seg.transcript, harvested...)
 		seg.dirty = true
@@ -590,7 +598,11 @@ func (c *Consumer) closingRoundOf(seg *segment, chain []event.Event) decisionRou
 // reason the drive it replaces delivered before it returned: an answer reaches
 // the outbound face once per segment, whether an entry waited on that segment
 // or a notification drove it into being. A segment that closed beside a named
-// failure reports that cause to its waiters and commits no output fact.
+// failure reports that cause to its waiters and commits no output fact. The tasks
+// whose settled result the segment paired turn consumed inside that same delivery:
+// the consumption is written after the answer left and never before it, so a
+// segment that never delivers leaves them awaited and the entry of a settlement is
+// never closed on a turn nobody read.
 func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Decision, outcome model.Outcome, round decisionRound, cause error) {
 	turn := Turn{
 		InvocationID: seg.inv.InvocationID,
@@ -618,6 +630,9 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 	answer := SegmentAnswer{Turn: turn, Err: cause, Trigger: seg.trigger, Consumed: append([]event.EventID(nil), seg.consumed...)}
 	if c.deliver != nil {
 		c.deliver(ctx, c.addr, answer)
+		for _, taskID := range seg.paired {
+			c.awaited.Store(taskID, TaskConsumed)
+		}
 	}
 	for taskID := range seg.pending {
 		c.awaited.Store(taskID, TaskOrphaned)
@@ -641,8 +656,10 @@ func (c *Consumer) closeSegment(ctx context.Context, seg *segment, decision Deci
 // each settled delivery the intake parked becomes the observation of its call,
 // observed through the pipeline of the decision that admitted it. The harvest
 // never waits: a call whose result has not arrived stays pending, and the loop
-// returns to the pull beside it.
-func (s *segment) harvest(ctx context.Context, l *Loop, awaited *sync.Map) []model.Message {
+// returns to the pull beside it. The tasks it paired stay awaited in the book
+// until this segment delivers, so a result that was paired but never delivered
+// is never read as consumed.
+func (s *segment) harvest(ctx context.Context, l *Loop) []model.Message {
 	if len(s.pending) == 0 {
 		return nil
 	}
@@ -665,9 +682,7 @@ func (s *segment) harvest(ctx context.Context, l *Loop, awaited *sync.Map) []mod
 			delete(in.settled, taskID)
 		}
 		delete(s.pending, taskID)
-		if awaited != nil {
-			awaited.Store(taskID, TaskConsumed)
-		}
+		s.paired = append(s.paired, taskID)
 		paired = append(paired, pairing{call: call, item: item})
 	}
 	in.mu.Unlock()
