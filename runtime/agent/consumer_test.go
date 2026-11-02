@@ -131,6 +131,91 @@ func TestConsumersResidentEveryAddress(t *testing.T) {
 	})
 }
 
+// TestConsumersStopJoinsTheWriter pins the stop of one consumption set as a stop over stopped writers.
+// - positive: a stop returns only once every loop it cancelled returned, so the segment a loop still unwinds is closed by that loop and not beside the stop
+// - negative: a stop never reports itself beside a loop that still runs, because the write a cancelled decision still owes would land after the close returned
+// - the write is behind the stop: the turn-end fact a cancelled decision still owes is landed by the loop before the set answers its stop, never after it
+//
+// 契约: docs/wiki/agent/event-flow.md#runner-flow
+func TestConsumersStopJoinsTheWriter(t *testing.T) {
+	t.Run("a stop returns only beside the loops it cancelled", func(t *testing.T) {
+		behaviour := newParkingLoopModel()
+		defer behaviour.release()
+		rig := newResidentInstanceRigWithModel(t, behaviour)
+		addr := rig.otherAddress()
+		rig.landInput(addr, residentInstanceInput)
+		consumer := rig.consumers.Ensure(addr)
+		if consumer == nil {
+			t.Fatalf("the resident instance of %s/%s = nil, want one instance to hold a decision", addr.AgentID, addr.SessionID)
+		}
+		consumer.Wake()
+		select {
+		case <-behaviour.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no model decision of %s/%s started: the material landed on the address drove nothing", addr.AgentID, addr.SessionID)
+		}
+
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			rig.consumers.Stop()
+		}()
+		select {
+		case <-stopped:
+			t.Fatal("the set answered its stop while the decision it flew was still unwinding: the write that decision still owes lands after the stop returned")
+		case <-time.After(residentInstanceQuietWindow):
+		}
+
+		behaviour.release()
+		select {
+		case <-stopped:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the stop of the set never returned beside the loop it cancelled")
+		}
+		select {
+		case <-consumer.Done():
+		default:
+			t.Fatal("the set answered its stop beside a loop that still runs, want every loop returned before the stop does")
+		}
+		if landed := rig.outputs(addr); len(landed) != 1 {
+			t.Fatalf("agent_output facts of %s beside the stop = %d, want the one turn-end fact of the cancelled decision landed before the stop answered", addr.SessionID, len(landed))
+		}
+	})
+}
+
+// parkingLoopModel parks every request until its caller gives up and then waits
+// for the release the check holds: a loop cancelled mid-decision is observably
+// still unwinding the segment it flew, so a stop that does not join the loop is
+// read as the stop it is not.
+type parkingLoopModel struct {
+	// entered signals each request the model took, so a check stops the set only
+	// beside a decision that really started.
+	entered chan struct{}
+	// parked holds every parked request until the check lets it go.
+	parked chan struct{}
+	once   sync.Once
+}
+
+// newParkingLoopModel returns a model that parks every request it is handed.
+func newParkingLoopModel() *parkingLoopModel {
+	return &parkingLoopModel{entered: make(chan struct{}, 4), parked: make(chan struct{})}
+}
+
+// GenerateContent reports the request it took, waits for its caller to give up
+// and then for the check's release, and answers the cancellation it ran under.
+func (m *parkingLoopModel) GenerateContent(ctx context.Context, _ *model.Request) (<-chan *model.Response, error) {
+	m.entered <- struct{}{}
+	<-ctx.Done()
+	<-m.parked
+	return nil, ctx.Err()
+}
+
+// Info reports the model descriptor.
+func (m *parkingLoopModel) Info() model.Info { return model.Info{Name: "parking-model"} }
+
+// release lets every parked request go; a second call releases nothing more.
+func (m *parkingLoopModel) release() { m.once.Do(func() { close(m.parked) }) }
+
 // TestConsumersResumeTheOwedNotice pins the resume of one notification the settle account still owes across a restart of the process.
 // - negative: a boot that opens a chain where the notice stands behind the answer the dead attempt closed on drives no segment by itself
 // - positive: the face that fires the attempt names the notification, and the next pull of the address drives a segment on it
@@ -241,6 +326,15 @@ type residentInstanceDelivery struct {
 func newResidentInstanceRig(t *testing.T) *residentInstanceRig {
 	t.Helper()
 	behaviour := newInvariantLoopModel(residentInstanceAnswer, nil)
+	rig := newResidentInstanceRigWithModel(t, behaviour)
+	rig.behaviour = behaviour
+	return rig
+}
+
+// newResidentInstanceRigWithModel assembles the same run over the model a check
+// hands it, so a check can hold one decision of the run in flight.
+func newResidentInstanceRigWithModel(t *testing.T, behaviour model.Model) *residentInstanceRig {
+	t.Helper()
 	declaration := &config.Declaration{
 		Entry:  residentInstanceEntry,
 		Agents: []config.AgentSpec{{ID: residentInstanceEntry}, {ID: residentInstanceOther}},
@@ -264,11 +358,10 @@ func newResidentInstanceRig(t *testing.T) *residentInstanceRig {
 	loop := NewLoop(bindings, state.NewOccupancy(), "instance-resident", nil)
 	loop.SetHistory(history)
 	rig := &residentInstanceRig{
-		entry:     residentInstanceEntry,
-		loop:      loop,
-		history:   history,
-		behaviour: behaviour,
-		answers:   make(chan SegmentAnswer, 8),
+		entry:   residentInstanceEntry,
+		loop:    loop,
+		history: history,
+		answers: make(chan SegmentAnswer, 8),
 	}
 	loop.SetFactCommit(rig.commit)
 	rig.consumers = NewConsumers(loop, context.Background(), rig.deliver)

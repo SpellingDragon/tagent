@@ -900,20 +900,34 @@ func (cs *Consumers) Resting() bool {
 	return true
 }
 
-// Stop ends every consumption loop this set owns; the loops answer their done
-// channels, no further instance mounts for any address, and the segments the
-// ended loops left flying stay on the chain for a restart.
+// Stop ends every consumption loop this set owns and answers only once each of
+// them returned: the loops answer their done channels, the segment a loop still
+// flew is closed by that loop — its commit included — and no further instance
+// mounts for any address. The segments the ended loops left flying stay on the
+// chain for a restart.
+//
+// The join is the stop itself, not a courtesy beside it: a loop is the writer of
+// its own address, so a set that returned while a loop still unwound a segment
+// would answer a stopped set over writes that have not landed yet, and a close
+// that read that answer would leave those writes behind it. The wait is
+// unbounded for the same reason the settle driver's stop is: the cancellation is
+// the request, and only the loop's own return is the confirmation.
 func (cs *Consumers) Stop() {
 	if cs == nil {
 		return
 	}
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	cs.stopped = true
+	loops := make([]*Consumer, 0, len(cs.live))
 	for _, consumer := range cs.live {
+		loops = append(loops, consumer)
 		if consumer.cancel != nil {
 			consumer.cancel()
 		}
+	}
+	cs.mu.Unlock()
+	for _, consumer := range loops {
+		<-consumer.done
 	}
 }
 

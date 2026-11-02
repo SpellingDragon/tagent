@@ -508,9 +508,19 @@ func (cs *Consumers) SetTurnContext(decorate func(ctx context.Context, trigger s
     declared construction shape of the set stays as it is.
 
 func (cs *Consumers) Stop()
-    Stop ends every consumption loop this set owns; the loops answer their done
-    channels, no further instance mounts for any address, and the segments the
-    ended loops left flying stay on the chain for a restart.
+    Stop ends every consumption loop this set owns and answers only once each
+    of them returned: the loops answer their done channels, the segment a loop
+    still flew is closed by that loop — its commit included — and no further
+    instance mounts for any address. The segments the ended loops left flying
+    stay on the chain for a restart.
+
+    The join is the stop itself, not a courtesy beside it: a loop is the writer
+    of its own address, so a set that returned while a loop still unwound a
+    segment would answer a stopped set over writes that have not landed yet,
+    and a close that read that answer would leave those writes behind it.
+    The wait is unbounded for the same reason the settle driver's stop is:
+    the cancellation is the request, and only the loop's own return is the
+    confirmation.
 
 func (cs *Consumers) Wake(addr event.Address)
     Wake signals the consumption loop of one address; an address beside no loop

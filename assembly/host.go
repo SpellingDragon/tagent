@@ -1274,9 +1274,13 @@ func (h *Host) CloseReport() agent.DrainReport {
 // Close stops injection into this host, quiesces the run it drives and only then
 // stops the consumers, the settle driver and the facilities behind them. One
 // deadline bounds the quiesce and the run close behind it, so a cancelled caller
-// never abandons the run close half-way. A repeated close reports the first
-// result and runs no second quiesce; a close that follows a bare quiesce still
-// stops the facilities that quiesce left running.
+// never abandons the run close half-way. Every stop here is a join: a consumer
+// set, a driver and a face answer only once the writers they cancelled returned,
+// so the writer barrier this close reads is a barrier over writers that are truly
+// stopped — a segment a cancelled decision still unwinds is landed by that loop
+// before the close reads its stop, never after the close returned. A repeated
+// close reports the first result and runs no second quiesce; a close that
+// follows a bare quiesce still stops the facilities that quiesce left running.
 func (h *Host) Close(ctx context.Context) error {
 	if h == nil {
 		return nil
