@@ -155,8 +155,18 @@ func TestSendDrivesTargetTurn(t *testing.T) {
 
 		scene.drivePeerTurn(t)
 		scene.awaitPeerBody(t)
-		if rounds := scene.peerRoundsCarrying(t); len(rounds) != 1 {
-			t.Fatalf("target rounds carrying the body = %d, want the one boundary read:\n%s", len(rounds), scene.describe())
+		if rounds := scene.peerRoundsCarrying(t); len(rounds) == 0 {
+			t.Fatalf("no target round carried the delivered body, want the next boundary read (whichever turn flies it):\n%s", scene.describe())
+		}
+		if newest, ok := scene.lastPeerRequest(); !ok || !sendRigCarries(newest, hostDriveBody) {
+			t.Fatalf("the target round driven after the park does not carry the delivered body, want it read at the next boundary:\n%s",
+				scene.describe())
+		}
+		for _, round := range scene.peerRoundsCarrying(t) {
+			if carried := scene.bodyOccurrences(round); carried != 1 {
+				t.Fatalf("one target round presented the body %d time(s), want the one delivery it read:\n%s",
+					carried, scene.describe())
+			}
 		}
 		scene.refuteOutbound(t)
 	})
@@ -358,6 +368,31 @@ func (s *hostDriveScene) peerRoundsCarrying(t *testing.T) []scriptedRequest {
 		}
 	}
 	return out
+}
+
+// lastPeerRequest reports the newest request the peer model was served: the round the
+// check drove after the parked one.
+func (s *hostDriveScene) lastPeerRequest() (scriptedRequest, bool) {
+	var newest scriptedRequest
+	served := false
+	for _, request := range s.provider.servedRequests() {
+		if request.Model == hostDrivePeerModel {
+			newest, served = request, true
+		}
+	}
+	return newest, served
+}
+
+// bodyOccurrences reports how many messages of one round carry the delivered body:
+// one delivery reads the body once, whatever the resident loop presents it as.
+func (s *hostDriveScene) bodyOccurrences(request scriptedRequest) int {
+	carried := 0
+	for _, message := range request.Messages {
+		if strings.Contains(message.Content, hostDriveBody) {
+			carried++
+		}
+	}
+	return carried
 }
 
 // refuteOutbound states that the delivered body never left through the outbound

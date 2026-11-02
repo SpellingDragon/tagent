@@ -1773,6 +1773,26 @@ func (l *smokeLogRecorder) size() int {
 	return len(l.lines)
 }
 
+// trace 把含给定子串的日志行按记录顺序拼回去：一次超时用它把该面的决策原样带回，
+// 而不是只报一个计数。recorder 为 nil（场景没接管日志面）时说出这一点，不给空串。
+func (l *smokeLogRecorder) trace(substr string) string {
+	if l == nil {
+		return "(the scenario records no host log)\n"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	traced := make([]string, 0, len(l.lines))
+	for _, line := range l.lines {
+		if strings.Contains(line, substr) {
+			traced = append(traced, line)
+		}
+	}
+	if len(traced) == 0 {
+		return "(no line carries " + substr + ")\n"
+	}
+	return strings.Join(traced, "\n") + "\n"
+}
+
 // mark 报告当前的日志下标：调用方用它把一次故障注入前后的日志切开，避免把
 // 无关的旧日志算成该次故障的具名证据。
 func (l *smokeLogRecorder) mark() int {

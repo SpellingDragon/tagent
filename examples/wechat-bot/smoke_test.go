@@ -1231,17 +1231,38 @@ func (r *smokeApprovalRelay) script(w http.ResponseWriter, _ int, modelName stri
 	return true
 }
 
-// smokeApprovalWaitSends 等到冥想面发出第 want 次投递。
-func smokeApprovalWaitSends(t *testing.T, relay *smokeApprovalRelay, want int, timeout time.Duration) {
+// smokeApprovalFace 是审批场景读冥想面的那一扇窗：relay 说脚本已经发出几次投递，
+// provider 说冥想面真正读到了什么请求与工具结果，logs 说驱动每一次 pass 的决策。
+// 场景等的是这扇窗里的一条事实——一次投递被工具结果配对——而不是脚本计数穿过某个
+// 时刻；超时时这扇窗把三者一起带出来，说明第二次投递停在哪一道门。
+type smokeApprovalFace struct {
+	relay    *smokeApprovalRelay
+	provider *smokeProvider
+	logs     *smokeLogRecorder
+}
+
+// waitCall 等到第 n 次投递被工具结果配对，交回那段正文：投递的结局（凭据或等待）
+// 是工具真的答了这次调用，迟到也只迟到那一条事实，与驱动跑完一轮的早晚无关。
+func (f smokeApprovalFace) waitCall(t *testing.T, n int, timeout time.Duration) string {
 	t.Helper()
+	callID := smokeApprovalRelayCall(n)
 	deadline := time.Now().Add(timeout)
-	for relay.sends() < want {
-		if time.Now().After(deadline) {
-			t.Fatalf("the meditation face issued %d send call(s) within %s, want %d", relay.sends(), timeout, want)
+	for {
+		if receipt := smokeApprovalReceipt(f.provider, callID); receipt != "" {
+			return receipt
 		}
-		time.Sleep(25 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("the meditation face issued %d send call(s) and never settled %s within %s\nreflect requests:\n%s\ndriver decisions:\n%s",
+				f.relay.sends(), callID, timeout,
+				smokeRequestDetail(f.provider, smokeReflectModel), f.logs.trace(smokeApprovalDriverLine))
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// smokeApprovalDriverLine 是冥想驱动每次 pass 交给宿主的决策行（assembly 侧
+// "tagent: meditation driver of <agent>: <disposition> (<reason>)" 的字面前缀）。
+const smokeApprovalDriverLine = "meditation driver of "
 
 // smokeApprovalReceipt 报告冥想面在给定调用下读到的工具结果；读不到返回空串。
 func smokeApprovalReceipt(provider *smokeProvider, callID string) string {
@@ -1256,22 +1277,6 @@ func smokeApprovalReceipt(provider *smokeProvider, callID string) string {
 		}
 	}
 	return ""
-}
-
-// smokeApprovalWaitReceipt 等到给定调用被工具结果配对，交回那段正文。
-func smokeApprovalWaitReceipt(t *testing.T, provider *smokeProvider, callID string, timeout time.Duration) string {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if receipt := smokeApprovalReceipt(provider, callID); receipt != "" {
-			return receipt
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("no tool result answered %s within %s\nreflect requests:\n%s",
-				callID, timeout, smokeRequestDetail(provider, smokeReflectModel))
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
 }
 
 // smokeApprovalDelivered 报告目标会话链上带给定正文的投递事实条数（trigger=send）。
@@ -1310,14 +1315,14 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: host.logs}
 	chat := smokeChats[0]
 	body := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
 	relay.arm(body)
 	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
-	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
-	held := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(1), 120*time.Second)
+	held := face.waitCall(t, 1, 120*time.Second)
 	if held == smokeSendCredential || !strings.Contains(held, "parked awaiting approval") {
 		t.Fatalf("the held delivery read back %q, want the wait and never the delivered credential", held)
 	}
@@ -1355,8 +1360,7 @@ func smokeIntegrityApprovalPositive(t *testing.T) {
 
 	relay.arm(body)
 	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
-	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
-	if settled := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(2), 120*time.Second); settled != smokeSendCredential {
+	if settled := face.waitCall(t, 2, 120*time.Second); settled != smokeSendCredential {
 		t.Fatalf("the approved retry read back %q, want the bare %q credential", settled, smokeSendCredential)
 	}
 	smokeIntegrityWaitDelivered(t, rig, chat, body, 120*time.Second)
@@ -1384,13 +1388,14 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 	relay := &smokeApprovalRelay{}
 	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	rig, provider := host.rig, host.provider
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: host.logs}
 	chat := smokeChats[0]
 	approvedBody := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
 
 	relay.arm(approvedBody)
 	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
-	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
+	face.waitCall(t, 1, 120*time.Second)
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
@@ -1412,7 +1417,9 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 
 	relay.arm(approvedBody)
 	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
-	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
+	if settled := face.waitCall(t, 2, 120*time.Second); settled != smokeSendCredential {
+		t.Fatalf("the approved retry read back %q, want the bare %q credential", settled, smokeSendCredential)
+	}
 	smokeIntegrityWaitDelivered(t, rig, chat, approvedBody, 120*time.Second)
 	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
 	if got := smokeApprovalDelivered(rig, chat, approvedBody); got != 1 {
@@ -1422,8 +1429,7 @@ func smokeIntegrityApprovalNegative(t *testing.T) {
 	changedBody := smokeApprovalMarker + " " + smokeIntegrityApprovalChanged
 	relay.arm(changedBody)
 	rig.postTask(smokeIntegrityApprovalChanged + " plain question")
-	smokeApprovalWaitSends(t, relay, 3, 120*time.Second)
-	changedHeld := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(3), 120*time.Second)
+	changedHeld := face.waitCall(t, 3, 120*time.Second)
 	if changedHeld == smokeSendCredential || !strings.Contains(changedHeld, "parked awaiting approval") {
 		t.Fatalf("the changed retry read back %q, want a fresh wait and never the delivered credential", changedHeld)
 	}
@@ -1510,11 +1516,12 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 	}()
 	chat := smokeChats[2]
 	body := smokeApprovalMarker + " " + smokeIntegrityApprovalTurn
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: logs}
 
 	relay.arm(body)
 	rig.drive(chat, smokeIntegrityApprovalTurn+" plain question")
 	rig.waitText(chat, "answer "+smokeIntegrityApprovalTurn, 120*time.Second)
-	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
+	face.waitCall(t, 1, 120*time.Second)
 	pending := rig.pendingApproval(30 * time.Second)
 	digest := shortDigest(pending.ArgsDigest)
 	rig.waitText(smokeApproverChat, digest, 30*time.Second)
@@ -1529,8 +1536,7 @@ func smokeIntegrityApprovalExpired(t *testing.T) {
 
 	relay.arm(body)
 	rig.postTask(smokeIntegrityApprovalTurn + " plain question")
-	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
-	retried := smokeApprovalWaitReceipt(t, provider, smokeApprovalRelayCall(2), 120*time.Second)
+	retried := face.waitCall(t, 2, 120*time.Second)
 	if retried == smokeSendCredential || !strings.Contains(retried, "parked awaiting approval") {
 		t.Fatalf("the expired retry read back %q, want a wait that claims no delivery", retried)
 	}
@@ -1560,6 +1566,7 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	host := bootSmokeApprovalHost(t, "1ms", "0s", relay)
 	defer host.close(t)
 	rig, provider := host.rig, host.provider
+	face := smokeApprovalFace{relay: relay, provider: provider, logs: host.logs}
 	chat := smokeChats[0]
 	body := smokeApprovalMarker + " " + smokeIntegrityConsumerOpening
 
@@ -1593,7 +1600,9 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 		t.Fatalf("emit the first inbound message: %v", err)
 	}
 	rig.waitText(chat, "answer "+smokeIntegrityConsumerOpening, 120*time.Second)
-	smokeApprovalWaitSends(t, relay, 1, 120*time.Second)
+	if held := face.waitCall(t, 1, 120*time.Second); held == smokeSendCredential || !strings.Contains(held, "parked awaiting approval") {
+		t.Fatalf("the first inbound delivery read back %q, want the wait of the critical send", held)
+	}
 	wantAddr := rig.addressOf(chat)
 	if target, ok := rig.app.host.router.Target(wantAddr); !ok || target != chat {
 		t.Fatalf("router target of %+v = (%q, %t), want %q", wantAddr, target, ok, chat)
@@ -1615,7 +1624,9 @@ func smokeIntegrityApprovalConsumer(t *testing.T) {
 	}
 	relay.arm(body)
 	rig.postTask(smokeIntegrityConsumerOpening + " plain question")
-	smokeApprovalWaitSends(t, relay, 2, 120*time.Second)
+	if settled := face.waitCall(t, 2, 120*time.Second); settled != smokeSendCredential {
+		t.Fatalf("the approved retry read back %q through the formal entry, want the bare %q credential", settled, smokeSendCredential)
+	}
 	smokeIntegrityWaitDelivered(t, rig, chat, body, 120*time.Second)
 	smokeIntegrityWaitReflectSettled(t, provider, 500*time.Millisecond, 120*time.Second)
 	if got := smokeApprovalDelivered(rig, chat, body); got != 1 {
