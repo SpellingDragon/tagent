@@ -55,7 +55,8 @@ func (a *closeResidentsAdmit) Call(ctx context.Context, _ []byte) (any, error) {
 // TestCloseStopsTheResidentsTheRunMounted pins the stop the close of a run owes the resident loops it mounted:
 // - negative: the close never returns beside a segment a resident loop still flies, because a run at rest over a segment that lands afterwards is refused
 // - positive: the stop reaches the segment the loop left flying, so the delegated round waiting on it answers the cancelled terminal instead of hanging
-// - the run reports the drained it really reached, and no turn lands on the chain of the site after that answer
+// - the run is cut, not drained: the round the stop left without an answer stays owed beside the chain it was committed on
+// - the criterion reads that round off the chain, so the next process drives it again after the close answered
 // - a restart reading that chain reads the input it still owes and no turn the close wrote behind its own answer
 //
 // 契约: docs/wiki/agent/event-flow.md#runner-flow
@@ -127,8 +128,14 @@ func TestCloseStopsTheResidentsTheRunMounted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("close the run beside the resident loop it mounted: %v", err)
 	}
-	if !report.Drained {
-		t.Fatalf("the close of the run reported unsettled %+v, want the drained run it really reached", report.Unsettled)
+	if report.Drained {
+		t.Fatal("the close of the run reported it drained, want the input round the stopped segment consumed and never answered still owed")
+	}
+	if report.Outcome != agent.CloseCut {
+		t.Fatalf("the close of the run ended %v, want the cut the stopped segment left beside the round it consumed", report.Outcome)
+	}
+	if len(report.Unsettled) == 0 || report.Unsettled[0].FactKey == "" {
+		t.Fatalf("the close of the run reported unsettled %+v, want the driving fact of the round it cut", report.Unsettled)
 	}
 	select {
 	case answer := <-submitted:
