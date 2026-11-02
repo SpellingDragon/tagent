@@ -137,6 +137,11 @@ var ErrContinuationMissing = errors.New("subagent: no delegated turn of that tas
     no round of: the task was never delegated here, or its continuation was
     released.
 
+var ErrContinuationUnclaimed = errors.New("subagent: the round of that task was not claimed before it was served")
+    ErrContinuationUnclaimed reports a round served for a task whose one slot no
+    caller claimed: the input the round would read was never owned by this call,
+    so serving it would hand a body to a round a second caller believes it owns.
+
 var ErrDelegationMissing = errors.New("call_subagent: no delegation face is attached")
     ErrDelegationMissing reports a tool constructed with no delegation face.
 
@@ -326,6 +331,23 @@ func NewContinuations() *Continuations
     NewContinuations returns an empty continuation table. A tool given none
     keeps the one-round contract and serves no second round.
 
+func (c *Continuations) Abandon(taskID event.TaskID)
+    Abandon gives back a claimed slot without serving a round for it, so a
+    re-entry that claimed the one round of a task and then found a precondition
+    gone leaves the task re-entrant instead of holding a slot no round serves.
+
+func (c *Continuations) Claim(taskID event.TaskID) error
+    Claim takes the one round slot of the named task before any round is served
+    for it, and reports the claim it could not make by name: a task this tool
+    serves no round of, and a task whose round is already in flight, are each
+    refused.
+
+    The claim is the point at which the body handed to the re-entry is owned:
+    from the moment it returns, the one round that will carry that body is this
+    caller's, so a second caller is refused instead of being told a body was
+    taken that no round holds. A claim a caller does not serve gives the slot
+    back with Abandon.
+
 func (c *Continuations) Reenter(ctx context.Context, taskID event.TaskID, input string) error
     Reenter hands fresh input to the named task and serves its next round on the
     assembly its first round ran. The round settles through the same delegation
@@ -334,9 +356,24 @@ func (c *Continuations) Reenter(ctx context.Context, taskID event.TaskID, input 
     still in flight is refused by name beside no round served, so two re-entries
     of one task serve one round between them.
 
+    The caller that must settle other preconditions before the round is served
+    claims the slot first and serves it afterwards: the round a claim took is
+    the round the body is owed to, so a caller that returns a delivery receipt
+    for it knows the one round carrying the body exists.
+
 func (c *Continuations) Release(taskID event.TaskID)
     Release ends the continuation of one task: a released task is refused by a
     later re-entry instead of being served a round nobody asked for.
+
+func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input string) error
+    Serve serves the next round of a task this caller already claimed, reading
+    the input one earlier round still owes ahead of the input handed here,
+    and releases the slot when the round ends.
+
+    A round that ends without recording its terminal leaves the whole input owed
+    instead of dropping it: the body was accepted by the re-entry that claimed
+    the round, so it stays owed to the next round of the same task rather than
+    leaving the caller's receipt standing for a body nothing carried.
 
 func (c *Continuations) Served(taskID event.TaskID) bool
     Served reports whether this tool still serves the named task a round of its

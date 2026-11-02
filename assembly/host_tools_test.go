@@ -3,16 +3,20 @@ package assembly
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/api/model"
+	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -680,4 +684,252 @@ func ledgerKeysOf(held map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// TestReentrantSendOrdersItsCommits pins the two failure faces of a re-entrant send.
+// - negative (reopen_failure_rolls_back_reactivation): a refused reopen leaves the task settled and re-entrant, so the next send reaches the round it opens
+// - negative (reenter_occupied_round_not_reported_sent): an occupied round answers a refusal naming it, never the ok receipt of a body no round carries
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestReentrantSendOrdersItsCommits(t *testing.T) {
+	t.Run("reopen_failure_rolls_back_reactivation", func(t *testing.T) {
+		ctx := context.Background()
+		registry := reentryRegistry(t)
+		taskID := reentrySettled(t, registry)
+		continuations := &reentryContinuationsStub{}
+		ledger := &reentryLedgerStub{reopenErr: fmt.Errorf("%w: %s", errReentryNoLedgerEntry, taskID)}
+		port := &hostSendReentryPort{tasks: registry, ledger: ledger, continuations: continuations}
+
+		outcome, cause := port.ReenterTask(ctx, taskID, "review it again")
+		if outcome == deliverySent {
+			t.Fatalf("re-entry of a task whose reopen the ledger refused = %q (%q), want a refusal: the body reached no round", outcome, cause)
+		}
+		if !strings.Contains(cause, errReentryNoLedgerEntry.Error()) {
+			t.Fatalf("refusal = %q, want it to carry the cause the ledger reported", cause)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != task.StatusSettled {
+			t.Fatalf("status after the refused re-entry = (%v, %v), want the settled outcome it was re-entered from", status, err)
+		}
+		if got := continuations.abandonedCount(); got != 1 {
+			t.Fatalf("claimed rounds given back = %d, want the one round the refused re-entry claimed", got)
+		}
+		if got := continuations.servedCount(); got != 0 {
+			t.Fatalf("rounds served beside the refused reopen = %d, want none", got)
+		}
+		if err := registry.Reentrant(ctx, taskID); err != nil {
+			t.Fatalf("re-entrant read after the rollback = %v, want a task the next send reaches", err)
+		}
+
+		ledger.reopen(true)
+		outcome, cause = port.ReenterTask(ctx, taskID, "review it again")
+		if outcome != deliverySent {
+			t.Fatalf("re-entry after the rollback = %q (%q), want the round the next send opens", outcome, cause)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != task.StatusRunning {
+			t.Fatalf("status after the second re-entry = (%v, %v), want the round it opened", status, err)
+		}
+		if got := reentryAwaitServed(continuations, 1); got != "review it again" {
+			t.Fatalf("body served = %q, want the body the second re-entry carried", got)
+		}
+	})
+
+	t.Run("reenter_occupied_round_not_reported_sent", func(t *testing.T) {
+		ctx := context.Background()
+		registry := reentryRegistry(t)
+		taskID := reentrySettled(t, registry)
+		continuations := &reentryContinuationsStub{occupied: true}
+		ledger := &reentryLedgerStub{}
+		port := &hostSendReentryPort{tasks: registry, ledger: ledger, continuations: continuations}
+
+		outcome, cause := port.ReenterTask(ctx, taskID, "review it again")
+		if outcome == deliverySent {
+			t.Fatalf("re-entry of a task whose one round is in flight = %q (%q), want a refusal: no round owns the body", outcome, cause)
+		}
+		if !strings.Contains(cause, "in flight") || !strings.Contains(cause, string(taskID)) {
+			t.Fatalf("refusal = %q, want it to name the round in flight and the task it belongs to", cause)
+		}
+		if got := continuations.claims(); got != 1 {
+			t.Fatalf("claims = %d, want the one the occupied slot refused", got)
+		}
+		if got := continuations.abandonedCount(); got != 0 {
+			t.Fatalf("claimed rounds given back = %d, want none: the refused claim held no slot", got)
+		}
+		if got := ledger.reopenedRounds(); len(got) != 0 {
+			t.Fatalf("ledger rounds reopened = %v, want none: a body no round owns moves nothing", got)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != task.StatusSettled {
+			t.Fatalf("status after the refused re-entry = (%v, %v), want the task left where it stood", status, err)
+		}
+	})
+}
+
+// errReentryNoLedgerEntry is the cause the ledger stand-in refuses the reopen with: a
+// delegation ledger that holds no entry for the task it is asked to move.
+var errReentryNoLedgerEntry = fmt.Errorf("agent: %w", errReentryUnknownDelegation)
+
+// errReentryUnknownDelegation stands for the ledger's own unknown-delegation refusal,
+// so the stand-in reports the case it models instead of a refusal invented here.
+var errReentryUnknownDelegation = fmt.Errorf("no delegation is recorded for that task")
+
+// reentryRegistry returns an empty task table over an in-memory commit carrier, so the
+// anchors read a real task state machine instead of a stand-in for it.
+func reentryRegistry(t *testing.T) *task.MemoryRegistry {
+	t.Helper()
+	return task.NewMemoryRegistry(task.NewMemoryCommit(nil), task.NewMemoryAdmission())
+}
+
+// reentrySettled admits one task and settles it, so the re-entry starts from the settled
+// outcome design D7 admits.
+func reentrySettled(t *testing.T, registry *task.MemoryRegistry) event.TaskID {
+	t.Helper()
+	ctx := context.Background()
+	addr := event.Address{AgentID: "sender", SessionID: "session-send-reentry"}
+	receipt, err := registry.Register(ctx, task.Spec{
+		CallID:       "call-reentry",
+		DedupKey:     "dedup-reentry",
+		InvocationID: "invocation-reentry",
+		InstanceID:   "instance-reentry",
+		Description:  "one delegated review",
+		Source:       addr,
+		Target:       addr,
+	})
+	if err != nil || !receipt.Accepted {
+		t.Fatalf("admit the delegated review = (%+v, %v), want a fresh admission", receipt, err)
+	}
+	if result, err := registry.Advance(ctx, receipt.TaskID, task.StatusRunning, "running", nil); err != nil || result != task.CommitCommitted {
+		t.Fatalf("move the delegated review under way = (%v, %v), want a committed change", result, err)
+	}
+	if result, err := registry.Advance(ctx, receipt.TaskID, task.StatusSettled, "settled", nil); err != nil || result != task.CommitCommitted {
+		t.Fatalf("settle the delegated review = (%v, %v), want a committed change", result, err)
+	}
+	return receipt.TaskID
+}
+
+// reentryLedgerStub is the delegation-ledger stand-in the re-entry anchors read: the
+// reopen it is fixed to refuse or accept, and the rounds it was asked to move or
+// withdraw.
+type reentryLedgerStub struct {
+	mu        sync.Mutex
+	reopenErr error
+	rounds    []int64
+	abandoned []int64
+}
+
+// CanReopenRound reports the terminal entry this stand-in always holds: the anchors here
+// read the reopen that still fails, so the precheck is answered as a settled delegation.
+func (s *reentryLedgerStub) CanReopenRound(event.TaskID) error { return nil }
+
+// ReopenRound records the round it was asked to move and answers the failure it is fixed
+// with, or moves the entry when no failure is fixed.
+func (s *reentryLedgerStub) ReopenRound(taskID event.TaskID, round int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reopenErr != nil {
+		return s.reopenErr
+	}
+	s.rounds = append(s.rounds, round)
+	return nil
+}
+
+// AbandonRound records the round the re-entry withdrew.
+func (s *reentryLedgerStub) AbandonRound(_ event.TaskID, round int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.abandoned = append(s.abandoned, round)
+}
+
+// reopen fixes the stand-in to accept or refuse the next reopen.
+func (s *reentryLedgerStub) reopen(accept bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if accept {
+		s.reopenErr = nil
+		return
+	}
+	s.reopenErr = errReentryNoLedgerEntry
+}
+
+// reopenedRounds reports the rounds the ledger was asked to move, in call order.
+func (s *reentryLedgerStub) reopenedRounds() []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int64(nil), s.rounds...)
+}
+
+// reentryContinuationsStub is the continuation-table stand-in the re-entry anchors read:
+// the one slot a body is claimed into, the slot a refused re-entry gives back, and the
+// body the round was served with.
+type reentryContinuationsStub struct {
+	mu        sync.Mutex
+	occupied  bool
+	claimed   int
+	abandoned int
+	served    []string
+	serveErr  error
+}
+
+// Claim takes the one slot unless the stub is fixed as already held.
+func (s *reentryContinuationsStub) Claim(taskID event.TaskID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.claimed++
+	if s.occupied {
+		return fmt.Errorf("%w: %s", subagent.ErrContinuationBusy, taskID)
+	}
+	s.occupied = true
+	return nil
+}
+
+// Abandon gives the slot back.
+func (s *reentryContinuationsStub) Abandon(event.TaskID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.occupied = false
+	s.abandoned++
+}
+
+// Serve records the body the round carried and answers the failure it is fixed with.
+func (s *reentryContinuationsStub) Serve(_ context.Context, _ event.TaskID, input string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.served = append(s.served, input)
+	return s.serveErr
+}
+
+// claims reports how many claims the port made, refused ones included.
+func (s *reentryContinuationsStub) claims() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claimed
+}
+
+// abandonedCount reports how often the port gave a claimed round back.
+func (s *reentryContinuationsStub) abandonedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.abandoned
+}
+
+// servedCount reports how many rounds were served.
+func (s *reentryContinuationsStub) servedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.served)
+}
+
+// reentryAwaitServed waits for the nth body the round was served with and reports it: the
+// round runs beside the receipt, so a check waits on the face it reports through.
+func reentryAwaitServed(stub *reentryContinuationsStub, want int) string {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stub.mu.Lock()
+		served := append([]string(nil), stub.served...)
+		stub.mu.Unlock()
+		if len(served) >= want {
+			return served[want-1]
+		}
+		if !time.Now().Before(deadline) {
+			return ""
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

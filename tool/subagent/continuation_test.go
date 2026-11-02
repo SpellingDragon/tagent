@@ -215,3 +215,104 @@ func (m *gatedModel) Info() trpcmodel.Info { return trpcmodel.Info{Name: m.name}
 
 // release opens the gate, exactly once.
 func (m *gatedModel) release() { m.free.Do(func() { close(m.gate) }) }
+
+// TestSubagentClaimsOneRoundBeforeServing pins the claim a re-entry takes before serving.
+// - a claim of a task no round is served for, and a second claim of a taken round, are each refused by name
+// - a served round no caller claimed is refused, so no body reaches a round a second caller believes it owns
+// - a claim a caller does not serve gives the slot back, so the task stays re-entrant
+// - a round that ends without recording its terminal keeps the whole input owed, and the next round carries it ahead of the body it was handed
+// 契约: docs/wiki/agent/agent-architecture.md#subagent-loop
+func TestSubagentClaimsOneRoundBeforeServing(t *testing.T) {
+	t.Run("refuses_a_claim_of_a_task_served_here_by_no_round", func(t *testing.T) {
+		if err := NewContinuations().Claim("task-nowhere"); !errors.Is(err, ErrContinuationMissing) {
+			t.Fatalf("claim of a task no round is served for = %v, want %v", err, ErrContinuationMissing)
+		}
+	})
+
+	t.Run("refuses_a_second_claim_of_one_round", func(t *testing.T) {
+		delegation, _, continuations, taskID := continuationServedTask(t)
+		if err := continuations.Claim(taskID); err != nil {
+			t.Fatalf("claim the one round of the served task = %v", err)
+		}
+		if err := continuations.Claim(taskID); !errors.Is(err, ErrContinuationBusy) {
+			t.Fatalf("second claim of the same round = %v, want %v", err, ErrContinuationBusy)
+		}
+		continuations.Abandon(taskID)
+		if err := continuations.Claim(taskID); err != nil {
+			t.Fatalf("claim after the slot was given back = %v, want the round it opens", err)
+		}
+		continuations.Abandon(taskID)
+		if got := delegation.calls(); got != 1 {
+			t.Fatalf("delegations = %d, want the one task the first round admitted", got)
+		}
+	})
+
+	t.Run("refuses_a_round_no_caller_claimed", func(t *testing.T) {
+		_, _, continuations, taskID := continuationServedTask(t)
+		if err := continuations.Serve(context.Background(), taskID, "review it again"); !errors.Is(err, ErrContinuationUnclaimed) {
+			t.Fatalf("serve of a round no caller claimed = %v, want %v", err, ErrContinuationUnclaimed)
+		}
+	})
+
+	t.Run("keeps_the_body_owed_when_the_round_ends_beside", func(t *testing.T) {
+		delegation, provider, continuations, taskID := continuationServedTask(t)
+		delegation.mu.Lock()
+		delegation.terminalErr = errors.New("the ledger refused the terminal of the round")
+		delegation.mu.Unlock()
+
+		if err := continuations.Claim(taskID); err != nil {
+			t.Fatalf("claim the round of the served task = %v", err)
+		}
+		if err := continuations.Serve(context.Background(), taskID, "review it again"); err == nil {
+			t.Fatal("serve of a round whose terminal the ledger refused reported no cause")
+		}
+
+		delegation.mu.Lock()
+		delegation.terminalErr = nil
+		delegation.mu.Unlock()
+		if err := continuations.Claim(taskID); err != nil {
+			t.Fatalf("claim the round after the failed one = %v, want the slot given back", err)
+		}
+		if err := continuations.Serve(context.Background(), taskID, "review the last change"); err != nil {
+			t.Fatalf("serve the round after the failed one = %v", err)
+		}
+
+		requests := provider.recorded()
+		if len(requests) != 3 {
+			t.Fatalf("rounds served = %d, want the first round beside the failed one and the round after it", len(requests))
+		}
+		last := ""
+		for _, message := range requests[len(requests)-1].Messages {
+			last += message.Content + "\n"
+		}
+		owed, handed := strings.Index(last, "review it again"), strings.Index(last, "review the last change")
+		if owed < 0 {
+			t.Fatalf("the round after the failed one does not carry the body left owed: %q", last)
+		}
+		if handed < 0 || handed < owed {
+			t.Fatalf("the round after the failed one does not carry the body it was handed after the owed one: %q", last)
+		}
+	})
+}
+
+// continuationServedTask drives one call through the delegation tool so the continuation
+// table serves that task a round, and returns the table beside the model the rounds were
+// served against and the task the table serves.
+func continuationServedTask(t *testing.T) (*stubDelegation, *serveModel, *Continuations, event.TaskID) {
+	t.Helper()
+	delegation := &stubDelegation{receipt: task.AdmissionReceipt{
+		CallID:   "call-review",
+		TaskID:   "task-serve-claimed",
+		Accepted: true,
+		Kind:     task.AdmissionFresh,
+	}}
+	provider := &serveModel{name: "model-caller", answer: "review recorded"}
+	continuations := NewContinuations()
+	tool := newContinuationTool(t, delegation, provider, continuations)
+	receipt, ok := callTool(t, tool, map[string]any{"name": "reviewer", "prompt": "review the change"}).(task.AdmissionReceipt)
+	if !ok || receipt.TaskID != "task-serve-claimed" {
+		t.Fatalf("call result = %#v, want the admission receipt of the served task", receipt)
+	}
+	awaitCompletions(t, delegation, 1)
+	return delegation, provider, continuations, receipt.TaskID
+}

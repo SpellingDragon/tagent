@@ -26,6 +26,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory"
 	"github.com/SpellingDragon/tagent/runtime/agent"
 	"github.com/SpellingDragon/tagent/runtime/task"
+	"github.com/SpellingDragon/tagent/tool/subagent"
 
 	trpctool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -105,13 +106,73 @@ type hostSendReentry interface {
 // construction. A port bound to no run refuses the call by name rather than
 // reporting a re-entry no task can answer.
 type hostSendReentryPort struct {
-	run *Run
+	tasks         hostReentryTasks
+	ledger        hostReentryLedger
+	continuations hostReentryContinuations
 }
 
 var _ hostSendReentry = (*hostSendReentryPort)(nil)
 
+// hostReentryTasks is the task-table face one re-entry moves, and nothing more: the
+// settled status design D7 admits read without moving the task, the reactivation that
+// opens the round the body is owed to, and the compensation that puts the task back
+// when the round it opened is never served. The face is the seam between the tool and
+// the task state machine, so the order the port settles its preconditions in is
+// readable here instead of being spread over the registry.
+type hostReentryTasks interface {
+	// Reentrant reports whether the task may be re-entered, without moving it, and
+	// names an identity the table holds no record of.
+	Reentrant(ctx context.Context, taskID event.TaskID) error
+	// Reactivate re-enters a settled task as a new round and reports the round it
+	// opened.
+	Reactivate(ctx context.Context, taskID event.TaskID) (int64, error)
+	// RollbackReactivation puts the task back to the settled outcome that round
+	// re-entered it from, because nothing served it.
+	RollbackReactivation(ctx context.Context, taskID event.TaskID, round int64) error
+}
+
+// hostReentryLedger is the delegation-ledger face one re-entry moves: the terminal
+// entry the reopen needs read without moving it, the reopen that moves the entry to
+// the round the task opened, and the withdrawal of a round nothing served.
+type hostReentryLedger interface {
+	// CanReopenRound reports whether the ledger would reopen the entry of one
+	// delegation, without moving it.
+	CanReopenRound(taskID event.TaskID) error
+	// ReopenRound moves the ledger entry to the round the reactivation opened.
+	ReopenRound(taskID event.TaskID, round int64) error
+	// AbandonRound withdraws the reopening of one round nothing served.
+	AbandonRound(taskID event.TaskID, round int64)
+}
+
+// hostReentryContinuations is the continuation-table face one re-entry claims: the
+// one round that will carry the body, the slot a refused re-entry gives back, and
+// the round the body is served into.
+type hostReentryContinuations interface {
+	// Claim takes the one round slot of one task and reports the claim it could not
+	// make by name.
+	Claim(taskID event.TaskID) error
+	// Abandon gives a claimed slot back without serving a round for it.
+	Abandon(taskID event.TaskID)
+	// Serve serves the next round of the claimed task with the body.
+	Serve(ctx context.Context, taskID event.TaskID, input string) error
+}
+
 // Bind attaches the assembled run the port re-enters tasks through.
-func (p *hostSendReentryPort) Bind(run *Run) { p.run = run }
+func (p *hostSendReentryPort) Bind(run *Run) {
+	p.tasks, p.ledger, p.continuations = nil, nil, nil
+	if run == nil {
+		return
+	}
+	if run.registry != nil {
+		p.tasks = run.registry
+	}
+	if run.delegations != nil {
+		p.ledger = run.delegations
+	}
+	if run.continuations != nil {
+		p.continuations = run.continuations
+	}
+}
 
 // ReenterTask hands one body to the named task and reports the outcome of that
 // re-entry: a settled task of this host is reactivated into a new round, the
@@ -121,50 +182,79 @@ func (p *hostSendReentryPort) Bind(run *Run) { p.run = run }
 // receipt exactly as the round of a fresh admission does, so the turn that issued
 // the call keeps deciding while the task it re-entered runs.
 //
-// Only a task this host serves a round of is re-entered. An identity the task
-// table holds no record of, a task whose delegated round this host never served,
-// and every status design D7 refuses are each answered as a named refusal rather
-// than reactivated into a round nobody asked for.
+// Every read the round depends on is settled before the first mutation, and the one
+// round that will carry the body is in this call's hand before it answers:
+// - The settled status design D7 admits and the terminal ledger entry the reopen needs are both read first, so a refusal moves nothing at all.
+// - The claim is what makes the receipt true. Without it the call could answer "ok" for a body a second re-entry also took, or for a round that never opened, and the body would be lost behind a receipt that said otherwise.
+// - The round is opened last, and the round a later step refuses is read against the one step that still had to race: the round is put back rather than leaving the task in flight with no turn to serve it.
+// - A round that ends without recording its terminal puts the task and the ledger back and leaves the body owed to the next round, so a body the receipt accepted is never dropped.
+// - Only a task this host serves a round of is re-entered: an identity the table holds no record of, a task whose delegated round this host never served, and every status design D7 refuses are each answered as a named refusal rather than reactivated into a round nobody asked for.
 func (p *hostSendReentryPort) ReenterTask(ctx context.Context, taskID event.TaskID, content string) (deliveryOutcome, string) {
-	if p.run == nil {
+	if p.tasks == nil || p.ledger == nil {
 		return deliveryRefused, "the host is not assembled"
 	}
-	if _, _, err := p.run.registry.Lookup(ctx, taskID); err != nil {
-		return deliveryRefused, fmt.Sprintf("the task table holds no record of %s, and a body names a task of this host", taskID)
+	continuations := p.continuations
+	if continuations == nil {
+		return deliveryRefused, hostReentryCause(taskID, subagent.ErrContinuationMissing)
 	}
-	if p.run.continuations == nil || !p.run.continuations.Served(taskID) {
-		return deliveryRefused, fmt.Sprintf("no delegated round of %s is served here: the task was never delegated, or the round it was served in already left", taskID)
+	if err := p.tasks.Reentrant(ctx, taskID); err != nil {
+		return deliveryRefused, hostReentryCause(taskID, err)
 	}
-	round, err := p.run.registry.Reactivate(ctx, taskID)
+	if err := p.ledger.CanReopenRound(taskID); err != nil {
+		return deliveryRefused, hostReentryCause(taskID, err)
+	}
+	if err := continuations.Claim(taskID); err != nil {
+		return deliveryRefused, hostReentryCause(taskID, err)
+	}
+	round, err := p.tasks.Reactivate(ctx, taskID)
 	if err != nil {
-		return deliveryRefused, hostReentryCause(err)
+		continuations.Abandon(taskID)
+		return deliveryRefused, hostReentryCause(taskID, err)
 	}
-	if err := p.run.delegations.ReopenRound(taskID, round); err != nil {
-		assemblyWarn("tagent: the re-entry of %s opened round %d beside no ledger entry: %v", taskID, round, err)
-		return deliveryRefused, hostReentryCause(err)
+	if err := p.ledger.ReopenRound(taskID, round); err != nil {
+		continuations.Abandon(taskID)
+		p.unwindReentry(ctx, taskID, round, err)
+		return deliveryRefused, hostReentryCause(taskID, err)
 	}
-	continuations := p.run.continuations
 	go func() {
-		if err := continuations.Reenter(context.WithoutCancel(ctx), taskID, content); err != nil {
-			assemblyWarn("tagent: the round %s was re-entered into ended beside: %v", taskID, err)
+		if err := continuations.Serve(context.WithoutCancel(ctx), taskID, content); err != nil {
+			p.unwindReentry(ctx, taskID, round, err)
 		}
 	}()
 	return deliverySent, ""
 }
 
+// unwindReentry puts a round nothing served back: the task returns to the settled
+// outcome the reactivation re-entered it from, the ledger entry returns to the
+// terminal it reopened from, and the cause is reported rather than left in the log
+// of a body the caller was told had been taken. The body itself stays owed to the
+// next round of the task, so the re-entry loses the round and never the input.
+func (p *hostSendReentryPort) unwindReentry(ctx context.Context, taskID event.TaskID, round int64, cause error) {
+	ctx = context.WithoutCancel(ctx)
+	if err := p.tasks.RollbackReactivation(ctx, taskID, round); err != nil {
+		assemblyWarn("tagent: the round %d of %s was opened and never served, and the task was not put back: %v", round, taskID, err)
+	}
+	p.ledger.AbandonRound(taskID, round)
+	assemblyWarn("tagent: the round %d of %s was withdrawn beside: %v; the body it was handed stays owed to the next re-entry of the task", round, taskID, cause)
+}
+
 // hostReentryCause renders the cause one refused re-entry is answered with: the
-// named refusal the task table or the delegation ledger reported, so the model
-// reads which status it named and what answers it instead.
-func hostReentryCause(err error) string {
+// named refusal the task table, the delegation ledger or the continuation table
+// reported, so the model reads which status it named and what answers it instead.
+func hostReentryCause(taskID event.TaskID, err error) string {
 	switch {
+	case errors.Is(err, task.ErrTaskNotFound):
+		return fmt.Sprintf("the task table holds no record of %s, and a body names a task of this host", taskID)
 	case errors.Is(err, task.ErrReactivationFailed):
 		return "the task is failed: " + task.ErrReactivationFailed.Error()
 	case errors.Is(err, task.ErrReactivationCancelled):
 		return "the task is cancelled: " + task.ErrReactivationCancelled.Error()
-	case errors.Is(err, task.ErrRoundInFlight):
-		return "a round of the task is in flight, so the body waits for its terminal: " + task.ErrRoundInFlight.Error()
+	case errors.Is(err, task.ErrRoundInFlight), errors.Is(err, subagent.ErrContinuationBusy):
+		return fmt.Sprintf("a round of %s is in flight, so the body waits for its terminal: %v", taskID, task.ErrRoundInFlight)
 	case errors.Is(err, agent.ErrDelegationNotSettled):
 		return "the delegation has not settled, so its next round is not open yet: " + agent.ErrDelegationNotSettled.Error()
+	case errors.Is(err, subagent.ErrContinuationMissing):
+		return fmt.Sprintf("no delegated round of %s is served here: the task was never delegated, or the round it was served in already left", taskID)
 	default:
 		return err.Error()
 	}

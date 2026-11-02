@@ -238,6 +238,11 @@ var ErrReactivationFailed = errors.New("task: a failed task is re-entered by rel
     its terminal fact is kept, and re-entering the same task in place would
     overwrite an outcome the chain already holds.
 
+var ErrReactivationRollback = errors.New("task: the task holds no round of that re-entry in flight")
+    ErrReactivationRollback reports a rollback naming no round of that task in
+    flight, so there is nothing of that re-entry left to withdraw. The rollback
+    is refused by name and moves nothing.
+
 var ErrResumeCancelled = errors.New("task: a cancelled task is resumed by relaunch or re-spawn")
     ErrResumeCancelled reports a resume refused for a cancelled task.
     A cancelled task is relaunched or re-spawned under a new identity.
@@ -1096,6 +1101,13 @@ func (r *MemoryRegistry) Reactivate(ctx context.Context, taskID event.TaskID) (i
     the first moves the task out of its settled status and the second is refused
     by name.
 
+func (r *MemoryRegistry) Reentrant(ctx context.Context, taskID event.TaskID) error
+    Reentrant reports whether the task may be re-entered, without moving it:
+    the settled status design D7 admits, and the named refusal of every status
+    it does not. A caller that settles more than one precondition before it
+    opens a round reads this first, so the round it opens is the only thing it
+    has to put back when a later precondition turns out to be gone.
+
 func (r *MemoryRegistry) Register(ctx context.Context, spec Spec) (AdmissionReceipt, error)
     Register admits one task declaration and returns its admission receipt.
     A repeated admission of the same dedup key reports the task of the
@@ -1139,6 +1151,27 @@ func (r *MemoryRegistry) Resume(ctx context.Context, taskID event.TaskID, input 
     so the input channel stays beneath both without a declaration of its own.
     It carries an event identity rather than free text, so a call naming no
     identity opens no round.
+
+func (r *MemoryRegistry) RollbackReactivation(ctx context.Context, taskID event.TaskID, round int64) error
+    RollbackReactivation puts one task back to the settled outcome the
+    reactivation of that round re-entered it from, because nothing served the
+    round it opened.
+
+    The rollback exists for the re-entry that opened a round and then found a
+    later precondition gone: without it the task keeps a round in flight that
+    no turn will ever settle, so every later re-entry is refused by name until
+    the task expires. The compensating fact is committed on the commit port
+    before it becomes visible, like every other transition, so the chain replays
+    the task at the outcome it holds rather than at the round nobody served.
+    The obligation the reactivation opened is withdrawn with it, so a task put
+    back is read as settled and owes nothing.
+
+    - Only a round reactivation really opened is put back: a task holding
+    another round, or no round in flight at all, is refused by name and moves
+    nothing. - The round number stays consumed — a round identity is never
+    reused, so the notification identities of the attempts that followed keep
+    their own — and the re-entry deadline keeps counting from the reactivation,
+    which reads no differently for a task that holds its terminal fact.
 
 func (r *MemoryRegistry) Unfinished(ctx context.Context) ([]UnsettledWork, error)
     Unfinished reports the work this registry holds with no terminal, read from

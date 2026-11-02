@@ -277,3 +277,113 @@ func TestInteractiveReentryTTL(t *testing.T) {
 		}
 	})
 }
+
+// TestTaskReactivationRollback pins the compensation of a re-entry whose round no turn served.
+// - the rollback puts the task back to the settled outcome it was re-entered from, and the chain stores the compensating fact
+// - the obligation the reactivation opened is withdrawn with it, so a task put back owes nothing of the round it never ran
+// - the task is re-entrant afterwards: the next reactivation opens a round of its own, so no round is left hanging
+// - a rollback naming another round, and one naming a task that holds no round at all, are each refused by name and move nothing
+// 契约: docs/wiki/agent/task-lifecycle.md#status-machine
+func TestTaskReactivationRollback(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a round nothing served is put back", func(t *testing.T) {
+		registry, carrier := invariantRegistry(t)
+		taskID := reactivationSettled(t, registry)
+		round, err := registry.Reactivate(ctx, taskID)
+		if err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		if got := reactivationAwaitingTool(registry, taskID); got != 1 {
+			t.Fatalf("open execution obligations of the re-entered task = %d, want the one round it opened", got)
+		}
+
+		if err := registry.RollbackReactivation(ctx, taskID, round); err != nil {
+			t.Fatalf("put the round back = %v", err)
+		}
+		if _, status, err := registry.Lookup(ctx, taskID); err != nil || status != StatusSettled {
+			t.Fatalf("status after the rollback = (%v, %v), want the settled outcome the round was re-entered from", status, err)
+		}
+		if got := reactivationAwaitingTool(registry, taskID); got != 0 {
+			t.Fatalf("open execution obligations after the rollback = %d, want none: the round that opened them was withdrawn", got)
+		}
+		if _, found := reactivationRollbackFact(carrier, taskID, round); !found {
+			t.Fatalf("chain of %s carries no compensating fact for round %d: %+v", taskID, round, carrier.Facts(taskID))
+		}
+	})
+
+	t.Run("the task is re-entrant after the rollback", func(t *testing.T) {
+		registry, _ := invariantRegistry(t)
+		taskID := reactivationSettled(t, registry)
+		round, err := registry.Reactivate(ctx, taskID)
+		if err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		if err := registry.RollbackReactivation(ctx, taskID, round); err != nil {
+			t.Fatalf("put the round back = %v", err)
+		}
+		again, err := registry.Reactivate(ctx, taskID)
+		if err != nil {
+			t.Fatalf("re-enter the task the rollback put back = %v, want the round it opens instead of a round left hanging", err)
+		}
+		if again <= round {
+			t.Fatalf("round after the second re-entry = %d, want one past the rolled-back round %d: a round identity is never reused", again, round)
+		}
+	})
+
+	t.Run("rejects_rollback_of_another_round", func(t *testing.T) {
+		registry, carrier := invariantRegistry(t)
+		taskID := reactivationSettled(t, registry)
+		round, err := registry.Reactivate(ctx, taskID)
+		if err != nil {
+			t.Fatalf("re-enter the settled task: %v", err)
+		}
+		stored := len(carrier.Facts(taskID))
+		if err := registry.RollbackReactivation(ctx, taskID, round+1); !errors.Is(err, ErrReactivationRollback) {
+			t.Fatalf("rollback of round %d = %v, want %v", round+1, err, ErrReactivationRollback)
+		}
+		if got := len(carrier.Facts(taskID)); got != stored {
+			t.Fatalf("facts after the refused rollback = %d, want the stored ones alone", got)
+		}
+		if _, status, _ := registry.Lookup(ctx, taskID); status != StatusRunning {
+			t.Fatalf("status after the refused rollback = %v, want the round it still holds", status)
+		}
+	})
+
+	t.Run("rejects_rollback_beside_no_round", func(t *testing.T) {
+		registry, _ := invariantRegistry(t)
+		taskID := reactivationSettled(t, registry)
+		if err := registry.RollbackReactivation(ctx, taskID, 2); !errors.Is(err, ErrReactivationRollback) {
+			t.Fatalf("rollback of a task that holds no round in flight = %v, want %v", err, ErrReactivationRollback)
+		}
+	})
+}
+
+// reactivationAwaitingTool counts the execution obligations one task still holds open,
+// so a rollback is read by the obligation it withdrew rather than by a status alone.
+func reactivationAwaitingTool(registry *MemoryRegistry, taskID event.TaskID) int {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	entry, ok := registry.tasks[taskID]
+	if !ok {
+		return 0
+	}
+	count := 0
+	for _, held := range entry.obligations {
+		if held.obligation.Kind == ObligationAwaitingTool {
+			count++
+		}
+	}
+	return count
+}
+
+// reactivationRollbackFact reports the compensating fact of the nth re-entry of one task.
+func reactivationRollbackFact(carrier *MemoryCommit, taskID event.TaskID, round int64) (CommitRecord, bool) {
+	wanted := MutationID(rollbackPrefix + string(taskID) + ":" + strconv.FormatInt(round, 10))
+	for _, fact := range carrier.Facts(taskID) {
+		if fact.MutationID == wanted {
+			return fact, true
+		}
+	}
+	return CommitRecord{}, false
+}

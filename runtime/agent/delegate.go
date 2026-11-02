@@ -290,6 +290,10 @@ type delegationEntry struct {
 	pending  task.Status
 	booked   bool
 	admitted time.Time
+	// reopened is the terminal status the entry was moved out of by the last
+	// ReopenRound, so a round nothing served is put back at the outcome it
+	// reopened from instead of leaving the ledger reading a round in flight.
+	reopened task.Status
 }
 
 // Delegator is one agent's sub-agent delegation ledger. It owns the call
@@ -401,6 +405,7 @@ func (d *Delegator) Delegate(ctx context.Context, req Delegation) (task.Admissio
 		delegateDebug("tagent: delegation admitted result=dedup task=%s agent=%s call=%s", receipt.TaskID, issuer.AgentID, req.CallID)
 		return receipt, nil
 	}
+	fmt.Printf("DEBUG delegate admitted task=%q inv=%q call=%q target=%v issuer=%v\n", receipt.TaskID, req.InvocationID, req.CallID, req.Sites.Target, issuer)
 	record := req
 	record.Sites.Issuer = issuer
 	record.TaskID = receipt.TaskID
@@ -550,6 +555,7 @@ func (d *Delegator) complete(ctx context.Context, taskID event.TaskID, status ta
 		delegateDebug("tagent: delegation refused result=terminal task=%s status=%s", taskID, delegationStatusName(standing))
 		return task.Notice{}, fmt.Errorf("%w: %s", ErrDelegationTerminal, taskID)
 	}
+	fmt.Printf("DEBUG complete task=%q inv=%q kind=%v\n", taskID, entry.record.InvocationID, kind)
 	notice := task.Notice{TaskID: taskID, Round: entry.round, Kind: kind, Seq: 0, Event: fact, Text: settleNoticeTextOf(text)}
 	envelope := task.Envelope{
 		Notice:         notice,
@@ -637,6 +643,7 @@ func (d *Delegator) ReopenRound(taskID event.TaskID, round int64) error {
 	if !isTerminalStatus(entry.record.Status) {
 		return fmt.Errorf("%w: %s", ErrDelegationNotSettled, taskID)
 	}
+	entry.reopened = entry.record.Status
 	entry.record.Status = task.StatusRunning
 	entry.round = round
 	entry.pending = task.StatusUnknown
@@ -647,6 +654,47 @@ func (d *Delegator) ReopenRound(taskID event.TaskID, round int64) error {
 	}
 	delegateDebug("tagent: delegation reopened task=%s round=%d", taskID, round)
 	return nil
+}
+
+// CanReopenRound reports whether the ledger would reopen the entry of one
+// delegation, without moving it: the entry the ledger holds and the terminal it
+// stands at. A re-entry reads this before it opens the round of the task, so the
+// only mutation left to put back when the reopen itself is refused is the round
+// the task machine already opened.
+func (d *Delegator) CanReopenRound(taskID event.TaskID) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.entries[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrDelegationUnknown, taskID)
+	}
+	if !isTerminalStatus(entry.record.Status) {
+		return fmt.Errorf("%w: %s", ErrDelegationNotSettled, taskID)
+	}
+	return nil
+}
+
+// AbandonRound withdraws the reopening of one round, because nothing served it:
+// the entry goes back to the terminal it reopened from, the terminal waiting to
+// land is forgotten and the pre-registration the reopen booked is withdrawn. A
+// ledger that is not holding that round is left as it is, so a rollback of a
+// round already settled moves nothing.
+func (d *Delegator) AbandonRound(taskID event.TaskID, round int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	entry, ok := d.entries[taskID]
+	if !ok || entry.round != round || isTerminalStatus(entry.record.Status) {
+		return
+	}
+	if entry.reopened != task.StatusUnknown {
+		entry.record.Status = entry.reopened
+	}
+	entry.pending = task.StatusUnknown
+	if entry.booked {
+		entry.booked = false
+		d.withdrawBookingLocked()
+	}
+	delegateDebug("tagent: delegation abandoned task=%s round=%d status=%s", taskID, round, delegationStatusName(entry.record.Status))
 }
 
 // land reports the pending terminal of one delegation once its obligations are

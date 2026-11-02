@@ -684,6 +684,20 @@ func NewDelegator(tasks DelegationTasks, holder state.Borrow, instance event.Ins
     NewDelegator returns an empty delegation ledger over the task face and the
     state owner's borrowing face, scoped to one runtime instance.
 
+func (d *Delegator) AbandonRound(taskID event.TaskID, round int64)
+    AbandonRound withdraws the reopening of one round, because nothing served
+    it: the entry goes back to the terminal it reopened from, the terminal
+    waiting to land is forgotten and the pre-registration the reopen booked
+    is withdrawn. A ledger that is not holding that round is left as it is,
+    so a rollback of a round already settled moves nothing.
+
+func (d *Delegator) CanReopenRound(taskID event.TaskID) error
+    CanReopenRound reports whether the ledger would reopen the entry of one
+    delegation, without moving it: the entry the ledger holds and the terminal
+    it stands at. A re-entry reads this before it opens the round of the task,
+    so the only mutation left to put back when the reopen itself is refused is
+    the round the task machine already opened.
+
 func (d *Delegator) Complete(ctx context.Context, taskID event.TaskID, status task.Status, fact event.EventID) (task.Notice, error)
     Complete settles one admitted delegation with the terminal status and the
     fact identity the outcome points at, and returns the notification the

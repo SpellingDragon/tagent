@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/SpellingDragon/tagent/api/event"
@@ -18,6 +19,11 @@ var ErrContinuationMissing = errors.New("subagent: no delegated turn of that tas
 // running. One round of one task runs at a time, so a re-entry arriving inside a
 // round is refused by name rather than queued behind it.
 var ErrContinuationBusy = errors.New("subagent: a round of that delegated task is in flight")
+
+// ErrContinuationUnclaimed reports a round served for a task whose one slot no
+// caller claimed: the input the round would read was never owned by this call, so
+// serving it would hand a body to a round a second caller believes it owns.
+var ErrContinuationUnclaimed = errors.New("subagent: the round of that task was not claimed before it was served")
 
 // Continuations is the round-typed continuation point of the delegated turns one
 // tool serves: one entry per served task, holding the assembly, the address and
@@ -37,14 +43,20 @@ type Continuations struct {
 }
 
 // continuation is the served task a re-entry may hand input to: the faces its
-// next round settles through, the assembly and address it runs on, and whether a
-// round of it is running right now.
+// next round settles through, the assembly and address it runs on, whether a
+// round of it is running right now, and the input a round that ended beside still
+// owes.
 type continuation struct {
 	faces    delegationFaces
 	builder  Builder
 	assembly *Assembly
 	addr     event.Address
 	running  bool
+	// owed holds the input one earlier round could not settle, in the order it was
+	// handed over. A body whose round ends beside stays owed rather than being
+	// dropped, and the round the next re-entry serves carries it ahead of the body
+	// that re-entry was handed, so no accepted body is lost.
+	owed []string
 }
 
 // NewContinuations returns an empty continuation table. A tool given none keeps
@@ -105,7 +117,66 @@ func (c *Continuations) Release(taskID event.TaskID) {
 // re-entry never mints a task of its own. A task whose round is still in flight is
 // refused by name beside no round served, so two re-entries of one task serve one
 // round between them.
+//
+// The caller that must settle other preconditions before the round is served claims
+// the slot first and serves it afterwards: the round a claim took is the round the
+// body is owed to, so a caller that returns a delivery receipt for it knows the one
+// round carrying the body exists.
 func (c *Continuations) Reenter(ctx context.Context, taskID event.TaskID, input string) error {
+	if err := c.Claim(taskID); err != nil {
+		return err
+	}
+	return c.Serve(ctx, taskID, input)
+}
+
+// Claim takes the one round slot of the named task before any round is served for
+// it, and reports the claim it could not make by name: a task this tool serves no
+// round of, and a task whose round is already in flight, are each refused.
+//
+// The claim is the point at which the body handed to the re-entry is owned: from
+// the moment it returns, the one round that will carry that body is this caller's,
+// so a second caller is refused instead of being told a body was taken that no
+// round holds. A claim a caller does not serve gives the slot back with Abandon.
+func (c *Continuations) Claim(taskID event.TaskID) error {
+	if c == nil {
+		return fmt.Errorf("%w: %s", ErrContinuationMissing, taskID)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.served[taskID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrContinuationMissing, taskID)
+	}
+	if entry.running {
+		return fmt.Errorf("%w: %s", ErrContinuationBusy, taskID)
+	}
+	entry.running = true
+	return nil
+}
+
+// Abandon gives back a claimed slot without serving a round for it, so a re-entry
+// that claimed the one round of a task and then found a precondition gone leaves
+// the task re-entrant instead of holding a slot no round serves.
+func (c *Continuations) Abandon(taskID event.TaskID) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.served[taskID]; ok {
+		entry.running = false
+	}
+}
+
+// Serve serves the next round of a task this caller already claimed, reading the
+// input one earlier round still owes ahead of the input handed here, and releases
+// the slot when the round ends.
+//
+// A round that ends without recording its terminal leaves the whole input owed
+// instead of dropping it: the body was accepted by the re-entry that claimed the
+// round, so it stays owed to the next round of the same task rather than leaving
+// the caller's receipt standing for a body nothing carried.
+func (c *Continuations) Serve(ctx context.Context, taskID event.TaskID, input string) error {
 	if c == nil {
 		return fmt.Errorf("%w: %s", ErrContinuationMissing, taskID)
 	}
@@ -115,20 +186,41 @@ func (c *Continuations) Reenter(ctx context.Context, taskID event.TaskID, input 
 		c.mu.Unlock()
 		return fmt.Errorf("%w: %s", ErrContinuationMissing, taskID)
 	}
-	if entry.running {
+	if !entry.running {
 		c.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrContinuationBusy, taskID)
+		return fmt.Errorf("%w: %s", ErrContinuationUnclaimed, taskID)
 	}
-	entry.running = true
+	owed := entry.owed
+	entry.owed = nil
 	c.mu.Unlock()
 
-	status, body := entry.faces.runRound(ctx, entry.builder, entry.assembly, entry.addr, input, nil)
+	status, body := entry.faces.runRound(ctx, entry.builder, entry.assembly, entry.addr, joinOwed(owed, input), nil)
 	err := entry.faces.completeDelegation(ctx, taskID, status, body)
 	c.mu.Lock()
 	entry.running = false
+	if err != nil {
+		entry.owed = append(append(make([]string, 0, len(owed)+1), owed...), input)
+	}
 	c.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("subagent: the next round of %s settled beside: %w", taskID, err)
 	}
 	return nil
 }
+
+// joinOwed renders the input one round reads: the bodies an earlier round left owed,
+// in the order they were handed over, and the body this round was handed last.
+func joinOwed(owed []string, input string) string {
+	if len(owed) == 0 {
+		return input
+	}
+	bodies := make([]string, 0, len(owed)+1)
+	bodies = append(bodies, owed...)
+	bodies = append(bodies, input)
+	return strings.Join(bodies, hostOwedSeparator)
+}
+
+// hostOwedSeparator is the blank line between the bodies one round reads: each body
+// is a whole message of its own, so a round that carries a body left owed ahead of
+// the one just handed over reads both as the separate deliveries they were.
+const hostOwedSeparator = "\n\n"
