@@ -11,6 +11,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -763,15 +764,12 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 		t.Fatalf("the settled material %q names neither the task %s nor the kind %s of its identity",
 			material, notice.TaskID, notice.Kind)
 	}
-	_, followIndex := continuationWaitForRequest(t, provider, material, 30*time.Second)
-	baselineRequests := provider.servedRequests()
-	acceptIndex := -1
-	for index, request := range baselineRequests {
-		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
-			acceptIndex = index
-		}
+	noticeFact := reproductionAwaitNoticeFact(t, host, addr, notice.TaskID, material)
+	if want := agent.NoticeFactKey(noticeFact.InvocationID, notice); noticeFact.Key != want {
+		t.Fatalf("the notice fact key = %s, want the notice identity key %s", noticeFact.Key, want)
 	}
-	batchedShape := acceptIndex >= 0 && followIndex == acceptIndex
+	facts = host.Run().SessionFacts(addr)
+	batchedShape := continuationTurnConsumed(facts, turn.InvocationID, noticeFact.Key)
 	if !batchedShape {
 		script.await(t, followStep)
 		script.release(followStep)
@@ -785,17 +783,23 @@ func runRequestAndSendIdentityCorrelation(t *testing.T) {
 			material, notice.FactKey(), reproductionFactsSummary(facts))
 	}
 	_ = inputFacts[0]
-	noticeFact := reproductionAwaitNoticeFact(t, host, addr, notice.TaskID, material)
-	if want := agent.NoticeFactKey(noticeFact.InvocationID, notice); noticeFact.Key != want {
-		t.Fatalf("the notice fact key = %s, want the notice identity key %s", noticeFact.Key, want)
-	}
 
 	requests := provider.servedRequests()
-	if requests[followIndex].Model != "model-entry" {
-		t.Fatalf("the follow-up request named model %q, want the entry identity of the remembered user address", requests[followIndex].Model)
+	acceptIndex := -1
+	for index, request := range requests {
+		if acceptIndex < 0 && requestCarriesToolResult("call-correlation")(request) {
+			acceptIndex = index
+		}
 	}
 	if acceptIndex < 0 {
-		t.Fatalf("no request carried the delegation tool result of call-correlation; requests = %+v", baselineRequests)
+		t.Fatalf("no request carried the delegation tool result of call-correlation; requests = %+v", requests)
+	}
+	followIndex := acceptIndex
+	if !batchedShape {
+		followIndex = followStep.request
+	}
+	if requests[followIndex].Model != "model-entry" {
+		t.Fatalf("the follow-up request named model %q, want the entry identity of the remembered user address", requests[followIndex].Model)
 	}
 	workerIndex := -1
 	for index, request := range requests {
@@ -911,6 +915,30 @@ func driveContinuationTurn(t *testing.T, ctx context.Context, host *assembly.Hos
 			input, turn.Terminal, turn.DecisionCount, decisions)
 	}
 	return turn
+}
+
+// continuationTurnConsumed reports whether the answer of one turn names the
+// given input fact among the inputs its segment consumed. The batched shape folds
+// the notice into the flying segment's own decision, so that decision's answer
+// consumed the notice input; the separate shape leaves the notice to a range of
+// its own, and the settled result a flight may carry beside it is the delivery
+// record of the call, not the notice input itself.
+func continuationTurnConsumed(facts []event.Event, invocation event.InvocationID, key event.EventID) bool {
+	for _, fact := range facts {
+		if fact.Type != event.TypeAgentOutput || fact.InvocationID != invocation {
+			continue
+		}
+		var consumed []event.EventID
+		if err := json.Unmarshal([]byte(fact.Meta[event.MetaKeyInputEvents]), &consumed); err != nil {
+			continue
+		}
+		for _, held := range consumed {
+			if held == key {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // continuationWaitForRequest waits until exactly one request carries the notice

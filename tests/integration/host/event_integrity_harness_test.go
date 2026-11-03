@@ -69,6 +69,9 @@ type integrityStep struct {
 	arrivedOnce sync.Once
 	hold        chan struct{}
 	unreachedOK bool
+	// request is the ordinal of the request this step answered, recorded as the
+	// script consumes it so a check reads the decision the step served.
+	request int
 }
 
 // newIntegrityScript returns the script a drive declares its steps over.
@@ -166,6 +169,7 @@ func (s *integrityScript) decide(request scriptedRequest) (string, error) {
 		step := stream.steps[stream.next]
 		if step.match(request) {
 			stream.next++
+			step.request = request.Index
 			step.arrivedOnce.Do(func() { close(step.arrived) })
 			hold, payload := step.hold, step.answering
 			s.mu.Unlock()
