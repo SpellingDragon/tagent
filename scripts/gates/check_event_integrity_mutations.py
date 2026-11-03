@@ -425,7 +425,8 @@ MUTATIONS: Tuple[Mutation, ...] = (
         evidence_kind="confirmed_defect",
         evidence_ref=(
             "00.3-frozen-contract.json defects[EVID-04-notice-visibility-loss]; "
-            "negative anchor TestEventIntegrityProjection/notice_visible_under_fold"
+            "negative anchor TestEventIntegrityProjection/notice_visible_under_fold; "
+            "boundary identity anchor TestEventIntegrityProjection/range_head_survives_fold_rewrite"
         ),
         description=(
             "Restore the boundary of the range in flight as the position it appended "
@@ -560,7 +561,7 @@ MUTATIONS: Tuple[Mutation, ...] = (
         test_file="tests/integration/history/event_integrity_test.go",
         test_name="TestEventIntegrityProjection",
         test_selector="^TestEventIntegrityProjection$",
-        expect_assertion="want the notice identity and its material",
+        expect_assertion="copies of the range-opening notice in its own request",
     ),
     Mutation(
         id="MUT-EVID-05-restart-flat-restore",

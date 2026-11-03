@@ -556,10 +556,30 @@ func TestQuiesceUnsettledSingleSource(t *testing.T) {
 	t.Run("restart_reads_the_same_criterion", runQuiesceRestartReadsSameCriterion)
 }
 
+// unconsumedScene is the one scene the close anchors read: a delegated worker
+// whose notification reaches the entry chain after the caller cancels, beside a
+// model that answers nothing once the delegation is out.
+type unconsumedScene struct {
+	host       *assembly.Host
+	provider   *scriptedProvider
+	addr       event.Address
+	configPath string
+	// releaseWorker lets the delegated worker answer.
+	releaseWorker func()
+	// followUpSeen closes when the notification's follow-up turn reaches the
+	// provider, and releaseFollowUp lets that turn end. A close that must catch
+	// the work still owed waits on the turn instead of racing the failure it
+	// lands.
+	followUpSeen    <-chan struct{}
+	releaseFollowUp func()
+}
+
 // unconsumedSceneUnder drives one delegated notification onto the chain beside a
 // model that answers nothing once the delegation is out, so the notification the
-// worker owes stays unconsumed.
-func unconsumedSceneUnder(t *testing.T, ctx context.Context) (*assembly.Host, *scriptedProvider, event.Address, func(), string) {
+// worker owes stays unconsumed. With holdFollowUp the follow-up turn stops at
+// its provider after announcing itself, so the caller reads the close while the
+// notification still stands on the chain.
+func unconsumedSceneUnder(t *testing.T, ctx context.Context, holdFollowUp bool) *unconsumedScene {
 	t.Helper()
 	wakeEnv(t)
 
@@ -571,7 +591,9 @@ func unconsumedSceneUnder(t *testing.T, ctx context.Context) (*assembly.Host, *s
 	var offline atomic.Bool
 	workerSeen := make(chan struct{})
 	releaseWorker := make(chan struct{})
-	var workerOnce, releaseOnce sync.Once
+	followUpSeen := make(chan struct{})
+	releaseFollowUp := make(chan struct{})
+	var workerOnce, releaseWorkerOnce, followUpOnce, releaseFollowUpOnce sync.Once
 	var mu sync.Mutex
 	entryCalls := 0
 	provider.decide = func(request scriptedRequest) (string, error) {
@@ -581,6 +603,10 @@ func unconsumedSceneUnder(t *testing.T, ctx context.Context) (*assembly.Host, *s
 			return scriptedAnswerOf(workerBody), nil
 		}
 		if offline.Load() {
+			if holdFollowUp {
+				followUpOnce.Do(func() { close(followUpSeen) })
+				<-releaseFollowUp
+			}
 			return "", errors.New("the model endpoint is unreachable")
 		}
 		mu.Lock()
@@ -591,17 +617,20 @@ func unconsumedSceneUnder(t *testing.T, ctx context.Context) (*assembly.Host, *s
 		}
 		return scriptedAnswerOf(entryAnswer), nil
 	}
-	release := func() { releaseOnce.Do(func() { close(releaseWorker) }) }
+	releaseWorkerFn := func() { releaseWorkerOnce.Do(func() { close(releaseWorker) }) }
+	releaseFollowUpFn := func() { releaseFollowUpOnce.Do(func() { close(releaseFollowUp) }) }
 
 	root := t.TempDir()
 	configPath := writeScriptedHostDocument(t, root, provider.endpoint(), "model-entry")
 	writeHostDocumentFile(t, configPath, scriptedHostDocumentWithAgentSections(root, provider.endpoint(), "model-entry", wakeAgentSections))
 	host, err := assembly.Boot(configPath, assembly.WithSender(&deliveryRecorder{}))
 	if err != nil {
-		release()
+		releaseWorkerFn()
+		releaseFollowUpFn()
 		t.Fatalf("boot the delegating host: %v", err)
 	}
-	t.Cleanup(release)
+	t.Cleanup(releaseWorkerFn)
+	t.Cleanup(releaseFollowUpFn)
 	addr := event.Address{AgentID: "user", SessionID: "session-quiesce-single-source"}
 
 	invokeCtx, invokeCancel := context.WithCancel(ctx)
@@ -617,14 +646,14 @@ func unconsumedSceneUnder(t *testing.T, ctx context.Context) (*assembly.Host, *s
 	case <-workerSeen:
 	case <-time.After(30 * time.Second):
 		invokeCancel()
-		release()
+		releaseWorkerFn()
 		t.Fatal("the delegated turn never reached its provider")
 	}
 	invokeCancel()
 	<-invoked
 
 	offline.Store(true)
-	release()
+	releaseWorkerFn()
 	waitForSettle(t, "the delegated task to land its notification", func() bool {
 		for _, fact := range host.Run().SessionFacts(addr) {
 			if fact.Type == event.TypeTaskSettled && fact.Meta[event.MetaKeySettleTriggerSource] != "" {
@@ -633,7 +662,10 @@ func unconsumedSceneUnder(t *testing.T, ctx context.Context) (*assembly.Host, *s
 		}
 		return false
 	})
-	return host, provider, addr, release, configPath
+	return &unconsumedScene{
+		host: host, provider: provider, addr: addr, configPath: configPath,
+		releaseWorker: releaseWorkerFn, followUpSeen: followUpSeen, releaseFollowUp: releaseFollowUpFn,
+	}
 }
 
 // failureObservationFactsOf reports the failure observations one session chain
@@ -686,8 +718,9 @@ func scriptedRequestCarriesText(request scriptedRequest, text string) bool {
 func runQuiesceReportReadsOneCriterion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	host, _, addr, release, _ := unconsumedSceneUnder(t, ctx)
-	defer release()
+	scene := unconsumedSceneUnder(t, ctx, false)
+	defer scene.releaseWorker()
+	host, addr := scene.host, scene.addr
 
 	report, err := host.Quiesce(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)})
 	if err != nil {
@@ -731,8 +764,9 @@ func runQuiesceReportReadsOneCriterion(t *testing.T) {
 func runQuiesceRestartReadsSameCriterion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	host, _, addr, release, configPath := unconsumedSceneUnder(t, ctx)
-	defer release()
+	scene := unconsumedSceneUnder(t, ctx, false)
+	defer scene.releaseWorker()
+	host, addr, configPath := scene.host, scene.addr, scene.configPath
 
 	if _, err := host.Quiesce(ctx, agent.CloseRequest{Timeout: time.Now().Add(5 * time.Second)}); err != nil {
 		t.Fatalf("quiesce beside the failed follow-up = %v, want the settled failure as a normal return", err)

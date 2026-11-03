@@ -413,6 +413,11 @@ func (p *smokeProvider) answerFor(modelName string, messages []smokeModelMessage
 		}
 	}
 	switch {
+	case strings.Contains(last, smokeReflectionMarker):
+		// The meditation send lands as a fresh input of its target session, so
+		// its reply is the reflection receipt; answering with the session's
+		// previous marker would replay a business answer as a second action.
+		return smokeAnswerBody("reflection received")
 	case strings.Contains(last, "tagent: task") && strings.Contains(last, "settled"):
 		return smokeAnswerBody("settle-ack " + marker)
 	case strings.Contains(last, "smoke retry"):

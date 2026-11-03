@@ -3592,7 +3592,7 @@ func runNoticeVisibleUnderFold(t *testing.T) {
 // the shortened sequence — the request of that range then presents the notice
 // that opened it a second time as ended material beside the transcript.
 // - the notice that opens the range lands, then a fold rewrites the sequence under it
-// - the request of that range reads the notice material exactly once
+// - the request of that range reads the notice identity exactly once, in no presentation form beside the transcript
 func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -3643,7 +3643,14 @@ func runRangeHeadSurvivesFoldRewrite(t *testing.T) {
 	}
 	copies := 0
 	for _, msg := range requests[len(requests)-1].Messages {
-		if strings.Contains(msg.Content, "task-77 settled") {
+		// The budget prefix presents the notice at the first form the room
+		// allows — full text, ticket, stored summary or identity card — so a
+		// second presentation counts in every one of those forms, not only in
+		// the full material.
+		if strings.Contains(msg.Content, "task-77 settled") ||
+			strings.HasPrefix(msg.Content, "[ticket ") ||
+			strings.HasPrefix(msg.Content, "[notice ") ||
+			msg.Content == "settled" {
 			copies++
 		}
 	}

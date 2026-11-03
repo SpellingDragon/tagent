@@ -15,12 +15,21 @@ import (
 func TestQuiesceCancelledCallerAnswersCut(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	host, _, _, release, _ := unconsumedSceneUnder(t, ctx)
-	defer release()
+	scene := unconsumedSceneUnder(t, ctx, true)
+	defer scene.releaseWorker()
+	defer scene.releaseFollowUp()
 
+	// The notification's follow-up turn is on the chain but has not answered;
+	// waiting for it to reach the provider reads the close beside work the run
+	// still owes, not beside the failure a fast endpoint would have settled.
+	select {
+	case <-scene.followUpSeen:
+	case <-ctx.Done():
+		t.Fatal("the delegated notification never reached its follow-up turn")
+	}
 	cancelled, cancelCall := context.WithCancel(ctx)
 	cancelCall()
-	report, err := host.Quiesce(cancelled, agent.CloseRequest{Timeout: time.Now().Add(400 * time.Millisecond)})
+	report, err := scene.host.Quiesce(cancelled, agent.CloseRequest{Timeout: time.Now().Add(400 * time.Millisecond)})
 	if err != nil {
 		t.Fatalf("quiesce beside a cancelled caller = %v, want Cut as a normal return", err)
 	}
@@ -30,7 +39,8 @@ func TestQuiesceCancelledCallerAnswersCut(t *testing.T) {
 	if len(report.Unsettled) == 0 {
 		t.Fatalf("report = %+v, want the criterion answered as the run stands", report)
 	}
-	if err := host.Close(ctx); err != nil {
+	scene.releaseFollowUp()
+	if err := scene.host.Close(ctx); err != nil {
 		t.Fatalf("close of the host = %v, want the facilities to stop", err)
 	}
 }
